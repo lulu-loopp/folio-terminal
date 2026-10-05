@@ -344,6 +344,11 @@ webview` and its siblings (`video`, `attention_pipe`, `launch_pipe`,
 `#[cfg(windows)] mod win`, `#[cfg(target_os = "macos")] mod mac` and a
 `not(any(...))` third body, re-exporting one set of names.
 
+The executable gate now also admits `update_handoff.rs` for one Windows-only
+test fixture: it drives the real detached update hand-off and observes the
+native process identity. The product hand-off remains portable and has no
+platform branch in that file.
+
 ### 4.4 Refuse at runtime — with named exceptions, and they are type-level
 
 **Recommendation: an item is present on every platform and refuses when

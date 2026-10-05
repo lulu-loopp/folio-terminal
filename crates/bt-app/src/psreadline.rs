@@ -458,12 +458,10 @@ fn run_probe() -> Probe {
     else {
         return Probe::default();
     };
-    let output = command
-        .args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND])
-        .output()
-        .inspect(|output| {
-            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, output)
-        });
+    command.args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND]);
+    let output = bt_platform::probe_output(command).inspect(|output| {
+        bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, output)
+    });
     let Ok(output) = output else {
         return Probe::default();
     };

@@ -27,7 +27,10 @@
 //!    `EntranceFailed`, `Abandoned`, cleared.
 //! 3. **Admit** (M4 → M5): exclusive admission on `H/admission`, within what
 //!    is left of the window, and no process running from the installed
-//!    bundle's executable (`bt_platform::install_flip::running_from`) →
+//!    bundle's executable (`bt_platform::install_flip::running_from`) — one
+//!    still there is waited for within the same window, as the Windows road
+//!    waits for a held file (`update_apply::until_let_go`, U-40: a person's
+//!    start that hands itself to the recovery build is gone within moments) →
 //!    `Admitted`: the journal says `Moving` (the note's `Exchanging`), with
 //!    both identities already in its layout since `Prepared`. Refused → the
 //!    plist removed, `Reverted` to `Prepared`.
@@ -40,11 +43,14 @@
 //! 5. **Trial** (M6 → M7): `open -n -W -a <bundle> --args --update-trial <txn>
 //!    <nonce>` with a fresh nonce, held ([`Launch`]); then, polling through the
 //!    wait door until [`Limits::trial_within_ms`] after the launch: the trial's
-//!    pid, by listing the processes whose image is the installed executable
-//!    and started after the launch (LaunchServices reports none), and its
-//!    receipt `H/<txn>/health-<nonce>`. A pid (or a receipt, whose own pid is
-//!    taken when the list has none yet) → `Trial{nonce, process, began_ms}`,
-//!    durable. **The launch over and nothing seen** — `open -W` returns when
+//!    pid — LaunchServices reports none, so it is the receipt's own, or the
+//!    process whose image is the installed executable and whose arguments
+//!    carry these very words (`update_apply::launched_trial`, 0.4.7 ticket
+//!    U-40: never a process only because it started after the launch, which a
+//!    person's start of the new build in that instant also does) — and its
+//!    receipt `H/<txn>/health-<nonce>`. Found →
+//!    `Trial{nonce, process, began_ms}`, durable. **The launch over and
+//!    nothing seen** — `open -W` returns when
 //!    the application it opened ends — is a trial that ended before it could
 //!    be seen: no receipt, at once (0.4.7 ticket U-38; it used to cost the
 //!    whole deadline with no window).
@@ -458,6 +464,12 @@ pub(crate) enum Ended {
     Failed(String),
     /// **Nothing was recorded, started or swapped** (U-37, H.3).
     Deferred(Deferral),
+    /// **The transaction was already decided when this holder had it**
+    /// (U-40): retired — its entrance removed if one was left — or back at
+    /// `Prepared`, by the lock holder a recovery waited for. Nothing else is
+    /// this holder's: the next ordinary start retires a retired transaction,
+    /// and a prepared one is the running build's.
+    Left(String),
 }
 
 impl Ended {
@@ -744,7 +756,10 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
 ///   `Committed` and the cleanup (W8/M8); otherwise `RollbackIntent` and the
 ///   rollback (M9);
 /// - `RollbackIntent`, `Stuck`, `RolledBack` rolled back and retired (M9–M11),
-///   `Committed` retired as after a commit (M11).
+///   `Committed` retired as after a commit (M11);
+/// - `Retired`, `Abandoned` or `Prepared` — decided by the lock holder a
+///   person's start waited for (U-40): its entrance removed if one is left,
+///   and [`Ended::Left`]; the start then opens what the disk names.
 ///
 /// Handed a person's start (`start`), a `Stuck` left with the new bundle
 /// live has the new build started as a trial — recorded, and its receipt
@@ -822,6 +837,7 @@ pub(crate) fn recover(
                 | Ended::LockHeld
                 | Ended::Abandoned
                 | Ended::Deferred(_)
+                | Ended::Left(_)
         );
     Recovered {
         ended,
@@ -1193,24 +1209,38 @@ impl<'a> Txn<'a> {
                     return self.revert(Actor::Applier);
                 }
             };
-        match install_flip::running_from(places.program) {
-            Ok(running) if running.is_empty() => {}
-            Ok(running) => {
-                world.say(&format!(
-                    "BT_UPDATE_APPLY {} still runs from {}",
-                    running
-                        .iter()
-                        .map(|process| process.pid.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    places.program.display()
-                ));
-                return self.revert(Actor::Applier);
-            }
-            Err(error) => {
-                world.say(&format!("BT_UPDATE_APPLY the process list: {error}"));
-                return self.revert(Actor::Applier);
-            }
+        // A process of the installed executable that is leaving — a person's
+        // start that hands itself to the recovery build is gone within moments
+        // — is waited for within the window, as the Windows road waits for a
+        // held file (U-40); only one still running when the window ends
+        // reverts the transaction.
+        let program = places.program;
+        let mut said_waiting = false;
+        let let_go = crate::update_apply::until_let_go(
+            window,
+            self.road.limits.poll,
+            &mut Instant::now,
+            &mut || {
+                let running = install_flip::running_from(program)
+                    .map_err(|error| format!("the process list: {error}"))?;
+                let held: Vec<String> = running
+                    .iter()
+                    .map(|process| format!("{} (pid {})", program.display(), process.pid))
+                    .collect();
+                if !held.is_empty() && !said_waiting {
+                    said_waiting = true;
+                    world.say(&format!(
+                        "BT_UPDATE_APPLY {} runs; the exchange waits for it to leave",
+                        held.join(", ")
+                    ));
+                }
+                Ok(held)
+            },
+            &mut |pause| bt_platform::wait::sleep_within(worker, pause),
+        );
+        if let Err(why) = let_go {
+            world.say(&format!("BT_UPDATE_APPLY {why}"));
+            return self.revert(Actor::Applier);
         }
         self.record(Actor::Applier, &Event::Admitted)?;
         let live = crate::update_prepare_macos::identity(worker, places.installed);
@@ -1346,9 +1376,10 @@ impl<'a> Txn<'a> {
     }
 
     /// **The trial, waited for** (M7, W7): the one this holder just started
-    /// (`started`: its nonce and when), found in the process list — a process
-    /// of the installed executable that started after the launch, or the
-    /// receipt's own — and recorded (`Trial` over `Moving`, the retrial over
+    /// (`started`: its nonce and when), found by exact evidence — the
+    /// receipt's own, or the process of the installed executable that carries
+    /// its words (`update_apply::launched_trial`, U-40) — and recorded
+    /// (`Trial` over `Moving`, the retrial over
     /// `Stuck`); or the one the journal records. Then, polling through the
     /// wait door until the deadline counted from its start: a receipt the
     /// journal accepts → `Committed` and the cleanup (`Some`); the process
@@ -1380,27 +1411,12 @@ impl<'a> Txn<'a> {
             poll: road.limits.poll,
             trial_within_ms: road.limits.trial_within_ms,
         };
-        // LaunchServices reports no pid: the trial is the process of the
-        // installed executable that started after the launch, or the
-        // receipt's own.
-        let program = places.program;
-        let mut find = |began_ms: u64, receipt: Option<&Receipt>| {
-            let listed = install_flip::running_from(program).ok().and_then(|list| {
-                list.into_iter()
-                    .filter(|process| process.started >= began_ms.saturating_mul(1000))
-                    .min_by_key(|process| process.started)
-            });
-            listed
-                .or_else(|| {
-                    receipt.map(|receipt| Running {
-                        pid: receipt.pid,
-                        started: install_flip::started_of(receipt.pid).unwrap_or(0),
-                    })
-                })
-                .map(|process| TrialProcess {
-                    pid: process.pid,
-                    started: process.started,
-                })
+        // LaunchServices reports no pid: the trial is the receipt's own, or
+        // the process of the installed executable that carries its words —
+        // never one that merely started after the launch (U-40).
+        let (txn, program) = (road.txn, places.program);
+        let mut find = |nonce: Nonce, receipt: Option<&Receipt>| {
+            crate::update_apply::launched_trial(txn, nonce, program, receipt)
         };
         let watched = crate::update_apply::watch_trial(
             worker,
@@ -1738,6 +1754,21 @@ impl<'a> Txn<'a> {
                     return Ok(Ended::GaveUp(last_error));
                 }
                 Action::FinishRollback { .. } => return Ok(self.finish_rollback(actor)),
+                // Decided by the holder this recovery waited for (U-40):
+                // complete evidence, and nothing left but what the next
+                // ordinary start does — as the Windows recovery leaves them.
+                Action::Retire { .. } => {
+                    self.disarm(actor)?;
+                    return Ok(Ended::Left(
+                        "the transaction is over; the next ordinary start deletes its folder and journal"
+                            .to_owned(),
+                    ));
+                }
+                Action::Leave => {
+                    return Ok(Ended::Left(
+                        "the transaction is the running build's to resume or discard".to_owned(),
+                    ));
+                }
                 other => return Err(format!("the recovery met {other:?}")),
             }
         }

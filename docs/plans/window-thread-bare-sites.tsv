@@ -38,7 +38,6 @@ bt-app	-	crate::files::canonical_path	std::fs::canonicalize	1
 bt-app	-	crate::files::read_directory	std::fs::metadata	1
 bt-app	-	crate::files::read_directory	std::fs::read_dir	1
 bt-app	-	crate::files::run_dir_worker	std::sync::mpsc::Receiver::recv	1
-bt-app	-	crate::git::run_git_with_input	std::process::Child::wait	1
 bt-app	-	crate::git::run_git_with_input	std::thread::JoinHandle::join	2
 bt-app	-	crate::git::run_git_with_input	std::thread::sleep	1
 bt-app	-	crate::git::run_git_worker	std::sync::mpsc::Receiver::recv	1
@@ -104,8 +103,6 @@ bt-app	-	crate::update_trial::take_the_claim_within	std::thread::sleep	1
 bt-app	-	crate::update_trial::watch	std::thread::sleep	1
 bt-app	-	crate::webhost::WebSeat::go_to	std::fs::canonicalize	1
 bt-app	[debug_assertions]	crate::hang_watch::run_selftest_if_due	std::thread::sleep	1
-bt-app	[windows]	crate::attention_copilot::run_probe	std::process::Command::output	1
-bt-app	[windows]	crate::psreadline::run_probe	std::process::Command::output	1
 bt-app	-	crate::shell_integration::run_powershell_probe	std::thread::sleep	1
 bt-persist	-	crate::atomic::commit_rename	std::fs::rename	1
 bt-persist	-	crate::atomic::write_temp	std::fs::File::sync_all	1
@@ -124,7 +121,6 @@ bt-platform	-	crate::launch_agent::sweep	std::fs::read_dir	1
 bt-platform	-	crate::macos_update::attach_with	std::fs::canonicalize	3
 bt-platform	-	crate::macos_update::detach_point	std::thread::sleep	1
 bt-platform	-	crate::macos_update::points_under	std::fs::canonicalize	1
-bt-platform	-	crate::macos_update::run_at	std::process::Child::wait	1
 bt-platform	-	crate::macos_update::run_at	std::thread::sleep	1
 bt-platform	-	crate::macos_update::verify_clone	std::fs::canonicalize	1
 bt-platform	[all(windows, target_arch = "x86_64")]	crate::hang::capture_thread_stack	windows::Win32::Foundation::CloseHandle	1
@@ -146,14 +142,12 @@ bt-platform	[target_os = "macos"]	crate::http::Download::wait	std::sync::Condvar
 bt-platform	[target_os = "macos"]	crate::http::Exchange::wait	std::sync::Condvar::wait_timeout	1
 bt-platform	[target_os = "macos"]	crate::install_txn::arm::<Os as Surface>::rename	std::fs::rename	1
 bt-platform	[target_os = "macos"]	crate::macos_files::recycle	std::fs::metadata	1
-bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::process::Child::wait	1
 bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::thread::sleep	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::<DirWatch as Drop>::drop	std::thread::JoinHandle::join	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::metadata	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::sync::mpsc::Receiver::recv	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::thread::JoinHandle::join	2
-bt-platform	[target_os = "macos"]	crate::quiet_command_text	std::process::Command::output	1
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	libc::close	1
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	libc::write	1
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	std::thread::JoinHandle::join	1

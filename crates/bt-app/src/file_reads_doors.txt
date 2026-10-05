@@ -17,8 +17,6 @@
 #     is the ticket that re-keys them.
 # A file-keyed key's first segment ends in .rs, which is how the two are told
 # apart. Order is not part of the comparison; the rows are a set.
-attention_copilot.rs: run_probe: .output
-psreadline.rs: run_probe: .output
 # The installed-module seam: both are the seam's own verb; its production arm reads
 # through file_reads::read(Lane::Settings), so the bytes are counted.
 psreadline.rs: is_folios_copy_at: installed_disk::read

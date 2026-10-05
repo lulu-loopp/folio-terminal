@@ -3052,7 +3052,7 @@ fn powershell_probe_command(program: &Path) -> Result<std::process::Command, Par
     }
 }
 
-fn stopped_output(mut child: std::process::Child) -> ProbeOutput {
+fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
     let _ = child.kill();
     child.wait_with_output().map_or_else(
         |_| ProbeOutput {
@@ -3080,7 +3080,8 @@ fn run_powershell_probe(
     // asks about the program a pane will run, so it asks about the one an
     // administrator installed.
     use std::process::Stdio;
-    let mut child = powershell_probe_command(program)?
+    let mut probe = powershell_probe_command(program)?;
+    probe
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -3088,11 +3089,11 @@ fn run_powershell_probe(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = bt_platform::spawn_probe(&mut probe)
         .map_err(|error| ParseProbeFailure::Spawn(error.to_string()))?;
     if let Some(input) = input {
-        let written = child.stdin.take().map_or_else(
+        let written = child.take_stdin().map_or_else(
             || Err("the piped stdin handle was absent".to_owned()),
             |mut stdin| {
                 stdin
@@ -7986,4 +7987,60 @@ mod tests {
     /// The name both PowerShells give the file, for the tests that stand one up
     /// rather than asking a shell where it is.
     const PROFILE_LEAF: &str = "Microsoft.PowerShell_profile.ps1";
+
+    /// A stand-in for a PowerShell that the parse probe asks: it reads the
+    /// whole of standard input and answers `1`, as the parse command does for
+    /// text that parses.
+    #[cfg(unix)]
+    fn parse_stand_in(tag: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = temp_dir(tag);
+        let program = directory.join("pwsh");
+        std::fs::write(&program, "#!/bin/sh\ncat >/dev/null\nprintf 1\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (directory, program)
+    }
+
+    /// RED mutation: in `bt_platform::ProbeChild::settle`, drop the early
+    /// return of the kept status; the probe's poll reaps the child, the
+    /// collection after it is refused, and the answer is `Wait`.
+    #[cfg(unix)]
+    #[test]
+    fn a_parse_probe_on_unix_answers_after_its_poll_settled_the_child() {
+        let (directory, program) = parse_stand_in("unix-parse");
+        let answer = run_parse_probe(
+            &program,
+            "Write-Output 'na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}'",
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(answer, Ok(true));
+    }
+
+    /// RED mutation: as above, drop the early return of the kept status in
+    /// `bt_platform::ProbeChild::settle`; the collection after `kill` is
+    /// refused and the diagnostics lose what the probe had written.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_probe_on_unix_keeps_what_it_wrote() {
+        use std::io::BufRead as _;
+        let said = "partial na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}";
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let mut command = hygiene.command("/bin/sh", bt_platform::quiet_command);
+        command
+            .arg("-c")
+            .arg(format!(
+                "printf '%s' '{said}'; printf 'ready\\n' >&2; exec sleep 30"
+            ))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = bt_platform::spawn_probe(&mut command).expect("start the stand-in");
+        let mut line = String::new();
+        std::io::BufReader::new(child.take_stderr().expect("stderr was piped"))
+            .read_line(&mut line)
+            .expect("read readiness");
+        assert_eq!(line, "ready\n");
+        let output = stopped_output(child);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), said);
+    }
 }

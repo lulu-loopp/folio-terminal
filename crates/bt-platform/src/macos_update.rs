@@ -258,12 +258,13 @@ fn run_at(
         program: name,
         detail,
     };
-    let mut child = crate::quiet_command(at)
+    let mut command = crate::quiet_command(at);
+    command
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = crate::spawn_probe(&mut command)
         .map_err(|error| refused(format!("did not start: {error}")))?;
     let deadline = Instant::now() + within;
     loop {

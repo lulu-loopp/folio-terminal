@@ -1039,7 +1039,24 @@ restart** or **Retry** raises the same `Available` offer from `Idle`
 current after its one unasked offer; never unasked. A launch a finished rollback
 sent (`--update-failed`) likewise raises nothing by itself, and its asked verbs
 work once the check lands; while an update this launch was told is incomplete
-may still be committed forward, nothing can be asked. **The frozen address**: a press fetches exactly
+may still be committed forward, nothing can be asked. **A launch a rollback sent
+that finds a Folio already running hands its report over with its launch**
+(U-36): the launch wire carries the start's own verdict — *Previous version
+restored.*, the update stopped before the new version ran, or *Update
+incomplete.* and its journal's folder, which the receiver holds to the gate the
+launch's own folder meets — not a local path, it is dropped and the card names no
+folder and offers the releases page, the report kept; never a trial's card, which is true only
+of the trial — in two keys a v2 reader of 0.4.6 ignores, so that build takes the
+launch unchanged and shows no card. The running Folio's job is told it as that
+start would have been at its own start: the failed card is raised in the window
+the launch landed in, over no card, an unpressed offer (its tag stays askable)
+or an earlier failure closed or not — the newest report wins — and the
+launch's unasked offer is spent; every window's Version row follows. A
+transaction the running Folio is running — from the press to the quit, or while
+its launch pass settles one — is not disturbed: the report is kept as the
+launch's last failure, named on Version with Details once the job is `Idle`. A
+reported launch whose folder the running Folio refuses opens its own window
+instead of ending with a sentence nobody reads. **The frozen address**: a press fetches exactly
 two files, by the offer's own tag, from
 `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/` —
 `folio-<version>-windows-x64.zip` with `SHA256SUMS.txt`, or
@@ -1130,7 +1147,19 @@ keeps its delivery; a trial whose transaction is still undecided hands it back
 to the recovery build at 102, 204, 408 and 816 s, one recovery at a time, and
 never ends itself — the recovery ends one that never became ready; on macOS the
 trial's launch (`open -n -W`) is watched, so one that ends before it is seen
-ends the applier's wait at once.
+ends the applier's wait at once. **A start of Folio during the unsettled
+window never decides the update from incomplete evidence** (U-40; from a
+source build of 0.4.7 or later, as above): a holder names the trial it
+launched only by exact evidence — on Windows the pid its launch returned; on
+macOS, where `open` reports none, the trial's receipt or the process of the
+installed executable whose arguments carry that launch's own words — never a
+process because it started after the launch; a person's start of the new
+build at any instant of a live holder's road hands itself to the recovery
+build, which waits for the holder's lock and then takes its decision as it
+stands (a retired or prepared transaction is left to the next ordinary
+start); and the macOS process check before the exchange waits within its
+window for a process of the installed executable to leave, as the Windows
+road waits for a held file, reverting only for one still there at its end.
 An applier killed from outside after
 it has taken the window duty, and a live holder the recovery build deferred to
 that is then killed from outside, are outside the guarantee and are recovered
@@ -1161,7 +1190,10 @@ job's gate is a build fact per platform …* (U-31); 2026-09-28 *every road proc
 of an update leaves through one exit guard …* (U-34), *Folio offers its own
 updates on macOS too …* (U-32); 2026-09-29 *a trial nobody alive is deciding is
 decided anyway …* (U-37, U-38); 2026-10-04 *two OS launch refusals reserve one
-last ordinary trial before it starts …* (U-35).
+last ordinary trial before it starts …* (U-35); 2026-10-05 *a start a rollback
+sent hands its report to a Folio already running …* (U-36); 2026-10-05 *a start of
+Folio during an update's unsettled window never decides the update from
+incomplete evidence …* (U-40).
 **Overrides.** The U-31 entry replaces the U-18 entry's "offers are the constant
 `false` until U-31/U-32" and the U-19 entry's "no shipped build shows any of
 this" for Windows, and replaces §7.52's "不下载、不替换、不重启" as a bound on
@@ -1178,6 +1210,10 @@ recorded, and its receipt commits. U-35 replaces U-32's remaining double-launch
 failure on Windows with the one reserved same-image trial, which can commit
 itself, and its named failure road; its round 2 withdraws round 1's macOS
 change and its "the next manual start hands the transaction to recovery".
+U-40 replaces U-28's "the trial's pid … a process of the installed executable
+that started after the launch" and the reading of §C.5's "a race with a manual
+launch completes the transaction" as recording that manual launch, and U-28's
+immediate revert of M4 for any process of the installed executable.
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

@@ -141,6 +141,14 @@ impl Children {
         pid
     }
 
+    /// **Start `bundle`'s executable as the trial a launch was asked for**:
+    /// with the launch's own words, as LaunchServices hands them on — the
+    /// words its holder knows it by (U-40).
+    fn start_trial(&self, bundle: &Path, args: &[OsString]) -> u32 {
+        let words: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+        self.start_with(bundle, &words)
+    }
+
     /// How `pid` ended, once it has.
     fn status(&self, pid: u32) -> Option<ExitStatus> {
         self.ended
@@ -455,6 +463,26 @@ impl Install {
             launch_agent::arm(&self.agents, self.txn.bytes(), &rescue, self.home.root()).unwrap();
     }
 
+    /// **This test process is the applier that took the window at `Handoff`**
+    /// (T-UPDATE-LOCK-RACE): its election record, the mark naming it, as one
+    /// `apply` keeps it while it carries its own road past `Handoff`. A
+    /// fixture that enters that road at a later phase stages the applier that
+    /// still owns it; without the mark it would stage a *later* contender,
+    /// which the election turns away (`Window::RoadTaken`). The Windows
+    /// fixtures' twin is `Install::claim_window` there.
+    fn claim_window(&self) {
+        assert!(
+            crate::update_apply::take_the_window(
+                None,
+                &self.home,
+                self.txn,
+                crate::update_apply::this_process(),
+                Instant::now(),
+            )
+            .is_mine()
+        );
+    }
+
     /// The installation after the exchange: the new bundle live, the old one
     /// in `stage/`.
     fn exchanged(&self) {
@@ -610,7 +638,7 @@ fn a_healthy_trial(install: &Install, children: &Children, carried: Option<Nonce
     let children = children.clone();
     Box::new(move |bundle, args| {
         let nonce = trial_nonce(args);
-        let pid = children.start(bundle, "trial");
+        let pid = children.start_trial(bundle, args);
         let receipt = Receipt {
             txn,
             nonce: carried.unwrap_or(nonce),
@@ -1016,63 +1044,234 @@ fn the_old_bundle_is_removed_only_after_committed() {
     );
 }
 
-/// RED (U-28) — **the receipt completes the transaction whichever process
-/// the applier recorded as the trial**: here the process list first finds a
-/// process of the new version that a person started by hand, and the receipt
-/// then arrives carrying another pid — the trial's nonce and the transaction
-/// are what the journal asks of it, never the pid.
+/// RED (U-40) — **a process of the installed executable that the applier
+/// finds at its process check (M4) is waited for within the window, and the
+/// update goes on once it has left**: a person's start in that instant hands
+/// itself to the recovery build and is gone within moments, so it never
+/// reverts the update. One that is still there when the window ends reverts
+/// it, as before, naming what holds the executable.
 ///
-/// §C.5: "Any Folio of `to_version` starting from this installation
-/// satisfies it, … so a race with a manual launch **completes** the
-/// transaction instead of failing it." Since F-14 a start without the trial's
-/// nonce hands itself to the rescue build and writes no receipt (U-12); what
-/// remains of the sentence is this: a hand-started process of the new build
-/// in the list neither fails the trial nor stands in the way of its receipt.
-///
-/// MUTATION: in `trial`, accept a receipt only when its pid is the recorded
-/// trial process's.
+/// MUTATION: in `Txn::at_armed`, revert at the first sighting of a process
+/// of the installed executable (the rule before U-40).
 #[test]
-fn a_manual_launch_of_the_new_version_completes_the_transaction() {
+fn a_persons_start_at_the_process_check_is_waited_for() {
     if !on_macos() {
         return;
     }
-    let install = Install::new("manual");
+    let install = Install::new("armed-person");
     let children = Children::default();
-    let world = Fake::default();
-    let launched = world.launched.clone();
-    let applier = start(install.road(limits(5_000, 10_000)), world);
-    let give_up = Instant::now() + Duration::from_secs(20);
-    let args = loop {
-        if let Some(args) = launched.lock().unwrap().first().cloned() {
-            break args;
+    let person = children.start(&install.installed, "person");
+    let mut world = launching(a_healthy_trial(&install, &children, None));
+    let leaves = children.clone();
+    world.on_say = Some(Box::new(move |line| {
+        if line.contains("the exchange waits for it to leave") {
+            leaves.end(person);
         }
-        assert!(Instant::now() < give_up, "no launch");
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    let by_hand = children.start(&install.installed, "by-hand");
+    }));
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert!(
+        said(&world, &format!("(pid {person}) runs; the exchange waits")),
+        "{:?}",
+        world.said
+    );
+    assert!(children.ended(person).is_some());
+    assert_eq!(version_of(&install.installed), "2.0");
+
+    // A copy that stays past the window still reverts the transaction.
+    let install = Install::new("armed-stays");
+    let children = Children::default();
+    let stays = children.start(&install.installed, "copy");
+    let (ended, world) = applied(install.road(limits(1_500, 5_000)), Fake::default());
+    assert_eq!(ended, Ended::Reverted, "{:?}", world.said);
+    assert!(
+        said(&world, "held open by another process: ") && said(&world, &format!("(pid {stays})")),
+        "{:?}",
+        world.said
+    );
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(children.status(stays), None, "the copy runs on");
+}
+
+/// **Where a person's start of the new build falls in the applier's road**
+/// (U-40): each instant between the exchange and the receipt at which a
+/// second start can meet a live applier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Beside {
+    /// At the exchange: started from the old bundle, which is exchanged under
+    /// it.
+    Exchange,
+    /// After the trial's launch, before the trial is seen and recorded.
+    Launch,
+    /// After `Trial` is recorded, before its receipt.
+    Record,
+}
+
+/// **One road with a person's start beside it**, up to the trial's record.
+struct BesideRoad {
+    install: Install,
+    children: Children,
+    /// The process the launch started, with the launch's own words.
+    trial: u32,
+    /// The person's start: a process of the same executable with none of
+    /// them.
+    person: u32,
+    recorded: TrialProcess,
+    nonce: Nonce,
+    applier: JoinHandle<(Ended, Fake)>,
+}
+
+/// **The applier's road with a person's start of the new build at
+/// `beside`**, run until the journal records its trial.
+fn a_start_beside(beside: Beside) -> BesideRoad {
+    let install = Install::new(&format!("beside-{beside:?}"));
+    let children = Children::default();
+    let person: Arc<Mutex<Option<u32>>> = Arc::default();
+    let trial: Arc<Mutex<Option<u32>>> = Arc::default();
+    let mut world = Fake::default();
+    if beside == Beside::Exchange {
+        let (children, person) = (children.clone(), Arc::clone(&person));
+        world.on_exchange = Some(Box::new(move |live, _| {
+            let mut person = person.lock().unwrap();
+            if person.is_none() {
+                *person = Some(children.start(live, "person"));
+            }
+        }));
+    }
+    {
+        let (children, person, trial) = (children.clone(), Arc::clone(&person), Arc::clone(&trial));
+        world.on_launch = Some(Box::new(move |bundle, args| {
+            if beside == Beside::Launch {
+                *person.lock().unwrap() = Some(children.start(bundle, "person"));
+            }
+            *trial.lock().unwrap() = Some(children.start_trial(bundle, args));
+            Ok(())
+        }));
+    }
+    let applier = start(install.road(limits(5_000, 20_000)), world);
     let journal = journal_reaches(&install, |journal| {
         journal.body.phase.kind() == PhaseKind::Trial
     });
-    let Phase::Trial { process, .. } = journal.body.phase else {
+    let Phase::Trial { process, nonce, .. } = journal.body.phase else {
         unreachable!()
     };
-    assert_eq!(
-        process.pid, by_hand,
-        "the list found the hand-started process"
-    );
-    install.receipt(trial_nonce(&args), trial_nonce(&args), std::process::id());
-    let (ended, world) = applier.join().unwrap();
-    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    if beside == Beside::Record {
+        *person.lock().unwrap() = Some(children.start(&install.installed, "person"));
+    }
+    let person = person.lock().unwrap().expect("the person's start");
+    let trial = trial.lock().unwrap().expect("the trial's launch");
+    BesideRoad {
+        install,
+        children,
+        trial,
+        person,
+        recorded: process,
+        nonce,
+        applier,
+    }
 }
 
-/// RED (U-28, M4–M6; U-29b) — **an applier started again over its own
-/// transaction goes on from what is live**: at `Armed` it admits, exchanges
-/// and commits; at `Moving` with the old bundle live it removes the plist and
-/// reverts to `Prepared` (M5); at `Moving` with the new bundle live it starts
-/// the trial nobody started and commits on its receipt, or rolls back when it
-/// cannot start one (M6, as the coordinator's ruling 1 of U-29b decides it
-/// for recovery too). A hand-over to another applier is refused and nothing
-/// is touched.
+/// RED (U-40) — **a person's start of the new build, at any instant of a live
+/// applier's road from the exchange to the receipt, is never taken for the
+/// trial and never fails it**: the trial recorded is the process the launch
+/// started — it carries the launch's words — the person's start leaves at
+/// once, as a start that hands itself to the recovery build does, and the
+/// receipt commits. The trial is the one window; nothing else is started.
+///
+/// The macOS rehearsal's defect 9 (`U-32-rehearsal.md`, D14), in the instant
+/// between the launch and the trial's record: the applier took the first
+/// process of the installed executable that started after the launch for its
+/// trial, so it could record a person's start, see it leave without a receipt
+/// and roll a healthy trial back.
+///
+/// MUTATION: in `update_apply::launched_trial`, answer the earliest-started
+/// process of `program` (the rule before U-40 took the earliest one started
+/// after the launch).
+#[test]
+fn a_persons_start_anywhere_in_the_window_never_fails_a_healthy_trial() {
+    if !on_macos() {
+        return;
+    }
+    for beside in [Beside::Exchange, Beside::Launch, Beside::Record] {
+        let row = a_start_beside(beside);
+        assert_eq!(
+            row.recorded.pid, row.trial,
+            "{beside:?}: the launched trial is recorded, never the person's start {}",
+            row.person
+        );
+        row.children.end(row.person);
+        assert!(row.children.ended(row.person).is_some(), "{beside:?}");
+        row.install.receipt(row.nonce, row.nonce, row.trial);
+        let (ended, world) = row.applier.join().unwrap();
+        assert_eq!(ended, Ended::Committed, "{beside:?}: {:?}", world.said);
+        assert_eq!(version_of(&row.install.installed), "2.0", "{beside:?}");
+        assert!(
+            said(
+                &world,
+                &format!(
+                    "{} runs and opens Folio; nothing else was started",
+                    row.trial
+                )
+            ),
+            "{beside:?}: {:?}",
+            world.said
+        );
+        assert!(world.relaunched.is_empty(), "{beside:?}");
+        assert_eq!(row.children.status(row.trial), None, "{beside:?}: it runs");
+    }
+}
+
+/// RED (U-40) — **a trial that really ends without a receipt is still rolled
+/// back at once, whatever person's start of the new build runs beside it, at
+/// every instant of the same window**: its end is seen at once (never the
+/// deadline's), the old bundle comes back, and the old build is started with
+/// `--update-failed`.
+///
+/// MUTATION: in `Txn::watch_trial`, take the trial to be alive while any
+/// process of the installed executable runs.
+#[test]
+fn a_dead_trial_beside_a_persons_start_is_still_rolled_back() {
+    if !on_macos() {
+        return;
+    }
+    for beside in [Beside::Exchange, Beside::Launch, Beside::Record] {
+        let row = a_start_beside(beside);
+        assert_eq!(row.recorded.pid, row.trial, "{beside:?}");
+        row.children.end(row.trial);
+        assert!(row.children.ended(row.trial).is_some(), "{beside:?}");
+        let (ended, world) = row.applier.join().unwrap();
+        row.children.end(row.person);
+        assert_eq!(ended, Ended::RolledBack, "{beside:?}: {:?}", world.said);
+        assert!(
+            said(
+                &world,
+                &format!("the trial {} ended without a receipt", row.trial)
+            ),
+            "{beside:?}: {:?}",
+            world.said
+        );
+        assert_eq!(version_of(&row.install.installed), "1.0", "{beside:?}");
+        assert_eq!(
+            world.relaunched,
+            vec![(
+                row.install.installed.clone(),
+                failed_then(&row.install, &[])
+            )],
+            "{beside:?}"
+        );
+    }
+}
+
+/// RED (U-28, M4–M6; U-29b) — **an applier that still owns its transaction
+/// goes on from what is live**: a recorded holder at `Armed` admits,
+/// exchanges and commits; at `Moving` with the old bundle live it removes the
+/// plist and reverts to `Prepared` (M5); at `Moving` with the new bundle live
+/// it starts the trial nobody started and commits on its receipt, or rolls
+/// back when it cannot start one (M6, as the coordinator's ruling 1 of U-29b
+/// decides it for recovery too). A hand-over to another applier is refused
+/// and nothing is touched. An unmarked *later* applier may not use these
+/// resume rules (T-UPDATE-LOCK-RACE round 3): see
+/// `an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road`.
 ///
 /// M5/M6: "recovery decides by reading the installed bundle's version, not by
 /// trusting the phase" (§C.4).
@@ -1089,6 +1288,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     }
     // M4.
     let install = Install::new("m4");
+    install.claim_window();
     let rescue = install.home.rescue_executable(install.txn).unwrap();
     let armed = launch_agent::arm(
         &install.agents,
@@ -1113,6 +1313,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
 
     // M5.
     let install = Install::new("m5");
+    install.claim_window();
     install.write(Phase::Moving);
     let rescue = install.home.rescue_executable(install.txn).unwrap();
     let _plist = launch_agent::arm(
@@ -1137,6 +1338,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     // M6 as U-29b rules it: decided by a trial, which commits here; and a
     // trial that cannot start is rolled back (M9, U-29).
     let install = Install::new("m6");
+    install.claim_window();
     install.write(Phase::Moving);
     install_flip::exchange(&install.installed, &install.stage()).unwrap();
     let children = Children::default();
@@ -1151,6 +1353,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     assert_eq!(version_of(&install.installed), "2.0", "kept");
 
     let install = Install::new("m6-no-trial");
+    install.claim_window();
     install.write(Phase::Moving);
     install_flip::exchange(&install.installed, &install.stage()).unwrap();
     let world = launching(Box::new(|_, _| Err(io::Error::other("no open (test)"))));
@@ -1173,6 +1376,54 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     let (ended, _) = applied(road, Fake::default());
     assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
+    assert_eq!(version_of(&install.installed), "1.0");
+}
+
+/// RED (T-UPDATE-LOCK-RACE round 3 on macOS) — **an applier that arrives
+/// over a transaction already past `Handoff` without the window's mark stands
+/// down, and the recovery at the next start finishes the road.** The product
+/// never starts one: O's hand-over is the only `--update-apply`, built only
+/// from `Prepared`, with the mark cleared just before `Handoff`
+/// (`update_handoff::HandoffJob::new`, `perform_counted`), so such a process
+/// is a later contender — a stray or repeated start. The election answers
+/// `RoadTaken(Armed)`: the journal, the entrance and the bundles stay exactly
+/// as they are and nothing is started (the applier that took the road owns
+/// its window; a dead one's road is the recovery's, which runs no election).
+/// The recovery then does what the cell needs: at `Armed`, nothing moved,
+/// back to `Prepared` with the entrance removed.
+///
+/// MUTATION: in `update_apply::window_duty_is_open`, count `Armed` as open (a
+/// later applier resumes a road it does not own).
+#[test]
+fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("later");
+    install.arm();
+    install.write(Phase::Armed);
+    let before = std::fs::read(install.home.journal()).unwrap();
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), Fake::default());
+    assert!(
+        matches!(&ended, Ended::Refused(why) if why.contains("RoadTaken(Armed)")),
+        "{ended:?}: {:?}",
+        world.said
+    );
+    assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
+    assert!(install.plist().exists(), "the entrance is the recovery's");
+    assert_eq!(version_of(&install.installed), "1.0", "nothing exchanged");
+    assert_eq!(world.exchanges, 0);
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::Reverted), "{:?}", hands.said);
+    assert_eq!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Prepared {
+            deferred_launches: 0
+        }
+    );
+    assert!(!install.plist().exists());
     assert_eq!(version_of(&install.installed), "1.0");
 }
 
@@ -1346,8 +1597,8 @@ fn a_failed_health_swaps_back() {
     let install = Install::new("health");
     let children = Children::default();
     let started = children.clone();
-    let world = launching(Box::new(move |bundle, _| {
-        started.start(bundle, "trial");
+    let world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
         Ok(())
     }));
     let (ended, world) = applied(install.road(limits(5_000, 1_500)), world);
@@ -1407,8 +1658,8 @@ fn a_dead_trial_rolls_back_at_once() {
     let install = Install::new("dead");
     let children = Children::default();
     let started = children.clone();
-    let world = launching(Box::new(move |bundle, _| {
-        started.start(bundle, "trial");
+    let world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
         Ok(())
     }));
     let killer = {
@@ -2603,7 +2854,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
         (failed, trial)
     };
     let incomplete = |install: &Install| crate::update_job::Failure::Incomplete {
-        folder: install.home.root().to_path_buf(),
+        folder: Some(install.home.root().to_path_buf()),
     };
 
     // A folder where the transaction lock should be: the lock cannot be
@@ -2677,8 +2928,8 @@ fn the_stuck_bound_still_holds_when_the_new_bundle_is_live() {
     let children = Children::default();
     let silent = |children: &Children| -> LaunchHook {
         let children = children.clone();
-        Box::new(move |bundle, _| {
-            children.start(bundle, "trial");
+        Box::new(move |bundle, args| {
+            children.start_trial(bundle, args);
             Ok(())
         })
     };
@@ -2768,6 +3019,8 @@ fn a_failed_applier_still_opens_the_live_bundle_with_the_incomplete_card() {
     );
 
     let install = Install::new("fail-write");
+    // The applier whose own road met the refused write still owns its window.
+    install.claim_window();
     install.write(Phase::Armed);
     install.arm();
     std::fs::write(install.home.lock(), b"").unwrap();
@@ -2816,8 +3069,8 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back() {
     let root = install.home.root().to_path_buf();
     let shut: Arc<Mutex<Option<std::fs::Permissions>>> = Arc::default();
     let at_launch = Arc::clone(&shut);
-    let mut world = launching(Box::new(move |bundle, _| {
-        started.start(bundle, "trial");
+    let mut world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
         let before = std::fs::metadata(&root).unwrap().permissions();
         let mut closed = before.clone();
         closed.set_readonly(true);
@@ -2951,8 +3204,8 @@ fn a_home_unwritable_after_the_exchange_leaves_the_new_build_as_a_trial_with_the
     let root = install.home.root().to_path_buf();
     let shut: Arc<Mutex<Option<std::fs::Permissions>>> = Arc::default();
     let at_launch = Arc::clone(&shut);
-    let world = launching(Box::new(move |bundle, _| {
-        started.start(bundle, "trial");
+    let world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
         let before = std::fs::metadata(&root).unwrap().permissions();
         let mut closed = before.clone();
         closed.set_readonly(true);
@@ -3009,8 +3262,8 @@ fn failed_with_the_home_shut(tag: &str) -> (Install, Children, TrialProcess, Fak
     let root = install.home.root().to_path_buf();
     let shut: Arc<Mutex<Option<std::fs::Permissions>>> = Arc::default();
     let at_launch = Arc::clone(&shut);
-    let world = launching(Box::new(move |bundle, _| {
-        started.start(bundle, "trial");
+    let world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
         let before = std::fs::metadata(&root).unwrap().permissions();
         let mut closed = before.clone();
         closed.set_readonly(true);
@@ -4220,6 +4473,64 @@ fn shape_exit_guard_follows_the_layout() {
     assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Stuck)]);
 }
 
+/// RED (U-40) — **a recovery a person's start sent while a live holder had
+/// the lock takes the holder's decision as it stands when it gets the lock**:
+/// a retired transaction (its entrance, left as the holder's debt, removed)
+/// and one reverted to `Prepared` end `Left` with the journal untouched — the
+/// next ordinary start retires the one, and the other is the running build's —
+/// as the Windows recovery leaves them, never "the recovery met" a failure.
+/// The start that sent it then opens what the disk names. Runs on every host
+/// (a scripted layout); the entrance is armed on macOS only.
+///
+/// MUTATION: in `Txn::settle`, delete the `Action::Retire` and
+/// `Action::Leave` arms.
+#[test]
+fn a_recovery_that_waited_for_a_live_holder_takes_its_decision_as_it_stands() {
+    for (tag, phase) in [
+        (
+            "decided-retired",
+            Phase::Retired {
+                outcome: Outcome::Committed,
+                untried: false,
+            },
+        ),
+        (
+            "decided-prepared",
+            Phase::Prepared {
+                deferred_launches: 0,
+            },
+        ),
+    ] {
+        let install = shape_install(tag);
+        install.write(phase.clone());
+        // The LaunchAgent's door makes its folder durable as macOS does it.
+        if on_macos() && matches!(phase, Phase::Retired { .. }) {
+            install.arm();
+        }
+        let recorder = Recorder::of(&install)
+            .answering([(Some(install.new.clone()), Some(install.old.clone()))]);
+        let road = recorded_road(&install, &recorder, limits(5_000, 0));
+        let (recovered, hands) = on_a_worker(move |worker| {
+            let mut hands = Fake::default();
+            let recovered = recover(worker, &road, &mut hands, Some(&[]));
+            (recovered, hands)
+        });
+        assert!(
+            matches!(recovered.ended, Ended::Left(_)),
+            "{tag}: {:?} {:?}",
+            recovered.ended,
+            hands.said
+        );
+        assert!(recovered.waiting, "{tag}: the person's start is owed one");
+        assert_eq!(
+            install.on_disk().map(|journal| journal.body.phase),
+            Some(phase),
+            "{tag}"
+        );
+        assert!(!install.plist().exists(), "{tag}");
+    }
+}
+
 /// RED (U-41a1, managed-update §1.1 R1–R2) — **the macOS road calls the
 /// layout its journal names, each point once at the phase the note's table
 /// gives it: `Activate` once, with `Moving` durable; `Activate` back once,
@@ -4271,8 +4582,8 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
     let install = Install::new("points-back");
     let children = Children::default();
     let started = children.clone();
-    let world = launching(Box::new(move |bundle, _| {
-        started.start(bundle, "trial");
+    let world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
         Ok(())
     }));
     let recorder = Recorder::of(&install);
