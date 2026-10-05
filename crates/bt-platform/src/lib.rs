@@ -14043,7 +14043,28 @@ pub use windows_impl::{
 mod portable_impl;
 
 #[cfg(target_os = "linux")]
+mod linux_clipboard;
+#[cfg(target_os = "linux")]
+mod linux_clipboard_x11;
+#[cfg(target_os = "linux")]
+mod linux_clipboard_x11_transport;
+#[cfg(target_os = "linux")]
 mod linux_files;
+#[cfg(target_os = "linux")]
+pub use linux_clipboard::{
+    LINUX_CLIPBOARD_OPERATION_BUDGET, LinuxClipboardBackend, clipboard_payload_on_worker,
+    clipboard_text_on_worker, set_clipboard_text_on_worker,
+};
+#[cfg(target_os = "linux")]
+pub use linux_clipboard::{
+    install_backend as install_linux_clipboard_backend, shutdown as release_clipboard,
+    shutdown_on_worker as release_clipboard_on_worker,
+};
+#[cfg(target_os = "linux")]
+pub use linux_clipboard_x11::{
+    ClaimOutcome as LinuxX11ClaimOutcome, ReconcileOutcome as LinuxX11ReconcileOutcome,
+    StartError as LinuxX11StartError, X11OwnerCandidate as LinuxX11OwnerCandidate,
+};
 #[cfg(target_os = "linux")]
 pub use linux_files::recycle_on_worker;
 
@@ -15194,6 +15215,7 @@ mod portable_clipboard {
 
     /// Put one string on the clipboard. Refused, and said so — the caller's own
     /// failure path already turns this into a line a reader sees.
+    #[cfg(not(target_os = "linux"))]
     pub fn set_clipboard_text(text: &str) -> Result<(), String> {
         let _ = text;
         Err("this platform has no clipboard backend".to_owned())
@@ -15201,7 +15223,9 @@ mod portable_clipboard {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub use portable_clipboard::{clipboard_text, set_clipboard_text};
+pub use portable_clipboard::clipboard_text;
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub use portable_clipboard::set_clipboard_text;
 
 /// **A door in this crate has one signature, and no window in it**
 /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②, ticket M1-9).

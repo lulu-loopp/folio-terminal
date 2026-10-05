@@ -1174,6 +1174,8 @@ windows = { version = "0.62.2", features = [
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"] }
+wl-clipboard-rs = { version = "=0.9.4", default-features = false }
 x11rb = { version = "=0.13.2", default-features = false, features = ["xkb", "randr", "resource_manager", "xfixes"] }
 xkeysym = { version = "=0.2.1", default-features = false }
 # `fontdb` already comes through `glyphon`; this direct edge reads the configured

@@ -54812,27 +54812,24 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
         rung < paste,
         "`Ctrl+V` reaches the clipboard rung before the card's"
     );
-    // The door every clipboard road shares asks the list before it reads the clipboard.
+    // The door every clipboard road shares asks the list before it queues a read.
     let door = squeezed_body("Runtime", "paste_from_clipboard_into");
     let asked = door
         .find("ifself.a_surface_above_the_clipboard_rung_holds_the_keyboard(){returnOk(());}")
         .unwrap_or_else(|| {
             panic!("the clipboard door does not ask who holds the keyboard:\n{door}")
         });
-    let read = door
-        .find("bt_platform::clipboard_payload()")
-        .expect("the door reads the clipboard");
+    let request = door
+        .find("self.request_clipboard_read(token,ReadKind::Payload)")
+        .expect("the door queues the payload read");
     assert!(
-        asked < read,
-        "the question is asked after the clipboard was read"
+        asked < request,
+        "the question is asked after the payload read was queued"
     );
-    // PR1's extraction (the port split) moved the delivery into
-    // `apply_clipboard_payload`; the Linux async read rewrites this pin in PR4
-    // of the split. The paste still leaves through the one door every paste's
-    // notices leave by.
+    let delivery = squeezed_body("Runtime", "apply_clipboard_payload");
     assert!(
-        squeezed_body("Runtime", "apply_clipboard_payload").contains("self.deliver_paste("),
-        "and delivers the paste"
+        delivery.contains("self.deliver_paste("),
+        "the async result uses the shared paste delivery door"
     );
     // And the terminal menu's Paste goes through that door, not around it.
     assert!(

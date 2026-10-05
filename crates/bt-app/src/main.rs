@@ -103,6 +103,8 @@ mod lane_contract_tests;
 mod launch_wire;
 mod layout_tables;
 mod linebreak;
+#[cfg(target_os = "linux")]
+mod linux_clipboard_lane;
 mod marks;
 mod menubar;
 mod mouse_trace;
@@ -795,6 +797,9 @@ enum AppEvent {
     /// window's own picture mailbox by the time this is sent, and this says only
     /// that there is one.
     ClipboardPictureReady,
+    /// A native Linux clipboard reader published its one bounded answer.
+    #[cfg(target_os = "linux")]
+    LinuxClipboardReady,
     /// **A hand-off to the system has been answered** (`handoff_lane`, `docs/DESIGN.md`
     /// 2026-09-22 — *a hand-off to the system runs on its own lane*).
     ///
@@ -852,6 +857,8 @@ impl AppEvent {
             // The station the acquisition opened, charged again for the half of
             // the same gesture that finishes it.
             Self::ClipboardPictureReady => Station::ClipboardRead,
+            #[cfg(target_os = "linux")]
+            Self::LinuxClipboardReady => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
             Self::PsReadLineProbed
@@ -4674,6 +4681,9 @@ fn preview_tab_index_among(tabs: &[TabState], tab: TabId) -> Option<usize> {
 /// would be three booleans that can all say yes.
 #[derive(Default)]
 struct PreviewPane {
+    /// Identity of this particular preview surface for delayed operations.
+    #[cfg(target_os = "linux")]
+    instance_identity: Arc<()>,
     neighbours: Option<preview_neighbours::Folder>,
     /// The picture on this surface, if it is showing one. Mutually exclusive
     /// with [`Self::buffer`] — the two doors clear each other on the way in.
@@ -12366,6 +12376,10 @@ struct App {
     /// different pictures. A number minted here is unique wherever it is read.
     animation_serials: u64,
     event_proxy: EventLoopProxy<AppEvent>,
+    /// The one process-wide asynchronous owner for Linux clipboard ordering.
+    #[cfg(target_os = "linux")]
+    clipboard_lane:
+        Option<linux_clipboard_lane::ClipboardLane<ClipboardTargetToken, ClipboardWriteTarget>>,
     /// **The OS hand-off lane** — the one thread every hand-off that leaves a window runs on
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
     /// be unique across windows, because an answer finds its window by id.
@@ -13157,6 +13171,9 @@ impl NewWindowPlan {
 /// field into a map keyed by `WindowId`; this slice only makes that sentence
 /// something the type system can express.
 struct WindowRuntime {
+    /// Identity of this particular native window instance for delayed operations.
+    #[cfg(target_os = "linux")]
+    instance_identity: Arc<()>,
     ime_report: ime_report::Report,
     ime_report_due: Option<Instant>,
     /// **When this window gives up waiting for its pages to let go** (§7.35).
@@ -19778,13 +19795,70 @@ enum TextFieldSeat {
     FindBar,
 }
 
-/// What a clipboard write should say once the platform's clipboard path has
-/// accepted it. Linux grows the variants a lane can only land on a later turn.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct ClipboardTargetToken {
+    window: WindowId,
+    window_identity: Arc<()>,
+    destination: ClipboardDestination,
+}
+
 enum ClipboardWriteEffect {
     None,
+    #[cfg(target_os = "linux")]
+    ClearTerminalSelection {
+        target: PasteTarget,
+        expected: ViewSelection,
+    },
+    #[cfg(target_os = "linux")]
+    MathCopied {
+        target: PasteTarget,
+        anchor: MathBlockAnchor,
+    },
     Toast {
         anchor: toast::ToastAnchor,
         text: String,
+    },
+}
+
+#[cfg(target_os = "linux")]
+struct ClipboardWriteTarget {
+    window: WindowId,
+    window_identity: Arc<()>,
+    effect: ClipboardWriteEffect,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+enum ClipboardDestination {
+    Terminal(PasteTarget),
+    Field(ClipboardFieldTarget),
+    Preview {
+        surface: PreviewSurface,
+        source: preview::PreviewSource,
+        identity: Arc<()>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+enum ClipboardFieldTarget {
+    Rename(Arc<()>),
+    GitPrompt(Arc<()>),
+    Palette(Arc<()>),
+    Settings {
+        target: settings::SettingsTarget,
+        identity: Arc<()>,
+    },
+    GraphSearch {
+        tab: TabId,
+        surface: PreviewSurface,
+        identity: Arc<()>,
+    },
+    FindBar {
+        tab: TabId,
+        seat: SeatId,
+        identity: Arc<()>,
     },
 }
 
@@ -40863,6 +40937,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         clock
     };
     WindowRuntime {
+        #[cfg(target_os = "linux")]
+        instance_identity: Arc::default(),
         ime_report,
         ime_report_due: None,
         // A window is born staying.
@@ -41999,6 +42075,14 @@ impl Runtime<'_> {
             // service. A mismatch would route later requests to the wrong backend,
             // so it must stop startup; service failures remain operation-local.
             bt_platform::install_linux_display_backend(backend).map_err(|error| anyhow!(error))?;
+            let clipboard_backend = match backend {
+                bt_platform::linux_window::Backend::X11 => bt_platform::LinuxClipboardBackend::X11,
+                bt_platform::linux_window::Backend::Wayland => {
+                    bt_platform::LinuxClipboardBackend::Wayland
+                }
+            };
+            bt_platform::install_linux_clipboard_backend(clipboard_backend)
+                .map_err(|error| anyhow!(error))?;
         }
         // **The clipboard's owner window, told once here and never carried by a
         // caller again** (M1-9). `OpenClipboard` wants a window and
@@ -42393,6 +42477,8 @@ impl Runtime<'_> {
             tab_ids,
             animation_serials: 0,
             event_proxy: proxy.clone(),
+            #[cfg(target_os = "linux")]
+            clipboard_lane: None,
             git_watch: git_watch::GitWatch::default(),
             handoff_lane,
             layout_tables,
@@ -55367,8 +55453,31 @@ mod formula_tool_seat_tests {
         let copy = method_body("Runtime", "copy_math_latex");
         assert!(
             copy.find("self.live_paste_target(target)").unwrap()
-                < copy.find("bt_platform::set_clipboard_text").unwrap()
+                < copy.find("self.submit_clipboard_write").unwrap()
         );
+        assert!(copy.contains("ClipboardWriteEffect::MathCopied"));
+        assert_eq!(
+            found(
+                needle!(Pattern::text("bt_platform::set_clipboard_text_on_worker(")),
+                View::Raw
+            )
+            .in_the_product(source())
+            .len(),
+            1,
+            "Linux native writes enter only through the lane adapter"
+        );
+        let sync_setters = found(
+            needle!(Pattern::text("bt_platform::set_clipboard_text(")),
+            View::Raw,
+        );
+        assert_eq!(
+            sync_setters.in_the_product(source()).len(),
+            2,
+            "only the non-Linux terminal helper and formula fallback call the synchronous setter:\n{}",
+            sync_setters.report(source())
+        );
+        assert!(copy.contains("#[cfg(not(target_os = \"linux\"))]"));
+        assert!(copy.contains("bt_platform::set_clipboard_text(source)"));
         let validate = method_body("Runtime", "live_paste_target");
         assert!(validate.contains("tab.sessions.get(&target.seat)"));
         assert!(validate.contains("paste_target_is_live(tab.id, standing, target)"));
@@ -60883,6 +60992,87 @@ impl FolioApp {
         batch
     }
 
+    #[cfg(target_os = "linux")]
+    fn cancel_stale_clipboard_reads(&mut self) {
+        let pending = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+            .map_or_else(Vec::new, |reads| reads.pending_targets());
+        let stale: Vec<u64> = pending
+            .into_iter()
+            .filter_map(|(id, target)| {
+                let current = self
+                    .runtime(target.window)
+                    .is_some_and(|mut runtime| runtime.clipboard_target_is_current(&target));
+                (!current).then_some(id)
+            })
+            .collect();
+        if let Some(reads) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+        {
+            reads.cancel_requests(&stale);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain_clipboard_lane(&mut self) -> Result<()> {
+        let result = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+            .and_then(|lane| lane.take_result());
+        let Some(result) = result else {
+            return Ok(());
+        };
+        let result_id = result.id();
+        let adopted = match result {
+            linux_clipboard_lane::ClipboardLaneResult::Read(result) => {
+                match self.runtime(result.target.window) {
+                    Some(mut runtime) => {
+                        if runtime.clipboard_target_is_current(&result.target) {
+                            runtime.apply_clipboard_read_result(result)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    _ => Ok(()),
+                }
+            }
+            linux_clipboard_lane::ClipboardLaneResult::Write(result) => {
+                if !recoverable_clipboard_write(
+                    result.result.map_err(|error| anyhow!(error)),
+                    result.action,
+                ) || matches!(&result.effect.effect, ClipboardWriteEffect::None)
+                {
+                    Ok(())
+                } else {
+                    match self.runtime(result.effect.window) {
+                        Some(mut runtime)
+                            if Arc::ptr_eq(
+                                &runtime.window.instance_identity,
+                                &result.effect.window_identity,
+                            ) =>
+                        {
+                            runtime.apply_clipboard_write_effect(result.effect.effect)
+                        }
+                        _ => Ok(()),
+                    }
+                }
+            }
+        };
+        if let Some(lane) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+        {
+            lane.acknowledge_result(result_id);
+        }
+        adopted
+    }
+
     /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
     ///
     /// Each answer is offered to every open window and claimed by the one whose duties hold its
@@ -63713,6 +63903,10 @@ impl FolioApp {
         // reaping one, or rebuilding the menu bar was reported as a wake that
         // named no lane. See [`hang_watch::Station::AppTurn`].
         hang_watch::at(hang_watch::Station::AppTurn);
+        #[cfg(target_os = "linux")]
+        hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.cancel_stale_clipboard_reads();
+        });
         // **This turn's allowance for deferrable work** (0.4.6 A4; budget note §R-B): one shared
         // deadline — the earliest next frame of the windows on the glass whose clocks are running,
         // less the present's reserve — taken from the turn's start, before any window takes its
@@ -63817,6 +64011,17 @@ impl FolioApp {
             .and_then(|()| self.settle_quake(event_loop))
             .and_then(|()| self.settle_quit(event_loop))
         {
+            self.fail(event_loop, error);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.cancel_stale_clipboard_reads();
+        });
+        #[cfg(target_os = "linux")]
+        if let Err(error) = hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.drain_clipboard_lane()
+        }) {
             self.fail(event_loop, error);
             return;
         }
@@ -64430,6 +64635,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             #[cfg(target_os = "linux")]
             AppEvent::NativeDialogReady => Ok(()),
+            #[cfg(target_os = "linux")]
+            AppEvent::LinuxClipboardReady => Ok(()),
             #[cfg(target_os = "linux")]
             AppEvent::WindowCloseRequested(window_id) => {
                 self.window_event(event_loop, window_id, WindowEvent::CloseRequested);
@@ -65478,6 +65685,7 @@ fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn copy_selection(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
@@ -65491,6 +65699,7 @@ fn copy_selection(
     true
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn write_selection_text(
     session: &DualPlaneSession,
     ignore_empty: bool,
@@ -65508,6 +65717,7 @@ fn write_selection_text(
     true
 }
 
+#[cfg(not(target_os = "linux"))]
 fn write_terminal_clipboard_text(text: &str) -> Result<()> {
     hang_watch::during(hang_watch::Station::ClipboardWrite, || {
         bt_platform::set_clipboard_text(text)
@@ -72777,7 +72987,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 25] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 28] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -72797,8 +73007,8 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
-        // First-window display identity is strict; optional service failures
-        // remain local to their operation.
+        // First-window display and clipboard identities are strict; optional
+        // service failures remain local to their operation.
         "main.rs",
         // The Linux focus door must refuse a Wayland focus request before calling winit.
         "owner_door.rs",
@@ -72811,10 +73021,14 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Linux's generation-checked native hotkey answers read the current claim here.
         "quake.rs",
-        // Linux keeps its input method across a focus loss in this ladder.
+        // Linux clipboard reads return on a later turn and are adopted by destination identity.
+        "runtime/clipboard.rs",
+        // Linux page input follows this runtime's shortcut and IME owner ladder.
         "runtime/keyboard.rs",
         // Linux's client frame starts a native resize from this pointer gesture.
         "runtime/mouse.rs",
+        // Linux preview paste adopts its delayed text reply only at the original document instance.
+        "runtime/preview.rs",
         // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
         "runtime/quake.rs",
         // The Linux-only minimize restore bridge has only the Linux quake summon caller.
@@ -72826,12 +73040,14 @@ mod platform_gate_tests {
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
+        // Linux field identities reject delayed clipboard answers after a field is replaced.
+        "text_field.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
-        // Only the symlinked-log regression fixture; the recovery road is portable.
-        "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
         "update_handoff.rs",
+        // Only the symlinked-log regression fixture; the recovery road is portable.
+        "update_recover.rs",
         // WSL.
         "wsl.rs",
     ];
@@ -73411,10 +73627,10 @@ mod cross_window_drag_tests {
     /// `Result`.
     ///
     /// The five portable service calls are the M1 exception list. Linux adds a
-    /// separate list for process-wide backend identity: the display and hotkey
-    /// backends are bound from the first window's actual native handle, and the
-    /// installer probes no service availability. A mismatch would make later
-    /// requests use the wrong backend, so it must stop startup.
+    /// separate two-name list for process-wide backend identity: both are bound
+    /// from the first window's actual native handle, and neither installer probes
+    /// service availability. A mismatch would make later requests use the wrong
+    /// backend, so it must stop startup.
     ///
     /// Every other propagated platform call remains fatal to this gate.
     ///
@@ -73432,7 +73648,10 @@ mod cross_window_drag_tests {
             "Compositor::new",            // step 13
         ];
         /// The backend calls bind OnceLocks selected from the first native window.
-        const LINUX_BACKEND_BINDINGS: [&str; 1] = ["install_linux_display_backend"];
+        const LINUX_BACKEND_BINDINGS: [&str; 2] = [
+            "install_linux_display_backend",
+            "install_linux_clipboard_backend",
+        ];
 
         /// Every `bt_platform::…` call in `body` whose statement carries a `?`.
         ///
@@ -74701,8 +74920,9 @@ mod palette_wiring_tests {
             "the paste chord is the window's own predicate, not a second spelling"
         );
         assert!(
-            method_body("Runtime", "clipboard_line").contains("text_field::one_line"),
-            "and what it hands the field is one line of printable text"
+            method_body("Runtime", "apply_clipboard_text_to_field")
+                .contains("text_field::one_line"),
+            "and the result door hands a one-line field printable text"
         );
         assert!(
             keys.contains(
@@ -75494,10 +75714,13 @@ mod edit_menu_clipboard_tests {
             item_body(&ItemQuery::function("rename_pastes")).contains("input::is_paste_shortcut("),
             "the name box spells its own paste chord"
         );
-        // PR1's extraction (the port split) made `apply_clipboard_text_to_field`
-        // the door that carries a field's own insert; that is where the skip is
-        // pinned until the Linux async read rewrites this test in PR4.
-        let door = method_body("Runtime", "apply_clipboard_text_to_field");
+        let door = method_body("Runtime", "paste_into_field");
+        assert!(
+            door.contains("self.request_clipboard_text(field)")
+                && door.contains("self.apply_clipboard_text_to_field(field, &text)"),
+            "the platform read or queued read bypasses the field insert helper"
+        );
+        let field_insert = method_body("Runtime", "apply_clipboard_text_to_field");
         for insert in [
             "self.search_ime(",
             "self.graph_search_ime(",
@@ -75507,7 +75730,7 @@ mod edit_menu_clipboard_tests {
             "self.paste_into_settings_field(",
         ] {
             assert!(
-                door.contains(insert),
+                field_insert.contains(insert),
                 "a field's paste skips its own insert: {insert}"
             );
         }
@@ -77155,14 +77378,29 @@ mod clipboard_path_tests {
                 View::Raw
             )),
             1,
-            "the board is read in one place the product compiles"
+            "the synchronous non-Linux payload path remains one place"
+        );
+        assert_eq!(
+            in_product_items(&found(
+                needle!(Pattern::text("bt_platform::clipboard_payload_on_worker(")),
+                View::Raw
+            )),
+            1,
+            "Linux payload reads enter through the single worker adapter"
+        );
+        assert_eq!(
+            in_product_items(&found(
+                needle!(Pattern::text("bt_platform::clipboard_text_on_worker(")),
+                View::Raw
+            )),
+            1,
+            "Linux text reads enter through the same worker adapter"
         );
         let paste = method_body("Runtime", "paste_from_clipboard_into");
         assert!(paste.contains("bt_platform::clipboard_payload()"));
         assert!(paste.contains("hang_watch::Station::ClipboardRead"));
-        // PR1's extraction (the port split) moved the paste's preparation into
-        // `apply_clipboard_payload`; the recipient is captured there now, and
-        // the Linux async read rewrites this pin again in PR4 of the split.
+        assert!(paste.contains("ClipboardDestination::Terminal(target)"));
+        assert!(paste.contains("request_clipboard_read("));
         let delivery = method_body("Runtime", "apply_clipboard_payload");
         assert!(delivery.contains("leaf.paste_recipient.clone()"));
         assert!(!paste.contains("set_focus("));
@@ -77173,6 +77411,26 @@ mod clipboard_path_tests {
         assert!(k144.contains("self.seats.set_focus(seat)"));
         assert!(k144.contains("paste_text("));
         assert!(!k144.contains("to_string_lossy"));
+    }
+
+    #[test]
+    fn policy_command_copy_uses_the_linux_write_lane_and_defers_its_toast() {
+        let copy = method_body("Runtime", "copy_policy_command");
+        let (linux, non_linux) = copy
+            .split_once("#[cfg(not(target_os = \"linux\"))]")
+            .expect("the synchronous platform branch remains explicit");
+        assert!(linux.contains("#[cfg(target_os = \"linux\")]"));
+        assert!(linux.contains("self.submit_clipboard_write("));
+        assert!(linux.contains("crate::shell_integration::POLICY_COMMAND.to_owned()"));
+        assert!(linux.contains("ClipboardWriteEffect::Toast"));
+        assert!(linux.contains("crate::i18n::graph_copied("));
+        assert!(
+            !linux.contains("write_terminal_clipboard_text"),
+            "Linux policy copies enter the clipboard lane before native publication:\n{linux}"
+        );
+        assert!(
+            non_linux.contains("copy_policy_command_with(crate::write_terminal_clipboard_text)")
+        );
     }
 
     /// A PowerShell recipient whose quote policy is named by the caller.

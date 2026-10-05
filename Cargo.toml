@@ -3,6 +3,7 @@
 # dependency versions, so a dep can't silently resolve to something our pinned
 # toolchain can't build.
 resolver = "3"
+exclude = ["vendor/arboard", "vendor/wl-clipboard-rs"]
 members = [
     "crates/bt-term",
     "crates/bt-transcript",
@@ -316,8 +317,10 @@ panic = "unwind"
 debug = "line-tables-only"
 
 [patch.crates-io]
+arboard = { path = "vendor/arboard" }
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 mitex = { path = "vendor/mitex" }
 mitex-parser = { path = "vendor/mitex-parser" }
 portable-pty = { path = "vendor/conpty/portable-pty" }
 vte = { path = "vendor/vte" }
+wl-clipboard-rs = { path = "vendor/wl-clipboard-rs" }
