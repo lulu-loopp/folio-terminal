@@ -201,9 +201,9 @@ file*, where `\\wsl.localhost\<distro>\…` is exactly the name that works.
 
 ## Injecting the script
 
-PowerShell's script is process-scoped and automatic, and this product never writes `$PROFILE`.
-Folio owns a refreshed copy below its data directory and composes the one PowerShell argv at the
-leaf-spawn seam. A row with no terminal host switch receives exactly `-NoExit -Command <loader>`.
+PowerShell's script is process-scoped and automatic when the row can be composed. Folio owns a
+refreshed copy below its data directory and composes the one PowerShell argv at the leaf-spawn
+seam. A row with no terminal host switch receives exactly `-NoExit -Command <loader>`.
 For an existing `Command` or strict base64/UTF-16LE `EncodedCommand`, a below-normal preparation
 worker first asks the row's resolved PowerShell executable to parse the exact command text. A valid
 answer appends `CRLF` and the loader inside that same terminal command; Folio preserves an existing
@@ -214,6 +214,83 @@ command line are left unchanged. A failed probe is an unavailable answer rather 
 command: a later birth may schedule the next background attempt, up to three attempts for the
 exact executable and argv in one process, and the birth never waits. The Settings capability
 sentence reads that same answer.
+
+When a PowerShell row must instead be spawned as written (`File`, `CommandWithArgs`, stdin,
+`NonInteractive`, or an unknown/invalid host line), Settings > Profiles offers one **Enable via
+profile** button for that edition. One click uses the existing managed-line writer and backup to
+add Folio's guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation is interposed, and
+the success toast offers Undo. The installed fact is per edition, so every such row for that
+edition changes to the ordinary capability sentence together. The one existing **PowerShell
+`$PROFILE` line** row remains the only lasting removal surface. No button is offered when the row
+has any accepted `NoProfile` spelling, or when the execution policy that row would run under refuses
+profile scripts. Nor is it offered before that edition's first profile/policy observation has
+landed, or off Windows, where there is no profile probe. A missing profile file is created with only
+the managed line.
+
+The policy is read per row from the scope list the probe reports (`Get-ExecutionPolicy -List`), in
+PowerShell's precedence order — MachinePolicy, UserPolicy, Process, CurrentUser, LocalMachine, then
+the default — with the row's own `-ExecutionPolicy` (any spelling) as its Process scope. A refusing
+policy is one of three cases, and the capability sentence says which:
+
+* **Set by the user's own scopes** (CurrentUser, LocalMachine or the default decides, nothing above
+  CurrentUser is set). `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, which needs no
+  elevation, would decide the effective policy, so the row offers one **Copy** button in the place
+  of the Enable button; it puts exactly that command on the clipboard and the window says what was
+  copied. Folio never runs it.
+
+Either button stands in the row only while the text column can spare it (at most the share of the
+row a picker may take on any other page); at narrow dialog widths it is not drawn, and the row's
+`⋯` menu, which offers the same verb first on every row that has one, is the way to it.
+* **Set by the organisation** (MachinePolicy or UserPolicy, i.e. Group Policy). No command and no
+  button: the user cannot change it.
+* **Set for the process** (a refusing Process scope: the row's own `-ExecutionPolicy`, its last
+  occurrence as both binders take it, or a `PSExecutionPolicyPreference` in the environment). It
+  outranks CurrentUser, so the command would not help; the sentence says the policy set for this
+  process refuses `$PROFILE`, with no button.
+
+Two more cases offer nothing:
+
+* **Where `$PROFILE` is stored.** `RemoteSigned` refuses an unsigned script from the Internet or
+  Untrusted zone, and the two editions decide the zone differently (measured 2026-10-05 through
+  real UNC paths and a Mark of the Web): PowerShell 7 keys on the file's Mark of the Web alone, so
+  an unmarked profile on a redirected share loads; Windows PowerShell also maps the path's URL
+  zone, so a profile on a share it places in the Internet zone (`\\host.example.com\…`) is
+  refused. The probe asks the row's own edition for its answer — the zone function its
+  authorization manager uses — so each row follows its edition's rule. When `RemoteSigned` is the
+  policy that decides, or would decide once the command has run, and the edition says it would not
+  load the profile from there (or gives no answer), the row says `$PROFILE` is stored where the
+  policy may refuse it. A line already installed where the edition says it loads shows the
+  ordinary "loaded via $PROFILE" sentence. The edition's zone function is internal; when an
+  edition gives no answer, the same probe run's public facts decide what can still be known — an
+  unmarked profile on a local fixed drive loads, so its row keeps the button; a marked file or a
+  network or removable path gets the Location sentence — and diagnostics say once per edition
+  that the fallback was used.
+* **A row this build cannot read** (for example `-ep:Bypass`: the colon form is not an option to
+  either binder) makes no claim about its policy and shows only the "not provided" sentence.
+
+The default policy, used when no scope is set, is not a constant: the probe asks the edition for
+its effective policy with the probe's own Process scope cleared.
+
+After the user runs the command in any shell, the next visit to the Profiles page re-reads the
+policy (the page-entry observation edge) and the row becomes the ordinary Enable offer; the Enable
+click re-probes the policy for that row anyway. There is no polling. Opening the Profiles page starts the existing background
+profile/policy observation once for that visit; leaving and returning starts another observation,
+with no polling loop.
+
+The PowerShell script, and only it, first verifies `TERM_PROGRAM=Folio`: Folio itself adds its line
+to `$PROFILE`, and that line must be inert when the same profile is read in another terminal. A
+nested PowerShell started inside a Folio pane inherits the declaration and is deliberately
+integrated. The process-scoped launch paths set the same declaration, so this guard does not
+distinguish automatic composition from the opted-in profile line. Known limit: a PowerShell session
+on another host reached by ssh from a Folio pane, whose profile sources `folio.ps1`, is inert
+unless the ssh connection forwards `TERM_PROGRAM` (`SendEnv` on the client and `AcceptEnv` on the
+server); `TERM_PROGRAM` does not cross ssh by default.
+
+The bash and zsh scripts are unchanged: they act wherever they are sourced. Folio never adds a line
+to a bash or zsh rc file, and a hand-installed copy sourced from an rc file on a remote host reached
+by ssh from a Folio pane, or in a `sudo -i` / `su -` shell inside a pane, must keep working there —
+`TERM_PROGRAM` crosses neither ssh nor `sudo`'s `env_reset`. The sequences they emit are the
+standard `OSC 133` and `OSC 7` that other terminals read or ignore.
 
 The bash script is also installed automatically, for one session at a time:
 
@@ -346,7 +423,7 @@ fallback path described under **Authority and fallback** rather than on a guess.
 |---|---|---|---|---|---|---|---|---|
 | **PowerShell** (7, script installed) | yes | yes | yes | yes | yes | `PowerShell` | script | PSReadLine |
 | **Windows PowerShell** (5.1, script installed) | yes | yes | yes | yes | yes | `Windows PowerShell` | script | PSReadLine |
-| **either PowerShell** (script not installed or argv declined) | no | no | no | no | no | — | no | PSReadLine |
+| **either PowerShell** (script not installed or argv declined, profile fallback off) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
 | **WSL** (zsh login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | zsh's own |
@@ -579,6 +656,8 @@ idempotent within one shell, and does nothing at all in a non-interactive one.
 The process loader preserves the prompt and PSReadLine implementation that exist when it runs, then
 the owned script wraps them with standard A/B/C/D markers. The script is idempotent within one shell
 process and works in both PowerShell 7 (`pwsh`) and Windows PowerShell 5.1 (`powershell.exe`). It
+returns before doing anything unless `TERM_PROGRAM` is exactly `Folio`; nested PowerShell sessions
+inside Folio inherit that value and are intentionally integrated. It
 requires PSReadLine. PowerShell 7 may revive only its already-loaded in-box PSReadLine assembly when
 execution policy prevented module registration; Windows PowerShell does not take that path. A
 missing PSReadLine installation, non-FullLanguage session, refused argv, failed preparation or

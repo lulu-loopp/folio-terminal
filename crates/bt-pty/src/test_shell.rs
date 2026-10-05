@@ -37,8 +37,9 @@
 //!   because `-Command` runs before the first prompt; the gate is what turns a
 //!   shell that could not establish it into a test that says so, rather than a
 //!   test that waits for a prompt it was never going to get. The module
-//!   analysis cache is redirected too (`PSModuleAnalysisCachePath`), and
-//!   `pwsh`'s telemetry and update check are off. A one-shot PowerShell
+//!   analysis cache is the tests' own, one per edition and warmed once before
+//!   the first child ([`warmed_module_analysis_cache`]), and `pwsh`'s
+//!   telemetry and update check are off. A one-shot PowerShell
 //!   (`-Command`, `-EncodedCommand` or `-File` without `-NoExit`) never runs a
 //!   line editor, so it has no history to refuse.
 //! * **cmd** — `/D`, so the `AutoRun` commands in the user's registry are not
@@ -56,6 +57,15 @@
 //!   distribution's own home directory, which nothing on this side can move.
 //! * **Anything else** (`node`, `git`, a test's own program) gets the
 //!   environment alone.
+//!
+//! Every family also starts **without the variables Folio announces to a pane**
+//! ([`PANE_ANNOUNCEMENTS`]), unless the test sets one itself: a test run from a
+//! shell inside a Folio pane inherits `TERM_PROGRAM=Folio`, `FORCE_HYPERLINK`
+//! and the rest, and a CI runner does not, so a gate that passes only because
+//! its child inherited them passes for a reason CI does not have. A child on a
+//! pseudoconsole still gets what `bt-pty` itself declares to every child
+//! (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `COLORTERM`, `TERM`) — the
+//! product's declaration, the same on every machine.
 //!
 //! Process starts that are not on a pseudoconsole — a one-shot script, a shell
 //! fed on a pipe — take the same rule through [`Hygiene::command`].
@@ -102,6 +112,324 @@ pub const REFUSED_EXIT_CODE: u32 = 75;
 /// tests' own ceilings are (`bt-app`'s `real_powershell_input_reaches_a_viewport_owned_frame`).
 const ESTABLISH_CEILING: Duration = Duration::from_secs(180);
 const ESTABLISH_POLL: Duration = Duration::from_millis(10);
+
+/// **The variables Folio announces to a pane by name** — the ones a process
+/// started from inside a Folio pane inherits and a CI runner does not.
+///
+/// `bt-pty`'s own declarations to every child (`PtyCommand`'s environment
+/// layers: [`crate::TERM_PROGRAM`]'s variable, its version, `COLORTERM`,
+/// `TERM`) and `bt-app`'s per-pane ones: the hyperlink capability, the
+/// attention wire's three, and the shell-integration marker and zsh bridge.
+/// `bt-app` pins its names to this list
+/// (`shell_integration::tests::every_pane_announcement_is_one_the_test_shell_strips`).
+/// A `WSLENV` entry that forwards one of these is an announcement too, and is
+/// dropped from the list it stands in. Values Folio derives from the user's own
+/// (`PROMPT`, `WSLENV`'s other entries, the locale, `ZDOTDIR`) are the user's,
+/// and are left as they are.
+pub const PANE_ANNOUNCEMENTS: [&str; 10] = [
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "COLORTERM",
+    "TERM",
+    "FORCE_HYPERLINK",
+    "FOLIO_PANE",
+    "FOLIO_ATTENTION",
+    "FOLIO_ATTENTION_PIPE",
+    "BT_SHELL_INTEGRATION",
+    "BT_USER_ZDOTDIR",
+];
+
+/// The variable a PowerShell finds its modules through.
+const MODULE_PATH: &str = "PSModulePath";
+
+/// **The module path a PowerShell test child starts with: the one a pane gets** — the current
+/// user's fresh logon block's (`bt_platform::environment::fresh_logon_environment`, the block a
+/// pane is composed from on Windows), from which each edition then computes its own (Windows
+/// PowerShell adds the account's Documents path; PowerShell 7 puts its own directories first).
+///
+/// Not the session's: PowerShell 7 rewrites `PSModulePath` for every process it starts, so a
+/// test run from a PowerShell 7 session — every CI step here is one — hands a Windows PowerShell
+/// child 7's directories, and the child loads 7's `Microsoft.PowerShell.Security` (and
+/// `Get-ExecutionPolicy` is not found) and 7's PSReadLine, which no Windows PowerShell pane loads.
+/// Measured 2026-10-05 (T-INTEGRATION-INJECT-4 round 6).
+///
+/// `None` where the platform has no fresh logon block: a pane inherits there, and so does the
+/// child. `Some(None)` where the block names no module path. Asked once per test process.
+fn fresh_module_path() -> Option<Option<OsString>> {
+    static FRESH: std::sync::OnceLock<Option<Option<OsString>>> = std::sync::OnceLock::new();
+    FRESH
+        .get_or_init(|| {
+            let worker = bt_platform::spawn_at_priority(
+                "bt-test-shell-logon",
+                bt_platform::ThreadPriority::BelowNormal,
+                bt_platform::environment::fresh_logon_environment,
+            )
+            .unwrap_or_else(|error| panic!("the test shell's logon worker cannot start: {error}"));
+            let block = worker
+                .join()
+                .expect("the test shell's logon worker panicked")
+                .unwrap_or_else(|error| {
+                    panic!("the current user's fresh logon block cannot be read: {error}")
+                });
+            block.map(|block| {
+                block
+                    .into_iter()
+                    .find(|(key, _)| crate::environment_key_eq(key, OsStr::new(MODULE_PATH)))
+                    .map(|(_, value)| value)
+            })
+        })
+        .clone()
+}
+
+/// The variable a PowerShell keeps its module analysis cache under — a file path.
+const MODULE_ANALYSIS_CACHE: &str = "PSModuleAnalysisCachePath";
+
+/// **The module analysis cache a PowerShell test child starts with: one per edition, shared by
+/// every test child, and warm** (T-INTEGRATION-INJECT-4 round 7).
+///
+/// A PowerShell's first command lookup analyses every module on its path that its analysis cache
+/// does not already describe. A real account's cache (`%LOCALAPPDATA%\Microsoft\Windows\
+/// PowerShell\ModuleAnalysisCache`) is warm after its first session; a cache made empty for
+/// every test child is a machine nobody has ever used. Measured on the CI runner (run
+/// 37259729917): its machine module path lists 103 Az modules (`C:\Modules\az_15.6.1`) ahead of
+/// Windows PowerShell's own, and a 5.1 child with an empty cache took 23 s (the fresh logon's
+/// module path) to 46 s (the variable absent) to reach its first command — `Set-PSReadLineOption`
+/// in the history refusal — past every test's wait; with a warm cache the same child reached its
+/// prompt in 0.4 s. So the cache is the tests' own (under the temporary directory, never the
+/// account's), one per edition because the editions write different files, and it is warmed
+/// once per test process, before the first child of that edition, by a one-shot lookup of a
+/// command that does not exist — which analyses every module on the path, as the slow first
+/// lookup would have. Children started meanwhile wait for the warm-up rather than race it.
+fn warmed_module_analysis_cache(program: &OsStr) -> PathBuf {
+    static WARMED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let edition = program_name(program).unwrap_or_else(|| "powershell".to_owned());
+    let root = std::env::temp_dir()
+        .join("folio-test-shell-module-analysis")
+        .join(&edition);
+    let cache = root.join("ModuleAnalysisCache");
+    let mut warmed = WARMED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // **A warm-up never fails a test** (review of round 7, item 2). When it cannot finish — the
+    // program cannot start (a fallback test's missing `pwsh.exe`), the folder or the copy is
+    // refused, another test process holds the file, PowerShell's delayed save comes after the
+    // wait — the edition stays cold, the next child of that edition tries again, and this child
+    // runs on whatever cache there is: slower at worst, and its give-up message names the
+    // warm-up's outcome ([`TestShell::account`]).
+    let outcome = if warmed.contains(&cache) {
+        return cache;
+    } else {
+        warm_module_analysis_cache(program, &root, &cache)
+    };
+    let done = outcome.is_ok();
+    WARM_UP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(match outcome {
+            Ok(said) | Err(said) => said,
+        });
+    if done {
+        warmed.push(cache.clone());
+    }
+    cache
+}
+
+/// The warm-up that makes `cache` what a pane's is: **the account's own analysis cache, copied,
+/// then completed for the module path a test child gets** ([`fresh_module_path`]). `Ok` with what
+/// it did when it finished; `Err` with why when it did not.
+///
+/// A pane's PowerShell uses the account's cache, which its sessions keep warm; the copy gives a
+/// test child that same start without a test ever writing the account's file. The edition is
+/// asked where that file is ([`account_analysis_cache`]) — PowerShell 7 names it with a hash
+/// only it knows. The copy is written under a name of this process's own and renamed into
+/// place, so two test processes warming at once each put a whole file there and neither reads
+/// half of the other's. A lookup of a command that does not exist then analyses whatever the
+/// copy does not describe, with the pane announcements removed and the per-user data folders
+/// pointed into `root`, so the warm-up writes nothing but the cache.
+///
+/// **The shell stays until what it analysed is on disk.** PowerShell writes the cache on a timer,
+/// about 14 s after it changed (measured on both editions, 2026-10-05), not when the process
+/// ends, and while a long analysis runs the timer can fire half-way through it: on the CI runner
+/// a warm-up that stopped at the first write left a cache that still cost the next child 19 s
+/// (scratch run 37261258948). So the warm-up waits for a write *after* its lookup ended, and
+/// stops waiting 30 s after it. When the lookup changed nothing, no write comes and the whole
+/// 30 s is spent; when a write comes, it stops at once.
+fn warm_module_analysis_cache(
+    program: &OsStr,
+    root: &Path,
+    cache: &Path,
+) -> Result<String, String> {
+    const CEILING: Duration = Duration::from_secs(300);
+    let shown = Path::new(program).display();
+    std::fs::create_dir_all(root.join("appdata")).map_err(|error| {
+        format!(
+            "{shown} not warmed: the folder {} cannot be made: {error}",
+            root.display()
+        )
+    })?;
+    let started = Instant::now();
+    let copied = match account_analysis_cache(program) {
+        Some(account) if account.is_file() => {
+            let staging = root.join(format!("ModuleAnalysisCache.{}.copy", std::process::id()));
+            match std::fs::copy(&account, &staging).and_then(|_| std::fs::rename(&staging, cache)) {
+                Ok(()) => format!("copied the account's {}", account.display()),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&staging);
+                    format!(
+                        "the account's {} was not copied ({error}); completing what is there",
+                        account.display()
+                    )
+                }
+            }
+        }
+        Some(account) => format!("the account has no cache at {} yet", account.display()),
+        None => "the edition did not say where the account's cache is".to_owned(),
+    };
+    let literal = powershell_literal(&cache.to_string_lossy());
+    let mut command = bt_platform::quiet_command(program);
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Get-Command -Name '__folio_test_shell_warm__' -ErrorAction SilentlyContinue | \
+                 Out-Null; $done = [DateTime]::UtcNow; $until = $done.AddSeconds(30); \
+                 while ([DateTime]::UtcNow -lt $until -and -not ((Test-Path -LiteralPath \
+                 {literal}) -and (Get-Item -LiteralPath {literal}).LastWriteTimeUtc -gt $done)) \
+                 {{ Start-Sleep -Milliseconds 200 }}"
+            ),
+        ])
+        .env(MODULE_ANALYSIS_CACHE, cache)
+        .env("APPDATA", root.join("appdata"))
+        .env("LOCALAPPDATA", root.join("appdata"))
+        .env("POWERSHELL_TELEMETRY_OPTOUT", "1")
+        .env("POWERSHELL_UPDATECHECK", "Off")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for name in PANE_ANNOUNCEMENTS {
+        command.env_remove(name);
+    }
+    match fresh_module_path() {
+        Some(Some(value)) => {
+            command.env(MODULE_PATH, value);
+        }
+        Some(None) => {
+            command.env_remove(MODULE_PATH);
+        }
+        None => {}
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{shown} not warmed: it could not be started ({error})"))?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() > CEILING => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{shown} not warmed: the warm-up did not end within {CEILING:?} ({copied})"
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                return Err(format!(
+                    "{shown} not warmed: the warm-up could not be waited for ({error})"
+                ));
+            }
+        }
+    }
+    if cache.is_file() {
+        Ok(format!(
+            "{shown} warmed {} in {:?} ({copied})",
+            cache.display(),
+            started.elapsed()
+        ))
+    } else {
+        Err(format!(
+            "{shown} not warmed: no cache was written at {} ({copied})",
+            cache.display()
+        ))
+    }
+}
+
+/// **Where `program` keeps the account's own module analysis cache**, asked of the edition in a
+/// process that names no cache of its own: Windows PowerShell's `cacheStoreLocation`, PowerShell
+/// 7's `s_cacheStoreLocation` (by reflection; both internal). Read only — the file is copied,
+/// never written. `None` when the edition does not say.
+fn account_analysis_cache(program: &OsStr) -> Option<PathBuf> {
+    let output = bt_platform::quiet_command(program)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$t = [psobject].Assembly.GetType('System.Management.Automation.AnalysisCacheData'); \
+             foreach ($n in 's_cacheStoreLocation', 'cacheStoreLocation') { $f = \
+             $t.GetField($n, [Reflection.BindingFlags]'NonPublic,Static'); if ($f) { \
+             [Console]::Out.Write([string]$f.GetValue($null)); break } }",
+        ])
+        .env_remove(MODULE_ANALYSIS_CACHE)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let said = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!said.is_empty()).then(|| PathBuf::from(said))
+}
+
+/// What each warm-up took, for [`TestShell::account`].
+static WARM_UP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// `block` with its module path replaced by the fresh logon's, for a PowerShell child.
+fn with_fresh_module_path(mut block: Vec<(OsString, OsString)>) -> Vec<(OsString, OsString)> {
+    if let Some(fresh) = fresh_module_path() {
+        block.retain(|(key, _)| !crate::environment_key_eq(key, OsStr::new(MODULE_PATH)));
+        if let Some(value) = fresh {
+            block.push((MODULE_PATH.into(), value));
+        }
+    }
+    block
+}
+
+fn is_pane_announcement(key: &OsStr) -> bool {
+    PANE_ANNOUNCEMENTS
+        .iter()
+        .any(|name| crate::environment_key_eq(key, OsStr::new(name)))
+}
+
+/// `WSLENV` with every entry that forwards a pane announcement removed; `None`
+/// when nothing is left.
+fn wslenv_without_announcements(value: &OsStr) -> Option<OsString> {
+    let value = value.to_string_lossy();
+    let kept = value
+        .split(':')
+        .filter(|entry| {
+            let name = entry.split('/').next().unwrap_or_default();
+            !name.is_empty() && !is_pane_announcement(OsStr::new(name))
+        })
+        .collect::<Vec<_>>();
+    (!kept.is_empty()).then(|| kept.join(":").into())
+}
+
+/// `environment` as a CI runner would hand it on: without the pane
+/// announcements, and with `WSLENV` no longer forwarding them.
+pub fn without_pane_announcements(
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    environment
+        .into_iter()
+        .filter(|(key, _)| !is_pane_announcement(key))
+        .filter_map(|(key, value)| {
+            if crate::environment_key_eq(&key, OsStr::new("WSLENV")) {
+                wslenv_without_announcements(&value).map(|value| (key, value))
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect()
+}
 
 /// The family a program belongs to, by its file name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -297,6 +625,12 @@ impl Hygiene {
         self.root.join("history-refusal.failed")
     }
 
+    /// What the shell said about itself before anything was typed: its module path and the
+    /// PSReadLine it loaded ([`powershell_hygiene`] writes it; [`TestShell::account`] reads it).
+    fn facts_file(&self) -> PathBuf {
+        self.root.join("shell-facts")
+    }
+
     fn directories(&self) -> Vec<PathBuf> {
         let mut directories = vec![self.home()];
         directories.extend(self.xdg().into_iter().map(|(_, path)| path));
@@ -331,7 +665,7 @@ impl Hygiene {
     /// Every variable this family is started with, and whether a test may set
     /// it itself (to a path inside [`Self::root`]) — `false` for the values
     /// that are not locations.
-    fn environment(&self, family: Family) -> Vec<(&'static str, OsString, bool)> {
+    fn environment(&self, program: &OsStr, family: Family) -> Vec<(&'static str, OsString, bool)> {
         let mut environment: Vec<(&'static str, OsString, bool)> =
             vec![("HOME", self.home().into_os_string(), true)];
         if cfg!(windows) {
@@ -348,12 +682,8 @@ impl Hygiene {
         );
         match family {
             Family::PowerShell => {
-                let cache = self
-                    .application_data()
-                    .last()
-                    .map_or_else(|| self.root.clone(), |(_, local)| local.clone())
-                    .join("ModuleAnalysisCache");
-                environment.push(("PSModuleAnalysisCachePath", cache.into_os_string(), true));
+                let cache = warmed_module_analysis_cache(program);
+                environment.push((MODULE_ANALYSIS_CACHE, cache.into_os_string(), false));
                 environment.push(("POWERSHELL_TELEMETRY_OPTOUT", "1".into(), false));
                 environment.push(("POWERSHELL_UPDATECHECK", "Off".into(), false));
             }
@@ -418,7 +748,33 @@ impl Hygiene {
             Family::Cmd | Family::Posix(_) | Family::Program => (arguments, Gate::Open),
         };
         command.arguments = arguments;
-        for (key, value, settable) in self.environment(family) {
+        // The child's base block is this process's, without the pane announcements: through the
+        // refresh seam `PtySession::spawn` clears the inherited block and starts from this one,
+        // then lays the command's own declarations — and so anything the test set — over it.
+        command.environment_refresh = Some(match command.environment_refresh.take() {
+            Some(refresh) => crate::EnvironmentRefresh::new(
+                without_pane_announcements(refresh.fresh),
+                without_pane_announcements(refresh.launch_snapshot),
+                without_pane_announcements(refresh.inherited),
+            ),
+            None => {
+                let inherited = without_pane_announcements(std::env::vars_os());
+                crate::EnvironmentRefresh::new(inherited.clone(), inherited.clone(), inherited)
+            }
+        });
+        if family == Family::PowerShell
+            && let Some(refresh) = command.environment_refresh.as_mut()
+        {
+            for list in [
+                &mut refresh.fresh,
+                &mut refresh.launch_snapshot,
+                &mut refresh.inherited,
+            ] {
+                *list = with_fresh_module_path(std::mem::take(list));
+            }
+        }
+        let program = command.program.clone();
+        for (key, value, settable) in self.environment(&program, family) {
             let chosen = command
                 .environment
                 .iter()
@@ -535,7 +891,29 @@ impl Hygiene {
         let family = Family::of(program);
         let mut command = new(program.to_os_string());
         command.args(self.flagged(family, Vec::new()));
-        for (key, value, _) in self.environment(family) {
+        // Without the pane announcements; a test that wants one sets it after this, and wins.
+        for name in PANE_ANNOUNCEMENTS {
+            command.env_remove(name);
+        }
+        if family == Family::PowerShell {
+            match fresh_module_path() {
+                Some(Some(value)) => {
+                    command.env(MODULE_PATH, value);
+                }
+                Some(None) => {
+                    command.env_remove(MODULE_PATH);
+                }
+                None => {}
+            }
+        }
+        match std::env::var_os("WSLENV") {
+            Some(listed) => match wslenv_without_announcements(&listed) {
+                Some(kept) => command.env("WSLENV", kept),
+                None => command.env_remove("WSLENV"),
+            },
+            None => &mut command,
+        };
+        for (key, value, _) in self.environment(program, family) {
             command.env(key, value);
         }
         command
@@ -666,6 +1044,16 @@ fn powershell_literal(text: &str) -> String {
 /// its name and moved into place, so a reader never sees half of it.
 #[must_use]
 pub fn powershell_hygiene(hygiene: &Hygiene) -> String {
+    // **The shell says what it is made of**, in both outcomes, so a give-up message carries the
+    // module path it ran with and the line editor it loaded (round 6: a Windows PowerShell went
+    // silent on CI after its module path changed, and nothing said which PSReadLine it had).
+    let facts = powershell_literal(&hygiene.facts_file().to_string_lossy());
+    let tell = format!(
+        "try {{ Set-Content -LiteralPath {facts} -Encoding UTF8 -ErrorAction Stop -Value \
+         ('PSModulePath ' + $env:PSModulePath + [char]10 + 'PSReadLine ' + (@(Get-Module \
+         PSReadLine | ForEach-Object {{ [string]$_.Version + ' at ' + $_.ModuleBase }}) -join ', ')) \
+         }} catch {{ }};"
+    );
     let history = powershell_literal(&hygiene.history_file().to_string_lossy());
     let proof = hygiene.proof_file();
     let partial = powershell_literal(&format!("{}.part", proof.to_string_lossy()));
@@ -680,7 +1068,7 @@ pub fn powershell_hygiene(hygiene: &Hygiene) -> String {
          [IO.File]::WriteAllText({partial}, $__FolioTestShell); [IO.File]::Move({partial}, {proof}) \
          }} else {{ Set-Content -LiteralPath {partial} -Value $__FolioTestShell -NoNewline \
          -Encoding UTF8 -ErrorAction Stop; Move-Item -LiteralPath {partial} -Destination {proof} \
-         -Force -ErrorAction Stop }}; $__FolioTestShell = $null }} catch {{ \
+         -Force -ErrorAction Stop }}; $__FolioTestShell = $null; {tell} }} catch {{ {tell} \
          if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ \
          [IO.File]::WriteAllText({refusal}, [string]$_) }} else {{ Set-Content -LiteralPath \
          {refusal} -Value ([string]$_) -Encoding UTF8 -ErrorAction SilentlyContinue }}; \
@@ -945,7 +1333,26 @@ impl TestShell {
             Ok(None) => "is still running".to_owned(),
             Err(error) => format!("cannot be asked whether it is running ({error})"),
         };
-        format!("{program}: history refusal {refusal}; the shell {child}")
+        let facts = match std::fs::read_to_string(self.hygiene.facts_file()) {
+            Ok(facts) => format!(
+                "reported {}",
+                facts
+                    .trim_start_matches('\u{feff}')
+                    .trim()
+                    .replace("\r\n", "; ")
+                    .replace('\n', "; ")
+            ),
+            Err(_) => "reported nothing about its module path or line editor".to_owned(),
+        };
+        let warm = WARM_UP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let facts = if warm.is_empty() {
+            facts
+        } else {
+            format!("{facts}; module analysis: {}", warm.join(", "))
+        };
+        format!("{program}: history refusal {refusal}; the shell {child}; it {facts}")
     }
 
     pub fn read_output(&self) -> Vec<u8> {
@@ -1023,6 +1430,101 @@ mod tests {
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.clone())
+    }
+
+    /// PIN — **a test shell starts as a CI runner would, not as a Folio pane
+    /// would**: the pane announcements are gone from every block it is started
+    /// from, `WSLENV` no longer forwards them, and what a test sets itself is
+    /// kept.
+    ///
+    /// RED (mutations: `is_pane_announcement` answers `false`; `Hygiene::command`
+    /// removes nothing; `prepare` leaves `environment_refresh` as it found it;
+    /// `command` leaves the session's `PSModulePath` in place).
+    #[test]
+    fn a_test_shell_does_not_inherit_what_folio_announces_to_its_pane() {
+        let block = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+                .collect::<Vec<_>>()
+        };
+        let inherited = block(&[
+            ("TERM_PROGRAM", "Folio"),
+            ("TERM_PROGRAM_VERSION", "0.4.6"),
+            ("COLORTERM", "truecolor"),
+            ("TERM", "xterm-256color"),
+            ("FORCE_HYPERLINK", "1"),
+            ("FOLIO_PANE", "1.1"),
+            ("FOLIO_ATTENTION", "capability"),
+            ("FOLIO_ATTENTION_PIPE", "pipe"),
+            ("BT_SHELL_INTEGRATION", "marker"),
+            ("BT_USER_ZDOTDIR", "/zsh"),
+            ("WSLENV", "USERPROFILE/p:TERM_PROGRAM/u:FORCE_HYPERLINK/u"),
+            ("PATH", "kept"),
+        ]);
+        assert_eq!(
+            without_pane_announcements(inherited),
+            block(&[("WSLENV", "USERPROFILE/p"), ("PATH", "kept")])
+        );
+        assert_eq!(
+            without_pane_announcements(block(&[("WSLENV", "TERM_PROGRAM/u")])),
+            block(&[])
+        );
+
+        let hygiene = Hygiene::new();
+        let command = hygiene.command("powershell.exe", std::process::Command::new);
+        let removed = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_owned())
+            .collect::<Vec<_>>();
+        for name in PANE_ANNOUNCEMENTS {
+            assert!(
+                removed
+                    .iter()
+                    .any(|key| crate::environment_key_eq(key, OsStr::new(name))),
+                "{name} is removed from a child off a pseudoconsole"
+            );
+        }
+        // And a PowerShell child's module path is the fresh logon's, as a pane's is.
+        let module_path = command
+            .get_envs()
+            .find(|(key, _)| crate::environment_key_eq(key, OsStr::new(MODULE_PATH)))
+            .map(|(_, value)| value.map(OsStr::to_owned));
+        match fresh_module_path() {
+            Some(fresh) => assert_eq!(
+                module_path,
+                Some(fresh),
+                "a PowerShell child starts with the fresh logon's module path"
+            ),
+            None => assert_eq!(
+                module_path, None,
+                "where a pane inherits, so does the child"
+            ),
+        }
+
+        let (prepared, _) = hygiene.prepare(
+            PtyCommand::new("powershell.exe")
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg("exit")
+                .env("TERM_PROGRAM", "a test's own"),
+        );
+        let refresh = prepared
+            .environment_refresh
+            .as_ref()
+            .expect("a test shell starts from a cleaned block");
+        for list in [&refresh.fresh, &refresh.launch_snapshot, &refresh.inherited] {
+            assert!(
+                list.iter().all(|(key, _)| !is_pane_announcement(key)),
+                "{list:?}"
+            );
+        }
+        assert_eq!(
+            value(&prepared, "TERM_PROGRAM").as_deref(),
+            Some(OsStr::new("a test's own")),
+            "what the test sets itself is kept"
+        );
     }
 
     /// RED (T-TEST-SHELL-HYGIENE) — **each family is started without the user's startup files,
@@ -1145,6 +1647,84 @@ mod tests {
         );
         assert!(matches!(gate, Gate::Open));
         assert!(value(&one_shot, "PSModuleAnalysisCachePath").is_some());
+    }
+
+    /// PIN — **every PowerShell test child of one edition shares one module analysis cache, and
+    /// it has been warmed before the first child starts** (T-INTEGRATION-INJECT-4 round 7). The
+    /// runner's evidence is in [`warmed_module_analysis_cache`]: an empty cache per child cost each
+    /// 5.1 child 23–46 s before its first command. Two tests' children name the same cache; the
+    /// two editions do not; and this process's warm-up has run and left the cache written.
+    ///
+    /// RED (mutations: a cache under each test's own directory, as before round 7 — the two
+    /// children differ; skip `warm_module_analysis_cache` — no warm-up is recorded).
+    #[cfg(windows)]
+    #[test]
+    fn a_powershell_child_starts_with_the_shared_warm_analysis_cache() {
+        let cache_of = |program: &str| {
+            let hygiene = Hygiene::new();
+            let (prepared, _) = hygiene.prepare(
+                PtyCommand::new(program)
+                    .arg("-NoProfile")
+                    .arg("-Command")
+                    .arg("exit"),
+            );
+            value(&prepared, MODULE_ANALYSIS_CACHE).expect("a PowerShell child is given a cache")
+        };
+        let first = cache_of("powershell.exe");
+        assert_eq!(first, cache_of("powershell.exe"), "one cache per edition");
+        assert_ne!(
+            first,
+            cache_of("pwsh.exe"),
+            "the editions write different caches"
+        );
+        assert!(
+            Path::new(&first).is_file(),
+            "the warm-up wrote the cache {} before the first child",
+            Path::new(&first).display()
+        );
+        // The file outlives a test process, so it alone does not show that this process warmed
+        // it: the warm-up's own record does.
+        let warmed = WARM_UP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(
+            warmed
+                .iter()
+                .any(|line| line.starts_with("powershell.exe warmed ")),
+            "this process warmed the Windows PowerShell cache before its first child: {warmed:?}"
+        );
+    }
+
+    /// PIN — **a warm-up that cannot finish never fails a test, and leaves its edition cold**
+    /// (review of round 7, item 2). A program that cannot be started is the cheapest of those
+    /// outcomes to make here; the others take the same road (`Err` → recorded, not marked
+    /// warmed). The child is still handed the cache path, the outcome is on record for the
+    /// give-up message, and the next child of that edition tries again.
+    ///
+    /// RED (mutations: panic on a warm-up `Err`; mark the edition warmed whatever the outcome —
+    /// the second child does not try again).
+    #[test]
+    fn a_warm_up_that_cannot_finish_leaves_the_edition_cold_and_the_test_running() {
+        let program = OsStr::new(r"C:\folio-test-shell\missing\pwsh-not-here.exe");
+        let attempts = || {
+            WARM_UP
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|line| line.contains("pwsh-not-here.exe not warmed"))
+                .count()
+        };
+        let before = attempts();
+        let first = warmed_module_analysis_cache(program);
+        assert_eq!(attempts(), before + 1, "the failed warm-up is on record");
+        let second = warmed_module_analysis_cache(program);
+        assert_eq!(first, second);
+        assert_eq!(
+            attempts(),
+            before + 2,
+            "the edition stayed cold, so it was tried again"
+        );
     }
 
     /// RED (T-TEST-SHELL-HYGIENE) — **a location a test chooses itself must be inside its own

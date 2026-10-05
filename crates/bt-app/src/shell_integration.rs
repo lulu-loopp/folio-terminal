@@ -56,8 +56,9 @@ use crate::{
 pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
-    begin_removal, begin_startup_migration, remove_shell_integration, remove_shell_integration_at,
-    take_removal,
+    ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
+    begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
+    remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
 };
 
 /// The script, compiled in.
@@ -484,6 +485,26 @@ pub struct ShellCommand {
     pub environment: Vec<(OsString, OsString)>,
     /// The selected profile's final environment layer.
     pub profile_environment: Vec<(OsString, OsString)>,
+    /// The facts needed to re-derive environment-dependent declarations at pane birth.
+    pub(crate) environment_derivation: EnvironmentDerivation,
+}
+
+/// Which Folio declarations depend on values already present in a pane's environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EnvironmentDerivation {
+    pub(crate) integration: Integration,
+    pub(crate) crosses_wsl: bool,
+    pub(crate) forwards_terminal_into_wsl: bool,
+}
+
+impl Default for EnvironmentDerivation {
+    fn default() -> Self {
+        Self {
+            integration: Integration::None,
+            crosses_wsl: false,
+            forwards_terminal_into_wsl: false,
+        }
+    }
 }
 
 /// The whole argument list and environment for one leaf of `profile`, with the
@@ -515,13 +536,31 @@ pub fn shell_command(
     // asks the program for, before any door below trades a word for its script.
     let words = profiles::launch_args(profile);
     let own = || {
-        words
-            .iter()
-            .map(OsString::from)
-            .chain(place_arguments.iter().cloned())
-            .collect::<Vec<_>>()
+        let words = words.iter().map(OsString::from);
+        if profiles::served_by(profile) == Integration::PowerShellOptIn {
+            // PowerShell keeps parsing non-terminal switches only until a terminal such as
+            // -Command. A starting-place launcher flag therefore has to precede the row's own
+            // words; after -Command it would become user command text instead of a host flag.
+            place_arguments
+                .iter()
+                .cloned()
+                .chain(words)
+                .collect::<Vec<_>>()
+        } else {
+            words
+                .chain(place_arguments.iter().cloned())
+                .collect::<Vec<_>>()
+        }
     };
     let mut command = shell_command_for(profile, scripts, environment, &own);
+    command.environment_derivation = EnvironmentDerivation {
+        integration: profiles::served_by(profile),
+        crosses_wsl: profile.paths == profiles::PathNamespace::Wsl,
+        forwards_terminal_into_wsl: command
+            .environment
+            .iter()
+            .any(|(name, _)| environment_name_eq(name, OsStr::new("WSLENV"))),
+    };
     let mine = &profile.env;
     command.environment.extend(hyperlink_declaration(
         profiles::served_by(profile),
@@ -543,6 +582,113 @@ pub fn shell_command(
     }
     layer_profile_environment(&mut command.profile_environment, mine);
     command
+}
+
+struct ComposedEnvironment<'a>(&'a [(OsString, OsString)]);
+
+impl ShellEnvironment for ComposedEnvironment<'_> {
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(name, _)| environment_name_eq(name, OsStr::new(key)))
+            .map(|(_, value)| value.clone())
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+}
+
+/// Rebuild every Folio declaration derived from a value the pane already has.
+///
+/// Called once on the pane-birth worker with the composed fresh account block plus explicit
+/// launch overrides, before Folio's declarations and the profile's final layer are applied.
+pub(crate) fn derive_environment_for_birth(
+    derivation: EnvironmentDerivation,
+    environment: &[(OsString, OsString)],
+    folio: &mut Vec<(OsString, OsString)>,
+    profile: &[(OsString, OsString)],
+) {
+    let environment = ComposedEnvironment(environment);
+    let profile_has = |wanted: &str| {
+        profile
+            .iter()
+            .any(|(name, _)| environment_name_eq(name, OsStr::new(wanted)))
+    };
+    let remove = |rows: &mut Vec<(OsString, OsString)>, wanted: &str| {
+        rows.retain(|(name, _)| !environment_name_eq(name, OsStr::new(wanted)));
+    };
+
+    if derivation.integration == Integration::CmdPrompt {
+        remove(folio, CMD_PROMPT);
+        folio.push((
+            OsString::from(CMD_PROMPT),
+            cmd_prompt(environment.var_os(CMD_PROMPT)),
+        ));
+    }
+
+    remove(folio, FORCE_HYPERLINK);
+    if derivation.integration != Integration::PowerShellOptIn
+        && !profile_has(FORCE_HYPERLINK)
+        && environment.var_os(FORCE_HYPERLINK).is_none()
+    {
+        folio.push((OsString::from(FORCE_HYPERLINK), OsString::from("1")));
+    }
+
+    for name in LOCALE_VARIABLES {
+        remove(folio, name);
+    }
+    if !LOCALE_VARIABLES.iter().any(|name| profile_has(name)) {
+        folio.extend(locale_declaration(
+            bt_platform::system_locale_declaration(),
+            &environment,
+            &[],
+        ));
+    }
+
+    if derivation.integration == Integration::ZshDotDir {
+        remove(folio, USER_ZDOTDIR);
+        if let Some(theirs) = environment.var_os(ZDOTDIR) {
+            folio.push((OsString::from(USER_ZDOTDIR), theirs));
+        }
+    }
+
+    if derivation.crosses_wsl {
+        remove(folio, "WSLENV");
+        let mut list = environment
+            .var_os("WSLENV")
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let mut append = |name: &str| {
+            if list
+                .split(':')
+                .any(|entry| entry.split('/').next().is_some_and(|entry| entry == name))
+            {
+                return;
+            }
+            if !list.is_empty() && !list.ends_with(':') {
+                list.push(':');
+            }
+            list.push_str(name);
+            list.push_str("/u");
+        };
+        if derivation.forwards_terminal_into_wsl {
+            for name in FORWARDED {
+                append(name);
+            }
+        }
+        for (name, _) in profile {
+            let name = name.to_string_lossy();
+            if !name.is_empty() && !name.eq_ignore_ascii_case("WSLENV") {
+                append(&name);
+            }
+        }
+        if !list.is_empty() {
+            folio.push((OsString::from("WSLENV"), OsString::from(list)));
+        }
+    }
 }
 
 /// The PowerShell console-host parser's meaning for one spelling.
@@ -570,6 +716,10 @@ enum PowerShellOptionKind {
 #[derive(Clone, Copy)]
 struct PowerShellOption {
     name: &'static str,
+    /// **The parameter this call binds** — the option's identity, whatever it was spelled as.
+    /// An alias call (`ep`, `ec`, `wd`, …) binds the same parameter as its full name, so it
+    /// names that full name here; every reader that asks *which* option a word is asks this.
+    parameter: &'static str,
     minimum: &'static str,
     kind: PowerShellOptionKind,
 }
@@ -577,121 +727,151 @@ struct PowerShellOption {
 const WINPS_OPTIONS: &[PowerShellOption] = &[
     PowerShellOption {
         name: "version",
+        parameter: "version",
         minimum: "v",
-        kind: PowerShellOptionKind::Value,
+        kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "help",
+        parameter: "help",
         minimum: "h",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "?",
+        parameter: "?",
         minimum: "?",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "noexit",
+        parameter: "noexit",
         minimum: "noe",
         kind: PowerShellOptionKind::NoExit,
     },
     PowerShellOption {
         name: "noprofile",
+        parameter: "noprofile",
         minimum: "nop",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "nologo",
+        parameter: "nologo",
         minimum: "nol",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "noninteractive",
+        parameter: "noninteractive",
         minimum: "noni",
         kind: PowerShellOptionKind::NonInteractive,
     },
     PowerShellOption {
         name: "configurationname",
+        parameter: "configurationname",
         minimum: "config",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "command",
+        parameter: "command",
         minimum: "c",
         kind: PowerShellOptionKind::Command,
     },
     PowerShellOption {
         name: "windowstyle",
+        parameter: "windowstyle",
         minimum: "w",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "file",
+        parameter: "file",
         minimum: "f",
         kind: PowerShellOptionKind::File,
     },
     PowerShellOption {
         name: "outputformat",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "of",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "inputformat",
+        parameter: "inputformat",
         minimum: "in",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "if",
+        parameter: "inputformat",
         minimum: "if",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "executionpolicy",
+        parameter: "executionpolicy",
         minimum: "ex",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "ep",
+        parameter: "executionpolicy",
         minimum: "ep",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "encodedcommand",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "ec",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "encodedarguments",
+        parameter: "encodedarguments",
         minimum: "encodeda",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "ea",
+        parameter: "encodedarguments",
         minimum: "ea",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
-        name: "sta",
+        name: "servermode",
+        parameter: "servermode",
         minimum: "s",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "sta",
+        parameter: "sta",
+        minimum: "sta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "mta",
+        parameter: "mta",
         minimum: "mta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "psconsolefile",
+        parameter: "psconsolefile",
         minimum: "psconsolefile",
         kind: PowerShellOptionKind::Value,
     },
@@ -700,166 +880,199 @@ const WINPS_OPTIONS: &[PowerShellOption] = &[
 const PWSH_OPTIONS: &[PowerShellOption] = &[
     PowerShellOption {
         name: "version",
+        parameter: "version",
         minimum: "v",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "help",
+        parameter: "help",
         minimum: "h",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "?",
+        parameter: "?",
         minimum: "?",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "login",
+        parameter: "login",
         minimum: "l",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "noexit",
+        parameter: "noexit",
         minimum: "noe",
         kind: PowerShellOptionKind::NoExit,
     },
     PowerShellOption {
         name: "noprofile",
+        parameter: "noprofile",
         minimum: "nop",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "nologo",
+        parameter: "nologo",
         minimum: "nol",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "noninteractive",
+        parameter: "noninteractive",
         minimum: "noni",
         kind: PowerShellOptionKind::NonInteractive,
     },
     PowerShellOption {
         name: "noprofileloadtime",
+        parameter: "noprofileloadtime",
         minimum: "noprofileloadtime",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "interactive",
+        parameter: "interactive",
         minimum: "i",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "configurationfile",
+        parameter: "configurationfile",
         minimum: "configurationfile",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "configurationname",
+        parameter: "configurationname",
         minimum: "config",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "custompipename",
+        parameter: "custompipename",
         minimum: "cus",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "commandwithargs",
+        parameter: "commandwithargs",
         minimum: "commandwithargs",
         kind: PowerShellOptionKind::CommandWithArgs,
     },
     PowerShellOption {
         name: "cwa",
+        parameter: "commandwithargs",
         minimum: "cwa",
         kind: PowerShellOptionKind::CommandWithArgs,
     },
     PowerShellOption {
         name: "command",
+        parameter: "command",
         minimum: "c",
         kind: PowerShellOptionKind::Command,
     },
     PowerShellOption {
         name: "windowstyle",
+        parameter: "windowstyle",
         minimum: "w",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "file",
+        parameter: "file",
         minimum: "f",
         kind: PowerShellOptionKind::File,
     },
     PowerShellOption {
         name: "outputformat",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "of",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "inputformat",
+        parameter: "inputformat",
         minimum: "inp",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "if",
+        parameter: "inputformat",
         minimum: "if",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "executionpolicy",
+        parameter: "executionpolicy",
         minimum: "ex",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "ep",
+        parameter: "executionpolicy",
         minimum: "ep",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "encodedcommand",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "ec",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "encodedarguments",
+        parameter: "encodedarguments",
         minimum: "encodeda",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "ea",
+        parameter: "encodedarguments",
         minimum: "ea",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "settingsfile",
+        parameter: "settingsfile",
         minimum: "settings",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "sta",
+        parameter: "sta",
         minimum: "sta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "mta",
+        parameter: "mta",
         minimum: "mta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "workingdirectory",
+        parameter: "workingdirectory",
         minimum: "wo",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "wd",
+        parameter: "workingdirectory",
         minimum: "wd",
         kind: PowerShellOptionKind::Value,
     },
@@ -877,7 +1090,8 @@ enum PowerShellTerminal {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PowerShellNonTerminal {
-    name: &'static str,
+    /// [`PowerShellOption::parameter`]: one identity for every accepted spelling.
+    parameter: &'static str,
     option: usize,
     value: Option<usize>,
 }
@@ -952,13 +1166,15 @@ fn classify_powershell_arguments(
                 && option.name.len() >= key.len()
                 && option.name[..key.len()].eq_ignore_ascii_case(key)
         })?;
-        if is_pwsh(program) && option.name == "login" && at != 0 {
+        if (is_pwsh(program) && option.parameter == "login" && at != 0)
+            || (!is_pwsh(program) && option.parameter == "psconsolefile" && at != 0)
+        {
             return None;
         }
         match option.kind {
             PowerShellOptionKind::Flag => {
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: None,
                 });
@@ -967,7 +1183,7 @@ fn classify_powershell_arguments(
             PowerShellOptionKind::NoExit => {
                 no_exit = true;
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: None,
                 });
@@ -975,7 +1191,7 @@ fn classify_powershell_arguments(
             }
             PowerShellOptionKind::Value => {
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: Some(at + 1),
                 });
@@ -987,7 +1203,7 @@ fn classify_powershell_arguments(
             PowerShellOptionKind::NonInteractive => {
                 non_interactive = true;
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: None,
                 });
@@ -1044,10 +1260,25 @@ fn classify_powershell_arguments(
             }
             PowerShellOptionKind::EncodedCommand => {
                 let payload = at + 1;
-                if payload + 1 != arguments.len() {
+                if payload >= arguments.len() || payload + 2 < arguments.len() {
                     return None;
                 }
                 let text = decode_encoded_command(arguments[payload].to_str()?)?;
+                if payload + 1 < arguments.len() {
+                    let trailing = arguments[payload + 1].to_str()?.trim();
+                    let trailing = trailing
+                        .strip_prefix('-')
+                        .or_else(|| trailing.strip_prefix('/'))?;
+                    if !trailing.eq_ignore_ascii_case("noexit") {
+                        return None;
+                    }
+                    no_exit = true;
+                    non_terminal.push(PowerShellNonTerminal {
+                        parameter: "noexit",
+                        option: payload + 1,
+                        value: None,
+                    });
+                }
                 return Some(ParsedPowerShellArguments {
                     non_terminal,
                     no_exit,
@@ -1456,6 +1687,7 @@ fn shell_command_for(
                     arguments,
                     environment: installed_environment(login),
                     profile_environment: Vec::new(),
+                    environment_derivation: EnvironmentDerivation::default(),
                 }
             }
             // WSL: `wsl.exe` is a launcher, so the shell and its flag come
@@ -1493,6 +1725,7 @@ fn shell_command_for(
                     arguments: own(),
                     environment: zdotdir_environment(zdotdir.as_os_str().to_owned(), environment),
                     profile_environment: Vec::new(),
+                    environment_derivation: EnvironmentDerivation::default(),
                 },
                 // Under WSL the launcher is handed the question, and the
                 // directory has to be named in the distribution's own spelling
@@ -1507,11 +1740,13 @@ fn shell_command_for(
                 cmd_prompt(environment.var_os(CMD_PROMPT)),
             )],
             profile_environment: Vec::new(),
+            environment_derivation: EnvironmentDerivation::default(),
         },
         _ => ShellCommand {
             arguments: own(),
             environment: Vec::new(),
             profile_environment: Vec::new(),
+            environment_derivation: EnvironmentDerivation::default(),
         },
     }
 }
@@ -1540,6 +1775,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
             arguments: own(),
             environment: Vec::new(),
             profile_environment: Vec::new(),
+            environment_derivation: EnvironmentDerivation::default(),
         };
     }
     ShellCommand {
@@ -1561,6 +1797,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
             .collect(),
         environment: crossing_environment(),
         profile_environment: Vec::new(),
+        environment_derivation: EnvironmentDerivation::default(),
     }
 }
 
@@ -1931,9 +2168,201 @@ pub fn is_powershell(program: &Path) -> bool {
 /// where their startup file is would be absurd. `-NonInteractive` so nothing can
 /// stop for a prompt on a thread with no console.
 ///
+/// After the path, the effective policy and then the five scopes it is decided from, one
+/// `Scope=Policy` line each (`Get-ExecutionPolicy -List`), so the row can say who set a
+/// refusing policy ([`policy_cause`]). Then two more facts the same run can answer without
+/// running anything:
+///
+/// * `Zone=` — **the edition's own answer** to where its `RemoteSigned` would place the profile:
+///   `ClrFacade.GetFileSecurityZone`, the function each edition's authorization manager itself
+///   asks, reached by reflection (it is internal). Measured 2026-10-05 on both editions with a
+///   file and its Mark of the Web, and through real UNC paths (`\\localhost\c$`,
+///   `\\127.0.0.1\c$`): in all ten cases the answer predicted the edition's own decision — and
+///   the editions differ. PowerShell 7 keys on the Mark of the Web alone (an unmarked file on any
+///   share is `MyComputer` and loads); Windows PowerShell maps the path's URL zone as well (the
+///   dotted share is `Internet` and is refused). An edition without the function answers
+///   nothing, and then the next two lines are what can still be known.
+/// * `Local=` and `Marked=` — by public means only: whether the profile's path is on a local
+///   fixed drive (`[Uri]`, `[IO.DriveInfo]`), and whether the file carries a Mark of the Web
+///   (`Get-Item -Stream Zone.Identifier`). Read only when the edition gave no zone answer
+///   ([`remote_signed_loads`]): the zone function is internal, and a future edition that renames
+///   it, or a language mode that refuses the reflection, must not take every local profile's
+///   road away.
+/// * `NoProcess=` — the effective policy once the probe's own Process scope is cleared (an
+///   in-process change of the probe's own session; nothing persistent is written). When no other
+///   scope is set this is the machine's default, which `Get-ExecutionPolicy` never names.
+///
 /// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
-const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost";
+const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; try { $z = [string][psobject].Assembly.GetType('System.Management.Automation.ClrFacade').GetMethod('GetFileSecurityZone', [Reflection.BindingFlags]'NonPublic,Static').Invoke($null, @([string]$p)) } catch { }; 'Zone=' + $z; $local = $false; try { $local = (-not ([Uri]$p).IsUnc) -and ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($p)).DriveType -eq [IO.DriveType]::Fixed) } catch { }; 'Local=' + $local; 'Marked=' + [bool](Get-Item -LiteralPath $p -Stream Zone.Identifier -ErrorAction SilentlyContinue); Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString()"#;
+
+/// **The one command a user may run to let PowerShell load `$PROFILE`**: the CurrentUser scope,
+/// which needs no elevation, set to `RemoteSigned`. Folio copies it on the user's click and
+/// never runs it.
+pub const POLICY_COMMAND: &str = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
+
+/// The policy [`POLICY_COMMAND`] writes into the CurrentUser scope — what decides once it has
+/// run, so what the profile's zone is judged against ([`policy_cause`]).
+const POLICY_COMMAND_POLICY: crate::psreadline::ExecutionPolicy =
+    crate::psreadline::ExecutionPolicy::RemoteSigned;
+
+/// The five scopes `Get-ExecutionPolicy -List` reports, and the policy that applies when every
+/// one of them is `Undefined`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PolicyScopes {
+    machine_policy: crate::psreadline::ExecutionPolicy,
+    user_policy: crate::psreadline::ExecutionPolicy,
+    process: crate::psreadline::ExecutionPolicy,
+    current_user: crate::psreadline::ExecutionPolicy,
+    local_machine: crate::psreadline::ExecutionPolicy,
+    /// What applies when no scope is set: the probe's `NoProcess=` answer, the effective policy
+    /// with its own Process scope cleared. [`policy_cause`] reads it only when MachinePolicy,
+    /// UserPolicy, CurrentUser and LocalMachine are all `Undefined` too — and then that answer is
+    /// the machine's default, as PowerShell itself resolved it.
+    default: crate::psreadline::ExecutionPolicy,
+}
+
+/// **What a row's own arguments say about its Process scope.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowProcessScope {
+    /// The row carries no `-ExecutionPolicy`; the process scope is the environment's.
+    Absent,
+    /// The row's own `-ExecutionPolicy` — the **last** occurrence, as both editions' binders
+    /// take it.
+    Set(crate::psreadline::ExecutionPolicy),
+    /// The classifier cannot read the row's arguments (a `-ep:Bypass` colon form, which neither
+    /// binder reads as an option either; an option the table does not know), so this build
+    /// cannot say what the process scope is — and makes no claim about the policy.
+    Unreadable,
+}
+
+/// **Who decides that `$PROFILE` may not load**, for one row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolicyCause {
+    /// The effective policy lets `$PROFILE` load.
+    Allows,
+    /// The CurrentUser or LocalMachine scope, or the default, refuses, and nothing above
+    /// CurrentUser is set — so [`POLICY_COMMAND`] decides the effective policy once it is run.
+    Changeable,
+    /// Group Policy (MachinePolicy or UserPolicy) refuses; no user command changes it.
+    Organisation,
+    /// The process scope refuses: the row's own `-ExecutionPolicy`, or a
+    /// `PSExecutionPolicyPreference` in the environment. It is above CurrentUser, so
+    /// [`POLICY_COMMAND`] would not change it.
+    Process,
+    /// `RemoteSigned` is (or, after [`POLICY_COMMAND`], would be) the deciding policy and the
+    /// edition says its `RemoteSigned` would not load the profile from where it is, or gave no answer.
+    Location,
+    /// The row's arguments cannot be read ([`RowProcessScope::Unreadable`]): no claim.
+    Unreadable,
+}
+
+impl PolicyCause {
+    /// The capability sentence for a cause that keeps `$PROFILE` from being offered; `None`
+    /// when the policy allows it. An unreadable row says only what is true without a claim:
+    /// the shipped "not provided" sentence.
+    #[must_use]
+    pub fn sentence(self) -> Option<crate::i18n::Text> {
+        match self {
+            Self::Allows => None,
+            Self::Changeable => Some(crate::i18n::Text::CapPowerShellPolicyChangeable),
+            Self::Organisation => Some(crate::i18n::Text::CapPowerShellPolicyManaged),
+            Self::Process => Some(crate::i18n::Text::CapPowerShellPolicyProcess),
+            Self::Location => Some(crate::i18n::Text::CapPowerShellPolicyLocation),
+            Self::Unreadable => Some(crate::i18n::Text::CapPowerShellNotProvided),
+        }
+    }
+}
+
+impl PowerShellProfileFallback {
+    /// The policy cause a refusing state stands for.
+    #[must_use]
+    pub fn policy_cause(self) -> Option<PolicyCause> {
+        match self {
+            Self::PolicyChangeable => Some(PolicyCause::Changeable),
+            Self::PolicyManaged => Some(PolicyCause::Organisation),
+            Self::PolicyProcess => Some(PolicyCause::Process),
+            Self::PolicyLocation => Some(PolicyCause::Location),
+            Self::Unreadable => Some(PolicyCause::Unreadable),
+            Self::NotNeeded
+            | Self::Pending
+            | Self::Offer
+            | Self::Enabled
+            | Self::NoProfile
+            | Self::Unsupported => None,
+        }
+    }
+}
+
+/// **PowerShell's precedence, read once** — MachinePolicy, UserPolicy, Process, CurrentUser,
+/// LocalMachine, then the default: the first scope that is not `Undefined` decides. The process
+/// scope is the row's own `-ExecutionPolicy` when it carries one.
+///
+/// This is also the answer to "would [`POLICY_COMMAND`] make the policy permissive": `Changeable`
+/// is returned only when nothing above CurrentUser is set, which is exactly when the CurrentUser
+/// scope the command writes becomes the deciding one; anything set above it is the cause instead.
+/// And whichever policy will decide — the one that does now, or [`POLICY_COMMAND_POLICY`] once
+/// the command has run — when it is `RemoteSigned`, the edition has to have said it would load
+/// the profile from where it is (`remote_signed_loads`, [`ProfileObservation`]), or the cause is
+/// the location.
+fn policy_cause(
+    scopes: PolicyScopes,
+    remote_signed_loads: Option<bool>,
+    row: RowProcessScope,
+) -> PolicyCause {
+    use crate::psreadline::ExecutionPolicy;
+    let set = |policy: &ExecutionPolicy| *policy != ExecutionPolicy::Undefined;
+    let process = match row {
+        RowProcessScope::Unreadable => return PolicyCause::Unreadable,
+        RowProcessScope::Set(policy) => policy,
+        RowProcessScope::Absent => scopes.process,
+    };
+    let (deciding, refused) = if let Some(policy) = [scopes.machine_policy, scopes.user_policy]
+        .into_iter()
+        .find(set)
+    {
+        (policy, PolicyCause::Organisation)
+    } else if set(&process) {
+        (process, PolicyCause::Process)
+    } else {
+        let policy = [scopes.current_user, scopes.local_machine]
+            .into_iter()
+            .find(set)
+            .unwrap_or(scopes.default);
+        (policy, PolicyCause::Changeable)
+    };
+    let (applies, cause) = if !deciding.blocks_script() {
+        (deciding, PolicyCause::Allows)
+    } else if refused == PolicyCause::Changeable {
+        (POLICY_COMMAND_POLICY, PolicyCause::Changeable)
+    } else {
+        return refused;
+    };
+    if applies == ExecutionPolicy::RemoteSigned && remote_signed_loads != Some(true) {
+        return PolicyCause::Location;
+    }
+    cause
+}
+
+/// What the row's own arguments say about its Process scope — through the classifier, the one
+/// reader of a PowerShell row: its parsed `executionpolicy` option, the last one as the binders
+/// take it, or [`RowProcessScope::Unreadable`] when it cannot read the row at all.
+fn row_process_scope(program: &Path, arguments: &[OsString]) -> RowProcessScope {
+    let Some(parsed) = classify_powershell_arguments(program, arguments) else {
+        return RowProcessScope::Unreadable;
+    };
+    parsed
+        .non_terminal
+        .iter()
+        .rev()
+        .find(|option| option.parameter == "executionpolicy")
+        .and_then(|option| option.value)
+        .map_or(RowProcessScope::Absent, |value| {
+            RowProcessScope::Set(crate::psreadline::ExecutionPolicy::parse(
+                &arguments[value].to_string_lossy(),
+            ))
+        })
+}
 
 /// **The path is asked of the shell and never composed**, and the machine this
 /// was written on is why.
@@ -1956,6 +2385,231 @@ const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Tex
 type ProfileAnswer = std::sync::Arc<OnceLock<Option<PathBuf>>>;
 type ProfileAnswers = std::collections::BTreeMap<PathBuf, ProfileAnswer>;
 static PROFILE_ANSWERS: OnceLock<std::sync::Mutex<ProfileAnswers>> = OnceLock::new();
+
+/// The two profile scopes a Windows account can carry. Every executable of one
+/// edition reads the same CurrentUserCurrentHost profile, so this is the key
+/// that makes two uncomposable rows flip together.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PowerShellEdition {
+    WindowsPowerShell,
+    PowerShellSeven,
+}
+
+fn powershell_edition(program: &Path) -> PowerShellEdition {
+    if is_pwsh(program) {
+        PowerShellEdition::PowerShellSeven
+    } else {
+        PowerShellEdition::WindowsPowerShell
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProfileObservation {
+    path: PathBuf,
+    scopes: PolicyScopes,
+    /// **What the edition said about whether its `RemoteSigned` would load an unsigned
+    /// `$PROFILE` from where it is** — its own zone answer ([`PROFILE_COMMAND`]'s `Zone=`):
+    /// `Some(true)` for this computer, the intranet or a trusted site, `Some(false)` for the
+    /// Internet or an untrusted site, `None` when the edition gave no answer.
+    edition_says: Option<bool>,
+    /// What can be known without the edition's answer ([`PROFILE_COMMAND`]'s `Local=`/`Marked=`).
+    location: ProfileLocation,
+    line_present: bool,
+}
+
+/// Where `$PROFILE` is, as far as public means can say: the fallback's two facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProfileLocation {
+    /// On a local fixed drive (not a share, not a removable drive).
+    local_fixed: bool,
+    /// The file carries a `Zone.Identifier` stream.
+    marked: bool,
+}
+
+impl ProfileLocation {
+    /// The kind of path, for the diagnostics line.
+    fn kind(self) -> &'static str {
+        match (self.local_fixed, self.marked) {
+            (_, true) => "a profile carrying a Mark of the Web",
+            (true, false) => "a profile on a local fixed drive",
+            (false, false) => "a profile on a network or removable drive",
+        }
+    }
+}
+
+impl ProfileObservation {
+    /// [`remote_signed_loads`] for this observation.
+    fn remote_signed_loads(&self) -> Option<bool> {
+        remote_signed_loads(self.edition_says, self.location)
+    }
+}
+
+/// **Whether `RemoteSigned` would load the profile from where it is** — the edition's own answer
+/// when it gave one, in every case. Without one, the one fallback this build keeps: an unmarked
+/// profile on a local fixed drive loads under `RemoteSigned` on both editions (measured
+/// 2026-10-05, round 6), so its road stays; a marked file or a network or removable path cannot
+/// be known without the edition, and is `None` — the Location sentence.
+fn remote_signed_loads(edition_says: Option<bool>, location: ProfileLocation) -> Option<bool> {
+    edition_says.or((location.local_fixed && !location.marked).then_some(true))
+}
+
+/// **The editions whose missing zone answer has been said in diagnostics** — once per edition
+/// per process, so a future break of the internal zone function is noticed without a line per
+/// probe.
+#[derive(Default)]
+struct FallbackNotices(Mutex<std::collections::BTreeSet<PowerShellEdition>>);
+
+impl FallbackNotices {
+    /// The diagnostics line for this edition's first unanswered observation; `None` after it.
+    fn first(&self, program: &Path, location: ProfileLocation) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(powershell_edition(program))
+            .then(|| {
+                format!(
+                    "BT_SHELL_PROFILE {}: the edition did not answer whether RemoteSigned loads \
+                     {}; using the fallback",
+                    program.display(),
+                    location.kind()
+                )
+            })
+    }
+}
+
+static FALLBACK_NOTICES: OnceLock<FallbackNotices> = OnceLock::new();
+
+static PROFILE_OBSERVATIONS: OnceLock<Mutex<BTreeMap<PowerShellEdition, ProfileObservation>>> =
+    OnceLock::new();
+
+/// What an uncomposable PowerShell row can honestly offer on the Profiles page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PowerShellProfileFallback {
+    /// The argv can receive process-scoped integration; no persistent fallback is needed.
+    NotNeeded,
+    /// A command-bearing row is still waiting for its asynchronous parse fact, or the edition's
+    /// first `$PROFILE` and policy observation has not landed yet.
+    Pending,
+    /// The managed line can be added with one press.
+    Offer,
+    /// This edition's profile already carries an active Folio line.
+    Enabled,
+    /// The row explicitly tells PowerShell not to load profiles.
+    NoProfile,
+    /// The policy refuses `$PROFILE` and [`POLICY_COMMAND`] would change that
+    /// ([`PolicyCause::Changeable`]).
+    PolicyChangeable,
+    /// Group Policy refuses `$PROFILE` ([`PolicyCause::Organisation`]).
+    PolicyManaged,
+    /// The process scope refuses `$PROFILE` ([`PolicyCause::Process`]).
+    PolicyProcess,
+    /// `RemoteSigned` decides and `$PROFILE`'s zone is one it refuses or one this edition cannot
+    /// name ([`PolicyCause::Location`]).
+    PolicyLocation,
+    /// The row's arguments cannot be read, so nothing is claimed and nothing offered
+    /// ([`PolicyCause::Unreadable`]).
+    Unreadable,
+    /// This platform has no `$PROFILE` probe ([`PROFILE_PROBE_EXISTS`]), so nothing is observed
+    /// and nothing is offered.
+    Unsupported,
+}
+
+fn asks_for_no_profile(program: &Path, arguments: &[OsString]) -> bool {
+    classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
+        parsed
+            .non_terminal
+            .iter()
+            .any(|option| option.parameter == "noprofile")
+    })
+}
+
+/// The Profiles page's row model, kept pure apart from reading the latest
+/// worker-published edition fact.
+#[must_use]
+pub fn powershell_profile_fallback(
+    program: &Path,
+    arguments: &[OsString],
+    integration_enabled: bool,
+) -> PowerShellProfileFallback {
+    let composable = integration_enabled && powershell_arguments_are_safe(program, arguments);
+    let no_profile = asks_for_no_profile(program, arguments);
+    let pending = classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
+        matches!(
+            parsed.terminal,
+            PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. }
+        ) && cached_parse_answer(program, arguments).is_none()
+    });
+    let observed = PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&powershell_edition(program))
+        .cloned();
+    let row = row_process_scope(program, arguments);
+    profile_fallback_from_parts(
+        PROFILE_PROBE_EXISTS,
+        integration_enabled,
+        composable,
+        pending,
+        no_profile,
+        observed.map(|observed| {
+            (
+                policy_cause(observed.scopes, observed.remote_signed_loads(), row),
+                observed.line_present,
+            )
+        }),
+    )
+}
+
+/// The row model's one decision. `Offer` needs an observation of the row's edition: before the
+/// first one lands the row is `Pending`, and on a platform with no probe it never lands, which
+/// is `Unsupported` rather than a wait.
+fn profile_fallback_from_parts(
+    probe_exists: bool,
+    integration_enabled: bool,
+    composable: bool,
+    pending: bool,
+    no_profile: bool,
+    observed: Option<(PolicyCause, bool)>,
+) -> PowerShellProfileFallback {
+    if composable {
+        return PowerShellProfileFallback::NotNeeded;
+    }
+    if !integration_enabled || no_profile {
+        return PowerShellProfileFallback::NoProfile;
+    }
+    if !probe_exists {
+        return PowerShellProfileFallback::Unsupported;
+    }
+    if pending {
+        return PowerShellProfileFallback::Pending;
+    }
+    match observed {
+        None => PowerShellProfileFallback::Pending,
+        Some((PolicyCause::Changeable, _)) => PowerShellProfileFallback::PolicyChangeable,
+        Some((PolicyCause::Organisation, _)) => PowerShellProfileFallback::PolicyManaged,
+        Some((PolicyCause::Process, _)) => PowerShellProfileFallback::PolicyProcess,
+        Some((PolicyCause::Location, _)) => PowerShellProfileFallback::PolicyLocation,
+        Some((PolicyCause::Unreadable, _)) => PowerShellProfileFallback::Unreadable,
+        Some((PolicyCause::Allows, true)) => PowerShellProfileFallback::Enabled,
+        Some((PolicyCause::Allows, false)) => PowerShellProfileFallback::Offer,
+    }
+}
+
+fn publish_profile_observation(program: &Path, observed: ProfileObservation) {
+    if observed.edition_says.is_none()
+        && let Some(line) = FALLBACK_NOTICES
+            .get_or_init(Default::default)
+            .first(program, observed.location)
+    {
+        eprintln!("{line}");
+    }
+    PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(powershell_edition(program), observed);
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ParseKey {
@@ -1982,15 +2636,31 @@ enum ParseAnswer {
 /// Process-owned answers from the target PowerShell parser.
 ///
 /// The executable in the key is the already-resolved [`profiles::ProfilePrograms`]
-/// answer and the argv is exact. Editing any row therefore makes a new key and
-/// a new question without invalidating an answer another row may still use.
+/// answer and the argv is exact except for a starting-directory launcher pair.
+/// That pair is supplied only at birth and cannot change the command grammar;
+/// removing it makes the startup question and the birth name the same fact.
+/// Editing any command row therefore still makes a new key and a new question
+/// without invalidating an answer another row may still use.
 type ParseAnswers = BTreeMap<ParseKey, ParseAnswer>;
 static PARSE_ANSWERS: OnceLock<Mutex<ParseAnswers>> = OnceLock::new();
 
 fn parse_key(program: &Path, arguments: &[OsString]) -> ParseKey {
+    let mut arguments = arguments.to_vec();
+    if let Some(parsed) = classify_powershell_arguments(program, &arguments) {
+        let mut launcher = parsed
+            .non_terminal
+            .iter()
+            .filter(|option| option.parameter == "workingdirectory")
+            .filter_map(|option| option.value.map(|value| (option.option, value)))
+            .collect::<Vec<_>>();
+        launcher.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        for (option, value) in launcher {
+            arguments.drain(option..=value);
+        }
+    }
     ParseKey {
         program: profile_key(program),
-        arguments: arguments.to_vec(),
+        arguments,
     }
 }
 
@@ -2353,15 +3023,28 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
 }
 
+/// **The probe's PowerShell finds its modules where a pane's would, not where Folio's parent
+/// put them.** A pane's environment is the fresh logon block on Windows (T-ENV-REFRESH), but a
+/// child of this door inherits Folio's own — and a Folio started from a PowerShell 7 session
+/// carries 7's `PSModulePath`, with which a Windows PowerShell probe loads 7's
+/// `Microsoft.PowerShell.Security` and finds no `Get-ExecutionPolicy` (measured 2026-10-05). Without
+/// the variable each edition computes its own module path; every command this door runs (the
+/// parser, `$PROFILE`, the policy cmdlets, the zone question) is answered by the edition's inbox
+/// modules, which that path always holds. Off Windows a pane inherits, and so does the probe.
 fn powershell_probe_command(program: &Path) -> Result<std::process::Command, ParseProbeFailure> {
     #[cfg(windows)]
     {
-        bt_platform::quiet_command_named(program).ok_or_else(|| {
-            ParseProbeFailure::Spawn(format!(
-                "the named child-process door could not resolve {}",
-                program.display()
-            ))
-        })
+        bt_platform::quiet_command_named(program)
+            .map(|mut command| {
+                command.env_remove("PSModulePath");
+                command
+            })
+            .ok_or_else(|| {
+                ParseProbeFailure::Spawn(format!(
+                    "the named child-process door could not resolve {}",
+                    program.display()
+                ))
+            })
     }
     #[cfg(not(windows))]
     {
@@ -2474,14 +3157,109 @@ fn run_powershell_probe(
 
 #[cfg(windows)]
 fn run_profile_probe(program: &Path) -> Option<PathBuf> {
-    let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
-    let path = parse_profile_answer(std::str::from_utf8(&output.stdout).ok()?)?;
-    path.is_absolute().then_some(path)
+    probe_profile_observation(program).map(|observed| observed.path)
 }
 
 #[cfg(not(windows))]
 fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
     None
+}
+
+/// **Whether this platform can ask a PowerShell for its `$PROFILE` and execution policy** — the
+/// one place that platform fact lives, beside the probe it describes. Off Windows
+/// [`probe_profile_observation`] answers nothing, so the Profiles row model
+/// ([`profile_fallback_from_parts`]) offers no fallback there.
+const PROFILE_PROBE_EXISTS: bool = cfg!(windows);
+
+fn probe_profile_observation(program: &Path) -> Option<ProfileObservation> {
+    probe_profile_observation_unless(profile_sandboxed(), || {
+        #[cfg(windows)]
+        {
+            let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
+            parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = program;
+            None
+        }
+    })
+}
+
+/// **The `$PROFILE` sandbox replaces every real profile, so a sandboxed run asks no shell about
+/// one** (`BT_POWERSHELL_PROFILE`, the test door — `warm_profile_answers` already kept that
+/// promise; the edition observation added in this ticket did not, and a sandboxed test's child
+/// started a real PowerShell per edition and read the real `$PROFILE`'s path inside a 3-second
+/// wait: U-35's `a_start_that_is_no_trial_writes_as_it_always_has` on CI, round 6).
+fn probe_profile_observation_unless(
+    sandboxed: bool,
+    ask: impl FnOnce() -> Option<ProfileObservation>,
+) -> Option<ProfileObservation> {
+    if sandboxed { None } else { ask() }
+}
+
+/// Whether the `$PROFILE` sandbox is set: the question the probes and `warm_profile_answers` ask
+/// before starting a shell. The variable is read twice more, each for its value: by
+/// `profile_runtime::sandbox_profile` (the sandboxed profile's path) and on the uninstaller's own
+/// road (`uninstall.rs`).
+fn profile_sandboxed() -> bool {
+    std::env::var_os("BT_POWERSHELL_PROFILE").is_some()
+}
+
+/// Read what [`PROFILE_COMMAND`] writes: the profile path, then the effective execution policy.
+/// Windows only, like the probe that is its one reader and the test that pins it.
+#[cfg(windows)]
+fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
+    use crate::psreadline::ExecutionPolicy;
+    let mut lines = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let path = PathBuf::from(lines.next()?);
+    if !path.is_absolute() {
+        return None;
+    }
+    let _effective = lines.next()?;
+    let mut reported = BTreeMap::new();
+    for line in lines {
+        let (key, value) = line.split_once('=')?;
+        reported.insert(key.trim().to_owned(), value.trim().to_owned());
+    }
+    let scope = |name: &str| {
+        reported
+            .get(name)
+            .map(|value| ExecutionPolicy::parse(value))
+    };
+    // The edition's `SecurityZone`, by name; anything else — `NoZone`, `Unknown`, an answer
+    // this build has no name for — is no answer.
+    let edition_says = match reported.get("Zone")?.as_str() {
+        "MyComputer" | "Intranet" | "Trusted" => Some(true),
+        "Internet" | "Untrusted" => Some(false),
+        _ => None,
+    };
+    let fact = |name: &str| {
+        reported
+            .get(name)
+            .map(|value| value.eq_ignore_ascii_case("True"))
+    };
+    let location = ProfileLocation {
+        local_fixed: fact("Local")?,
+        marked: fact("Marked")?,
+    };
+    Some(ProfileObservation {
+        scopes: PolicyScopes {
+            machine_policy: scope("MachinePolicy")?,
+            user_policy: scope("UserPolicy")?,
+            process: scope("Process")?,
+            current_user: scope("CurrentUser")?,
+            local_machine: scope("LocalMachine")?,
+            default: scope("NoProcess")?,
+        },
+        path,
+        edition_says,
+        location,
+        line_present: false,
+    })
 }
 
 /// Read the one line the probe command writes.
@@ -2491,9 +3269,9 @@ fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
 /// and whichever folder — there is no shape this function is entitled to expect,
 /// because the answer is exactly the thing this build must not think it knows.
 ///
-/// Read by the Windows [`run_profile_probe`] and by the tests; off Windows there is no answer
-/// to read.
-#[cfg(any(windows, test))]
+/// Kept as the narrow path-only parser for existing fixtures; production now
+/// reads path and execution policy together through [`parse_profile_observation`].
+#[cfg(test)]
 #[must_use]
 pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
     stdout
@@ -2670,7 +3448,6 @@ pub fn begin_powershell_script_preparation() {
 }
 
 /// What one write into a profile did.
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileWrite {
     /// The file that now carries the line.
@@ -2690,7 +3467,6 @@ pub fn add_to_profile(
     add_profile_with_forms(profile, line, &profile_marks::Forms::new(&[]), at)
 }
 
-#[cfg(test)]
 fn add_profile_with_forms(
     profile: &Path,
     line: &str,
@@ -3488,6 +4264,785 @@ mod tests {
         }
     }
 
+    /// RED (mutation: map `-s` to STA) — 5.1 measured it as server mode.
+    #[test]
+    fn inject4_winps_s_is_not_sta() {
+        let winps = Path::new("powershell.exe");
+        assert_eq!(
+            classify_powershell_arguments(winps, &os_words(&["-s"])),
+            None
+        );
+        assert!(classify_powershell_arguments(winps, &os_words(&["-sta"])).is_some());
+    }
+
+    /// RED (mutation: accept 5.1 `-Version`) — it selects another engine.
+    #[test]
+    fn inject4_winps_version_is_not_composable() {
+        let winps = Path::new("powershell.exe");
+        assert_eq!(
+            classify_powershell_arguments(winps, &os_words(&["-Version", "2"])),
+            None
+        );
+    }
+
+    /// RED (mutation: allow a late `-PSConsoleFile`) — 5.1 binds it only at argv zero.
+    #[test]
+    fn inject4_winps_psconsolefile_is_position_zero_only() {
+        let winps = Path::new("powershell.exe");
+        assert!(
+            classify_powershell_arguments(
+                winps,
+                &os_words(&["-PSConsoleFile", "legacy.psc1", "-NoLogo"])
+            )
+            .is_some()
+        );
+        assert_eq!(
+            classify_powershell_arguments(
+                winps,
+                &os_words(&["-NoLogo", "-PSConsoleFile", "legacy.psc1"])
+            ),
+            None
+        );
+    }
+
+    /// RED (mutation: require the encoded payload to be last) — both hosts
+    /// continue far enough to accept the trailing NoExit.
+    #[test]
+    fn inject4_encoded_command_accepts_trailing_noexit() {
+        let encoded = encode_command("Get-Date");
+        for program in [Path::new("powershell.exe"), Path::new("pwsh.exe")] {
+            let words = ["-EncodedCommand", encoded.as_str(), "-NoExit"];
+            let parsed = classify_powershell_arguments(program, &os_words(&words))
+                .expect("the hosts continue option parsing after the encoded payload");
+            assert!(parsed.no_exit);
+            assert!(matches!(
+                parsed.terminal,
+                PowerShellTerminal::EncodedCommand { text, .. } if text == "Get-Date"
+            ));
+        }
+    }
+
+    /// RED (mutations: offer beside a composable row, ignore `-NoProfile`,
+    /// ignore a blocking policy, or key the installed fact by row) — the
+    /// Profiles page's fallback is one edition fact applied to every row.
+    #[test]
+    fn inject4_powershell_profile_fallback_row_model_covers_every_state() {
+        use PolicyCause::{Allows, Changeable, Location, Organisation, Process, Unreadable};
+        use PowerShellProfileFallback::{
+            Enabled, NoProfile, NotNeeded, Offer, Pending, PolicyChangeable, PolicyLocation,
+            PolicyManaged, PolicyProcess,
+        };
+        let decide = |composable, pending, no_profile, observed| {
+            profile_fallback_from_parts(true, true, composable, pending, no_profile, observed)
+        };
+        assert_eq!(decide(true, false, false, None), NotNeeded);
+        assert_eq!(decide(false, false, false, Some((Allows, false))), Offer);
+        assert_eq!(decide(false, true, false, None), Pending);
+        assert_eq!(decide(false, false, true, None), NoProfile);
+        for (cause, state) in [
+            (Changeable, PolicyChangeable),
+            (Organisation, PolicyManaged),
+            (Process, PolicyProcess),
+            (Location, PolicyLocation),
+            (Unreadable, PowerShellProfileFallback::Unreadable),
+        ] {
+            assert_eq!(decide(false, false, false, Some((cause, false))), state);
+            assert_eq!(decide(false, false, false, Some((cause, true))), state);
+        }
+        assert_eq!(decide(false, false, false, Some((Allows, true))), Enabled);
+
+        let two_rows = |present| {
+            [
+                decide(false, false, false, Some((Allows, present))),
+                decide(false, false, false, Some((Allows, present))),
+            ]
+        };
+        assert_eq!(two_rows(false), [Offer, Offer]);
+        assert_eq!(two_rows(true), [Enabled, Enabled]);
+
+        for (program, spelling) in [("powershell.exe", "-NoP"), ("pwsh.exe", "-nop")] {
+            assert_eq!(
+                powershell_profile_fallback(
+                    Path::new(program),
+                    &os_words(&[spelling, "-File", "enter.ps1"]),
+                    true,
+                ),
+                NoProfile,
+                "{program} must honour its accepted NoProfile prefix"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    fn probe_answer(path: &str, current_user: &str, zone: &str, no_process: &str) -> String {
+        format!(
+            "\r\n{path}\r\nRemoteSigned\r\n\
+             MachinePolicy=Undefined\r\nUserPolicy=Undefined\r\nProcess=Undefined\r\n\
+             CurrentUser={current_user}\r\nLocalMachine=Undefined\r\n\
+             Zone={zone}\r\nLocal=True\r\nMarked=False\r\nNoProcess={no_process}\r\n"
+        )
+    }
+
+    /// PIN — **the profile probe's answer is the path the shell names, its effective policy,
+    /// the five scopes, the profile's zone and the policy with no Process scope** (rounds 4–5).
+    /// The default is the `NoProcess=` answer — PowerShell's own resolution, never a constant.
+    /// The zone is the edition's own `SecurityZone` name, read as whether `RemoteSigned` loads
+    /// from there; `NoZone` or anything unnamed is no answer, never a guess. A relative path, or
+    /// an answer missing a scope, the zone or `NoProcess=`, is no answer.
+    ///
+    /// RED (mutations: drop the `is_absolute` check; take the default from a constant
+    /// `Restricted`; read `NoZone` as this computer).
+    #[cfg(windows)]
+    #[test]
+    fn the_profile_probe_answer_is_a_path_a_policy_and_its_scopes() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Undefined};
+        let local = r"D:\Documents\PowerShell\Microsoft.PowerShell_profile.ps1";
+        let share = r"\\files.example.com\home\me\Microsoft.PowerShell_profile.ps1";
+        let observed = parse_profile_observation(&probe_answer(
+            local,
+            "Undefined",
+            "MyComputer",
+            "RemoteSigned",
+        ))
+        .expect("an answer");
+        assert_eq!(observed.path, PathBuf::from(local));
+        assert_eq!(observed.scopes.current_user, Undefined);
+        assert_eq!(
+            observed.scopes.default, RemoteSigned,
+            "the probe's own resolution"
+        );
+        assert_eq!(observed.edition_says, Some(true));
+        assert_eq!(
+            observed.location,
+            ProfileLocation {
+                local_fixed: true,
+                marked: false
+            }
+        );
+        let facts = probe_answer(local, "Undefined", "NoZone", "Restricted")
+            .replace("Local=True", "Local=False")
+            .replace("Marked=False", "Marked=True");
+        let facts = parse_profile_observation(&facts).expect("an answer");
+        assert_eq!(
+            facts.location,
+            ProfileLocation {
+                local_fixed: false,
+                marked: true
+            }
+        );
+        assert!(!observed.line_present, "presence is read from the file");
+        for (zone, path, expected) in [
+            ("Internet", local, Some(false)),
+            ("Untrusted", share, Some(false)),
+            ("Intranet", share, Some(true)),
+            ("Trusted", share, Some(true)),
+            ("MyComputer", share, Some(true)),
+            ("NoZone", local, None),
+            ("Unknown", share, None),
+            ("3", local, None),
+        ] {
+            let parsed =
+                parse_profile_observation(&probe_answer(path, "Undefined", zone, "Restricted"))
+                    .expect("an answer");
+            assert_eq!(parsed.edition_says, expected, "Zone={zone} for {path}");
+        }
+        assert!(
+            parse_profile_observation("C:\\p\\profile.ps1\r\nRestricted\r\n").is_none(),
+            "no scope list, no answer"
+        );
+        let without_zone = probe_answer(local, "Undefined", "MyComputer", "Restricted")
+            .replace("Zone=MyComputer\r\n", "");
+        assert!(parse_profile_observation(&without_zone).is_none());
+        assert!(parse_profile_observation("profile.ps1\r\nBypass\r\n").is_none());
+        assert!(parse_profile_observation("  \r\n").is_none());
+    }
+
+    fn scopes(
+        machine_policy: crate::psreadline::ExecutionPolicy,
+        user_policy: crate::psreadline::ExecutionPolicy,
+        process: crate::psreadline::ExecutionPolicy,
+        current_user: crate::psreadline::ExecutionPolicy,
+        local_machine: crate::psreadline::ExecutionPolicy,
+    ) -> PolicyScopes {
+        PolicyScopes {
+            machine_policy,
+            user_policy,
+            process,
+            current_user,
+            local_machine,
+            default: crate::psreadline::ExecutionPolicy::Restricted,
+        }
+    }
+
+    /// PIN — **who set a refusing policy, read in PowerShell's precedence order** (round 4,
+    /// the owner's ruling of 2026-10-04). Group Policy is the organisation's; a process scope
+    /// is the row's or the environment's; CurrentUser, LocalMachine or the default is the user's
+    /// to change — and then, and only then, [`POLICY_COMMAND`] decides the effective policy.
+    ///
+    /// RED (mutations: read Process before Group Policy; treat a refusing LocalMachine as the
+    /// organisation's; let a set CurrentUser fall through to LocalMachine).
+    #[test]
+    fn who_set_the_policy_is_read_in_precedence_order() {
+        use crate::psreadline::ExecutionPolicy::{
+            AllSigned, Bypass, RemoteSigned, Restricted, Undefined,
+        };
+        use PolicyCause::{Allows, Changeable, Organisation, Process};
+        use RowProcessScope::{Absent, Set};
+        let none = Undefined;
+        let here = Some(true);
+        for (name, list, row, cause) in [
+            (
+                "Group Policy refuses over a permissive CurrentUser",
+                scopes(Restricted, none, none, RemoteSigned, none),
+                Absent,
+                Organisation,
+            ),
+            (
+                "UserPolicy refuses",
+                scopes(none, AllSigned, none, none, none),
+                Absent,
+                Organisation,
+            ),
+            (
+                "Group Policy allows over the row's own refusal",
+                scopes(RemoteSigned, none, none, none, none),
+                Set(Restricted),
+                Allows,
+            ),
+            (
+                "the row's own -ExecutionPolicy Restricted",
+                scopes(none, none, none, RemoteSigned, none),
+                Set(Restricted),
+                Process,
+            ),
+            (
+                "a refusing process scope from the environment",
+                scopes(none, none, AllSigned, none, none),
+                Absent,
+                Process,
+            ),
+            (
+                "the row's own -ExecutionPolicy Bypass over a refusing CurrentUser",
+                scopes(none, none, none, Restricted, none),
+                Set(Bypass),
+                Allows,
+            ),
+            (
+                "CurrentUser Restricted, the rest Undefined",
+                scopes(none, none, none, Restricted, none),
+                Absent,
+                Changeable,
+            ),
+            (
+                "LocalMachine AllSigned, CurrentUser Undefined",
+                scopes(none, none, none, none, AllSigned),
+                Absent,
+                Changeable,
+            ),
+            (
+                "a set CurrentUser wins over LocalMachine",
+                scopes(none, none, none, RemoteSigned, AllSigned),
+                Absent,
+                Allows,
+            ),
+            (
+                "nothing set: the default decides",
+                scopes(none, none, none, none, none),
+                Absent,
+                Changeable,
+            ),
+        ] {
+            assert_eq!(policy_cause(list, here, row), cause, "{name}");
+        }
+        // And `Changeable` means the command works: the CurrentUser scope it writes, then read.
+        let command_policy = crate::psreadline::ExecutionPolicy::parse(
+            POLICY_COMMAND.rsplit(' ').next().expect("a policy word"),
+        );
+        assert_eq!(command_policy, POLICY_COMMAND_POLICY);
+        assert!(POLICY_COMMAND.contains("-Scope CurrentUser"));
+        for list in [
+            scopes(none, none, none, Restricted, none),
+            scopes(none, none, none, none, AllSigned),
+            scopes(none, none, none, none, none),
+        ] {
+            assert_eq!(policy_cause(list, here, Absent), Changeable);
+            let after = PolicyScopes {
+                current_user: command_policy,
+                ..list
+            };
+            assert_eq!(policy_cause(after, here, Absent), Allows, "{list:?}");
+        }
+    }
+
+    /// PIN — **the default is PowerShell's own answer** (review of round 4, item 7). The process
+    /// scope came from `PSExecutionPolicyPreference` and the row clears it with
+    /// `-ExecutionPolicy Undefined`; nothing else is set, so the machine's default decides — and
+    /// the probe's `NoProcess=` answer is what that default is, on a server (`RemoteSigned`) as
+    /// on a client (`Restricted`).
+    ///
+    /// RED (mutation: `.unwrap_or(scopes.default)` → `.unwrap_or(Restricted)`).
+    #[test]
+    fn a_cleared_process_scope_falls_to_the_probes_own_default() {
+        use crate::psreadline::ExecutionPolicy::{AllSigned, RemoteSigned, Restricted, Undefined};
+        let none = Undefined;
+        for (default, cause) in [
+            (RemoteSigned, PolicyCause::Allows),
+            (Restricted, PolicyCause::Changeable),
+        ] {
+            let list = PolicyScopes {
+                default,
+                ..scopes(none, none, AllSigned, none, none)
+            };
+            assert_eq!(
+                policy_cause(list, Some(true), RowProcessScope::Set(Undefined)),
+                cause,
+                "default {default:?}"
+            );
+        }
+    }
+
+    /// PIN — **`RemoteSigned` and where `$PROFILE` lives, by the edition's own word** (review of
+    /// round 4 item 6; review of round 5 (a), (d)). Whichever policy will decide — the one deciding
+    /// now, or `RemoteSigned` once [`POLICY_COMMAND`] has run — when it is `RemoteSigned`, the row
+    /// is promised only where the edition said its `RemoteSigned` loads from there. A PowerShell 7
+    /// profile on a redirected share (the edition says yes) keeps Enable and Copy; a Windows
+    /// PowerShell one on a share it maps to the Internet zone (the edition says no), or an edition
+    /// that gave no answer, gets the Location sentence. `Bypass` and `Unrestricted` load from
+    /// anywhere. And a line already installed where it loads is Enabled, not the Location sentence.
+    ///
+    /// RED (mutations: skip the zone check; judge the changeable case by the refusing policy
+    /// instead of `POLICY_COMMAND_POLICY`; treat no answer as loadable).
+    #[test]
+    fn remote_signed_is_judged_against_the_profiles_zone() {
+        use crate::psreadline::ExecutionPolicy::{Bypass, RemoteSigned, Restricted, Undefined};
+        use PolicyCause::{Allows, Changeable, Location};
+        let none = Undefined;
+        let remote_signed = scopes(none, none, none, RemoteSigned, none);
+        let refusing = scopes(none, none, none, Restricted, none);
+        let bypassed = scopes(none, none, Bypass, none, none);
+        for (zone, now, after_command, bypass) in [
+            (Some(true), Allows, Changeable, Allows),
+            (Some(false), Location, Location, Allows),
+            (None, Location, Location, Allows),
+        ] {
+            let row = RowProcessScope::Absent;
+            assert_eq!(policy_cause(remote_signed, zone, row), now, "{zone:?}");
+            assert_eq!(policy_cause(refusing, zone, row), after_command, "{zone:?}");
+            assert_eq!(policy_cause(bypassed, zone, row), bypass, "{zone:?}");
+        }
+        // (d): installed where the edition says it loads — Enabled.
+        assert_eq!(
+            profile_fallback_from_parts(
+                true,
+                true,
+                false,
+                false,
+                false,
+                Some((
+                    policy_cause(remote_signed, Some(true), RowProcessScope::Absent),
+                    true
+                )),
+            ),
+            PowerShellProfileFallback::Enabled
+        );
+    }
+
+    /// PIN — **a private API is not a single point of failure for the ordinary case** (review of
+    /// round 7, item 1). The edition's own zone answer wins in every combination. Without it, an
+    /// unmarked profile on a local fixed drive keeps its road (Offer, or Copy where the policy is
+    /// the user's), while a marked file or a network path cannot be known and gets the Location
+    /// sentence.
+    ///
+    /// RED (mutations: the fallback answers `None` always — the local unmarked rows lose the
+    /// road; it ignores the mark; it ignores the drive; it wins over the edition's answer).
+    #[test]
+    fn the_editions_answer_wins_and_the_fallback_covers_only_what_can_be_known() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted, Undefined};
+        let at = |local_fixed, marked| ProfileLocation {
+            local_fixed,
+            marked,
+        };
+        let every = [
+            at(true, false),
+            at(true, true),
+            at(false, false),
+            at(false, true),
+        ];
+        for answer in [Some(true), Some(false)] {
+            for location in every {
+                assert_eq!(
+                    remote_signed_loads(answer, location),
+                    answer,
+                    "{answer:?} at {location:?}"
+                );
+            }
+        }
+        assert_eq!(remote_signed_loads(None, at(true, false)), Some(true));
+        assert_eq!(remote_signed_loads(None, at(true, true)), None);
+        assert_eq!(remote_signed_loads(None, at(false, false)), None);
+        assert_eq!(remote_signed_loads(None, at(false, true)), None);
+
+        // Through the row: no answer + local unmarked is the road it was before round 6.
+        let none = Undefined;
+        let permissive = scopes(none, none, none, RemoteSigned, none);
+        let refusing = scopes(none, none, none, Restricted, none);
+        let row = RowProcessScope::Absent;
+        let cause = |list, location| policy_cause(list, remote_signed_loads(None, location), row);
+        assert_eq!(cause(permissive, at(true, false)), PolicyCause::Allows);
+        assert_eq!(cause(refusing, at(true, false)), PolicyCause::Changeable);
+        assert_eq!(cause(permissive, at(true, true)), PolicyCause::Location);
+        assert_eq!(cause(permissive, at(false, false)), PolicyCause::Location);
+        assert_eq!(cause(refusing, at(false, false)), PolicyCause::Location);
+    }
+
+    /// PIN — **a missing zone answer is said in diagnostics once per edition**, naming the kind of
+    /// path (review of round 7, item 1), so a future break of the internal zone function shows.
+    ///
+    /// RED (mutation: `FallbackNotices::first` answers every time).
+    #[test]
+    fn a_missing_zone_answer_is_said_once_per_edition() {
+        let notices = FallbackNotices::default();
+        let local = ProfileLocation {
+            local_fixed: true,
+            marked: false,
+        };
+        let first = notices
+            .first(Path::new("powershell.exe"), local)
+            .expect("the first unanswered observation is said");
+        assert!(first.contains("did not answer whether RemoteSigned loads"));
+        assert!(first.contains("a profile on a local fixed drive"));
+        assert!(first.contains("using the fallback"));
+        assert_eq!(notices.first(Path::new("powershell.exe"), local), None);
+        assert!(
+            notices.first(Path::new("pwsh.exe"), local).is_some(),
+            "the other edition is said once too"
+        );
+    }
+
+    /// PIN — **a run inside the `$PROFILE` sandbox asks no shell** (round 6; U-35's ordinary-start
+    /// test went red on CI because a sandboxed child started real PowerShell probes).
+    ///
+    /// RED (mutation: `probe_profile_observation_unless` asks whatever `sandboxed` says).
+    #[test]
+    fn a_sandboxed_run_asks_no_shell_about_the_real_profile() {
+        assert!(
+            probe_profile_observation_unless(true, || panic!("a sandboxed run asked a shell"))
+                .is_none()
+        );
+        let asked = std::cell::Cell::new(false);
+        let _ = probe_profile_observation_unless(false, || {
+            asked.set(true);
+            None
+        });
+        assert!(asked.get(), "an ordinary run asks");
+    }
+
+    /// PIN — **a probe's PowerShell computes its own module path** (round 6): the door does not
+    /// hand it the module path of whatever session started Folio.
+    ///
+    /// RED (mutation: drop the `env_remove("PSModulePath")` in `powershell_probe_command`).
+    #[cfg(windows)]
+    #[test]
+    fn a_probe_powershell_computes_its_own_module_path() {
+        let command = powershell_probe_command(Path::new("powershell.exe"))
+            .expect("Windows PowerShell is on every supported Windows");
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key.eq_ignore_ascii_case("PSModulePath") && value.is_none()),
+            "the probe's module path is the edition's own"
+        );
+    }
+
+    /// PIN — **each refusing cause is its own row state and its own sentence, and only the
+    /// changeable one has a button** (rounds 4–5). The first sentence of each is the shipped
+    /// "not provided" one; an unreadable row says that sentence alone.
+    ///
+    /// RED (mutations: map `Organisation` to `PolicyChangeable`; give `PolicyManaged` the Copy
+    /// button; give `Unreadable` the Enable button).
+    #[test]
+    fn each_policy_cause_is_its_own_row_and_sentence() {
+        use crate::i18n::Text;
+        use crate::settings::ProfileButton;
+        for (cause, state, sentence, button) in [
+            (
+                PolicyCause::Changeable,
+                PowerShellProfileFallback::PolicyChangeable,
+                Text::CapPowerShellPolicyChangeable,
+                Some(ProfileButton::CopyPolicyCommand),
+            ),
+            (
+                PolicyCause::Organisation,
+                PowerShellProfileFallback::PolicyManaged,
+                Text::CapPowerShellPolicyManaged,
+                None,
+            ),
+            (
+                PolicyCause::Process,
+                PowerShellProfileFallback::PolicyProcess,
+                Text::CapPowerShellPolicyProcess,
+                None,
+            ),
+            (
+                PolicyCause::Location,
+                PowerShellProfileFallback::PolicyLocation,
+                Text::CapPowerShellPolicyLocation,
+                None,
+            ),
+            (
+                PolicyCause::Unreadable,
+                PowerShellProfileFallback::Unreadable,
+                Text::CapPowerShellNotProvided,
+                None,
+            ),
+        ] {
+            assert_eq!(
+                profile_fallback_from_parts(true, true, false, false, false, Some((cause, false))),
+                state
+            );
+            assert_eq!(state.policy_cause(), Some(cause));
+            assert_eq!(cause.sentence(), Some(sentence));
+            assert_eq!(ProfileButton::of(state), button);
+            assert!(
+                sentence
+                    .text()
+                    .starts_with(Text::CapPowerShellNotProvided.text()),
+                "{sentence:?} starts with the shipped sentence"
+            );
+        }
+        assert_eq!(PolicyCause::Allows.sentence(), None);
+        assert_eq!(
+            ProfileButton::of(PowerShellProfileFallback::Offer),
+            Some(ProfileButton::Enable)
+        );
+    }
+
+    /// PIN — **a policy changed while Folio runs is read again, and the row follows** (round 4).
+    /// What the page-entry edge starts (`begin_profile_observation_for`, pinned as one edge per
+    /// visit by `inject4_profiles_page_observation_is_one_edge_per_visit`) publishes a new
+    /// observation; the row is read from the latest one, so the next frame shows `Offer`.
+    ///
+    /// RED (mutation: `publish_profile_observation` keeps the first observation of an edition).
+    #[test]
+    fn a_policy_changed_since_the_last_visit_flips_the_row_to_offer() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted, Undefined};
+        // Windows PowerShell's edition, which no other test publishes for; restored after.
+        let program = Path::new("powershell.exe");
+        let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
+        let observed = |current_user| ProfileObservation {
+            path: PathBuf::from("profile.ps1"),
+            scopes: scopes(Undefined, Undefined, Undefined, current_user, Undefined),
+            edition_says: Some(true),
+            location: ProfileLocation {
+                local_fixed: true,
+                marked: false,
+            },
+            line_present: false,
+        };
+        publish_profile_observation(program, observed(Restricted));
+        let before = powershell_profile_fallback(program, &row, true);
+        publish_profile_observation(program, observed(RemoteSigned));
+        let after = powershell_profile_fallback(program, &row, true);
+        PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&powershell_edition(program));
+        if PROFILE_PROBE_EXISTS {
+            assert_eq!(before, PowerShellProfileFallback::PolicyChangeable);
+            assert_eq!(after, PowerShellProfileFallback::Offer);
+        } else {
+            assert_eq!(before, PowerShellProfileFallback::Unsupported);
+            assert_eq!(after, PowerShellProfileFallback::Unsupported);
+        }
+    }
+
+    /// PIN — **a row's own `-ExecutionPolicy` is read by the classifier, the last one wins, and
+    /// a row the classifier cannot read makes no claim** (rounds 4–5). Any accepted spelling
+    /// and case; a repeated option takes its last value, as both editions' binders do (pinned
+    /// against them by `the_real_binders_read_the_execution_policy_as_the_classifier_does`); a
+    /// colon form (`-ep:Bypass`) is not an option to either binder and not one to the
+    /// classifier, so the row is `Unreadable`.
+    ///
+    /// RED (mutations: `row_process_scope` takes the first occurrence; answers `Absent` for an
+    /// argv the classifier cannot read).
+    #[test]
+    fn a_rows_own_execution_policy_is_its_process_scope() {
+        use crate::psreadline::ExecutionPolicy::{Bypass, Restricted};
+        use RowProcessScope::{Absent, Set, Unreadable};
+        for (program, words, expected) in [
+            (
+                "pwsh.exe",
+                vec!["-ExecutionPolicy", "Restricted", "-File", "a.ps1"],
+                Set(Restricted),
+            ),
+            (
+                "powershell.exe",
+                vec!["-ep", "bypass", "-NoExit", "-File", "a.ps1"],
+                Set(Bypass),
+            ),
+            (
+                "pwsh.exe",
+                vec!["-ep", "Restricted", "-ep", "Bypass", "-File", "a.ps1"],
+                Set(Bypass),
+            ),
+            (
+                "powershell.exe",
+                vec![
+                    "-ep",
+                    "Bypass",
+                    "-ExecutionPolicy",
+                    "Restricted",
+                    "-File",
+                    "a.ps1",
+                ],
+                Set(Restricted),
+            ),
+            ("pwsh.exe", vec!["-NoExit", "-File", "a.ps1"], Absent),
+            ("pwsh.exe", vec!["-ep:Bypass", "-File", "a.ps1"], Unreadable),
+            (
+                "powershell.exe",
+                vec!["-ExecutionPolicy:Bypass", "-File", "a.ps1"],
+                Unreadable,
+            ),
+            (
+                "pwsh.exe",
+                vec!["-NoProfile:$false", "-File", "a.ps1"],
+                Unreadable,
+            ),
+        ] {
+            assert_eq!(
+                row_process_scope(Path::new(program), &os_words(&words)),
+                expected,
+                "{program} {words:?}"
+            );
+        }
+        // An unreadable row offers nothing, whatever the edition's policy.
+        assert_eq!(
+            policy_cause(
+                scopes(
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                    crate::psreadline::ExecutionPolicy::RemoteSigned,
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                ),
+                Some(true),
+                Unreadable,
+            ),
+            PolicyCause::Unreadable
+        );
+    }
+
+    /// PIN — **the classifier reads `-ExecutionPolicy` exactly as the real binders do** (review
+    /// of round 4, items 4–5). On each installed edition, started through `bt_pty::test_shell`
+    /// (no profile, no history, a one-shot `-Command`): a repeated option is bound to its last
+    /// value, and a colon form is not bound at all — PowerShell 7 takes `-ep:Bypass` for a
+    /// script file's name, Windows PowerShell for the command's own text; either way the process
+    /// scope is not `Bypass`.
+    ///
+    /// RED (mutation: the classifier's `row_process_scope` takes the first occurrence — the
+    /// classifier's answer then disagrees with the binder's).
+    #[cfg(windows)]
+    #[test]
+    fn the_real_binders_read_the_execution_policy_as_the_classifier_does() {
+        use bt_pty::test_shell::Hygiene;
+        let query = "(Get-ExecutionPolicy -Scope Process).ToString()";
+        for name in ["powershell.exe", "pwsh.exe"] {
+            let Some(program) = bt_platform::program_on_path(Path::new(name)) else {
+                eprintln!("{name}: not installed; real binder arm skipped");
+                continue;
+            };
+            let bound = |words: &[&str]| -> String {
+                let hygiene = Hygiene::new();
+                let output = hygiene
+                    .command(&program, bt_platform::quiet_command)
+                    .args(["-NonInteractive"])
+                    .args(words)
+                    .args(["-Command", query])
+                    .output()
+                    .expect("the shell starts");
+                String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            };
+            for words in [
+                ["-ep", "Restricted", "-ep", "Bypass"],
+                ["-ep", "Bypass", "-ep", "Restricted"],
+            ] {
+                let mut row = os_words(&words);
+                row.extend(os_words(&["-Command", query]));
+                let RowProcessScope::Set(classified) = row_process_scope(&program, &row) else {
+                    panic!("{name} {words:?}: the classifier reads a repeated -ep");
+                };
+                assert_eq!(bound(&words), classified.name(), "{name} {words:?}");
+            }
+            let colon = bound(&["-ep:Bypass"]);
+            assert_ne!(
+                colon, "Bypass",
+                "{name}: -ep:Bypass is not bound as an option"
+            );
+            let mut row = os_words(&["-ep:Bypass"]);
+            row.extend(os_words(&["-Command", query]));
+            assert_eq!(
+                row_process_scope(&program, &row),
+                RowProcessScope::Unreadable,
+                "{name}"
+            );
+        }
+    }
+
+    /// PIN — **no button before the edition has been looked at** (review C-5 of
+    /// T-INTEGRATION-INJECT-4). An uncomposable row whose edition has no observation yet is
+    /// `Pending`: the line may already be there, or the policy may refuse it.
+    ///
+    /// RED (mutation: `None => Offer` in `profile_fallback_from_parts`).
+    #[test]
+    fn an_unobserved_edition_is_pending_not_offered() {
+        assert_eq!(
+            profile_fallback_from_parts(true, true, false, false, false, None),
+            PowerShellProfileFallback::Pending
+        );
+    }
+
+    /// PIN — **where the profile probe does not exist, the row model never offers** (review G-6
+    /// of T-INTEGRATION-INJECT-4). Whatever else is known, a platform without the probe is
+    /// `Unsupported`, and the public model passes the probe's own platform fact.
+    ///
+    /// RED (mutations: delete the `!probe_exists` arm — the observed, line-less, permissive case
+    /// is `Offer`; pass `true` instead of `PROFILE_PROBE_EXISTS` in
+    /// `powershell_profile_fallback` — red on a build without the probe).
+    #[test]
+    fn a_platform_without_the_profile_probe_never_offers() {
+        for observed in [
+            None,
+            Some((PolicyCause::Allows, false)),
+            Some((PolicyCause::Allows, true)),
+            Some((PolicyCause::Changeable, false)),
+        ] {
+            for pending in [false, true] {
+                assert_eq!(
+                    profile_fallback_from_parts(false, true, false, pending, false, observed),
+                    PowerShellProfileFallback::Unsupported,
+                    "{observed:?} pending={pending}"
+                );
+            }
+        }
+        // No test publishes an observation, so on this build an uncomposable row is waiting for
+        // one where the probe exists and is unsupported where it does not.
+        let answer = powershell_profile_fallback(
+            Path::new("pwsh.exe"),
+            &os_words(&["-NoExit", "-File", "enter.ps1"]),
+            true,
+        );
+        assert_eq!(
+            answer,
+            if PROFILE_PROBE_EXISTS {
+                PowerShellProfileFallback::Pending
+            } else {
+                PowerShellProfileFallback::Unsupported
+            }
+        );
+    }
+
     /// RED (mutation: treat `-c` as a literal name, discard `-NoExit`, or let
     /// the next option parse after Command) — the motivating generated rows are
     /// the host's Command terminal, not an unsafe suffix point.
@@ -3518,7 +5073,7 @@ mod tests {
                 parsed
                     .non_terminal
                     .iter()
-                    .any(|option| option.name == "noexit" && option.value.is_none()),
+                    .any(|option| option.parameter == "noexit" && option.value.is_none()),
                 "the parsed non-terminal list names NoExit: {program} {words:?}"
             );
             assert!(
@@ -3536,7 +5091,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(conda.non_terminal[0].name, "executionpolicy");
+        assert_eq!(conda.non_terminal[0].parameter, "executionpolicy");
         assert_eq!(conda.non_terminal[0].option, 0);
         assert_eq!(conda.non_terminal[0].value, Some(1));
     }
@@ -3575,6 +5130,14 @@ mod tests {
             Some(format!("{unicode}\r\n{loader}"))
         );
         assert_eq!(result[..2], os_words(&["-NoExit", "-ec"]));
+
+        let trailing_noexit = ["-ec", encoded.as_str(), "-NoExit"];
+        let result = compose(&trailing_noexit, Some(true)).expect("encoded command with suffix");
+        assert_eq!(result[2], "-NoExit");
+        assert_eq!(
+            decode_encoded_command(result[1].to_str().unwrap()),
+            Some(format!("{unicode}\r\n{loader}"))
+        );
 
         for words in [
             vec!["-File", "x.ps1"],
@@ -3648,6 +5211,90 @@ mod tests {
                 .unwrap()
                 .insert(parse_key(program, &arguments), answer);
             assert_eq!(cached_parse_answer(program, &arguments), expected);
+        }
+    }
+
+    /// RED (mutation: key the launcher's working-directory pair) — startup asks
+    /// about the row before a pane has a concrete place, while birth adds that
+    /// non-terminal pair. Both name the same command grammar fact.
+    #[test]
+    fn inject4_launcher_flag_profile_matches_the_startup_parse_cache_key() {
+        let program = Path::new("pwsh.exe");
+        let startup = os_words(&["-Command", "Get-Date"]);
+        let birth = os_words(&[
+            "-WorkingDirectory",
+            "C:/reader/project",
+            "-Command",
+            "Get-Date",
+        ]);
+        assert_eq!(parse_key(program, &startup), parse_key(program, &birth));
+        assert_eq!(
+            command_text(program, &startup),
+            command_text(program, &birth)
+        );
+    }
+
+    /// PIN — **every spelling of the working-directory launcher flag leaves the parse-cache
+    /// identity** (review E of T-INTEGRATION-INJECT-4). The spellings are the table's own: each
+    /// call whose parameter is `workingdirectory`, every accepted length of it, with each
+    /// prefix and in two cases; those the classifier reads as that parameter all key the same
+    /// fact as the row without the pair. The alias `wd` is among them.
+    ///
+    /// RED (mutation: the `wd` entry's `parameter: "wd"`, i.e. identity by spelled name) — `-wd`
+    /// is no longer read as the working directory, and the set loses it.
+    #[test]
+    fn every_spelling_of_the_working_directory_leaves_the_parse_key() {
+        let program = Path::new("pwsh.exe");
+        let startup = os_words(&["-Command", "Get-Date"]);
+        let mut spellings = Vec::new();
+        for option in option_table(program)
+            .iter()
+            .filter(|option| option.parameter == "workingdirectory")
+        {
+            for length in option.minimum.len()..=option.name.len() {
+                let key = &option.name[..length];
+                for prefix in ["-", "--", "/"] {
+                    for spelled in [key.to_owned(), key.to_ascii_uppercase()] {
+                        spellings.push(format!("{prefix}{spelled}"));
+                    }
+                }
+            }
+        }
+        let read_as_working_directory = spellings
+            .into_iter()
+            .filter(|spelling| {
+                classify_powershell_arguments(
+                    program,
+                    &os_words(&[
+                        spelling.as_str(),
+                        "C:/reader/project",
+                        "-Command",
+                        "Get-Date",
+                    ]),
+                )
+                .is_some_and(|parsed| parsed.non_terminal[0].parameter == "workingdirectory")
+            })
+            .collect::<Vec<_>>();
+        for expected in ["-wd", "/WD", "-WorkingDirectory", "--wo"] {
+            assert!(
+                read_as_working_directory
+                    .iter()
+                    .any(|spelling| spelling.eq_ignore_ascii_case(expected)),
+                "{expected} is a working-directory spelling: {read_as_working_directory:?}"
+            );
+        }
+        for spelling in &read_as_working_directory {
+            let birth = os_words(&[
+                spelling.as_str(),
+                "C:/reader/project",
+                "-Command",
+                "Get-Date",
+            ]);
+            assert_eq!(
+                parse_key(program, &startup),
+                parse_key(program, &birth),
+                "{spelling}"
+            );
         }
     }
 
@@ -4149,7 +5796,7 @@ mod tests {
             has_no_profile: parsed
                 .non_terminal
                 .iter()
-                .any(|option| option.name == "noprofile"),
+                .any(|option| option.parameter == "noprofile"),
         }
     }
 
@@ -4489,22 +6136,144 @@ mod tests {
     ///
     /// Red gate: rename [`bt_pty::TERM_PROGRAM`] without the script's literal, or
     /// the script's literal without the constant, and this fails.
+    ///
+    /// The script names this terminal twice — the guard that returns outside a
+    /// Folio session, and the hyperlink declaration — and both are pinned: every
+    /// `$env:TERM_PROGRAM` comparison in it is one of those two, spelled with the
+    /// declared name. The script suite's session-scope case declares the same
+    /// name, and is pinned here likewise.
+    ///
+    /// Red gate: rename [`bt_pty::TERM_PROGRAM`] without the script's literals,
+    /// either literal without the constant, or the session-scope case's
+    /// declaration without the constant, and this fails.
     #[test]
     fn the_integration_script_knows_the_name_this_terminal_announces() {
         let declared = bt_pty::TERM_PROGRAM;
-        let comparison = format!("$env:TERM_PROGRAM -eq '{declared}'");
-        assert!(
-            script_source_ps1().contains(&comparison),
-            "the terminal declares TERM_PROGRAM={declared:?}, so the script must \
-             test for it verbatim; folio.ps1 does not contain {comparison:?}"
-        );
-        // And it is the *only* spelling the script compares against, so a rename
-        // cannot pass by leaving the old literal in a second branch beside it.
+        let guard = format!("if ($env:TERM_PROGRAM -ne '{declared}') {{");
+        let hyperlink = format!("if ($env:TERM_PROGRAM -eq '{declared}' -and");
+        for comparison in [&guard, &hyperlink] {
+            assert_eq!(
+                script_source_ps1().matches(comparison.as_str()).count(),
+                1,
+                "the terminal declares TERM_PROGRAM={declared:?}, so the script must \
+                 test for it verbatim, once; folio.ps1 does not contain {comparison:?}"
+            );
+        }
+        // And those are the *only* places the script compares the name, so a
+        // rename cannot pass by leaving the old literal in a third branch.
         assert_eq!(
-            script_source_ps1().matches("$env:TERM_PROGRAM -eq").count(),
-            1,
-            "the script recognises this terminal in one place, not two"
+            script_source_ps1().matches("$env:TERM_PROGRAM -").count(),
+            2,
+            "the script recognises this terminal in exactly the guard and the \
+             hyperlink declaration"
         );
+        let session_scope =
+            include_str!("../../../scripts/shell-integration/tests/session-scope.ps1");
+        let declaration = format!("$env:TERM_PROGRAM = '{declared}'");
+        assert_eq!(
+            session_scope.matches("$env:TERM_PROGRAM =").count(),
+            1,
+            "the session-scope case declares this terminal in one place"
+        );
+        assert!(
+            session_scope.contains(&declaration),
+            "the session-scope case must declare {declaration:?}"
+        );
+    }
+
+    /// PIN — **every variable this build announces to a pane by name is one a test shell does not
+    /// inherit** (T-INTEGRATION-INJECT-4 round 3). A test run from inside a Folio pane inherits
+    /// these and CI does not; `bt_pty::test_shell` removes exactly
+    /// [`bt_pty::test_shell::PANE_ANNOUNCEMENTS`] from every child it builds, and the script
+    /// suites' runner clears the same list. A name added to a pane here without being added
+    /// there is a local gate that can pass for a reason CI does not have.
+    ///
+    /// RED (mutations: drop `FORCE_HYPERLINK` from `PANE_ANNOUNCEMENTS`; drop a name from
+    /// `run.ps1`'s `$paneAnnouncements`).
+    #[test]
+    fn every_pane_announcement_is_one_the_test_shell_strips() {
+        let stripped = bt_pty::test_shell::PANE_ANNOUNCEMENTS;
+        for announced in [
+            "TERM_PROGRAM",
+            "TERM_PROGRAM_VERSION",
+            "COLORTERM",
+            "TERM",
+            FORCE_HYPERLINK,
+            INSTALLED_MARKER,
+            USER_ZDOTDIR,
+            crate::attention_wire::PANE_VARIABLE,
+            crate::attention_wire::ENDPOINT_VARIABLE,
+            crate::attention_wire::CAPABILITY_VARIABLE,
+        ] {
+            assert!(
+                stripped.contains(&announced),
+                "{announced} is announced to a pane and must be stripped from a test shell"
+            );
+        }
+        // `FORWARDED` is what crosses into WSL; every name in it is an announcement.
+        for forwarded in FORWARDED {
+            let name = forwarded.split('/').next().unwrap_or_default();
+            assert!(stripped.contains(&name), "{name} crosses into WSL");
+        }
+        let runner = include_str!("../../../scripts/shell-integration/tests/run.ps1");
+        let line = runner
+            .lines()
+            .find(|line| line.starts_with("$paneAnnouncements = @("))
+            .expect("the suites' runner clears the pane announcements");
+        let listed = line.split('\'').skip(1).step_by(2).collect::<Vec<_>>();
+        assert_eq!(
+            listed, stripped,
+            "run.ps1 clears exactly the test shell's list"
+        );
+    }
+
+    /// PIN — **the bash and zsh scripts act wherever they are sourced** (owner's
+    /// ruling 2026-10-04). A hand-installed copy sourced from an rc file on a host
+    /// reached by ssh from a Folio pane, or in a `sudo -i` / `su -` shell inside
+    /// one, sees no `TERM_PROGRAM`, and its standard `OSC 133` / `OSC 7` are what
+    /// the pane reads; only `folio.ps1`, whose line Folio itself adds to
+    /// `$PROFILE`, is scoped to Folio.
+    ///
+    /// RED (mutation: restore `[ "${TERM_PROGRAM-}" = Folio ] || return 0` in
+    /// either script).
+    #[test]
+    fn the_bash_and_zsh_scripts_do_not_ask_which_terminal_runs_them() {
+        for (name, source) in [
+            ("folio.bash", script_source()),
+            ("folio.zsh", script_source_zsh()),
+        ] {
+            assert!(
+                !source.contains("TERM_PROGRAM"),
+                "{name} must act in any terminal that sources it"
+            );
+        }
+    }
+
+    /// RED (mutation: remove the startup pre-ask or join its worker) — every
+    /// command-bearing row is asked before the first window, while neither the
+    /// startup path nor pane birth waits for that answer.
+    #[test]
+    fn inject4_startup_preasks_power_shell_rows_without_a_birth_waiting() {
+        let source = include_str!("main.rs");
+        let ask = "shell_integration::begin_powershell_preparation_for(&profile_programs);";
+        assert!(source.contains(ask));
+        assert!(source.find(ask).unwrap() < source.find("opening_window_attributes(").unwrap());
+        let worker = include_str!("shell_integration.rs")
+            .split_once("pub fn begin_powershell_preparation_for(")
+            .unwrap()
+            .1
+            .split_once("pub fn begin_powershell_script_preparation()")
+            .unwrap()
+            .0;
+        assert!(!worker.contains(".join()"));
+        let birth = include_str!("pty_door.rs")
+            .split_once("pub(crate) fn spawn_shell(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn resize(")
+            .unwrap()
+            .0;
+        assert!(!birth.contains("parse_worker.join()"));
     }
 
     /// PIN — **what a pane is told it is, is one answer for every platform**

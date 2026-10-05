@@ -716,7 +716,7 @@ birth, and the font lookup by name take theirs in `bt-platform` and `bt-render`,
 on every platform arm; winit's calls go through `bt-app::owner_door` (title,
 caret area, focus, visibility, cursor); `bt-pty`'s three — a shell's birth, a
 leaf's resize, the quit's wait for retirements — through `bt-app::pty_door`,
-because `bt-pty` has no edge to `bt-platform`; the first window's GPU through
+because the shipped `bt-pty` has no edge to `bt-platform` (its `test-shell` feature, for tests only, has one); the first window's GPU through
 `bt-app::gpu_door`. The commits inside an admitted batch (a tree's birth, the
 window's ground, a page's rehost and its compensation) call
 `Compositor::commit_now`, which is `pub(crate)` with seven callers. A present is

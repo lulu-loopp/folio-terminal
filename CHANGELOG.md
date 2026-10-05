@@ -8,6 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- PowerShell profiles whose startup command cannot be safely extended can enable Folio through that edition's `$PROFILE` in one click from Settings, with Undo. When PowerShell's execution policy blocks `$PROFILE`, the row says who set it and, when it is yours to change, offers the one command to copy.
 - In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
 - A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
@@ -27,8 +28,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- New panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
+- Folio's PowerShell integration script does nothing when your `$PROFILE` is read by another terminal; PowerShell started inside Folio stays integrated. A PowerShell on another machine reached by ssh is integrated only if ssh forwards `TERM_PROGRAM`. The bash and zsh scripts are unchanged: a copy you source yourself, for example on a server you ssh into from Folio, keeps working.
 - On Windows, a newly installed command is found in a new tab without restarting Folio.
-- PowerShell panes have command marks, folder tracking and inline formulas without any setup; nothing is added to your PowerShell profile.
+- PowerShell panes have command marks, folder tracking and inline formulas without setup when their command line can be safely extended; Settings offers the per-edition `$PROFILE` fallback for rows that cannot be extended.
 - PowerShell profile rows that run a command at startup — including Visual Studio Developer PowerShell and conda environments — now keep that command and receive the same command marks, folder tracking and inline formulas when PowerShell confirms the command parses.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.
 - The README says how to uninstall each kind of copy, and the zip's
@@ -40,6 +43,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- In a narrow Settings window, a button whose edge is cut off no longer answers a click on the space beside it.
 - Commands Folio runs to learn about the machine no longer leave helper processes behind after a timeout or after Folio exits.
 - PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
 - PowerShell's integration loader now keeps its PSReadLine reflection state process-wide and silently leaves the shell unchanged if its owned script cannot be read.
@@ -106,6 +110,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- Tests and the shell-integration script suites start their shells without the
+  variables Folio gives its own panes, so a run from inside Folio sees what CI
+  sees.
 - CI's structural gates now hold derived enum coverage and stable properties
   instead of hand-maintained counts, snapshots and source-location inventories,
   and every gate's self-test runs on every run. Tests that wait on or measure

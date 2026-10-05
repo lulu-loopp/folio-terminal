@@ -13402,6 +13402,8 @@ struct WindowRuntime {
     /// longer matches does nothing, which is the honest answer: the thing it
     /// offered to undo is no longer the thing that would come back.
     profile_undo: Option<(toast::ToastId, profiles::Profile, usize)>,
+    /// The one managed `$PROFILE` line a standing toast can remove again.
+    powershell_profile_undo: Option<(toast::ToastId, PathBuf, PathBuf)>,
     /// **Where a checkout came from**, while it is in flight (user ruling,
     /// 2026-08-19): the repository, and the branch `HEAD` was on before.
     ///
@@ -38294,6 +38296,7 @@ fn create_leaf_session(
                     program.into(),
                     &command.arguments,
                     powershell_integration,
+                    command.environment_derivation,
                     &command.environment,
                     &command.profile_environment,
                     pty_size(grid, PhysicalSize::new(body.width, body.height)),
@@ -41015,6 +41018,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         settings: settings::SettingsPanel::default(),
         settings_geometry: settings::geometry::Geometry::default(),
         profile_undo: None,
+        powershell_profile_undo: None,
         checkout_from: None,
         checkout_undo: None,
         settings_scroll: 0.0,
@@ -42962,6 +42966,13 @@ impl Runtime<'_> {
         if agents_opened {
             self.refresh_agent_rows();
         }
+        let profiles_opened = self.window.settings.take_profiles_open_edge(
+            self.window.settings.category() == settings::SettingsCategory::Profiles
+                && content.editor.is_none(),
+        );
+        if profiles_opened {
+            shell_integration::begin_profile_observation_for(&self.app.profile_programs);
+        }
         // Use the refreshed fact on this very layout, including its geometry.
         let refreshed_values = (psreadline_opened || agents_opened).then(|| {
             let state = self.psreadline_row_state();
@@ -43897,6 +43908,12 @@ impl Runtime<'_> {
     ) -> Result<()> {
         if let Some(action) = settings::profile_action_requested(target) {
             self.apply_profile_action(action)?;
+        }
+        if let settings::SettingsTarget::ProfileEnable(index) = target {
+            self.enable_via_profile(index);
+        }
+        if let settings::SettingsTarget::ProfileCopyPolicyCommand(_) = target {
+            self.copy_policy_command()?;
         }
         self.apply_editor_choice(target)?;
         if let Some(mode) = settings::theme_requested(target) {
@@ -44897,6 +44914,12 @@ impl Runtime<'_> {
                 self.apply_default_profile(&id)?;
                 return Ok(());
             }
+            // The row's button, behind the `⋯`: the same press, through the same door.
+            settings::RowVerb::EnableViaProfile => {
+                self.enable_via_profile(index);
+                return Ok(());
+            }
+            settings::RowVerb::CopyPolicyCommand => return self.copy_policy_command(),
         }
         self.store_profiles()
     }
@@ -45303,6 +45326,8 @@ impl Runtime<'_> {
             | settings::SettingsTarget::ResetAdvanced(_)
             | settings::SettingsTarget::ProfileUp(_)
             | settings::SettingsTarget::ProfileDown(_)
+            | settings::SettingsTarget::ProfileEnable(_)
+            | settings::SettingsTarget::ProfileCopyPolicyCommand(_)
             | settings::SettingsTarget::MenuAction(_)
             | settings::SettingsTarget::MenuItemEdit(..)
             | settings::SettingsTarget::MenuItemDelete(..)
@@ -64302,6 +64327,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // here. A removal that found nothing to remove changed nothing,
                 // so it says nothing.
                 let mut removal = shell_integration::take_removal();
+                // Each answer is addressed to the window whose click asked for it; an answer
+                // for a window that has since closed is delivered nowhere.
+                let installs = shell_integration::take_profile_installs();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()?;
@@ -64319,6 +64347,35 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                             None,
                             text,
                         )?;
+                    }
+                    for outcome in
+                        shell_integration::profile_installs_for(&installs, runtime.window_id())
+                    {
+                        match outcome.clone() {
+                            shell_integration::ProfileInstallOutcome::Installed {
+                                program,
+                                profile,
+                            } => {
+                                let id = runtime.toast_with_verb(
+                                    toast::ToastKind::Info,
+                                    toast::ToastAnchor::Window,
+                                    i18n::Text::ShellProfileAddedToast.text(),
+                                    i18n::Text::ProfilesUndo.text(),
+                                )?;
+                                runtime.window.powershell_profile_undo =
+                                    Some((id, program, profile));
+                            }
+                            shell_integration::ProfileInstallOutcome::Refused(reason)
+                            | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
+                                runtime.toast(
+                                    toast::ToastKind::Error,
+                                    toast::ToastAnchor::Window,
+                                    Some(i18n::Text::ShellProfileRefused.text().to_owned()),
+                                    reason,
+                                )?;
+                            }
+                            shell_integration::ProfileInstallOutcome::Undone => {}
+                        }
                     }
                     Ok(())
                 })

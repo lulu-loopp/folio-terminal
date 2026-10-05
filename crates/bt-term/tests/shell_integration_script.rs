@@ -26,12 +26,25 @@ fn script_path() -> PathBuf {
 }
 
 /// Run the integration script in a child Windows PowerShell 5.1, `cd` to `directory`, and return
-/// the bytes its `prompt` writes.
+/// the bytes its `prompt` writes. The child declares the terminal it runs in exactly as a Folio
+/// pane does (`TERM_PROGRAM` = [`bt_pty::TERM_PROGRAM`]) — the script acts only there — and
+/// [`prompt_bytes_outside_folio`] runs it with no declaration at all.
 ///
 /// The user's own prompt is stubbed to a plain ASCII string first, exactly as a real profile would
 /// have defined one before dot-sourcing: the script wraps whatever prompt it finds, and stubbing it
 /// keeps the *prompt's* text out of the bytes under test without touching the markers around it.
 fn prompt_bytes(directory: &Path) -> Vec<u8> {
+    prompt_bytes_declaring(directory, Some(bt_pty::TERM_PROGRAM))
+}
+
+/// [`prompt_bytes`] in a child that declares no terminal, as in any terminal but Folio. The test
+/// shell has already removed every variable Folio announces to a pane, so the child sees no
+/// `TERM_PROGRAM` even when this test runs from inside one.
+fn prompt_bytes_outside_folio(directory: &Path) -> Vec<u8> {
+    prompt_bytes_declaring(directory, None)
+}
+
+fn prompt_bytes_declaring(directory: &Path, terminal: Option<&str>) -> Vec<u8> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -53,8 +66,11 @@ fn prompt_bytes(directory: &Path) -> Vec<u8> {
     .unwrap();
     // Through `bt_pty::test_shell::Hygiene`: `-NoProfile` and a temporary HOME/APPDATA.
     let hygiene = bt_pty::test_shell::Hygiene::new();
-    let output = hygiene
-        .command("powershell.exe", Command::new)
+    let mut command = hygiene.command("powershell.exe", Command::new);
+    if let Some(terminal) = terminal {
+        command.env("TERM_PROGRAM", terminal);
+    }
+    let output = command
         .args(["-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&driver)
         .arg(directory)
@@ -158,5 +174,22 @@ fn a_non_filesystem_location_retracts_the_reported_working_directory() {
         "a registry location resolves no relative image path, and says so"
     );
 
+    std::fs::remove_dir(&directory).unwrap();
+}
+
+/// PIN — **outside Folio the script does nothing** (T-INTEGRATION-INJECT-4: a `$PROFILE` line is
+/// inert in every other terminal). With no `TERM_PROGRAM` declared, the prompt is the user's own,
+/// byte for byte: no OSC 7, no OSC 133, no OSC 8 declaration — nothing but `PS> `.
+///
+/// RED (mutation: delete the `TERM_PROGRAM` guard at the top of `folio.ps1`).
+#[test]
+fn outside_folio_the_integration_script_emits_nothing() {
+    let directory = temporary_directory();
+    let bytes = prompt_bytes_outside_folio(&directory);
+    assert_eq!(
+        String::from_utf8_lossy(&bytes),
+        "PS> ",
+        "the user's prompt alone, with no sequence of this terminal's around it"
+    );
     std::fs::remove_dir(&directory).unwrap();
 }
