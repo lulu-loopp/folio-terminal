@@ -155,7 +155,7 @@ fn observe_profile_lines(
     data: &Path,
     programs: &[PathBuf],
 ) -> Report {
-    let answers = profile_answers(data, PROBE_DEADLINE);
+    let answers = profile_answers(data, POWERSHELL_PROBE_DEADLINE);
     if !profile_sandboxed() {
         for program in programs {
             match probe_profile_observation(worker, program) {
@@ -290,7 +290,7 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
 /// be asked to make on a window thread. An edition the record locates
 /// ([`ProfileFiles::located`], written when Folio wrote its line) is not asked: the probe is the
 /// fallback for a line an older Folio wrote without that record (release read M1). `patience` is
-/// the asker's ([`PROBE_DEADLINE`], [`REMOVAL_PROBE_DEADLINE`]). The record is read here without
+/// the asker's ([`POWERSHELL_PROBE_DEADLINE`], [`REMOVAL_PROBE_DEADLINE`]). The record is read here without
 /// the lock — to decide only which editions to ask; the removal reads it again under the lock.
 fn profile_answers(data: &Path, patience: std::time::Duration) -> PathAnswers {
     // The sandbox door replaces the whole candidate set, so no shell is asked.

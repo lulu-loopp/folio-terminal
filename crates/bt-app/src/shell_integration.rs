@@ -2973,13 +2973,13 @@ fn schedule_parse_retry(question: ParseQuestion) {
 const PARSE_COMMAND: &str = "$enc=[Text.UTF8Encoding]::new($false);[Console]::InputEncoding=$enc;[Console]::OutputEncoding=$enc;$source=[Console]::In.ReadToEnd();$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)>$null;if($errors.Count -eq 0){[Console]::Out.Write('1')}else{[Console]::Out.Write('0')}";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProbeOutput {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(crate) struct ProbeOutput {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum ParseProbeFailure {
+pub(crate) enum ParseProbeFailure {
     WorkerSpawn(String),
     Spawn(String),
     Stdin {
@@ -3006,6 +3006,9 @@ enum ParseProbeFailure {
         stderr: String,
     },
 }
+
+/// The deadline shared by every PowerShell machine probe.
+pub(crate) const POWERSHELL_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl std::fmt::Display for ParseProbeFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3062,7 +3065,12 @@ fn output_prefix(bytes: &[u8]) -> String {
 }
 
 fn run_parse_probe(program: &Path, text: &str) -> Result<bool, ParseProbeFailure> {
-    let output = run_powershell_probe(program, PARSE_COMMAND, Some(text), PROBE_DEADLINE)?;
+    let output = run_powershell_probe(
+        program,
+        PARSE_COMMAND,
+        Some(text),
+        POWERSHELL_PROBE_DEADLINE,
+    )?;
     parse_probe_answer(output)
 }
 
@@ -3096,7 +3104,7 @@ fn profile_key(program: &Path) -> PathBuf {
 
 /// Resolving executable aliases can touch disk, so it happens only on workers.
 /// All aliases point at the same slot before any worker asks PowerShell. `deadline` is the
-/// asker's patience ([`PROBE_DEADLINE`] for the Profiles page, [`REMOVAL_PROBE_DEADLINE`] for a
+/// asker's patience ([`POWERSHELL_PROBE_DEADLINE`] for the Profiles page, [`REMOVAL_PROBE_DEADLINE`] for a
 /// removal somebody asked for).
 fn cached_profile_answer(program: &Path, deadline: std::time::Duration) -> Option<PathBuf> {
     let resolved = bt_platform::program_on_path(program).unwrap_or_else(|| program.to_path_buf());
@@ -3186,7 +3194,9 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
 /// the variable each edition computes its own module path; every command this door runs (the
 /// parser, `$PROFILE`, the policy cmdlets, the zone question) is answered by the edition's inbox
 /// modules, which that path always holds. Off Windows a pane inherits, and so does the probe.
-fn powershell_probe_command(program: &Path) -> Result<std::process::Command, ParseProbeFailure> {
+pub(crate) fn powershell_probe_command(
+    program: &Path,
+) -> Result<std::process::Command, ParseProbeFailure> {
     #[cfg(windows)]
     {
         bt_platform::quiet_command_named(program)
@@ -3214,17 +3224,15 @@ fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
         },
-        |output| ProbeOutput {
-            stdout: output.stdout,
-            stderr: output.stderr,
+        |output| {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, &output);
+            ProbeOutput {
+                stdout: output.stdout,
+                stderr: output.stderr,
+            }
         },
     )
 }
-
-/// **How long a question the Profiles page or a birth asks may take**: the parse probe and the
-/// page-entry observation. Short, because nobody is waiting for it and the next visit or birth
-/// asks again.
-const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// **How long the one question a removal needs may take** — where a PowerShell keeps `$PROFILE`,
 /// asked by the Settings remover, `--remove-shell-integration` and both uninstall verbs: an
@@ -3234,11 +3242,11 @@ const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// command, so this is the bound on a start, not on a lookup (release read M1).
 const REMOVAL_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
-fn run_powershell_probe(
+pub(crate) fn run_powershell_probe(
     program: &Path,
     command: &str,
     input: Option<&str>,
-    patience: std::time::Duration,
+    deadline_after: std::time::Duration,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
@@ -3280,7 +3288,7 @@ fn run_powershell_probe(
         }
     }
     let _started_pid = child.id(); // Only this owned child may be stopped.
-    let deadline = std::time::Instant::now() + patience;
+    let deadline = std::time::Instant::now() + deadline_after;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -3311,6 +3319,7 @@ fn run_powershell_probe(
             stdout: "[]".to_owned(),
             stderr: "[]".to_owned(),
         })?;
+    bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, &output);
     if !output.status.success() {
         return Err(ParseProbeFailure::Exit {
             code: output.status.code(),
@@ -3372,7 +3381,8 @@ fn probe_profile_observation(
         #[cfg(windows)]
         {
             let output =
-                run_powershell_probe(program, PROFILE_COMMAND, None, PROBE_DEADLINE).ok()?;
+                run_powershell_probe(program, PROFILE_COMMAND, None, POWERSHELL_PROBE_DEADLINE)
+                    .ok()?;
             let mut observed =
                 parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)?;
             let fresh = bt_platform::environment::fresh_logon_environment(worker)
@@ -4187,8 +4197,8 @@ mod tests {
         assert!(command.contains("quiet_command_named"));
         assert!(command.contains("quiet_command(program)"));
         assert!(probe.contains("-NoProfile"));
-        assert_eq!(PROBE_DEADLINE, std::time::Duration::from_secs(5));
-        assert!(REMOVAL_PROBE_DEADLINE > PROBE_DEADLINE);
+        assert!(include_str!("shell_integration.rs").contains("const POWERSHELL_PROBE_DEADLINE:"));
+        assert!(REMOVAL_PROBE_DEADLINE > POWERSHELL_PROBE_DEADLINE);
         let parse_probe = include_str!("shell_integration.rs")
             .split_once("fn run_parse_probe(program: &Path, text: &str)")
             .expect("the Windows target parser probe")
@@ -4196,11 +4206,7 @@ mod tests {
             .split_once("fn profile_key")
             .expect("the item after that probe")
             .0;
-        assert!(
-            parse_probe.contains(
-                "run_powershell_probe(program, PARSE_COMMAND, Some(text), PROBE_DEADLINE)"
-            )
-        );
+        assert!(parse_probe.contains("POWERSHELL_PROBE_DEADLINE"));
         assert!(probe.contains("Stdio::piped()"));
         assert!(probe.contains("input.as_bytes()"));
         assert!(!probe.contains(".arg(input)"));
