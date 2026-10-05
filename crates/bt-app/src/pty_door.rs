@@ -207,6 +207,87 @@ pub(crate) fn spawn_shell(
         .map_err(|_| PtyError::Backend("PTY birth worker panicked".into()))?
 }
 
+/// **What one pane's birth question answered** (T-LAUNCH-PROBE round 2): the identity it is born
+/// as and the completed answers that decide its start, or the sentence its worker left when it
+/// unwound — the same failure the birth door's own join reports for a panicked `bt-pty-birth`.
+pub(crate) struct BirthAnswer {
+    pub(crate) ticket: u64,
+    pub(crate) answer: Result<(String, crate::profiles::ProfilePrograms), String>,
+}
+
+static BIRTH_ANSWERS: Mutex<Vec<BirthAnswer>> = Mutex::new(Vec::new());
+static NEXT_BIRTH_TICKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn post_birth_answer(answer: BirthAnswer) {
+    BIRTH_ANSWERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(answer);
+    crate::profiles::wake_for_program_answers();
+}
+
+/// A question's promise to answer, kept however its worker ends: a worker that unwinds answers
+/// with the failure, so the pane in birth meets main's handling of a failed birth instead of
+/// waiting for ever.
+struct OwedAnswer(Option<u64>);
+
+impl Drop for OwedAnswer {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.0.take() {
+            post_birth_answer(BirthAnswer {
+                ticket,
+                answer: Err("the pane's birth question worker panicked".to_owned()),
+            });
+        }
+    }
+}
+
+/// **Ask one pane's program question on its own `bt-pty-birth` worker** (T-LAUNCH-PROBE round 2)
+/// — the half of a birth that may wait on the disk, with no deadline. The window thread never
+/// joins it: the answer lands in [`take_birth_answers`] under the returned ticket and wakes the
+/// window loop, and the product drops the handle (a test joins it to know the answer is posted).
+/// A worker that will not start is this birth's own failure, as a `bt-pty-birth` that will not
+/// start is the door's: the caller's `?` carries it.
+pub(crate) fn begin_birth_question(
+    question: impl FnOnce() -> (String, crate::profiles::ProfilePrograms) + Send + 'static,
+) -> std::io::Result<(u64, JoinHandle<()>)> {
+    let ticket = NEXT_BIRTH_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let worker = bt_platform::spawn_at_priority(
+        "bt-pty-birth",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |_ctx| {
+            let mut owed = OwedAnswer(Some(ticket));
+            let answer = question();
+            owed.0 = None;
+            post_birth_answer(BirthAnswer {
+                ticket,
+                answer: Ok(answer),
+            });
+        },
+    )?;
+    Ok((ticket, worker))
+}
+
+/// Take the one answer `ticket` names, if it has landed — for a test that must not take another
+/// test's answers out of the shared mailbox.
+#[cfg(test)]
+pub(crate) fn take_birth_answer(ticket: u64) -> Option<BirthAnswer> {
+    let mut answers = BIRTH_ANSWERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = answers.iter().position(|answer| answer.ticket == ticket)?;
+    Some(answers.swap_remove(at))
+}
+
+/// Take every birth answer that has landed.
+pub(crate) fn take_birth_answers() -> Vec<BirthAnswer> {
+    std::mem::take(
+        &mut *BIRTH_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
 /// **One leaf's `ResizePseudoConsole` round trip** (row 12): the one `PtySession::resize`,
 /// minted in `commit_leaf_resize` after the reflow and before the reconcile. One admission per
 /// leaf; the flush that walks the leaves is not admitted.

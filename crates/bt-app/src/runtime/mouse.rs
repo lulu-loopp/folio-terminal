@@ -21,6 +21,7 @@ use crate::{
     web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
     write_pty_input,
 };
+use crate::{LeafSession, PtyTarget};
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -209,7 +210,7 @@ impl Runtime<'_> {
                     kind,
                     tab.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
+                        .map(|leaf| profiles::identity_mark(&leaf.profile)),
                     palette,
                 );
                 // The dragged seat's own name, by id — the ghost and the
@@ -1561,7 +1562,7 @@ impl Runtime<'_> {
         let pty = self.window.tabs[active]
             .sessions
             .get(&seat)
-            .and_then(|leaf| leaf.pty.as_ref());
+            .map_or(PtyTarget::Nowhere, LeafSession::input_target);
         write_pty_input(pty, bytes, context)
     }
 

@@ -165,7 +165,7 @@ bt_platform::WebHost::rehost	WebRehost
 crate	arm	item	effects	kind	authority	door
 bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
-bt-app	-	crate::profiles::ask_program_file_before_deadline	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::profiles::walk_rows	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
 bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	

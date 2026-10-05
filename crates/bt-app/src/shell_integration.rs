@@ -3158,13 +3158,10 @@ mod tests {
             !worker.contains(".join()"),
             "the window thread waits for no startup worker"
         );
-        let landing = source
-            .find("AppEvent::ProfileProgramsReady =>")
-            .expect("the program answer's landing");
         let warmed = source
-            .find("shell_integration::begin_powershell_preparation_for(&app.profile_programs);")
-            .expect("the answer starts the script's preparation");
-        assert!(landing < warmed, "preparation follows the program answer");
+            .find("shell_integration::begin_powershell_script_preparation();")
+            .expect("launch starts the script's preparation");
+        assert!(warmed < source.find("opening_window_attributes(").unwrap());
         let probe = source_for_profile_probe();
         let command = source_for_probe_command();
         assert!(command.contains("quiet_command_named"));
@@ -4430,10 +4427,10 @@ mod tests {
         assert_eq!(
             owners,
             [
+                "Runtime::land_pane_birth",
                 "Runtime::pop_out_preview",
                 "Runtime::restart_shell",
                 "Runtime::split_seat",
-                "Runtime::start_pending_program_births",
                 "create_leaf_session",
                 "create_tab_state",
             ],

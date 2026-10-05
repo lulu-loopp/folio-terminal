@@ -2139,7 +2139,9 @@ impl ProfileTable {
             .into_iter()
             .filter(|index| {
                 self.profiles.get(*index).is_none_or(|profile| {
-                    profile.origin != Origin::Builtin || programs.is_available(&profile.id)
+                    profile.origin != Origin::Builtin
+                        || programs.is_available(&profile.id)
+                        || programs.is_pending_for(&profile.id)
                 })
             })
             .collect()
@@ -2339,19 +2341,19 @@ impl Registry {
     /// [`set_hidden`]'s body — the two guards over this table's own floor rather
     /// than over the process's, which is what lets a test hide a row without
     /// moving the window's answer to "which profile is the floor".
-    fn set_hidden(&self, index: usize, hidden: bool, default: usize) -> bool {
-        self.set_hidden_on(index, hidden, default, SeedPlatform::of_this_build())
+    fn set_hidden(&self, index: usize, hidden: bool, defaults: &[usize]) -> bool {
+        self.set_hidden_on(index, hidden, defaults, SeedPlatform::of_this_build())
     }
 
     fn set_hidden_on(
         &self,
         index: usize,
         hidden: bool,
-        default: usize,
+        defaults: &[usize],
         platform: SeedPlatform,
     ) -> bool {
         let floor = fallback_profile_in_on(&self.table(), platform);
-        if hidden && (index == default || index == floor) {
+        if hidden && (defaults.contains(&index) || index == floor) {
             return false;
         }
         self.edit(index, |profile| {
@@ -3291,11 +3293,13 @@ pub fn set_env(index: usize, env: Vec<(String, String)>) -> bool {
 /// politeness (plan §2.4, R5): the **default** cannot be hidden because hiding it
 /// leaves no new tab to open, and the **fallback floor** cannot, because every
 /// degradation in this product lands on it and a floor that can be taken away is
-/// a chain with a hole in the bottom. `default` is passed in rather than read,
+/// a chain with a hole in the bottom. `defaults` is passed in rather than read,
 /// because which row is the default is `settings.json`'s answer resolved against
-/// this machine ([`default_profile`]) and not a fact this table holds.
-pub fn set_hidden(index: usize, hidden: bool, default: usize) -> bool {
-    registry().set_hidden(index, hidden, default)
+/// this machine ([`possible_defaults`]) and not a fact this table holds — every
+/// row that may be the default while the machine has not decided it, and the
+/// one row once it has.
+pub fn set_hidden(index: usize, hidden: bool, defaults: &[usize]) -> bool {
+    registry().set_hidden(index, hidden, defaults)
 }
 
 /// Take one row out of the table and hand it back whole, so an Undo can put it
@@ -3895,7 +3899,11 @@ pub struct ProfileLine {
 /// resolved answer rather than the file so that the page and the `+` cannot
 /// disagree about what the default is.
 #[must_use]
-pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -> Vec<ProfileLine> {
+pub fn page_lines(
+    programs: &ProfilePrograms,
+    default: Option<usize>,
+    automatic: bool,
+) -> Vec<ProfileLine> {
     let fallback = fallback_profile();
     with_table(|table| {
         table
@@ -3903,13 +3911,14 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
             .iter()
             .enumerate()
             .map(|(index, profile)| {
+                let pending = programs.is_pending_for(&profile.id);
                 let available = programs.is_available(&profile.id);
                 let is_agent = agent_command(profile).is_some();
                 ProfileLine {
                     index,
                     mark: profile.mark,
                     title: title(index),
-                    command: match (programs.is_pending(), available, is_agent) {
+                    command: match (pending, available, is_agent) {
                         (true, _, _) => pending_hint_text().to_owned(),
                         (false, true, _) => command_line(profile, programs.program(&profile.id)),
                         // An agent this window did not find says **where it
@@ -3932,13 +3941,13 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                         .text()
                     }),
                     is_agent,
-                    is_default: !programs.is_pending() && index == default,
-                    default_is_automatic: !programs.is_pending() && automatic,
+                    is_default: default == Some(index),
+                    default_is_automatic: default.is_some() && automatic,
                     is_fallback: index == fallback,
                     deletable: profile.origin == Origin::User,
                     hidden: profile.hidden,
                     available,
-                    pending: programs.is_pending(),
+                    pending,
                 }
             })
             .collect()
@@ -4413,15 +4422,94 @@ fn shipped_order_for(platform: SeedPlatform) -> &'static [&'static str] {
 /// exactly as long as its cause. The same sentence is why an unset default is
 /// resolved afresh on every read and never written down: a machine that grows a
 /// PowerShell 7 opens with it the next morning, and one that loses it stops.
+///
+/// **`None` while the answer depends on a row the machine has not answered**
+/// (T-LAUNCH-PROBE round 2): the default is never the fallback "because the
+/// real default is not known yet". A surface that names the default names
+/// nothing until it is decided; a seed takes [`DEFAULT_IDENTITY`] and its birth
+/// decides.
 #[must_use]
-pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
+pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> Option<usize> {
+    default_profile_decided(stored, programs).ok()
+}
+
+/// [`default_profile`] with the unknown rows it consulted named — what a
+/// pane's birth question asks next.
+pub(crate) fn default_profile_decided(
+    stored: &str,
+    programs: &ProfilePrograms,
+) -> Result<usize, Vec<String>> {
     with_table(|table| {
-        default_profile_in(table, stored, |index| {
-            table
-                .get(index)
-                .is_some_and(|row| programs.is_available(&row.id))
+        decided_from_answers(programs, |available| {
+            default_profile_in(table, stored, |index| {
+                table.get(index).is_some_and(|row| available(&row.id))
+            })
         })
     })
+}
+
+/// **Every row that may be the default** — the decided default alone, or while
+/// rows it depends on are unknown, each of those rows and the row the rule
+/// reaches past them. What a guard protects "the default" with when the default
+/// is not decided (review m8): never the fallback in its place.
+#[must_use]
+pub fn possible_defaults(stored: &str, programs: &ProfilePrograms) -> Vec<usize> {
+    with_table(|table| {
+        let unknown = std::cell::RefCell::new(Vec::new());
+        let reached = default_profile_in(table, stored, |index| {
+            let Some(row) = table.get(index) else {
+                return false;
+            };
+            match programs.answer(&row.id) {
+                Some(found) => found.is_some(),
+                None => {
+                    unknown.borrow_mut().push(index);
+                    false
+                }
+            }
+        });
+        let mut rows = unknown.into_inner();
+        rows.push(reached);
+        rows
+    })
+}
+
+/// **The identity a seed carries for "the default profile, still to be
+/// resolved"** — the empty id. A pane holding it is titled and marked as a
+/// terminal of no particular profile, is saved as it, and its birth resolves
+/// it; it is never spelled as the fallback's id.
+pub const DEFAULT_IDENTITY: &str = "";
+
+/// The default profile in the spelling a pane seed owns: the decided row's
+/// id, or [`DEFAULT_IDENTITY`] while the answer is unknown. Every door that
+/// seeds "the default" at pane creation asks this one function.
+#[must_use]
+pub fn default_profile_identity(stored: &str, programs: &ProfilePrograms) -> String {
+    default_profile(stored, programs).map_or_else(|| DEFAULT_IDENTITY.to_owned(), id)
+}
+
+/// **The name a pane's profile identity goes by** — the row's title, and for
+/// [`DEFAULT_IDENTITY`] the plain word for a terminal: that pane is a terminal
+/// of no particular profile until its birth decides which, and naming the
+/// fallback there would be naming a shell it may never run (review m1).
+#[must_use]
+pub fn identity_title(id: &str) -> &'static str {
+    if id == DEFAULT_IDENTITY {
+        crate::i18n::Text::SeatTerminal.text()
+    } else {
+        title(index_of_id(id))
+    }
+}
+
+/// The mark a pane's profile identity wears — the row's, and for
+/// [`DEFAULT_IDENTITY`] the mark a terminal seat of no particular shell wears.
+#[must_use]
+pub fn identity_mark(id: &str) -> ChromeMark {
+    if id == DEFAULT_IDENTITY {
+        ActionIcon::UnknownSeat.mark()
+    } else {
+        mark(index_of_id(id))
+    }
 }
 
 /// Whether the answer above came from the machine rather than from the reader —
@@ -4432,15 +4520,18 @@ pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
 /// and one naming a shell that has since been uninstalled, are both defaults
 /// nobody is currently choosing, and a badge that called them chosen would be
 /// pointing at a row for a reason that is not the reason it is there.
+///
+/// `false` while the stored row is unknown: no badge is drawn from unknown.
 #[must_use]
 pub fn default_profile_is_automatic(stored: &str, programs: &ProfilePrograms) -> bool {
     with_table(|table| {
-        chosen_profile_in(table, stored, |index| {
-            table
-                .get(index)
-                .is_some_and(|row| programs.is_available(&row.id))
+        decided_from_answers(programs, |available| {
+            chosen_profile_in(table, stored, |index| {
+                table.get(index).is_some_and(|row| available(&row.id))
+            })
+            .is_none()
         })
-        .is_none()
+        .unwrap_or(false)
     })
 }
 
@@ -4604,8 +4695,12 @@ pub enum Qualifier {
 /// was read on and the click aimed at it is a worse answer than a settled one.
 #[must_use]
 pub fn title(profile: usize) -> &'static str {
-    static TITLES: RwLock<Option<(u64, Vec<&'static str>)>> = RwLock::new(None);
-    let revision = profile_revision();
+    // Keyed on whether WSL's installation has been read as well as on the table: that read
+    // follows the walk's answer about `wsl.exe` (T-LAUNCH-PROBE round 2), so a title composed
+    // before it is composed again once, after it.
+    type ComposedTitles = Option<((u64, bool), Vec<&'static str>)>;
+    static TITLES: RwLock<ComposedTitles> = RwLock::new(None);
+    let revision = (profile_revision(), crate::wsl::facts_settled());
     {
         let held = TITLES
             .read()
@@ -5255,13 +5350,38 @@ fn is_a_git_on(platform: HostPlatform, path: &Path, environment: &dyn ShellEnvir
 /// third when the probe ran, so a window holding one of these read a reorder as
 /// every pane changing shell. An id is the one thing about a row that a move
 /// does not touch, so a snapshot keyed on it cannot observe a move at all — a
-/// row that was startable stays startable wherever it now sits, and a row that
-/// is not in the snapshot is a row this window has not probed yet, which is the
-/// same answer as "not on this machine" and degrades the same way.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// row that was startable stays startable wherever it now sits.
+///
+/// **Only completed answers are held** (T-LAUNCH-PROBE round 2). A row with no
+/// entry is a row whose question has not been answered — asked and still in
+/// flight, never asked, or asked about a program source the row no longer has —
+/// and that is *unknown*, never "not on this machine": a deadline, a slow disk
+/// or a worker that failed produces no entry, so nothing can decide a fallback,
+/// rewrite a saved pane or hide an agent from it. Each entry remembers the
+/// [`ProgramSource`] it answered and the walk generation that answered it, so
+/// an edit keeps every answer whose question did not change and a late answer
+/// from an older walk never replaces a newer one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfilePrograms {
-    resolved: BTreeMap<String, Option<OsString>>,
-    pending: bool,
+    resolved: BTreeMap<String, RowAnswer>,
+}
+
+/// One completed program question: what was asked, by which walk, and the
+/// answer — `None` is a completed "nowhere on this machine".
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RowAnswer {
+    asked: ProgramSource,
+    generation: u64,
+    program: Option<OsString>,
+}
+
+/// One row's completed answer as it leaves a walk or a birth question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowVerdict {
+    id: String,
+    asked: ProgramSource,
+    generation: u64,
+    program: Option<OsString>,
 }
 
 impl ProfilePrograms {
@@ -5283,27 +5403,141 @@ impl ProfilePrograms {
         Self {
             resolved: rows
                 .iter()
-                .map(|profile| (profile.id.clone(), Self::resolve_row(profile, environment)))
+                .map(|profile| {
+                    (
+                        profile.id.clone(),
+                        RowAnswer {
+                            asked: profile.program.clone(),
+                            generation: 0,
+                            program: Self::resolve_row(profile, environment),
+                        },
+                    )
+                })
                 .collect(),
-            pending: false,
         }
     }
 
-    /// A truthful launch-time answer before the machine walk has landed.
-    /// Nothing is advertised or started from it; terminal leaves keep their
-    /// requested profile and acquire a process when the settled value arrives.
+    /// Nothing answered yet: every row is unknown. What launch starts from, so
+    /// the window thread asks the machine nothing before its first frame.
     #[must_use]
     pub fn pending() -> Self {
+        Self::default()
+    }
+
+    /// Whether any row of the live table is still unknown.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        with_table(|table| {
+            table
+                .profiles
+                .iter()
+                .any(|profile| self.is_pending_for(&profile.id))
+        })
+    }
+
+    /// Whether this row's own question is unanswered — unknown, which is not
+    /// absent.
+    #[must_use]
+    pub fn is_pending_for(&self, id: &str) -> bool {
+        !self.resolved.contains_key(id)
+    }
+
+    /// The three answers a row can have: `None` unknown, `Some(None)` a
+    /// completed "nowhere on this machine", `Some(Some(program))` found.
+    #[must_use]
+    pub fn answer(&self, id: &str) -> Option<Option<&OsStr>> {
+        self.resolved.get(id).map(|row| row.program.as_deref())
+    }
+
+    /// The answers that still answer the live table's questions: an entry is
+    /// kept while its row exists and still names the program source it was
+    /// asked about, so moving, renaming or hiding a row keeps its answer and
+    /// only a changed or new row becomes unknown (review m2).
+    #[must_use]
+    pub fn carried_into_live_table(&self) -> Self {
+        with_table(|table| self.carried_into(table))
+    }
+
+    /// [`Self::carried_into_live_table`] over a table handed in.
+    fn carried_into(&self, table: &ProfileTable) -> Self {
         Self {
-            resolved: BTreeMap::new(),
-            pending: true,
+            resolved: self
+                .resolved
+                .iter()
+                .filter(|(id, answer)| {
+                    table
+                        .position_of_id(id)
+                        .and_then(|index| table.get(index))
+                        .is_some_and(|row| row.program == answer.asked)
+                })
+                .map(|(id, answer)| (id.clone(), answer.clone()))
+                .collect(),
         }
     }
 
-    /// Whether the machine has not answered yet.
+    /// The live table's rows whose questions are unanswered here.
     #[must_use]
-    pub fn is_pending(&self) -> bool {
-        self.pending
+    pub fn unknown_rows(&self) -> Vec<Profile> {
+        with_table(|table| {
+            table
+                .profiles
+                .iter()
+                .filter(|profile| self.is_pending_for(&profile.id))
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Take completed answers. An answer counts only for a row that still
+    /// names the program source it was asked about, and never replaces an
+    /// answer from a newer walk; a late answer is otherwise always used.
+    /// Answers whether any row changed.
+    pub fn adopt(&mut self, verdicts: impl IntoIterator<Item = RowVerdict>) -> bool {
+        let mut changed = false;
+        for verdict in verdicts {
+            let current = with_table(|table| {
+                table
+                    .position_of_id(&verdict.id)
+                    .and_then(|index| table.get(index))
+                    .is_some_and(|row| row.program == verdict.asked)
+            });
+            if !current
+                || self.resolved.get(&verdict.id).is_some_and(|held| {
+                    held.asked == verdict.asked && held.generation > verdict.generation
+                })
+            {
+                continue;
+            }
+            let answer = RowAnswer {
+                asked: verdict.asked,
+                generation: verdict.generation,
+                program: verdict.program,
+            };
+            if self.resolved.get(&verdict.id) != Some(&answer) {
+                self.resolved.insert(verdict.id, answer);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Ask one live row's question here and now, with no deadline — the
+    /// patience a pane's birth has, on the birth's own worker. A row the live
+    /// table no longer holds stays unknown, and the rule that consulted it
+    /// stops consulting it once the table says it is gone.
+    pub(crate) fn ask_row(&mut self, id: &str, environment: &dyn ShellEnvironment) {
+        let Some(row) = row_of(id) else {
+            return;
+        };
+        let program = Self::resolve_row(&row, environment);
+        self.resolved.insert(
+            id.to_owned(),
+            RowAnswer {
+                asked: row.program,
+                generation: 0,
+                program,
+            },
+        );
     }
 
     /// Where one row's program is on this machine, or `None` when it is nowhere.
@@ -5330,17 +5564,15 @@ impl ProfilePrograms {
         }
     }
 
-    /// The program the profile with this **id** would start, or `None` when this
-    /// machine has nowhere to start it from — and equally when this snapshot was
-    /// taken before the row existed.
+    /// The program the profile with this **id** would start, or `None` when no
+    /// program can be started from this answer — absent, or still unknown.
     ///
-    /// The two are one answer on purpose: a caller that cannot start a program
-    /// and a caller that has never looked for one both owe the reader the same
-    /// degradation, and a third state here would be a third arm at every call
-    /// site for a difference nobody can act on.
+    /// For callers that only draw or start a found program. A caller that
+    /// would *decide* something from "not found" (a fallback, a hidden row, a
+    /// first-run offer) asks [`Self::answer`], which keeps unknown apart.
     #[must_use]
     pub fn program(&self, id: &str) -> Option<&OsStr> {
-        self.resolved.get(id)?.as_deref()
+        self.answer(id).flatten()
     }
 
     /// The same answer about **the row standing at one position of the live
@@ -5384,15 +5616,28 @@ impl ProfilePrograms {
                     .map(|(index, profile)| {
                         (
                             profile.id.clone(),
-                            available
-                                .contains(&index)
-                                .then(|| OsString::from(format!("C:\\fake\\{index}.exe"))),
+                            RowAnswer {
+                                asked: profile.program.clone(),
+                                generation: 0,
+                                program: available
+                                    .contains(&index)
+                                    .then(|| OsString::from(format!("C:\\fake\\{index}.exe"))),
+                            },
                         )
                     })
                     .collect()
             }),
-            pending: false,
         }
+    }
+
+    /// The same machine with one row's question left unanswered — what a
+    /// birth or a surface sees while that row is unknown. Its callers speak
+    /// Windows' rows (PowerShell 7, Git Bash), so it is compiled where they are.
+    #[cfg(all(test, windows))]
+    #[must_use]
+    pub(crate) fn without(mut self, id: &str) -> Self {
+        self.resolved.remove(id);
+        self
     }
 
     /// Where one candidate says to look, or `None` when the machine cannot even
@@ -5452,160 +5697,363 @@ impl ProfilePrograms {
     }
 }
 
-/// One filesystem question from an environment-named program location. A slow
-/// redirector is abandoned at this bound so the next PATH entry is still asked.
-const PROGRAM_PATH_ENTRY_DEADLINE: Duration = Duration::from_millis(40);
+// ── The whole-table walk: what the listing surfaces show, never what a pane starts ──
+//
+// T-LAUNCH-PROBE round 2. The walk feeds the menus, Settings ▸ Profiles and the
+// agent rows; a pane's birth asks its own question (`pty_door::begin_birth_question`).
+// It runs on the background preparation road and has **no deadline**: a question
+// that has not answered is unknown, and unknown is never published as absent.
 
-trait ProgramFileQuestion {
-    /// `None` is a question that did not answer inside its bound.
-    fn ask(&self, path: &Path) -> Option<bool>;
+/// How many PATH or install directories the walk asks at once. A directory
+/// that never answers holds one of these and nothing else: the names asked of
+/// it queue behind its first question instead of each taking a thread (review
+/// M3), and every other directory is asked in the remaining slots.
+const PROGRAM_WALK_DIRECTORIES_AT_ONCE: usize = 4;
+
+/// One blocking filesystem question about a program location, asked with the
+/// patience the window thread used to have — none of it on the window thread.
+pub(crate) trait ProgramFileQuestion: Send + Sync + 'static {
+    fn is_file(&self, path: &Path) -> bool;
 }
 
-struct DeadlineProgramFileQuestion<'a>(&'a bt_platform::admission::WorkerCtx);
+/// The machine itself.
+struct MachineFileQuestion;
 
-fn ask_program_file_before_deadline(
-    _worker: &bt_platform::admission::WorkerCtx,
-    asked: PathBuf,
-    question: impl FnOnce(PathBuf) -> bool + Send + 'static,
-) -> Option<bool> {
-    let (send, receive) = std::sync::mpsc::sync_channel(1);
-    bt_platform::spawn_at_priority(
-        "powershell-script-prepare",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |_worker| {
-            let _ = send.send(question(asked));
-        },
-    )
-    .ok()?;
-    receive.recv_timeout(PROGRAM_PATH_ENTRY_DEADLINE).ok()
-}
-
-impl ProgramFileQuestion for DeadlineProgramFileQuestion<'_> {
-    fn ask(&self, path: &Path) -> Option<bool> {
-        ask_program_file_before_deadline(self.0, path.to_path_buf(), |asked| {
-            bt_pty::SystemShellEnvironment.is_file(&asked)
-        })
+impl ProgramFileQuestion for MachineFileQuestion {
+    fn is_file(&self, path: &Path) -> bool {
+        bt_pty::SystemShellEnvironment.is_file(path)
     }
 }
 
-type ProgramVariableQuestion = dyn Fn(&str) -> Option<OsString> + Send + Sync;
-
-struct ProgramProbeEnvironment<Q> {
-    variable: Arc<ProgramVariableQuestion>,
-    question: Q,
-    answers: Mutex<BTreeMap<PathBuf, bool>>,
-    timed_out: AtomicU64,
+/// **The rows' own resolution, run over the answers in hand.** A question with
+/// no answer yet reads as "not here" *only so that the search goes on* and
+/// asks every later entry in the same pass; it is recorded, and a row whose
+/// evaluation consulted one is not decided. A row is decided by exactly the
+/// sequential rule [`ProfilePrograms::resolve_row`] states, over completed
+/// answers only, so the verdict is the one an unhurried walk would reach.
+struct KnownAnswers<'a> {
+    variable: &'a dyn Fn(&str) -> Option<OsString>,
+    answers: &'a BTreeMap<PathBuf, bool>,
+    unknown: std::cell::RefCell<std::collections::BTreeSet<PathBuf>>,
 }
 
-impl<'a> ProgramProbeEnvironment<DeadlineProgramFileQuestion<'a>> {
-    fn new(worker: &'a bt_platform::admission::WorkerCtx) -> Self {
-        Self {
-            variable: Arc::new(|key| std::env::var_os(key)),
-            question: DeadlineProgramFileQuestion(worker),
-            answers: Mutex::new(BTreeMap::new()),
-            timed_out: AtomicU64::new(0),
-        }
-    }
-}
-
-#[cfg(test)]
-impl<Q> ProgramProbeEnvironment<Q> {
-    fn with_seams(
-        variable: impl Fn(&str) -> Option<OsString> + Send + Sync + 'static,
-        question: Q,
-    ) -> Self {
-        Self {
-            variable: Arc::new(variable),
-            question,
-            answers: Mutex::new(BTreeMap::new()),
-            timed_out: AtomicU64::new(0),
-        }
-    }
-}
-
-impl<Q: ProgramFileQuestion> ShellEnvironment for ProgramProbeEnvironment<Q> {
+impl ShellEnvironment for KnownAnswers<'_> {
     fn var_os(&self, key: &str) -> Option<OsString> {
         (self.variable)(key)
     }
 
     fn is_file(&self, path: &Path) -> bool {
-        if let Some(answer) = self
-            .answers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(path)
-            .copied()
-        {
-            return answer;
+        if let Some(answer) = self.answers.get(path) {
+            return *answer;
         }
-        let answer = self.question.ask(path).unwrap_or_else(|| {
-            self.timed_out.fetch_add(1, Ordering::Relaxed);
-            false
-        });
-        self.answers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(path.to_path_buf(), answer);
-        answer
+        self.unknown.borrow_mut().insert(path.to_path_buf());
+        false
     }
 }
 
-static PROGRAM_PROBE_REVISION: AtomicU64 = AtomicU64::new(0);
-static PROGRAM_PROBE_ANSWER: Mutex<Option<(u64, ProfilePrograms)>> = Mutex::new(None);
-static PROGRAM_PROBE_WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
-
-fn spawn_program_probe_worker(
-    work: impl FnOnce(&bt_platform::admission::WorkerCtx) + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    bt_platform::spawn_at_priority(
-        "powershell-script-prepare",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |worker| work(worker),
-    )
+/// What a directory's asker tells the walk.
+enum WalkMessage {
+    Answer(PathBuf, bool),
+    DirectoryDone(PathBuf),
 }
 
-/// Install the window-loop wake used by launch and later profile-table probes.
-pub fn install_program_probe_wake(wake: impl Fn() + Send + Sync + 'static) {
-    let _ = PROGRAM_PROBE_WAKE.set(Box::new(wake));
+/// Which questions are waiting, per directory, and which directories have an
+/// asker out. One asker per directory at a time and at most
+/// [`PROGRAM_WALK_DIRECTORIES_AT_ONCE`] askers in all.
+#[derive(Default)]
+struct DirectoryBoard {
+    waiting: BTreeMap<PathBuf, Vec<PathBuf>>,
+    asking: std::collections::BTreeSet<PathBuf>,
+    wanted: std::collections::BTreeSet<PathBuf>,
 }
 
-/// Ask for the current profile table on the existing background preparation
-/// road. A newer table revision supersedes an older answer before publication.
-pub fn begin_program_probe() {
-    let revision = PROGRAM_PROBE_REVISION.fetch_add(1, Ordering::AcqRel) + 1;
-    let rows = with_table(|table| table.profiles.clone());
-    let started = spawn_program_probe_worker(move |worker| {
-        let environment = ProgramProbeEnvironment::new(worker);
-        let answer = ProfilePrograms::probe_rows(&rows, &environment);
-        let timed_out = environment.timed_out.load(Ordering::Relaxed);
-        if timed_out != 0 {
-            eprintln!(
-                "Folio program discovery skipped {timed_out} filesystem questions after their per-entry deadline"
-            );
+type WalkSpawn<'a> = &'a dyn Fn(Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
+
+impl DirectoryBoard {
+    fn want(&mut self, path: PathBuf) {
+        if self.wanted.insert(path.clone()) {
+            let directory = path
+                .parent()
+                .map_or_else(|| path.clone(), Path::to_path_buf);
+            self.waiting.entry(directory).or_default().push(path);
         }
-        if PROGRAM_PROBE_REVISION.load(Ordering::Acquire) == revision {
-            *PROGRAM_PROBE_ANSWER
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((revision, answer));
-            if let Some(wake) = PROGRAM_PROBE_WAKE.get() {
-                wake();
+    }
+
+    fn dispatch(
+        &mut self,
+        send: &std::sync::mpsc::Sender<WalkMessage>,
+        question: &Arc<dyn ProgramFileQuestion>,
+        spawn: WalkSpawn<'_>,
+    ) -> std::io::Result<()> {
+        while self.asking.len() < PROGRAM_WALK_DIRECTORIES_AT_ONCE {
+            let Some(directory) = self
+                .waiting
+                .keys()
+                .find(|directory| !self.asking.contains(*directory))
+                .cloned()
+            else {
+                return Ok(());
+            };
+            let paths = self.waiting.remove(&directory).unwrap_or_default();
+            let send = send.clone();
+            let question = Arc::clone(question);
+            let asked = directory.clone();
+            spawn(Box::new(move || {
+                for path in paths {
+                    let answer = question.is_file(&path);
+                    let _ = send.send(WalkMessage::Answer(path, answer));
+                }
+                let _ = send.send(WalkMessage::DirectoryDone(asked));
+            }))?;
+            self.asking.insert(directory);
+        }
+        Ok(())
+    }
+}
+
+/// Walk `rows` to completed verdicts, publishing each row the moment its
+/// verdict is complete. Returns only when every row is decided, or when an
+/// asker could not be started (the undecided rows then stay unknown). A
+/// directory that never answers keeps the rows that depend on it unknown —
+/// the truth — while every other row is decided; its late answer is used.
+fn walk_rows(
+    _worker: &bt_platform::admission::WorkerCtx,
+    rows: Vec<Profile>,
+    generation: u64,
+    variable: &dyn Fn(&str) -> Option<OsString>,
+    question: &Arc<dyn ProgramFileQuestion>,
+    spawn: WalkSpawn<'_>,
+    publish: &mut dyn FnMut(Vec<RowVerdict>),
+) -> std::io::Result<()> {
+    let (send, receive) = std::sync::mpsc::channel();
+    let mut answers = BTreeMap::new();
+    let mut board = DirectoryBoard::default();
+    let mut open = rows;
+    loop {
+        let mut decided = Vec::new();
+        let mut undecided = Vec::new();
+        for row in open {
+            let known = KnownAnswers {
+                variable,
+                answers: &answers,
+                unknown: std::cell::RefCell::default(),
+            };
+            let program = ProfilePrograms::resolve_row(&row, &known);
+            let unknown = known.unknown.into_inner();
+            if unknown.is_empty() {
+                decided.push(RowVerdict {
+                    id: row.id.clone(),
+                    asked: row.program.clone(),
+                    generation,
+                    program,
+                });
+            } else {
+                unknown.into_iter().for_each(|path| board.want(path));
+                undecided.push(row);
             }
         }
-    });
-    if let Err(error) = started {
-        eprintln!("Folio program discovery worker would not start: {error}");
+        if !decided.is_empty() {
+            publish(decided);
+        }
+        if undecided.is_empty() {
+            return Ok(());
+        }
+        open = undecided;
+        board.dispatch(&send, question, spawn)?;
+        // Every unknown path is either answered or in an asker's hands, and an
+        // asker reports its directory done only after its last answer, so an
+        // undecided row always has an asker out: this receive has a sender.
+        let mut message = receive.recv().ok();
+        while let Some(landed) = message {
+            match landed {
+                WalkMessage::Answer(path, answer) => {
+                    answers.insert(path, answer);
+                }
+                WalkMessage::DirectoryDone(directory) => {
+                    board.asking.remove(&directory);
+                }
+            }
+            message = receive.try_recv().ok();
+        }
     }
 }
 
-/// Take the newest completed program answer, if one has landed.
-pub fn take_program_probe() -> Option<ProfilePrograms> {
-    PROGRAM_PROBE_ANSWER
+/// Which walks are running and what they have answered that the window has
+/// not taken yet. One lock for the comparison and the store: an older walk's
+/// answer never replaces a newer one's (review M2's race).
+#[derive(Default)]
+struct WalkLedger {
+    next_generation: u64,
+    in_flight: std::collections::BTreeSet<u64>,
+    landed: BTreeMap<String, RowVerdict>,
+}
+
+static PROGRAM_WALK: Mutex<WalkLedger> = Mutex::new(WalkLedger {
+    next_generation: 1,
+    in_flight: std::collections::BTreeSet::new(),
+    landed: BTreeMap::new(),
+});
+
+static PROGRAM_ANSWER_WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+fn program_walk() -> std::sync::MutexGuard<'static, WalkLedger> {
+    PROGRAM_WALK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-        .and_then(|(revision, answer)| {
-            (PROGRAM_PROBE_REVISION.load(Ordering::Acquire) == revision).then_some(answer)
-        })
+}
+
+/// Install the window loop's wake, which both the walk and a pane's birth
+/// question use when an answer lands.
+pub fn install_program_answer_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = PROGRAM_ANSWER_WAKE.set(Box::new(wake));
+}
+
+/// Wake the window loop because an answer landed.
+pub(crate) fn wake_for_program_answers() {
+    if let Some(wake) = PROGRAM_ANSWER_WAKE.get() {
+        wake();
+    }
+}
+
+impl WalkLedger {
+    /// Keep each verdict unless a newer walk's verdict about the same question is already
+    /// waiting — compared and stored under the one lock the caller holds.
+    fn deposit(&mut self, verdicts: Vec<RowVerdict>) {
+        for verdict in verdicts {
+            let newer_held = self.landed.get(&verdict.id).is_some_and(|held| {
+                held.asked == verdict.asked && held.generation > verdict.generation
+            });
+            if !newer_held {
+                self.landed.insert(verdict.id.clone(), verdict);
+            }
+        }
+    }
+}
+
+fn deposit_program_verdicts(verdicts: Vec<RowVerdict>) {
+    program_walk().deposit(verdicts);
+    wake_for_program_answers();
+}
+
+/// A running walk's mark in the ledger, removed however the walk ends —
+/// completed, stopped, or unwound by a panic — so the next edge asks again.
+struct WalkInFlight(u64);
+
+impl Drop for WalkInFlight {
+    fn drop(&mut self) {
+        program_walk().in_flight.remove(&self.0);
+    }
+}
+
+/// Ask the machine about `rows` on the background preparation road. Nothing
+/// waits for it; each row's verdict lands through
+/// [`take_program_verdicts`] as soon as it is complete. A worker that will not
+/// start leaves the rows unknown, and the next edge that lists programs
+/// (a menu opening, the Profiles page) asks again.
+pub fn begin_program_walk(rows: Vec<Profile>) {
+    begin_program_walk_with(
+        rows,
+        Arc::new(|key: &str| std::env::var_os(key)),
+        Arc::new(MachineFileQuestion),
+        Box::new(deposit_program_verdicts),
+    );
+}
+
+/// The environment a walk reads its variables from.
+type WalkVariable = dyn Fn(&str) -> Option<OsString> + Send + Sync;
+
+/// [`begin_program_walk`] with its three seams handed in: the environment's variables, the
+/// filesystem question, and where verdicts go.
+pub(crate) fn begin_program_walk_with(
+    rows: Vec<Profile>,
+    variable: Arc<WalkVariable>,
+    question: Arc<dyn ProgramFileQuestion>,
+    mut publish: Box<dyn FnMut(Vec<RowVerdict>) + Send>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let generation = {
+        let mut ledger = program_walk();
+        let generation = ledger.next_generation;
+        ledger.next_generation += 1;
+        ledger.in_flight.insert(generation);
+        generation
+    };
+    let started = bt_platform::spawn_at_priority(
+        "powershell-script-prepare",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            let _in_flight = WalkInFlight(generation);
+            let spawn = |asker: Box<dyn FnOnce() + Send>| {
+                bt_platform::spawn_at_priority(
+                    "powershell-script-prepare",
+                    bt_platform::ThreadPriority::BelowNormal,
+                    move |_worker| asker(),
+                )
+                .map(drop)
+            };
+            if let Err(error) = walk_rows(
+                worker,
+                rows,
+                generation,
+                &*variable,
+                &question,
+                &spawn,
+                &mut *publish,
+            ) {
+                eprintln!(
+                    "Folio program discovery stopped: an asker would not start ({error}); the rows it had not decided stay unknown until a menu or the Profiles page asks again"
+                );
+            }
+        },
+    );
+    if let Err(error) = started {
+        program_walk().in_flight.remove(&generation);
+        eprintln!(
+            "Folio program discovery would not start ({error}); the rows stay unknown until a menu or the Profiles page asks again"
+        );
+    }
+}
+
+/// Whether a walk is still running — and so whether an unknown row is still
+/// being asked about, rather than left unknown by a walk that ended.
+#[must_use]
+pub fn program_walk_in_flight() -> bool {
+    !program_walk().in_flight.is_empty()
+}
+
+/// Take every verdict that has landed since the last take.
+pub fn take_program_verdicts() -> Vec<RowVerdict> {
+    std::mem::take(&mut program_walk().landed)
+        .into_values()
+        .collect()
+}
+
+/// **What decides from the machine's answers, with unknown kept apart.**
+/// `rule` asks `available(id)`; a row whose answer is unknown reads as "not
+/// startable" only for the rest of the evaluation, is recorded, and makes the
+/// whole verdict undecided. `Err` names every unknown row the rule consulted,
+/// which is exactly what a birth question has to ask next.
+pub(crate) fn decided_from_answers<R>(
+    programs: &ProfilePrograms,
+    rule: impl FnOnce(&dyn Fn(&str) -> bool) -> R,
+) -> Result<R, Vec<String>> {
+    let unknown = std::cell::RefCell::new(Vec::<String>::new());
+    let available = |id: &str| match programs.answer(id) {
+        Some(found) => found.is_some(),
+        None => {
+            unknown.borrow_mut().push(id.to_owned());
+            false
+        }
+    };
+    let verdict = rule(&available);
+    let unknown = unknown.into_inner();
+    if unknown.is_empty() {
+        Ok(verdict)
+    } else {
+        Err(unknown)
+    }
 }
 
 /// Which row of the menu, and **what kind of row** — the two lists the picker
@@ -5805,7 +6253,9 @@ impl ProfileMenuLayout {
             .profiles
             .iter()
             .zip(&self.items)
-            .filter(|(index, _)| !programs.row_is_available(**index))
+            .filter(|(index, _)| {
+                !programs.row_is_available(**index) && !programs.is_pending_for(&id(**index))
+            })
             .map(|(index, rect)| (MenuRow::Profile(*index), *rect, unavailable_tip(*index)));
         let recents = self
             .recent
@@ -6162,7 +6612,7 @@ pub fn hit(
     // after the folder is known, and the default profile is startable by
     // construction (`default_profile` refuses one this machine cannot run).
     if contains(layout.new_in_folder, x, y) {
-        return Some((!programs.is_pending()).then_some(MenuRow::NewInFolder));
+        return Some(Some(MenuRow::NewInFolder));
     }
     for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
         if contains(*row, x, y) {
@@ -6197,7 +6647,12 @@ fn recent_is_available(seed: &Seed, programs: &ProfilePrograms) -> bool {
         // id this table no longer holds revives as the fallback profile, so
         // what the grey has to answer for is the profile that would really
         // start.
-        Seed::Term { profile_id, .. } => programs.row_is_available(index_of_id(profile_id)),
+        // A row whose answer is unknown is offered: its birth asks the machine
+        // itself, and only a completed "not here" greys a place you have been.
+        Seed::Term { profile_id, .. } => {
+            let index = index_of_id(profile_id);
+            programs.row_is_available(index) || programs.is_pending_for(&id(index))
+        }
         Seed::Files { .. } | Seed::Preview { .. } => true,
         // **A window is offered while any one of its tabs can still be opened**
         // (multiwindow slice D). Greying it because one shell of six has gone
@@ -6233,7 +6688,7 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 pub fn build(
     layout: &ProfileMenuLayout,
     programs: &ProfilePrograms,
-    default: usize,
+    default: Option<usize>,
     hover: Option<MenuRow>,
     recent: &[RecentEntry],
     now: SystemTime,
@@ -6292,10 +6747,10 @@ pub fn build(
                 // by an `if/else` that could one day pick wrong: `default` is
                 // resolved through [`default_profile`], which refuses to answer
                 // with a profile this machine cannot start.
-                hint: if programs.is_pending() {
+                hint: if programs.is_pending_for(&id(index)) {
                     Some(hint(pending_hint_text().to_owned()))
                 } else if available {
-                    (index == default).then(|| hint(hint_text().to_owned()))
+                    (default == Some(index)).then(|| hint(hint_text().to_owned()))
                 } else {
                     Some(hint(unavailable_hint_text().to_owned()))
                 },
@@ -6362,14 +6817,12 @@ pub fn build(
             // glyph names the thing being chosen, not the thing being opened.
             mark: Some(ActionIcon::NewTerminalInFolder.mark()),
             name: new_in_folder_text(),
-            hint: programs
-                .is_pending()
-                .then(|| hint(pending_hint_text().to_owned())),
+            hint: None,
             // A system chooser is not a verb the shortcut table carries.
             accel: None,
             dirty: false,
             hovered: hover == Some(MenuRow::NewInFolder),
-            available: !programs.is_pending(),
+            available: true,
             pin: None,
         },
         scale,
@@ -14239,7 +14692,7 @@ mod tests {
             let layers = build(
                 &layout,
                 &equipped(),
-                fallback_profile(),
+                Some(fallback_profile()),
                 None,
                 NO_RECENT,
                 now(),
@@ -15151,7 +15604,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            0,
+            Some(0),
             None,
             &vault,
             now(),
@@ -16214,7 +16667,7 @@ mod tests {
             "a bare Windows box can start one row, so one row is what it is offered"
         );
         assert!(
-            page_lines(&bare(), fallback_profile(), true).len() > 1,
+            page_lines(&bare(), Some(fallback_profile()), true).len() > 1,
             "and the eleven it dropped are still on the page that explains them"
         );
         assert_eq!(
@@ -16246,9 +16699,17 @@ mod tests {
             resolved: table
                 .profiles()
                 .iter()
-                .map(|profile| (profile.id.clone(), None))
+                .map(|profile| {
+                    (
+                        profile.id.clone(),
+                        RowAnswer {
+                            asked: profile.program.clone(),
+                            generation: 0,
+                            program: None,
+                        },
+                    )
+                })
                 .collect(),
-            pending: false,
         };
         assert_eq!(
             table
@@ -16272,7 +16733,7 @@ mod tests {
     /// stands under, and answers `None` on a machine that has them all.
     #[test]
     fn the_page_keeps_every_agent_row_and_the_group_says_the_way_out_once() {
-        let missing = page_lines(&bare(), fallback_profile(), true);
+        let missing = page_lines(&bare(), Some(fallback_profile()), true);
         assert_eq!(missing.len(), count(), "every row, agents included");
         let claude = missing
             .iter()
@@ -16293,7 +16754,7 @@ mod tests {
             "which stands under the last agent row"
         );
 
-        let all_of_them = page_lines(&equipped(), fallback_profile(), false);
+        let all_of_them = page_lines(&equipped(), Some(fallback_profile()), false);
         assert_eq!(
             agent_note_after(&all_of_them),
             None,
@@ -16532,7 +16993,7 @@ mod tests {
             let layers = build(
                 &layout,
                 &equipped(),
-                chosen,
+                Some(chosen),
                 None,
                 NO_RECENT,
                 now(),
@@ -16597,7 +17058,7 @@ mod tests {
                 let layer = one_layer(build(
                     &layout,
                     &programs,
-                    chosen,
+                    Some(chosen),
                     None,
                     &vault,
                     now(),
@@ -16771,23 +17232,23 @@ mod tests {
 
         assert_eq!(
             default_profile("cmd", &all),
-            index_of_id("cmd"),
+            Some(index_of_id("cmd")),
             "a stored id this machine can start is the answer, whatever index it is"
         );
         assert_eq!(
             default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &all),
-            index_of_id("pwsh"),
+            Some(index_of_id("pwsh")),
             "nobody has ever opened the setting: the first shipped shell this \
              machine has, which on a machine with PowerShell 7 is PowerShell 7"
         );
         assert_eq!(
             default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &bare()),
-            fallback_profile(),
+            Some(fallback_profile()),
             "and on a machine that has only the one, the walk stops at the floor"
         );
         assert_eq!(
             default_profile(WINDOWS_POWERSHELL_ID, &all),
-            index_of_id(WINDOWS_POWERSHELL_ID),
+            Some(index_of_id(WINDOWS_POWERSHELL_ID)),
             "unset is not the same as choosing 5.1: a reader who picked it keeps it \
              on the very machine the unset answer would have moved off"
         );
@@ -16802,12 +17263,12 @@ mod tests {
         );
         assert_eq!(
             default_profile("a-profile-from-a-newer-build", &all),
-            index_of_id("pwsh"),
+            Some(index_of_id("pwsh")),
             "an id this build does not have decides nothing, so the machine does"
         );
         assert_eq!(
             default_profile("gitbash", &bare()),
-            fallback_profile(),
+            Some(fallback_profile()),
             "chosen, installed once, uninstalled since — the window still opens"
         );
         // And the resolved answer is always startable, which is the property
@@ -16815,7 +17276,8 @@ mod tests {
         for stored in ["cmd", "gitbash", "wsl", "pwsh", "", "nonsense"] {
             for machine in [&all, &bare()] {
                 assert!(
-                    machine.row_is_available(default_profile(stored, machine)),
+                    default_profile(stored, machine)
+                        .is_some_and(|index| machine.row_is_available(index)),
                     "the default resolved for {stored:?} must be startable"
                 );
             }
@@ -18590,7 +19052,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &programs,
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             NO_RECENT,
             now(),
@@ -18714,7 +19176,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &programs,
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -18886,7 +19348,7 @@ mod tests {
         let rest = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             NO_RECENT,
             now(),
@@ -18896,7 +19358,7 @@ mod tests {
         let hover = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             Some(MenuRow::Profile(0)),
             NO_RECENT,
             now(),
@@ -19054,7 +19516,7 @@ mod tests {
         let layers = build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             NO_RECENT,
             now(),
@@ -19146,7 +19608,7 @@ mod tests {
             let layer = one_layer(build(
                 &layout,
                 &equipped(),
-                fallback_profile(),
+                Some(fallback_profile()),
                 None,
                 NO_RECENT,
                 now(),
@@ -19491,7 +19953,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19535,7 +19997,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19627,7 +20089,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19665,7 +20127,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19746,7 +20208,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             Some(MenuRow::Recent(0)),
             &vault,
             now(),
@@ -22726,7 +23188,7 @@ mod tests {
     #[test]
     fn the_profiles_page_keeps_every_row_and_names_what_is_missing() {
         let machine = bare();
-        let lines = page_lines(&machine, 0, true);
+        let lines = page_lines(&machine, Some(0), true);
         assert_eq!(lines.len(), count(), "no row is dropped from the page");
         let absent: Vec<&ProfileLine> = lines.iter().filter(|line| !line.available).collect();
         assert!(
@@ -22823,208 +23285,355 @@ mod tests {
         );
     }
 
-    struct OneBlockedFileQuestion {
-        blocked: PathBuf,
-        release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
-        asked: Mutex<Vec<PathBuf>>,
+    // ── T-LAUNCH-PROBE round 2: unknown is never absent ─────────────────────
+
+    /// A row of this build's table re-pointed at one program file, for the walk tests.
+    fn row_finding(id: &str, program: ProgramSource) -> Profile {
+        let mut row = shipped()[0].clone();
+        row.id = id.to_owned();
+        row.program = program;
+        row
     }
 
-    impl ProgramFileQuestion for OneBlockedFileQuestion {
-        fn ask(&self, path: &Path) -> Option<bool> {
-            self.asked
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(path.to_path_buf());
-            if path != self.blocked {
-                return Some(true);
+    /// A filesystem where one directory never answers until the test lets it, every other
+    /// question answers at once, and each question says which thread asked it.
+    struct OneDeadDirectory {
+        dead: PathBuf,
+        present: std::collections::BTreeSet<PathBuf>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        caller: std::thread::ThreadId,
+    }
+
+    impl ProgramFileQuestion for OneDeadDirectory {
+        fn is_file(&self, path: &Path) -> bool {
+            assert_ne!(
+                std::thread::current().id(),
+                self.caller,
+                "a program question was asked on the thread that started the walk"
+            );
+            if path.parent() == Some(self.dead.as_path()) {
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv();
             }
-            let release = Arc::clone(&self.release);
-            let (send, receive) = std::sync::mpsc::sync_channel(1);
-            bt_platform::spawn_at_priority(
-                "powershell-script-prepare",
-                bt_platform::ThreadPriority::BelowNormal,
-                move |_worker| {
-                    let answer = release
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .recv()
-                        .is_ok();
-                    let _ = send.send(answer);
-                },
-            )
-            .ok()?;
-            receive.recv_timeout(PROGRAM_PATH_ENTRY_DEADLINE).ok()
+            self.present.contains(path)
         }
     }
 
-    /// RED mutation: return `false` directly from the first unanswered file
-    /// question instead of continuing `search_path`; the later entry is never
-    /// asked and the program remains absent.
+    /// RED (T-LAUNCH-PROBE round 2, review X1/M3) — **a PATH entry that has not answered makes
+    /// the rows that depend on it unknown, holds no other row, and its late answer is used.**
+    ///
+    /// `PATH` is a dead entry and then the folder `a.exe` is really in. A row that does not
+    /// search `PATH` (`b.exe` under a variable) is decided while the dead entry is still out;
+    /// the `PATH` row is not — the dead entry comes first, and it could hold an `a.exe` that
+    /// wins — and the moment the dead entry answers, the row is decided as found.
+    ///
+    /// MUTATION: in `KnownAnswers::is_file`, answer an unanswered question `false` without
+    /// recording it (a deadline read as "not there"): `a.exe`'s row is published as absent
+    /// before the dead entry answers, and the first assertion on it fails.
     #[test]
-    fn a_path_entry_that_never_answers_does_not_hold_the_later_entries() {
-        let root = std::env::current_dir().expect("test working directory");
-        let slow_root = root.join("slow-entry");
-        let fast_root = root.join("fast-entry");
-        let slow = slow_root.join("tool.exe");
-        let fast = fast_root.join("tool.exe");
-        let path = std::env::join_paths([&slow_root, &fast_root]).expect("two path entries");
-        let (release, blocked) = std::sync::mpsc::sync_channel(1);
-        let question = OneBlockedFileQuestion {
-            blocked: slow.clone(),
-            release: Arc::new(Mutex::new(blocked)),
-            asked: Mutex::new(Vec::new()),
-        };
-        let environment = ProgramProbeEnvironment::with_seams(
-            move |key| (key == "PATH").then(|| path.clone()),
-            question,
-        );
-
-        assert_eq!(search_path(&environment, "tool.exe"), Some(fast.clone()));
-        release
-            .send(())
-            .expect("release the test-owned blocked question");
-        assert_eq!(environment.timed_out.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            *environment
-                .question
-                .asked
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![slow, fast]
-        );
-    }
-
-    /// RED mutation: run `spawn_program_probe_worker`'s work inline (or join
-    /// it before returning); this test remains held at the blocked walk and the
-    /// launch-time frame model below is never produced.
-    #[test]
-    fn a_blocked_program_walk_cannot_hold_the_first_frame() {
-        let (entered, begun) = std::sync::mpsc::sync_channel(1);
-        let (release, blocked) = std::sync::mpsc::sync_channel(1);
-        let worker = spawn_program_probe_worker(move |_worker| {
-            entered.send(()).expect("announce the blocked walk");
-            blocked.recv().expect("release the blocked walk");
-        })
-        .expect("start the existing preparation worker");
-        begun
-            .recv()
-            .expect("the worker reached its blocked question");
-
-        let pending = ProfilePrograms::pending();
-        let first_frame = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &pending,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert!(first_frame.profiles.is_empty());
-        assert!(pending.is_pending());
-
-        release.send(()).expect("release the test-owned walk");
-        worker.join().expect("the test-owned walk ended");
-    }
-
-    /// RED mutation: construct launch programs with `bare()` instead of
-    /// `ProfilePrograms::pending`; Settings asserts programs are absent and a
-    /// first shell row appears before the machine has answered.
-    #[test]
-    fn launch_programs_pending_is_true_on_every_program_surface() {
-        let pending = ProfilePrograms::pending();
-        assert!(pending.is_pending());
-        assert!(table().offered_to_start(&pending).is_empty());
-        let lines = page_lines(&pending, fallback_profile(), true);
-        assert!(lines.iter().all(|line| {
-            line.pending
-                && !line.available
-                && !line.is_default
-                && !line.default_is_automatic
-                && line.command == pending_hint_text()
-        }));
-        assert_eq!(agent_note_after(&lines), None);
-
-        let layout = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &pending,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert!(layout.profiles.is_empty(), "no shell is advertised pending");
-        let folder = layout.new_in_folder;
-        assert_eq!(
-            hit(
-                &layout,
-                &pending,
-                &[],
-                f64::from((folder[0] + folder[2]) / 2.0),
-                f64::from((folder[1] + folder[3]) / 2.0),
+    fn a_dead_path_entry_leaves_its_rows_unknown_holds_nothing_else_and_answers_late() {
+        let root = std::env::temp_dir();
+        let dead = root.join("dead-share").join("bin");
+        let live = root.join("tools").join("bin");
+        let path = std::env::join_paths([&dead, &live]).expect("two entries");
+        let (release, released) = std::sync::mpsc::channel();
+        let question: Arc<dyn ProgramFileQuestion> = Arc::new(OneDeadDirectory {
+            dead: dead.clone(),
+            present: [live.join("a.exe"), live.join("b.exe")]
+                .into_iter()
+                .collect(),
+            release: Mutex::new(released),
+            caller: std::thread::current().id(),
+        });
+        let rows = vec![
+            row_finding(
+                "on-path",
+                ProgramSource::FirstOf(vec![ProgramCandidate::OnPath {
+                    name: "a.exe".to_owned(),
+                }]),
             ),
-            Some(None),
-            "a default-shell folder action is body until the default is known"
+            row_finding(
+                "under-a-variable",
+                ProgramSource::FirstOf(vec![ProgramCandidate::Under {
+                    variable: "TOOLS".to_owned(),
+                    tail: format!("bin{}b.exe", std::path::MAIN_SEPARATOR),
+                }]),
+            ),
+        ];
+        let (publish, published) = std::sync::mpsc::channel();
+        let tools = root.join("tools").into_os_string();
+        begin_program_walk_with(
+            rows,
+            Arc::new(move |key: &str| match key {
+                "PATH" => Some(path.clone()),
+                "TOOLS" => Some(tools.clone()),
+                _ => None,
+            }),
+            question,
+            Box::new(move |verdicts| {
+                for verdict in verdicts {
+                    let _ = publish.send(verdict);
+                }
+            }),
         );
+        let first = published
+            .recv()
+            .expect("a verdict while the dead entry is out");
+        assert_eq!(first.id, "under-a-variable", "{first:?}");
+        assert_eq!(first.program, Some(live.join("b.exe").into_os_string()));
+        release.send(()).expect("the dead entry answers at last");
+        let late = published.recv().expect("the late answer is used");
+        assert_eq!(late.id, "on-path");
+        assert_eq!(late.program, Some(live.join("a.exe").into_os_string()));
     }
 
-    /// RED mutation: store the menu ordinal instead of `MenuRow::Profile`'s
-    /// table identity; PowerShell 5.1 moves from row zero to row one when
-    /// PowerShell 7 lands, and the highlight or activation follows the wrong
-    /// item.
+    /// RED (review M3) — **one asker per directory, and a bounded number of askers**: a PATH of
+    /// sixty entries with one dead entry, three names asked of every entry, is asked with at
+    /// most [`PROGRAM_WALK_DIRECTORIES_AT_ONCE`] askers out, one per directory however many
+    /// names it is asked about, and the dead directory never stops the others being asked.
+    ///
+    /// MUTATION: key `DirectoryBoard::waiting` by the path instead of its parent directory: the
+    /// dead entry takes three askers instead of one and the asker count fails.
     #[test]
-    fn an_open_menu_updates_on_landing_and_keeps_highlight_and_press_by_identity() {
-        let before_machine = FakeMachine::bare_windows()
-            .with_var("ProgramFiles", r"C:\Program Files")
-            .with_file(r"C:\Program Files\Git\bin\bash.exe");
-        let before = ProfilePrograms::probe(&before_machine);
+    fn sixty_path_entries_and_a_dead_one_are_asked_by_a_bounded_number_of_askers() {
+        let entries: Vec<PathBuf> = (0..60)
+            .map(|entry| PathBuf::from(format!(r"C:\path-{entry:02}")))
+            .collect();
+        let dead = entries[0].clone();
+        let mut board = DirectoryBoard::default();
+        for entry in &entries {
+            for name in ["claude.cmd", "codex.cmd", "copilot.cmd"] {
+                board.want(entry.join(name));
+            }
+        }
+        let (release, released) = std::sync::mpsc::channel();
+        let question: Arc<dyn ProgramFileQuestion> = Arc::new(OneDeadDirectory {
+            dead: dead.clone(),
+            present: std::collections::BTreeSet::new(),
+            release: Mutex::new(released),
+            caller: std::thread::current().id(),
+        });
+        let (send, receive) = std::sync::mpsc::channel();
+        let spawn = |asker: Box<dyn FnOnce() + Send>| {
+            bt_platform::spawn_at_priority(
+                "powershell-script-prepare",
+                bt_platform::ThreadPriority::BelowNormal,
+                move |_worker| asker(),
+            )
+            .map(drop)
+        };
+        let (mut started, mut done) = (0, 0);
+        loop {
+            let before = board.asking.clone();
+            board
+                .dispatch(&send, &question, &spawn)
+                .expect("start the askers");
+            started += board.asking.difference(&before).count();
+            assert!(
+                board.asking.len() <= PROGRAM_WALK_DIRECTORIES_AT_ONCE,
+                "{} askers out",
+                board.asking.len()
+            );
+            if done == entries.len() - 1 {
+                break;
+            }
+            if let Ok(WalkMessage::DirectoryDone(directory)) = receive.recv() {
+                board.asking.remove(&directory);
+                done += 1;
+            }
+        }
+        assert_eq!(started, entries.len(), "one asker per entry, not per name");
+        assert!(board.waiting.is_empty(), "every other entry was asked");
+        assert!(
+            board.asking.contains(&dead),
+            "while the dead entry is still out"
+        );
+        for _ in 0..3 {
+            release.send(()).expect("let the dead entry's asker finish");
+        }
+    }
+
+    /// RED (review M2's race) — **an older walk's answer never replaces a newer one's**, in
+    /// the mailbox (compared and stored under one lock) and in the window's table.
+    ///
+    /// MUTATION: drop the `generation >` comparison from `WalkLedger::deposit` (and from
+    /// `ProfilePrograms::adopt`): the older answer lands last and wins.
+    #[test]
+    fn an_older_walks_answer_never_replaces_a_newer_one() {
+        let row = table().profiles()[0].clone();
+        let verdict = |generation, program: &str| RowVerdict {
+            id: row.id.clone(),
+            asked: row.program.clone(),
+            generation,
+            program: Some(OsString::from(program)),
+        };
+        let mut ledger = WalkLedger::default();
+        ledger.deposit(vec![verdict(2, "newer")]);
+        ledger.deposit(vec![verdict(1, "older")]);
+        assert_eq!(
+            ledger.landed[&row.id].program,
+            Some(OsString::from("newer"))
+        );
+        let mut programs = ProfilePrograms::pending();
+        assert!(programs.adopt([verdict(2, "newer")]));
+        assert!(!programs.adopt([verdict(1, "older")]));
+        assert_eq!(programs.program(&row.id), Some(OsStr::new("newer")));
+    }
+
+    /// RED (review M2) — **a walk that unwinds is not "still asking"**: its mark leaves the
+    /// ledger however it ends, so the next menu or Profiles page asks the rows again.
+    ///
+    /// MUTATION: empty `WalkInFlight::drop`: the generation stays in flight after the panic.
+    #[test]
+    fn a_walk_that_panics_is_no_longer_in_flight() {
+        let generation = u64::MAX - 41;
+        program_walk().in_flight.insert(generation);
+        let unwound = std::panic::catch_unwind(|| {
+            let _in_flight = WalkInFlight(generation);
+            panic!("a walk that unwinds");
+        });
+        assert!(unwound.is_err());
+        assert!(!program_walk().in_flight.contains(&generation));
+    }
+
+    /// RED (review m2) — **an edit asks again only about what it changed**: a moved, renamed or
+    /// hidden row keeps its answer, a re-pointed row and a new row become unknown, and nothing
+    /// becomes "not installed" meanwhile.
+    ///
+    /// MUTATION: make `carried_into` keep nothing: every row turns unknown on every edit.
+    #[test]
+    fn an_edit_asks_again_only_about_the_rows_it_changed() {
+        let before = table();
+        let programs = ProfilePrograms {
+            resolved: before
+                .profiles()
+                .iter()
+                .map(|row| {
+                    (
+                        row.id.clone(),
+                        RowAnswer {
+                            asked: row.program.clone(),
+                            generation: 1,
+                            program: Some(OsString::from(format!(r"C:\found\{}.exe", row.id))),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let mut profiles = before.profiles().to_vec();
+        profiles.swap(0, 1);
+        profiles[0].display_title = "Renamed 名前".to_owned();
+        profiles[2].hidden = !profiles[2].hidden;
+        let repointed = profiles[3].id.clone();
+        profiles[3].program = ProgramSource::Path(PathBuf::from(r"D:\elsewhere\shell.exe"));
+        let mut added = profiles[4].clone();
+        added.id = "added-row".to_owned();
+        profiles.push(added);
+        let after = ProfileTable { profiles };
+        let carried = programs.carried_into(&after);
+        for row in after.profiles() {
+            let unknown = row.id == repointed || row.id == "added-row";
+            assert_eq!(carried.is_pending_for(&row.id), unknown, "{}", row.id);
+            if !unknown {
+                assert!(carried.answer(&row.id).flatten().is_some(), "{}", row.id);
+            }
+        }
+    }
+
+    /// RED (T-LAUNCH-PROBE round 2, review X1/m8) — **while a row the default depends on is
+    /// unknown, there is no default**: not the fallback, not the next row in the order. A seed
+    /// spells it as the unresolved default, the page marks no row, and every row that may yet
+    /// be the default is guarded as one.
+    ///
+    /// MUTATION: in `decided_from_answers`, read an unanswered row as absent without recording
+    /// it: the default is decided as the fallback while PowerShell 7 is still unknown.
+    #[cfg(windows)]
+    #[test]
+    fn an_unknown_row_decides_no_default_and_the_fallback_does_not_stand_in() {
+        let pwsh = index_of_id("pwsh");
+        let winps = index_of_id(WINDOWS_POWERSHELL_ID);
+        let slow = ProfilePrograms::with_only(&[pwsh, winps]).without("pwsh");
+        for stored in ["", "pwsh"] {
+            assert_eq!(default_profile(stored, &slow), None, "{stored:?}");
+            assert_eq!(default_profile_identity(stored, &slow), DEFAULT_IDENTITY);
+            assert!(possible_defaults(stored, &slow).contains(&pwsh));
+        }
+        assert_eq!(
+            default_profile_decided("", &slow),
+            Err(vec!["pwsh".to_owned()]),
+            "and what it waits for is the one row it needs"
+        );
+        let lines = page_lines(&slow, default_profile("", &slow), true);
+        assert!(lines.iter().all(|line| !line.is_default));
+        assert!(lines[pwsh].pending && !lines[pwsh].available);
+        assert!(
+            !lines[winps].pending && lines[winps].available,
+            "a known row is drawn as known"
+        );
+        let answered = ProfilePrograms::with_only(&[pwsh, winps]);
+        assert_eq!(default_profile("", &answered), Some(pwsh));
+        assert_eq!(default_profile_identity("", &answered), "pwsh");
+        assert_eq!(possible_defaults("", &answered), vec![pwsh]);
+    }
+
+    /// RED (owner's rule: lists always update; review B4) — **an open menu shows an unknown
+    /// row as unknown, updates by identity when its answer lands, and a press acts on the row
+    /// it showed.** Before the answer the row is listed and cannot be pressed; after it, the
+    /// highlight still names the same row and the press starts it.
+    ///
+    /// MUTATION: drop `|| programs.is_pending_for(..)` from `offered_to_start`: the unknown row
+    /// is left off the list as if it were not installed, and the first assertion fails.
+    #[cfg(windows)]
+    #[test]
+    fn an_open_menu_lists_an_unknown_row_and_updates_it_by_identity() {
         let target = index_of_id("gitbash");
+        let pwsh = index_of_id("pwsh");
+        let winps = index_of_id(WINDOWS_POWERSHELL_ID);
+        let before = ProfilePrograms::with_only(&[pwsh, winps, target]).without("gitbash");
         let mut menu = ProfileMenu::default();
         menu.toggle();
         assert!(menu.set_hover(Some(MenuRow::Profile(target))));
-        let before_layout = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &before,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert_eq!(before_layout.profiles.last(), Some(&target));
-
-        let after =
-            ProfilePrograms::probe(&before_machine.with_file(r"C:\WINDOWS\System32\wsl.exe"));
-        let after_layout = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &after,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert_ne!(after_layout.profiles[0], target, "a row arrived above it");
-        let ordinal = after_layout
-            .profiles
-            .iter()
-            .position(|index| *index == target)
-            .expect("the highlighted item remains in the updated list");
-        assert_eq!(menu.hover(), Some(MenuRow::Profile(target)));
-        let item = after_layout.items[ordinal];
-        assert_eq!(
+        let lay = |programs: &ProfilePrograms| {
+            layout(
+                [0.0, 0.0, 100.0, 30.0],
+                MenuSide::Below,
+                programs,
+                (960.0, 600.0),
+                1.0,
+                &[],
+                &chord_table(),
+                &mut fake_measure,
+            )
+        };
+        let press = |layout: &ProfileMenuLayout, programs: &ProfilePrograms| {
+            let ordinal = layout
+                .profiles
+                .iter()
+                .position(|index| *index == target)
+                .expect("the row is on the list");
+            let item = layout.items[ordinal];
             hit(
-                &after_layout,
-                &after,
+                layout,
+                programs,
                 &[],
                 f64::from((item[0] + item[2]) / 2.0),
                 f64::from((item[1] + item[3]) / 2.0),
-            ),
+            )
+        };
+        let pending_layout = lay(&before);
+        assert_eq!(
+            press(&pending_layout, &before),
+            Some(None),
+            "an unknown row is shown and not pressable"
+        );
+        let after = ProfilePrograms::with_only(&[pwsh, winps, target]);
+        let landed_layout = lay(&after);
+        assert_eq!(menu.hover(), Some(MenuRow::Profile(target)));
+        assert_eq!(
+            press(&landed_layout, &after),
             Some(Some(MenuRow::Profile(target))),
             "the pressed row acts on the identity it showed"
         );
@@ -25653,14 +26262,14 @@ mod tests {
             .position_of_id(WINDOWS_POWERSHELL_ID)
             .unwrap();
         assert!(
-            !registry.set_hidden_on(0, true, 0, SeedPlatform::Windows),
+            !registry.set_hidden_on(0, true, &[0], SeedPlatform::Windows),
             "0 is the default here"
         );
-        assert!(!registry.set_hidden_on(floor, true, 0, SeedPlatform::Windows));
+        assert!(!registry.set_hidden_on(floor, true, &[0], SeedPlatform::Windows));
         assert!(registry.table().profiles().iter().all(|row| !row.hidden));
 
         let cmd = registry.table().position_of_id("cmd").unwrap();
-        assert!(registry.set_hidden_on(cmd, true, 0, SeedPlatform::Windows));
+        assert!(registry.set_hidden_on(cmd, true, &[0], SeedPlatform::Windows));
         assert!(
             !registry.table().offered().contains(&cmd),
             "hiding is being out of the pickers"
@@ -25671,7 +26280,7 @@ mod tests {
             "and it is still a profile: a seat already on disk restarts through \
              its own id"
         );
-        assert!(registry.set_hidden_on(cmd, false, 0, SeedPlatform::Windows));
+        assert!(registry.set_hidden_on(cmd, false, &[0], SeedPlatform::Windows));
     }
 
     /// RED (B-AUDIT-046 SET-1) — a Mac registry protects `/bin/sh`, not the
@@ -25693,8 +26302,8 @@ mod tests {
         assert_ne!(first, floor, "the test distinguishes a row from the floor");
         drop(table);
 
-        assert!(registry.set_hidden_on(first, true, floor, SeedPlatform::MacOs));
-        assert!(!registry.set_hidden_on(floor, true, first, SeedPlatform::MacOs));
+        assert!(registry.set_hidden_on(first, true, &[floor], SeedPlatform::MacOs));
+        assert!(!registry.set_hidden_on(floor, true, &[first], SeedPlatform::MacOs));
         assert!(registry.table().get(first).unwrap().hidden);
         assert!(!registry.table().get(floor).unwrap().hidden);
     }
@@ -25716,7 +26325,7 @@ mod tests {
             true
         });
         let cmd = registry.table().position_of_id("cmd").unwrap();
-        registry.set_hidden(cmd, true, 1);
+        registry.set_hidden(cmd, true, &[1]);
         registry.rename(cmd, "Console");
         registry.move_profile(0, true);
         let moved = registry.table().position_of_id("pwsh").unwrap();
@@ -26430,7 +27039,7 @@ mod tests {
     /// one line the row has room for is the reason it cannot start.
     #[test]
     fn an_unavailable_row_gives_its_reason_and_drops_its_capability_line() {
-        let lines = page_lines(&bare(), fallback_profile(), true);
+        let lines = page_lines(&bare(), Some(fallback_profile()), true);
         assert_eq!(lines.len(), count());
         let git = lines
             .iter()
@@ -26467,7 +27076,7 @@ mod tests {
     /// say nothing about where the tab opens, which is what `--cd ~` is.
     #[test]
     fn the_line_under_a_name_is_the_executable_and_its_words() {
-        let lines = page_lines(&equipped(), fallback_profile(), false);
+        let lines = page_lines(&equipped(), Some(fallback_profile()), false);
         let of = |id: &str| {
             lines
                 .iter()

@@ -1,6 +1,7 @@
 //! `clipboard` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::PtyTarget;
 use crate::{
     Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey, PasteOffer, PasteTarget,
     PreparedClipboardPaste, Runtime, StagedPaste, TextFieldSeat, UserInputKind, copy_selection,
@@ -494,6 +495,7 @@ impl Runtime<'_> {
         let seat = target.seat;
         let Some(LeafSession {
             pty,
+            birth,
             session,
             projection,
             ..
@@ -508,7 +510,7 @@ impl Runtime<'_> {
         // bookkeeping a paste owes is owed for the gesture rather than for the
         // ring's mood — and only what this function *answers* now depends on it.
         let landed = paste_body(session, projection, body, |bytes| {
-            offer_pty_input(pty.as_ref(), bytes, context)
+            offer_pty_input(PtyTarget::of(pty.as_ref(), birth.as_ref()), bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard

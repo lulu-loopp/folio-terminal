@@ -4,8 +4,8 @@
 use crate::shell_integration;
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
-    diagnostics, explorer_menu, first_run, i18n, install_channel, persist, psreadline, restore,
-    toast, tooltip,
+    diagnostics, explorer_menu, first_run, i18n, install_channel, persist, profiles, psreadline,
+    restore, toast, tooltip,
 };
 use anyhow::Result;
 use std::path::PathBuf;
@@ -568,6 +568,16 @@ impl Runtime<'_> {
         // through it worth anything.
         if !first_run::due(store.was_missing(), store.loaded().first_run_card)
             && !diagnostics::switched_on(std::env::var_os("BT_FIRST_RUN_CARD"))
+        {
+            return Ok(());
+        }
+        // **Which agents this machine has is a completed answer or nothing**
+        // (T-LAUNCH-PROBE round 2): while the walk has not answered one of the
+        // three rows this card offers, the card waits — the answer's landing
+        // brings the next turn round — rather than offer a machine without them.
+        if ["claude", "codex", "copilot"]
+            .iter()
+            .any(|id| profiles::has_id(id) && self.app.profile_programs.is_pending_for(id))
         {
             return Ok(());
         }

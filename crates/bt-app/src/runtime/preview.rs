@@ -12037,6 +12037,7 @@ impl Runtime<'_> {
                 None,
                 &LeafSeed::default(),
                 &self.app.profile_programs,
+                &self.app.settings_store.loaded().default_profile,
                 formulas,
                 scrollback,
                 self.app.settings_store.loaded().line_wrapping,

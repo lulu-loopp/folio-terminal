@@ -12,6 +12,7 @@ use crate::{
     rename_key, rename_pastes, restore, settings, settings_key_of, shortcuts, toast,
     window_ime_cursor_area, write_pty_input, write_terminal_clipboard_text,
 };
+use crate::{LeafSession, PtyTarget};
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
 use bt_render::{FrameSource, FrameTrigger, ImeCursorArea, Preedit};
@@ -2355,7 +2356,8 @@ impl Runtime<'_> {
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
                 write_pty_input(
-                    self.focused().and_then(|leaf| leaf.pty.as_ref()),
+                    self.focused()
+                        .map_or(PtyTarget::Nowhere, LeafSession::input_target),
                     &ime_commit_bytes(&text),
                     "write IME UTF-8 commit to PTY",
                 )?;

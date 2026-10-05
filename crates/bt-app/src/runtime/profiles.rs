@@ -3,7 +3,7 @@
 
 use crate::{
     FilesFocusArrival, Popup, Runtime, cli, i18n, launch_wire, persist, profile_menu_anchor,
-    profiles, seats, settings, text_field, toast,
+    profiles, seats, settings, shell_integration, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -29,7 +29,7 @@ impl Runtime<'_> {
         &self,
         request: &launch_wire::LaunchRequest,
     ) -> (String, Vec<cli::CliRefusal>) {
-        let plan = cli::resolve(
+        let plan: cli::CliPlan = cli::resolve(
             &cli::CliRequest {
                 cwd: request.cwd.clone(),
                 profile: request.profile.clone(),
@@ -45,7 +45,22 @@ impl Runtime<'_> {
             self.default_profile(),
             cli::machine_path_kind,
         );
-        (profiles::id(plan.profile), plan.refusals)
+        (
+            plan.profile
+                .map_or_else(|| profiles::DEFAULT_IDENTITY.to_owned(), profiles::id),
+            plan.refusals,
+        )
+    }
+
+    /// [`Self::new_tab_with_profile`] for a second start handed to this one: the folder came off
+    /// a command line, so a pane whose default is not decided yet crosses it at its birth and
+    /// says there, on the command line's own card, a folder it cannot reach.
+    pub(crate) fn new_tab_for_a_launch(
+        &mut self,
+        profile: &str,
+        place: Option<PathBuf>,
+    ) -> Result<()> {
+        self.new_tab_from_the_focus(profile, place, true)
     }
 
     /// The picker's verb: a tab on the profile the row names, optionally
@@ -79,6 +94,15 @@ impl Runtime<'_> {
         profile: &str,
         place: Option<PathBuf>,
     ) -> Result<()> {
+        self.new_tab_from_the_focus(profile, place, false)
+    }
+
+    fn new_tab_from_the_focus(
+        &mut self,
+        profile: &str,
+        place: Option<PathBuf>,
+        folder_from_command_line: bool,
+    ) -> Result<()> {
         // **Both facts are read off the *same* leaf** — the focused session,
         // which is also what `working_directory()` is asked of. A profile taken
         // from one pane and a directory from another would be the exact mismatch
@@ -93,7 +117,13 @@ impl Runtime<'_> {
             .focused()
             .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
         let source_profile = self.session_profile();
-        self.new_tab_seeded_from(profile, place, &source_profile, source_cwd)
+        self.new_tab_seeded_from(
+            profile,
+            place,
+            &source_profile,
+            source_cwd,
+            folder_from_command_line,
+        )
     }
 
     /// Where the profile picker hangs right now, or `None` when it is shut.
@@ -169,6 +199,19 @@ impl Runtime<'_> {
         ))
     }
 
+    /// **Ask again about the rows nothing is asking about** (T-LAUNCH-PROBE round 2, review M2).
+    ///
+    /// Called on the edges where a list of programs is about to be read — the profile menu
+    /// opening, the Settings dialog opening. A row is left unknown with no walk running only when
+    /// the walk's worker would not start or ended without answering it; this is where that row
+    /// is asked about again, rather than reading "checking" for the rest of the process. A walk
+    /// still running (a directory that has not answered yet) is left to deliver.
+    pub(crate) fn ask_unanswered_programs(&self) {
+        if self.app.profile_programs.is_pending() && !profiles::program_walk_in_flight() {
+            profiles::begin_program_walk(self.app.profile_programs.unknown_rows());
+        }
+    }
+
     /// Which profile the `+` starts, the window is titled after and the picker
     /// marks `default` — the user's setting, resolved against this machine.
     ///
@@ -177,7 +220,7 @@ impl Runtime<'_> {
     /// have to be refreshed by whoever wrote it, in every place they wrote it.
     /// [`profiles::default_profile`] is cheap — a walk of four entries and an
     /// array index — and none of these callers is a hot path.
-    pub(crate) fn default_profile(&self) -> usize {
+    pub(crate) fn default_profile(&self) -> Option<usize> {
         profiles::default_profile(
             &self.app.settings_store.loaded().default_profile,
             &self.app.profile_programs,
@@ -191,12 +234,17 @@ impl Runtime<'_> {
     /// stable id, because everything downstream of a new-tab door holds its
     /// profile across at least one gesture — a folder chooser, a tear-out, a
     /// save — and a position does not survive one.
+    ///
+    /// **Every door that seeds "the default" at pane creation asks this** — the `+`, a new
+    /// window, the summoned window, `Open terminal here`, a second start handed over — and while
+    /// the machine has not answered enough to decide the default it answers
+    /// [`profiles::DEFAULT_IDENTITY`], never the fallback's id (review X3): the pane is born
+    /// through its own question and is the user's default once it is decided.
     pub(in crate::runtime) fn default_profile_id(&self) -> String {
-        if self.app.profile_programs.is_pending() {
-            String::new()
-        } else {
-            profiles::id(self.default_profile())
-        }
+        profiles::default_profile_identity(
+            &self.app.settings_store.loaded().default_profile,
+            &self.app.profile_programs,
+        )
     }
 
     /// Whether that answer came from the machine rather than from the reader —
@@ -223,6 +271,7 @@ impl Runtime<'_> {
     /// judgement forbids — it holds until some other door (a chord, a menu row,
     /// a restored gesture) opens this menu without a press in the right place.
     pub(in crate::runtime) fn toggle_profile_menu(&mut self) -> Result<()> {
+        self.ask_unanswered_programs();
         self.close_popups_except(Popup::Profile);
         // Whichever way the toggle goes, the picker that was up (if any) is
         // gone and takes its pin with it (owner ruling 2026-09-23); a press that
@@ -408,8 +457,13 @@ impl Runtime<'_> {
     /// reasons, which is why they are one call rather than two lists that have
     /// to be kept in step.
     fn adopt_profile_table(&mut self) -> Result<()> {
-        self.app.profile_programs = profiles::ProfilePrograms::pending();
-        profiles::begin_program_probe();
+        // **Only what the edit changed is asked again** (T-LAUNCH-PROBE round 2, review m2): a
+        // row that still names the program source it was answered for keeps its answer, so a
+        // move, a rename or a hide changes no row's state, and a new or re-pointed row is unknown
+        // until the walk answers it — never "not installed" meanwhile.
+        self.app.profile_programs = self.app.profile_programs.carried_into_live_table();
+        profiles::begin_program_walk(self.app.profile_programs.unknown_rows());
+        shell_integration::begin_powershell_preparation_for(&self.app.profile_programs);
         self.app.first_run_attempted = false;
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),

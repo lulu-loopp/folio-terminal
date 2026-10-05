@@ -40,7 +40,7 @@ App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table
 App.pending_restore_answer	-	ASYNC	windows	the 2026-09-25 table
 App.pins_store	-	DUR	files	proposed by census-1
 App.profiles_store	-	DUR	profiles	the 2026-09-25 table
-App.profile_programs	-	OBS	profiles	T-LAUNCH-PROBE: profiles owns the pending machine-program question; the application adopts its revisioned answer
+App.profile_programs	-	OBS	profiles	T-LAUNCH-PROBE round 2: profiles owns the machine-program answers (completed answers only; unknown is never absent); the application adopts each walk verdict by identity and generation
 App.quake	-	LIFE	quake	the 2026-09-25 table
 App.quit	-	LIFE	windows	the 2026-09-25 table
 App.recent	-	DUR	windows	the 2026-09-25 table
@@ -49,6 +49,7 @@ App.restore_question	-	DUR	windows	the 2026-09-25 table
 App.session_store	-	DUR	windows	the 2026-09-25 table
 App.settings_store	-	DUR	main[settings]	the 2026-09-25 table
 App.shortcuts	-	DUR	keyboard	the 2026-09-25 table
+App.startup_shells	-	LIFE	panes	T-LAUNCH-PROBE round 2: the launch writes the startup trace's pending shell lines once; the birth landing (runtime::panes) records each born identity shell and clears it when the lines are said
 App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
 App.web_spare	-	LIFE	web	proposed by census-1
 App.web_warmup	-	LIFE	web	proposed by census-1

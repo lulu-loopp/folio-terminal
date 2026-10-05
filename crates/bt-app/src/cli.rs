@@ -688,9 +688,13 @@ pub struct CliPlan {
     pub wants_pane: bool,
     /// Which profile that pane starts as — the caller's, or this machine's
     /// default when they named none or named one this build has not got.
-    pub profile: usize,
+    /// `None` when that default is not decided yet (T-LAUNCH-PROBE round 2): the
+    /// pane is the unresolved default, which its birth decides.
+    pub profile: Option<usize>,
     /// Where it opens, **already in that profile's namespace**, or `None` for
-    /// "wherever a fresh shell of it would".
+    /// "wherever a fresh shell of it would". With no profile decided it is the
+    /// host's own folder, uncrossed: the birth crosses it, and says the
+    /// "can't reach this folder" refusal there when it cannot.
     pub cwd: Option<PathBuf>,
     /// A document to open a preview on, once there is a window.
     pub preview: Option<PathBuf>,
@@ -1272,7 +1276,11 @@ impl CliRefusal {
 /// `default_profile` is the resolved `settings.json` default — the same number
 /// `create_tab_state` starts a seatless terminal as, handed in for the same
 /// reason it is handed in there: a `usize`'s own `Default` is `0`, which is the
-/// right profile only for as long as the default is a constant.
+/// right profile only for as long as the default is a constant. `None` while
+/// the machine has not answered enough to decide it: then a request that does
+/// not name a profile keeps its folder in the host's namespace and the crossing
+/// waits for the birth (`resolved_birth_seed`), so no folder is ever crossed
+/// into a namespace the default was only guessed to have.
 ///
 /// The order matters and is the order a reader would guess: the profile is
 /// settled first because the folder's namespace depends on it, and the
@@ -1280,12 +1288,12 @@ impl CliRefusal {
 /// what `--cwd` already said.
 pub fn resolve(
     request: &CliRequest,
-    default_profile: usize,
+    default_profile: Option<usize>,
     kind: impl Fn(&Path) -> PathKind,
 ) -> CliPlan {
     let mut refusals = Vec::new();
     let profile = match request.profile.as_deref() {
-        Some(id) if profiles::has_id(id) => profiles::index_of_id(id),
+        Some(id) if profiles::has_id(id) => Some(profiles::index_of_id(id)),
         Some(id) => {
             refusals.push(CliRefusal::NoSuchProfile(id.to_owned()));
             default_profile
@@ -1320,17 +1328,20 @@ pub fn resolve(
     // that pane starts as may not speak them — so the crossing is asked here,
     // through the same function a split's folder chooser goes through, and the
     // pairs that cannot cross are reported rather than dropped.
-    let cwd = folder.and_then(|folder| {
-        let crossed = profiles::translate_cwd(
-            profiles::PathNamespace::Windows,
-            profiles::paths(profile),
-            &folder,
-        );
-        if crossed.is_none() {
-            refusals.push(CliRefusal::UnreachableFolder { folder, profile });
-        }
-        crossed
-    });
+    let cwd = match profile {
+        Some(profile) => folder.and_then(|folder| {
+            let crossed = profiles::translate_cwd(
+                profiles::PathNamespace::Windows,
+                profiles::paths(profile),
+                &folder,
+            );
+            if crossed.is_none() {
+                refusals.push(CliRefusal::UnreachableFolder { folder, profile });
+            }
+            crossed
+        }),
+        None => folder,
+    };
     CliPlan {
         wants_pane: request.names_a_place(),
         profile,
@@ -1893,11 +1904,11 @@ mod tests {
     fn a_folder_that_exists_is_the_first_panes_place() {
         let plan = resolve(
             &parsed(&["--cwd", r"D:\Developer"]),
-            PWSH,
+            Some(PWSH),
             table(&[(r"D:\Developer", PathKind::Directory)]),
         );
         assert_eq!(plan.cwd, Some(PathBuf::from(r"D:\Developer")));
-        assert_eq!(plan.profile, PWSH);
+        assert_eq!(plan.profile, Some(PWSH));
         assert_eq!(plan.preview, None);
         assert!(plan.refusals.is_empty());
         assert!(plan.wants_pane);
@@ -1920,7 +1931,7 @@ mod tests {
         for line in [vec!["--cwd", r"D:\gone"], vec!["--cwd", r"D:\a\file.txt"]] {
             let plan = resolve(
                 &parsed(&line),
-                PWSH,
+                Some(PWSH),
                 table(&[(r"D:\a\file.txt", PathKind::File)]),
             );
             assert_eq!(plan.cwd, None, "{line:?}");
@@ -1945,16 +1956,16 @@ mod tests {
     fn every_profile_id_this_build_has_resolves_and_an_unknown_one_falls_to_the_default() {
         for index in 0..profiles::count() {
             let id = profiles::id(index);
-            let plan = resolve(&parsed(&["--profile", &id]), PWSH, table(&[]));
-            assert_eq!(plan.profile, index, "{id}");
+            let plan = resolve(&parsed(&["--profile", &id]), Some(PWSH), table(&[]));
+            assert_eq!(plan.profile, Some(index), "{id}");
             assert!(plan.refusals.is_empty(), "{id}");
         }
         let plan = resolve(
             &parsed(&["--profile", "fish"]),
-            profiles::fallback_profile(),
+            Some(profiles::fallback_profile()),
             table(&[]),
         );
-        assert_eq!(plan.profile, profiles::fallback_profile());
+        assert_eq!(plan.profile, Some(profiles::fallback_profile()));
         assert!(plan.wants_pane);
         assert_eq!(
             plan.refusals,
@@ -1969,14 +1980,14 @@ mod tests {
             (r"D:\Developer", PathKind::Directory),
             (r"D:\Developer\notes.md", PathKind::File),
         ]);
-        let plan = resolve(&parsed(&[r"D:\Developer"]), PWSH, &machine);
+        let plan = resolve(&parsed(&[r"D:\Developer"]), Some(PWSH), &machine);
         assert_eq!(plan.cwd, Some(PathBuf::from(r"D:\Developer")));
         assert_eq!(plan.preview, None);
-        let plan = resolve(&parsed(&[r"D:\Developer\notes.md"]), PWSH, &machine);
+        let plan = resolve(&parsed(&[r"D:\Developer\notes.md"]), Some(PWSH), &machine);
         assert_eq!(plan.cwd, None, "a file names a document, not a place");
         assert_eq!(plan.preview, Some(PathBuf::from(r"D:\Developer\notes.md")));
         assert!(plan.refusals.is_empty());
-        let plan = resolve(&parsed(&[r"D:\nothing"]), PWSH, &machine);
+        let plan = resolve(&parsed(&[r"D:\nothing"]), Some(PWSH), &machine);
         assert_eq!(plan.preview, None);
         assert_eq!(
             plan.refusals,
@@ -1993,20 +2004,28 @@ mod tests {
             (r"D:\b", PathKind::Directory),
             (r"D:\b\x.rs", PathKind::File),
         ]);
-        let plan = resolve(&parsed(&["--cwd", r"D:\a", r"D:\b"]), PWSH, &machine);
+        let plan = resolve(&parsed(&["--cwd", r"D:\a", r"D:\b"]), Some(PWSH), &machine);
         assert_eq!(plan.cwd, Some(PathBuf::from(r"D:\a")));
         assert_eq!(
             plan.refusals,
             vec![CliRefusal::PlaceAlreadyNamed(PathBuf::from(r"D:\b"))]
         );
-        let plan = resolve(&parsed(&["--cwd", r"D:\a", r"D:\b\x.rs"]), PWSH, &machine);
+        let plan = resolve(
+            &parsed(&["--cwd", r"D:\a", r"D:\b\x.rs"]),
+            Some(PWSH),
+            &machine,
+        );
         assert_eq!(plan.cwd, Some(PathBuf::from(r"D:\a")));
         assert_eq!(plan.preview, Some(PathBuf::from(r"D:\b\x.rs")));
         assert!(plan.refusals.is_empty(), "a document is not a second place");
 
         // And the flag still wins when the flag is the broken one — see
         // `CliRefusal::PlaceAlreadyNamed`. Both are read back; neither opens.
-        let plan = resolve(&parsed(&["--cwd", r"D:\gone", r"D:\b"]), PWSH, &machine);
+        let plan = resolve(
+            &parsed(&["--cwd", r"D:\gone", r"D:\b"]),
+            Some(PWSH),
+            &machine,
+        );
         assert_eq!(plan.cwd, None);
         assert_eq!(
             plan.refusals,
@@ -2028,15 +2047,15 @@ mod tests {
         let wsl = profiles::index_of_id("wsl");
         let plan = resolve(
             &parsed(&["--cwd", r"D:\Developer", "--profile", "wsl"]),
-            PWSH,
+            Some(PWSH),
             table(&[(r"D:\Developer", PathKind::Directory)]),
         );
-        assert_eq!(plan.profile, wsl);
+        assert_eq!(plan.profile, Some(wsl));
         assert_eq!(plan.cwd, Some(PathBuf::from("/mnt/d/Developer")));
         assert!(plan.refusals.is_empty());
         let plan = resolve(
             &parsed(&["--cwd", r"\\server\share", "--profile", "wsl"]),
-            PWSH,
+            Some(PWSH),
             table(&[(r"\\server\share", PathKind::Directory)]),
         );
         assert_eq!(plan.cwd, None);
@@ -2056,13 +2075,13 @@ mod tests {
     fn an_empty_request_resolves_to_a_plan_that_wants_nothing() {
         let plan = resolve(
             &CliRequest::default(),
-            profiles::fallback_profile(),
+            Some(profiles::fallback_profile()),
             table(&[]),
         );
         assert!(!plan.wants_pane);
         assert_eq!(plan.cwd, None);
         assert_eq!(plan.preview, None);
-        assert_eq!(plan.profile, profiles::fallback_profile());
+        assert_eq!(plan.profile, Some(profiles::fallback_profile()));
         assert!(plan.refusals.is_empty());
     }
 

@@ -228,6 +228,13 @@ pub fn start(program: Option<&OsStr>) {
     let _ = INSTALLATION.set(installation);
 }
 
+/// Whether [`start`] has read the installation yet — what a cache of anything composed from
+/// [`facts`] keys on, so that it is composed again once the reading is in.
+#[must_use]
+pub fn facts_settled() -> bool {
+    INSTALLATION.get().is_some()
+}
+
 /// What the machine says, right now, without waiting for anything.
 ///
 /// **There is no blocking twin to tell this apart from** (§7.40 ④), which is why

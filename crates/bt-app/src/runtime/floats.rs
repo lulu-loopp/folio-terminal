@@ -1395,7 +1395,7 @@ impl Runtime<'_> {
             subject,
             powers,
             crumbs,
-            terminal: profiles::mark(self.default_profile()).in_line(),
+            terminal: profiles::identity_mark(&self.default_profile_id()).in_line(),
         }
     }
 

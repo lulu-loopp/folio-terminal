@@ -5,19 +5,6 @@
 //! which the table reads as "not a link". These three are the whole vocabulary the tables below
 //! need, spelled once so that a test that cares about an arm does not have to spell a struct.
 
-/// RED mutation: cap `for_each_window_index` at one item; the later windows do
-/// not repaint when the program-discovery answer lands.
-#[test]
-fn a_program_answer_landing_repaints_every_window() {
-    let mut repainted = [false; 3];
-    for_each_window_index(repainted.len(), |index| {
-        repainted[index] = true;
-        Ok::<_, std::convert::Infallible>(())
-    })
-    .expect("an infallible fake repaint");
-    assert_eq!(repainted, [true, true, true]);
-}
-
 // ── `bt-source`, and the one set of helpers every reader in this module asks
 //    it through (`docs/plans/bt-app-split-prep.md` §6.3, tickets P3 and P14)
 //
@@ -4145,6 +4132,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
+            folder_from_command_line: false,
         }
     );
     assert_eq!(
@@ -4155,6 +4143,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
+            folder_from_command_line: false,
         }
     );
     assert_ne!(
@@ -10466,26 +10455,29 @@ fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
     assert_ne!(git, fallback, "the fixture needs two different rows");
 
     let equipped = profiles::ProfilePrograms::with_only(&[git, fallback]);
-    assert_eq!(startable_profile("gitbash", &equipped), Started::AsAsked);
+    assert_eq!(
+        startable_profile("gitbash", &equipped),
+        Ok(Started::AsAsked)
+    );
 
     // Git uninstalled between two launches, which is the row's own case.
     let gitless = profiles::ProfilePrograms::with_only(&[fallback]);
     assert_eq!(
         startable_profile("gitbash", &gitless),
-        Started::FellBack(fallback_id.to_owned()),
+        Ok(Started::FellBack(fallback_id.to_owned())),
         "the pane comes back running what this machine does have"
     );
     assert_eq!(
         startable_profile(fallback_id, &gitless),
-        Started::AsAsked,
+        Ok(Started::AsAsked),
         "and the profile standing in for the others is not standing in for itself"
     );
 
     // Nothing at all: a machine with no Windows PowerShell, or a `BT_SHELL`
     // pointed at a program that is not there.
     let bare = profiles::ProfilePrograms::with_only(&[]);
-    assert_eq!(startable_profile("gitbash", &bare), Started::Nothing);
-    assert_eq!(startable_profile(fallback_id, &bare), Started::Nothing);
+    assert_eq!(startable_profile("gitbash", &bare), Ok(Started::Nothing));
+    assert_eq!(startable_profile(fallback_id, &bare), Ok(Started::Nothing));
 
     // **An id the table does not hold at all** — a row somebody deleted in
     // Settings ▸ Profiles while a pane was running it, which the snapshot
@@ -10494,7 +10486,7 @@ fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
     assert!(!profiles::has_id("a-row-nobody-has"));
     assert_eq!(
         startable_profile("a-row-nobody-has", &equipped),
-        Started::FellBack(fallback_id.to_owned()),
+        Ok(Started::FellBack(fallback_id.to_owned())),
         "a profile that is gone degrades exactly as a missing program does"
     );
 }
@@ -25085,7 +25077,7 @@ fn a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace() {
         .find("let profile = if let Some(fallback) = &shell_fallback {")
         .expect("the swap");
     let said = spawn
-        .find("birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place.at_shell_home)")
+        .find("birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place_at_shell_home)")
         .expect("the birth place is said for the started profile");
     let told = spawn
         .find("session.set_spawn_at_shell_home(at_shell_home);")
@@ -45023,7 +45015,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // takes one from.
         incarnation: next_incarnation(),
         pty: None,
-        pending_program_birth: None,
+        birth: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,
@@ -56373,4 +56365,215 @@ fn an_update_doors_panic_unwinds_through_its_exit_guard_under_mains_hook() {
         "the child got past the panic: {said}"
     );
     assert!(said.contains("1 passed"), "{said}");
+}
+
+// ── T-LAUNCH-PROBE round 2: the launch walk leaves the window thread, and nothing else
+//    about launch changes ─────────────────────────────────────────────────────────────
+
+/// A filesystem question that never answers while its gate is held, and refuses to be asked
+/// on the thread that started the launch.
+struct GatedOnAnotherThread {
+    caller: std::thread::ThreadId,
+    gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl profiles::ProgramFileQuestion for GatedOnAnotherThread {
+    fn is_file(&self, _path: &Path) -> bool {
+        assert_ne!(
+            std::thread::current().id(),
+            self.caller,
+            "a program question was asked on the window thread"
+        );
+        let _ = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv();
+        false
+    }
+}
+
+pub(crate) fn a_pane_in_birth(seed: LeafSeed) -> PaneBirth {
+    PaneBirth {
+        ticket: 0,
+        seed,
+        probe_input: None,
+        typed: std::cell::RefCell::default(),
+    }
+}
+
+/// RED (T-LAUNCH-PROBE round 2, review M5) — **the launch's program state is produced without
+/// the window thread asking the machine anything, while the walk is held forever; and the first
+/// pane's birth is then in progress on its own worker.**
+///
+/// The walk's seam is a `PATH` entry that never answers, and every verdict the walk publishes
+/// says which thread published it. `launch_program_state` returns (the launch goes on to its
+/// first frame) with every row unknown and the default unresolved; the first pane's seed is
+/// not decided from that, and its question is started and is still out when this test lets it
+/// go.
+///
+/// MUTATION: put main's walk back on the window thread — in `launch_program_state`, build the
+/// table with `ProfilePrograms::probe_rows(table, &SystemShellEnvironment)` instead of starting
+/// from unknown: the launch's state is answered before the first frame and the first
+/// assertion fails.
+#[test]
+fn the_launch_asks_nothing_before_its_first_frame_and_its_first_pane_asks_on_its_own_worker() {
+    let caller = std::thread::current().id();
+    let (gate, gated) = std::sync::mpsc::channel::<()>();
+    let (launch, launched) = launch_program_state("", |rows| {
+        profiles::begin_program_walk_with(
+            rows,
+            Arc::new(|key: &str| {
+                (key == "PATH").then(|| std::ffi::OsString::from(r"C:\never-answers"))
+            }),
+            Arc::new(GatedOnAnotherThread {
+                caller,
+                gate: std::sync::Mutex::new(gated),
+            }),
+            Box::new(move |_verdicts| {
+                assert_ne!(
+                    std::thread::current().id(),
+                    caller,
+                    "the walk published on the window thread"
+                );
+            }),
+        );
+    });
+    assert!(
+        launch.is_pending(),
+        "nothing is answered before the first frame"
+    );
+    assert_eq!(launched, profiles::DEFAULT_IDENTITY);
+    let seed = LeafSeed {
+        profile: launched,
+        ..LeafSeed::default()
+    };
+    assert_eq!(
+        decided_birth(&seed, &launch),
+        None,
+        "the first pane is not decided from unknown"
+    );
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (ticket, worker) = pty_door::begin_birth_question(move || {
+        assert_ne!(std::thread::current().id(), caller);
+        let _ = released.recv();
+        (String::from("pwsh"), profiles::ProfilePrograms::pending())
+    })
+    .expect("the birth worker starts");
+    assert!(
+        pty_door::take_birth_answer(ticket).is_none(),
+        "its question is still out on its worker"
+    );
+    release.send(()).expect("let the question answer");
+    worker.join().expect("the question answered");
+    let answered = pty_door::take_birth_answer(ticket).expect("its answer is posted");
+    assert_eq!(answered.answer.expect("answered").0, "pwsh");
+    drop(gate);
+}
+
+/// RED (T-LAUNCH-PROBE round 2, review M2) — **a birth question whose worker unwinds still
+/// answers**, with the failure, so the pane in birth meets main's handling of a birth whose
+/// worker panicked (`Runtime::land_pane_births` returns it as the birth's error, as
+/// `pty_door::spawn_shell` returns a panicked `bt-pty-birth` join) instead of waiting for ever.
+///
+/// MUTATION: empty `OwedAnswer::drop`: the worker unwinds and nothing is posted.
+#[test]
+fn a_birth_question_whose_worker_panics_answers_with_the_failure() {
+    let (ticket, worker) =
+        pty_door::begin_birth_question(|| -> (String, profiles::ProfilePrograms) {
+            panic!("a birth question that unwinds")
+        })
+        .expect("the birth worker starts");
+    assert!(worker.join().is_err(), "the worker unwound");
+    let answered = pty_door::take_birth_answer(ticket).expect("a panicked question still answers");
+    assert!(answered.answer.is_err());
+}
+
+/// RED (T-LAUNCH-PROBE round 2, review M1) — **what is typed, pasted or committed into a pane
+/// whose shell is being born reaches that shell first and in order**, and is counted as sent.
+///
+/// MUTATION: make `offer_pty_input`'s `PtyTarget::Birth` arm answer `NoChild` without holding
+/// the bytes (round 1's drop): the queue is empty and the order assertion fails.
+#[test]
+fn input_offered_to_a_pane_in_birth_reaches_its_shell_first_and_in_order() {
+    let birth = a_pane_in_birth(LeafSeed::default());
+    for chunk in ["echo 你好", " && ", "dir\r"] {
+        assert_eq!(
+            offer_pty_input(PtyTarget::Birth(&birth), chunk.as_bytes(), "type-ahead")
+                .expect("held"),
+            PtyInput::HeldForBirth
+        );
+    }
+    assert!(
+        PtyInput::HeldForBirth.queued(),
+        "a drop's focus move counts it as sent"
+    );
+    assert_eq!(birth.take_typed(), "echo 你好 && dir\r".as_bytes());
+    assert!(birth.take_typed().is_empty(), "taken once");
+    let mut leaf = leaf_saying("");
+    leaf.birth = Some(a_pane_in_birth(LeafSeed::default()));
+    assert!(matches!(leaf.input_target(), PtyTarget::Birth(_)));
+}
+
+/// RED (T-LAUNCH-PROBE round 2, review X2) — **the startup trace names the ConPTY the first shell
+/// was really born on, and waits for that birth rather than printing a stand-in.** A pane in
+/// birth has no source yet; the lines are said when the identity shell of every launch tab has
+/// been born, with that shell's own source — the value `scripts/release/smoke.ps1` reads.
+///
+/// MUTATION: make `conpty_source_of` answer `"direct-input"` for a pane in birth (round 1's
+/// launch line): the first assertion fails, and the lines would be said at once with it.
+#[test]
+fn the_startup_trace_waits_for_the_first_shell_and_names_its_conpty() {
+    let mut leaf = leaf_saying("");
+    leaf.birth = Some(a_pane_in_birth(LeafSeed::default()));
+    assert_eq!(
+        conpty_source_of(Some(&leaf)),
+        None,
+        "no stand-in for a shell being born"
+    );
+    leaf.birth = None;
+    assert_eq!(
+        conpty_source_of(Some(&leaf)).as_deref(),
+        Some("direct-input")
+    );
+    assert_eq!(conpty_source_of(None).as_deref(), Some("none"));
+
+    let mut shells = StartupShells {
+        shells: vec![
+            (TabId(1), SeatId(1), None),
+            (TabId(2), SeatId(1), Some("none".into())),
+        ],
+        phase_started: Instant::now(),
+        conpty_line: true,
+        startup_line: Some(StartupLine {
+            head: "BT_STARTUP window=1ms".to_owned(),
+            probe_input: 0,
+            runtime_ready: Duration::from_millis(9),
+        }),
+    };
+    assert_eq!(
+        shells.lines(Duration::ZERO),
+        None,
+        "nothing is said before the birth"
+    );
+    shells.born(TabId(1), SeatId(2), "source=elsewhere".to_owned());
+    assert_eq!(
+        shells.lines(Duration::ZERO),
+        None,
+        "only the identity shell answers for a tab"
+    );
+    shells.born(TabId(1), SeatId(1), "source=sidecar dir=…".to_owned());
+    let lines = shells
+        .lines(Duration::from_millis(7))
+        .expect("every shell is born");
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[0].starts_with("BT_CONPTY_SOURCE sources=[\"source=sidecar"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].contains("pty_spawn=7ms probe_input=0 conpty_sources=[\"source=sidecar"),
+        "{lines:?}"
+    );
+    assert!(lines[1].ends_with("runtime_ready=9ms"), "{lines:?}");
 }

@@ -13,7 +13,7 @@ use crate::{
     persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
     preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
     render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
-    revive_plan, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
+    revive_plan, revived_profile, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
     session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
     tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
 };
@@ -67,12 +67,12 @@ impl Runtime<'_> {
         plan: &NewWindowPlan,
         like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
     ) -> Result<(WindowId, WindowRuntime)> {
-        let default_profile = profiles::default_profile(
+        // The default as a seed spells it — the decided row's id, or the unresolved default
+        // while the machine has not answered — see `Runtime::default_profile_id`.
+        let default_profile_id = profiles::default_profile_identity(
             &app.settings_store.loaded().default_profile,
             &app.profile_programs,
         );
-        // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::id(default_profile);
         // **Where this window opens** (multiwindow slice D). The saved rectangle
         // when the file asked for the window, and the product's own size when a
         // verb did: a second window opened exactly on top of the first is a
@@ -87,7 +87,7 @@ impl Runtime<'_> {
             .flatten()
             .and_then(|saved| restore_window_placement(event_loop, saved));
         let attributes = opening_window_attributes(
-            profiles::title(default_profile),
+            profiles::identity_title(&default_profile_id),
             placement.map_or(
                 LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
                 |placement| placement.size,
@@ -397,6 +397,7 @@ impl Runtime<'_> {
                 &preview,
                 seed,
                 &app.profile_programs,
+                &app.settings_store.loaded().default_profile,
                 &default_profile_id,
                 // The opening rectangle is this program's, exactly as the first
                 // window's is: nobody has taken hold of a frame that has not been
@@ -779,24 +780,21 @@ impl Runtime<'_> {
                 // read for a Recent row: the shell you are asking back is the
                 // shell you had, and "whatever the default is today" is a
                 // different tab wearing this one's folder.
+                let revived = revived_profile(&profile_id);
                 let leaves = BTreeMap::from([(
                     seats.identity(),
                     LeafSeed {
                         // The saved id, or the fallback's when this build has no
                         // such row — `revive_plan`'s own line, for the same reason.
-                        profile: if profiles::has_id(&profile_id) {
-                            profile_id.clone()
-                        } else {
-                            profiles::fallback_profile_id().to_owned()
-                        },
+                        profile: revived.0,
                         cwd: profiles::revived_cwd(
                             profiles::index_of_id(&profile_id),
                             Path::new(&cwd),
                         ),
-                        unknown_profile_id: (!profiles::has_id(&profile_id))
-                            .then(|| profile_id.clone()),
+                        unknown_profile_id: revived.1,
                         card_skip: 0,
                         prefill: None,
+                        folder_from_command_line: false,
                     },
                 )]);
                 (seats, manual_name, leaves, BTreeMap::new())
@@ -921,6 +919,7 @@ impl Runtime<'_> {
                 pinned: false,
             },
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             &self.default_profile_id(),
             self.window.size_policy,
             // The posture, for [`Self::resolve_seat_layout`]'s reason.
@@ -1001,6 +1000,7 @@ impl Runtime<'_> {
                 &preview,
                 seed,
                 &self.app.profile_programs,
+                &self.app.settings_store.loaded().default_profile,
                 &self.default_profile_id(),
                 self.window.size_policy,
                 // The posture, for [`Self::resolve_seat_layout`]'s reason.

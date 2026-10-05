@@ -87,7 +87,12 @@ impl Runtime<'_> {
                 .get(index)
                 .map(TabState::tooltip_text)
                 .unwrap_or_default(),
-            tooltip::TooltipAnchorId::NewTab => new_tab_tip(self.default_profile()),
+            // While the default is undecided the tip names a terminal, not a shell it may
+            // never be (T-LAUNCH-PROBE round 2).
+            tooltip::TooltipAnchorId::NewTab => self.default_profile().map_or_else(
+                || i18n::new_tab_tip(profiles::identity_title(profiles::DEFAULT_IDENTITY)),
+                new_tab_tip,
+            ),
             tooltip::TooltipAnchorId::NewTabMenu => i18n::Text::ChooseProfile.text().to_owned(),
             _ => String::new(),
         }

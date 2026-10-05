@@ -4,7 +4,7 @@
 use crate::{
     ColumnNotch, CommandFlash, DividerGrip, Drag, DragCarry, DragHandover, DragSource, DropLanding,
     FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches, FrameImageReferences, FrameTraces,
-    HandoverInto, LeafId, LeafOnStage, LeafSeed, LeafSession, MathHoverExit, MenuPaint, Motion,
+    HandoverInto, LeafId, LeafOnStage, LeafSession, MathHoverExit, MenuPaint, Motion,
     NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState, PaneTransform, PopoverTrigger, Popup,
     PopupOwner, PresentIntent, PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY,
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
@@ -21,7 +21,10 @@ use crate::{
     scrollback_quota, seats, size_authority_for_rectangle, solve_seats, solve_tree, trace_sink,
     trace_unchanged_present, video_seat, webhost,
 };
-use crate::{LeafView, TextScale};
+use crate::{
+    LeafView, TextScale, conpty_source_of, profile_banner_name, pty_door, resolved_birth_seed,
+    toast, write_pty_input,
+};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{Axis, SeatId, SeatMetrics, SizePolicy};
@@ -39,86 +42,138 @@ use winit::event::MouseScrollDelta;
 use winit::window::{Window, WindowId};
 
 impl Runtime<'_> {
-    /// Start every launch-time terminal only after the complete machine-program
-    /// answer has landed. Until this call each such leaf is a drawable terminal
-    /// model with no process, so the first frame never waits and no provisional
-    /// shell can differ from the resolved one.
-    pub(crate) fn start_pending_program_births(&mut self) -> Result<()> {
-        let default = profiles::id(profiles::default_profile(
-            &self.app.settings_store.loaded().default_profile,
-            &self.app.profile_programs,
-        ));
-        let render_physical =
-            presentation_physical_size(self.window.renderer.presentation_geometry());
-        let rail = self.rail_posture();
-        let chrome = self.platform_chrome();
-        let scale = self.window.renderer.scale_factor() as f32;
-        let metrics = seats::seat_metrics(self.window.renderer.dpi_milli().get());
-        let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
-        let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
-        let line_wrapping = self.app.settings_store.loaded().line_wrapping;
-
+    /// **Land every birth answer that belongs to a pane of this window** (T-LAUNCH-PROBE round 2).
+    ///
+    /// A pane in birth is found by its question's ticket, in whichever tab it now stands; an
+    /// answer whose pane has closed finds nothing and is left for the caller to drop. The pane is
+    /// then born through [`create_leaf_session`] — the same function and the same `bt-pty-birth`
+    /// door as every other shell — from its own seed with its default resolved and its folder
+    /// crossed ([`resolved_birth_seed`]), at its text size and its seat's current rectangle, with
+    /// the completed answers its question gathered. What was typed into it meanwhile is written
+    /// to the new shell first, in order. A question that failed is the birth's own failure, met
+    /// exactly as main meets a birth that fails: the error leaves this call.
+    pub(crate) fn land_pane_births(
+        &mut self,
+        answers: &mut Vec<pty_door::BirthAnswer>,
+    ) -> Result<()> {
+        if answers.is_empty() {
+            return Ok(());
+        }
+        let mut landed = false;
         for tab_index in 0..self.window.tabs.len() {
-            let pending: Vec<_> = self.window.tabs[tab_index]
+            let due: Vec<(SeatId, u64)> = self.window.tabs[tab_index]
                 .sessions
                 .iter()
-                .filter_map(|(seat, leaf)| {
-                    leaf.pending_program_birth
-                        .clone()
-                        .map(|birth| (*seat, birth, leaf.text_scale))
-                })
+                .filter_map(|(seat, leaf)| Some((*seat, leaf.birth.as_ref()?.ticket)))
                 .collect();
-            if pending.is_empty() {
-                continue;
-            }
-            let (layout, _, _, _) = solve_seats(
-                &self.window.tabs[tab_index].seats,
-                &self.window.renderer,
-                render_physical,
-                self.window.size_policy,
-                rail,
-                chrome,
-            );
-            for (seat, birth, text_scale) in pending {
-                let seed = if birth.uses_default {
-                    LeafSeed {
-                        profile: default.clone(),
-                        ..birth.seed
-                    }
-                } else {
-                    birth.seed
-                };
-                let body = seats::birth_body_viewport(
-                    &self.window.tabs[tab_index].seats,
-                    &layout,
-                    seat,
-                    &metrics,
-                    scale,
-                );
-                let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
-                let spawned = create_leaf_session(
-                    view,
-                    body,
-                    LeafId {
-                        tab: self.window.tabs[tab_index].id,
-                        seat,
-                    },
-                    &self.window.pty_wake,
-                    None,
-                    &seed,
-                    &self.app.profile_programs,
-                    formulas,
-                    scrollback,
-                    line_wrapping,
-                )?;
-                self.window.tabs[tab_index].sessions.insert(seat, spawned);
+            for (seat, ticket) in due {
+                if let Some(at) = answers.iter().position(|answer| answer.ticket == ticket) {
+                    let answer = answers.swap_remove(at);
+                    self.land_pane_birth(tab_index, seat, answer)?;
+                    landed = true;
+                }
             }
         }
-        self.refresh_chrome();
-        self.publish_frame(FrameTrigger {
-            occurred_at: Instant::now(),
-            source: FrameSource::Expose,
-        })
+        if landed {
+            self.refresh_chrome();
+            self.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn land_pane_birth(
+        &mut self,
+        tab_index: usize,
+        seat: SeatId,
+        answer: pty_door::BirthAnswer,
+    ) -> Result<()> {
+        let tab_id = self.window.tabs[tab_index].id;
+        let Some(birth) = self.window.tabs[tab_index]
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| leaf.birth.as_ref())
+        else {
+            return Ok(());
+        };
+        let held_seed = birth.seed.clone();
+        let probe_input = birth.probe_input.clone();
+        let text_scale = self.window.tabs[tab_index].sessions[&seat].text_scale;
+        let (identity, programs) = answer.answer.map_err(|failure| {
+            anyhow!(failure).context(format!(
+                "spawn the {} profile in ConPTY",
+                profile_banner_name(&held_seed.profile)
+            ))
+        })?;
+        let (seed, refusal) = resolved_birth_seed(&held_seed, &identity);
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let (layout, _, _, _) = solve_seats(
+            &self.window.tabs[tab_index].seats,
+            &self.window.renderer,
+            render_physical,
+            self.window.size_policy,
+            self.rail_posture(),
+            self.platform_chrome(),
+        );
+        let body = seats::birth_body_viewport(
+            &self.window.tabs[tab_index].seats,
+            &layout,
+            seat,
+            &seats::seat_metrics(self.window.renderer.dpi_milli().get()),
+            self.window.renderer.scale_factor() as f32,
+        );
+        let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
+        let born = create_leaf_session(
+            view,
+            body,
+            LeafId { tab: tab_id, seat },
+            &self.window.pty_wake,
+            probe_input.as_deref(),
+            &seed,
+            &programs,
+            &self.app.settings_store.loaded().default_profile,
+            FormulaSwitches::from_settings(self.app.settings_store.loaded()),
+            scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
+            self.app.settings_store.loaded().line_wrapping,
+        )?;
+        // The pane in birth goes here, by the insert, and with it the queue: its bytes are taken
+        // first and handed to the shell that has just been born, ahead of anything typed after.
+        let typed = self.window.tabs[tab_index]
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| leaf.birth.as_ref())
+            .map(crate::PaneBirth::take_typed)
+            .unwrap_or_default();
+        if !typed.is_empty() {
+            write_pty_input(
+                born.input_target(),
+                &typed,
+                "deliver what was typed while the shell was being born",
+            )?;
+        }
+        if let (Some(shells), Some(source)) = (
+            self.app.startup_shells.as_mut(),
+            conpty_source_of(Some(&born)),
+        ) {
+            shells.born(tab_id, seat, source);
+        }
+        self.window.tabs[tab_index].sessions.insert(seat, born);
+        if let Some(shells) = self.app.startup_shells.take() {
+            let pty_spawn = shells.phase_started.elapsed();
+            self.app.startup_shells = shells.say_if_born(pty_spawn);
+        }
+        if let Some(refusal) = refusal {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                refusal.notice(),
+            )?;
+        }
+        Ok(())
     }
 
     /// Re-solve the tree against the current surface and place the terminal
@@ -1487,6 +1542,7 @@ impl Runtime<'_> {
             None,
             &inherited,
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,

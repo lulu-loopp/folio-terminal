@@ -66,6 +66,8 @@ impl Runtime<'_> {
         place: Option<PathBuf>,
         source_profile: &str,
         source_cwd: Option<PathBuf>,
+        // `place` came off a command line — see `LeafSeed::folder_from_command_line`.
+        folder_from_command_line: bool,
     ) -> Result<()> {
         // No assertion that the table still holds this id, and that is the point
         // of the id: `Duplicate tab` names the profile the source pane is
@@ -94,6 +96,8 @@ impl Runtime<'_> {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                folder_from_command_line: folder_from_command_line
+                    && profile == profiles::DEFAULT_IDENTITY,
             },
         )]);
         let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
@@ -112,6 +116,7 @@ impl Runtime<'_> {
             &PreviewRestore::default(),
             TabSeed::default(),
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             &self.default_profile_id(),
             self.window.size_policy,
             // The posture and not the stored preference, for
@@ -614,7 +619,7 @@ impl Runtime<'_> {
                     kind,
                     self.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
+                        .map(|leaf| profiles::identity_mark(&leaf.profile)),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -1299,7 +1304,7 @@ impl Runtime<'_> {
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the
         // same place — said in the one function that knows how to say it.
-        self.new_tab_seeded_from(&profile, None, &profile, cwd)
+        self.new_tab_seeded_from(&profile, None, &profile, cwd, false)
     }
 
     /// **`Move tab to new window`** — the row 丙2 exists for.
@@ -1499,7 +1504,7 @@ impl Runtime<'_> {
                 // for it, and `None` there is the honest answer rather than a
                 // path the chooser would reject.
                 profiles::spawn_place(
-                    self.default_profile(),
+                    profiles::index_of_id(&self.default_profile_id()),
                     None,
                     &bt_pty::SystemShellEnvironment,
                 )
@@ -2804,6 +2809,7 @@ impl Runtime<'_> {
                 pinned: false,
             },
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             &self.default_profile_id(),
             self.window.size_policy,
             self.rail_posture(),

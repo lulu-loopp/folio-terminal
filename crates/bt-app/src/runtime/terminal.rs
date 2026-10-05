@@ -13,7 +13,7 @@ use crate::{
     restart_seed, scrollback_quota, seats, shell_literal, should_copy_on_select_release,
     stepped_command_mark, terminal_link_answers_a_press, termscroll, toast, write_pty_input,
 };
-use crate::{LeafView, TextStep, pane_cell_metrics, step_leaf_text_scale};
+use crate::{LeafView, PtyTarget, TextStep, pane_cell_metrics, step_leaf_text_scale};
 use anyhow::Context;
 use anyhow::Result;
 use bt_doc::Bias;
@@ -703,6 +703,7 @@ impl Runtime<'_> {
             None,
             &seed,
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
@@ -818,13 +819,14 @@ impl Runtime<'_> {
 
         let LeafSession {
             pty,
+            birth,
             session,
             projection,
             ..
         } = self.window.tabs[active].shell_mut();
         paste_text(session, projection, &text, |bytes| {
             write_pty_input(
-                pty.as_ref(),
+                PtyTarget::of(pty.as_ref(), birth.as_ref()),
                 bytes,
                 "write an inserted files row path to PTY",
             )
