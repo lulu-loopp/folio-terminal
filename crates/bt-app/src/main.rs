@@ -2079,7 +2079,7 @@ struct VideoGlance {
 /// The `metadata` call comes first and stands whatever the decoder does: a file this platform has
 /// no source for still has a size, and the card that says only its size is the honest one rather
 /// than the refusal it replaced.
-fn read_video_glance(path: &Path) -> VideoGlance {
+fn read_video_glance(worker: &bt_platform::admission::WorkerCtx, path: &Path) -> VideoGlance {
     // **Media Foundation opens what it is given** (route A of the untrusted-path audit,
     // 2026-09-08). `first_frame` hands the path to `IMFSourceReader`, which is a full container
     // parse of a file this window never checked was one of its own; a `.mp4` on a share was
@@ -2099,7 +2099,10 @@ fn read_video_glance(path: &Path) -> VideoGlance {
     let metadata = std::fs::metadata(path).ok();
     let bytes = metadata.as_ref().map(std::fs::Metadata::len);
     let mtime = metadata.and_then(|meta| meta.modified().ok());
-    let frame = bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1);
+    let frame = {
+        let _ = worker;
+        bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1)
+    };
     VideoGlance {
         facts: preview::VideoFacts {
             duration_ms: frame.as_ref().and_then(|frame| frame.duration_ms),
@@ -2260,8 +2263,8 @@ impl MathWorker {
             "bt-math-worker",
             bt_platform::ThreadPriority::BelowNormal,
             Some(bt_math::MATH_WORKER_STACK_BYTES),
-            move |_ctx| {
-                run_decoration_worker(task_rx, result_tx, wake);
+            move |ctx| {
+                run_decoration_worker(ctx, task_rx, result_tx, wake);
             },
         )
         .context("spawn math rendering worker")?;
@@ -2301,6 +2304,7 @@ fn run_path_verify_worker(
 
 /// The production decoration queue, also exercised without a window by regression tests.
 fn run_decoration_worker(
+    worker: &bt_platform::admission::WorkerCtx,
     task_rx: mpsc::Receiver<MathWorkerRequest>,
     result_tx: mpsc::Sender<MathWorkerResult>,
     mut wake: impl FnMut(),
@@ -2357,7 +2361,7 @@ fn run_decoration_worker(
                 (leaf, DecorationWorkerCompletion::PeekImage { path, result })
             }
             MathWorkerRequest::PeekVideoFrame { leaf, path } => {
-                let glance = read_video_glance(&path);
+                let glance = read_video_glance(worker, &path);
                 (
                     leaf,
                     DecorationWorkerCompletion::PeekVideoFrame { path, glance },
@@ -19748,6 +19752,16 @@ enum TextFieldSeat {
     GraphSearch,
     /// The in-pane find bar.
     FindBar,
+}
+
+/// What a clipboard write should say once the platform's clipboard path has
+/// accepted it. Linux grows the variants a lane can only land on a later turn.
+enum ClipboardWriteEffect {
+    None,
+    Toast {
+        anchor: toast::ToastAnchor,
+        text: String,
+    },
 }
 
 /// **Which text field holds the keyboard**, read off the rung the ladder
@@ -42031,6 +42045,7 @@ impl Runtime<'_> {
         // opens a second window is the one that will have somewhere to put it.
         let opened_at = dpi_snapshot(&window)?;
         stand_the_window_at(
+            &window,
             native,
             startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
             "restore the first window's outer rectangle",
@@ -51999,14 +52014,21 @@ mod launch_landing_tests {
              reader was looking at:\n{landing}"
         );
         let raise = method_body("FolioApp", "raise_for_a_launch");
-        let restore = raise.find("set_minimized(false)").unwrap_or(usize::MAX);
-        let front = raise.find("give_foreground_to(").unwrap_or(0);
+        assert!(raise.contains("bring_owned_window_forward(&runtime.window.window)"));
+        let forward = item_body(&ItemQuery::function("bring_owned_window_forward"));
+        let restore = forward
+            .find("restore_minimized_window(window)?")
+            .unwrap_or(usize::MAX);
+        let front = forward
+            .find("give_foreground_to(native_window(window)?)")
+            .unwrap_or(0);
         assert!(
             restore < front,
             "an iconified window is asked to the front before it is restored, \
              which on some configurations is a click answered twice and seen \
-             never:\n{raise}"
+             never:\n{forward}"
         );
+        assert!(forward.contains("give_foreground_to(native_window(window)?)"));
     }
 
     /// **RED (U-36) — every launch the wire carries tells the update job what
@@ -62246,13 +62268,8 @@ impl FolioApp {
         let Some(runtime) = self.runtime(id) else {
             return;
         };
-        if runtime.window.window.is_minimized() == Some(true) {
-            runtime.window.window.set_minimized(false);
-        }
-        if let Ok(native) = native_window(&runtime.window.window)
-            && !bt_platform::hotkey::give_foreground_to(native)
-        {
-            eprintln!("BT_LAUNCH the window a second start asked for could not take the keyboard");
+        if let Err(error) = bring_owned_window_forward(&runtime.window.window) {
+            eprintln!("BT_LAUNCH {error}");
         }
     }
 
@@ -62482,13 +62499,13 @@ impl FolioApp {
                 previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
             app.quake.shown_over(previous);
         }
-        if let Some(native) = native
-            && !bt_platform::hotkey::give_foreground_to(native)
+        if let Some(runtime) = self.runtime(id)
+            && let Err(error) = runtime.take_keyboard_focus()
         {
             // Said to the log and never to the reader: there is nothing a person
             // can do about a foreground lock, and a card over their editor
             // reporting one would be a worse interruption than the one it reports.
-            eprintln!("BT_QUAKE the summoned window could not take the keyboard");
+            eprintln!("BT_QUAKE the summoned window could not take the keyboard: {error}");
         }
         // **And the one command the reader asked to have run, on the first summon
         // of this launch** (§7.54e ⑤). Taken here rather than at the door that
@@ -69733,11 +69750,13 @@ fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
 /// one available, and the plan's §4.4 says which of the two a deferred service
 /// owes its caller.
 fn stand_the_window_at(
-    window: bt_platform::NativeWindow,
+    window: &Window,
+    native: bt_platform::NativeWindow,
     rect: bt_platform::WindowRect,
     what: &str,
 ) {
-    if let Err(error) = bt_platform::set_window_outer_rect(window, rect) {
+    let _ = window;
+    if let Err(error) = bt_platform::set_window_outer_rect(native, rect) {
         eprintln!("BT_WINDOW {what}: {error}");
     }
 }
@@ -70019,6 +70038,48 @@ fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
             "bt-app has no native window backend for {other:?} on this platform"
         )),
     }
+}
+
+fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
+    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+        Ok(())
+    } else {
+        Err(anyhow!("the window could not take the keyboard"))
+    }
+}
+
+fn restore_minimized_window(window: &Window) -> Result<()> {
+    if window.is_minimized() == Some(true) {
+        window.set_minimized(false);
+    }
+    Ok(())
+}
+
+fn bring_owned_window_forward(window: &Window) -> Result<()> {
+    restore_minimized_window(window)?;
+    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+        Ok(())
+    } else {
+        Err(anyhow!("the window could not take the keyboard"))
+    }
+}
+
+fn request_owned_window_close(window: &Window, proxy: &EventLoopProxy<AppEvent>) -> Result<()> {
+    let _ = proxy;
+    bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+}
+
+fn minimize_owned_window(window: &Window) -> Result<()> {
+    window.set_minimized(true);
+    Ok(())
+}
+
+fn press_owned_title_bar(
+    window: &Window,
+    frame: &bt_platform::CustomWindowFrame,
+) -> Result<(), String> {
+    let _ = window;
+    frame.press_title_bar()
 }
 
 /// **Hand this window's touch input to the system that already knows what to do
@@ -72301,7 +72362,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 17] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 18] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -72310,6 +72371,9 @@ mod platform_gate_tests {
         // The fixture for "an argument is not text", and nothing else — see the
         // module's own note above.
         "cli.rs",
+        // Linux arming and start failures are asynchronous; this owner applies
+        // them to each folder's wake and error policy.
+        "dir_news.rs",
         // The Explorer verb itself, which has no counterpart off Windows.
         "explorer_menu.rs",
         // Drive roots, the recycle bin, and the reveal.

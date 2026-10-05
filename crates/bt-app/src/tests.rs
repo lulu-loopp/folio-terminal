@@ -289,7 +289,12 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     });
     let (tasks, requests) = mpsc::channel();
     let (results, completions) = mpsc::channel();
-    let worker = std::thread::spawn(move || run_decoration_worker(requests, results, || {}));
+    let worker = bt_platform::spawn_at_priority(
+        "bt-test-decoration",
+        bt_platform::ThreadPriority::Normal,
+        move |ctx| run_decoration_worker(ctx, requests, results, || {}),
+    )
+    .expect("start decoration worker");
     let leaf = probe_leaf();
     let render = |source: &str, budget| {
         tasks

@@ -23,7 +23,7 @@ use crate::{
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{CursorStyle, FrameSource, FrameTrigger, MathHitTarget, set_cursor_style};
 use std::path::PathBuf;
@@ -3628,7 +3628,10 @@ impl Runtime<'_> {
                 position.x,
                 position.y,
             ) {
-                if let Err(reason) = self.window.custom_window_frame.press_title_bar() {
+                if let Err(reason) = crate::press_owned_title_bar(
+                    &self.window.window,
+                    &self.window.custom_window_frame,
+                ) {
                     eprintln!("{reason}");
                 }
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar state={state:?} button={button:?} target={traced_target:?}"));
@@ -4177,16 +4180,16 @@ impl Runtime<'_> {
                 }
             }
             seats::ChromeTarget::PanelToggle => self.toggle_rail_collapsed()?,
-            seats::ChromeTarget::Minimize => self.window.window.set_minimized(true),
+            seats::ChromeTarget::Minimize => {
+                crate::minimize_owned_window(&self.window.window)?;
+            }
             seats::ChromeTarget::Maximize => {
                 self.window
                     .window
                     .set_maximized(!self.window.window.is_maximized());
             }
             seats::ChromeTarget::CloseWindow => {
-                let native = native_window(&self.window.window)?;
-                bt_platform::request_window_close(native)
-                    .map_err(|error| anyhow!(error))
+                self.request_window_close()
                     .context("request self-drawn caption close")?;
             }
             // **The rail, on none of its controls.** Nothing happens, and the
