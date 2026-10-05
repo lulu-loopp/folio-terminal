@@ -1213,7 +1213,16 @@ mod tests {
             "the commit replaces the card"
         );
 
-        let rows: Vec<(&str, Job<u32>, CheckView, Option<&str>, String, Kind)> = vec![
+        /// A state's name, its job, the check beside it, the offered tag, the line and the control.
+        type Row = (
+            &'static str,
+            Job<u32>,
+            CheckView,
+            Option<&'static str>,
+            String,
+            Kind,
+        );
+        let rows: Vec<Row> = vec![
             (
                 "checking",
                 Job::with_offers(true),
