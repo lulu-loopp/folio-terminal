@@ -65,7 +65,7 @@ impl Runtime<'_> {
         profile: &str,
         place: Option<PathBuf>,
         source_profile: &str,
-        source_cwd: Option<PathBuf>,
+        source_cwd: Option<profiles::SeedPlace>,
     ) -> Result<()> {
         // No assertion that the table still holds this id, and that is the point
         // of the id: `Duplicate tab` names the profile the source pane is
@@ -86,7 +86,7 @@ impl Runtime<'_> {
                 profile,
                 place.as_deref(),
                 source_profile,
-                source_cwd.as_deref(),
+                source_cwd.as_ref(),
             ),
         )]);
         let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
@@ -1287,7 +1287,7 @@ impl Runtime<'_> {
         let profile = leaf.profile.clone();
         // §7.1.4's ladder, the one `Restart shell` reads: a shell that never reported is in the
         // folder it was put down in.
-        let cwd = leaf.place_for_a_new_shell();
+        let cwd = leaf.seed_place_for_a_new_shell();
         // The source profile *is* the target profile, so `cwd_for_spawn` has no
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the

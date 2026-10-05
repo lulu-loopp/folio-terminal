@@ -108,7 +108,8 @@ All notable changes to Folio are recorded here. The format follows
   longer opens and the pane menu no longer drops from under the strip.
 - Open in Folio, `folio <folder>`, `--cwd`, New terminal in folder… and New
   terminal here open the folder you chose even when the profile's Starting
-  directory is Home or a fixed folder (issue #16).
+  directory is Home or a fixed folder, and that pane's Restart shell, Duplicate
+  and splits start there too (issue #16).
 - About → Version says what an update is doing after the download: Verifying,
   then ready with Restart…, then Restarting…, instead of Downloading again or
   offering Update and restart for an update already downloaded.

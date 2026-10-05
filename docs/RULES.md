@@ -900,7 +900,13 @@ folder", the folder carried from the pane it was opened beside, a restart, a dup
 or a saved session; otherwise the profile's home. A named Windows folder is crossed
 into a WSL profile's namespace as before. `profiles::place_for` is the one owner of
 this order; a seed only says whether its folder is named (`SeedPlace::Named`) or
-carried (`SeedPlace::Carried`).
+carried (`SeedPlace::Carried`). **A pane born in a named folder hands its folder on as
+named** (coordinator's ruling 2026-10-05, with the owner's 2026-10-04 "Restart shell goes
+back to the folder the pane was first opened in"): its Restart shell, Duplicate tab,
+Duplicate pane and splits start where it stands (its last reported folder, else that named
+folder) whatever the profile's starting place; its `+` and picker rows do not. That fact
+lives on the pane for the life of the process only — the session document has no field for
+it, so a restored pane's folder is carried and its next shells follow its profile.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration

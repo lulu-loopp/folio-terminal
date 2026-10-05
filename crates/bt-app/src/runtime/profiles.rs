@@ -89,9 +89,13 @@ impl Runtime<'_> {
         // This wrapper is the whole of what "the pane you are looking at" means,
         // and it is the only thing that separates every existing door from the
         // one 丙2 added — see [`Self::new_tab_seeded_from`].
-        let source_cwd = self
-            .focused()
-            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
+        // Carried: the `+` and a picker row keep the profile's starting rule whatever the pane
+        // under them was born in (coordinator's ruling 2026-10-05).
+        let source_cwd = self.focused().and_then(|leaf| {
+            leaf.session
+                .working_directory()
+                .map(|cwd| profiles::SeedPlace::Carried(cwd.to_path_buf()))
+        });
         let source_profile = self.session_profile();
         self.new_tab_seeded_from(profile, place, &source_profile, source_cwd)
     }

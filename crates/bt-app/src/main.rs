@@ -9571,11 +9571,12 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
 /// The manual name is not here because it is not a fact about a shell: it is the
 /// tab's (`TabSeed::manual_name`), and a restart that never touches a tab keeps
 /// it by construction rather than by copying it.
-fn restart_seed(profile: &str, standing_in: Option<&Path>) -> LeafSeed {
+fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> LeafSeed {
     LeafSeed {
         profile: profile.to_owned(),
-        // Carried, not named: a restart keeps the profile's starting rule (`place_for`).
-        cwd: standing_in.map(|path| profiles::SeedPlace::Carried(path.to_path_buf())),
+        // Named or carried as the leaf says (`LeafSession::seed_place_for_a_new_shell`):
+        // `profiles::place_for` weighs it.
+        cwd: standing_in,
         // A running pane's profile is one this build has, by construction — it
         // started a process from it.
         unknown_profile_id: None,
@@ -11584,6 +11585,18 @@ struct LeafSession {
     /// row carry is the *string* this helps compute, in the field that already
     /// held one, so no schema moves.
     spawn_place: Option<PathBuf>,
+    /// **Whether this pane was born in a folder named for its launch** (`profiles::SpawnPlace::named`:
+    /// the Explorer verb, `folio <folder>`, `--cwd`, `New terminal in folder…`, a hand-over).
+    ///
+    /// Such a pane was first opened in that folder, so the shells later started in its place —
+    /// Restart shell, Duplicate tab, Duplicate pane, the splits — carry their folder as named and
+    /// stand there whatever the profile's starting place says (coordinator's ruling 2026-10-05,
+    /// read with the owner's 2026-10-04 "Restart shell goes back to the folder the pane was
+    /// first opened in"). See [`Self::seed_place_for_a_new_shell`].
+    ///
+    /// Runtime only, like [`Self::spawn_place`]: the session document has no field for it, so a
+    /// restored pane's folder is carried and follows its profile's starting place.
+    born_named: bool,
     /// **Something to be typed into this shell as soon as it has a prompt**, and whether it is to
     /// be submitted (§7.54e ④ and ⑤).
     ///
@@ -19074,6 +19087,19 @@ impl LeafSession {
             .working_directory()
             .map(Path::to_path_buf)
             .or_else(|| self.spawn_place.clone())
+    }
+
+    /// [`Self::place_for_a_new_shell`] with the kind a spawn weighs it by: **named** for a pane
+    /// born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
+    /// Duplicate tab, Duplicate pane and the splits read this; `profiles::place_for` decides.
+    fn seed_place_for_a_new_shell(&self) -> Option<profiles::SeedPlace> {
+        self.place_for_a_new_shell().map(|path| {
+            if self.born_named {
+                profiles::SeedPlace::Named(path)
+            } else {
+                profiles::SeedPlace::Carried(path)
+            }
+        })
     }
 
     /// **Turn [`Self::has_rail`] on at the ledger's first mark**, and answer
@@ -37696,7 +37722,7 @@ fn new_tab_cwd(
     profile: &str,
     place: Option<&Path>,
     source_profile: &str,
-    focused: Option<&Path>,
+    focused: Option<&profiles::SeedPlace>,
 ) -> Option<profiles::SeedPlace> {
     // **Both profiles are named by id and placed against the table here**, one
     // call before the answer is used. `index_of_id` is the standing rule for an
@@ -37715,8 +37741,12 @@ fn new_tab_cwd(
             place,
         )
         .map(profiles::SeedPlace::Named),
-        None => profiles::cwd_for_spawn(source_profile, profile, focused)
-            .map(profiles::SeedPlace::Carried),
+        // The source's folder keeps its kind across the crossing: carried for the `+` and a
+        // picker row, named for `Duplicate tab` of a pane born in a named folder.
+        None => focused.and_then(|focused| {
+            profiles::cwd_for_spawn(source_profile, profile, Some(focused.path()))
+                .map(|crossed| focused.with_path(crossed))
+        }),
     }
 }
 
@@ -37728,7 +37758,7 @@ fn new_tab_leaf_seed(
     profile: &str,
     place: Option<&Path>,
     source_profile: &str,
-    source_cwd: Option<&Path>,
+    source_cwd: Option<&profiles::SeedPlace>,
 ) -> LeafSeed {
     LeafSeed {
         profile: profile.to_owned(),
@@ -37861,11 +37891,11 @@ enum SplitSeed {
 impl SplitSeed {
     /// The seed a split actually spawns, given what the source pane is and where
     /// it stands.
-    fn applied(&self, source_profile: &str, source_cwd: Option<&Path>) -> LeafSeed {
+    fn applied(&self, source_profile: &str, source_cwd: Option<&profiles::SeedPlace>) -> LeafSeed {
         match self {
             Self::Inherit => LeafSeed {
                 profile: source_profile.to_owned(),
-                cwd: source_cwd.map(|cwd| profiles::SeedPlace::Carried(cwd.to_path_buf())),
+                cwd: source_cwd.cloned(),
                 // A running pane's profile is one this build has, by construction.
                 unknown_profile_id: None,
                 // **A new pane is aimed at the tail**, whichever of the three
@@ -37877,12 +37907,14 @@ impl SplitSeed {
             },
             Self::Profile(profile) => LeafSeed {
                 profile: profile.clone(),
-                cwd: profiles::cwd_for_spawn(
-                    profiles::index_of_id(source_profile),
-                    profiles::index_of_id(profile),
-                    source_cwd,
-                )
-                .map(profiles::SeedPlace::Carried),
+                cwd: source_cwd.and_then(|source_cwd| {
+                    profiles::cwd_for_spawn(
+                        profiles::index_of_id(source_profile),
+                        profiles::index_of_id(profile),
+                        Some(source_cwd.path()),
+                    )
+                    .map(|crossed| source_cwd.with_path(crossed))
+                }),
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
@@ -38530,6 +38562,9 @@ fn create_leaf_session(
             .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
         profile,
         program: resolved_program,
+        // Named only while the started shell stands in the named folder: a fallback profile that
+        // could not spell it was put down elsewhere (`birth_place_of_the_started_shell`).
+        born_named: place.named && spawn_place.is_some(),
         spawn_place,
         // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
         // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.

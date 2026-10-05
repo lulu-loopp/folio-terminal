@@ -4900,6 +4900,11 @@ pub struct SpawnPlace {
     /// to read any other pane's first report that way, because a pane that inherited a folder was
     /// put down somewhere that is not its home.
     pub at_shell_home: bool,
+    /// Whether [`Self::directory`] is a folder named for the launch ([`SeedPlace::Named`]) —
+    /// decided here and nowhere else. The leaf keeps it, so the shells started later in this
+    /// pane's place (Restart shell, Duplicate, the splits) carry that folder as named too
+    /// (coordinator's ruling 2026-10-05: a pane opened in a named folder was first opened there).
+    pub named: bool,
 }
 
 /// A directory a leaf of `profile` was saved standing in, if it is still a
@@ -5011,7 +5016,7 @@ impl SeedPlace {
 
     /// The same kind of place, standing somewhere else.
     #[must_use]
-    fn with_path(&self, path: PathBuf) -> Self {
+    pub fn with_path(&self, path: PathBuf) -> Self {
         match self {
             Self::Carried(_) => Self::Carried(path),
             Self::Named(_) => Self::Named(path),
@@ -5078,6 +5083,7 @@ pub(crate) fn place_for(
     // `starting_dir` decides which of the two channels it travels on, and a
     // place that never arrived falls through to the profile's home exactly as an
     // untranslatable inheritance already did.
+    let named = matches!(inherited, Some(SeedPlace::Named(_)));
     let place = match (inherited, start_at.clone()) {
         // **A folder named for this launch wins outright** (GitHub issue #16). The editor's
         // question is where a new tab starts when nobody says; somebody just said.
@@ -5106,6 +5112,7 @@ pub(crate) fn place_for(
                 // The account's home is a home this machine can spell, so there is no mark here
                 // for anybody downstream to expand.
                 at_shell_home: false,
+                named,
             }
         }
         StartingDir::LauncherFlag { flag, home } => {
@@ -5124,6 +5131,7 @@ pub(crate) fn place_for(
                 ],
                 directory: Some(directory),
                 at_shell_home,
+                named,
             }
         }
     }
@@ -17530,6 +17538,7 @@ mod tests {
                     arguments: Vec::new(),
                     directory: Some(PathBuf::from(r"C:\Users\dev")),
                     at_shell_home: false,
+                    named: false,
                 },
                 "{profile} is a Windows process and takes a working directory"
             );
@@ -17546,6 +17555,7 @@ mod tests {
                 // And it is a **mark**: only the shell can expand it, which is why the
                 // session reads the expansion off this pane's first OSC 7 report (§7.30).
                 at_shell_home: true,
+                named: false,
             },
             "WSL's home has no Windows spelling, so it is asked for rather than handed over"
         );
@@ -17593,6 +17603,7 @@ mod tests {
                 arguments: Vec::new(),
                 directory: Some(here.clone()),
                 at_shell_home: false,
+                named: false,
             },
             "a Windows process is simply started there"
         );
@@ -17608,6 +17619,7 @@ mod tests {
                 directory: Some(PathBuf::from("/mnt/d/Developer")),
                 // A pane that inherited a folder was not put down at its shell's own home.
                 at_shell_home: false,
+                named: false,
             },
             "the launcher is told the place, in the namespace the shell reads"
         );
@@ -25612,6 +25624,10 @@ mod tests {
                 "{start_at:?}: the folder somebody named for this launch is where it opens"
             );
             assert_eq!(place.directory, Some(clicked.clone()), "{start_at:?}");
+            assert!(
+                place.named,
+                "{start_at:?}: the leaf is told its folder was named"
+            );
         }
         let carried_to = |start_at: &StartAt| {
             place_for(
@@ -25624,6 +25640,17 @@ mod tests {
             .working_directory
         };
         assert_eq!(carried_to(&StartAt::Inherit), Some(clicked.clone()));
+        assert!(
+            !place_for(
+                &StartAt::Inherit,
+                &StartingDir::AccountHome,
+                PathNamespace::Windows,
+                carried(),
+                &machine,
+            )
+            .named,
+            "a carried folder is not a named one"
+        );
         assert_eq!(
             carried_to(&StartAt::Home),
             home,
