@@ -6288,6 +6288,11 @@ pub fn head_run_revealed(revealed: HeadRun, seat: SeatId) -> bool {
 /// which is exactly the "you have to know it is there to make it appear" state
 /// [`ChromePointer::pane_hover`] exists to avoid, and it would re-open this bug
 /// for the first press of every entry into a pane.
+///
+/// [`hit_chrome_in_motion`] is the moving form. It shares [`pane_chrome_box`] with the painter:
+/// quads answer only inside the clip, and a raster control answers only when its whole sprite is
+/// present, because [`clip_pane_chrome`] drops rather than crops partial sprites.
+#[cfg(test)]
 pub fn hit_chrome(
     seats: &Seats,
     layout: &SeatLayout,
@@ -6296,19 +6301,41 @@ pub fn hit_chrome(
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
+    hit_chrome_in_motion(
+        seats,
+        layout,
+        scale,
+        revealed,
+        PaneMotionFrame::default(),
+        x,
+        y,
+    )
+}
+
+/// [`hit_chrome`] through the same sampled pane transforms the painter uses.
+pub fn hit_chrome_in_motion(
+    seats: &Seats,
+    layout: &SeatLayout,
+    scale: f32,
+    revealed: HeadRun,
+    pane_motion: PaneMotionFrame<'_>,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
     for placement in &layout.rects {
         let Some(device) = placement.device_rect else {
             continue;
         };
-        let rect = [
+        let solved = [
             device.left as f32,
             device.top as f32,
             device.right as f32,
             device.bottom as f32,
         ];
+        let geometry = pane_chrome_box(solved, pane_motion.of(placement.id));
         if matches!(placement.presentation, Presentation::Collapsed(_)) {
-            if contains(rect, x, y) {
+            if contains(geometry.content, x, y) && contains(geometry.clip, x, y) {
                 return Some(ChromeTarget::CollapseBar(placement.id));
             }
             continue;
@@ -6318,7 +6345,7 @@ pub fn hit_chrome(
             // `pane_body_viewport` both round it: the header you can grab is
             // exactly the header you can see.
             let head = pane_head_geometry(
-                rect,
+                geometry.content,
                 placement.kind,
                 layout.seat_is_on_stage(placement.id),
                 false,
@@ -6328,21 +6355,42 @@ pub fn hit_chrome(
             // run: `⌄ 🗀 ×` on a terminal, `⧉ ×` on a column, all four of them
             // hung off the one `.pane:hover` the painter hangs them off.
             let showing = head_run_revealed(revealed, placement.id);
-            // Smallest first inside the head too: the `×` is a dead zone in the
-            // drag handle (C35), so it has to answer before the handle does.
-            if showing && head.close.is_some_and(|close| contains(close, x, y)) {
-                return Some(ChromeTarget::PaneClose(placement.id));
+            // Smallest first inside the head too. A control exists in this frame when its glyph
+            // survives the painter's drop-not-crop clip; its box then owns only the visible part.
+            // Whatever visible header that leaves over is still the header, never the terminal.
+            for (verb, target, box_) in [
+                (
+                    crate::icons::ActionIcon::ClosePane,
+                    ChromeTarget::PaneClose(placement.id),
+                    head.close,
+                ),
+                (
+                    crate::icons::ActionIcon::OpenFilesPane,
+                    ChromeTarget::PaneFiles(placement.id),
+                    head.files,
+                ),
+                (
+                    crate::icons::ActionIcon::FloatFilesPane,
+                    ChromeTarget::PaneFloat(placement.id),
+                    head.float,
+                ),
+                (
+                    crate::icons::ActionIcon::OpenPaneMenu,
+                    ChromeTarget::PaneMenu(placement.id),
+                    head.chevron,
+                ),
+            ] {
+                let Some(box_) = box_ else { continue };
+                let glyph = pane_head_control_glyph_box(verb, box_, scale);
+                if showing
+                    && box_contains(geometry.clip, glyph)
+                    && contains(geometry.clip, x, y)
+                    && contains(box_, x, y)
+                {
+                    return Some(target);
+                }
             }
-            if showing && head.files.is_some_and(|files| contains(files, x, y)) {
-                return Some(ChromeTarget::PaneFiles(placement.id));
-            }
-            if showing && head.float.is_some_and(|float| contains(float, x, y)) {
-                return Some(ChromeTarget::PaneFloat(placement.id));
-            }
-            if showing && head.chevron.is_some_and(|split| contains(split, x, y)) {
-                return Some(ChromeTarget::PaneMenu(placement.id));
-            }
-            if contains(head.head, x, y) {
+            if contains(head.head, x, y) && contains(geometry.clip, x, y) {
                 return Some(ChromeTarget::PaneHeader(placement.id));
             }
         }
@@ -7345,6 +7393,26 @@ pub fn pane_head_control_boxes(
     .into_iter()
     .filter_map(|(verb, box_)| Some((verb, box_?)))
     .collect()
+}
+
+/// The raster rectangle the pane-head painter gives one control's glyph.
+fn pane_head_control_glyph_box(
+    verb: crate::icons::ActionIcon,
+    box_: [f32; 4],
+    scale: f32,
+) -> [f32; 4] {
+    let [glyph_w, glyph_h] = if verb == crate::icons::ActionIcon::FloatFilesPane {
+        // **Not the slot**: the float glyph is an outline with a gap, and the mock-up gives that
+        // stroke a little more room than the solid folder beside it so both read at one weight.
+        // That fill-against-stroke judgement is specific to the files head.
+        let side = (PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+        [side, side]
+    } else {
+        compact_head_glyph_box(verb.mark(), scale)
+    };
+    let left = ((box_[0] + box_[2] - glyph_w) / 2.0).round();
+    let top = ((box_[1] + box_[3] - glyph_h) / 2.0).round();
+    [left, top, left + glyph_w, top + glyph_h]
 }
 
 /// Lay out one pane head.
@@ -9457,6 +9525,27 @@ impl<'a> PaneMotionFrame<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PaneChromeBox {
+    /// Chrome laid out at its final size from the moving pane's corner.
+    content: [f32; 4],
+    /// The moving pane box through which that chrome is visible and interactive.
+    clip: [f32; 4],
+}
+
+/// The one reading of a pane transform shared by painting and hit testing.
+fn pane_chrome_box(solved: [f32; 4], transform: crate::PaneTransform) -> PaneChromeBox {
+    PaneChromeBox {
+        content: [
+            solved[0] + transform.dx,
+            solved[1] + transform.dy,
+            solved[2] + transform.dx,
+            solved[3] + transform.dy,
+        ],
+        clip: transform.applied_to(solved),
+    }
+}
+
 /// One run of chrome in the three channels it is drawn in.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChromeGroup {
@@ -9748,14 +9837,8 @@ pub fn build_chrome_for_tabs(
         //
         // Both are the solved rectangle when nothing is in flight, and then
         // every expression below is the one that was there before U8.
-        let transform = pane_motion.of(placement.id);
-        let rect = [
-            solved[0] + transform.dx,
-            solved[1] + transform.dy,
-            solved[2] + transform.dx,
-            solved[3] + transform.dy,
-        ];
-        let clip = transform.applied_to(solved);
+        let geometry = pane_chrome_box(solved, pane_motion.of(placement.id));
+        let (rect, clip) = (geometry.content, geometry.clip);
         pane_quads.clear();
         pane_labels.clear();
         pane_sprites.clear();
@@ -10225,18 +10308,14 @@ pub fn build_chrome_for_tabs(
                     // one run: the user's 2026-08-25 report was that the run
                     // reads as three weights, and the audit measured 1.56
                     // against 0.80. One slot, asked per mark, is the whole fix.
-                    let [glyph_w, glyph_h] = compact_head_glyph_box(ChromeMark::PaneClose, scale);
-                    let glyph_left = ((close[0] + close[2] - glyph_w) / 2.0).round();
-                    let glyph_top = ((close[1] + close[3] - glyph_h) / 2.0).round();
                     pane_sprites.push(
                         ChromeSprite::new(
                             ChromeMark::PaneClose,
-                            [
-                                glyph_left,
-                                glyph_top,
-                                glyph_left + glyph_w,
-                                glyph_top + glyph_h,
-                            ],
+                            pane_head_control_glyph_box(
+                                crate::icons::ActionIcon::ClosePane,
+                                close,
+                                scale,
+                            ),
                             // `color: var(--ink3)` at rest, `--ink` under the
                             // pointer — and under the pointer there is always the
                             // pill this pass has just drawn, never the bare head.
@@ -10277,60 +10356,25 @@ pub fn build_chrome_for_tabs(
                             (
                                 box_,
                                 ChromeTarget::PaneMenu(placement.id),
-                                // The house's one glyph for "there is a list
-                                // behind me", at rest — pointing down at a menu
-                                // that is folded away. It does not turn when the
-                                // menu opens, and that is the strip's chevron's
-                                // rule read honestly rather than copied: the
-                                // strip's `⌄` turns because its menu hangs
-                                // *below* it and the arrow ends up pointing at
-                                // the list; this menu is dropped at the pointer
-                                // and can land above, below or beside the
-                                // button, so an arrow that swung to 180° would be
-                                // pointing away from its own list as often as at
-                                // it.
-                                crate::icons::ActionIcon::OpenPaneMenu.mark(),
-                                compact_head_glyph_box(
-                                    crate::icons::ActionIcon::OpenPaneMenu.mark(),
-                                    scale,
-                                ),
+                                crate::icons::ActionIcon::OpenPaneMenu,
                             )
                         }),
                         head.files.map(|box_| {
                             (
                                 box_,
                                 ChromeTarget::PaneFiles(placement.id),
-                                crate::icons::ActionIcon::OpenFilesPane.mark(),
-                                compact_head_glyph_box(
-                                    crate::icons::ActionIcon::OpenFilesPane.mark(),
-                                    scale,
-                                ),
+                                crate::icons::ActionIcon::OpenFilesPane,
                             )
                         }),
                         head.float.map(|box_| {
                             (
                                 box_,
                                 ChromeTarget::PaneFloat(placement.id),
-                                crate::icons::ActionIcon::FloatFilesPane.mark(),
-                                // **Not the slot**: the mock-up strikes this one
-                                // a pixel above the folder beside it and says
-                                // why — "the float glyph is an outline with a
-                                // gap in it, and an outline needs a little more
-                                // room than a solid to read at the same weight".
-                                // That is a fill-against-stroke judgement the
-                                // slot's ink ratio does not model, and it is on
-                                // a files head rather than in the run the
-                                // 2026-08-25 report was about.
-                                [
-                                    (PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX * scale).round().max(1.0),
-                                    (PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX * scale).round().max(1.0),
-                                ],
+                                crate::icons::ActionIcon::FloatFilesPane,
                             )
                         }),
                     ];
-                    for (box_, target, glyph_mark, [glyph_w, glyph_h]) in
-                        triggers.into_iter().flatten()
-                    {
+                    for (box_, target, verb) in triggers.into_iter().flatten() {
                         let lit = pointer.hover == Some(target);
                         if lit {
                             pane_sprites.push(
@@ -10347,16 +10391,9 @@ pub fn build_chrome_for_tabs(
                                 .with_opacity(head_ink_here),
                             );
                         }
-                        let glyph_left = ((box_[0] + box_[2] - glyph_w) / 2.0).round();
-                        let glyph_top = ((box_[1] + box_[3] - glyph_h) / 2.0).round();
                         let mut mark = ChromeSprite::new(
-                            glyph_mark,
-                            [
-                                glyph_left,
-                                glyph_top,
-                                glyph_left + glyph_w,
-                                glyph_top + glyph_h,
-                            ],
+                            verb.mark(),
+                            pane_head_control_glyph_box(verb, box_, scale),
                             // `color: var(--ink3)` rising to `var(--accent)` —
                             // and the accent is opaque in both themes, so unlike
                             // every ink around it there is nothing to pre-mix.
@@ -40074,6 +40111,181 @@ mod tests {",
             resting.quads, displaced.quads,
             "a real transform has to change the chrome, or the equalities above \
              are pinning a function that ignores its argument"
+        );
+    }
+
+    /// RED (T-GUARDS-BLIND round 2) — over real one-pane, 2×2, cramped and zoomed layouts, at
+    /// 100/150/200 %, and throughout a pane flight, every grid point in a visible header belongs
+    /// to a drawn control's visible box or to the header itself. It never falls into the terminal.
+    ///
+    /// MUTATIONS: return `None` instead of `PaneHeader` for the trailing head arm, or decide a
+    /// control from its box without requiring its glyph inside the clip. Empty-header points or a
+    /// partly clipped control respectively make this test red.
+    #[test]
+    fn moving_pane_headers_own_every_point_not_owned_by_a_drawn_control() {
+        fn layouts(dpi_milli: u32) -> Vec<(&'static str, Seats, SeatLayout)> {
+            let metrics = seat_metrics(dpi_milli);
+
+            let mut one = Seats::lone_terminal();
+            let terminal = one.identity();
+            one.add_files_pane(&metrics, None)
+                .expect("a files pane fits in the one-pane case");
+            assert!(one.close_seat(&metrics, terminal));
+            let one_layout = solved(&one, viewport_of(1600, 900, dpi_milli), &metrics);
+
+            let mut quad = Seats::lone_terminal();
+            let top_left = quad.identity();
+            let top_right = quad
+                .split_terminal(&metrics, top_left, Axis::Row, false)
+                .expect("the first split fits");
+            quad.split_terminal(&metrics, top_left, Axis::Col, false)
+                .expect("the left column splits");
+            quad.split_terminal(&metrics, top_right, Axis::Col, false)
+                .expect("the right column splits");
+            let quad_layout = solved(&quad, viewport_of(1600, 900, dpi_milli), &metrics);
+
+            let mut narrow = Seats::lone_terminal();
+            let left = narrow.identity();
+            narrow
+                .split_terminal(&metrics, left, Axis::Row, false)
+                .expect("the cramped tree still has two real leaves");
+            let narrow_layout = solved(&narrow, viewport_of(360, 320, dpi_milli), &metrics);
+
+            let mut zoomed = Seats::lone_terminal();
+            let left = zoomed.identity();
+            let right = zoomed
+                .split_terminal(&metrics, left, Axis::Row, false)
+                .expect("the zoom fixture starts split");
+            assert!(zoomed.toggle_zoom(right));
+            let zoomed_layout = solved(&zoomed, viewport_of(1600, 900, dpi_milli), &metrics);
+
+            vec![
+                ("one pane", one, one_layout),
+                ("2x2", quad, quad_layout),
+                ("too narrow", narrow, narrow_layout),
+                ("focus mode", zoomed, zoomed_layout),
+            ]
+        }
+
+        let mut saw_missing_control = false;
+        for dpi_milli in [1_000, 1_500, 2_000] {
+            let scale = dpi_milli as f32 / 1_000.0;
+            for (case, seats, layout) in layouts(dpi_milli) {
+                for progress in [0.0_f32, 0.2, 0.45, 0.7, 1.0] {
+                    let transforms: Vec<(SeatId, crate::PaneTransform)> = layout
+                        .rects
+                        .iter()
+                        .filter_map(|placement| placement.device_rect.map(|_| placement.id))
+                        .map(|id| {
+                            (
+                                id,
+                                crate::PaneTransform {
+                                    dx: -80.0 * (1.0 - progress),
+                                    dy: 18.0 * (1.0 - progress),
+                                    sx: 0.18 + 0.82 * progress,
+                                    sy: 0.35 + 0.65 * progress,
+                                },
+                            )
+                        })
+                        .collect();
+                    let frame = PaneMotionFrame::new(&transforms);
+                    for placement in &layout.rects {
+                        let Some(device) = placement.device_rect else {
+                            continue;
+                        };
+                        if !matches!(placement.presentation, Presentation::Full)
+                            || !seats.seat_wears_head(placement.kind)
+                        {
+                            continue;
+                        }
+                        let solved = [
+                            device.left as f32,
+                            device.top as f32,
+                            device.right as f32,
+                            device.bottom as f32,
+                        ];
+                        let transform = frame.of(placement.id);
+                        let geometry = pane_chrome_box(solved, transform);
+                        let head = pane_head_geometry(
+                            geometry.content,
+                            placement.kind,
+                            layout.seat_is_on_stage(placement.id),
+                            false,
+                            scale,
+                        );
+                        let Some(visible_head) = box_intersection(head.head, geometry.clip) else {
+                            continue;
+                        };
+                        let controls = [
+                            (
+                                crate::icons::ActionIcon::ClosePane,
+                                ChromeTarget::PaneClose(placement.id),
+                                head.close,
+                            ),
+                            (
+                                crate::icons::ActionIcon::OpenFilesPane,
+                                ChromeTarget::PaneFiles(placement.id),
+                                head.files,
+                            ),
+                            (
+                                crate::icons::ActionIcon::FloatFilesPane,
+                                ChromeTarget::PaneFloat(placement.id),
+                                head.float,
+                            ),
+                            (
+                                crate::icons::ActionIcon::OpenPaneMenu,
+                                ChromeTarget::PaneMenu(placement.id),
+                                head.chevron,
+                            ),
+                        ];
+                        saw_missing_control |= controls.iter().any(|(_, _, box_)| box_.is_none());
+                        let step = scale.round().max(1.0) as usize;
+                        for y in (visible_head[1].ceil() as i32..visible_head[3].floor() as i32)
+                            .step_by(step)
+                        {
+                            for x in (visible_head[0].ceil() as i32..visible_head[2].floor() as i32)
+                                .step_by(step)
+                            {
+                                let (x, y) = (x as f32 + 0.25, y as f32 + 0.25);
+                                let expected = controls
+                                    .iter()
+                                    .filter_map(|(verb, target, box_)| {
+                                        let box_ = (*box_)?;
+                                        box_contains(
+                                            geometry.clip,
+                                            pane_head_control_glyph_box(*verb, box_, scale),
+                                        )
+                                        .then_some((target, box_))
+                                    })
+                                    .find(|(_, box_)| {
+                                        contains(*box_, x, y) && contains(geometry.clip, x, y)
+                                    })
+                                    .map_or(
+                                        ChromeTarget::PaneHeader(placement.id),
+                                        |(target, _)| *target,
+                                    );
+                                assert_eq!(
+                                    hit_chrome_in_motion(
+                                        &seats,
+                                        &layout,
+                                        scale,
+                                        HeadRun::hovered(placement.id),
+                                        frame,
+                                        f64::from(x),
+                                        f64::from(y),
+                                    ),
+                                    Some(expected),
+                                    "{case} at {dpi_milli} milli-DPI, progress {progress}, point ({x}, {y})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_missing_control,
+            "the cramped real layout must exercise a head too narrow for all controls"
         );
     }
 

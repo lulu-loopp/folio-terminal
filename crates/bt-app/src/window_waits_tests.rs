@@ -841,21 +841,312 @@ fn callees_in(world: &World, body: &str, site_name: &str) -> Vec<String> {
         .collect()
 }
 
-/// RED (T-PROBE-CHILD round 4) — **product code is resolved only against its package's product
-/// edges**: `PtySession::shutdown` calls `kill` on a portable-pty child whose type its source
-/// does not write, so the call answers every first-party `kill` its package can reach. `bt-pty`
-/// reaches `bt-platform` only for tests — an optional dependency the test-only `test-shell`
-/// feature activates, and a dev-dependency — so `bt_platform::ProbeChild::kill` is not a callee,
-/// and it is not one either when the edge is a dev-dependency alone. Written as a product
-/// dependency, the same edge makes it one; and `bt-app`, whose edge to `bt-platform` is a product
-/// edge, still reaches it from `GitChild::kill`.
+// Parsed by the guard but deliberately absent from the Rust build: these source shapes include
+// calls Rust would reject precisely because the guard must not infer the receiver's type.
+#[cfg(any())]
+struct ReceiverTypingSourceShapes {
+    typed_field: CappedReads,
+}
+
+#[cfg(any())]
+impl ReceiverTypingSourceShapes {
+    fn receiver_typing_source_shapes(&mut self) {
+        self.typed_field.observe(0);
+
+        let annotated: CappedReads = unreachable!();
+        annotated.observe(0);
+
+        let chained_constructor = CappedReads::new(unreachable!(), 1).observe(0);
+        chained_constructor.kill();
+        let constructor_later = passthrough(CappedReads::new(unreachable!(), 1));
+        constructor_later.kill();
+        let factory = Pending::new(None, Vec::new());
+        factory.kill();
+
+        let mut reassigned: CappedReads = unreachable!();
+        reassigned = unreachable!();
+        reassigned.kill();
+
+        let shadow_let: CappedReads = unreachable!();
+        let shadow_let = unreachable!();
+        shadow_let.kill();
+
+        let shadow_closure: CappedReads = unreachable!();
+        let _ = |shadow_closure| shadow_closure;
+        shadow_closure.kill();
+
+        let shadow_for: CappedReads = unreachable!();
+        for shadow_for in unreachable!() {
+            drop(shadow_for);
+        }
+        shadow_for.kill();
+
+        let shadow_match: CappedReads = unreachable!();
+        match unreachable!() {
+            shadow_match => drop(shadow_match),
+        }
+        shadow_match.kill();
+
+        let shadow_if: CappedReads = unreachable!();
+        if let Some(shadow_if) = unreachable!() {
+            drop(shadow_if);
+        }
+        shadow_if.kill();
+
+        let slice: &[CappedReads] = unreachable!();
+        slice.kill();
+        let array: [CappedReads; 2] = unreachable!();
+        array.kill();
+        let option: Option<CappedReads> = unreachable!();
+        option.kill();
+        let boxed: Box<CappedReads> = unreachable!();
+        boxed.kill();
+        let generic: CappedReads<Vec<u8>> = unreachable!();
+        generic.kill();
+
+        type ReadsAlias = CappedReads;
+        let alias: ReadsAlias = unreachable!();
+        alias.kill();
+
+        let ambiguous: Pending = unreachable!();
+        ambiguous.kill();
+
+        let trait_method: FileAnimationSource = unreachable!();
+        trait_method.restart();
+
+        let deref_reached: Runtime = unreachable!();
+        deref_reached.preview_here(unreachable!());
+
+        let macro_wrapped = Pending::new(None, Vec::new());
+        passthrough!(macro_wrapped.kill());
+    }
+}
+
+fn source_shape_body<'a>(world: &'a World) -> Body<'a> {
+    let (src, record) = world
+        .srcs
+        .iter()
+        .enumerate()
+        .find_map(|(src, source)| {
+            source
+                .index
+                .items()
+                .iter()
+                .find(|record| record.name() == "receiver_typing_source_shapes")
+                .map(|record| (src, record))
+        })
+        .expect("the cfg-false source-shape fixture is indexed");
+    Body::new(world, src, record)
+}
+
+/// RED (T-GUARDS-BLIND round 3) — the complete receiver-shape table. Only a direct `self.field`
+/// with one restricted written field type and a uniquely bound, never-assigned annotated local
+/// have a type. Every other row equals the pre-ticket reachable method-name match.
 ///
-/// MUTATIONS: in `resolve_product`, treat every edge as live whether `optional` or not, and the
-/// first assertion goes red (the merge of `main`'s `test-shell` edge with this branch's
-/// `ProbeChild::kill`); have `dependency_tables` also read `[dev-dependencies]`, and the first
-/// goes red too (the real manifest also writes the dev-dependency; the second assertion holds the
-/// dev-only shape alone); have `World::of` give every package only itself to reach, and the
-/// product-edge assertion goes red.
+/// MUTATIONS, in table order: infer the leading constructor; scan for a later constructor; infer
+/// factory returns; ignore assignment; count only `let` shadowing; ignore closure, `for`, match-arm,
+/// or `if let` bindings; peel slice, array, `Option`, `Box`, or generic interiors; resolve aliases;
+/// union same-named types; retain a first-party trait method; retain a `Deref` type; inspect through
+/// a macro argument. Each mutation types its named row and makes the `receiver_types` assertion
+/// red. Removing annotation typing or `self.field` typing makes the corresponding positive row red;
+/// returning an empty preferred set instead of [`nonempty_or`] makes a name-match equality red.
+#[test]
+fn receiver_typing_only_narrows_a_non_empty_source_stated_answer() {
+    let world = World::new();
+    let body = source_shape_body(&world);
+    let shapes = [
+        ("self", "observe", true, "remove self-field typing"),
+        (
+            "annotated",
+            "observe",
+            true,
+            "remove annotated-local typing",
+        ),
+        (
+            "chained_constructor",
+            "kill",
+            false,
+            "infer a leading chained constructor",
+        ),
+        (
+            "constructor_later",
+            "kill",
+            false,
+            "scan for a later constructor",
+        ),
+        ("factory", "kill", false, "infer a factory return"),
+        ("reassigned", "kill", false, "ignore assignment targets"),
+        ("shadow_let", "kill", false, "ignore a second let binding"),
+        ("shadow_closure", "kill", false, "ignore closure parameters"),
+        ("shadow_for", "kill", false, "ignore for-pattern bindings"),
+        ("shadow_match", "kill", false, "ignore match-arm bindings"),
+        ("shadow_if", "kill", false, "ignore if-let bindings"),
+        ("slice", "kill", false, "peel a slice interior"),
+        ("array", "kill", false, "peel an array interior"),
+        ("option", "kill", false, "peel Option's argument"),
+        ("boxed", "kill", false, "peel Box's argument"),
+        ("generic", "kill", false, "ignore generic arguments"),
+        ("alias", "kill", false, "resolve a type alias"),
+        (
+            "ambiguous",
+            "kill",
+            false,
+            "union same-named first-party types",
+        ),
+        (
+            "trait_method",
+            "restart",
+            false,
+            "retain a first-party trait receiver",
+        ),
+        (
+            "deref_reached",
+            "preview_here",
+            false,
+            "retain a Deref receiver",
+        ),
+        (
+            "macro_wrapped",
+            "kill",
+            false,
+            "infer through a macro argument",
+        ),
+    ];
+    let sites = body.sites();
+    for (receiver, method, typed, mutation) in shapes {
+        let site = sites
+            .iter()
+            .find(|site| {
+                site.name == method
+                    && matches!(&site.form, Form::Method(Some(chain)) if chain[0] == receiver)
+            })
+            .unwrap_or_else(|| panic!("the `{receiver}.{method}` fixture call is indexed"));
+        assert_eq!(
+            body.receiver_types(site).is_some(),
+            typed,
+            "the `{receiver}.{method}` row has the promised typing; RED mutation: {mutation}"
+        );
+        let resolved: BTreeSet<String> = body
+            .resolve(site)
+            .iter()
+            .map(|callable| world.key(callable))
+            .collect();
+        if typed {
+            assert_eq!(
+                resolved,
+                BTreeSet::from(["bt-pty crate::CappedReads::observe".to_owned()]),
+                "the `{receiver}.{method}` row narrows to its written type"
+            );
+        } else {
+            let named: BTreeSet<String> = world
+                .callables
+                .get(method)
+                .into_iter()
+                .flatten()
+                .filter(|callable| {
+                    world.reach[body.src].contains(&callable.src) && callable.type_owner.is_some()
+                })
+                .map(|callable| world.key(callable))
+                .collect();
+            assert_eq!(resolved, named, "`{receiver}.{method}` stays name-matched");
+        }
+    }
+}
+
+/// AUDIT (T-GUARDS-BLIND round 3) — the real-tree diff against the pre-round-1 local-receiver
+/// rule. Direct `self.field` typing already existed at that baseline, so only a newly typed local
+/// can shrink the answer. Every such row is nonempty and drops only methods owned by another type;
+/// the count and rows are printed for the ticket report. The fixture above supplies the RED proof
+/// for both permitted cases even when the real tree has no newly narrowed local today.
+#[test]
+fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
+    let world = World::new();
+    let mut shrinks = Vec::new();
+    for (src_at, src) in world.srcs.iter().enumerate() {
+        let reach = &world.reach[src_at];
+        for record in src
+            .index
+            .items()
+            .iter()
+            .filter(|record| record.kind().is_callable() && src.product_item(record))
+        {
+            let body = Body::new(&world, src_at, record);
+            for site in body.sites() {
+                let Form::Method(Some(chain)) = &site.form else {
+                    continue;
+                };
+                if chain.len() != 1 || !body.locals.contains_key(chain[0]) {
+                    continue;
+                }
+                let Some(types) = body.receiver_types(&site) else {
+                    continue;
+                };
+                let before: BTreeSet<String> = world
+                    .callables
+                    .get(site.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|callable| {
+                        reach.contains(&callable.src) && callable.type_owner.is_some()
+                    })
+                    .map(|callable| world.key(callable))
+                    .collect();
+                let after: BTreeSet<String> = body
+                    .resolve(&site)
+                    .iter()
+                    .map(|callable| world.key(callable))
+                    .collect();
+                if before == after || !after.is_subset(&before) {
+                    continue;
+                }
+                assert!(!after.is_empty(), "typing may never narrow to empty");
+                let removed: Vec<String> = before.difference(&after).cloned().collect();
+                for callable in world
+                    .callables
+                    .get(site.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|callable| removed.contains(&world.key(callable)))
+                {
+                    assert!(
+                        callable
+                            .type_owner
+                            .as_ref()
+                            .is_some_and(|owner| !types.contains(owner)),
+                        "{} lost a method of its own stated type {types:?}",
+                        src.location(site.at)
+                    );
+                }
+                shrinks.push(format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    key_of(src, record),
+                    src.location(site.at),
+                    chain.join("."),
+                    types.iter().cloned().collect::<Vec<_>>().join("|"),
+                    after.iter().cloned().collect::<Vec<_>>().join("|"),
+                    removed.join("|")
+                ));
+            }
+        }
+    }
+    eprintln!("CALLEE_SHRINK_COUNT\t{}", shrinks.len());
+    for row in shrinks {
+        eprintln!("CALLEE_SHRINK\t{row}");
+    }
+}
+
+/// RED (T-PROBE-CHILD round 4, T-GUARDS-BLIND) — **a receiver whose field declaration writes
+/// its type does not become every method with the same name**: `PtySession::shutdown` binds
+/// `child` from `self.child`, but that unannotated local is deliberately untyped. In the
+/// real graph and with a dev-only edge `ProbeChild` is unreachable. With an artificial product
+/// edge the tightened round-2 rule deliberately falls back to the name match, but the inventory
+/// still attributes this source spelling to the registered `Child::kill` vocabulary effect before
+/// treating it as a first-party edge. A real `ProbeChild` arm in `GitChild::kill` and the
+/// name-matched `CappedReads::observe` call remain attributed to their actual callees.
+///
+/// MUTATIONS: infer a type from the `self.child.take()` initializer, and the product-edge collision
+/// goes red; return no methods for an untyped local, and the `CappedReads` assertion goes red; give
+/// every package only itself to reach, and the real `GitChild` attribution goes red.
 #[test]
 fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
@@ -898,13 +1189,25 @@ fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     let callees = callees_in(&product_edge, PTY_SHUTDOWN, "kill");
     assert!(
         callees.iter().any(|key| key == PROBE_KILL),
-        "a product edge reaches the dependency's methods: {callees:?}"
+        "typed-empty must fall back to the old name match: {callees:?}"
     );
 
     let callees = callees_in(&as_written, "bt-app crate::git::GitChild::kill", "kill");
     assert!(
         callees.iter().any(|key| key == PROBE_KILL),
-        "bt-app's product edge to bt-platform still reaches `ProbeChild::kill`: {callees:?}"
+        "a real `ProbeChild` call is still attributed: {callees:?}"
+    );
+
+    let callees = callees_in(
+        &as_written,
+        "bt-pty crate::read_pty_output_without_dump",
+        "observe",
+    );
+    assert!(
+        callees
+            .iter()
+            .any(|key| key == "bt-pty crate::CappedReads::observe"),
+        "an untyped constructor local still has its name-matched method: {callees:?}"
     );
 }
 
@@ -1377,6 +1680,7 @@ struct World {
     reach: Vec<BTreeSet<usize>>,
     callables: HashMap<String, Vec<Callable>>,
     fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
+    deref_types: BTreeSet<String>,
 }
 
 /// Words that open a parenthesis without calling anything.
@@ -1426,8 +1730,29 @@ impl World {
         let mut callables: HashMap<String, Vec<Callable>> = HashMap::new();
         let mut fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>> =
             HashMap::new();
+        let mut deref_types = BTreeSet::new();
         for (at, src) in srcs.iter().enumerate() {
+            for block in src.index.impls() {
+                if src.in_product(block.whole().start())
+                    && block.trait_name().is_some_and(|name| {
+                        name.rsplit("::")
+                            .next()
+                            .is_some_and(|last| last.trim() == "Deref")
+                    })
+                {
+                    deref_types.insert(block.type_owner().to_owned());
+                }
+            }
             for record in src.index.items() {
+                if record.kind() == ItemKind::Field
+                    && let Some(owner) = record.type_owner()
+                    && (src.product_item(record) || owner == "ReceiverTypingSourceShapes")
+                {
+                    fields
+                        .entry((owner.to_owned(), record.name().to_owned()))
+                        .or_default()
+                        .push((at, record));
+                }
                 if !src.product_item(record) {
                     continue;
                 }
@@ -1442,13 +1767,6 @@ impl World {
                             trait_name: record.trait_name().map(ToOwned::to_owned),
                             record: Some(record),
                         });
-                } else if record.kind() == ItemKind::Field
-                    && let Some(owner) = record.type_owner()
-                {
-                    fields
-                        .entry((owner.to_owned(), record.name().to_owned()))
-                        .or_default()
-                        .push((at, record));
                 }
             }
             // `#[from]` on an error enum's field makes a first-party `From::from` no byte holds.
@@ -1481,6 +1799,7 @@ impl World {
             reach,
             callables,
             fields,
+            deref_types,
         }
     }
 
@@ -1505,30 +1824,104 @@ impl World {
         }
     }
 
-    /// The upper-case names a type is written with: `Option<JoinHandle<()>>` is both.
-    fn type_names(src: &Src, toks: &[Tok]) -> BTreeSet<String> {
-        toks.iter()
-            .filter(|tok| tok.kind == Kind::Ident)
-            .map(|tok| src.text(*tok))
-            .filter(|name| name.starts_with(|c: char| c.is_ascii_uppercase()))
-            .map(ToOwned::to_owned)
+    /// The one first-party type a written type spells. Only leading references are peeled; the
+    /// rest must be one path with no arguments or other type syntax, and that path's final name
+    /// must identify exactly one reachable first-party type.
+    fn written_type(&self, from: usize, src: &Src, toks: &[Tok]) -> BTreeSet<String> {
+        let mut at = 0;
+        while src.is(toks.get(at), "&") {
+            at += 1;
+            if toks.get(at).is_some_and(|tok| tok.kind == Kind::Lifetime) {
+                at += 1;
+            }
+            if src.is(toks.get(at), "mut") {
+                at += 1;
+            }
+        }
+        let path = &toks[at..];
+        if path.is_empty()
+            || path.iter().enumerate().any(|(at, tok)| {
+                if at % 2 == 0 {
+                    tok.kind != Kind::Ident
+                } else {
+                    !src.is(Some(tok), "::")
+                }
+            })
+            || path.len().is_multiple_of(2)
+        {
+            return BTreeSet::new();
+        }
+        let name = src.text(*path.last().expect("a nonempty path"));
+        if self.reachable_type_locations(from, name).len() == 1 {
+            BTreeSet::from([name.to_owned()])
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    fn reachable_type_locations(&self, from: usize, name: &str) -> BTreeSet<(usize, String)> {
+        self.reach[from]
+            .iter()
+            .flat_map(|at| {
+                self.srcs[*at]
+                    .index
+                    .items()
+                    .iter()
+                    .filter(|record| {
+                        record.kind().is_type()
+                            && record.name() == name
+                            && self.srcs[*at].product_item(record)
+                    })
+                    .map(|record| (*at, record.module_paths()[0].to_owned()))
+            })
             .collect()
     }
 
-    /// The types `field` is declared with on any of `owners`.
-    fn field_types(&self, owners: &BTreeSet<String>, field: &str) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        for owner in owners {
-            let declared = self.fields.get(&(owner.clone(), field.to_owned()));
-            for (at, record) in declared.into_iter().flatten() {
-                let src = &self.srcs[*at];
-                let toks = src.lex(record.whole().start(), record.whole().end());
-                if let Some(colon) = toks.iter().position(|t| src.is(Some(t), ":")) {
-                    out.extend(Self::type_names(src, &toks[colon + 1..]));
-                }
-            }
+    fn receiver_type_must_fallback(
+        &self,
+        from: usize,
+        name: &str,
+        types: &BTreeSet<String>,
+    ) -> bool {
+        if types.iter().any(|ty| self.deref_types.contains(ty)) {
+            return true;
         }
-        out
+        self.callables
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|callable| {
+                self.reach[from].contains(&callable.src)
+                    && callable
+                        .type_owner
+                        .as_ref()
+                        .is_some_and(|owner| types.contains(owner))
+            })
+            .filter_map(|callable| callable.trait_name.as_deref())
+            .any(|trait_name| {
+                let bare = trait_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(trait_name)
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(trait_name)
+                    .trim();
+                self.callables.values().flatten().any(|candidate| {
+                    self.reach[from].contains(&candidate.src)
+                        && candidate.type_owner.is_none()
+                        && candidate.trait_name.as_deref().is_some_and(|name| {
+                            name.split('<')
+                                .next()
+                                .unwrap_or(name)
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(name)
+                                .trim()
+                                == bare
+                        })
+                })
+            })
     }
 }
 
@@ -1560,6 +1953,8 @@ struct Body<'w> {
     src: usize,
     record: &'static ItemRecord,
     params: HashMap<&'static str, Vec<Tok>>,
+    /// Simple locals whose current type is stated by one unshadowed, unreassigned binding.
+    locals: HashMap<&'static str, (usize, BTreeSet<String>)>,
     toks: Vec<Tok>,
 }
 
@@ -1584,23 +1979,21 @@ impl<'w> Body<'w> {
                 let Some(colon) = param.iter().position(|t| s.is(Some(t), ":")) else {
                     continue;
                 };
-                if let Some(name) = param[..colon]
-                    .iter()
-                    .rev()
-                    .find(|t| t.kind == Kind::Ident && s.text(**t) != "mut")
-                {
-                    params.insert(s.text(*name), param[colon + 1..].to_vec());
+                for name in pattern_names(s, &param[..colon]) {
+                    params.insert(name, param[colon + 1..].to_vec());
                 }
             }
         }
         let toks = record
             .body()
             .map_or_else(Vec::new, |body| s.lex(body.start(), body.end()));
+        let locals = local_types(world, src, record, &toks, &params);
         Self {
             world,
             src,
             record,
             params,
+            locals,
             toks,
         }
     }
@@ -1630,9 +2023,68 @@ impl<'w> Body<'w> {
         if here.is_empty() { methods } else { here }
     }
 
-    /// The first-party items a call can be, by what the source says of it: a receiver whose type
-    /// is written (`self`, a field of it, a parameter) narrows by that type; one whose type is not
-    /// written answers every method of the name the package can reach.
+    fn self_field_type(&self, field: &str) -> BTreeSet<String> {
+        let Some(owner) = self.record.type_owner() else {
+            return BTreeSet::new();
+        };
+        let module = self.record.module_paths()[0];
+        let mut types = BTreeSet::new();
+        for (at, record) in self
+            .world
+            .fields
+            .get(&(owner.to_owned(), field.to_owned()))
+            .into_iter()
+            .flatten()
+            .filter(|(at, record)| *at == self.src && record.module_paths()[0] == module)
+        {
+            let src = &self.world.srcs[*at];
+            let toks = src.lex(record.whole().start(), record.whole().end());
+            if let Some(colon) = toks.iter().position(|tok| src.is(Some(tok), ":")) {
+                types.extend(self.world.written_type(self.src, src, &toks[colon + 1..]));
+            }
+        }
+        types
+    }
+
+    fn receiver_types(&self, site: &Site) -> Option<BTreeSet<String>> {
+        let Form::Method(Some(chain)) = &site.form else {
+            return None;
+        };
+        let types = match chain.as_slice() {
+            ["self", field] => self.self_field_type(field),
+            [local] => self
+                .locals
+                .get(local)
+                .filter(|(bound, _)| *bound < site.at)
+                .map(|(_, types)| types.clone())
+                .unwrap_or_default(),
+            _ => BTreeSet::new(),
+        };
+        if types.is_empty()
+            || self
+                .world
+                .receiver_type_must_fallback(self.src, site.name, &types)
+        {
+            None
+        } else {
+            Some(types)
+        }
+    }
+
+    fn receiver_is_typed(&self, site: &Site) -> bool {
+        match &site.form {
+            Form::Method(_) => self.receiver_types(site).is_some(),
+            _ => true,
+        }
+    }
+
+    /// The first-party items a call can be, by what the source states. A receiver type exists only
+    /// for `self.field` whose declaration is a reference or one unambiguous first-party path, and
+    /// for `let name: Type = …` with the same type restriction when `name` has exactly one binding
+    /// in the whole function and is never assigned. Constructor and return expressions are never
+    /// typed. A same-name type ambiguity, trait-provided method, or `Deref` receiver is untyped.
+    /// Every narrowed lookup goes through [`nonempty_or`], so an empty typed answer always returns
+    /// the name-matched answer.
     fn resolve(&self, site: &Site) -> Vec<Callable> {
         let world = self.world;
         let reach = &world.reach[self.src];
@@ -1659,61 +2111,252 @@ impl<'w> Body<'w> {
                 .cloned()
                 .collect()
         };
-        match &site.form {
-            Form::Macro => Vec::new(),
-            Form::Method(_) if site.name == "into" => named("from")
-                .into_iter()
-                .filter(|c| {
-                    c.trait_name
-                        .as_deref()
-                        .is_some_and(|t| t == "From" || t.starts_with("From<"))
-                })
-                .collect(),
-            Form::Method(Some(chain)) if chain.as_slice() == ["self"] => self.own_methods(&all),
-            Form::Method(Some(chain)) => {
-                let mut types = match chain[0] {
-                    "self" => self
-                        .record
-                        .type_owner()
-                        .map(|owner| BTreeSet::from([owner.to_owned()]))
-                        .unwrap_or_default(),
-                    first => match self.params.get(first) {
-                        Some(ty) => World::type_names(self.s(), ty),
-                        None => return any_method(),
-                    },
-                };
-                for field in &chain[1..] {
-                    types = world.field_types(&types, field);
-                }
-                methods_of(&all, &types)
+        let (fallback, preferred) = match &site.form {
+            Form::Macro => (Vec::new(), Vec::new()),
+            Form::Method(_) if site.name == "into" => {
+                let from: Vec<Callable> = named("from")
+                    .into_iter()
+                    .filter(|c| {
+                        c.trait_name
+                            .as_deref()
+                            .is_some_and(|t| t == "From" || t.starts_with("From<"))
+                    })
+                    .collect();
+                (from.clone(), from)
             }
-            Form::Method(None) => any_method(),
+            Form::Method(Some(chain)) if chain.as_slice() == ["self"] => {
+                let preferred = self
+                    .record
+                    .type_owner()
+                    .filter(|owner| !world.deref_types.contains(*owner))
+                    .map_or_else(Vec::new, |_| self.own_methods(&all));
+                (any_method(), preferred)
+            }
+            Form::Method(Some(_)) => {
+                let preferred = self
+                    .receiver_types(site)
+                    .map_or_else(Vec::new, |types| methods_of(&all, &types));
+                (any_method(), preferred)
+            }
+            Form::Method(None) => (any_method(), any_method()),
             Form::Path(quals) => match quals.last().copied().unwrap_or_default() {
-                "Self" => self.own_methods(&all),
-                "crate" | "self" | "super" => free(&|c: &Callable| c.src == self.src),
-                qualifier if qualifier.starts_with(|c: char| c.is_ascii_uppercase()) => {
-                    methods_of(&all, &BTreeSet::from([qualifier.to_owned()]))
+                "Self" => (any_method(), self.own_methods(&all)),
+                "crate" | "self" | "super" => {
+                    let preferred = free(&|c: &Callable| c.src == self.src);
+                    (free(&|_| true), preferred)
                 }
-                module => free(&|c: &Callable| c.module.rsplit("::").next() == Some(module)),
+                qualifier if qualifier.starts_with(|c: char| c.is_ascii_uppercase()) => (
+                    any_method(),
+                    methods_of(&all, &BTreeSet::from([qualifier.to_owned()])),
+                ),
+                module => {
+                    let preferred =
+                        free(&|c: &Callable| c.module.rsplit("::").next() == Some(module));
+                    (free(&|_| true), preferred)
+                }
             },
             Form::Bare | Form::Value => {
                 if self.params.contains_key(site.name) {
-                    return Vec::new();
-                }
-                let module = self.record.module_paths()[0];
-                let here = free(&|c: &Callable| c.src == self.src && c.module == module);
-                if !here.is_empty() {
-                    return here;
-                }
-                let package = free(&|c: &Callable| c.src == self.src);
-                if package.is_empty() {
-                    free(&|_| true)
+                    (Vec::new(), Vec::new())
                 } else {
-                    package
+                    let module = self.record.module_paths()[0];
+                    let here = free(&|c: &Callable| c.src == self.src && c.module == module);
+                    let package = free(&|c: &Callable| c.src == self.src);
+                    let preferred = if !here.is_empty() { here } else { package };
+                    (free(&|_| true), preferred)
+                }
+            }
+        };
+        nonempty_or(fallback, preferred)
+    }
+}
+
+fn nonempty_or(fallback: Vec<Callable>, preferred: Vec<Callable>) -> Vec<Callable> {
+    if preferred.is_empty() {
+        fallback
+    } else {
+        preferred
+    }
+}
+
+/// The end of a `let` statement, respecting delimiters inside its initializer.
+fn let_end(s: &Src, toks: &[Tok], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate().skip(start) {
+        match s.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" if depth > 0 => depth -= 1,
+            ";" if depth == 0 => return at,
+            _ => {}
+        }
+    }
+    toks.len()
+}
+
+fn top_level_token(s: &Src, toks: &[Tok], wanted: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate() {
+        match s.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" if depth > 0 => depth -= 1,
+            text if depth == 0 && text == wanted => return Some(at),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn receiver_pattern_names(src: &Src, toks: &[Tok]) -> BTreeSet<&'static str> {
+    toks.iter()
+        .filter(|tok| tok.kind == Kind::Ident)
+        .map(|tok| src.text(*tok))
+        .filter(|name| {
+            ![
+                "let", "mut", "ref", "Some", "Ok", "Err", "None", "self", "Self",
+            ]
+            .contains(name)
+                && !name.starts_with(|c: char| c.is_ascii_uppercase())
+        })
+        .collect()
+}
+
+/// How often `name` is introduced by any binding form this lexical guard can encounter. A
+/// conservative extra count only disables typing, which is the required direction when a pattern
+/// cannot be decided mechanically.
+fn binding_count(src: &Src, toks: &[Tok], params: &HashMap<&str, Vec<Tok>>, name: &str) -> usize {
+    let mut count = usize::from(params.contains_key(name));
+    for (at, tok) in toks.iter().enumerate() {
+        if src.is(Some(tok), "let") {
+            let end = let_end(src, toks, at + 1);
+            let statement = &toks[at + 1..end];
+            let pattern_end = top_level_token(src, statement, "=").unwrap_or(statement.len());
+            count +=
+                usize::from(receiver_pattern_names(src, &statement[..pattern_end]).contains(name));
+        }
+        if src.is(Some(tok), "for") {
+            let rest = &toks[at + 1..];
+            if let Some(end) = top_level_token(src, rest, "in") {
+                count += usize::from(receiver_pattern_names(src, &rest[..end]).contains(name));
+            }
+        }
+        if src.is(Some(tok), "match") {
+            let open = depth_zero(src, toks, at + 1, &["{"]);
+            let Some(close) = (open < toks.len())
+                .then(|| closing(src, toks, open))
+                .flatten()
+            else {
+                continue;
+            };
+            let arms = &toks[open + 1..close];
+            let mut arm = 0;
+            while arm < arms.len() {
+                let arrow = depth_zero(src, arms, arm, &["=>"]);
+                if arrow >= arms.len() {
+                    break;
+                }
+                let guard = arms[arm..arrow]
+                    .iter()
+                    .position(|tok| src.is(Some(tok), "if"))
+                    .map_or(arrow, |guard| arm + guard);
+                count += usize::from(receiver_pattern_names(src, &arms[arm..guard]).contains(name));
+                let body = arrow + 1;
+                arm = if src.is(arms.get(body), "{") {
+                    closing(src, arms, body).map_or(arms.len(), |close| close + 1)
+                } else {
+                    depth_zero(src, arms, body, &[","])
+                };
+                if src.is(arms.get(arm), ",") {
+                    arm += 1;
                 }
             }
         }
     }
+    let mut at = 0;
+    while at < toks.len() {
+        if src.is(toks.get(at), "|")
+            && let Some(close) = toks[at + 1..]
+                .iter()
+                .position(|tok| src.is(Some(tok), "|"))
+                .map(|close| close + at + 1)
+        {
+            count += usize::from(receiver_pattern_names(src, &toks[at + 1..close]).contains(name));
+            at = close + 1;
+        } else {
+            at += 1;
+        }
+    }
+    count
+}
+
+fn assigned(src: &Src, toks: &[Tok], name: &str, after: usize) -> bool {
+    toks.iter().enumerate().any(|(at, tok)| {
+        if tok.start <= after || !src.is(Some(tok), "=") {
+            return false;
+        }
+        let start = toks[..at]
+            .iter()
+            .rposition(|candidate| {
+                [";", "{", "}"]
+                    .iter()
+                    .any(|stop| src.is(Some(candidate), stop))
+            })
+            .map_or(0, |start| start + 1);
+        let target = &toks[start..at];
+        !target
+            .iter()
+            .any(|candidate| src.is(Some(candidate), "let"))
+            && target
+                .iter()
+                .any(|candidate| candidate.kind == Kind::Ident && src.text(*candidate) == name)
+    })
+}
+
+/// Locals whose receiver type is stated by exactly `let name: Type = …`, where the written type
+/// is a reference or one unambiguous first-party path, the name has exactly one binding in the
+/// whole function, and it is never assigned. Initializers never contribute a type.
+fn local_types(
+    world: &World,
+    src: usize,
+    _record: &ItemRecord,
+    toks: &[Tok],
+    params: &HashMap<&str, Vec<Tok>>,
+) -> HashMap<&'static str, (usize, BTreeSet<String>)> {
+    let s = &world.srcs[src];
+    let mut found = HashMap::new();
+    for (at, tok) in toks.iter().enumerate() {
+        if !s.is(Some(tok), "let") {
+            continue;
+        }
+        let end = let_end(s, toks, at + 1);
+        let statement = &toks[at + 1..end];
+        let Some(equal) = top_level_token(s, statement, "=") else {
+            continue;
+        };
+        let pattern = &statement[..equal];
+        let Some(colon) = top_level_token(s, pattern, ":") else {
+            continue;
+        };
+        let binding: Vec<&Tok> = pattern[..colon]
+            .iter()
+            .filter(|tok| !s.is(Some(tok), "mut"))
+            .collect();
+        let [name] = binding.as_slice() else {
+            continue;
+        };
+        if name.kind != Kind::Ident {
+            continue;
+        }
+        let name = s.text(**name);
+        let types = world.written_type(src, s, &pattern[colon + 1..]);
+        if types.is_empty() {
+            continue;
+        }
+        let bound = toks.get(end).map_or(tok.end, |end| end.start);
+        if binding_count(s, toks, params, name) == 1 && !assigned(s, toks, name, bound) {
+            found.insert(name, (bound, types));
+        }
+    }
+    found
 }
 
 fn methods_of(all: &[Callable], types: &BTreeSet<String>) -> Vec<Callable> {
@@ -3302,10 +3945,12 @@ const JOIN_WITHIN: &str = "bt-pty crate::join_within";
 const PTY_ERROR_FROM: &str = "bt-pty crate::PtyError::from (generated)";
 const REQUEST: &str = "bt-platform crate::http::<Request as Drop>::drop [windows]";
 const SHARED_LOCKED: &str = "bt-platform crate::http::Shared::locked [windows]";
+const MACOS_TASKBAR: &str =
+    "bt-platform crate::macos_notify::<Taskbar as Drop>::drop [target_os = \"macos\"]";
 
 /// **The exception table** (revision (e)3 as corrected by (f)2 and (g)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`.
-const EXCEPTIONS: [Exception; 13] = [
+const EXCEPTIONS: [Exception; 14] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -3358,15 +4003,19 @@ const EXCEPTIONS: [Exception; 13] = [
         row: "http::Request (Windows)",
         drop: REQUEST,
     },
+    Exception {
+        row: "Taskbar (macOS)",
+        drop: MACOS_TASKBAR,
+    },
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 40] = [
+const PINNED: [Pinned; 41] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
         effects: &[("SetEvent", 1), ("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: CLOSE_WINDOWS,
@@ -3378,13 +4027,13 @@ const PINNED: [Pinned; 40] = [
         body: DIRWATCH_MACOS,
         edges: &[&[STOPPER_SIGNAL]],
         effects: &[("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: STOPPER_SIGNAL,
         edges: &[],
         effects: &[],
-        leaves: &[],
+        leaves: &["signal"],
     },
     Pinned {
         body: SHUTDOWN,
@@ -3396,7 +4045,7 @@ const PINNED: [Pinned; 40] = [
         body: ADMITTED,
         edges: &[&[ROLE], &[CONTAINS], &[COUNT], &[METER], &[FRESH], &[FRESH]],
         effects: &[],
-        leaves: &[],
+        leaves: &["refused"],
     },
     Pinned {
         body: ROLE,
@@ -3448,7 +4097,7 @@ const PINNED: [Pinned; 40] = [
             ("Receiver::recv_timeout", 1),
             ("JoinHandle::join", 1),
         ],
-        leaves: &["take"],
+        leaves: &["now", "take"],
     },
     Pinned {
         body: QUEUE_CLOSE,
@@ -3460,7 +4109,7 @@ const PINNED: [Pinned; 40] = [
         body: ATTENTION_WINDOWS,
         edges: &[],
         effects: &[("SetEvent", 1), ("JoinHandle::join", 1), ("CloseHandle", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: ATTENTION_UNIX,
@@ -3470,13 +4119,13 @@ const PINNED: [Pinned; 40] = [
             ("JoinHandle::join", 1),
             ("libc::close", 1),
         ],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: LAUNCH_WINDOWS,
         edges: &[],
         effects: &[("SetEvent", 1), ("JoinHandle::join", 1), ("CloseHandle", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: LAUNCH_UNIX,
@@ -3486,7 +4135,7 @@ const PINNED: [Pinned; 40] = [
             ("JoinHandle::join", 1),
             ("libc::close", 1),
         ],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: ENGINE_WINDOWS,
@@ -3498,7 +4147,7 @@ const PINNED: [Pinned; 40] = [
         body: ENGINE_WINDOWS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["load", "take"],
     },
     Pinned {
         body: ENGINE_MACOS,
@@ -3510,7 +4159,7 @@ const PINNED: [Pinned; 40] = [
         body: ENGINE_MACOS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["load", "take"],
     },
     Pinned {
         body: ENGINE_PORTABLE_SHUTDOWN,
@@ -3544,13 +4193,13 @@ const PINNED: [Pinned; 40] = [
         body: SEATS_SHUTDOWN_ALL,
         edges: &[&[SEAT_SHUTDOWN]],
         effects: &[],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: PTY,
         edges: &[&[DUMP_FINISH], &[PTY_SHUTDOWN]],
         effects: &[],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: DUMP_FINISH,
@@ -3575,7 +4224,7 @@ const PINNED: [Pinned; 40] = [
             &[JOIN_WITHIN],
         ],
         effects: &[("Child::try_wait", 2)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: INPUT_CLOSE,
@@ -3624,6 +4273,12 @@ const PINNED: [Pinned; 40] = [
         edges: &[],
         effects: &[],
         leaves: &[],
+    },
+    Pinned {
+        body: MACOS_TASKBAR,
+        edges: &[],
+        effects: &[],
+        leaves: &["new"],
     },
 ];
 
@@ -3739,11 +4394,10 @@ fn check_pinned(
 /// vocabulary effects by call site, and every edge is itself a pinned body; a `Drop` that is not a
 /// row reaches no registered door, no pinned body and no vocabulary that waits.
 ///
-/// A call is resolved to first-party items by what its source says: a receiver whose type is
-/// written (`self`, a field of it, a parameter) narrows by that type, and one whose type is not
-/// written answers every method of that name the package can reach — which is why a row may list
-/// a leaf. This is a pinned-edge check over the stated inventory, not a whole-program analysis
-/// (§11, A1e's row).
+/// A call follows [`Body::resolve`]'s source-stated rule: typing can only narrow a non-empty answer;
+/// every untyped or typed-empty receiver answers every method of that name the package can reach —
+/// which is why a row may list a leaf. This is a pinned-edge check over the stated inventory, not
+/// a whole-program analysis (§11, A1e's row).
 fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
     world: &World,
     words: &[Word],
@@ -3811,8 +4465,7 @@ fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
                 .collect();
             // A receiver whose type is written is exact; one whose type is not is red only when
             // every item of that name the package can reach is a door or a pinned body.
-            let exact = !matches!(&site.form, Form::Method(None))
-                && !matches!(&site.form, Form::Method(Some(chain)) if chain[0] != "self" && !body.params.contains_key(chain[0]));
+            let exact = body.receiver_is_typed(&site);
             if !reached.is_empty() && (exact || reached.len() == candidates.len()) {
                 failures.push(format!(
                     "`{key}` is a `Drop` outside the exception table that calls `{}` at {}, which \
@@ -4088,7 +4741,7 @@ fn every_door_is_where_the_registry_says() {
 //
 // Every vocabulary entry found in the product outside the body of a registered door function, as
 // rows `(crate, cfg arm, item, entry, count)`, over the declared universe above (`World`). The
-// reading is `cfg`-blind, so a Windows arm and its macOS twin are two rows.
+// reading is platform-blind, so a Windows arm and its macOS twin are two rows.
 //
 // **How a site is recognised.** An entry is a path. A path written in the code — called, or handed
 // over as a value — is resolved through the `use` declarations in scope (both spellings: the full

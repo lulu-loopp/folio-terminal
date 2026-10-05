@@ -5002,7 +5002,7 @@ mod tests {
     #[test]
     fn the_pages_branch_name_goes_quiet_while_the_repository_is_being_read() {
         let mut cache = with_branches(
-            answered(b"## main ", Vec::new(), false),
+            answered(b"## main\0", Vec::new(), false),
             vec![branch("main", true, 0, 0)],
         );
         let head_of_page = |cache: &GitCache| match &rows_of(cache).rows[0] {

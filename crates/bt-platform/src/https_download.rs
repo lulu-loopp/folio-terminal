@@ -656,6 +656,7 @@ impl<S: Store> Drop for Partial<S> {
 /// half at `http://127.0.0.1:{port}`.
 #[cfg(test)]
 pub(crate) mod loopback {
+    #[cfg(any(windows, target_os = "macos"))]
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -663,6 +664,7 @@ pub(crate) mod loopback {
     };
 
     /// One thing the server does on a connection, in order.
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) enum Step {
         /// Write these bytes.
         Send(Vec<u8>),
@@ -677,10 +679,12 @@ pub(crate) mod loopback {
     /// How long a server waits for connections it was told to expect before
     /// its thread ends, so a test that fails early leaves no listener behind
     /// for long.
+    #[cfg(any(windows, target_os = "macos"))]
     const LISTEN_FOR: Duration = Duration::from_secs(60);
 
     /// Serve up to `connections` connections, each answered by `script` given
     /// the request line's path. Returns the port.
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn serve(
         connections: usize,
         script: impl Fn(&str) -> Vec<Step> + Send + 'static,
@@ -747,6 +751,7 @@ pub(crate) mod loopback {
     }
 
     /// A status line, `Connection: close`, and the headers given.
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn head(status: u16, reason: &str, headers: &[String]) -> Vec<u8> {
         let mut out = format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\n");
         for header in headers {
@@ -766,6 +771,7 @@ pub(crate) mod loopback {
     /// arrived — against this server a head followed by silence reached
     /// `didReceiveResponse:` only after the idle timeout (observed on macOS 26,
     /// 2026-09-26), where a real asset's body follows its head at once.
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn begun(headers: &[String]) -> Vec<u8> {
         let mut all = vec!["Content-Type: application/octet-stream".to_owned()];
         all.extend_from_slice(headers);
@@ -775,6 +781,7 @@ pub(crate) mod loopback {
     }
 
     /// A `200` carrying `body`, with its length announced when `announce`.
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn ok(body: &[u8], announce: Option<usize>) -> Vec<u8> {
         let headers: Vec<String> = announce
             .map(|length| vec![format!("Content-Length: {length}")])

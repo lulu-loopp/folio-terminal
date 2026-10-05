@@ -43,6 +43,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A click on a pane's title-bar controls while the pane is moving lands only on a control that is drawn there.
 - In a narrow Settings window, a button whose edge is cut off no longer answers a click on the space beside it.
 - Commands Folio runs to learn about the machine no longer leave helper processes behind after a timeout or after Folio exits.
 - PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
