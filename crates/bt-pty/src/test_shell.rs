@@ -210,50 +210,77 @@ fn warmed_module_analysis_cache(program: &OsStr) -> PathBuf {
     let mut warmed = WARMED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // A program that cannot be started has nothing to warm, and the child's own start will fail
-    // the same way — which is what a fallback test is about. It leaves the edition unwarmed, so
-    // the next child of that edition that can start does warm it.
-    if !warmed.contains(&cache) && warm_module_analysis_cache(program, &root, &cache) {
+    // **A warm-up never fails a test** (review of round 7, item 2). When it cannot finish — the
+    // program cannot start (a fallback test's missing `pwsh.exe`), the folder or the copy is
+    // refused, another test process holds the file, PowerShell's delayed save comes after the
+    // wait — the edition stays cold, the next child of that edition tries again, and this child
+    // runs on whatever cache there is: slower at worst, and its give-up message names the
+    // warm-up's outcome ([`TestShell::account`]).
+    let outcome = if warmed.contains(&cache) {
+        return cache;
+    } else {
+        warm_module_analysis_cache(program, &root, &cache)
+    };
+    let done = outcome.is_ok();
+    WARM_UP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(match outcome {
+            Ok(said) | Err(said) => said,
+        });
+    if done {
         warmed.push(cache.clone());
     }
     cache
 }
 
 /// The warm-up that makes `cache` what a pane's is: **the account's own analysis cache, copied,
-/// then completed for the module path a test child gets** ([`fresh_module_path`]).
+/// then completed for the module path a test child gets** ([`fresh_module_path`]). `Ok` with what
+/// it did when it finished; `Err` with why when it did not.
 ///
 /// A pane's PowerShell uses the account's cache, which its sessions keep warm; the copy gives a
 /// test child that same start without a test ever writing the account's file. The edition is
 /// asked where that file is ([`account_analysis_cache`]) — PowerShell 7 names it with a hash
-/// only it knows. A lookup of a command that does not exist then analyses whatever the copy does
-/// not describe, with the pane announcements removed and the per-user data folders pointed into
-/// `root`, so the warm-up writes nothing but the cache.
+/// only it knows. The copy is written under a name of this process's own and renamed into
+/// place, so two test processes warming at once each put a whole file there and neither reads
+/// half of the other's. A lookup of a command that does not exist then analyses whatever the
+/// copy does not describe, with the pane announcements removed and the per-user data folders
+/// pointed into `root`, so the warm-up writes nothing but the cache.
 ///
 /// **The shell stays until what it analysed is on disk.** PowerShell writes the cache on a timer,
 /// about 14 s after it changed (measured on both editions, 2026-10-05), not when the process
 /// ends, and while a long analysis runs the timer can fire half-way through it: on the CI runner
 /// a warm-up that stopped at the first write left a cache that still cost the next child 19 s
-/// (scratch run 37261258948). So the warm-up waits for a write *after* its lookup ended, up to
-/// 30 s past it; when the lookup changed nothing there is nothing to write, and none comes.
-fn warm_module_analysis_cache(program: &OsStr, root: &Path, cache: &Path) -> bool {
+/// (scratch run 37261258948). So the warm-up waits for a write *after* its lookup ended, and
+/// stops waiting 30 s after it. When the lookup changed nothing, no write comes and the whole
+/// 30 s is spent; when a write comes, it stops at once.
+fn warm_module_analysis_cache(
+    program: &OsStr,
+    root: &Path,
+    cache: &Path,
+) -> Result<String, String> {
     const CEILING: Duration = Duration::from_secs(300);
-    std::fs::create_dir_all(root.join("appdata")).unwrap_or_else(|error| {
-        panic!(
-            "the test shells' module analysis cache folder {} cannot be made: {error}",
+    let shown = Path::new(program).display();
+    std::fs::create_dir_all(root.join("appdata")).map_err(|error| {
+        format!(
+            "{shown} not warmed: the folder {} cannot be made: {error}",
             root.display()
         )
-    });
+    })?;
     let started = Instant::now();
     let copied = match account_analysis_cache(program) {
         Some(account) if account.is_file() => {
-            std::fs::copy(&account, cache).unwrap_or_else(|error| {
-                panic!(
-                    "the account's module analysis cache {} cannot be copied to {}: {error}",
-                    account.display(),
-                    cache.display()
-                )
-            });
-            format!("copied the account's {}", account.display())
+            let staging = root.join(format!("ModuleAnalysisCache.{}.copy", std::process::id()));
+            match std::fs::copy(&account, &staging).and_then(|_| std::fs::rename(&staging, cache)) {
+                Ok(()) => format!("copied the account's {}", account.display()),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&staging);
+                    format!(
+                        "the account's {} was not copied ({error}); completing what is there",
+                        account.display()
+                    )
+                }
+            }
         }
         Some(account) => format!("the account has no cache at {} yet", account.display()),
         None => "the edition did not say where the account's cache is".to_owned(),
@@ -280,7 +307,7 @@ fn warm_module_analysis_cache(program: &OsStr, root: &Path, cache: &Path) -> boo
         .env("POWERSHELL_UPDATECHECK", "Off")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::null());
     for name in PANE_ANNOUNCEMENTS {
         command.env_remove(name);
     }
@@ -293,54 +320,39 @@ fn warm_module_analysis_cache(program: &OsStr, root: &Path, cache: &Path) -> boo
         }
         None => {}
     }
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            WARM_UP
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(format!(
-                    "{} could not be started to warm {}: {error}",
-                    Path::new(program).display(),
-                    cache.display()
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{shown} not warmed: it could not be started ({error})"))?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() > CEILING => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{shown} not warmed: the warm-up did not end within {CEILING:?} ({copied})"
                 ));
-            return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                return Err(format!(
+                    "{shown} not warmed: the warm-up could not be waited for ({error})"
+                ));
+            }
         }
-    };
-    while child.try_wait().ok().flatten().is_none() {
-        if started.elapsed() > CEILING {
-            let _ = child.kill();
-            panic!(
-                "{} did not finish warming the test shells' module analysis cache {} within \
-                 {CEILING:?}",
-                Path::new(program).display(),
-                cache.display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(
-        cache.is_file(),
-        "{} ended without writing the test shells' module analysis cache {}: {}",
-        Path::new(program).display(),
-        cache.display(),
-        String::from_utf8_lossy(
-            &child
-                .wait_with_output()
-                .map(|output| output.stderr)
-                .unwrap_or_default()
-        )
-    );
-    WARM_UP
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(format!(
-            "{} warmed {} in {:?} ({copied})",
-            Path::new(program).display(),
+    if cache.is_file() {
+        Ok(format!(
+            "{shown} warmed {} in {:?} ({copied})",
             cache.display(),
             started.elapsed()
-        ));
-    true
+        ))
+    } else {
+        Err(format!(
+            "{shown} not warmed: no cache was written at {} ({copied})",
+            cache.display()
+        ))
+    }
 }
 
 /// **Where `program` keeps the account's own module analysis cache**, asked of the edition in a
@@ -1681,6 +1693,37 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("powershell.exe warmed ")),
             "this process warmed the Windows PowerShell cache before its first child: {warmed:?}"
+        );
+    }
+
+    /// PIN — **a warm-up that cannot finish never fails a test, and leaves its edition cold**
+    /// (review of round 7, item 2). A program that cannot be started is the cheapest of those
+    /// outcomes to make here; the others take the same road (`Err` → recorded, not marked
+    /// warmed). The child is still handed the cache path, the outcome is on record for the
+    /// give-up message, and the next child of that edition tries again.
+    ///
+    /// RED (mutations: panic on a warm-up `Err`; mark the edition warmed whatever the outcome —
+    /// the second child does not try again).
+    #[test]
+    fn a_warm_up_that_cannot_finish_leaves_the_edition_cold_and_the_test_running() {
+        let program = OsStr::new(r"C:\folio-test-shell\missing\pwsh-not-here.exe");
+        let attempts = || {
+            WARM_UP
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|line| line.contains("pwsh-not-here.exe not warmed"))
+                .count()
+        };
+        let before = attempts();
+        let first = warmed_module_analysis_cache(program);
+        assert_eq!(attempts(), before + 1, "the failed warm-up is on record");
+        let second = warmed_module_analysis_cache(program);
+        assert_eq!(first, second);
+        assert_eq!(
+            attempts(),
+            before + 2,
+            "the edition stayed cold, so it was tried again"
         );
     }
 
