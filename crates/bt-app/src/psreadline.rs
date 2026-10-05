@@ -238,16 +238,21 @@ pub enum ExecutionPolicy {
 
 impl ExecutionPolicy {
     #[must_use]
+    /// A policy's name in any case, as PowerShell reads it — the probe prints the canonical
+    /// spelling, and a row's own `-ExecutionPolicy bypass` is the same policy.
     pub fn parse(text: &str) -> Self {
-        match text.trim() {
-            "Restricted" => Self::Restricted,
-            "AllSigned" => Self::AllSigned,
-            "RemoteSigned" => Self::RemoteSigned,
-            "Unrestricted" => Self::Unrestricted,
-            "Bypass" => Self::Bypass,
-            "Undefined" => Self::Undefined,
-            _ => Self::Unknown,
-        }
+        let text = text.trim();
+        [
+            Self::Restricted,
+            Self::AllSigned,
+            Self::RemoteSigned,
+            Self::Unrestricted,
+            Self::Bypass,
+            Self::Undefined,
+        ]
+        .into_iter()
+        .find(|policy| policy.name().eq_ignore_ascii_case(text))
+        .unwrap_or(Self::Unknown)
     }
 
     /// `Get-ExecutionPolicy`'s own word, for the reason line.
@@ -281,6 +286,15 @@ impl ExecutionPolicy {
     #[must_use]
     pub fn refuses_unsigned_modules(self) -> bool {
         matches!(self, Self::AllSigned | Self::Restricted)
+    }
+
+    /// Whether this effective policy refuses an unsigned script file.
+    ///
+    /// The PSReadLine installer and the `$PROFILE` fallback ask the same policy
+    /// question about different script files, so the answer is named once.
+    #[must_use]
+    pub fn blocks_script(self) -> bool {
+        self.refuses_unsigned_modules()
     }
 }
 

@@ -82,7 +82,6 @@ impl Forms {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    #[cfg(test)]
     Migrate,
     Remove,
 }
@@ -153,7 +152,6 @@ fn invalid_encoding() -> io::Error {
 
 /// None means byte-identical. Each line keeps its own terminator; removal
 /// consumes only the owned line's terminator, never a neighbouring blank line.
-#[cfg(test)]
 pub fn rewrite(bytes: &[u8], forms: &Forms, action: Action) -> io::Result<Option<Vec<u8>>> {
     rewrite_recorded(bytes, forms, action, || Ok(()))
 }

@@ -1126,6 +1126,22 @@ impl EnvironmentRefresh {
             inherited,
         }
     }
+
+    /// The environment a pane receives before Folio and profile declarations are layered.
+    ///
+    /// Environment-derived declarations must read this block rather than the terminal process's
+    /// launch environment, otherwise a declaration computed before the refresh can overwrite the
+    /// current account value it was meant to extend.
+    #[must_use]
+    pub fn before_folio(&self) -> Vec<(OsString, OsString)> {
+        spawn_environment(
+            &self.fresh,
+            &self.launch_snapshot,
+            &self.inherited,
+            &[],
+            &[],
+        )
+    }
 }
 
 /// Compose the complete environment for one child while preserving source order.
@@ -2588,6 +2604,35 @@ mod tests {
             .iter()
             .find(|(key, _)| environment_key_eq(key, OsStr::new(name)))
             .map(|(_, value)| value.as_os_str())
+    }
+
+    /// PIN — **a pane's module path is the fresh logon's, not the one Folio's parent session
+    /// handed Folio** (T-INTEGRATION-INJECT-4 round 6). A Folio started from a PowerShell 7
+    /// session carries 7's `PSModulePath` in its own environment and in its launch snapshot
+    /// alike; that value is inherited, not an override, so a Windows PowerShell pane gets the
+    /// current user's logon value and computes its own module path from it — it does not load
+    /// 7's PSReadLine or 7's `Microsoft.PowerShell.Security`. A module path set for Folio's own
+    /// launch on purpose (differing from what Folio started with) still wins.
+    ///
+    /// RED (mutation: take every inherited value whatever the launch snapshot says).
+    #[test]
+    fn a_panes_module_path_is_the_fresh_logons_not_folios_parents() {
+        let logon = r"C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules";
+        let seven = r"D:\Documents\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules;C:\Program Files\WindowsPowerShell\Modules";
+        let fresh = environment(&[("PSModulePath", logon)]);
+        let from_seven = environment(&[("PSModulePath", seven)]);
+        let composed = spawn_environment(&fresh, &from_seven, &from_seven, &[], &[]);
+        assert_eq!(
+            composed_value(&composed, "PSModulePath"),
+            Some(OsStr::new(logon))
+        );
+        let chosen = environment(&[("PSModulePath", r"E:\modules")]);
+        let composed = spawn_environment(&fresh, &from_seven, &chosen, &[], &[]);
+        assert_eq!(
+            composed_value(&composed, "PSModulePath"),
+            Some(OsStr::new(r"E:\modules")),
+            "an explicit launch override still wins"
+        );
     }
 
     #[test]
@@ -4947,6 +4992,13 @@ mod tests {
             format!("{SEED}\r\n"),
             "the line editor saved what was typed into {}",
             history.display()
+        );
+        // And what a give-up message would say names the shell's module path and its line
+        // editor (round 6: a shell that went silent on CI said neither).
+        let account = oracle.session.account();
+        assert!(
+            account.contains("reported PSModulePath ") && account.contains("PSReadLine "),
+            "the account names the module path and the line editor: {account}"
         );
     }
 

@@ -3841,6 +3841,8 @@ pub struct ProfileLine {
     /// four answers left are the table's own, and a `String` per row per frame
     /// bought nothing but an allocation.
     pub capability: Option<&'static str>,
+    /// Whether this PowerShell row needs, and can use, the persistent fallback.
+    pub profile_fallback: crate::shell_integration::PowerShellProfileFallback,
     /// Whether this row starts one of the built-in **agents** — [`AGENT_IDS`],
     /// read through [`agent_command`].
     ///
@@ -3899,6 +3901,12 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
             .map(|(index, profile)| {
                 let available = programs.is_available(&profile.id);
                 let is_agent = agent_command(profile).is_some();
+                let program = programs.program(&profile.id).map(Path::new);
+                let profile_fallback = power_shell_profile_fallback_for_launch(
+                    profile,
+                    program,
+                    crate::shell_integration::powershell_integration_enabled(),
+                );
                 ProfileLine {
                     index,
                     mark: profile.mark,
@@ -3917,11 +3925,12 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                     capability: available.then(|| {
                         capability_text_for_launch(
                             profile,
-                            programs.program(&profile.id).map(Path::new),
+                            program,
                             crate::shell_integration::powershell_integration_enabled(),
                         )
                         .text()
                     }),
+                    profile_fallback,
                     is_agent,
                     is_default: index == default,
                     default_is_automatic: automatic,
@@ -4026,6 +4035,19 @@ pub fn capability_text(profile: &Profile) -> crate::i18n::Text {
     )
 }
 
+/// The arguments row `index` starts with, as the launch hands them over.
+#[must_use]
+pub fn launch_arguments_of(index: usize) -> Vec<OsString> {
+    with_table(|table| {
+        table.get(index).map_or_else(Vec::new, |profile| {
+            launch_args(profile)
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        })
+    })
+}
+
 #[must_use]
 pub fn capability_text_for_launch(
     profile: &Profile,
@@ -4033,17 +4055,30 @@ pub fn capability_text_for_launch(
     powershell_integration: bool,
 ) -> crate::i18n::Text {
     if served_by(profile) == Integration::PowerShellOptIn {
-        let arguments = launch_args(profile)
-            .into_iter()
-            .map(OsString::from)
-            .collect::<Vec<_>>();
-        if !powershell_integration
-            || !program.is_some_and(crate::shell_integration::is_powershell)
-            || !program.is_some_and(|program| {
-                crate::shell_integration::powershell_arguments_are_safe(program, &arguments)
-            })
+        let fallback =
+            power_shell_profile_fallback_for_launch(profile, program, powershell_integration);
+        if let Some(sentence) = fallback
+            .policy_cause()
+            .and_then(crate::shell_integration::PolicyCause::sentence)
         {
-            return crate::i18n::Text::CapPowerShellNotProvided;
+            return sentence;
+        }
+        match fallback {
+            crate::shell_integration::PowerShellProfileFallback::NotNeeded => {}
+            crate::shell_integration::PowerShellProfileFallback::Enabled => {
+                return crate::i18n::Text::CapPowerShellViaProfile;
+            }
+            crate::shell_integration::PowerShellProfileFallback::PolicyChangeable
+            | crate::shell_integration::PowerShellProfileFallback::PolicyManaged
+            | crate::shell_integration::PowerShellProfileFallback::PolicyProcess
+            | crate::shell_integration::PowerShellProfileFallback::PolicyLocation
+            | crate::shell_integration::PowerShellProfileFallback::Unreadable
+            | crate::shell_integration::PowerShellProfileFallback::Pending
+            | crate::shell_integration::PowerShellProfileFallback::Offer
+            | crate::shell_integration::PowerShellProfileFallback::NoProfile
+            | crate::shell_integration::PowerShellProfileFallback::Unsupported => {
+                return crate::i18n::Text::CapPowerShellNotProvided;
+            }
         }
     }
     capability_of_parts(
@@ -4051,6 +4086,29 @@ pub fn capability_text_for_launch(
         profile.paths,
         crate::shell_integration::declares_hyperlinks(profile),
         false,
+    )
+}
+
+fn power_shell_profile_fallback_for_launch(
+    profile: &Profile,
+    program: Option<&Path>,
+    powershell_integration: bool,
+) -> crate::shell_integration::PowerShellProfileFallback {
+    if served_by(profile) != Integration::PowerShellOptIn || !powershell_integration {
+        return crate::shell_integration::PowerShellProfileFallback::NoProfile;
+    }
+    let Some(program) = program.filter(|program| crate::shell_integration::is_powershell(program))
+    else {
+        return crate::shell_integration::PowerShellProfileFallback::NoProfile;
+    };
+    let arguments = launch_args(profile)
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    crate::shell_integration::powershell_profile_fallback(
+        program,
+        &arguments,
+        powershell_integration,
     )
 }
 

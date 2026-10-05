@@ -156,7 +156,7 @@ impl Runtime<'_> {
     /// belongs to: a second deletion while the first card is still standing
     /// replaces the pending undo, and a verb pressed on a card that is no longer
     /// the one holding it must do nothing rather than undo the wrong thing.
-    pub(in crate::runtime) fn toast_with_verb(
+    pub(crate) fn toast_with_verb(
         &mut self,
         kind: toast::ToastKind,
         anchor: toast::ToastAnchor,
@@ -292,6 +292,7 @@ impl Runtime<'_> {
         // no longer true.
         if let toast::ToastHit::Action(id) = hit {
             self.take_profile_undo(id)?;
+            self.take_powershell_profile_undo(id);
             self.take_checkout_undo(id)?;
             if self
                 .window

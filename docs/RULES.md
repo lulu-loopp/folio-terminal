@@ -91,12 +91,21 @@ command line above 32,766 UTF-16 code units are left byte-for-byte unchanged;
 Settings projects that same current answer. A probe failure is unknown, not
 invalid: the next birth may schedule another question on the background worker,
 but no birth waits for it, and one exact executable and argv may start at most
-three parser probes in a process. The loader reads Folio's own
-`shell-integration/folio.ps1`; it never writes `$PROFILE` or changes execution
-policy. Restart, split, duplicate, restore and Recent all use that same seam. An
-older Folio-managed `$PROFILE` line is observed but left
-byte-identical; only the explicit Settings remover, `--remove-shell-integration`
-or `--uninstall-cleanup` removes it. Every writer of that
+three parser probes in a process. Startup and every profile-table change ask all
+command-bearing PowerShell rows on the existing background preparation worker;
+a birth with no answer yet still starts as written and never waits. The loader
+reads Folio's own `shell-integration/folio.ps1`. Restart, split, duplicate,
+restore and Recent all use that same seam. A row which cannot be composed may
+offer one Settings action which writes the guarded managed line to that edition's
+`$PROFILE.CurrentUserCurrentHost`; rows with `NoProfile` or a script-refusing
+execution policy do not. The installed fact and policy are observed per edition,
+once on each Profiles-page visit, and Undo removes only the managed line. The
+PowerShell script returns outside `TERM_PROGRAM=Folio`, so that line is inert
+in other terminals; a nested PowerShell inherits the declaration intentionally.
+The bash and zsh scripts act wherever they are sourced.
+The one existing Settings remover, `--remove-shell-integration`, or
+`--uninstall-cleanup` removes a managed line. No path changes execution policy.
+Every writer of that
 record takes the advisory lock with an explicit asker: `Asker::InApp` waits
 behind Folio's own writers with no deadline, and up to `OUR_TURN` for a holder
 in another process, reporting only that second wait running out; `Asker::Door`
@@ -117,8 +126,11 @@ bound is only for a holder in another process*.
 case surfaced as a red toast. The 2026-09-23 entry replaces that entry's
 "`Asker::InApp` … waits its turn up to `OUR_TURN`" for a holder in this process,
 which gave a false `WouldBlock` whenever our own writer's I/O outlasted two
-seconds. T-INTEGRATION-INJECT-1 replaces §7.1.6j's opt-in offer and automatic
-profile writer with process-scoped injection and an explicit legacy-line remover.
+seconds. T-INTEGRATION-INJECT-1 replaces §7.1.6j's broad automatic profile
+writer with process-scoped injection and an explicit legacy-line remover.
+T-INTEGRATION-INJECT-4 restores a narrow, one-click per-edition fallback only
+beside rows whose argv cannot be safely composed, subject to the `NoProfile` and
+execution-policy gates.
 There is no §7.1.5c; the marks rules live in the
 sections above.
 

@@ -5,6 +5,35 @@ use std::{io, sync::Mutex};
 
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static REMOVAL: Mutex<Option<Report>> = Mutex::new(None);
+/// Every answered one-click install or Undo not yet delivered, each with the window that asked.
+/// A queue, not a slot: two windows' clicks in flight are two answers, and neither replaces the
+/// other.
+static PROFILE_INSTALLS: Mutex<Vec<ProfileInstallAnswer>> = Mutex::new(Vec::new());
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileInstallOutcome {
+    Installed { program: PathBuf, profile: PathBuf },
+    Refused(String),
+    Undone,
+    UndoRefused(String),
+}
+
+/// One answered request: **the window is part of the address** (`files::DirRequest`'s rule), so
+/// the outcome and the Undo handle it carries reach the window whose click asked for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileInstallAnswer {
+    pub window: winit::window::WindowId,
+    pub outcome: ProfileInstallOutcome,
+}
+
+fn answer_profile_install(window: winit::window::WindowId, outcome: ProfileInstallOutcome) {
+    if let Ok(mut answers) = PROFILE_INSTALLS.lock() {
+        answers.push(ProfileInstallAnswer { window, outcome });
+    }
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
+}
 
 /// A sandbox replaces the entire candidate set, including recorded real paths.
 /// An empty override refuses discovery rather than falling through to the user.
@@ -42,11 +71,31 @@ pub fn begin_startup_migration() {
         return;
     }
     let data = persist::storage_dir();
+    let programs = installed_powershells();
+    spawn_profile_observation(data, programs);
+}
+
+/// Refresh the two edition facts when the Profiles page opens. This is an edge
+/// trigger supplied by Settings, not a polling loop; a second visit asks again.
+pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
+    let mut resolved = installed_powershells();
+    for profile in profiles::table().profiles() {
+        let Some(program) = programs.program(&profile.id).map(PathBuf::from) else {
+            continue;
+        };
+        if is_powershell(&program) && !resolved.contains(&program) {
+            resolved.push(program);
+        }
+    }
+    spawn_profile_observation(persist::storage_dir(), resolved);
+}
+
+fn spawn_profile_observation(data: PathBuf, programs: Vec<PathBuf>) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-observation",
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| {
-            let report = observe_profile_lines(&data);
+            let report = observe_profile_lines(&data, &programs);
             for refusal in report.refusals() {
                 eprintln!(
                     "BT_SHELL_PROFILE {}: {}",
@@ -74,8 +123,14 @@ fn profile_bytes_carry_the_line(bytes: &[u8]) -> bool {
 /// Read-only startup discovery for the conditional Settings remover. Legacy marks remain useful
 /// as candidate locations, but no migration is allowed to rewrite a profile now that integration
 /// is process-scoped.
-fn observe_profile_lines(data: &Path) -> Report {
+fn observe_profile_lines(data: &Path, programs: &[PathBuf]) -> Report {
     warm_profile_answers();
+    for program in programs {
+        if let Some(mut observed) = probe_profile_observation(program) {
+            observed.line_present = profile_line_is_present(&observed.path);
+            publish_profile_observation(program, observed);
+        }
+    }
     let marks = match Marks::read(data) {
         Ok(marks) => marks,
         Err(error) => {
@@ -185,7 +240,7 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
 /// here leaves `candidates` reading a cache it would have filled anyway.
 fn warm_profile_answers() {
     // The sandbox door replaces the whole candidate set, so no shell is asked.
-    if std::env::var_os("BT_POWERSHELL_PROFILE").is_some() {
+    if profile_sandboxed() {
         return;
     }
     for program in installed_powershells() {
@@ -286,7 +341,6 @@ fn enable_record(data: &Path) -> io::Result<()> {
     marks.write(data)
 }
 
-#[cfg(test)]
 pub fn install_recorded(
     profile: &Path,
     data: &Path,
@@ -316,6 +370,113 @@ pub fn install_recorded(
     }
     marks.write(data)?;
     result
+}
+
+/// The click's own re-probe: the policy is asked again, for the row that was clicked (its own
+/// `-ExecutionPolicy` included), and a policy that would not load `$PROFILE` is refused with the
+/// sentence the row would show.
+fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<PathBuf> {
+    let mut observed = probe_profile_observation(program)
+        .ok_or_else(|| io::Error::other(Text::ShellProfileProbeFailed.text()))?;
+    observed.line_present = profile_line_is_present(&observed.path);
+    publish_profile_observation(program, observed.clone());
+    if let Some(sentence) = policy_cause(
+        observed.scopes,
+        observed.remote_signed_loads(),
+        row_process_scope(program, arguments),
+    )
+    .sentence()
+    {
+        return Err(io::Error::other(sentence.text()));
+    }
+    let data = persist::storage_dir();
+    let script = install_script_at(&data.join(SCRIPT_DIRECTORY), SCRIPT_FILE_PS1, SCRIPT_PS1)
+        .ok_or_else(|| io::Error::other(Text::ShellProfileRefused.text()))?;
+    install_recorded(
+        &observed.path,
+        &data,
+        &script,
+        MANAGED_LINE,
+        std::time::SystemTime::now(),
+    )?;
+    observed.line_present = true;
+    publish_profile_observation(program, observed.clone());
+    publish_powershell_profile_line_present(true);
+    Ok(observed.path)
+}
+
+fn undo_profile_install(profile: &Path) -> io::Result<()> {
+    let original = read_profile_for_edit(profile)?.unwrap_or_default();
+    let forms = Forms::new(&[]).targeting(MANAGED_LINE);
+    let Some(bytes) = rewrite(&original, &forms, Action::Remove)? else {
+        return Ok(());
+    };
+    replace_profile(profile, &original, &bytes, std::time::SystemTime::now())?;
+    Ok(())
+}
+
+pub fn begin_profile_install(
+    program: PathBuf,
+    arguments: Vec<OsString>,
+    window: winit::window::WindowId,
+) {
+    let _ = bt_platform::spawn_at_priority(
+        "powershell-profile-install",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |_ctx| {
+            let outcome = match install_for_program(&program, &arguments) {
+                Ok(profile) => ProfileInstallOutcome::Installed { program, profile },
+                Err(error) => ProfileInstallOutcome::Refused(error.to_string()),
+            };
+            answer_profile_install(window, outcome);
+        },
+    );
+}
+
+pub fn begin_profile_install_undo(
+    program: PathBuf,
+    profile: PathBuf,
+    window: winit::window::WindowId,
+) {
+    let _ = bt_platform::spawn_at_priority(
+        "powershell-profile-install-undo",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |_ctx| {
+            let outcome = match undo_profile_install(&profile) {
+                Ok(()) => {
+                    if let Some(mut observed) = probe_profile_observation(&program) {
+                        observed.line_present = profile_line_is_present(&observed.path);
+                        publish_profile_observation(&program, observed);
+                    }
+                    let _ =
+                        observe_profile_lines(&persist::storage_dir(), &installed_powershells());
+                    ProfileInstallOutcome::Undone
+                }
+                Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
+            };
+            answer_profile_install(window, outcome);
+        },
+    );
+}
+
+/// **The answers addressed to `window`**, oldest first — what the window owed them delivers; an
+/// answer for a window that has since closed is delivered nowhere.
+pub fn profile_installs_for(
+    answers: &[ProfileInstallAnswer],
+    window: winit::window::WindowId,
+) -> impl Iterator<Item = &ProfileInstallOutcome> {
+    answers
+        .iter()
+        .filter(move |answer| answer.window == window)
+        .map(|answer| &answer.outcome)
+}
+
+/// Every answer that has arrived since the last call, oldest first.
+pub fn take_profile_installs() -> Vec<ProfileInstallAnswer> {
+    PROFILE_INSTALLS
+        .lock()
+        .map(|mut answers| std::mem::take(&mut *answers))
+        .unwrap_or_default()
 }
 
 pub fn begin_removal() {
@@ -386,6 +547,77 @@ mod tests {
             .expect("a removal that could not be done is always news");
         assert!(refused);
         assert!(text.contains("the file is in use"));
+    }
+
+    /// RED (mutations: bypass `install_recorded`, omit the managed line, or
+    /// make Undo a no-op) — the click and its toast verb use the existing
+    /// atomic profile writer against an injected location only.
+    #[test]
+    fn inject4_profile_fallback_click_and_undo_use_the_managed_writer_in_a_sandbox() {
+        let root = super::super::tests::temp_dir("profile-fallback-click");
+        let data = root.join("data");
+        let profile = root.join("PowerShell").join("profile.ps1");
+        let script = data.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1);
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, SCRIPT_PS1).unwrap();
+
+        let wrote = install_recorded(
+            &profile,
+            &data,
+            &script,
+            MANAGED_LINE,
+            std::time::UNIX_EPOCH,
+        )
+        .expect("one click writes the managed line");
+        assert_eq!(wrote.profile, std::path::absolute(&profile).unwrap());
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            format!("{MANAGED_LINE}\r\n")
+        );
+        assert!(
+            Marks::read(&data)
+                .unwrap()
+                .powershell_profiles
+                .contains(&wrote.profile)
+        );
+
+        undo_profile_install(&profile).expect("Undo removes the managed line");
+        assert_eq!(fs::read(&profile).unwrap(), b"");
+    }
+
+    /// PIN — **two clicks in flight from two windows are two answers** (review C-4 of
+    /// T-INTEGRATION-INJECT-4). Each answer carries the window that asked, so each window
+    /// receives its own outcome and the Undo handle inside it; the second answer does not
+    /// replace the first.
+    ///
+    /// Delivered through [`profile_installs_for`], the filter the window's event handler reads
+    /// its answers through (review of round 4, item 9), and not by a filter of this test's own.
+    ///
+    /// RED (mutations: keep one slot, `answers.clear()` before the push in
+    /// `answer_profile_install` — the first window's answer is gone; drop the window filter in
+    /// `profile_installs_for` — each window receives both).
+    #[test]
+    fn two_windows_clicks_in_flight_each_get_their_own_answer() {
+        let first = winit::window::WindowId::from(7_u64);
+        let second = winit::window::WindowId::from(8_u64);
+        let installed = |profile: &str| ProfileInstallOutcome::Installed {
+            program: PathBuf::from("pwsh.exe"),
+            profile: PathBuf::from(profile),
+        };
+        answer_profile_install(first, installed("profile A.ps1"));
+        answer_profile_install(second, installed("profile B.ps1"));
+        let answers = take_profile_installs();
+        let mine = |window| {
+            profile_installs_for(&answers, window)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(mine(first), vec![installed("profile A.ps1")]);
+        assert_eq!(mine(second), vec![installed("profile B.ps1")]);
+        assert!(
+            take_profile_installs().is_empty(),
+            "an answer is delivered once"
+        );
     }
 
     #[test]
