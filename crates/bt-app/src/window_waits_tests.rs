@@ -271,7 +271,7 @@ fn the_architecture_table_is_the_registry() {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //
 // Everything below reads Folio's own source through `bt_source`, over a declared universe: the
-// product is `bt-app` and every first-party package its manifests reach (`product_packages`),
+// product is `bt-app` and every first-party package its manifests reach (`product`),
 // each package's own `src/` as `Index::of_package` lowers it, `vendor/` excluded; within it, only
 // a product target's file (a library, or `bt-app`'s `folio` binary — never a development binary
 // under `src/bin/`) and only an item standing on an arm a product build compiles
@@ -282,84 +282,106 @@ fn the_architecture_table_is_the_registry() {
 /// workspace member outside `vendor/` must be one `bt-app` depends on.
 const NOT_THE_PRODUCT: [&str; 3] = ["bt-corpus", "bt-lint-probe", "bt-source"];
 
-/// The first-party packages a manifest depends on (`[dependencies]` and the per-target tables).
-fn manifest_dependencies(manifest: &str) -> Vec<String> {
-    let mut section = "";
-    let mut out = Vec::new();
-    for line in manifest.lines().map(str::trim) {
-        if line.starts_with('[') {
-            section = line;
-            continue;
-        }
-        let dependencies = section == "[dependencies]"
-            || (section.starts_with("[target.") && section.ends_with(".dependencies]"));
-        if dependencies
-            && line.starts_with("bt-")
-            && let Some((name, _)) = line.split_once('=')
-        {
-            out.push(name.trim().to_owned());
-        }
-    }
-    out
+/// **The product as a build of `folio.exe` sees it**: the first-party packages in it, each with
+/// the first-party packages its product code can name (its *product* dependency edges), and the
+/// features that build turns on in each ([`resolve_product`]).
+#[derive(Debug)]
+struct Product {
+    /// Every product package, sorted, with its direct first-party product dependencies.
+    packages: Vec<(String, Vec<String>)>,
+    /// The features a product build turns on, per product package.
+    features: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// **The product**: `bt-app`, whose binary is `folio.exe`, and every first-party package it
-/// depends on however indirectly, each with its direct first-party dependencies — what its code
-/// can name.
-fn product_packages() -> Vec<(String, Vec<String>)> {
+/// The dependency tables a build of the package itself compiles in: `[dependencies]` and every
+/// `[target.….dependencies]`. `[dev-dependencies]` and `[build-dependencies]` are not among them.
+fn dependency_tables(document: &toml_edit::DocumentMut) -> Vec<&dyn toml_edit::TableLike> {
+    let mut tables = Vec::new();
+    if let Some(table) = document
+        .get("dependencies")
+        .and_then(toml_edit::Item::as_table_like)
+    {
+        tables.push(table);
+    }
+    if let Some(targets) = document
+        .get("target")
+        .and_then(toml_edit::Item::as_table_like)
+    {
+        for (_, target) in targets.iter() {
+            if let Some(table) = target
+                .get("dependencies")
+                .and_then(toml_edit::Item::as_table_like)
+            {
+                tables.push(table);
+            }
+        }
+    }
+    tables
+}
+
+/// The package a dependency entry written under `key` names (`package = …` when renamed).
+fn dependency_package(key: &str, entry: &toml_edit::Item) -> String {
+    entry
+        .as_table_like()
+        .and_then(|detail| detail.get("package"))
+        .and_then(toml_edit::Item::as_str)
+        .unwrap_or(key)
+        .to_owned()
+}
+
+/// **The product**, read off the workspace's manifests: every first-party package a dependency
+/// table of `bt-app` reaches, however indirectly and whether optional or not, is a candidate, and
+/// [`resolve_product`] decides which of them, and which of their edges, a build of `folio.exe`
+/// actually has.
+fn product() -> Product {
+    resolve_product("bt-app", &product_candidate_manifests())
+}
+
+/// The text of every candidate manifest [`product`] resolves, by package name.
+fn product_candidate_manifests() -> BTreeMap<String, String> {
     let root = repository_root();
     let workspace = bt_source::Workspace::read(&root).expect("the workspace's manifests");
-    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut manifests: BTreeMap<String, String> = BTreeMap::new();
     let mut queue = vec!["bt-app".to_owned()];
     while let Some(name) = queue.pop() {
-        if out.iter().any(|(known, _)| *known == name) {
+        if manifests.contains_key(&name) {
             continue;
         }
         let package = workspace.package(&name).expect("a workspace package");
-        let manifest = std::fs::read_to_string(package.directory().join("Cargo.toml"))
+        let text = std::fs::read_to_string(package.directory().join("Cargo.toml"))
             .expect("a package has a manifest");
-        let dependencies = manifest_dependencies(&manifest);
-        queue.extend(dependencies.iter().cloned());
-        out.push((name, dependencies));
+        let document: toml_edit::DocumentMut = text
+            .parse()
+            .unwrap_or_else(|error| panic!("{name}'s manifest is TOML: {error}"));
+        for table in dependency_tables(&document) {
+            for (key, entry) in table.iter() {
+                let dependency = dependency_package(key, entry);
+                if workspace
+                    .package(&dependency)
+                    .is_ok_and(|package| !bt_source::is_vendored(package.directory()))
+                {
+                    queue.push(dependency);
+                }
+            }
+        }
+        manifests.insert(name, text);
     }
-    out.sort();
-    out
+    manifests
 }
 
-/// **The features a build of `folio.exe` turns on**, per product package — read off the product
-/// manifests ([`resolve_product_features`]).
-///
-/// A feature named only on a *dev*-dependency is a test build's — `bt-pty`'s `test-shell`
-/// (T-TEST-SHELL-HYGIENE), `bt-platform`'s `trust-harness` — and an item standing on it is
-/// not in the product, however `bt_source`'s test-bit-only reading leaves it.
-fn product_features(packages: &[(String, Vec<String>)]) -> BTreeMap<String, BTreeSet<String>> {
-    let root = repository_root();
-    let workspace = bt_source::Workspace::read(&root).expect("the workspace's manifests");
-    let manifests: BTreeMap<String, String> = packages
-        .iter()
-        .map(|(name, _)| {
-            let package = workspace.package(name).expect("a workspace package");
-            let text = std::fs::read_to_string(package.directory().join("Cargo.toml"))
-                .expect("a package has a manifest");
-            (name.clone(), text)
-        })
-        .collect();
-    resolve_product_features("bt-app", &manifests)
-}
-
-/// Cargo's own feature resolution, over the product's manifests, for a build of `root` with its
-/// default features: a dependency (in `[dependencies]` or a `[target.….dependencies]` table, in
-/// any TOML form — inline, multi-line, or a `[dependencies.name]` table — and under its
-/// `package = …` name when it is renamed) contributes the features it names and, unless
-/// `default-features = false`, its `default`; a feature in a `[features]` table implies each of
-/// its entries — another feature of the same package, or `dep/feature` / `dep?/feature` in a
-/// dependency (an optional `dep:` entry turns no feature on) — until nothing changes.
-/// `[dev-dependencies]` and `[build-dependencies]` contribute nothing: a product build compiles
-/// neither into the product. Only the packages in `manifests` are resolved.
-fn resolve_product_features(
-    root: &str,
-    manifests: &BTreeMap<String, String>,
-) -> BTreeMap<String, BTreeSet<String>> {
+/// Cargo's own resolution of a build of `root` with its default features, over `manifests` (the
+/// candidates; a manifest no product edge reaches stays out). A dependency in `[dependencies]` or
+/// a `[target.….dependencies]` table, in any TOML form — inline, multi-line, or a
+/// `[dependencies.name]` table — and under its `package = …` name when it is renamed, is a product
+/// edge when it is not `optional`, or when a feature the build turns on in its dependent activates
+/// it: `dep:key`, `key/feature` (not `key?/feature`), or the implicit feature `key` of a package
+/// that never writes `dep:key`. A product edge contributes the features it names and, unless
+/// `default-features = false`, its `default`; a feature implies each entry of its `[features]`
+/// row — another feature of the same package, or `dep/feature` / `dep?/feature` in a dependency —
+/// until nothing changes. `[dev-dependencies]` and `[build-dependencies]` contribute nothing: a
+/// product build compiles neither into the product, and an optional dependency only a test-only
+/// feature activates is not in it either.
+fn resolve_product(root: &str, manifests: &BTreeMap<String, String>) -> Product {
     let documents: BTreeMap<&str, toml_edit::DocumentMut> = manifests
         .iter()
         .map(|(name, text)| {
@@ -370,14 +392,15 @@ fn resolve_product_features(
         })
         .collect();
 
-    // Every product dependency edge: (dependent, the key it is written under, package, features
-    // named, default features on).
+    // Every dependency edge between candidates: (dependent, the key it is written under,
+    // package, features named, default features on, optional).
     struct Edge {
         from: String,
         key: String,
         package: String,
         features: Vec<String>,
         defaults: bool,
+        optional: bool,
     }
     let strings = |item: Option<&toml_edit::Item>| -> Vec<String> {
         item.and_then(toml_edit::Item::as_array)
@@ -391,116 +414,154 @@ fn resolve_product_features(
     };
     let mut edges: Vec<Edge> = Vec::new();
     for (name, document) in &documents {
-        let mut tables: Vec<&toml_edit::Item> = Vec::new();
-        if let Some(table) = document.get("dependencies") {
-            tables.push(table);
-        }
-        if let Some(targets) = document
-            .get("target")
-            .and_then(toml_edit::Item::as_table_like)
-        {
-            for (_, target) in targets.iter() {
-                if let Some(table) = target.get("dependencies") {
-                    tables.push(table);
-                }
-            }
-        }
-        for table in tables {
-            let Some(table) = table.as_table_like() else {
-                continue;
-            };
+        for table in dependency_tables(document) {
             for (key, entry) in table.iter() {
-                let (package, features, defaults) = match entry.as_table_like() {
-                    Some(detail) => (
-                        detail
-                            .get("package")
-                            .and_then(toml_edit::Item::as_str)
-                            .unwrap_or(key)
-                            .to_owned(),
-                        strings(detail.get("features")),
-                        detail
-                            .get("default-features")
-                            .and_then(toml_edit::Item::as_bool)
-                            .unwrap_or(true),
-                    ),
-                    None => (key.to_owned(), Vec::new(), true),
+                let package = dependency_package(key, entry);
+                let detail = entry.as_table_like();
+                let flag = |field: &str| {
+                    detail
+                        .and_then(|detail| detail.get(field))
+                        .and_then(toml_edit::Item::as_bool)
                 };
                 if documents.contains_key(package.as_str()) {
                     edges.push(Edge {
                         from: (*name).to_owned(),
                         key: key.to_owned(),
                         package,
-                        features,
-                        defaults,
+                        features: strings(detail.and_then(|detail| detail.get("features"))),
+                        defaults: flag("default-features").unwrap_or(true),
+                        optional: flag("optional").unwrap_or(false),
                     });
                 }
             }
         }
     }
 
-    let table_of = |package: &str, feature: &str| -> Vec<String> {
-        strings(
-            documents
-                .get(package)
-                .and_then(|document| document.get("features"))
-                .and_then(|features| features.get(feature)),
-        )
-    };
-    let declares = |package: &str, feature: &str| {
+    let features_table = |package: &str| {
         documents
             .get(package)
             .and_then(|document| document.get("features"))
-            .and_then(|features| features.get(feature))
-            .is_some()
+            .and_then(toml_edit::Item::as_table_like)
+    };
+    // Whether `package` ever writes `dep:key`, which removes the implicit feature `key`.
+    let writes_dep = |package: &str, key: &str| {
+        features_table(package).is_some_and(|table| {
+            table.iter().any(|(_, row)| {
+                strings(Some(row))
+                    .iter()
+                    .any(|e| *e == format!("dep:{key}"))
+            })
+        })
+    };
+    let implicit = |package: &str, feature: &str| {
+        edges
+            .iter()
+            .any(|edge| edge.from == package && edge.key == feature && edge.optional)
+            && !writes_dep(package, feature)
+    };
+    let declares = |package: &str, feature: &str| {
+        features_table(package).is_some_and(|table| table.get(feature).is_some())
+            || implicit(package, feature)
+    };
+    let implies = |package: &str, feature: &str| -> Vec<String> {
+        match features_table(package).and_then(|table| table.get(feature)) {
+            Some(row) => strings(Some(row)),
+            None if implicit(package, feature) => vec![format!("dep:{feature}")],
+            None => Vec::new(),
+        }
     };
 
     let mut enabled: BTreeMap<String, BTreeSet<String>> = documents
         .keys()
         .map(|name| ((*name).to_owned(), BTreeSet::new()))
         .collect();
-    let mut queue: Vec<(String, String)> = Vec::new();
-    let mut turn_on = |package: &str, feature: &str, queue: &mut Vec<(String, String)>| {
-        if declares(package, feature)
-            && enabled
-                .get_mut(package)
-                .is_some_and(|set| set.insert(feature.to_owned()))
-        {
-            queue.push((package.to_owned(), feature.to_owned()));
+    let turn_on =
+        |enabled: &mut BTreeMap<String, BTreeSet<String>>, package: &str, feature: &str| {
+            declares(package, feature)
+                && enabled
+                    .get_mut(package)
+                    .is_some_and(|set| set.insert(feature.to_owned()))
+        };
+    let mut in_product: BTreeSet<String> = BTreeSet::from([root.to_owned()]);
+    let mut activated: BTreeSet<(String, String)> = BTreeSet::new();
+    turn_on(&mut enabled, root, "default");
+    // A fixed point: features activate optional edges, and edges bring packages and features in.
+    loop {
+        let mut changed = false;
+        let on: Vec<(String, String)> = enabled
+            .iter()
+            .flat_map(|(package, set)| set.iter().map(|f| (package.clone(), f.clone())))
+            .collect();
+        for (package, feature) in on {
+            for implied in implies(&package, &feature) {
+                if let Some(key) = implied.strip_prefix("dep:") {
+                    changed |= activated.insert((package.clone(), key.to_owned()));
+                    continue;
+                }
+                match implied.split_once('/') {
+                    Some((key, dependency_feature)) => {
+                        let weak = key.ends_with('?');
+                        let key = key.trim_end_matches('?');
+                        if !weak {
+                            changed |= activated.insert((package.clone(), key.to_owned()));
+                        }
+                        let targets: Vec<String> = edges
+                            .iter()
+                            .filter(|edge| {
+                                edge.from == package
+                                    && edge.key == key
+                                    && (!edge.optional
+                                        || activated.contains(&(package.clone(), key.to_owned())))
+                            })
+                            .map(|edge| edge.package.clone())
+                            .collect();
+                        for target in targets {
+                            changed |= turn_on(&mut enabled, &target, dependency_feature);
+                        }
+                    }
+                    None => changed |= turn_on(&mut enabled, &package, &implied),
+                }
+            }
         }
-    };
-    turn_on(root, "default", &mut queue);
-    // A package is in the product only if a product package depends on it, so its edges are
-    // walked from every product package; `manifests` holds exactly those.
-    for edge in &edges {
-        if edge.defaults {
-            turn_on(&edge.package, "default", &mut queue);
-        }
-        for feature in &edge.features {
-            turn_on(&edge.package, feature, &mut queue);
-        }
-    }
-    while let Some((package, feature)) = queue.pop() {
-        for implied in table_of(&package, &feature) {
-            if implied.starts_with("dep:") {
+        for edge in &edges {
+            let live = in_product.contains(&edge.from)
+                && (!edge.optional || activated.contains(&(edge.from.clone(), edge.key.clone())));
+            if !live {
                 continue;
             }
-            match implied.split_once('/') {
-                Some((key, dependency_feature)) => {
-                    let key = key.trim_end_matches('?');
-                    let targets: Vec<String> = edges
-                        .iter()
-                        .filter(|edge| edge.from == package && edge.key == key)
-                        .map(|edge| edge.package.clone())
-                        .collect();
-                    for target in targets {
-                        turn_on(&target, dependency_feature, &mut queue);
-                    }
-                }
-                None => turn_on(&package, &implied, &mut queue),
+            changed |= in_product.insert(edge.package.clone());
+            if edge.defaults {
+                changed |= turn_on(&mut enabled, &edge.package, "default");
+            }
+            for feature in &edge.features {
+                changed |= turn_on(&mut enabled, &edge.package, feature);
             }
         }
+        if !changed {
+            break;
+        }
     }
-    enabled
+
+    let packages = in_product
+        .iter()
+        .map(|name| {
+            let dependencies: BTreeSet<String> = edges
+                .iter()
+                .filter(|edge| {
+                    edge.from == *name
+                        && (!edge.optional
+                            || activated.contains(&(edge.from.clone(), edge.key.clone())))
+                })
+                .map(|edge| edge.package.clone())
+                .collect();
+            (name.clone(), dependencies.into_iter().collect())
+        })
+        .collect();
+    enabled.retain(|name, _| in_product.contains(name));
+    Product {
+        packages,
+        features: enabled,
+    }
 }
 
 /// What a `cfg` predicate says about a product build that has `features` on: `test` is off, a
@@ -593,7 +654,7 @@ fn enabled_in(resolved: &BTreeMap<String, BTreeSet<String>>, package: &str) -> V
 /// `default-features` and `bt-c`'s `default` turns on.
 #[test]
 fn product_features_follow_cargo_across_every_manifest_shape() {
-    let resolved = resolve_product_features(
+    let resolved = resolve_product(
         "bt-a",
         &manifests(&[
             (
@@ -654,7 +715,8 @@ build-only = []
 "#,
             ),
         ]),
-    );
+    )
+    .features;
     assert_eq!(enabled_in(&resolved, "bt-a"), ["default", "wide"]);
     assert_eq!(
         enabled_in(&resolved, "bt-b"),
@@ -675,7 +737,7 @@ build-only = []
 /// MUTATION: read `[dev-dependencies]` as a product table and both turn on.
 #[test]
 fn the_workspace_s_test_only_features_are_off_in_the_product() {
-    let resolved = product_features(&product_packages());
+    let resolved = product().features;
     for (package, feature) in [("bt-pty", "test-shell"), ("bt-platform", "trust-harness")] {
         assert!(
             !enabled_in(&resolved, package)
@@ -684,6 +746,166 @@ fn the_workspace_s_test_only_features_are_off_in_the_product() {
             "{package}'s {feature} is on in a build of folio.exe: {resolved:?}"
         );
     }
+}
+
+/// RED (T-PROBE-CHILD round 4) — **a product build's dependency edges are the ones cargo builds
+/// into it**: a non-optional edge, an optional one a product feature activates (`dep:key`, or the
+/// implicit feature `key`); not a dev-dependency, not an optional one only a test-only feature
+/// activates, and not one only a weak `key?/feature` names.
+///
+/// MUTATION: in `resolve_product`, treat every edge as live whether `optional` or not; `bt-b`
+/// becomes a product package and a product edge of `bt-a`.
+#[test]
+fn an_edge_only_a_test_build_activates_is_no_product_edge() {
+    let resolved = resolve_product(
+        "bt-a",
+        &manifests(&[
+            (
+                "bt-a",
+                r#"[package]
+name = "bt-a"
+
+[features]
+default = ["wide"]
+wide = ["dep:bt-d", "bt-f", "bt-b?/loud"]
+test-shell = ["dep:bt-b"]
+
+[dependencies]
+bt-b = { path = "../bt-b", optional = true }
+bt-c = { path = "../bt-c" }
+bt-d = { path = "../bt-d", optional = true }
+bt-f = { path = "../bt-f", optional = true }
+
+[dev-dependencies]
+bt-a = { path = ".", features = ["test-shell"] }
+bt-b = { path = "../bt-b" }
+"#,
+            ),
+            (
+                "bt-b",
+                "[package]\nname = \"bt-b\"\n\n[features]\nloud = []\n",
+            ),
+            ("bt-c", "[package]\nname = \"bt-c\"\n"),
+            ("bt-d", "[package]\nname = \"bt-d\"\n"),
+            ("bt-f", "[package]\nname = \"bt-f\"\n"),
+        ]),
+    );
+    assert_eq!(
+        resolved.packages,
+        [
+            (
+                "bt-a".to_owned(),
+                vec!["bt-c".to_owned(), "bt-d".to_owned(), "bt-f".to_owned()]
+            ),
+            ("bt-c".to_owned(), Vec::new()),
+            ("bt-d".to_owned(), Vec::new()),
+            ("bt-f".to_owned(), Vec::new()),
+        ],
+        "`bt-b` is reached only by a dev-dependency, a test-only feature and a weak feature"
+    );
+    assert_eq!(
+        enabled_in(&resolved.features, "bt-a"),
+        ["bt-f", "default", "wide"]
+    );
+}
+
+/// The first-party items `site_name` calls in `body` resolve to, in `world`, by key.
+fn callees_in(world: &World, body: &str, site_name: &str) -> Vec<String> {
+    let (src, record) = world
+        .srcs
+        .iter()
+        .enumerate()
+        .find_map(|(at, src)| {
+            src.index
+                .items()
+                .iter()
+                .find(|record| {
+                    record.kind().is_callable()
+                        && src.product_item(record)
+                        && key_of(src, record) == body
+                })
+                .map(|record| (at, record))
+        })
+        .unwrap_or_else(|| panic!("`{body}` is a product body"));
+    let body = Body::new(world, src, record);
+    let sites: Vec<Site> = body
+        .sites()
+        .into_iter()
+        .filter(|site| site.name == site_name)
+        .collect();
+    assert!(!sites.is_empty(), "`{site_name}` is called in the body");
+    sites
+        .iter()
+        .flat_map(|site| body.resolve(site))
+        .map(|callable| world.key(&callable))
+        .collect()
+}
+
+/// RED (T-PROBE-CHILD round 4) — **product code is resolved only against its package's product
+/// edges**: `PtySession::shutdown` calls `kill` on a portable-pty child whose type its source
+/// does not write, so the call answers every first-party `kill` its package can reach. `bt-pty`
+/// reaches `bt-platform` only for tests — an optional dependency the test-only `test-shell`
+/// feature activates, and a dev-dependency — so `bt_platform::ProbeChild::kill` is not a callee,
+/// and it is not one either when the edge is a dev-dependency alone. Written as a product
+/// dependency, the same edge makes it one; and `bt-app`, whose edge to `bt-platform` is a product
+/// edge, still reaches it from `GitChild::kill`.
+///
+/// MUTATIONS: in `resolve_product`, treat every edge as live whether `optional` or not, and the
+/// first assertion goes red (the merge of `main`'s `test-shell` edge with this branch's
+/// `ProbeChild::kill`); have `dependency_tables` also read `[dev-dependencies]`, and the first
+/// goes red too (the real manifest also writes the dev-dependency; the second assertion holds the
+/// dev-only shape alone); have `World::of` give every package only itself to reach, and the
+/// product-edge assertion goes red.
+#[test]
+fn a_test_only_edge_lends_product_code_no_first_party_callee() {
+    const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
+    const OPTIONAL: &str = "bt-platform = { path = \"../bt-platform\", optional = true }";
+    const FEATURE: &str = "test-shell = [\"dep:bt-platform\"]";
+    let real = product_candidate_manifests();
+    let with_pty = |manifest: String| {
+        let mut manifests = real.clone();
+        manifests.insert("bt-pty".to_owned(), manifest);
+        World::of(resolve_product("bt-app", &manifests))
+    };
+    let pty = &real["bt-pty"];
+    assert_eq!(
+        (pty.matches(OPTIONAL).count(), pty.matches(FEATURE).count()),
+        (1, 1),
+        "bt-pty's manifest still writes its test-only edge to bt-platform this way"
+    );
+
+    let as_written = World::new();
+    let callees = callees_in(&as_written, PTY_SHUTDOWN, "kill");
+    assert!(
+        !callees.iter().any(|key| key == PROBE_KILL),
+        "a test-only optional edge lent product code a callee: {callees:?}"
+    );
+
+    let dev_only = with_pty(
+        pty.replace(OPTIONAL, "")
+            .replace(FEATURE, "test-shell = []"),
+    );
+    let callees = callees_in(&dev_only, PTY_SHUTDOWN, "kill");
+    assert!(
+        !callees.iter().any(|key| key == PROBE_KILL),
+        "a dev-dependency lent product code a callee: {callees:?}"
+    );
+
+    let product_edge = with_pty(
+        pty.replace(OPTIONAL, "bt-platform = { path = \"../bt-platform\" }")
+            .replace(FEATURE, "test-shell = []"),
+    );
+    let callees = callees_in(&product_edge, PTY_SHUTDOWN, "kill");
+    assert!(
+        callees.iter().any(|key| key == PROBE_KILL),
+        "a product edge reaches the dependency's methods: {callees:?}"
+    );
+
+    let callees = callees_in(&as_written, "bt-app crate::git::GitChild::kill", "kill");
+    assert!(
+        callees.iter().any(|key| key == PROBE_KILL),
+        "bt-app's product edge to bt-platform still reaches `ProbeChild::kill`: {callees:?}"
+    );
 }
 
 /// RED (T-TEST-SHELL-HYGIENE review) — **a `cfg` predicate is read as a product build reads
@@ -741,7 +963,7 @@ struct Tok {
 struct Src {
     package: &'static str,
     index: &'static Index,
-    /// The features a product build turns on in this package ([`product_features`]).
+    /// The features a product build turns on in this package ([`Product::features`]).
     features: &'static BTreeSet<String>,
 }
 
@@ -1150,7 +1372,8 @@ struct Callable {
 
 struct World {
     srcs: Vec<Src>,
-    /// What each package's code can name: itself and its direct first-party dependencies.
+    /// What each package's product code can name: itself and its direct first-party product
+    /// dependencies ([`Product::packages`]); a dev-dependency or a test-only optional one is not one.
     reach: Vec<BTreeSet<usize>>,
     callables: HashMap<String, Vec<Callable>>,
     fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
@@ -1164,8 +1387,15 @@ const KEYWORDS: [&str; 22] = [
 
 impl World {
     fn new() -> Self {
-        let packages = product_packages();
-        let mut features = product_features(&packages);
+        Self::of(product())
+    }
+
+    /// The world of `product`'s packages, each reaching itself and its product dependencies.
+    fn of(product: Product) -> Self {
+        let Product {
+            packages,
+            mut features,
+        } = product;
         let srcs: Vec<Src> = packages
             .iter()
             .map(|(name, _)| {
