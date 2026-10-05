@@ -32768,6 +32768,23 @@ mod tests {
                 boxes.push(("capability 1", first));
                 boxes.push(("capability 2", second));
             }
+            // And the button has its column to itself: nothing of the text column — the title,
+            // the badge hanging off it, the sentences — reaches into the button's width, above or
+            // below it.
+            if let Some((_, button)) = row.button {
+                for (name, text) in boxes.iter().filter(|(name, _)| {
+                    matches!(
+                        *name,
+                        "title" | "badge" | "description" | "capability 1" | "capability 2"
+                    )
+                }) {
+                    assert!(
+                        text[2] <= button[0],
+                        "{what}: row {}'s {name} {text:?} reaches into its button's column {button:?}",
+                        row.index
+                    );
+                }
+            }
             for (at, (name, a)) in boxes.iter().enumerate() {
                 for (other, b) in &boxes[at + 1..] {
                     assert!(
@@ -32789,12 +32806,31 @@ mod tests {
     /// `button_ignores_badge` — the button stands without the badge's room).
     #[test]
     fn the_default_badge_and_the_rows_button_never_overlap() {
-        for fallback in [
-            crate::shell_integration::PowerShellProfileFallback::Offer,
-            crate::shell_integration::PowerShellProfileFallback::PolicyChangeable,
+        for (fallback, automatic) in [
+            (
+                crate::shell_integration::PowerShellProfileFallback::Offer,
+                false,
+            ),
+            (
+                crate::shell_integration::PowerShellProfileFallback::Offer,
+                true,
+            ),
+            (
+                crate::shell_integration::PowerShellProfileFallback::PolicyChangeable,
+                false,
+            ),
+            (
+                crate::shell_integration::PowerShellProfileFallback::PolicyChangeable,
+                true,
+            ),
         ] {
             let mut lines = pressable_profile_lines();
             lines[0].profile_fallback = fallback;
+            // `automatic default`, the longer of the two badges.
+            lines[0].default_is_automatic = automatic;
+            // A long title, so the badge hanging off it reaches the button's place.
+            lines[0].title = "Developer PowerShell for Visual Studio 2022 · 开发者命令行";
+            let mut stood = 0;
             for scale in PRESS_SCALES {
                 let mut width = narrowest_admitted(scale);
                 while width <= (SURFACE.0 * scale).round() {
@@ -32809,9 +32845,12 @@ mod tests {
                         &placed,
                         &format!("{fallback:?} at {scale}x, {width}px"),
                     );
+                    stood += usize::from(placed.profiles[0].button.is_some());
                     width += 7.0 * scale;
                 }
             }
+            // The walk reached the case: at the wide widths the button stands beside the badge.
+            assert!(stood > 0, "{fallback:?}: the button never stood");
         }
     }
 
