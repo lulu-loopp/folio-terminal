@@ -2742,6 +2742,20 @@ mod tests {
             let (actual_path, policy, version) = powershell_facts(pane, pane_input);
             let (expected_path, expected_policy, expected_version) =
                 powershell_facts(pane, fresh_value.as_deref());
+            // Each observation runs in its own temporary home, and PowerShell 7 puts that home's
+            // module folder first: the entries compared are the ones the home does not name.
+            let beyond_the_home = |path: &str| {
+                path.split(';')
+                    .filter(|entry| !entry.contains("folio-test-shell-"))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            };
+            let (actual_path, expected_path, parent_path) = (
+                beyond_the_home(&actual_path),
+                beyond_the_home(&expected_path),
+                beyond_the_home(&parent_path),
+            );
+            assert!(!actual_path.is_empty(), "{pane} reported a module path");
             assert_eq!(actual_path, expected_path, "{parent} -> {pane}");
             assert_eq!(policy, expected_policy, "{parent} -> {pane}");
             assert_eq!(version, expected_version, "{parent} -> {pane}");
