@@ -12118,6 +12118,23 @@ impl WindowRenderer {
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..6, 0..layer.rect_count);
         }
+        // **The browser's software frame is this layer's content**, after the
+        // opaque fills that form its face and before the controls that sit over
+        // that content. Videos keep `Overlay(index)` above the ground and below
+        // the layer's fills; a web page fills the body itself, so giving it the
+        // same stage makes a float paint the page black. Draw it in this layer's
+        // pass so a later float still covers it and a fading layer carries it
+        // through the same overlay-group texture.
+        if let Some((vertex_buffer, draws)) = video {
+            draw_video_stage(
+                pass,
+                gpu,
+                vertex_buffer,
+                draws,
+                VideoStage::OverlayContent(index),
+                surface,
+            );
+        }
         // **And then the part of this layer that is not there** (§7.14c): a float
         // carrying a page has just painted its own face across the rectangle the
         // page lives in, and the page is composed *under* this whole surface. So
@@ -31346,6 +31363,41 @@ mod tests {
             }
         }
 
+        fn raised_float_fill() -> OverlayLayer {
+            OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [100.0, 100.0, 180.0, 150.0],
+                    color: [0x55, 0x55, 0x55],
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            }
+        }
+
+        fn web_frame(stage: VideoStage) -> VideoLayer {
+            let body = SeatViewport {
+                x: 80,
+                y: 70,
+                width: 160,
+                height: 100,
+            };
+            VideoLayer {
+                key: "web:page:1".to_owned(),
+                box_: body,
+                clip: body,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(vec![0_u8, 255, 0, 255].into_boxed_slice()),
+                    width_px: 1,
+                    height_px: 1,
+                    generation: 1,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+                stage,
+            }
+        }
+
         fn group(layers: std::ops::Range<usize>, opacity: f32) -> OverlayGroup {
             OverlayGroup {
                 layers,
@@ -31606,6 +31658,55 @@ mod tests {
                 "green at one half over #1B should read #0E8D0E, read \
                  r={red:#04x} g={green:#04x} b={blue:#04x}"
             );
+        }
+
+        /// RED — **a Linux web page is the content of its float, so the float's
+        /// opaque fill cannot cover it; a higher float still covers it and its
+        /// own fade carries the page with it.**
+        ///
+        /// The page frame is given the same overlay index as its host. The first
+        /// point is inside the lower float and outside the next one; the second
+        /// is under the higher float's fill. A half-opacity group then checks
+        /// that the new stage is drawn inside the same group as the float.
+        ///
+        /// MUTATION: draw `OverlayContent` before `rect_buffer` and the first
+        /// pixel is the card plate instead of the green page; move it outside
+        /// `draw_overlay_layer` and the half-opacity frame returns at full
+        /// strength; draw it after the whole stack and the higher float cannot
+        /// cover it.
+        #[test]
+        fn web_content_sits_over_its_float_fill_under_later_floats_and_fades() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let green_page = web_frame(VideoStage::OverlayContent(1));
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer(), raised_float_fill()],
+                Vec::new(),
+            );
+            window.set_video_layers(vec![green_page.clone()]);
+            let stacked = present(&mut window, &mut gpu);
+            let content = stacked[(80 * WIDTH + 130) as usize];
+            assert!(
+                content[1] > 0xE0 && content[2] < 0x20,
+                "the web frame must be above its float's opaque fill, read {content:?}"
+            );
+            let covered = stacked[(110 * WIDTH + 110) as usize];
+            assert!(
+                (i16::from(covered[1]) - i16::from(covered[2])).abs() < 4 && covered[1] > 0x40,
+                "the later float still covers lower web content, read {covered:?}"
+            );
+
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 0.5)]);
+            let fading = present(&mut window, &mut gpu);
+            let [blue, green, red, _] = fading[(80 * WIDTH + 130) as usize];
+            assert!(
+                (0x8C..=0x8E).contains(&green) && (0x0D..=0x0F).contains(&red),
+                "the web frame fades with its owning float over #1B, read \
+                 r={red:#04x} g={green:#04x} b={blue:#04x}"
+            );
+            assert_eq!(window.overlay_groups_composited(), 1);
         }
 
         /// RED (46) — **spans nest, and a surface fading inside a fading

@@ -30750,6 +30750,7 @@ struct PreviewPlacement {
 /// passes that float's own layer, because the float is its pane — a hole under
 /// the stack is a hole the float's face paints straight back over, which is the
 /// report this argument exists to answer.
+#[cfg(any(not(target_os = "linux"), test))]
 fn hole_for(
     presence: webhost::WebPresence,
     floored: bool,
@@ -65627,6 +65628,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 WindowEvent::RedrawRequested => runtime.redraw(),
                 WindowEvent::Focused(false) => {
                     runtime.observe_ime_focus(false);
+                    #[cfg(target_os = "linux")]
+                    runtime.clear_web_input();
                     // Losing the window is a blur, and blur commits (J102). The
                     // mock-up's editor is a real focusable element and gets this
                     // from the DOM; here it has to be said. A press that was still
@@ -73554,7 +73557,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 32] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 35] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -73576,6 +73579,8 @@ mod platform_gate_tests {
         "git_panel.rs",
         // Linux-only cleanup labels remain available to all translation tests.
         "i18n.rs",
+        // Linux forwards winit key and composition values to its software page host.
+        "input.rs",
         // First-window display and clipboard identities are strict; optional
         // service failures remain local to their operation.
         "main.rs",
@@ -73604,6 +73609,8 @@ mod platform_gate_tests {
         "runtime/preview.rs",
         // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
         "runtime/quake.rs",
+        // Linux pages draw software frames; other native pages retain compositor holes.
+        "runtime/web.rs",
         // The Linux-only minimize restore bridge has only the Linux quake summon caller.
         "runtime/windows.rs",
         // Native failure fixture: Linux reports async watch-start failure; other starts refuse inline.
@@ -73623,6 +73630,8 @@ mod platform_gate_tests {
         "update_handoff.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
+        // Linux owns forwarded keys and software frame/caret generations in this web seat.
+        "webhost.rs",
         // WSL.
         "wsl.rs",
     ];

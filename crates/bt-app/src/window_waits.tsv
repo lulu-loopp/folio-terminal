@@ -199,7 +199,6 @@ bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::writ
 bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
-bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_dialogs::finish_helper	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_files::command_output	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_files::openable_target	std::fs::canonicalize 1, std::fs::metadata 1	worker-door-body	WorkerCtx	
@@ -211,6 +210,8 @@ bt-platform	[target_os = "linux"]	crate::linux_process::shutdown_helpers	std::th
 bt-platform	[target_os = "linux"]	crate::linux_system_settings::shutdown_system_settings	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_video::first_frame_on_worker	std::sync::mpsc::Receiver::recv 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_video::wait_for_child	std::sync::mpsc::Receiver::recv_timeout 1, std::thread::sleep 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_web_dirs::prepare_cache_directory	std::fs::create_dir_all 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::Actor::await_response_inner	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_clipboard_x11::X11OwnerCandidate::await_claim_until	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_clipboard_x11::X11OwnerCandidate::join_completed	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_clipboard_x11::X11OwnerCandidate::join_completed_until	std::thread::sleep 1	worker-door-body	WorkerCtx	
@@ -219,6 +220,14 @@ bt-platform	[target_os = "linux"]	crate::linux_clipboard_x11::retire_candidate	s
 bt-platform	[target_os = "linux"]	crate::linux_clipboard_x11::queue_retire_until_space	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_clipboard_x11::serve_candidate	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_clipboard_x11::wait_for_response	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::Actor::await_page_attachment	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::Actor::finish_browser	std::process::Child::wait 2, std::sync::mpsc::Receiver::recv_timeout 1, std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::Actor::start_browser	std::process::Child::wait 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::Actor::wait_for_page_load	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::trace_browser_startup	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::prepare_profile	std::fs::create_dir_all 1, std::fs::write 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::webview::linux::actor::write_private_extension	std::fs::create_dir_all 1, std::fs::write 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_watch::install_descendants	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_watch::retirement_loop	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
@@ -228,6 +237,7 @@ bt-platform	[not(windows)] [target_os = "linux"]	crate::video::linux_player::pum
 bt-platform	[not(windows)] [target_os = "linux"]	crate::video::linux_player::wait_for_shutdown	std::thread::sleep 1, std::thread::JoinHandle::join 1	owner-door-body	WaitToken	VideoShutdown
 bt-platform	[target_os = "linux"]	crate::linux_watch::stop_and_join	libc::write 1, std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "linux"]	crate::linux_watch::shutdown_watches	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners

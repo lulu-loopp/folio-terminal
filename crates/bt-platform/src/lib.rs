@@ -5058,10 +5058,11 @@ pub use web_environment::{
 pub use webview::{
     INSTALL_SEQUENCE, InstallRollback, InstallStep, REHOST_SEQUENCE, RehostCompensation,
     RehostOutcome, RehostSide, RehostStep, SpareParent, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
-    WebColorScheme, WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey,
-    WebMouseEvent, WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule,
-    forget_web_environment, install_rollback, rehost_compensation, spare_parent,
-    warm_web_environment, web_environment_epoch, web_mouse_buttons, webview2_runtime_version,
+    WebColorScheme, WebDpiOwnership, WebEvent, WebFrame, WebGuards, WebHost, WebImeEvent,
+    WebInstallReport, WebKey, WebKeyEvent, WebKeyModifiers, WebMouseEvent, WebNavigationVerdict,
+    WebRequestVerdict, WebSetting, WebSettingRule, forget_web_environment, install_rollback,
+    rehost_compensation, spare_parent, warm_web_environment, web_environment_epoch,
+    web_mouse_buttons, webview2_runtime_version,
 };
 
 #[cfg(windows)]
@@ -14111,6 +14112,11 @@ pub use linux_system_settings::{
     SystemSettingsWatch, shutdown_system_settings, system_uses_light_apps,
 };
 
+#[cfg(target_os = "linux")]
+mod linux_web_dirs;
+#[cfg(target_os = "linux")]
+pub use linux_web_dirs::{LinuxWebDirs, linux_web_profile, prepare_linux_web_dirs};
+
 #[cfg(not(windows))]
 pub use portable_impl::{
     CustomWindowFrame, FilePickKind, ImeSystemCaret, ShellPickKind, active_keyboard_layout,
@@ -16363,8 +16369,8 @@ mod macos_window_backend_tests {
             );
             assert!(
                 MACOS.contains(&format!("\npub fn {door}(")),
-                "`{door}` left the portable arm without arriving in the macOS one, which is \
-                 a platform with no such door at all"
+                "`{door}` left the portable arm without arriving in the macOS one, which is a \
+                 platform with no such door at all"
             );
         }
         assert!(
@@ -18482,26 +18488,28 @@ mod update_check_transport_tests {
     }
 }
 
-/// **The page host, held to one contract across three arms** (M4-2, DESIGN
+/// **The page host, held to one contract across four arms** (M4-2, DESIGN
 /// §13.29).
 ///
-/// `bt-app` names `WebHost` with no `cfg` at all — `webhost.rs` is not on
-/// `only_the_named_files_decide_what_platform_this_is`' list and must never
-/// join it — so **three files have to agree about one set of doors, and no
-/// compiler on one machine can check more than one of them**: a Windows box
-/// compiles the arm in `webview.rs`, a Mac compiles `macos_webview.rs`, and
-/// `webview_portable.rs` is the arm neither of them builds.
+/// `bt-app` keeps one `WebHost` call surface across all platforms. The app has
+/// finite, named platform seams for software frames, page keys and IME caret
+/// geometry; those do not change which doors the host provides. Four files
+/// implement that shared contract, and no compiler on one machine checks more
+/// than one of them: Windows builds `webview.rs`, macOS builds
+/// `macos_webview.rs`, Linux builds `webview_linux.rs`, and
+/// `webview_portable.rs` serves other platforms.
 ///
-/// So these read the three as text, which is the same instrument
+/// So these read every arm as text, which is the same instrument
 /// `update_check_transport_tests` above uses on the three HTTP arms and for the
 /// same reason. They run on every platform.
 #[cfg(test)]
 mod web_host_contract_tests {
-    /// The three arms' own text. The Windows one is inside `webview.rs`, behind
+    /// The platform arms' own text. The Windows one is inside `webview.rs`, behind
     /// a `#[cfg(windows)]`, which is why this reads the whole file and finds the
     /// one `impl WebHost` in it.
     const WINDOWS: &str = include_str!("webview.rs");
     const MACOS: &str = include_str!("macos_webview.rs");
+    const LINUX: &str = include_str!("webview_linux.rs");
     const PORTABLE: &str = include_str!("webview_portable.rs");
 
     /// Every door an arm declares: from `pub fn` to the opening brace, as one
@@ -18537,7 +18545,7 @@ mod web_host_contract_tests {
         found
     }
 
-    /// RED — **one host, spelled the same way in all three arms.**
+    /// RED — **one host, spelled the same way in all four arms.**
     ///
     /// This is the claim `bt-app` rests on. An arm that grew a door, lost one,
     /// or changed one's shape would compile on the machine it was written on and
@@ -18547,13 +18555,14 @@ mod web_host_contract_tests {
     /// RED GATE: take `set_request_rules` out of any one arm, or give the macOS
     /// `navigate` a `&mut self`, and this names the pair that disagree.
     #[test]
-    fn the_three_arms_declare_one_host() {
+    fn the_four_arms_declare_one_host() {
         let windows = doors(WINDOWS);
         assert!(
             windows.len() > 25,
             "the Windows arm's doors were not found: {windows:#?}"
         );
         let macos = doors(MACOS);
+        let linux = doors(LINUX);
         let portable = doors(PORTABLE);
         let difference = |ours: &[String], theirs: &[String]| -> Vec<String> {
             ours.iter()
@@ -18580,6 +18589,16 @@ mod web_host_contract_tests {
             difference(&portable, &windows),
             Vec::<String>::new(),
             "the portable arm has doors the Windows arm does not"
+        );
+        assert_eq!(
+            difference(&windows, &linux),
+            Vec::<String>::new(),
+            "the Linux arm is missing doors the Windows arm has"
+        );
+        assert_eq!(
+            difference(&linux, &windows),
+            Vec::<String>::new(),
+            "the Linux arm has doors the Windows arm does not"
         );
     }
 
@@ -18613,7 +18632,7 @@ mod web_host_contract_tests {
         );
     }
 
-    /// RED — **the three module arms are mutually exclusive and each names its
+    /// RED — **the four module arms are mutually exclusive and each names its
     /// own file.**
     ///
     /// The failure this guards against is quiet, and it is the one M4-10's own
@@ -18622,12 +18641,13 @@ mod web_host_contract_tests {
     /// that quietly keeps the arm which refuses every page.
     #[test]
     fn one_arm_per_machine_and_no_overlap() {
-        // The three declarations live at the foot of `webview.rs`, beside the
+        // The declarations live at the foot of `webview.rs`, beside the
         // twelve data types every arm shares.
         let root = WINDOWS;
         for needle in [
             "#[cfg(target_os = \"macos\")]\n#[path = \"macos_webview.rs\"]\nmod macos;",
-            "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n#[path = \"webview_portable.rs\"]\nmod portable;",
+            "#[cfg(target_os = \"linux\")]\n#[path = \"webview_linux.rs\"]\nmod linux;",
+            "#[cfg(all(not(windows), not(target_os = \"macos\"), not(target_os = \"linux\")))]\n#[path = \"webview_portable.rs\"]\nmod portable;",
         ] {
             assert!(
                 root.contains(needle),

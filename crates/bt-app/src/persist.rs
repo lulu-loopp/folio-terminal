@@ -2266,6 +2266,17 @@ fn storage_location(
     }
 }
 
+/// Resolve Folio's existing data root without performing relocation or I/O.
+///
+/// Consumers that need only a path, including the Linux Chromium profile,
+/// share the same XDG_DATA_HOME and legacy-relative-path rules as `storage_dir`.
+pub(crate) fn storage_directory_in(
+    platform: bt_platform::HostPlatform,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> PathBuf {
+    storage_location(platform, env).directory
+}
+
 /// `%APPDATA%\Folio\` on Windows, `~/Library/Application Support/Folio` on
 /// macOS — [`storage_location`] holds the rule and the reasons.
 ///
@@ -4460,12 +4471,8 @@ mod linux_xdg_tests {
         KEYBINDINGS_FILE_NAME, SETTINGS_FILE_NAME, config_directory_for, config_home_from,
         copy_config_bytes_if_missing, install_config_bytes_if_missing, migrate_config_documents,
         read_keybindings_with_legacy, read_settings_with_legacy,
-        settings_write_path_with_config_home,
+        settings_write_path_with_config_home, storage_directory_in,
     };
-    // DEFERRED (2026-10-06, port split): the `storage_directory_in` import and its
-    // `profile_data_path_keeps_the_existing_xdg_data_rule` test arrive with the
-    // web-preview PR, which is the one that adds that read-only profile seam; the
-    // rest of this module is the final state verbatim.
 
     fn on_worker<T: Send + 'static>(
         work: impl FnOnce(&bt_platform::admission::WorkerCtx) -> T + Send + 'static,
@@ -4521,6 +4528,25 @@ mod linux_xdg_tests {
             config_home_from(env(&[("HOME", "relative/home")])),
             None,
             "no absolute config home means the stores preserve their legacy data path"
+        );
+    }
+
+    #[test]
+    fn profile_data_path_keeps_the_existing_xdg_data_rule() {
+        assert_eq!(
+            storage_directory_in(
+                bt_platform::HostPlatform::OtherUnix,
+                env(&[("XDG_DATA_HOME", "relative/data"), ("HOME", "/home/dev"),])
+            ),
+            PathBuf::from("relative/data/Folio"),
+            "the profile seam keeps the existing relative XDG_DATA_HOME behavior"
+        );
+        assert_eq!(
+            storage_directory_in(
+                bt_platform::HostPlatform::OtherUnix,
+                env(&[("HOME", "/home/dev")])
+            ),
+            PathBuf::from("/home/dev/.local/share/Folio")
         );
     }
 

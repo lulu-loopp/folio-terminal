@@ -10232,6 +10232,40 @@ impl Runtime<'_> {
                 stage: drawn.shape.stage,
             });
         }
+        #[cfg(target_os = "linux")]
+        for web in self.window.web.values() {
+            let Some((frame, bounds, above)) = web.frame_layer() else {
+                continue;
+            };
+            let Some(box_) = viewport_of_rect(bounds.as_rect()) else {
+                continue;
+            };
+            let stage = above.map_or(
+                bt_render::VideoStage::Seat,
+                bt_render::VideoStage::OverlayContent,
+            );
+            crate::web_trace::line(|| {
+                format!(
+                    "linux_frame layer page={:?} generation={} sequence={} stage={stage:?} bounds={bounds:?}",
+                    frame.page, frame.generation, frame.sequence,
+                )
+            });
+            layers.push(bt_render::VideoLayer {
+                key: format!("web:{:?}:{}", frame.page, frame.generation),
+                box_,
+                clip: box_,
+                frame: Some(bt_render::VideoFrameUpload {
+                    bgra: Arc::clone(&frame.bgra),
+                    width_px: frame.width_px,
+                    height_px: frame.height_px,
+                    generation: frame.sequence,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+                stage,
+            });
+        }
         layers
     }
 

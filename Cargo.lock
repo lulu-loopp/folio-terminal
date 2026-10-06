@@ -464,6 +464,7 @@ name = "bt-platform"
 version = "0.4.6"
 dependencies = [
  "arboard",
+ "base64",
  "block2 0.6.2",
  "bt-pty",
  "bt-transcript",
@@ -472,6 +473,7 @@ dependencies = [
  "fontconfig-parser",
  "fontdb",
  "futures-util",
+ "image",
  "libc",
  "libloading",
  "objc2 0.6.4",
@@ -487,6 +489,7 @@ dependencies = [
  "objc2-uniform-type-identifiers 0.3.2",
  "objc2-user-notifications 0.3.2",
  "objc2-web-kit",
+ "serde_json",
  "tokio",
  "ttf-parser",
  "webview2-com",

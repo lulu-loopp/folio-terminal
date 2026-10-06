@@ -160,6 +160,67 @@ pub struct WebKey {
     pub down: bool,
 }
 
+/// Modifier state on a key sent by the window to its page.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebKeyModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+/// One key transition forwarded from the focused Folio window to its page.
+///
+/// `key` and `code` use the DOM `KeyboardEvent.key` and `KeyboardEvent.code`
+/// spellings. `text` is committed text belonging to this key-down; an IME
+/// preedit travels through [`WebImeEvent`] so the engine can keep composition
+/// separate from insertion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebKeyEvent {
+    pub key: String,
+    pub code: String,
+    pub text: Option<String>,
+    pub modifiers: WebKeyModifiers,
+    /// DOM key location: 0 standard, 1 left, 2 right, or 3 numpad.
+    pub location: u32,
+    pub down: bool,
+    pub repeat: bool,
+}
+
+/// Text composition forwarded to the focused page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WebImeEvent {
+    /// Replace the active preedit. Selection offsets are UTF-16 code units in
+    /// `text`, matching the engine's composition API.
+    Preedit {
+        text: String,
+        selection_utf16: Option<(u32, u32)>,
+    },
+    /// Commit text and end the active preedit.
+    Commit(String),
+    /// End composition without inserting text.
+    Cancel,
+}
+
+/// The newest software frame from a platform web host.
+///
+/// `generation` is the controller generation supplied to
+/// [`WebHost::request_controller`]. `sequence` increases from one for that
+/// generation. Pixels are immutable top-down BGRA8; their byte length is
+/// `width_px * height_px * 4`. `bounds_px` and `visible` report the host's last
+/// placement state when the engine produced this frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebFrame {
+    pub page: PageVisual,
+    pub generation: u64,
+    pub sequence: u64,
+    pub bounds_px: (i32, i32, u32, u32),
+    pub visible: bool,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub bgra: std::sync::Arc<[u8]>,
+}
+
 /// Everything the engine says, in the window's own vocabulary.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WebEvent {
@@ -213,6 +274,18 @@ pub enum WebEvent {
     /// `IDC_*` — 32512 arrow, 32513 I-beam, 32649 hand.
     CursorChanged {
         system_cursor_id: u32,
+    },
+    /// The browser's current editable caret bounds for its IME candidate UI.
+    /// `rect` is `(left, top, right, bottom)` in physical pixels relative to
+    /// the page viewport; `None` clears a position after focus leaves editable
+    /// content. The page and controller generation let the seat discard a
+    /// delayed result after a move or rebuild, and the reported rasterization
+    /// scale lets it reject geometry computed before the latest resize.
+    ImeCursorChanged {
+        page: PageVisual,
+        generation: u64,
+        rect: Option<[f64; 4]>,
+        rasterization_scale: f64,
     },
     /// The navigation stack moved: a page was pushed onto it, popped off it, or
     /// replaced through the history API.
@@ -3146,6 +3219,24 @@ impl WebHost {
         .map_err(|error| failure(&format!("SendMouseInput({})", event.name()), &error))
     }
 
+    /// The window's native input route already delivers keys to WebView2.
+    pub fn send_key(&self, event: WebKeyEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// The window's native input route already delivers IME composition to WebView2.
+    pub fn send_ime(&self, event: WebImeEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// WebView2 composes its pixels underneath the window surface, so this host has no CPU frame.
+    #[must_use]
+    pub fn take_frame(&self) -> Option<WebFrame> {
+        None
+    }
+
     /// **Ask the engine for a picture of what is on its glass** (W2 slice ⑥).
     ///
     /// `CapturePreview` is the only pixel channel the SDK offers a hosted page
@@ -4554,28 +4645,34 @@ pub use macos::{
     web_environment_epoch, webview2_runtime_version,
 };
 
-// TEMPORARY (2026-10-06, PR2 of the port split): `linux_process::shutdown_helpers`
-// rings this when the helper workers retire. The real shim — `webview_linux`'s
-// `mod linux` and its `shutdown_actor` — arrives with the Linux web actor (PR7 of
-// the port split); until then there is no browser actor to stop, so this is a
-// no-op.
+/// **The Linux page host**: a Chromium target rendered back through Folio's
+/// software frame path.
 #[cfg(target_os = "linux")]
-pub(crate) fn shutdown_linux_actor() {}
+#[path = "webview_linux.rs"]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::{
+    SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
+    web_environment_epoch, webview2_runtime_version,
+};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn shutdown_linux_actor() {
+    linux::shutdown_actor();
+}
 
 /// **The page host, on a platform whose engine has not been written yet.**
-///
-/// Neither of the two real ones: a Linux build has no web engine this product
-/// hosts, and this is what says so honestly rather than pretending.
 ///
 /// **`WebHost::new` cannot refuse**, because its return type is `Self`: the
 /// window builds one per web seat and holds it. So the refusal lives where a
 /// page is actually asked for — `request_environment` — and everything after
 /// that is unreachable until a seat gets past it, which no seat does.
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 #[path = "webview_portable.rs"]
 mod portable;
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 pub use portable::{
     SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
     web_environment_epoch, webview2_runtime_version,

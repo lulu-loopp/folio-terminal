@@ -120,10 +120,11 @@ fn not_here(what: &str) -> String {
 /// The methods divide the way the plan's classes divide. **The ones a frame
 /// makes are no-ops**: `commit`, `set_window_size` and `set_covered_size` are
 /// called on every resize and every present, and a refusal would be one line of
-/// stderr per frame for a tree that is not there. **The ones a page makes
-/// refuse**, because a page cannot be opened here at all — `WebHost::new`
-/// refuses first — so an `attach_web_visual` reaching this arm is a defect
-/// worth hearing about.
+/// stderr per frame for a tree that is not there. Linux pages also use this
+/// swapchain: `WebSeat` owns their placement and visibility, and `VideoLayer`
+/// draws Chromium's raster frames with the window's chrome and covers. Their
+/// visual calls succeed without a native composition tree. Other unsupported
+/// platforms refuse page calls when invoked.
 ///
 /// **Not compiled on macOS.** M4-1 wrote that arm — `macos_compose::Compositor`
 /// — and a second definition of the same name would be two `Compositor`s in one
@@ -187,14 +188,21 @@ impl Compositor {
         Ok(())
     }
 
-    /// A page arrives in the tree. Refused: there are no pages here until M4-2,
-    /// and a caller that got this far went past a `WebHost` that already said so.
+    /// A page arrives. Linux draws its raster frames in the window swapchain.
+    /// Other platforms without a page compositor refuse this operation.
     pub fn attach_web_visual(&self, page: PageVisual) -> Result<(), String> {
         let _ = page;
-        Err(not_here("the web preview's visual tree"))
+        #[cfg(target_os = "linux")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(not_here("the web preview's visual tree"))
+        }
     }
 
-    /// A page is put somewhere. Refused, as [`Self::attach_web_visual`].
+    /// A page is placed. Linux's `WebSeat` supplies the renderer's rectangle.
     pub fn place_web_visual(
         &self,
         page: PageVisual,
@@ -202,26 +210,53 @@ impl Compositor {
         clip: (f32, f32, f32, f32),
     ) -> Result<(), String> {
         let _ = (page, offset, clip);
-        Err(not_here("the web preview's visual tree"))
+        #[cfg(target_os = "linux")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(not_here("the web preview's visual tree"))
+        }
     }
 
-    /// The window says where its own chrome stands over a page. Refused, as
-    /// [`Self::attach_web_visual`]: there is no page here to be stood over.
+    /// The window covers a page. Linux draws these covers in its GPU scene.
     pub fn set_page_cover(&self, page: PageVisual, rects: &[[f32; 4]]) -> Result<(), String> {
         let _ = (page, rects);
-        Err(not_here("the web preview's visual tree"))
+        #[cfg(target_os = "linux")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(not_here("the web preview's visual tree"))
+        }
     }
 
-    /// A page is taken off the glass. Refused, as [`Self::attach_web_visual`].
+    /// A page is hidden. Linux's frame-layer collector excludes hidden seats.
     pub fn hide_web_visual(&self, page: PageVisual) -> Result<(), String> {
         let _ = page;
-        Err(not_here("the web preview's visual tree"))
+        #[cfg(target_os = "linux")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(not_here("the web preview's visual tree"))
+        }
     }
 
-    /// A page leaves the tree. Refused, as [`Self::attach_web_visual`].
+    /// A page leaves. Linux's `WebSeat` retires its frame and Chromium target.
     pub fn detach_web_visual(&self, page: PageVisual) -> Result<(), String> {
         let _ = page;
-        Err(not_here("the web preview's visual tree"))
+        #[cfg(target_os = "linux")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(not_here("the web preview's visual tree"))
+        }
     }
 
     /// Everything said since the last commit becomes visible. Nothing was said.
@@ -1993,10 +2028,15 @@ mod refusal_tests {
             on_the_window_thread();
             let compositor = compositor().expect("built above");
             let page = PageVisual { tab: 1, seat: 1 };
+            #[cfg(not(target_os = "linux"))]
             assert!(
                 compositor.attach_web_visual(page).is_err(),
                 "there is no visual tree to put a page in"
             );
+            #[cfg(target_os = "linux")]
+            compositor
+                .attach_web_visual(page)
+                .expect("Linux raster pages share the window swapchain");
             // And the frame's own calls are the no-ops a frame makes, not
             // refusals: one line of stderr per present is not a diagnostic, it
             // is a fault.

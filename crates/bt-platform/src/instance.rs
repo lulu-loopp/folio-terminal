@@ -588,12 +588,6 @@ pub(crate) fn prepare_runtime_directory() -> std::io::Result<PathBuf> {
     prepare_private_directory(&runtime_directory(), uid)
 }
 
-// TEMPORARY (2026-10-06, PR2 of the port split): the consumer of these three —
-// `linux_web_dirs::prepare_linux_web_dirs`, Chromium's profile/cache policy —
-// arrives with the Linux web preview (PR7 of the port split). Until then the
-// policy has no caller, so the dead-code lint is silenced rather than the
-// policy deferred; the test below keeps it honest in the meantime.
-#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 pub(crate) fn prepare_chromium_temporary_directory(
     _worker: &crate::admission::WorkerCtx,
@@ -604,7 +598,6 @@ pub(crate) fn prepare_chromium_temporary_directory(
     prepare_chromium_temporary_directory_from(requested.as_deref(), &runtime_directory(), uid)
 }
 
-#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 fn prepare_chromium_temporary_directory_from(
     requested: Option<&Path>,
@@ -622,7 +615,6 @@ fn prepare_chromium_temporary_directory_from(
     prepare_private_directory(&fallback.join("chromium"), uid)
 }
 
-#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 fn private_xdg_runtime_directory(directory: &Path, uid: u32) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};

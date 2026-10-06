@@ -826,11 +826,12 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             include_str!("persist.rs"),
             "SettingsStore::open",
         ),
-        // The `Remover::LinuxCache` guard row is deferred until the web-preview PR
-        // brings `bt-platform/src/linux_web_dirs.rs` (its writer source), which the
-        // `include_str!` here would otherwise fail to find; the `LinuxCache` mark
-        // itself and its writer string in the inventory are already recorded.
-
+        #[cfg(target_os = "linux")]
+        (
+            Remover::LinuxCache,
+            include_str!("../../bt-platform/src/linux_web_dirs.rs"),
+            "prepare_linux_web_dirs",
+        ),
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio/clipboard"),
             include_str!("clipboard_picture.rs"),
