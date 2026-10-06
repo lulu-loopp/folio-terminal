@@ -79413,6 +79413,8 @@ mod clipboard_path_tests {
             recipient < delivered,
             "delivery must use the resolved recipient"
         );
+        assert!(!apply.contains("set_focus("));
+        assert!(!apply.contains("set_files_keyboard("));
         let k144 = method_body("Runtime", "insert_path_into_terminal");
         assert!(k144.contains("shell_literal::paths_text("));
         assert!(k144.contains("set_files_keyboard(None"));
