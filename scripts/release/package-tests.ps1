@@ -203,10 +203,11 @@ Test-Case 'package_refuses_a_member_that_differs_from_the_manifest' {
         Copy-Item -LiteralPath (Join-Path (Join-Path $root 'packaging') $name) -Destination (Join-Path $packaging $name)
     }
     # One byte changed and none added, so the size agrees and only the hash
-    # can tell.
+    # can tell — the `e` of `@echo off` changes case, so the script keeps the
+    # shape `Test-BatchMember` asks of it and the refusal is the manifest's.
     $cmd = Join-Path $packaging 'uninstall.cmd'
     $bytes = [IO.File]::ReadAllBytes($cmd)
-    $bytes[0] = if ($bytes[0] -eq 0x40) { 0x41 } else { 0x40 }
+    $bytes[1] = $bytes[1] -bxor 0x20
     [IO.File]::WriteAllBytes($cmd, $bytes)
 
     $output = Join-Path $scratch 'out-changed'
@@ -216,6 +217,82 @@ Test-Case 'package_refuses_a_member_that_differs_from_the_manifest' {
     if (@(Get-ChildItem -LiteralPath $output -Filter '*.zip' -ErrorAction SilentlyContinue).Count) {
         throw 'an archive was written although the run was refused'
     }
+}
+
+# RED (0.4.7 uninstall fix) — **the archive's batch members are CRLF lines
+# that `cmd.exe` reads.**
+#
+# Every `.cmd` and `.bat` member of the archive `package.ps1` wrote from this
+# checkout, read back out of it: each begins with `@`, has no byte-order mark,
+# ends every line in CRLF, and holds no byte past ASCII before a line that
+# sets code page 65001 (`Test-BatchMember`). The 0.4.7 clean VM met
+# `uninstall.cmd` shipped with LF lines, and `cmd.exe` ran fragments of it.
+#
+# MUTATION: `.gitattributes` says `eol=lf` for `packaging/uninstall.cmd` (and
+# the file is checked out again) — `package.ps1` refuses, and this goes red.
+Test-Case 'the_archives_batch_members_are_crlf_lines_cmd_reads' {
+    if ($goodArchive.Count -ne 1) { throw "package.ps1 left $($goodArchive.Count) archives: $($good.Text)" }
+    $zip = [IO.Compression.ZipFile]::OpenRead($goodArchive[0].FullName)
+    try {
+        $batch = @($zip.Entries | Where-Object { $_.Name -match '\.(cmd|bat)$' })
+        if ($batch.Count -ne 2) { throw "the archive holds $($batch.Count) batch members; the list names two" }
+        foreach ($entry in $batch) {
+            $stream = $entry.Open()
+            $bytes = New-Object IO.MemoryStream
+            try { $stream.CopyTo($bytes) } finally { $stream.Dispose() }
+            $problems = @(Test-BatchMember -Name $entry.Name -Bytes $bytes.ToArray())
+            if ($problems.Count) { throw ($problems -join '; ') }
+            if ([Array]::IndexOf($bytes.ToArray(), [byte] 0x0D) -lt 0) { throw "$($entry.Name) has no CR at all" }
+        }
+    }
+    finally { $zip.Dispose() }
+}
+
+# RED (0.4.7 uninstall fix) — **package.ps1 refuses a batch member whose
+# lines end in LF alone, by its shape and before the manifest** — a checkout
+# that smudged the line endings agrees with a manifest built from it, so the
+# hash cannot be what catches it.
+#
+# MUTATION: drop the `Test-BatchMember` loop from `package.ps1`; the run then
+# refuses only by the hash, and the refusal does not name the line ending.
+Test-Case 'package_refuses_a_batch_member_with_lf_only_lines' {
+    $packaging = Join-Path $scratch 'packaging-lf'
+    [IO.Directory]::CreateDirectory($packaging) | Out-Null
+    foreach ($name in @('folio-here.cmd', 'uninstall.cmd')) {
+        Copy-Item -LiteralPath (Join-Path (Join-Path $root 'packaging') $name) -Destination (Join-Path $packaging $name)
+    }
+    $cmd = Join-Path $packaging 'uninstall.cmd'
+    $bytes = @([IO.File]::ReadAllBytes($cmd) | Where-Object { $_ -ne 0x0D })
+    [IO.File]::WriteAllBytes($cmd, [byte[]] $bytes)
+    $output = Join-Path $scratch 'out-lf'
+    $result = Invoke-Package -Output $output -More @('-Packaging', $packaging)
+    if ($result.ExitCode -eq 0) { throw "package.ps1 packed an LF-only uninstall.cmd: $($result.Text)" }
+    if ($result.Flat -notmatch 'uninstall\.cmd line 1 ends in LF alone') { throw "the refusal did not name the line ending: $($result.Text)" }
+    if ($result.Flat -match 'hashes to') { throw "the refusal came from the manifest, not the shape: $($result.Text)" }
+}
+
+# RED (0.4.7 uninstall fix) — **what `Test-BatchMember` refuses, one shape at
+# a time**: a byte-order mark, a first line without `@`, a last line without
+# CRLF, and a byte past ASCII before `chcp 65001` — and the same text with the
+# byte after it passes. A name that is not a batch file is not looked at.
+#
+# MUTATION: drop the code-page loop from `Test-BatchMember`; the Chinese line
+# before `chcp 65001` passes.
+Test-Case 'test_batch_member_refuses_each_shape_cmd_cannot_read' {
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    $case = { param([string] $Text) @(Test-BatchMember -Name 'x.cmd' -Bytes $utf8.GetBytes($Text)) }
+    $sound = "@echo off`r`nchcp 65001 >nul`r`necho 保留设置和数据 / Keep settings`r`n"
+    if (@(& $case $sound).Count) { throw "a good script was refused: $(& $case $sound)" }
+    foreach ($shape in @(
+            @(([string] [char] 0xFEFF + $sound), 'byte-order mark'),
+            @("echo off`r`n", 'does not begin with @'),
+            @("@echo off`r`necho x", 'does not end its last line'),
+            @("@echo off`r`necho 保留`r`nchcp 65001 >nul`r`n", 'byte past ASCII before'),
+            @("@echo off`nchcp 65001 >nul`r`n", 'line 1 ends in LF alone'))) {
+        $said = @(& $case $shape[0]) -join '; '
+        if ($said -notmatch [regex]::Escape($shape[1])) { throw "expected '$($shape[1])', got '$said'" }
+    }
+    if (@(Test-BatchMember -Name 'LICENSE-MIT' -Bytes $utf8.GetBytes("a`nb")).Count) { throw 'a document was judged as a batch file' }
 }
 
 Test-Case 'package refuses a member missing from where the list says it is' {
