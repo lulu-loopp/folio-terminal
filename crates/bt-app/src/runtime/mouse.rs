@@ -3628,10 +3628,8 @@ impl Runtime<'_> {
                 position.x,
                 position.y,
             ) {
-                if let Err(reason) = crate::press_owned_title_bar(
-                    &self.window.window,
-                    &self.window.custom_window_frame,
-                ) {
+                if let Err(reason) = crate::press_owned_title_bar(&self.window.custom_window_frame)
+                {
                     eprintln!("{reason}");
                 }
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar state={state:?} button={button:?} target={traced_target:?}"));

@@ -66,11 +66,7 @@ use std::{
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{
-    AppEvent,
-    dir_news::{take_watch_failure, watch_is_armed},
-    watch_clock::WatchClock,
-};
+use crate::{AppEvent, watch_clock::WatchClock};
 
 /// One watched folder: its subscription, and the clock its notifications feed.
 struct Watched {
@@ -105,13 +101,8 @@ impl FilesWatch {
     /// **Bring the subscriptions level with what the columns are showing** (rule
     /// 1), and say which folders owe their first post-attempt read (rule 3).
     ///
-    /// Linux's pending start returns an arrival only after it arms or fails; the
-    /// synchronous platforms return it with the attempt. The arrivals come back
-    /// rather than being acted on here for the reason
-    /// nothing in this file parses a notification: what a column should do about
-    /// a folder is the window's business, and this type does not know that a
-    /// column exists.
-    ///
+    /// Arrivals name folders whose first post-attempt read is owed. They return to the window
+    /// because this file does not parse notifications or decide what a column should do.
     /// **The proxy is borrowed here and cloned only where a watch is actually
     /// opened**, on [`crate::git_watch::GitWatch::sync`]'s reason and with its
     /// weight: a clone of an `EventLoopProxy` is an `Arc` bump on Windows and,
@@ -154,14 +145,16 @@ impl FilesWatch {
         let mut arrived = Vec::new();
         for directory in wanted {
             if let Some(entry) = self.dirs.get_mut(directory) {
-                if !entry.initial_read_reported && entry.watch.as_ref().is_none_or(watch_is_armed) {
+                if !entry.initial_read_reported
+                    && entry.watch.as_ref().is_none_or(|watch| watch.is_armed())
+                {
                     entry.initial_read_reported = true;
                     arrived.push(directory.clone());
                 }
                 continue;
             }
             let watch = open(directory);
-            let initial_read_reported = watch.as_ref().is_none_or(watch_is_armed);
+            let initial_read_reported = watch.as_ref().is_none_or(|watch| watch.is_armed());
             if initial_read_reported {
                 arrived.push(directory.clone());
             }
@@ -198,7 +191,7 @@ impl FilesWatch {
             return Vec::new();
         }
         for (directory, entry) in &mut self.dirs {
-            if let Some(error) = entry.watch.as_mut().and_then(take_watch_failure) {
+            if let Some(error) = entry.watch.as_mut().and_then(|watch| watch.take_failure()) {
                 trace(&format!("cannot watch {}: {error}", directory.display()));
                 entry.watch = None;
             }
@@ -235,7 +228,7 @@ impl FilesWatch {
             self.dirs.len(),
             self.dirs
                 .values()
-                .filter(|held| held.watch.as_ref().is_some_and(watch_is_armed))
+                .filter(|held| held.watch.as_ref().is_some_and(|watch| watch.is_armed()))
                 .count(),
         )
     }

@@ -14182,3 +14182,15 @@ The one-click `$PROFILE` fallback now asks two sessions: an ordinary session of 
 Removals locate `$PROFILE` from that record, ask an unrecorded edition only for the variable (`PROFILE_PATH_COMMAND`, no command discovery) with `REMOVAL_PROBE_DEADLINE`, keep no failed answer, and report a silent edition as `Fate::Unlocated`, which is not a refusal. The uninstall door's order is claims and preflight, removal rows, the program's step (`ProgramStep`), then the purge, which runs only when nothing refused. A managed copy's command joins the cleanup with `cmd /c "… && …"` and its row says to close Folio first; Homebrew's `--zap` runs the cleanup itself. A profile row's button stands only where the `default` badge still fits before it.
 
 Pinned by `the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_load_it`, `after_enable_and_undo_an_ordinary_restricted_session_prints_nothing` (a real Windows PowerShell 5.1 under `Restricted`), `what_folios_profile_writes_created_goes_with_its_line_and_nothing_else_does`, `every_removal_road_retires_what_the_write_created`, `a_power_loss_between_the_record_and_the_write_is_retired`, `a_profile_no_shell_located_is_said_and_refuses_nothing`, `the_remover_stands_only_for_a_line_it_can_prove_is_folios`, `a_failed_parse_question_is_undetermined_and_a_visit_asks_it_again`, `shell_integration_profile_path_askers_share_an_answer_and_ask_again_after_a_failure`, `a_refusal_before_the_purge_keeps_the_data_and_the_purge_comes_last`, `a_managed_copy_is_left_to_its_manager` and `the_default_badge_and_the_rows_button_never_overlap`.
+
+### 2026-10-06 — Current path for the policy-command clipboard pin
+
+The pin named in the 2026-10-04 policy note moved with its implementation. Its current path is `runtime::clipboard::tests::copy_puts_exactly_the_policy_command_on_the_clipboard`; the earlier entry is retained as written.
+
+### 2026-10-06 — Linux summons restore the minimized window before showing it
+
+On Linux, `FolioApp::summon_quake` reads the previous foreground, restores a minimized window through `Runtime::restore_minimized_window`, then shows it and runs the foreground retry. The other platforms keep the existing summon sequence. Pinned by `floated_page_tests::the_foreground_is_read_before_the_summon_and_handed_back_after_it`.
+
+### 2026-10-06 — Linux hand-offs retain the lane worker
+
+Linux dispatches file and address requests through `ShellThread::hand_over_on_worker`, carrying the handoff lane's `WorkerCtx` into the Linux file and process doors.

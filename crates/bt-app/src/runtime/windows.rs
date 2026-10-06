@@ -34,7 +34,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 impl Runtime<'_> {
-    pub(crate) fn take_keyboard_focus(&self) -> Result<()> {
+    pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
         crate::take_owned_keyboard_focus(&self.window.window)
     }
 
@@ -42,9 +42,8 @@ impl Runtime<'_> {
     pub(crate) fn restore_minimized_window(&self) -> Result<()> {
         crate::restore_minimized_window(&self.window.window)
     }
-
     pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
-        crate::request_owned_window_close(&self.window.window, &self.app.event_proxy)
+        crate::request_owned_window_close(&self.window.window)
     }
 
     /// **Open a second window on this application** (multiwindow slice C).
@@ -255,12 +254,7 @@ impl Runtime<'_> {
         let stood_at = standing.unwrap_or_else(|| {
             startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale)
         });
-        stand_the_window_at(
-            &window,
-            native,
-            stood_at,
-            "state the new window's outer rectangle",
-        );
+        stand_the_window_at(native, stood_at, "state the new window's outer rectangle");
         let physical = window.inner_size();
         let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's

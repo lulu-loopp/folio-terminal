@@ -12836,6 +12836,17 @@ mod windows_impl {
     }
 
     impl DirWatch {
+        /// A returned watcher has already armed its first read.
+        #[must_use]
+        pub fn is_armed(&self) -> bool {
+            true
+        }
+
+        /// Windows reports watch failures before returning the watcher.
+        pub fn take_failure(&mut self) -> Option<std::io::Error> {
+            None
+        }
+
         /// Start watching `path` and everything under it.
         ///
         /// `wake` is called on the watcher thread, once per notification, and is
@@ -14069,9 +14080,9 @@ pub use linux_process::{register_helper_worker as register_linux_helper_worker, 
 #[cfg(target_os = "linux")]
 mod linux_notifications;
 #[cfg(target_os = "linux")]
-pub use linux_notifications::shutdown_notifications;
-#[cfg(target_os = "linux")]
 pub use linux_dialogs::install_dialog_wake;
+#[cfg(target_os = "linux")]
+pub use linux_notifications::shutdown_notifications;
 
 #[cfg(target_os = "linux")]
 mod linux_system_settings;

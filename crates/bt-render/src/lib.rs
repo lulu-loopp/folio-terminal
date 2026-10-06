@@ -4838,8 +4838,7 @@ impl SurfaceAlphaReport {
     /// opaque, `CompositionVisual` is premultiplied.
     #[must_use]
     pub fn is_premultiplied(&self) -> bool {
-        alpha_representation(self.target, self.chosen)
-            == Some(SurfaceAlphaRepresentation::Premultiplied)
+        alpha_representation(self.target) == Some(SurfaceAlphaRepresentation::Premultiplied)
     }
 }
 
@@ -4888,13 +4887,7 @@ pub enum SurfaceAlphaRepresentation {
 /// glyph output on the Metal path at scale 2 — and a change made here before
 /// that measurement would be a correction nobody has looked at.
 #[must_use]
-fn alpha_representation(
-    target: WindowTargetKind,
-    chosen: wgpu::CompositeAlphaMode,
-) -> Option<SurfaceAlphaRepresentation> {
-    // The chosen mode only matters to a target whose representation follows the
-    // adapter's answer; the doors below have one fixed representation each.
-    let _ = chosen;
+fn alpha_representation(target: WindowTargetKind) -> Option<SurfaceAlphaRepresentation> {
     match target {
         WindowTargetKind::Hwnd => Some(SurfaceAlphaRepresentation::Opaque),
         WindowTargetKind::CompositionVisual | WindowTargetKind::MetalLayerOnOwnedView => {
@@ -30456,10 +30449,7 @@ mod tests {
                  would refuse every window this program can open there"
             );
             assert_eq!(
-                alpha_representation(
-                    WindowTargetKind::MetalLayerOnOwnedView,
-                    wgpu::CompositeAlphaMode::PostMultiplied,
-                ),
+                alpha_representation(WindowTargetKind::MetalLayerOnOwnedView),
                 Some(SurfaceAlphaRepresentation::Premultiplied),
                 "the pixels are the same pixels DirectComposition is given"
             );
@@ -30499,7 +30489,7 @@ mod tests {
                 wgpu::CompositeAlphaMode::Opaque
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::Hwnd, wgpu::CompositeAlphaMode::Opaque,),
+                alpha_representation(WindowTargetKind::Hwnd),
                 Some(SurfaceAlphaRepresentation::Opaque)
             );
             assert_eq!(
@@ -30507,10 +30497,7 @@ mod tests {
                 wgpu::CompositeAlphaMode::PreMultiplied
             );
             assert_eq!(
-                alpha_representation(
-                    WindowTargetKind::CompositionVisual,
-                    wgpu::CompositeAlphaMode::PreMultiplied,
-                ),
+                alpha_representation(WindowTargetKind::CompositionVisual),
                 Some(SurfaceAlphaRepresentation::Premultiplied)
             );
             // Against the lists the backends really answer, so the claim is
