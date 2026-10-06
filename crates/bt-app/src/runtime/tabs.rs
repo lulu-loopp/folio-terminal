@@ -1330,6 +1330,8 @@ impl Runtime<'_> {
             // where every other new window opens, because a reader who pressed a
             // *verb* pointed at a verb and not at a rectangle.
             at: None,
+            #[cfg(target_os = "linux")]
+            screen: None,
         };
         let like = self.window_id();
         self.app
