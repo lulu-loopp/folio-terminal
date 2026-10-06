@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers \
+            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers libxkbcommon-x11-0 \
             fonts-noto-cjk fonts-noto-mono fonts-dejavu-core \
             ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
