@@ -9,10 +9,13 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use bt_term::DualPlaneSession;
+
+static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
 
 fn nz(value: u32) -> std::num::NonZeroU32 {
     std::num::NonZeroU32::new(value).unwrap()
@@ -49,10 +52,7 @@ fn prompt_bytes_declaring(directory: &Path, terminal: Option<&str>) -> Vec<u8> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let driver = std::env::temp_dir().join(format!(
-        "betterterminal-osc7-driver-{}-{unique}.ps1",
-        std::process::id()
-    ));
+    let driver = driver_path_at(unique);
     std::fs::write(
         &driver,
         format!(
@@ -85,6 +85,39 @@ fn prompt_bytes_declaring(directory: &Path, terminal: Option<&str>) -> Vec<u8> {
     output.stdout
 }
 
+fn fixture_path_at(stem: &str, timestamp: u128, extension: &str) -> PathBuf {
+    let ordinal = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{stem}-{}-{timestamp}-{ordinal}{extension}",
+        std::process::id(),
+    ))
+}
+
+fn driver_path_at(timestamp: u128) -> PathBuf {
+    fixture_path_at("betterterminal-osc7-driver", timestamp, ".ps1")
+}
+
+fn directory_path_at(timestamp: u128) -> PathBuf {
+    fixture_path_at("betterterminal 图 片", timestamp, "")
+}
+
+#[test]
+fn equal_clock_samples_get_distinct_fixture_paths() {
+    let first_driver = driver_path_at(42);
+    let second_driver = driver_path_at(42);
+    assert_ne!(
+        first_driver, second_driver,
+        "wall-clock samples are not driver path identities"
+    );
+
+    let first_directory = directory_path_at(42);
+    let second_directory = directory_path_at(42);
+    assert_ne!(
+        first_directory, second_directory,
+        "wall-clock samples are not directory path identities"
+    );
+}
+
 /// A temporary directory whose name carries a space and CJK, so the encoder is exercised on both
 /// the byte that must become `%20` and the multi-byte characters that must become their UTF-8
 /// escapes rather than anything the console codepage would produce.
@@ -93,10 +126,7 @@ fn temporary_directory() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "betterterminal 图 片-{}-{unique}",
-        std::process::id()
-    ));
+    let directory = directory_path_at(unique);
     std::fs::create_dir(&directory).unwrap();
     // The shell names its location in long form; on a host whose %TEMP% is
     // spelled with an 8.3 short component (RUNNER~1), the path just joined is
