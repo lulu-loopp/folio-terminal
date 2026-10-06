@@ -160,9 +160,8 @@ mod tests {
     /// whose absence is the ordinary case.
     ///
     /// So the error here is **not constructed** — `io::Error::from(NotFound)`
-    /// would have passed on every one of those seven weeks. Synchronous
-    /// platforms return it from `DirWatch::start`; Linux delivers it through
-    /// the pending subscription after its startup wake.
+    /// would have passed on every one of those seven weeks. The error comes
+    /// from the real `DirWatch::start` call.
     ///
     /// MUTATION: put the raw `HRESULT` back in `win32_io_error` and this goes
     /// red, which is the stderr line coming back with it.

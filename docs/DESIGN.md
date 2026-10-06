@@ -14186,3 +14186,7 @@ Pinned by `the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_l
 ### 2026-10-06 — Current path for the policy-command clipboard pin
 
 The pin named in the 2026-10-04 policy note moved with its implementation. Its current path is `runtime::clipboard::tests::copy_puts_exactly_the_policy_command_on_the_clipboard`; the earlier entry is retained as written.
+
+### 2026-10-06 — The clipboard pin keeps its named test module
+
+The exact path is `runtime::clipboard::policy_command_tests::copy_puts_exactly_the_policy_command_on_the_clipboard`. This corrects the module name in the preceding path note.
