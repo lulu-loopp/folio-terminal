@@ -1135,7 +1135,7 @@ impl Runtime<'_> {
                 }
             })
             .collect();
-        let size = self.window.window.inner_size();
+        let size = self.client_size();
         present_gate::PresentSignature {
             renderer: self.window.renderer.present_state(),
             window_visible: self.window.window_shown
