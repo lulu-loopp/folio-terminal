@@ -51436,6 +51436,20 @@ impl App {
         self.ask_to_quit();
         Ok(())
     }
+
+    /// **The restart About → Version's *Update and restart* asked for, once it
+    /// is due** (N10, the owner's ruling of 2026-10-06): when the job reaches
+    /// `Verified` for the transaction that press started
+    /// ([`update_job::Job::take_asked_restart`]), the application restarts
+    /// through [`Self::restart_for_update`] — the Ready card's Restart, with
+    /// every refusal it has. A refused restart leaves the job at `Verified`:
+    /// its Ready card is up and Version says `<tag> ready` with `Restart…`.
+    fn restart_when_asked(&mut self) {
+        if self.update_job.take_asked_restart() {
+            // The refusal is the card's own answer for this state; nothing moves.
+            let _ = self.restart_for_update();
+        }
+    }
 }
 
 /// **Every open window, in the order they opened** (multiwindow slice C).
@@ -64497,6 +64511,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::UpdateJobProgress => {
                 if let Some(app) = self.app.as_mut() {
                     app.update_job.drain_progress();
+                    app.restart_when_asked();
                 }
                 Ok(())
             }
