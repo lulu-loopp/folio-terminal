@@ -26,6 +26,7 @@
 //! restore prompt's election — a question about a window nobody can see is a
 //! question nobody can answer.
 
+#[cfg(not(target_os = "linux"))]
 use bt_platform::NativeWindow;
 
 use bt_platform::WindowRect;
@@ -233,6 +234,7 @@ impl SummonScreen {
     ///
     /// This is the machine-reading half of the one summon door; the deciding half is
     /// [`Quake::placement`], which is pure and is where the rules live.
+    #[cfg(not(target_os = "linux"))]
     #[must_use]
     pub(crate) fn under_the_pointer(window: NativeWindow, cached_dpi: u32) -> Self {
         let pointer = bt_platform::pointer_position();
@@ -416,6 +418,8 @@ pub(crate) struct Quake {
     /// The message hook does nothing but wake the loop (see the hook's own note
     /// in `main`), so what a `WM_HOTKEY` leaves behind is this bit and a turn.
     summoned: bool,
+    #[cfg(target_os = "linux")]
+    summoned_pointer: Option<(i32, i32)>,
     /// **The window lost the keyboard and the reader wants it gone.**
     ///
     /// Set by the blur and spent on the *next* turn rather than in the arm,
@@ -530,8 +534,24 @@ impl Quake {
     /// A press has arrived.
     pub(crate) fn press(&mut self) {
         self.summoned = true;
+        #[cfg(target_os = "linux")]
+        {
+            self.summoned_pointer = None;
+        }
     }
 
+    /// Record the root point carried by this X11 key press.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn press_at(&mut self, pointer: (i32, i32)) {
+        self.summoned = true;
+        self.summoned_pointer = Some(pointer);
+    }
+
+    /// Take the location associated with the pending press.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_press_pointer(&mut self) -> Option<(i32, i32)> {
+        self.summoned_pointer.take()
+    }
     /// Take the press, if there is one waiting.
     pub(crate) fn take_press(&mut self) -> bool {
         std::mem::take(&mut self.summoned)
