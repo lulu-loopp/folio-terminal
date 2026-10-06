@@ -783,7 +783,7 @@ impl Runtime<'_> {
             ceiling.1 = ceiling.1.max(size.height);
         }
         if ceiling.0 == 0 || ceiling.1 == 0 {
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             ceiling = (inner.width.max(1), inner.height.max(1));
         }
         ceiling

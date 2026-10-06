@@ -13761,6 +13761,8 @@ struct WindowRuntime {
     window: Arc<Window>,
     #[cfg(target_os = "linux")]
     last_winit_rect: Option<bt_platform::WindowRect>,
+    #[cfg(target_os = "linux")]
+    last_winit_size: Option<PhysicalSize<u32>>,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
     /// An outbox, replaced whole at each commit rather than appended to, because
@@ -40991,8 +40993,6 @@ struct NewWindowParts {
     custom_window_frame: bt_platform::CustomWindowFrame,
     compositor: bt_platform::Compositor,
     window: Arc<Window>,
-    #[cfg(target_os = "linux")]
-    winit_rect: Option<bt_platform::WindowRect>,
     math_context_menu: bt_platform::MathContextMenu,
     folder_picker: bt_platform::FolderPicker,
     image_picker: bt_platform::ImagePicker,
@@ -41059,8 +41059,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         compositor,
         window,
         math_context_menu,
-        #[cfg(target_os = "linux")]
-        winit_rect,
         folder_picker,
         image_picker,
         save_picker,
@@ -41206,7 +41204,9 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         parked_pans,
         dropped_files: None,
         #[cfg(target_os = "linux")]
-        last_winit_rect: winit_rect,
+        last_winit_rect: None,
+        #[cfg(target_os = "linux")]
+        last_winit_size: None,
         #[cfg(target_os = "linux")]
         pending_summoned_arrangement: None,
         #[cfg(target_os = "linux")]
@@ -42225,12 +42225,11 @@ impl Runtime<'_> {
             );
         }
         let restored = restore_window_placement(event_loop, &opening);
-        let attributes = opening_window_attributes(
-            profiles::title(default_profile),
-            restored
-                .map(|placement| placement.size)
-                .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
-        );
+        let requested_size = restored
+            .map(|placement| placement.size)
+            .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
+        let attributes =
+            opening_window_attributes(profiles::title(default_profile), requested_size);
         let attributes = match restored.and_then(|placement| placement.position) {
             Some(position) => attributes.with_position(position),
             None => attributes,
@@ -42381,7 +42380,7 @@ impl Runtime<'_> {
         );
         let window_time = phase_started.elapsed();
         let startup_dpi = dpi_snapshot(&window, initial_rect)?;
-        let physical = window.inner_size();
+        let physical = opening_client_allocation(&window, requested_size, initial_rect);
         let startup_scale_factor = startup_dpi.authoritative_scale;
         let phase_started = Instant::now();
         // The visual tree first, because the swapchain hangs off it. Its
@@ -42836,8 +42835,6 @@ impl Runtime<'_> {
             compositor,
             window,
             math_context_menu,
-            #[cfg(target_os = "linux")]
-            winit_rect: initial_rect,
             folder_picker,
             image_picker,
             save_picker,
@@ -49877,7 +49874,7 @@ impl Runtime<'_> {
     /// tab list scrolled underneath it.
     fn open_broker(&mut self, source: &DragSource, position: PhysicalPosition<f64>) {
         let scale = self.window.renderer.scale_factor().max(0.01);
-        let size = self.window.window.inner_size();
+        let size = self.client_size();
         let window = self.window_id();
         self.app.drag_broker = Some(DragBroker {
             source: window,
@@ -68171,6 +68168,33 @@ fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {
 /// call). It is pinned by
 /// `the_window_is_asked_for_transparent_and_invisible`.
 #[must_use]
+/// The first surface allocation is a request; native observations arrive separately.
+fn opening_client_allocation(
+    window: &Window,
+    requested: LogicalSize<f64>,
+    placed: Option<bt_platform::WindowRect>,
+) -> PhysicalSize<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        if matches!(
+            linux_window_backend(window),
+            Ok(bt_platform::linux_window::Backend::X11)
+        ) && let Some(rect) = placed
+        {
+            return PhysicalSize::new(
+                rect.right.abs_diff(rect.left),
+                rect.bottom.abs_diff(rect.top),
+            );
+        }
+        requested.to_physical(window.scale_factor())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (requested, placed);
+        window.inner_size()
+    }
+}
+
 fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> WindowAttributes {
     let attributes = Window::default_attributes()
         // "新 tab，和启动" — one setting for both (mock-up 7575: `bootFresh()`
@@ -78280,6 +78304,38 @@ mod clipboard_path_tests {
         );
         assert!(dispatch.contains("runtime.refuse_pending_linux_pointer_actions()"));
         assert!(dispatch.contains("WindowEvent::CursorMoved { .. }"));
+    }
+
+    /// **The Linux runtime uses only observed resize events or its configured surface allocation.**
+    #[test]
+    fn linux_runtime_sizes_do_not_read_x11_on_the_window_thread() {
+        let size = method_body("Runtime", "client_size");
+        assert!(size.contains("last_winit_size"));
+        assert!(size.contains("presentation_physical_size"));
+        let linux = size
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .unwrap();
+        assert!(!linux.contains("inner_size()"));
+
+        let opening = item_body(&ItemQuery::function("opening_client_allocation"));
+        let linux = opening
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .unwrap();
+        assert!(!linux.contains("inner_size()"));
+        assert!(linux.contains("requested.to_physical(window.scale_factor())"));
+
+        let birth = item_body(&ItemQuery::function("new_window_runtime"));
+        assert!(birth.contains("last_winit_rect: None"));
+        assert!(birth.contains("last_winit_size: None"));
+
+        let resized = method_body("Runtime", "note_winit_size");
+        assert!(resized.contains("last_winit_size = Some(size)"));
+
+        let resize = method_body("Runtime", "resize");
+        assert!(resize.contains("self.client_size()"));
+        assert!(!resize.contains("self.window.window.inner_size()"));
     }
 
     /// **A native rectangle read cannot overwrite a newer winit event or a close snapshot**
