@@ -35,7 +35,6 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
 mod animation;
 mod app_delegate_wire;
 mod arrival;
@@ -273,6 +272,8 @@ use bt_viewport::{
 // seen" rule under the name this crate has always called it by.
 use bt_workbench::attention;
 use bt_workbench::attention::is_consumed as attention_is_consumed;
+#[cfg(any(windows, target_os = "macos"))]
+use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
@@ -283,7 +284,7 @@ use winit::{
     // needs the second: `Ctrl+Shift+1` produces `!` on a US keyboard and `1` on layouts that put
     // the digit behind Shift, and the binding is meant to be the digit either way.
     platform::modifier_supplement::KeyEventExtModifierSupplement,
-    raw_window_handle::{HasWindowHandle, RawWindowHandle},
+    raw_window_handle::HasWindowHandle,
     window::{Theme as OsTheme, Window, WindowAttributes, WindowId},
 };
 
@@ -63157,6 +63158,8 @@ impl FolioApp {
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
+        #[cfg(target_os = "linux")]
+        runtime.restore_minimized_window()?;
         runtime.show_quake_window()?;
         let native = native_window(&runtime.window.window).ok();
         if let Some(app) = self.app.as_mut() {
@@ -63175,7 +63178,7 @@ impl FolioApp {
             app.quake.shown_over(previous);
         }
         if let Some(runtime) = self.runtime(id)
-            && let Err(error) = runtime.take_keyboard_focus()
+            && let Err(error) = runtime.give_foreground_with_retry()
         {
             // Said to the log and never to the reader: there is nothing a person
             // can do about a foreground lock, and a card over their editor
@@ -69090,7 +69093,7 @@ mod floated_page_tests {
     /// seat that had been closed by `pop_out_preview`, and
     /// `settle_the_web_keyboard` — which runs every frame precisely so a page
     /// that has stopped being the typing target gives the keys back — read that
-    /// `false` and called `take_keyboard_focus` on the window. The engine held
+    /// `false` and called `bt_platform::take_keyboard_focus` on the window. The engine held
     /// the keyboard for less than one frame, every frame.
     ///
     /// Read off the file for this module's standing reason: a page holding the
@@ -69433,14 +69436,39 @@ mod floated_page_tests {
         let read = up
             .find("foreground_holder()")
             .expect("the summon reads who had the keyboard");
+        let restored = up
+            .find("runtime.restore_minimized_window()?")
+            .expect("the Linux summon restores its minimized window");
         let show = up
             .find("show_quake_window()")
             .expect("the summon shows the window");
+        assert!(
+            read < restored && restored < show,
+            "the summon restores a minimized window after reading and before showing it"
+        );
         assert!(
             read < show,
             "the foreground is read after the window is up, by which time it is \
              the window:\n{up}"
         );
+        let focus = up
+            .find("runtime.give_foreground_with_retry()")
+            .expect("the summon retries giving foreground to its window");
+        assert!(
+            show < focus,
+            "the foreground retry must follow showing the summon: {up}"
+        );
+        let runtime_focus = method_body("Runtime", "give_foreground_with_retry");
+        assert!(
+            runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
+            "the runtime focus helper does not use its owned-window path: {runtime_focus}"
+        );
+        let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
+        assert!(
+            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
+            "the foreground helper no longer uses the platform foreground door: {foreground}"
+        );
+
         let down = method_body("FolioApp", "dismiss_quake");
         let hide = down
             .find("hide_quake_window()")
@@ -70992,7 +71020,6 @@ fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
         }
     }
 }
-
 fn restore_minimized_window(window: &Window) -> Result<()> {
     if window.is_minimized() == Some(true) {
         #[cfg(target_os = "linux")]
@@ -73657,9 +73684,6 @@ mod platform_gate_tests {
         // The fixture for "an argument is not text", and nothing else — see the
         // module's own note above.
         "cli.rs",
-        // Linux arming and start failures are asynchronous; this owner applies
-        // them to each folder's wake and error policy.
-        "dir_news.rs",
         // The Explorer verb itself, which has no counterpart off Windows.
         "explorer_menu.rs",
         // Drive roots, the recycle bin, and the reveal.
@@ -73668,6 +73692,8 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
+        // Linux hands process work its WorkerCtx; the other hand-off doors are synchronous.
+        "handoff_lane.rs",
         // Linux-only cleanup labels remain available to all translation tests.
         "i18n.rs",
         // First-window display and clipboard identities are strict; optional
@@ -76389,6 +76415,16 @@ mod edit_menu_clipboard_tests {
                 && door.contains("self.apply_clipboard_text_to_field(field, &text)"),
             "the platform read or queued read bypasses the field insert helper"
         );
+        let read = door
+            .find("bt_platform::clipboard_text()")
+            .expect("the door reads the clipboard");
+        let applied = door
+            .find("self.apply_clipboard_text_to_field(field, &text)")
+            .expect("the door applies its clipboard text");
+        assert!(
+            read < applied,
+            "the field apply step must follow the clipboard read"
+        );
         let field_insert = method_body("Runtime", "apply_clipboard_text_to_field");
         for insert in [
             "self.search_ime(",
@@ -78066,14 +78102,33 @@ mod clipboard_path_tests {
             "Linux text reads enter through the same worker adapter"
         );
         let paste = method_body("Runtime", "paste_from_clipboard_into");
-        assert!(paste.contains("bt_platform::clipboard_payload()"));
+        let read = paste
+            .find("bt_platform::clipboard_payload()")
+            .expect("the terminal door reads the clipboard");
+        let applied = paste
+            .find("self.apply_clipboard_payload(target, payload)")
+            .expect("the terminal door applies the clipboard payload");
+        assert!(
+            read < applied,
+            "the payload apply step must follow the clipboard read"
+        );
         assert!(paste.contains("hang_watch::Station::ClipboardRead"));
         assert!(paste.contains("ClipboardDestination::Terminal(target)"));
         assert!(paste.contains("request_clipboard_read("));
-        let delivery = method_body("Runtime", "apply_clipboard_payload");
-        assert!(delivery.contains("leaf.paste_recipient.clone()"));
+        assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
         assert!(!paste.contains("set_focus("));
         assert!(!paste.contains("set_files_keyboard("));
+        let apply = method_body("Runtime", "apply_clipboard_payload");
+        let recipient = apply
+            .find("leaf.paste_recipient.clone()")
+            .expect("the apply step resolves the recipient");
+        let delivered = apply
+            .find("self.deliver_paste(")
+            .expect("the apply step delivers the paste");
+        assert!(
+            recipient < delivered,
+            "delivery must use the resolved recipient"
+        );
         let k144 = method_body("Runtime", "insert_path_into_terminal");
         assert!(k144.contains("shell_literal::paths_text("));
         assert!(k144.contains("set_files_keyboard(None"));
