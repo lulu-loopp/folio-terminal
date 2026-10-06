@@ -6,10 +6,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.7-preview — 2026-10-06
+
 ### Added
 
 - PowerShell profiles whose startup command cannot be safely extended can enable Folio through that edition's `$PROFILE` in one click from Settings, with Undo. When PowerShell's execution policy blocks `$PROFILE`, the row says who set it and, when it is yours to change, offers the one command to copy.
-- In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
+- In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder. In a video preview, seeking moved to Shift+← and Shift+→.
 - A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
   Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
@@ -28,9 +32,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
-- New panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
-- Folio's PowerShell integration script does nothing when your `$PROFILE` is read by another terminal; PowerShell started inside Folio stays integrated. A PowerShell on another machine reached by ssh is integrated only if ssh forwards `TERM_PROGRAM`. The bash and zsh scripts are unchanged: a copy you source yourself, for example on a server you ssh into from Folio, keeps working.
+- On Windows, new panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
+- Folio's PowerShell integration script does nothing when your `$PROFILE` is read by another terminal. By default, a PowerShell you start by typing `pwsh` or `powershell` in a pane is not integrated; it is when your `$PROFILE` has Folio's line. A PowerShell on another machine reached by ssh is integrated only if ssh forwards `TERM_PROGRAM`. The bash and zsh scripts are unchanged: a copy you source yourself, for example on a server you ssh into from Folio, keeps working.
 - On Windows, a newly installed command is found in a new tab without restarting Folio.
+- On Windows, a pane starts from your account's environment as it is now and no longer inherits variables that were set only in the shell Folio was started from (for example an activated Python or conda environment). For a pane that needs a prepared environment, use a profile.
 - PowerShell panes have command marks, folder tracking and inline formulas without setup when their command line can be safely extended; Settings offers the per-edition `$PROFILE` fallback for rows that cannot be extended.
 - PowerShell profile rows that run a command at startup — including Visual Studio Developer PowerShell and conda environments — now keep that command and receive the same command marks, folder tracking and inline formulas when PowerShell confirms the command parses.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.
@@ -43,6 +48,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- "Enable via $PROFILE" is offered only when your other PowerShell windows would load the profile too; on a machine whose policy refuses scripts it offers the command that allows them, so enabling it can no longer make every PowerShell window print an error.
+- Undo, removing the `$PROFILE` line and uninstalling also remove the profile file and folder Folio created and the one backup copy it kept; a file you had, or added to, stays.
+- Uninstalling no longer stops because a PowerShell was slow to start; it says which profile it could not check and goes on, and with "remove settings and data" on, nothing is deleted unless every other step succeeded.
+- The winget copy's Uninstall row says to close Folio first, and its command runs winget only after the cleanup succeeded, in Command Prompt and PowerShell alike.
+- The "Remove the line from $PROFILE" row appears only for a line Folio wrote, and a Profiles row's "could not be determined" no longer reads as a refusal; Folio asks again when the page is opened.
+- In a narrow Settings window, a profile's "default" badge no longer runs under its button.
+- The privacy notes and the README describe the update check where it now is (About → Automatic check), and that Check still asks when the automatic check is off.
 - A click on a pane's title-bar controls while the pane is moving lands only on a control that is drawn there.
 - In a narrow Settings window, a button whose edge is cut off no longer answers a click on the space beside it.
 - Commands Folio runs to learn about the machine no longer leave helper processes behind after a timeout or after Folio exits.
@@ -97,14 +109,30 @@ All notable changes to Folio are recorded here. The format follows
   was restored when nothing had been replaced; it says the previous version was
   restored only when it was, and says the update is incomplete when putting it
   back did not finish.
-- Restart shell, Duplicate pane, the splits and Duplicate tab start the new
-  shell in the folder the pane was opened in when its shell never reported
-  one, instead of the profile's default folder. A folder that has since been
+- On a profile that starts in the current pane's folder, Restart shell,
+  Duplicate pane, the splits and Duplicate tab start the new shell in the
+  folder the pane was opened in when its shell never reported one, instead of
+  the profile's default folder. A folder that has since been
   deleted opens the profile's own starting folder rather than the folder Folio
   itself was started from.
 - Pointing at a pane's notice strip — its words or its `×` — no longer also
   answers the pane's corner folder or `⌄` hidden under it: the files card no
   longer opens and the pane menu no longer drops from under the strip.
+- Open in Folio, `folio <folder>`, `--cwd`, New terminal in folder… and New
+  terminal here open the folder you chose even when the profile's Starting
+  directory is Home or a fixed folder, and that pane's Restart shell, Duplicate
+  and splits start in the folder it last reported, else the one you chose
+  (issue #16).
+- About → Version says what an update is doing after the download: Verifying,
+  then ready with Restart…, then Restarting…, instead of Downloading again or
+  offering Update and restart for an update already downloaded.
+- In Settings, Enter on About's buttons presses them, and when a focused
+  button stops being pressable the focus moves to the nearest control before
+  it on the page (after it when none is before) instead of staying on it with no
+  ring.
+- An update download on a slow connection is no longer stopped after ten
+  minutes; it stops only when the transfer stalls. This holds for updates made
+  from this version on: updating from 0.4.6 still uses 0.4.6's download.
 
 ### Known issues
 
@@ -112,6 +140,13 @@ All notable changes to Folio are recorded here. The format follows
   could not be recorded (its record kept out by another program, or a folder
   made read-only) runs without saving what it changes until the next start or
   logon finishes the update.
+- Updating from 0.4.6 still uses 0.4.6's updater: on macOS, do not open Folio
+  while the update is finishing, or 0.4.6 may come back although 0.4.7 works.
+- Updating from 0.4.6: if the update fails while another 0.4.6 window is open,
+  that window does not say so.
+- macOS: the first self-update makes macOS show its "software was added that
+  can run in the background" notice for Folio's login item — the updater's
+  recovery entry, removed once the update finishes.
 
 ### Internal
 

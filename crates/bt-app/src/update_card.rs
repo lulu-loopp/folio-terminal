@@ -549,7 +549,14 @@ pub(crate) enum VersionControl {
         enabled: bool,
     },
     UpdateAndRestart,
+    /// A verified update waits for **Restart** (`State::Verified`): the press raises the card
+    /// again (`Job::reopen`), whose own `Restart` then quits — so the verb wears the `…` of a
+    /// verb that asks first.
+    Restart,
     Progress(Bytes),
+    /// The download is complete and the job is past it — verifying, or quitting to apply
+    /// (`State::Staged`, `Quitting`, `Committing`): the bar, full. No verb.
+    Downloaded,
     CopyCommand {
         command: &'static str,
     },
@@ -570,7 +577,9 @@ pub(crate) enum VersionControl {
 pub(crate) enum VersionControlKind {
     Check,
     UpdateAndRestart,
+    Restart,
     Progress,
+    Downloaded,
     CopyCommand,
     Retry,
     OpenReleases,
@@ -583,7 +592,9 @@ impl VersionControl {
         match self {
             Self::Check { .. } => VersionControlKind::Check,
             Self::UpdateAndRestart => VersionControlKind::UpdateAndRestart,
+            Self::Restart => VersionControlKind::Restart,
             Self::Progress(_) => VersionControlKind::Progress,
+            Self::Downloaded => VersionControlKind::Downloaded,
             Self::CopyCommand { .. } => VersionControlKind::CopyCommand,
             Self::Retry { .. } => VersionControlKind::Retry,
             Self::OpenReleases => VersionControlKind::OpenReleases,
@@ -595,7 +606,8 @@ impl VersionControl {
         match self {
             Self::Check { .. } => Text::VersionCheck,
             Self::UpdateAndRestart => Text::VersionUpdateAndRestart,
-            Self::Progress(_) => return "",
+            Self::Restart => Text::VersionRestart,
+            Self::Progress(_) | Self::Downloaded => return "",
             Self::CopyCommand { .. } => Text::VersionCopyCommand,
             Self::Retry { .. } => Text::VersionRetry,
             Self::OpenReleases => Text::VersionOpenReleases,
@@ -607,7 +619,10 @@ impl VersionControl {
     pub(crate) const fn enabled(&self) -> bool {
         !matches!(
             self,
-            Self::Check { enabled: false } | Self::Retry { enabled: false } | Self::Progress(_)
+            Self::Check { enabled: false }
+                | Self::Retry { enabled: false }
+                | Self::Progress(_)
+                | Self::Downloaded
         )
     }
 
@@ -692,11 +707,32 @@ pub(crate) fn version_row<W: Copy + Eq>(
             link: None,
         };
     }
-    if let State::Staged(offer) | State::Quitting(offer) | State::Committing(offer) = job.state() {
+    // **Past the download, the row says what the job is doing now** (047-EXPERIENCE): the
+    // files are being checked, or Folio is quitting to put them in place. The bar stays full —
+    // every byte is on disk — and there is no verb, as there is none on the card.
+    if let State::Staged(offer) = job.state() {
         return VersionRow {
-            value: line(crate::i18n::version_downloading_in(lang, offer.tag())),
-            control: VersionControl::Progress(Bytes::default()),
+            value: line(crate::i18n::version_verifying_in(lang, offer.tag())),
+            control: VersionControl::Downloaded,
             link: None,
+        };
+    }
+    if let State::Quitting(_) | State::Committing(_) = job.state() {
+        return VersionRow {
+            value: line(Text::VersionRestarting.in_lang(lang).to_owned()),
+            control: VersionControl::Downloaded,
+            link: None,
+        };
+    }
+    // **Downloaded and verified, waiting for the restart**: the row says so, and its verb raises
+    // the Ready card again rather than offering a download that already happened.
+    if let State::Verified(offer) = job.state() {
+        return VersionRow {
+            value: line(crate::i18n::version_ready_in(lang, offer.tag())),
+            control: VersionControl::Restart,
+            link: Some(VersionLink::WhatsNew {
+                tag: offer.tag().to_owned(),
+            }),
         };
     }
     if matches!(job.state(), State::Pending(_)) {
@@ -804,8 +840,9 @@ pub(crate) enum RowFoot {
     /// that is not ours, not known, or has no release file here (§D).
     #[default]
     ReleasesPage,
-    /// `Restart to update`: a job waits at `Verified`, and the foot raises its
-    /// card again in the window it is pressed in. `tag` is the offer's.
+    /// A job waits at `Verified`; the row's control is `Restart…`
+    /// ([`VersionControl::Restart`]), whose press raises the Ready card again in
+    /// the window it is pressed in (`dispatch_version_control`). `tag` is the offer's.
     Restart { tag: String },
     /// `Copy`: a package manager updates this copy, and this is its command.
     Copy { command: &'static str },
@@ -1116,6 +1153,204 @@ mod tests {
             assert_eq!(row.value, value, "{name}");
             assert!(row.value.starts_with(&banner), "{name}: {}", row.value);
             assert_eq!(row.control.kind(), control, "{name}");
+        }
+    }
+
+    /// RED (047-EXPERIENCE) — **About ▸ Version says what the update job is doing in every
+    /// state, and offers only a verb that state has.** Each job is driven to its state through
+    /// the job's own entries (the press, the driver's posts, `restart`, a rollback's report, a
+    /// commit), never by writing the state.
+    ///
+    /// The rows that were wrong before: verifying and quitting said `Downloading` with a 35 %
+    /// bar, and a verified update said `available · Update and restart` as though nothing had
+    /// been downloaded.
+    ///
+    /// MUTATIONS, each observed red: (1) answer `State::Staged` with `version_downloading_in`
+    /// again — the verifying row; (2) delete the `State::Verified` arm of `version_row` — the
+    /// ready row (it falls to `available` and `UpdateAndRestart`); (3) give `Quitting` and
+    /// `Committing` `VersionControl::Progress(Bytes::default())` again — both restarting rows.
+    #[test]
+    fn about_version_says_what_every_job_state_is_doing() {
+        use super::{VersionControlKind as Kind, version_row};
+        use crate::update::CheckView;
+
+        let banner = crate::version::banner();
+        let now = 10 * 86_400_000;
+        let answered = CheckView {
+            answered: Some(true),
+            ..CheckView::default()
+        };
+        let unanswered = CheckView {
+            checked_at_ms: now,
+            answered: Some(false),
+            ..CheckView::default()
+        };
+        let (mut verifying, post) = downloading();
+        post.post(Step::Staged);
+        assert_eq!(verifying.drain_progress(), 0);
+        let (mut quitting, post) = downloading();
+        post.post(Step::Staged);
+        post.post(Step::Verified);
+        assert_eq!(quitting.drain_progress(), 0);
+        quitting.restart().expect("a verified job restarts");
+        let (mut committing, post) = downloading();
+        post.post(Step::Staged);
+        post.post(Step::Verified);
+        assert_eq!(committing.drain_progress(), 0);
+        committing.restart().expect("a verified job restarts");
+        post.post(Step::SessionLanded);
+        assert_eq!(committing.drain_progress(), 0);
+        let (mut stopped, post) = downloading();
+        post.post(Step::Stopped(crate::update_job::Stop::Download));
+        assert_eq!(stopped.drain_progress(), 0);
+        let after =
+            |failure: Failure| considered("v0.4.7", Channel::Ours).after_rollback(Some(failure));
+        let mut updated =
+            considered(RUNNING, Channel::Ours).after_rollback(Some(Failure::Incomplete {
+                folder: Some(PathBuf::from("journal")),
+            }));
+        assert!(
+            updated.after_commit(RUNNING),
+            "the commit replaces the card"
+        );
+
+        /// A state's name, its job, the check beside it, the offered tag, the line and the control.
+        type Row = (
+            &'static str,
+            Job<u32>,
+            CheckView,
+            Option<&'static str>,
+            String,
+            Kind,
+        );
+        let rows: Vec<Row> = vec![
+            (
+                "checking",
+                Job::with_offers(true),
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · Checking…"),
+                Kind::Check,
+            ),
+            (
+                "up to date",
+                considered(RUNNING, Channel::Ours),
+                answered,
+                None,
+                format!("{banner} · Up to date"),
+                Kind::Check,
+            ),
+            (
+                "no answer",
+                considered(RUNNING, Channel::Ours),
+                unanswered,
+                None,
+                format!("{banner} · Last checked: just now"),
+                Kind::Check,
+            ),
+            (
+                "offer",
+                considered("v0.4.7", Channel::Ours),
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · v0.4.7 available"),
+                Kind::UpdateAndRestart,
+            ),
+            (
+                "downloading",
+                downloading().0,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · Downloading v0.4.7"),
+                Kind::Progress,
+            ),
+            (
+                "verifying",
+                verifying,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · Verifying v0.4.7"),
+                Kind::Downloaded,
+            ),
+            (
+                "ready to restart",
+                verified(),
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · v0.4.7 ready"),
+                Kind::Restart,
+            ),
+            (
+                "quitting to apply",
+                quitting,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · Restarting…"),
+                Kind::Downloaded,
+            ),
+            (
+                "handing over",
+                committing,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · Restarting…"),
+                Kind::Downloaded,
+            ),
+            (
+                "failed, nothing changed",
+                stopped,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · v0.4.7 was not installed."),
+                Kind::Retry,
+            ),
+            (
+                "failed, restored",
+                after(Failure::RolledBack),
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · v0.4.7 was not installed. The previous version was restored."),
+                Kind::Retry,
+            ),
+            (
+                "failed, incomplete",
+                after(Failure::Incomplete {
+                    folder: Some(PathBuf::from("journal")),
+                }),
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · The update to v0.4.7 is incomplete."),
+                Kind::Retry,
+            ),
+            (
+                "trial",
+                after(Failure::TrialIncomplete {
+                    folder: PathBuf::from("journal"),
+                }),
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("{banner} · The update to v0.4.7 is incomplete."),
+                Kind::Retry,
+            ),
+            (
+                "updated by the trial's commit",
+                updated,
+                answered,
+                None,
+                format!("{banner} · Up to date"),
+                Kind::Check,
+            ),
+        ];
+        for (name, job, check, offered, value, control) in &rows {
+            let row = version_row(job, *check, *offered, now, Lang::English);
+            assert_eq!(&row.value, value, "{name}");
+            assert_eq!(row.control.kind(), *control, "{name}");
+        }
+        // Every job state is on the table.
+        let kinds: std::collections::HashSet<_> =
+            rows.iter().map(|(_, job, ..)| job.state().kind()).collect();
+        for kind in crate::update_job::Kind::ALL {
+            assert!(kinds.contains(&kind), "{kind:?} has no row");
         }
     }
 
