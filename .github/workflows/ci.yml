@@ -1102,7 +1102,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers \
+            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers libxkbcommon-x11-0 \
             xfce4-clipman dbus-x11 python3-xlib \
             fonts-noto-cjk fonts-noto-mono fonts-dejavu-core
 
