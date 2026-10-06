@@ -10138,6 +10138,56 @@ fn unknown_native_posture_preserves_the_saved_window_placement() {
     }
 }
 
+#[test]
+fn maximize_intent_keeps_desired_state_ahead_of_stale_answers() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+}
+
+#[test]
+fn maximize_intent_preserves_rapid_absolute_toggle_order() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+    assert_eq!(intent.posture_state(), Some(false));
+}
+
+#[test]
+fn maximize_intent_waits_for_unknown_state_and_cancels_even_toggles() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.posture_state(), Some(false));
+
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    let mut unknown = WindowMaximizeIntent::default();
+    assert_eq!(unknown.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(
+        unknown.observe(Some(true)),
+        Some(WindowMaximizeAction::Request(false))
+    );
+    assert_eq!(unknown.posture_state(), None);
+    assert_eq!(unknown.observe(Some(false)), None);
+    assert_eq!(unknown.posture_state(), Some(false));
+}
+
+#[test]
+fn an_initial_maximize_request_stays_desired_until_observed() {
+    let mut intent = WindowMaximizeIntent::default();
+    intent.request_initial(true);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.observe(Some(true)), None);
+    assert_eq!(intent.posture_state(), None);
+}
+
 /// The posture that does record: a normal window's rectangle is the user's,
 /// and it is written exactly. The fallback to what was saved covers only the
 /// case where the rectangle could not be measured at all.

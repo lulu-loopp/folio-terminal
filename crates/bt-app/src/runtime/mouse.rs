@@ -4187,9 +4187,7 @@ impl Runtime<'_> {
                 crate::minimize_owned_window(&self.window.window)?;
             }
             seats::ChromeTarget::Maximize => {
-                self.window
-                    .window
-                    .set_maximized(!self.window.window.is_maximized());
+                self.toggle_window_maximized();
             }
             seats::ChromeTarget::CloseWindow => {
                 self.request_window_close()
@@ -4451,7 +4449,7 @@ impl Runtime<'_> {
             self.hide_layout_peek()?;
             #[cfg(target_os = "linux")]
             if button == MouseButton::Left
-                && !self.window.window.is_maximized()
+                && self.window_maximized_state() == Some(false)
                 && self.window.window.fullscreen().is_none()
                 && let Some(position) = self.window.pointer_position
                 && let Some(direction) = crate::linux_resize_direction(
