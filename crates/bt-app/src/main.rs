@@ -61997,9 +61997,12 @@ impl FolioApp {
             });
             #[cfg(target_os = "linux")]
             if restore_placement.is_none() {
-                let saved = (plan.like.is_none() && plan.receives.is_none())
-                    .then_some(plan.saved.as_deref())
-                    .flatten();
+                let saved: Option<&SessionWindowV1> =
+                    if plan.like.is_none() && plan.receives.is_none() {
+                        plan.saved.as_deref()
+                    } else {
+                        None
+                    };
                 if let Some(saved) = saved {
                     let inputs = restore_monitor_inputs(event_loop);
                     if !saved.tabs.is_empty()
