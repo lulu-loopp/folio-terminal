@@ -33749,9 +33749,10 @@ fn observed_drag_guard_screen(
 fn drag_guard_allows_release(
     screen: Option<bt_platform::WindowRect>,
     request_pending: bool,
-    sample_ready: bool,
+    aim_pointer: Option<(f64, f64)>,
+    release_pointer: (f64, f64),
 ) -> bool {
-    screen.is_some() && !request_pending && !sample_ready
+    screen.is_some() && !request_pending && aim_pointer == Some(release_pointer)
 }
 
 /// **Where a cross-window gesture is pointing right now** (multiwindow slice
@@ -33926,7 +33927,11 @@ struct DragBroker {
     #[cfg(target_os = "linux")]
     guard_generation: u64,
     #[cfg(target_os = "linux")]
+    /// A confirmed screen sample available to authorize one broker turn.
     guard_sample_ready: bool,
+    #[cfg(target_os = "linux")]
+    /// The delivered point used to compute the broker's last aim.
+    guard_aim_pointer: Option<(f64, f64)>,
 }
 
 impl DragBroker {
@@ -33953,6 +33958,47 @@ impl DragBroker {
     /// The rest has been paid.
     fn spend(&mut self, tab: TabId) {
         self.spring.spend(tab);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_guard_screen_answer(
+        &mut self,
+        generation: u64,
+        answer: Result<bt_platform::WindowRect, String>,
+    ) -> bool {
+        if self.guard_generation != generation {
+            return false;
+        }
+        let Some(screen) = observed_drag_guard_screen(self.guard.screen, answer) else {
+            return false;
+        };
+        self.guard.screen = Some(screen);
+        self.guard_sample_ready = true;
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    fn consume_guard_screen_answer(&mut self) -> bool {
+        std::mem::replace(&mut self.guard_sample_ready, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn record_guarded_aim(&mut self, pointer: (f64, f64)) {
+        self.guard_aim_pointer = Some(pointer);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn guarded_release_is_current(
+        &self,
+        request_pending: bool,
+        release_pointer: (f64, f64),
+    ) -> bool {
+        drag_guard_allows_release(
+            self.guard.screen,
+            request_pending,
+            self.guard_aim_pointer,
+            release_pointer,
+        )
     }
 
     /// **The broker's own wake-up, for the loop's set** — the v3 增补's
@@ -33996,6 +34042,8 @@ impl DragBroker {
             guard_generation: 0,
             #[cfg(target_os = "linux")]
             guard_sample_ready: true,
+            #[cfg(target_os = "linux")]
+            guard_aim_pointer: None,
         }
     }
 }
@@ -49886,6 +49934,8 @@ impl Runtime<'_> {
             guard_generation,
             #[cfg(target_os = "linux")]
             guard_sample_ready: false,
+            #[cfg(target_os = "linux")]
+            guard_aim_pointer: None,
         });
     }
 
@@ -63179,8 +63229,8 @@ impl FolioApp {
                 .app
                 .as_ref()
                 .and_then(|app| app.drag_broker.as_ref())
-                .map(|broker| (broker.source, broker.guard.screen, broker.guard_generation));
-            if let Some((source, screen, active_generation)) = active
+                .map(|broker| (broker.source, broker.guard_generation));
+            if let Some((source, active_generation)) = active
                 && drag_guard_reply_matches(
                     Some(active_generation),
                     pending.broker_generation,
@@ -63194,16 +63244,14 @@ impl FolioApp {
                     )) => answer,
                     _ => Err("the Linux display worker returned no screen rectangle".to_owned()),
                 };
-                let observed = observed_drag_guard_screen(screen, answer);
-                if let Some(observed) = observed {
-                    if let Some(app) = self.app.as_mut()
-                        && let Some(broker) = app.drag_broker.as_mut()
-                        && broker.guard_generation == pending.broker_generation
-                    {
-                        broker.guard.screen = Some(observed);
-                        broker.guard_sample_ready = true;
-                    }
-                } else {
+                let accepted = self
+                    .app
+                    .as_mut()
+                    .and_then(|app| app.drag_broker.as_mut())
+                    .is_some_and(|broker| {
+                        broker.apply_guard_screen_answer(pending.broker_generation, answer)
+                    });
+                if !accepted {
                     if let Some(mut runtime) = self.runtime(source) {
                         runtime.cancel_drag()?;
                     }
@@ -63482,11 +63530,16 @@ impl FolioApp {
             if pending_for_broker {
                 return Ok(None);
             }
-            if let Some(app) = self.app.as_mut()
-                && let Some(broker) = app.drag_broker.as_mut()
-                && broker.guard_generation == guard_generation
-            {
-                broker.guard_sample_ready = false;
+            let consumed = self
+                .app
+                .as_mut()
+                .and_then(|app| app.drag_broker.as_mut())
+                .is_some_and(|broker| {
+                    broker.guard_generation == guard_generation
+                        && broker.consume_guard_screen_answer()
+                });
+            if !consumed {
+                return Ok(None);
             }
         }
         let Some((pointer, cargo, cargo_tree, face)) = self
@@ -63554,6 +63607,8 @@ impl FolioApp {
             && let Some(broker) = app.drag_broker.as_mut()
         {
             broker.aim_at(aim.clone(), now);
+            #[cfg(target_os = "linux")]
+            broker.record_guarded_aim(pointer);
         }
         // Spent before the switch is attempted and not after — `advance_drag_spring`'s
         // own note, for its own reason: a gate left armed because the tab had been
@@ -74210,9 +74265,8 @@ mod cross_window_drag_tests {
 
     #[cfg(target_os = "linux")]
     use super::{
-        RestoreMonitor, RestoreMonitorInput, drag_guard_allows_release, drag_guard_reply_matches,
-        observed_drag_guard_screen, restore_monitor_topology_matches,
-        restore_monitors_from_work_areas,
+        RestoreMonitor, RestoreMonitorInput, drag_guard_reply_matches,
+        restore_monitor_topology_matches, restore_monitors_from_work_areas,
     };
 
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
@@ -74881,6 +74935,7 @@ mod cross_window_drag_tests {
             generation: 23,
         };
         assert!(drag_guard_reply_matches(Some(23), 23, ready, ready));
+        assert!(!drag_guard_reply_matches(None, 23, ready, ready));
         assert!(!drag_guard_reply_matches(Some(24), 23, ready, ready));
         assert!(!drag_guard_reply_matches(
             Some(23),
@@ -74892,28 +74947,64 @@ mod cross_window_drag_tests {
             }
         ));
 
+        let source = WindowId::from(9_u64);
+        let target = WindowId::from(10_u64);
         let original = rect(-1920, 0, 3840, 2160);
-        assert_eq!(
-            observed_drag_guard_screen(None, Ok(original)),
-            Some(original)
+        let pointer = (320.0, 180.0);
+        let landing = DropLanding::StripAdopt { tab: TabId(7) };
+        let mut broker = DragBroker::for_test(source);
+        broker.guard.screen = None;
+        broker.guard_generation = 23;
+        broker.guard_sample_ready = false;
+        broker.pointer = pointer;
+
+        assert!(!broker.apply_guard_screen_answer(24, Ok(original)));
+        assert_eq!(broker.guard.screen, None);
+        assert!(!broker.consume_guard_screen_answer());
+
+        assert!(broker.apply_guard_screen_answer(23, Ok(original)));
+        assert!(broker.consume_guard_screen_answer());
+        assert!(!broker.guard_sample_ready);
+        broker.aim_at(
+            BrokerAim::Window {
+                window: target,
+                landing: Some(landing),
+            },
+            Instant::now(),
         );
+        broker.record_guarded_aim(pointer);
+
+        assert!(broker.guarded_release_is_current(false, pointer));
         assert_eq!(
-            observed_drag_guard_screen(Some(original), Ok(original)),
-            Some(original)
+            broker_verdict(&broker.cargo, &broker.aim),
+            BrokerRelease::Into {
+                window: target,
+                landing,
+            },
+            "consuming the screen sample before aiming must leave a valid release spendable"
         );
-        assert_eq!(
-            observed_drag_guard_screen(Some(original), Ok(rect(0, 0, 1920, 1080))),
-            None
-        );
-        assert_eq!(
-            observed_drag_guard_screen(Some(original), Err("refused".into())),
-            None
-        );
-        assert_eq!(observed_drag_guard_screen(None, Ok(rect(0, 0, 0, 0))), None);
-        assert!(!drag_guard_allows_release(None, false, false));
-        assert!(!drag_guard_allows_release(Some(original), true, false));
-        assert!(!drag_guard_allows_release(Some(original), false, true));
-        assert!(drag_guard_allows_release(Some(original), false, false));
+        assert!(!broker.guarded_release_is_current(true, pointer));
+        assert!(!broker.guarded_release_is_current(false, (pointer.0 + 1.0, pointer.1)));
+
+        let mut changed = broker.clone();
+        assert!(!changed.apply_guard_screen_answer(23, Ok(rect(0, 0, 1920, 1080))));
+        assert_eq!(changed.guard.screen, Some(original));
+        assert_eq!(changed.guard_aim_pointer, Some(pointer));
+        assert_eq!(changed.aim, broker.aim);
+        assert_eq!(changed.pointer, pointer);
+
+        let mut late = broker.clone();
+        assert!(!late.apply_guard_screen_answer(24, Ok(rect(0, 0, 1920, 1080))));
+        assert_eq!(late.aim, broker.aim);
+        assert_eq!(late.pointer, pointer);
+
+        let mut refused = DragBroker::for_test(source);
+        refused.guard.screen = None;
+        refused.guard_generation = 23;
+        refused.guard_sample_ready = false;
+        assert!(!refused.apply_guard_screen_answer(23, Err("refused".into())));
+        assert_eq!(refused.guard.screen, None);
+        assert!(!refused.guarded_release_is_current(false, pointer));
     }
 
     #[cfg(target_os = "linux")]
@@ -74929,7 +75020,7 @@ mod cross_window_drag_tests {
         assert!(!drive.contains("virtual_screen_rect"));
 
         let release = method_body("Runtime", "hand_over_across_windows");
-        assert!(release.contains("drag_guard_allows_release"));
+        assert!(release.contains("guarded_release_is_current"));
 
         let restore = free_fn_body("restore_monitors");
         assert!(
