@@ -13770,6 +13770,8 @@ struct WindowRuntime {
     #[cfg(target_os = "linux")]
     last_winit_size: Option<PhysicalSize<u32>>,
     #[cfg(target_os = "linux")]
+    native_client_origin: Option<(i32, i32)>,
+    #[cfg(target_os = "linux")]
     native_window_maximized: Option<bool>,
     #[cfg(target_os = "linux")]
     native_window_minimized: Option<bool>,
@@ -41245,6 +41247,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         last_winit_rect: None,
         #[cfg(target_os = "linux")]
         last_winit_size: None,
+        #[cfg(target_os = "linux")]
+        native_client_origin: None,
         #[cfg(target_os = "linux")]
         native_window_maximized: None,
         #[cfg(target_os = "linux")]

@@ -14236,3 +14236,8 @@ only winit events or an addressed native answer fill them. A saved or tear-out
 request no longer initializes the observed geometry cache. Windows and macOS
 keep their original size getters. Pinned by
 `clipboard_path_tests::linux_runtime_sizes_do_not_read_x11_on_the_window_thread`.
+
+
+### Linux client-origin observation — 2026-10-06
+
+Cross-window drag coordinates use the display worker's actual X11 client-to-root translation, separately from the outer frame rectangle. Move and resize events invalidate that origin until a matching current geometry answer arrives. An unavailable translation is not replaced by an outer-frame guess. Windows and macOS retain their Winit inner-position read; Wayland retains the absence of global window coordinates. This uses the existing display request and does not start another worker.

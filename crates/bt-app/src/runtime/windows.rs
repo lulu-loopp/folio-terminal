@@ -1336,6 +1336,7 @@ impl Runtime<'_> {
             request.try_take()
         {
             self.window.last_winit_rect = Some(facts.rect);
+            self.window.native_client_origin = facts.client_origin;
             self.window.native_window_minimized = facts.minimized;
             self.window.native_window_maximized = facts.maximized;
             let snapshot = self.window_snapshot_with_rect(|| Some(facts.rect));
@@ -2138,6 +2139,7 @@ impl Runtime<'_> {
     fn note_winit_position(&mut self, position: winit::dpi::PhysicalPosition<i32>) {
         #[cfg(target_os = "linux")]
         {
+            self.window.native_client_origin = None;
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
             if width > 0 && height > 0 {
                 self.window.last_winit_rect = Some(bt_platform::WindowRect {
@@ -2161,6 +2163,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn note_winit_size(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         #[cfg(target_os = "linux")]
         {
+            self.window.native_client_origin = None;
             self.window.last_winit_size = Some(size);
             if size.width > 0
                 && size.height > 0

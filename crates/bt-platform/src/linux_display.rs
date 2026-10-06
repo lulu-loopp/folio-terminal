@@ -133,6 +133,8 @@ pub enum LinuxDisplayAnswer {
 pub struct LinuxWindowFacts {
     /// The rectangle observed by the display worker.
     pub rect: WindowRect,
+    /// The observed client origin in root coordinates, or an unavailable translation.
+    pub client_origin: Option<(i32, i32)>,
     /// Whether both maximize state atoms were present, or absent.
     pub maximized: Option<bool>,
     /// Whether the hidden state atom was present, or absent.
@@ -423,10 +425,18 @@ pub fn get_window_rect(window: NativeWindow) -> Result<WindowRect, String> {
 /// Read a window's geometry and EWMH posture on the display worker.
 pub fn get_window_facts(window: NativeWindow) -> Result<LinuxWindowFacts, String> {
     with_x11("reading a window's rectangle and state", |session| {
-        let rect = window_rect(session, window.as_x11_window())?;
+        let (rect, root) = window_rect_and_root(session, window.as_x11_window())?;
+        let client_origin = session
+            .connection
+            .translate_coordinates(window.as_x11_window(), root, 0, 0)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .filter(|reply| reply.same_screen)
+            .map(|reply| (i32::from(reply.dst_x), i32::from(reply.dst_y)));
         let (maximized, minimized) = window_state_facts(session, window.as_x11_window());
         Ok(LinuxWindowFacts {
             rect,
+            client_origin,
             maximized,
             minimized,
         })
