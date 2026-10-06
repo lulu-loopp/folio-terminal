@@ -78802,8 +78802,8 @@ mod clipboard_path_tests {
             ),
             (
                 resized,
-                "window_rect_refresh_owed = true",
-                "a resize must invalidate an in-flight rectangle answer",
+                "self.queue_linux_window_rect_snapshot()",
+                "a resize must reach the coalescing geometry request",
             ),
             (
                 snapshot,
@@ -78818,6 +78818,20 @@ mod clipboard_path_tests {
         ] {
             assert!(body.contains(needle), "{reason}:\n{body}");
         }
+        let queue = method_body("Runtime", "queue_linux_window_rect_snapshot");
+        let pending = queue
+            .find("self.window.pending_window_rect.is_some()")
+            .expect("the refresh must observe an in-flight request");
+        let owed = queue
+            .find("self.window.window_rect_refresh_owed = true")
+            .expect("an event must invalidate the in-flight answer");
+        let fresh = queue
+            .find("bt_platform::linux_display::request_display(")
+            .expect("a window without a pending request asks for current facts");
+        assert!(
+            pending < owed && owed < fresh,
+            "a pending request must coalesce before new admission:\n{queue}"
+        );
         let stale = apply
             .find("self.window.window_rect_refresh_owed")
             .expect("an event can mark the native answer stale");
