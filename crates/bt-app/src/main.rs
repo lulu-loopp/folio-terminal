@@ -73798,7 +73798,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 30] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 33] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -73837,6 +73837,8 @@ mod platform_gate_tests {
         "runtime/dpi.rs",
         // A refused Linux external-drop batch remains closed through its event-turn boundary.
         "runtime/files.rs",
+        // Linux withdraws cross-window dragging when its observed client origin is invalidated.
+        "runtime/frame.rs",
         // Linux keeps its input method across a focus loss in this ladder.
         "runtime/keyboard.rs",
         // Linux's client frame starts a native resize from this pointer gesture.
@@ -73844,10 +73846,14 @@ mod platform_gate_tests {
         // Linux path drops and tear-out placement use worker answers; other platforms keep their
         // existing synchronous gesture path.
         "runtime/panes.rs",
+        // X11 monitor-cache misses read RandR on the existing background-image worker.
+        "runtime/preview.rs",
         // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
         "runtime/quake.rs",
         // Linux tear-out plans carry the worker's work-area and DPI answer to window creation.
         "runtime/tabs.rs",
+        // Linux screen coordinates use the display worker's client translation.
+        "runtime/terminal.rs",
         // The Linux-only minimize restore bridge has only the Linux quake summon caller.
         "runtime/windows.rs",
         // Native failure fixture: Linux reports async watch-start failure; other starts refuse inline.
