@@ -182,15 +182,6 @@ impl NativeWindow {
         }
     }
 
-    // TEMPORARY (2026-10-06, PR2 of the port split): the reader is
-    // `linux_display::pointer_position_in_window`, which arrives with the
-    // Linux windowing work (PR3 of the port split).
-    #[allow(dead_code)]
-    #[cfg(target_os = "linux")]
-    pub(crate) fn as_x11_window(self) -> u32 {
-        self.handle.get() as u32
-    }
-
     /// A Wayland surface supplied by the window owner.
     #[cfg(target_os = "linux")]
     #[must_use]
