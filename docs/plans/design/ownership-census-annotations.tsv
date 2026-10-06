@@ -24,8 +24,8 @@
 # for the owner to confirm.
 fact	part	class	proposed_owner	note
 App.activated	-	LIFE	windows	the 2026-09-25 table
-App.copilot_readiness	-	OBS	first_run	the 2026-09-25 table
 App.clipboard_lane	-	RES	the application (FolioApp)	Linux clipboard write design: one process ClipboardLane orders reads and writes; Runtime admits immutable requests, FolioApp adopts or discards each result and acknowledges its id, DesktopRetire takes the lane for shutdown
+App.copilot_readiness	-	OBS	first_run	the 2026-09-25 table
 App.device_loss_pilot	-	LIFE	frame	the 2026-09-25 table
 App.drag_broker	-	VIEW	the application (FolioApp)	revision (b)4: a cross-window interaction the application owns, not a surface module
 App.explorer_package_asked_by	-	ASYNC	first_run	the 2026-09-25 table
