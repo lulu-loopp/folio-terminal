@@ -4392,7 +4392,7 @@ impl Runtime<'_> {
         // where it is drawn.
         self.mouse_trace(|| {
             let presentation = self.window.renderer.presentation_geometry();
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             let pointer = self
                 .window
                 .pointer_position
@@ -4456,7 +4456,7 @@ impl Runtime<'_> {
                 && let Some(position) = self.window.pointer_position
                 && let Some(direction) = crate::linux_resize_direction(
                     position,
-                    self.window.window.inner_size(),
+                    self.client_size(),
                     self.window.window.scale_factor(),
                 )
                 && self.window.window.drag_resize_window(direction).is_ok()
@@ -6107,7 +6107,7 @@ impl Runtime<'_> {
         // nothing else does.
         self.mouse_trace(|| {
             let presentation = self.window.renderer.presentation_geometry();
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             mouse_trace::WheelEntry {
                 pointer: self.window.pointer_position.map(|at| (at.x, at.y)),
                 pointer_last_seen: self.window.pointer_last_seen.map(|at| (at.x, at.y)),
