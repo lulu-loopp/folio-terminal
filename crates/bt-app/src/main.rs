@@ -74765,7 +74765,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 39] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 38] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -74802,8 +74802,6 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Linux's generation-checked native hotkey answers read the current claim here.
         "quake.rs",
-        // Linux notification restore consumes worker posture; the other platforms keep Winit reads.
-        "runtime/attention.rs",
         // Linux clipboard and path-drop replies apply only to their captured destination.
         "runtime/clipboard.rs",
         // Linux snapshots use event geometry and an asynchronous native rectangle answer.
