@@ -14194,3 +14194,7 @@ On Linux, `FolioApp::summon_quake` reads the previous foreground, restores a min
 ### 2026-10-06 — Linux hand-offs retain the lane worker
 
 Linux dispatches file and address requests through `ShellThread::hand_over_on_worker`, carrying the handoff lane's `WorkerCtx` into the Linux file and process doors.
+
+### 2026-10-06 — The clipboard pin keeps its named test module
+
+The exact path is `runtime::clipboard::policy_command_tests::copy_puts_exactly_the_policy_command_on_the_clipboard`. This corrects the module name in the preceding path note.
