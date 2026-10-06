@@ -16,6 +16,7 @@ use bt_render::{FrameSource, FrameTrigger};
 use bt_viewport::MathBlockAnchor;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use winit::dpi::PhysicalPosition;
 use winit::event::Ime;
 
 impl Runtime<'_> {
@@ -275,15 +276,16 @@ impl Runtime<'_> {
     /// Answers the address to write to — the one **both** readings agree on —
     /// rather than a `bool`, so that no caller can take the verdict from here and
     /// the destination from somewhere older.
-    pub(in crate::runtime) fn paste_offer_kept(
+    /// **Check a path drop against the pointer answer already delivered** (release review 2026-09-17).
+    ///
+    /// The asynchronous X11 query supplies this point. The original offer, target shell, and plan
+    /// still have to agree before any bytes are written.
+    pub(in crate::runtime) fn paste_offer_kept_at(
         &self,
         drag: &Drag,
         plan: &seats::DropPlan,
+        released_at: PhysicalPosition<f64>,
     ) -> Option<PasteTarget> {
-        let released_at = self.platform_pointer_now()?;
-        // The seam latch is this gesture's and the runtime holds none of it; a
-        // copy is passed because this reading must not move the live one — the
-        // gesture is over.
         let mut seam = drag.seam;
         let at_release = self.survey_drop(&drag.source, drag.home, released_at, &mut seam);
         paste_offer_is_kept(
@@ -293,6 +295,17 @@ impl Runtime<'_> {
             plan.fits(),
             self.a_modal_holds_the_window(),
         )
+    }
+
+    /// The synchronous native pointer road used where the platform returns from the release event.
+    #[cfg(not(target_os = "linux"))]
+    pub(in crate::runtime) fn paste_offer_kept(
+        &self,
+        drag: &Drag,
+        plan: &seats::DropPlan,
+    ) -> Option<PasteTarget> {
+        self.platform_pointer_now()
+            .and_then(|released_at| self.paste_offer_kept_at(drag, plan, released_at))
     }
 
     /// **What the clipboard can put into a one-line field**, or nothing when
