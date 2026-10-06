@@ -13773,7 +13773,7 @@ struct WindowRuntime {
     #[cfg(target_os = "linux")]
     native_client_origin: Option<(i32, i32)>,
     #[cfg(target_os = "linux")]
-    native_window_maximized: Option<bool>,
+    maximize_intent: WindowMaximizeIntent,
     #[cfg(target_os = "linux")]
     native_window_minimized: Option<bool>,
     /// The geometry changes the most recent layout commit produced (T230).
@@ -41251,7 +41251,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         #[cfg(target_os = "linux")]
         native_client_origin: None,
         #[cfg(target_os = "linux")]
-        native_window_maximized: None,
+        maximize_intent: WindowMaximizeIntent::default(),
         #[cfg(target_os = "linux")]
         native_window_minimized: None,
         #[cfg(target_os = "linux")]
@@ -71248,9 +71248,22 @@ fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
     }
 }
 fn restore_minimized_window(window: &Window) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        match linux_window_backend(window)? {
+            bt_platform::linux_window::Backend::X11 => {
+                linux_window_request(window, bt_platform::linux_window::Operation::Restore)?;
+                window.set_minimized(false);
+            }
+            bt_platform::linux_window::Backend::Wayland => {
+                if window.is_minimized() == Some(true) {
+                    window.set_minimized(false);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     if window.is_minimized() == Some(true) {
-        #[cfg(target_os = "linux")]
-        linux_window_request(window, bt_platform::linux_window::Operation::Restore)?;
         window.set_minimized(false);
     }
     Ok(())
@@ -72294,6 +72307,65 @@ fn choose_window_posture(minimized: Option<bool>, maximized: Option<bool>) -> Wi
         (Some(false), Some(true)) => WindowPosture::Maximized,
         (Some(false), Some(false)) => WindowPosture::Normal,
         _ => WindowPosture::Unknown,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WindowMaximizeIntent {
+    observed: Option<bool>,
+    desired: Option<bool>,
+    toggle_while_unknown: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowMaximizeAction {
+    Request(bool),
+    WaitForObservation,
+}
+
+impl WindowMaximizeIntent {
+    pub(crate) const fn observed(&self) -> Option<bool> {
+        self.observed
+    }
+
+    fn posture_state(&self) -> Option<bool> {
+        let observed = self.observed();
+        if self
+            .desired
+            .is_some_and(|desired| Some(desired) != observed)
+        {
+            None
+        } else {
+            observed
+        }
+    }
+
+    pub(crate) fn request_initial(&mut self, desired: bool) {
+        self.desired = Some(desired);
+    }
+
+    pub(crate) fn toggle(&mut self) -> WindowMaximizeAction {
+        let Some(current) = self.desired.or(self.observed) else {
+            self.toggle_while_unknown = !self.toggle_while_unknown;
+            return WindowMaximizeAction::WaitForObservation;
+        };
+        let desired = !current;
+        self.desired = Some(desired);
+        WindowMaximizeAction::Request(desired)
+    }
+
+    pub(crate) fn observe(&mut self, observed: Option<bool>) -> Option<WindowMaximizeAction> {
+        self.observed = observed;
+        let observed = observed?;
+        if std::mem::take(&mut self.toggle_while_unknown) {
+            let desired = !observed;
+            self.desired = Some(desired);
+            return Some(WindowMaximizeAction::Request(desired));
+        }
+        if self.desired == Some(observed) {
+            self.desired = None;
+        }
+        None
     }
 }
 
@@ -78845,6 +78917,13 @@ mod clipboard_path_tests {
         let stale = apply
             .find("self.window.window_rect_refresh_owed")
             .expect("an event can mark the native answer stale");
+        let closing = apply
+            .find("self.window.leaving.is_some()")
+            .expect("a closing window discards late native facts");
+        assert!(
+            closing < stale,
+            "a late native reply can be spent after close:\n{apply}"
+        );
         let write = apply
             .find("self.window.last_winit_rect = Some(facts.rect)")
             .expect("a current native answer refreshes the cache");
@@ -78859,17 +78938,63 @@ mod clipboard_path_tests {
     fn linux_window_posture_comes_from_worker_facts_and_keeps_unknown() {
         let applying = method_body("Runtime", "apply_linux_window_rect_ready");
         assert!(applying.contains("native_window_minimized = facts.minimized"));
-        assert!(applying.contains("native_window_maximized = facts.maximized"));
+        assert!(applying.contains("maximize_intent.observe(facts.maximized)"));
 
-        let posture = method_body("Runtime", "window_posture");
-        assert!(posture.contains("Backend::X11"));
-        assert!(posture.contains("Backend::Wayland"));
+        let minimized = method_body("Runtime", "window_minimized_state");
+        assert!(minimized.contains("Backend::X11"));
+        assert!(minimized.contains("Backend::Wayland"));
+        let maximized = method_body("Runtime", "window_maximized_state");
+        assert!(maximized.contains("maximize_intent.posture_state()"));
+        assert!(maximized.contains("Backend::Wayland"));
+        let posture = item_body(&ItemQuery::function("choose_window_posture"));
         assert!(posture.contains("WindowPosture::Unknown"));
 
         let snapshot = method_body("Runtime", "window_snapshot_with_rect");
         assert!(snapshot.contains("self.window_posture()"));
         assert!(!snapshot.contains("is_maximized()"));
     }
+
+    /// The X11 maximize target stays window-owned and late state facts stay addressed.
+    #[test]
+    fn x11_maximize_intent_is_window_owned_and_late_answers_stay_addressed() {
+        let birth = item_body(&ItemQuery::function("new_window_runtime"));
+        assert!(birth.contains("maximize_intent: WindowMaximizeIntent::default()"));
+
+        let applying = method_body("Runtime", "apply_linux_window_rect_ready");
+        assert!(applying.contains("maximize_intent.observe(facts.maximized)"));
+
+        let state = method_body("Runtime", "window_maximized_state");
+        assert!(state.contains("maximize_intent.posture_state()"));
+        let restore = item_body(&ItemQuery::function("restore_minimized_window"));
+        let x11_restore = restore.split("Backend::Wayland").next().unwrap();
+        assert!(x11_restore.contains("Operation::Restore"));
+        assert!(!x11_restore.contains("is_minimized()"));
+
+        let notification = method_body("Runtime", "open_from_notification");
+        assert!(notification.contains("self.window_minimized_state()"));
+        assert!(!notification.contains("is_minimized()"));
+
+        let caption = method_body("Runtime", "chrome_mouse_input");
+        assert!(caption.contains("self.toggle_window_maximized()"));
+        assert!(!caption.contains("is_maximized()"));
+        let toggle = method_body("Runtime", "toggle_window_maximized");
+        let x11_toggle = toggle.split("Backend::Wayland").next().unwrap();
+        assert!(x11_toggle.contains("maximize_intent.toggle()"));
+        assert!(!x11_toggle.contains("is_maximized()"));
+        let edge = method_body("Runtime", "mouse_input");
+        assert!(edge.contains("window_maximized_state() == Some(false)"));
+        assert!(!edge.contains("is_maximized()"));
+
+        let request = method_body("Runtime", "request_linux_window_maximized");
+        assert!(request.contains("self.window.window.set_maximized(target)"));
+        assert!(request.contains("window_rect_refresh_owed = true"));
+
+        let close = method_body("Runtime", "close_window");
+        assert!(close.contains("self.let_go_of_this_window()"));
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        assert!(ready.contains("find(|id| u64::from(*id) == ready.owner)"));
+    }
+
 
     /// **A file row let go over a terminal's middle is spelled exactly as a file
     /// dropped from Explorer or Finder is** (§7.1.1, user ruling 2026-09-16).

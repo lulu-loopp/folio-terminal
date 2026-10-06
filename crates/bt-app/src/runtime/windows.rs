@@ -54,6 +54,83 @@ impl Runtime<'_> {
     pub(crate) fn restore_minimized_window(&self) -> Result<()> {
         crate::restore_minimized_window(&self.window.window)
     }
+    pub(crate) fn window_minimized_state(&self) -> Option<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => self.window.native_window_minimized,
+                Ok(bt_platform::linux_window::Backend::Wayland) => {
+                    self.window.window.is_minimized()
+                }
+                Err(_) => None,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            native_window(&self.window.window)
+                .ok()
+                .map(bt_platform::is_window_minimized)
+        }
+    }
+
+    pub(crate) fn window_maximized_state(&self) -> Option<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => {
+                    self.window.maximize_intent.posture_state()
+                }
+                Ok(bt_platform::linux_window::Backend::Wayland) => {
+                    Some(self.window.window.is_maximized())
+                }
+                Err(_) => None,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(self.window.window.is_maximized())
+        }
+    }
+
+    pub(crate) fn toggle_window_maximized(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => {
+                    match self.window.maximize_intent.toggle() {
+                        crate::WindowMaximizeAction::Request(target) => {
+                            self.request_linux_window_maximized(target);
+                        }
+                        crate::WindowMaximizeAction::WaitForObservation => {
+                            if self.window.pending_window_rect.is_none() {
+                                self.queue_linux_window_rect_snapshot();
+                            }
+                        }
+                    }
+                }
+                Ok(bt_platform::linux_window::Backend::Wayland) => self
+                    .window
+                    .window
+                    .set_maximized(!self.window.window.is_maximized()),
+                Err(_) => {}
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.window
+            .window
+            .set_maximized(!self.window.window.is_maximized());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_linux_window_maximized(&mut self, target: bool) {
+        self.window.window.set_maximized(target);
+        if self.window.pending_window_rect.is_some() {
+            self.window.window_rect_refresh_owed = true;
+        } else {
+            self.queue_linux_window_rect_snapshot();
+        }
+    }
+
     pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
         crate::request_owned_window_close(&self.window.window, &self.app.event_proxy)
     }
@@ -760,6 +837,19 @@ impl Runtime<'_> {
         // normal rectangle set above survives as the placement Windows restores
         // the window to when the user unmaximizes it.
         if maximized {
+            #[cfg(target_os = "linux")]
+            {
+                match crate::linux_window_backend(&self.window.window) {
+                    Ok(bt_platform::linux_window::Backend::X11) => {
+                        self.window.maximize_intent.request_initial(true);
+                        self.request_linux_window_maximized(true);
+                    }
+                    Ok(bt_platform::linux_window::Backend::Wayland) | Err(_) => {
+                        self.window.window.set_maximized(true);
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
             self.window.window.set_maximized(true);
         }
         // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
@@ -1336,6 +1426,9 @@ impl Runtime<'_> {
         let Some(request) = self.window.pending_window_rect.take() else {
             return Ok(false);
         };
+        if self.window.leaving.is_some() {
+            return Ok(true);
+        }
         if std::mem::take(&mut self.window.window_rect_refresh_owed) {
             self.queue_linux_window_rect_snapshot();
             return Ok(true);
@@ -1346,7 +1439,11 @@ impl Runtime<'_> {
             self.window.last_winit_rect = Some(facts.rect);
             self.window.native_client_origin = facts.client_origin;
             self.window.native_window_minimized = facts.minimized;
-            self.window.native_window_maximized = facts.maximized;
+            if let Some(crate::WindowMaximizeAction::Request(target)) =
+                self.window.maximize_intent.observe(facts.maximized)
+            {
+                self.request_linux_window_maximized(target);
+            }
             let snapshot = self.window_snapshot_with_rect(|| Some(facts.rect));
             self.app
                 .record_window(self.window.window.id(), snapshot, Instant::now());
@@ -1354,27 +1451,7 @@ impl Runtime<'_> {
         Ok(true)
     }
     fn window_posture(&self) -> WindowPosture {
-        #[cfg(target_os = "linux")]
-        {
-            match crate::linux_window_backend(&self.window.window) {
-                Ok(bt_platform::linux_window::Backend::X11) => crate::choose_window_posture(
-                    self.window.native_window_minimized,
-                    self.window.native_window_maximized,
-                ),
-                Ok(bt_platform::linux_window::Backend::Wayland) => crate::choose_window_posture(
-                    self.window.window.is_minimized(),
-                    Some(self.window.window.is_maximized()),
-                ),
-                Err(_) => WindowPosture::Unknown,
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let minimized = native_window(&self.window.window)
-                .ok()
-                .map(bt_platform::is_window_minimized);
-            crate::choose_window_posture(minimized, Some(self.window.window.is_maximized()))
-        }
+        crate::choose_window_posture(self.window_minimized_state(), self.window_maximized_state())
     }
 
     fn window_snapshot_with_rect(
