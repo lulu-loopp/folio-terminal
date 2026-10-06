@@ -42,18 +42,25 @@ Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
 `bt-install-channel` (ticket U-1), through the door. A1c (on `f2b31952`) moved the eighteen bare sites of `bt-app`
 and `bt-platform` through the door without adding or removing one. And one more after it: `update_trial::begin_watch`'s
 `folio-trial-watch` (0.4.6 U-13), through the door, started only in an update's trial. T-PROBE-CHILD adds one
-probe-output reader site, called once for each pipe, through the door. `crates/bt-platform/src/lib.rs` holds a NUL byte, so
-ripgrep skips it as binary; search it with `grep -a`. To re-count, grep the patterns in the last column and
-drop the test items; a number that moves edits this table and the pictures.
+probe-output reader site, called once for each pipe, through the door.
+
+The thread rows below were recounted with `bt-source` product items on 2026-10-06
+at `d4fbc2d7`. They include all OS branches but exclude the optional `trust-harness`
+and `test-shell` features. The Linux default build in that snapshot has 60 start sites:
+`bt-app` 43, `bt-platform` 13 and `bt-pty` 4, plus the separate rayon pool.
+Including both development features across all source branches gives 72 sites.
+The diagrams and non-thread rows retain the historical census above. Tracked
+source now passes the NUL-byte gate. Recounts use the product-item filter rather
+than raw text matches, which include comments and test bodies.
 
 | what | count | pattern |
 |---|---|---|
-| thread-spawn sites | **53** — `bt-app` 34, `bt-platform` 15, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **49** — `bt-app` 34, `bt-platform` 15; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site; T-ENV-REFRESH round 4 removes the launch-snapshot worker). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
+| thread-spawn sites | **70** across default-feature OS source — `bt-app` 43, `bt-platform` 23, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **66** across default-feature OS source — `bt-app` 43, `bt-platform` 23; each is a `Worker` by its name and its body is lent a `WorkerCtx`. The Linux default build has 56: `bt-app` 43 and `bt-platform` 13. The source guard `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` holds both crates to the door. | `spawn_at_priority` |
 | bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
 | of those through the door, in a door process rather than the window process | **4**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`), and `folio-remover-ready` (`deferred_removal::schedule`'s readiness pipe); each process's main thread waits as a worker, entered once through `enter_standalone_main`. The uninstaller and copied-remover doors enter once for their whole runs, so their process waits and retry backoff through `wait::sleep_within` are workers' waits too | `enter_standalone_main\(` |
-| named sites / distinct names | **49 / 45**, besides the pool | the first argument, or `.name(…)` |
-| `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
+| named sites / distinct source expressions | **67 / 59** across default-feature OS source, **57 / 55** on Linux; includes `pty-retirement`, excludes the pool. Forwarded parameters and constants count as source expressions, not resolved runtime strings. | the first argument, or `.name(…)` |
+| `spawn_blocking` | **0** explicit calls at the historical census | `spawn_blocking` |
 | channel constructions | **34** — 28 `mpsc::channel`, 6 `mpsc::sync_channel`; `bt-app` 27 (T-KEYBOARD-CTRLALT adds the layout-table request and answer pair), `bt-platform` 7 (T-UNINSTALL-UX adds the remover readiness pipe) — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **34** (T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
 | child-process construction | **one** `Command::new`, inside the doors `bt_platform::quiet_command` and `quiet_breakaway_command`, with **17** product callers — the existing probe, shell, Git, update, rescue and trial callers; `bt_platform::foreground_program` starts the private console-membership helper; `uninstall::leave_armed` starts `--uninstall [--remove-data] --after-pid <pid>`; and `bt_platform::deferred_removal::schedule` starts the internal native copy as `--uninstall-remove`. Both uninstall starts request `CREATE_BREAKAWAY_FROM_JOB` on Windows; a containing job that disallows breakaway makes creation fail and the caller reports failure instead of claiming a detached child exists. No command interpreter or mutable removal script is involved; besides this door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` remain | `quiet_command(_named)?\(`, `quiet_breakaway_command\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
@@ -568,10 +575,10 @@ does not have to find it later.
 
 ### 5.1 The seven lanes
 
-Fifty-two production thread-spawn sites exist across three crates (`bt-app` 34,
-`bt-platform` 14, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1).
-All but `bt-pty`'s four go through the thread door (0.4.6, A1c). T-PROBE-CHILD
-adds the probe-output reader site.
+The window-layer snapshot census is in §0.1. Linux adds nine platform-provider starts,
+including `bt-linux-display`; that snapshot has 60 explicit Linux start sites and
+one lazy rayon pool. The four `bt-pty` sites remain outside the thread door;
+the app and platform starts carry `WorkerCtx`.
 **The thread count is not the defect; the absence of a contract
 is.** `MathWorker::spawn` starts path verification and image scaling as well as
 math and returns all three through one `MathWorkerResult` — a historical hosting
