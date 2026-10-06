@@ -14241,3 +14241,8 @@ keep their original size getters. Pinned by
 ### Linux client-origin observation — 2026-10-06
 
 Cross-window drag coordinates use the display worker's actual X11 client-to-root translation, separately from the outer frame rectangle. Move and resize events invalidate that origin until a matching current geometry answer arrives. An unavailable translation is not replaced by an outer-frame guess. Windows and macOS retain their Winit inner-position read; Wayland retains the absence of global window coordinates. This uses the existing display request and does not start another worker.
+
+
+### Linux background monitor read — 2026-10-06
+
+The background-image worker reads X11 monitor dimensions before decoding, using its existing WorkerCtx and the independent display connection. The window thread captures only the current client-size fallback. Missing monitors retain that fallback; a native query error records a diagnostic. Wayland and the other platforms keep their Winit monitor path. This avoids the X11 monitor-cache miss reaching RandR from the background-image admission call and adds no worker.
