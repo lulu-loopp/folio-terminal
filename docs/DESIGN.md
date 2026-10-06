@@ -14188,3 +14188,15 @@ Pinned by `the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_l
 The port keeps `arboard` and `wl-clipboard-rs` as patched path dependencies outside the cross-platform workspace. The Wayland test server uses Linux epoll and cannot join the Windows or macOS workspace test commands. Instead, `core-linux` runs both complete suites through `scripts/ci/linux-vendor-clipboard-tests.py`, using each crate's retained lockfile. Arboard runs on private Xvfb with a real clipboard manager so its ownership-after-drop assertion is tested. The Wayland suite creates protocol servers under a private runtime directory. The harness owns its HOME, XDG directories, display and D-Bus session; it retires its recorded process groups on success or failure. This is the port's choice for review in PR #21; upstreaming the patches remains possible without removing this test gate.
 
 The local run passed Arboard's four unit tests and three documentation tests, and wl-clipboard-rs's 49 unit tests and 18 documentation tests. Windows and macOS keep their existing workspace membership and test commands.
+
+### 2026-10-06 — Current path for the policy-command clipboard pin
+
+The pin named in the 2026-10-04 policy note moved with its implementation. Its current path is `runtime::clipboard::tests::copy_puts_exactly_the_policy_command_on_the_clipboard`; the earlier entry is retained as written.
+
+### 2026-10-06 — Linux summons restore the minimized window before showing it
+
+On Linux, `FolioApp::summon_quake` reads the previous foreground, restores a minimized window through `Runtime::restore_minimized_window`, then shows it and runs the foreground retry. The other platforms keep the existing summon sequence. Pinned by `floated_page_tests::the_foreground_is_read_before_the_summon_and_handed_back_after_it`.
+
+### 2026-10-06 — Linux hand-offs retain the lane worker
+
+Linux dispatches file and address requests through `ShellThread::hand_over_on_worker`, carrying the handoff lane's `WorkerCtx` into the Linux file and process doors.
