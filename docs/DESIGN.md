@@ -14280,6 +14280,16 @@ A Linux summon captures the previous foreground before its display request. Its 
 
 Window-wait row 29a now records the completed application migration. Native X11 display, client-origin and posture facts are read on the display worker; geometry events invalidate and refresh observations, and closing windows reject late results. Layout uses event or configured sizes. Winit's own window construction and event processing remain its responsibility, and its populated monitor cache is retained. The previous open-row notes describe earlier checkpoints.
 
+
+### 2026-10-06 — Linux application display reads close row 29a
+
+Row 29a is done: application X11 display, client-origin and posture observations run on the display worker. The window thread uses addressed answers, event geometry and Winit's populated monitor cache. This records the completed migration described above; it does not replace Winit window construction or event processing.
+
+
+### 2026-10-06 — Linux desktop retirement uses the shared cutoff
+
+Row 30 retains this port's recorded design choice: desktop cleanup runs on its worker after the application drops, and the exiting thread uses the existing three-second SESSION_SAVE_BUDGET. It joins only a finished worker and continues shutdown with a diagnostic at the cutoff. This reuses the Windows session-writer close policy and is not a separate maintainer ruling.
+
 ### 2026-10-05 — Linux display/clipboard backend identity, `WindowTarget::LinuxWindow` alpha, fontconfig font discovery, and XDG data roots
 
 本条是 Linux 移植追加在文件末尾的一条记录:这份记录是 append-only 的,§13.8 的 ②/③、§13.18 与下面那条 "The rule now." 都保持原样,这里只引用它们、不改写它们;Linux 的决定按同一条规矩追加在这里。
