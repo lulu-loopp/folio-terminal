@@ -4,18 +4,19 @@
 use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
-    PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RevealTween, Runtime, TabSeed,
-    TabState, WindowPosture, WindowRuntime, broker_verdict, create_tab_state, dpi_snapshot,
-    dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
-    first_term_leaf, float, focus_leaf_index, git, hang_watch, i18n, ime_outbound, ime_report,
-    install_page_ground_color, install_theme_class_background, let_the_system_translate_touch,
-    marks, mouse_trace, native_window, new_window_runtime, opening_window_attributes,
-    persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
-    preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
-    render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
-    revive_plan, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
-    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
-    tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
+    PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RestoredPlacement, RevealTween,
+    Runtime, TabSeed, TabState, WindowPosture, WindowRuntime, broker_verdict, create_tab_state,
+    dpi_snapshot, dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale,
+    ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
+    i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
+    let_the_system_translate_touch, marks, mouse_trace, native_window, new_window_runtime,
+    opening_window_attributes, persisted_preview_pages, persisted_window_bounds, plan_launch,
+    presentation_physical_size, preview, preview_source_of_recent, profiles, quit, rail_state_for,
+    recorded_window_placement, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
+    restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
+    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
+    startup_window_rect, tear_out_rect, toast, unsaved_line, window_minimum_changed,
+    window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door};
 use anyhow::Context;
@@ -89,6 +90,7 @@ impl Runtime<'_> {
         app: &mut App,
         plan: &NewWindowPlan,
         like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+        _resolved_restore_placement: Option<Option<RestoredPlacement>>,
     ) -> Result<(WindowId, WindowRuntime)> {
         let default_profile = profiles::default_profile(
             &app.settings_store.loaded().default_profile,
@@ -103,6 +105,15 @@ impl Runtime<'_> {
         // question this slice answers. The judgment is `restore_window_placement`'s
         // in both cases, so a saved rectangle no monitor can see forfeits its
         // corner here exactly as the first window's does.
+        #[cfg(target_os = "linux")]
+        let placement = _resolved_restore_placement.unwrap_or_else(|| {
+            plan.like
+                .is_none()
+                .then_some(plan.saved.as_deref())
+                .flatten()
+                .and_then(|saved| restore_window_placement(event_loop, saved))
+        });
+        #[cfg(not(target_os = "linux"))]
         let placement = plan
             .like
             .is_none()
@@ -1959,6 +1970,21 @@ impl Runtime<'_> {
         // belong to this gesture.
         if broker.source != self.window_id() {
             return Ok(false);
+        }
+        #[cfg(target_os = "linux")]
+        let guard_request_pending = self
+            .app
+            .pending_drag_guard_screen
+            .as_ref()
+            .is_some_and(|pending| pending.broker_generation == broker.guard_generation);
+        #[cfg(target_os = "linux")]
+        if !crate::drag_guard_allows_release(
+            broker.guard.screen,
+            guard_request_pending,
+            broker.guard_sample_ready,
+        ) {
+            self.settle_home(drag);
+            return Ok(true);
         }
         let verdict = broker_verdict(&broker.cargo, &broker.aim);
         // The road's second station ([`Runtime::foreign_strip_landing`] is the

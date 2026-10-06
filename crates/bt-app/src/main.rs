@@ -12409,6 +12409,8 @@ struct App {
     animation_serials: u64,
     #[cfg(target_os = "linux")]
     display_generation: u64,
+    #[cfg(target_os = "linux")]
+    display_input_generation: u64,
     event_proxy: EventLoopProxy<AppEvent>,
     /// **The OS hand-off lane** — the one thread every hand-off that leaves a window runs on
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
@@ -12844,6 +12846,10 @@ struct App {
         Option<WindowId>,
         Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
     )>,
+    #[cfg(target_os = "linux")]
+    pending_new_window_restore_placement: Option<(Option<WindowId>, Option<RestoredPlacement>)>,
+    #[cfg(target_os = "linux")]
+    pending_drag_guard_screen: Option<PendingDragGuardScreen>,
     /// **The drag that is crossing a window boundary**, if one is (multiwindow
     /// slice F2/F4). See [`DragBroker`] for why the pointer needs a broker at all
     /// and why the clock is here rather than on either window.
@@ -13102,10 +13108,24 @@ struct PendingQuakeSummon {
 }
 
 #[cfg(target_os = "linux")]
+struct PendingDragGuardScreen {
+    broker_generation: u64,
+    request: bt_platform::linux_display::LinuxDisplayRequest,
+}
+
+#[cfg(target_os = "linux")]
 struct PendingNewWindowDisplay {
     plan: NewWindowPlan,
     request: bt_platform::linux_display::LinuxDisplayRequest,
     like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+    input_generation: u64,
+    kind: PendingNewWindowDisplayKind,
+}
+
+#[cfg(target_os = "linux")]
+enum PendingNewWindowDisplayKind {
+    TearOut,
+    Restore { inputs: Vec<RestoreMonitorInput> },
 }
 
 impl NewWindowPlan {
@@ -33682,23 +33702,56 @@ struct DragGuard {
     /// Which window holds the loop thread's mouse capture.
     capture: Option<bt_platform::NativeWindow>,
     /// The bounding box of every monitor together.
-    screen: bt_platform::WindowRect,
+    screen: Option<bt_platform::WindowRect>,
 }
 
 impl DragGuard {
     /// Read both facts as they are now, for the window that should be holding
     /// the capture.
+    #[cfg(not(target_os = "linux"))]
     fn sample() -> Self {
         Self {
             capture: bt_platform::thread_mouse_capture(),
-            screen: bt_platform::virtual_screen_rect(),
+            screen: Some(bt_platform::virtual_screen_rect()),
         }
     }
 
     /// Whether the world this gesture began in is still the world it is in.
+    #[cfg(any(not(target_os = "linux"), test))]
     fn still_holds(&self, now: &Self) -> bool {
-        self.capture == now.capture && self.screen == now.screen
+        self.capture == now.capture && self.screen.is_some() && self.screen == now.screen
     }
+}
+
+#[cfg(target_os = "linux")]
+fn drag_guard_reply_matches(
+    active_generation: Option<u64>,
+    pending_generation: u64,
+    request: bt_platform::linux_display::LinuxDisplayReady,
+    ready: bt_platform::linux_display::LinuxDisplayReady,
+) -> bool {
+    active_generation == Some(pending_generation) && request == ready
+}
+
+#[cfg(target_os = "linux")]
+fn observed_drag_guard_screen(
+    previous: Option<bt_platform::WindowRect>,
+    answer: Result<bt_platform::WindowRect, String>,
+) -> Option<bt_platform::WindowRect> {
+    let observed = answer.ok()?;
+    (observed.left < observed.right
+        && observed.top < observed.bottom
+        && previous.is_none_or(|previous| previous == observed))
+    .then_some(observed)
+}
+
+#[cfg(target_os = "linux")]
+fn drag_guard_allows_release(
+    screen: Option<bt_platform::WindowRect>,
+    request_pending: bool,
+    sample_ready: bool,
+) -> bool {
+    screen.is_some() && !request_pending && !sample_ready
 }
 
 /// **Where a cross-window gesture is pointing right now** (multiwindow slice
@@ -33870,6 +33923,10 @@ struct DragBroker {
     spring: SpringGate,
     /// The world this gesture began in — see [`DragGuard`].
     guard: DragGuard,
+    #[cfg(target_os = "linux")]
+    guard_generation: u64,
+    #[cfg(target_os = "linux")]
+    guard_sample_ready: bool,
 }
 
 impl DragBroker {
@@ -33928,13 +33985,17 @@ impl DragBroker {
             spring: SpringGate::default(),
             guard: DragGuard {
                 capture: None,
-                screen: bt_platform::WindowRect {
+                screen: Some(bt_platform::WindowRect {
                     left: 0,
                     top: 0,
                     right: 0,
                     bottom: 0,
-                },
+                }),
             },
+            #[cfg(target_os = "linux")]
+            guard_generation: 0,
+            #[cfg(target_os = "linux")]
+            guard_sample_ready: true,
         }
     }
 }
@@ -42575,6 +42636,8 @@ impl Runtime<'_> {
             animation_serials: 0,
             #[cfg(target_os = "linux")]
             display_generation: 0,
+            #[cfg(target_os = "linux")]
+            display_input_generation: 0,
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
             handoff_lane,
@@ -42670,6 +42733,10 @@ impl Runtime<'_> {
             pending_new_window_display: None,
             #[cfg(target_os = "linux")]
             pending_new_window_like: None,
+            #[cfg(target_os = "linux")]
+            pending_new_window_restore_placement: None,
+            #[cfg(target_os = "linux")]
+            pending_drag_guard_screen: None,
             drag_broker: None,
             pending_handover: None,
             quit_requested: false,
@@ -49788,6 +49855,15 @@ impl Runtime<'_> {
         let scale = self.window.renderer.scale_factor().max(0.01);
         let size = self.client_size();
         let window = self.window_id();
+        #[cfg(target_os = "linux")]
+        let guard_generation = self.app.next_display_generation();
+        #[cfg(target_os = "linux")]
+        let guard = DragGuard {
+            capture: bt_platform::thread_mouse_capture(),
+            screen: None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let guard = DragGuard::sample();
         self.app.drag_broker = Some(DragBroker {
             source: window,
             cargo: source.clone(),
@@ -49805,7 +49881,11 @@ impl Runtime<'_> {
             },
             aim: BrokerAim::Home,
             spring: SpringGate::default(),
-            guard: DragGuard::sample(),
+            guard,
+            #[cfg(target_os = "linux")]
+            guard_generation,
+            #[cfg(target_os = "linux")]
+            guard_sample_ready: false,
         });
     }
 
@@ -61826,6 +61906,8 @@ impl FolioApp {
                             plan,
                             request,
                             like,
+                            input_generation: app.display_input_generation,
+                            kind: PendingNewWindowDisplayKind::TearOut,
                         });
                         app.pending_new_windows.extend(plans);
                         return Ok(());
@@ -61833,11 +61915,78 @@ impl FolioApp {
                     Err(_) => {}
                 }
             }
+            #[cfg(target_os = "linux")]
+            let mut restore_placement = self.app.as_mut().and_then(|app| {
+                let matches = app
+                    .pending_new_window_restore_placement
+                    .as_ref()
+                    .is_some_and(|(for_like, _)| *for_like == plan.like);
+                matches
+                    .then(|| app.pending_new_window_restore_placement.take())
+                    .flatten()
+                    .map(|(_, placement)| placement)
+            });
+            #[cfg(target_os = "linux")]
+            if restore_placement.is_none() {
+                let saved = (plan.like.is_none() && plan.receives.is_none())
+                    .then(|| plan.saved.as_deref())
+                    .flatten();
+                if let Some(saved) = saved {
+                    let inputs = restore_monitor_inputs(event_loop);
+                    if !saved.tabs.is_empty()
+                        && bt_platform::linux_display_backend()
+                            == Some(bt_platform::linux_window::Backend::X11)
+                    {
+                        let points = inputs
+                            .iter()
+                            .map(|input| {
+                                (
+                                    input.full.left + (input.full.right - input.full.left) / 2,
+                                    input.full.top + (input.full.bottom - input.full.top) / 2,
+                                )
+                            })
+                            .collect();
+                        let request = self.app.as_mut().map(|app| {
+                            let generation = app.next_display_generation();
+                            bt_platform::linux_display::request_display(
+                                0,
+                                generation,
+                                bt_platform::linux_display::LinuxDisplayQuery::MonitorWorkAreasAt(
+                                    points,
+                                ),
+                            )
+                        });
+                        if let Some(Ok(request)) = request {
+                            let Some(app) = self.app.as_mut() else {
+                                return Ok(());
+                            };
+                            app.pending_new_window_display = Some(PendingNewWindowDisplay {
+                                plan,
+                                request,
+                                like,
+                                input_generation: app.display_input_generation,
+                                kind: PendingNewWindowDisplayKind::Restore { inputs },
+                            });
+                            app.pending_new_windows.extend(plans);
+                            return Ok(());
+                        }
+                    }
+                    restore_placement = Some(choose_restored_placement(
+                        saved,
+                        &restore_monitors_from_work_areas(&inputs, None),
+                    ));
+                } else {
+                    restore_placement = Some(None);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let restore_placement = None;
             let Some(app) = self.app.as_mut() else {
                 return Ok(());
             };
             let opened_at = Instant::now();
-            let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
+            let (id, window) =
+                Runtime::open_window(event_loop, app, &plan, like, restore_placement)?;
             let door = opened_at.elapsed();
             self.windows.insert(id, window);
             // **The tear-out's second half, in the turn its first half ran in**
@@ -62940,27 +63089,131 @@ impl FolioApp {
             None
         };
         if let Some(pending) = pending_window {
-            let answer = pending.request.try_take().map_err(|error| {
-                anyhow!("the Linux display worker woke without a tear-out answer: {error}")
-            })?;
-            let bt_platform::linux_display::LinuxDisplayAnswer::TearOutScreen { work, dpi } =
-                answer
-            else {
-                return Err(anyhow!(
-                    "the Linux display worker returned the wrong tear-out answer"
-                ));
-            };
-            let mut plan = pending.plan;
-            let Some(errand) = plan.receives.as_mut() else {
-                return Err(anyhow!("the pending tear-out plan has no receiving tab"));
-            };
-            errand.screen = Some((work, dpi));
-            let Some(app) = self.app.as_mut() else {
-                return Ok(());
-            };
-            app.pending_new_window_like = Some((plan.like, pending.like));
-            app.pending_new_windows.insert(0, plan);
-            return self.open_pending_window(event_loop);
+            let answer = pending.request.try_take().ok();
+            match pending.kind {
+                PendingNewWindowDisplayKind::TearOut => {
+                    let Some(bt_platform::linux_display::LinuxDisplayAnswer::TearOutScreen {
+                        work,
+                        dpi,
+                    }) = answer
+                    else {
+                        return Err(anyhow!(
+                            "the Linux display worker returned no tear-out answer"
+                        ));
+                    };
+                    let mut plan = pending.plan;
+                    let Some(errand) = plan.receives.as_mut() else {
+                        return Err(anyhow!("the pending tear-out plan has no receiving tab"));
+                    };
+                    errand.screen = Some((work, dpi));
+                    let Some(app) = self.app.as_mut() else {
+                        return Ok(());
+                    };
+                    app.pending_new_window_like = Some((plan.like, pending.like));
+                    app.pending_new_windows.insert(0, plan);
+                    return self.open_pending_window(event_loop);
+                }
+                PendingNewWindowDisplayKind::Restore { inputs } => {
+                    let plan = pending.plan;
+                    let placement = plan.saved.as_deref().and_then(|saved| {
+                        let input_generation_matches = self.app.as_ref().is_some_and(|app| {
+                            app.display_input_generation == pending.input_generation
+                        });
+                        let Some(answer) = answer else {
+                            return choose_restored_placement(
+                                saved,
+                                &restore_monitors_from_work_areas(&inputs, None),
+                            );
+                        };
+                        let bt_platform::linux_display::LinuxDisplayAnswer::MonitorWorkAreasAt(Ok(
+                            observed,
+                        )) = answer
+                        else {
+                            return choose_restored_placement(
+                                saved,
+                                &restore_monitors_from_work_areas(&inputs, None),
+                            );
+                        };
+                        if !input_generation_matches
+                            || observed.work_areas.len() != inputs.len()
+                            || !restore_monitor_topology_matches(
+                                &inputs,
+                                &observed.monitor_bounds,
+                                observed.primary_bounds,
+                            )
+                        {
+                            return choose_restored_placement(saved, &[]);
+                        }
+                        let work_areas = observed
+                            .work_areas
+                            .into_iter()
+                            .map(Result::ok)
+                            .collect::<Vec<_>>();
+                        let monitors = restore_monitors_from_work_areas(&inputs, Some(&work_areas));
+                        choose_restored_placement(saved, &monitors)
+                    });
+                    let Some(app) = self.app.as_mut() else {
+                        return Ok(());
+                    };
+                    app.pending_new_window_like = Some((plan.like, pending.like));
+                    app.pending_new_window_restore_placement = Some((plan.like, placement));
+                    app.pending_new_windows.insert(0, plan);
+                    return self.open_pending_window(event_loop);
+                }
+            }
+        }
+        let pending_guard = if let Some(app) = self.app.as_mut() {
+            let matches = app
+                .pending_drag_guard_screen
+                .as_ref()
+                .is_some_and(|pending| pending.request.ready() == ready);
+            matches
+                .then(|| app.pending_drag_guard_screen.take())
+                .flatten()
+        } else {
+            None
+        };
+        if let Some(pending) = pending_guard {
+            let answer = pending.request.try_take().ok();
+            let active = self
+                .app
+                .as_ref()
+                .and_then(|app| app.drag_broker.as_ref())
+                .map(|broker| (broker.source, broker.guard.screen, broker.guard_generation));
+            if let Some((source, screen, active_generation)) = active
+                && drag_guard_reply_matches(
+                    Some(active_generation),
+                    pending.broker_generation,
+                    pending.request.ready(),
+                    ready,
+                )
+            {
+                let answer = match answer {
+                    Some(bt_platform::linux_display::LinuxDisplayAnswer::VirtualScreenRect(
+                        answer,
+                    )) => answer,
+                    _ => Err("the Linux display worker returned no screen rectangle".to_owned()),
+                };
+                let observed = observed_drag_guard_screen(screen, answer);
+                if let Some(observed) = observed {
+                    if let Some(app) = self.app.as_mut()
+                        && let Some(broker) = app.drag_broker.as_mut()
+                        && broker.guard_generation == pending.broker_generation
+                    {
+                        broker.guard.screen = Some(observed);
+                        broker.guard_sample_ready = true;
+                    }
+                } else {
+                    if let Some(mut runtime) = self.runtime(source) {
+                        runtime.cancel_drag()?;
+                    }
+                    if let Some(app) = self.app.as_mut() {
+                        app.drag_broker = None;
+                    }
+                    self.clear_visitors()?;
+                }
+            }
+            return Ok(());
         }
         let Some(id) = self
             .windows
@@ -63133,12 +63386,46 @@ impl FolioApp {
     /// target window will receive no further event of any kind, so a dwell over
     /// it that waited for one would wait for ever.
     fn drive_drag_broker(&mut self, now: Instant) -> Result<Option<Instant>> {
-        let Some(broker) = self.app.as_ref().and_then(|app| app.drag_broker.as_ref()) else {
+        let Some((source, guard, guard_generation, guard_sample_ready)) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.drag_broker.as_ref())
+            .map(|broker| {
+                (
+                    broker.source,
+                    broker.guard,
+                    {
+                        #[cfg(target_os = "linux")]
+                        {
+                            broker.guard_generation
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            0
+                        }
+                    },
+                    {
+                        #[cfg(target_os = "linux")]
+                        {
+                            broker.guard_sample_ready
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            false
+                        }
+                    },
+                )
+            })
+        else {
             self.clear_visitors()?;
             return Ok(None);
         };
-        let source = broker.source;
-        let held = broker.guard.still_holds(&DragGuard::sample());
+        #[cfg(not(target_os = "linux"))]
+        let _ = (guard_generation, guard_sample_ready);
+        #[cfg(target_os = "linux")]
+        let held = guard.capture == bt_platform::thread_mouse_capture();
+        #[cfg(not(target_os = "linux"))]
+        let held = guard.still_holds(&DragGuard::sample());
         if !held || !self.windows.contains(source) {
             // One result for every cause, which is what the plan asked for. The
             // payload goes home by the route Esc already takes — the drag is
@@ -63153,10 +63440,70 @@ impl FolioApp {
             self.clear_visitors()?;
             return Ok(None);
         }
-        let pointer = broker.pointer;
-        let cargo = broker.cargo.clone();
-        let cargo_tree = broker.cargo_tree.clone();
-        let face = broker.face.clone();
+        #[cfg(target_os = "linux")]
+        {
+            let pending = self
+                .app
+                .as_ref()
+                .and_then(|app| app.pending_drag_guard_screen.as_ref());
+            let pending_for_broker =
+                pending.is_some_and(|pending| pending.broker_generation == guard_generation);
+            if !guard_sample_ready {
+                if pending.is_some() {
+                    return Ok(None);
+                }
+                let request = bt_platform::linux_display::request_display(
+                    u64::from(source),
+                    guard_generation,
+                    bt_platform::linux_display::LinuxDisplayQuery::VirtualScreenRect,
+                );
+                match request {
+                    Ok(request) => {
+                        if let Some(app) = self.app.as_mut() {
+                            app.pending_drag_guard_screen = Some(PendingDragGuardScreen {
+                                broker_generation: guard_generation,
+                                request,
+                            });
+                        }
+                        return Ok(None);
+                    }
+                    Err(_) => {
+                        if let Some(mut runtime) = self.runtime(source) {
+                            runtime.cancel_drag()?;
+                        }
+                        if let Some(app) = self.app.as_mut() {
+                            app.drag_broker = None;
+                        }
+                        self.clear_visitors()?;
+                        return Ok(None);
+                    }
+                }
+            }
+            if pending_for_broker {
+                return Ok(None);
+            }
+            if let Some(app) = self.app.as_mut()
+                && let Some(broker) = app.drag_broker.as_mut()
+                && broker.guard_generation == guard_generation
+            {
+                broker.guard_sample_ready = false;
+            }
+        }
+        let Some((pointer, cargo, cargo_tree, face)) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.drag_broker.as_ref())
+            .map(|broker| {
+                (
+                    broker.pointer,
+                    broker.cargo.clone(),
+                    broker.cargo_tree.clone(),
+                    broker.face.clone(),
+                )
+            })
+        else {
+            return Ok(None);
+        };
         // **The picture of the pane in the air, taken from the window holding
         // it** (B2, 2026-09-01). Pulled here rather than pushed from the source's
         // pointer handler, because a hand that crosses onto another window's
@@ -65249,6 +65596,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         present_diagnostics::event();
         hang_watch::at(hang_watch::Station::Event);
         hang_watch::during(window_event_station(&event), || {
+            #[cfg(target_os = "linux")]
+            if matches!(&event, WindowEvent::ScaleFactorChanged { .. })
+                && let Some(app) = self.app.as_mut()
+            {
+                app.display_input_generation = app.display_input_generation.wrapping_add(1);
+            }
             // **The one line the whole slice is about.** winit stamps the id of the
             // window the event happened to; before this, the loop compared it against
             // the only window there was and dropped anything else. Now it is a
@@ -71972,6 +72325,12 @@ struct RestoreMonitor {
     bottom: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RestoreMonitorInput {
+    full: bt_platform::WindowRect,
+    scale: f64,
+}
+
 impl RestoreMonitor {
     fn width(self) -> f64 {
         (self.right - self.left).max(0.0)
@@ -72000,10 +72359,59 @@ impl RestoreMonitor {
 /// monitor can see to the first entry, because a window that forfeits its corner opens wherever
 /// the OS puts it, and that is the primary.
 ///
-/// The one impure half of the restore judgment, and all it does is read. `available_monitors`
-/// gives the arrangement, and Win32 gives each monitor's work area — the taskbar's strip is not a
-/// fact winit reports, and it is exactly the strip a restored window must not open under.
+/// The one impure half of the restore judgment, and all it does is read. Winit gives each
+/// monitor's bounds and scale. Windows and macOS keep their existing native work-area read here;
+/// Linux uses these full bounds for the first-window fallback and sends saved secondary restores
+/// to the display worker for their work-area answers.
 fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
+    #[cfg(target_os = "linux")]
+    {
+        let inputs = restore_monitor_inputs(event_loop);
+        restore_monitors_from_work_areas(&inputs, None)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let primary = event_loop.primary_monitor();
+        primary
+            .clone()
+            .into_iter()
+            .chain(
+                event_loop
+                    .available_monitors()
+                    .filter(|monitor| Some(monitor) != primary.as_ref()),
+            )
+            .map(|monitor| {
+                let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
+                let origin = monitor.position();
+                let extent = monitor.size();
+                let full = bt_platform::WindowRect {
+                    left: origin.x,
+                    top: origin.y,
+                    right: origin
+                        .x
+                        .saturating_add(extent.width.min(i32::MAX as u32) as i32),
+                    bottom: origin
+                        .y
+                        .saturating_add(extent.height.min(i32::MAX as u32) as i32),
+                };
+                let asked = bt_platform::work_area_at(
+                    full.left + (full.right - full.left) / 2,
+                    full.top + (full.bottom - full.top) / 2,
+                );
+                let work = monitor_work_area(full, asked.ok());
+                RestoreMonitor {
+                    left: f64::from(work.left) / scale,
+                    top: f64::from(work.top) / scale,
+                    right: f64::from(work.right) / scale,
+                    bottom: f64::from(work.bottom) / scale,
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_monitor_inputs(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitorInput> {
     let primary = event_loop.primary_monitor();
     primary
         .clone()
@@ -72027,21 +72435,52 @@ fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
                     .y
                     .saturating_add(extent.height.min(i32::MAX as u32) as i32),
             };
+            RestoreMonitorInput { full, scale }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn restore_monitors_from_work_areas(
+    inputs: &[RestoreMonitorInput],
+    work_areas: Option<&[Option<bt_platform::WindowRect>]>,
+) -> Vec<RestoreMonitor> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
             // The centre, because that is the one point of a monitor that is certainly on it —
             // `MonitorFromPoint` resolves a shared edge to whichever neighbour it likes.
-            let asked = bt_platform::work_area_at(
-                full.left + (full.right - full.left) / 2,
-                full.top + (full.bottom - full.top) / 2,
+            let work = monitor_work_area(
+                input.full,
+                work_areas.and_then(|areas| areas.get(index).copied().flatten()),
             );
-            let work = monitor_work_area(full, asked.ok());
             RestoreMonitor {
-                left: f64::from(work.left) / scale,
-                top: f64::from(work.top) / scale,
-                right: f64::from(work.right) / scale,
-                bottom: f64::from(work.bottom) / scale,
+                left: f64::from(work.left) / input.scale,
+                top: f64::from(work.top) / input.scale,
+                right: f64::from(work.right) / input.scale,
+                bottom: f64::from(work.bottom) / input.scale,
             }
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn restore_monitor_topology_matches(
+    inputs: &[RestoreMonitorInput],
+    native_bounds: &[bt_platform::WindowRect],
+    native_primary: bt_platform::WindowRect,
+) -> bool {
+    let mut expected = inputs.iter().map(|input| input.full).collect::<Vec<_>>();
+    let mut observed = native_bounds.to_vec();
+    let by_position =
+        |rect: &bt_platform::WindowRect| (rect.left, rect.top, rect.right, rect.bottom);
+    expected.sort_by_key(by_position);
+    observed.sort_by_key(by_position);
+    expected == observed
+        && inputs
+            .first()
+            .is_some_and(|input| input.full == native_primary)
 }
 
 /// **One monitor's work area, held to the one thing a work area always is: a
@@ -73769,6 +74208,13 @@ mod cross_window_drag_tests {
         profiles, seats, strip_insert_slot, tear_out_rect,
     };
 
+    #[cfg(target_os = "linux")]
+    use super::{
+        RestoreMonitor, RestoreMonitorInput, drag_guard_allows_release, drag_guard_reply_matches,
+        observed_drag_guard_screen, restore_monitor_topology_matches,
+        restore_monitors_from_work_areas,
+    };
+
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -74378,13 +74824,13 @@ mod cross_window_drag_tests {
     ///
     /// Red gate: sample only the capture and a monitor unplugged mid-drag leaves
     /// a highlight burning on a window that has moved out from under the pointer;
-    /// sample neither and a stolen capture leaves a tab floating over a tab list
-    /// nobody is holding any more.
+    /// treat an unknown screen sample as a match and an unanswered X11 request
+    /// can spend a drop after its guard stopped being observable.
     #[test]
     fn one_guard_answers_every_way_a_cross_window_gesture_is_taken_away() {
         let held = DragGuard {
             capture: Some(bt_platform::NativeWindow::stand_in(0x1234)),
-            screen: rect(0, 0, 3840, 2160),
+            screen: Some(rect(0, 0, 3840, 2160)),
         };
         assert!(
             held.still_holds(&held),
@@ -74408,12 +74854,149 @@ mod cross_window_drag_tests {
         );
         assert!(
             !held.still_holds(&DragGuard {
-                screen: rect(0, 0, 1920, 1080),
+                screen: Some(rect(0, 0, 1920, 1080)),
                 ..held
             }),
             "the desktop changed shape under a gesture whose whole state is \
              screen coordinates, so every rectangle it was reasoning about is \
              stale — including the one it was about to open a window in"
+        );
+        assert!(
+            !held.still_holds(&DragGuard {
+                screen: None,
+                ..held
+            }),
+            "an unavailable screen answer is a refusal, never a successful empty snapshot"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn delayed_drag_guard_answers_need_the_same_broker_and_observed_screen() {
+        use bt_platform::linux_display::LinuxDisplayReady;
+
+        let ready = LinuxDisplayReady {
+            owner: 9,
+            request_id: 17,
+            generation: 23,
+        };
+        assert!(drag_guard_reply_matches(Some(23), 23, ready, ready));
+        assert!(!drag_guard_reply_matches(Some(24), 23, ready, ready));
+        assert!(!drag_guard_reply_matches(
+            Some(23),
+            23,
+            ready,
+            LinuxDisplayReady {
+                request_id: 18,
+                ..ready
+            }
+        ));
+
+        let original = rect(-1920, 0, 3840, 2160);
+        assert_eq!(
+            observed_drag_guard_screen(None, Ok(original)),
+            Some(original)
+        );
+        assert_eq!(
+            observed_drag_guard_screen(Some(original), Ok(original)),
+            Some(original)
+        );
+        assert_eq!(
+            observed_drag_guard_screen(Some(original), Ok(rect(0, 0, 1920, 1080))),
+            None
+        );
+        assert_eq!(
+            observed_drag_guard_screen(Some(original), Err("refused".into())),
+            None
+        );
+        assert_eq!(observed_drag_guard_screen(None, Ok(rect(0, 0, 0, 0))), None);
+        assert!(!drag_guard_allows_release(None, false, false));
+        assert!(!drag_guard_allows_release(Some(original), true, false));
+        assert!(!drag_guard_allows_release(Some(original), false, true));
+        assert!(drag_guard_allows_release(Some(original), false, false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_drag_guard_and_restore_reads_resume_from_display_answers() {
+        let open = method_body("Runtime", "open_broker");
+        assert!(open.contains("screen: None"));
+        assert!(!open.contains("virtual_screen_rect"));
+
+        let drive = method_body("FolioApp", "drive_drag_broker");
+        assert!(drive.contains("LinuxDisplayQuery::VirtualScreenRect"));
+        assert!(drive.contains("pending_drag_guard_screen"));
+        assert!(!drive.contains("virtual_screen_rect"));
+
+        let release = method_body("Runtime", "hand_over_across_windows");
+        assert!(release.contains("drag_guard_allows_release"));
+
+        let restore = free_fn_body("restore_monitors");
+        assert!(
+            restore.contains("#[cfg(target_os = \"linux\")]"),
+            "the Linux restore reads only the captured Winit topology"
+        );
+        assert!(restore.contains("restore_monitors_from_work_areas(&inputs, None)"));
+        assert!(restore.contains("#[cfg(not(target_os = \"linux\"))]"));
+        assert!(restore.contains("bt_platform::work_area_at"));
+
+        let open_pending = method_body("FolioApp", "open_pending_window");
+        assert!(open_pending.contains("LinuxDisplayQuery::MonitorWorkAreasAt"));
+        assert!(open_pending.contains("PendingNewWindowDisplayKind::Restore"));
+
+        let apply = method_body("FolioApp", "apply_linux_display_ready");
+        assert!(apply.contains("LinuxDisplayAnswer::MonitorWorkAreasAt"));
+        assert!(apply.contains("restore_monitor_topology_matches"));
+        assert!(apply.contains("input_generation_matches"));
+        assert!(!apply.contains("available_monitors"));
+        assert!(!apply.contains("primary_monitor"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn async_restore_work_areas_require_the_captured_topology_and_primary() {
+        let inputs = [
+            RestoreMonitorInput {
+                full: rect(0, 0, 1920, 1080),
+                scale: 2.0,
+            },
+            RestoreMonitorInput {
+                full: rect(-1920, 0, 0, 1080),
+                scale: 1.0,
+            },
+        ];
+        assert!(restore_monitor_topology_matches(
+            &inputs,
+            &[rect(-1920, 0, 0, 1080), rect(0, 0, 1920, 1080)],
+            rect(0, 0, 1920, 1080),
+        ));
+        assert!(!restore_monitor_topology_matches(
+            &inputs,
+            &[rect(-1920, 0, 0, 1080), rect(0, 0, 1920, 1080)],
+            rect(-1920, 0, 0, 1080),
+        ));
+        assert!(!restore_monitor_topology_matches(
+            &inputs,
+            &[rect(-1920, 0, 0, 1080), rect(0, 0, 1600, 900)],
+            rect(0, 0, 1920, 1080),
+        ));
+
+        assert_eq!(
+            restore_monitors_from_work_areas(&inputs, Some(&[Some(rect(0, 0, 1920, 1000)), None]),),
+            [
+                RestoreMonitor {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 960.0,
+                    bottom: 500.0,
+                },
+                RestoreMonitor {
+                    left: -1920.0,
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 1080.0,
+                },
+            ]
         );
     }
 
