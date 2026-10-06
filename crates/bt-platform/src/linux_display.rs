@@ -1810,7 +1810,7 @@ mod stalled_server_tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread::JoinHandle;
     use x11rb::protocol::xproto::{BackingStore, ImageOrder, Screen, Setup};
@@ -2013,7 +2013,7 @@ mod stalled_server_tests {
         std::fs::write(&authority, []).expect("write empty Xauthority data");
         let stderr_file = std::fs::File::create(&stderr_path).expect("capture child diagnostics");
         let mut child = ChildGuard(
-            Command::new(std::env::current_exe().expect("locate this test binary"))
+            crate::quiet_command(std::env::current_exe().expect("locate this test binary"))
                 .args([
                     "--exact",
                     "linux_display::stalled_server_tests::client_child",
