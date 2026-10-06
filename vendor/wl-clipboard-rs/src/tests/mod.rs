@@ -175,8 +175,10 @@ impl<S: Send + 'static> TestServer<S> {
                     }
                     2 => {
                         let mut byte = [0];
-                        if let Some(reader) = flush_wake.as_mut() {
+                        if let Some(mut reader) = flush_wake.take() {
                             let _ = reader.read(&mut byte);
+                            epoll::delete(&self.epoll, &reader).unwrap();
+                            drop(reader);
                         }
                         if !flush_gate
                             .as_ref()
