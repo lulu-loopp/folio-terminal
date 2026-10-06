@@ -13711,23 +13711,19 @@ On a framed capture, a structural row's source identity in the context signature
 
 ### 2026-10-04 — A new shell reads the account environment as it exists now while preserving launch-only overrides (T-ENV-REFRESH)
 
-On Windows, every PTY birth worker asks `bt_platform::environment::fresh_logon_environment` for a current-user block made by `OpenProcessToken` and `CreateEnvironmentBlock(FALSE)` and releases it with `DestroyEnvironmentBlock`. The window thread never enters that door. One worker takes the same block once at process startup as the launch snapshot; the existing `PtyBirth` admission joins a separate `bt-pty-birth` worker that composes and creates the process. macOS and other Unix hosts return no fresh block and retain ordinary inherited spawning.
+On Windows, every PTY birth worker asks `bt_platform::environment::fresh_logon_environment` for a current-user block made by `OpenProcessToken` and `CreateEnvironmentBlock(FALSE)` and releases it with `DestroyEnvironmentBlock`. The window thread never enters that door. The existing `PtyBirth` admission joins the `bt-pty-birth` worker that composes and creates the process. macOS and other Unix hosts return no fresh block and retain ordinary inherited spawning.
 
-The child block has one pure owner, `bt_pty::spawn_environment`. It begins with the fresh block. A process-inherited value survives only when it differs from the launch snapshot or had no launch-snapshot row, preserving explicit launch overrides while allowing a machine or account row removed since launch to disappear. Folio's terminal and pane declarations follow, and the selected profile's environment is last. Windows names compare case-insensitively and every replacement keeps the winning layer's spelling. The last-resort shell receives the refreshed process baseline and its own terminal declarations, never the failed profile's variables.
+The child block has one pure owner, `bt_pty::spawn_environment`. It begins with the fresh block. An explicitly identified launcher-override layer follows; inherited differences are not evidence of an override. Folio's terminal and pane declarations follow, and the selected profile's environment is last. Windows names compare case-insensitively and every replacement keeps the winning layer's spelling. The last-resort shell receives the refreshed process baseline and its own terminal declarations, never the failed profile's variables.
 
 Pinned by `bt_pty::tests::{fresh_environment_overlay_table,the_spawn_seam_asks_the_compositor_instead_of_using_raw_inherited_environment}` and, on Windows, `bt_platform::environment::tests::the_windows_logon_block_contains_system_root`.
 
 ### 2026-10-04 — An unreadable account environment degrades one shell birth to inheritance and is retried (T-ENV-REFRESH round 2)
 
-The launch snapshot owner stores only a successful platform answer. A startup worker or platform
-failure leaves it empty, the affected shell birth uses the process's inherited environment with
-Folio's and the selected profile's declarations, and a later birth asks the same platform door
-again. Once that retry succeeds, its answer is the launch baseline for the rest of the process.
-
-The per-birth current-account read follows the same rule without a cache: a failed read uses the
-ordinary inherited spawn for that birth and the next birth asks again. Each actual failed read is
-written once to resident diagnostics. Pinned by
-`pty_door::tests::{a_current_environment_door_error_uses_the_inherited_spawn,a_snapshot_error_is_retried_and_a_later_spawn_composes_normally}`.
+The current-account environment owner stores no answer: each birth asks again. A platform
+failure makes the affected shell birth use the process's inherited environment with Folio's and
+the selected profile's declarations; the next birth asks the same platform door again. Each
+actual failed read is written once to resident diagnostics. Pinned by
+`pty_door::tests::{a_current_environment_door_error_uses_the_inherited_spawn,a_current_environment_error_is_retried_and_a_later_spawn_composes_normally}`.
 
 ### 2026-10-04 — A pane's notice strip owns the points it is drawn on: the router asks it between the floats and the docked chrome, and a strip stands the corner ghost down (T-STRIP-HOVER-THROUGH)
 
@@ -13996,7 +13992,7 @@ Pinned by:
 **Round 6 (CI after round 5; review of round 5).**
 - **Windows PowerShell test children went silent on the runner.** Every CI step runs under PowerShell 7, and round 5 stopped 5.1 children inheriting 7's `PSModulePath`, through which they had been loading 7's PSReadLine 2.4.5. With the variable absent, 5.1 computes its own path — Documents, Program Files, `system32` — which on this machine holds the account's own PSReadLine 2.4.6 and on a runner only the inbox 2.0.0. The silence itself did not reproduce here: 5.1 with only 2.0.0 visible worked under ConPTY, so the remaining difference — the runner is elevated, its module set its own — is not established.
 - **The general rule now holds: a test's PowerShell gets the module path a pane gets.** That is the current user's fresh logon block, through `bt_platform::environment::fresh_logon_environment` (a test-only `bt-pty` → `bt-platform` edge under `test-shell`; the shipped `bt-pty` has none). Each shell writes its module path and loaded PSReadLine to a facts file the give-up account reports, so the next disagreement says why in one run.
-- **Panes and probes.** Panes were already right: `spawn_environment` takes the fresh value because the inherited `PSModulePath` equals the launch snapshot (pinned by `a_panes_module_path_is_the_fresh_logons_not_folios_parents`). The `$PROFILE`/parse probes were not, since they inherited Folio's own environment; they now start without `PSModulePath`, so each edition computes its own. `psreadline::run_probe` has the same inheritance and is reported, not changed.
+- **Panes and probes.** The `$PROFILE`/parse probes start without `PSModulePath`, so each edition computes its own. T-ENV-REFRESH round 4 later established that panes cannot infer an override from an inherited difference and gave `psreadline::run_probe` the same contained door, deadline, and module-path rule.
 - **U-35's ordinary-start test failed because of this branch, not because of load.** The edition observation started real PowerShell probes inside the `$PROFILE` sandbox (and read the real `$PROFILE`'s path) within the test child's 3-second wait. `probe_profile_observation` now asks no shell when sandboxed.
 - **The zone question is asked of the edition**, `ClrFacade.GetFileSecurityZone`, by reflection. Measured with a file, its Mark of the Web, and `\\localhost\c$` / `\\127.0.0.1\c$`, it predicted each edition's own RemoteSigned decision in all ten cases. PowerShell 7 keys on the mark alone; Windows PowerShell also maps the path's URL zone. So a PowerShell 7 profile on a redirected share keeps its button. The observation stores the one answer that matters (`remote_signed_loads: Option<bool>`), which also removes the Windows-only zone enum macOS's clippy refused; the probe-answer test helper is gated with its one `cfg(windows)` user.
 - **Keyboard.** `page_order` lists a row's button only where the layout placed it (`SettingsLayout::placed_profile_buttons`, told to the panel before a key, `note_placed`). The page-walking harness now holds every keyboard stop on every page to a drawn, pressable box.
@@ -14025,6 +14021,52 @@ Pinned by:
 - **Pinned by:**
   - `shell_integration::tests::{the_editions_answer_wins_and_the_fallback_covers_only_what_can_be_known,a_missing_zone_answer_is_said_once_per_edition,the_profile_probe_answer_is_a_path_a_policy_and_its_scopes}`;
   - `test_shell::tests::a_warm_up_that_cannot_finish_leaves_the_edition_cold_and_the_test_running`.
+
+**WARMUP (CI run 37318864463: a "warmed" cache from an account with none, and silent children behind it).**
+- **What happened.** The conpty job ran before anything on its runner had used Windows PowerShell, so the account had no analysis cache to copy. The warm-up analysed from nothing (47 s) and said "warmed". Three 5.1 children then sat silent for 30 s at their first command lookups.
+- **How PowerShell saves the cache.** From a background task: 10 s after the first change, then once nothing has changed for 3 s. A process does not wait for that task when it exits. The count of changes waiting to be saved (`_saveCacheToDiskQueued`) goes back to 0 only after the save's last byte. This was measured on both editions.
+- **Two ways the rounds 7–8 warm-up took a file short of what its lookup analysed.** That warm-up stopped at the first sign of a save after its lookup, or after 30 s without one. Both ways were measured here:
+  - **The process ended during the save.** The file's write time passes the lookup's end at the save's first byte, not its last.
+    - A 17.67 MB synthetic cache was left at 4.46 MB in one run of three. A fresh process on it analysed every module again (528 changes).
+    - On the CI runner one save of the 1.65 MB cache took 1.44 s from its first visible byte to its last.
+  - **The save dropped what was analysed while it was being written.**
+    - A module analysed while a 35.7 MB save stood at 2.4 MB left the count at 0 after the save. No save came in the next 25 s, and a fresh process analysed that module again.
+    - When that is the end of a lookup, the old warm-up waited out its 30 s and took the half-way file.
+  - Windows PowerShell analyses again whatever a cache lacks, so every child of such a run pays for it behind a line that says "warmed".
+- **On the runner, neither was caught directly** (scratch runs 37332806509, 37336349718 and 37339927076, account caches moved away). Ten runs of the old command from nothing each left a whole file: three of them at once, and six under eight spinning threads.
+  - The runner does show what makes both possible. Every from-nothing lookup had a 293,527-byte save in its middle, at 13–18 s, and a save there can span more than a second.
+- **Hypotheses measured and refuted on the runner:**
+  - (1) The lookup leaves something for the child's startup. It does not.
+    - Its cache (1,650,003 bytes) equals one made by running the child's own startup commands first.
+    - On a copy of either, `Set-PSReadLineOption` takes 97–114 ms, against 12,327 ms on an empty cache.
+    - `Get-Module -ListAvailable` adds 34 KB and makes nothing faster.
+  - (3) The cache is keyed differently for children. It is not: children use the shared file, and none rewrote it.
+  - (4) Concurrency re-analyses. It does not: three children started at once on a whole cache reached their prompts in 0.42–0.67 s.
+- **The fix: a cache is called warm only when a fresh process's lookup on it analyses nothing** (`complete_analysis_cache`, `judged_lookup`).
+  - A lookup analysed nothing only if nothing was waiting to be saved after it **and** the file was not written while it ran. A half-way save resets the count and may have dropped entries, so the count alone proves nothing.
+  - A lookup that analysed something stays until its save has ended (at most 60 s), and the next lookup checks.
+  - The edition stays cold, and the line says why, in two cases:
+    - three lookups without a clean one;
+    - an edition that does not show the count.
+  - The line names every lookup.
+- **Measured on the runner with the account's caches moved away** (fd71f42d, scratch runs 37336349718 and 37339927076):
+
+  | | run 37336349718 | run 37339927076 |
+  |---|---|---|
+  | warm-up | 47.9 s | 86.2 s |
+  | lookup 1 (analysed, save ended) | 42.4 s | 77.3 s |
+  | lookup 2 (analysed nothing) | 144 ms | 89 ms |
+  | first child, after the warm-up | 0.53 s | 0.86 s |
+  | the next children | 0.30–0.67 s, three at once included | same range |
+
+  - The whole bt-pty suite after it was green in both runs.
+  - The later commit adds only the file-unwritten condition to the judgement; in those runs lookup 2 took 89–144 ms, far inside PowerShell's 10 s save delay, so nothing could have been written while it ran.
+  - Here, from the account's copied cache, the warm-up takes 0.45 s, where the old one waited out 30 s for a save that never came.
+- **Pinned by:**
+  - `test_shell::tests::a_lookup_analysed_nothing_only_when_nothing_was_waiting_and_nothing_was_saved`, the judgement table;
+  - `a_cache_cut_short_is_completed_and_only_a_lookup_that_analyses_nothing_proves_it`, where half of a whole cache is completed by lookup 1 and proven by lookup 2;
+  - `a_powershell_child_starts_with_the_shared_warm_analysis_cache`, which now requires the line to name a lookup that analysed nothing.
+  - Each is red under its named mutations: the count alone; an ended save taken as the proof; a saved lookup taken as the last; a lookup that does not wait for its save.
 
 ### 2026-10-05 — A start a rollback sent hands its report to a Folio already running, in two keys every v2 reader ignores (U-36)
 
@@ -14081,6 +14123,65 @@ The source gates fail closed over their real input. Tracked text is strict UTF-8
 The window-waits resolver gives a receiver a type in exactly two cases: `self.field` when the field declaration, after removing only `&` or `&mut`, is one unambiguous first-party path with no type arguments; and `let name: Type = …` under the same type restriction when `name` is bound exactly once in the whole function by every binding form and is never assigned. No initializer, parameter, alias, wrapper, generic interior, slice, array, tuple, `dyn` or `impl` supplies a receiver type, and a same-named type in more than one reachable first-party location is untyped. A type with `Deref`, or with a first-party trait method of the called name, is treated as untyped. Every empty preferred lookup — including `self` and `Self::` — returns the pre-ticket name match. Pinned by `receiver_typing_only_narrows_a_non_empty_source_stated_answer`, `a_test_only_edge_lends_product_code_no_first_party_callee`, and the closed Drop inventory.
 
 Pane-title hits and painting share the transformed content, clip, control box and glyph rectangle. Throughout real one-pane, 2×2, cramped and zoomed layouts at 100/150/200 %, a drawn control owns only its visible box and every other visible header point remains the header, never the terminal. Pinned by `moving_pane_headers_own_every_point_not_owned_by_a_drawn_control`. The five other clipped-chrome hit paths remain review-owned by T-POINTER-CAPTURE, as do neutral shell-program values, macro/type aliases, platform predicates the source index cannot decide, and timing hidden inside a called helper.
+
+### 2026-10-05 — A current account environment is not inferred from a stale parent, and PSReadLine asks again after failure (T-ENV-REFRESH round 4)
+
+**The false distinction.** The launch snapshot was another fresh account block, not the environment Folio inherited when it started. `spawn_environment` therefore called every inherited value that differed from the fresh block a deliberate launcher override. That cannot be known from a diff: the parent can be an old Folio leaving for an update, a resident Folio receiving a launch, Explorer, an autostart process, or a terminal whose environment is hours old. PowerShell 7 also rewrites `PSModulePath` without the person choosing an override. The former test supplied the PowerShell 7 value as both inherited state and the supposed launch snapshot, so it did not reproduce the real start.
+
+**The rule.** A Windows pane has four ordered inputs: the current account block read at this birth; launcher overrides the caller identifies explicitly; Folio declarations derived at this birth; and profile declarations. A difference in inherited process state identifies nothing. No product start road currently has a separate, provable launcher-override input, so each supplies an empty second layer. The seam remains for a future launcher that can name what it set. The startup snapshot worker and its process-lifetime cache are gone; one `bt-pty-birth` worker owns the current read, composition, and process birth. A failed current read still degrades only that birth to ordinary inheritance and is retried at the next birth.
+
+| Windows start road | What Folio inherits | Former pane result | Required and current pane result |
+|---|---|---|---|
+| ordinary cold start | the shell, Explorer, Start, or another launcher | every difference from the account block survived | current account; no inferred override |
+| Restart to update | the old, possibly hours-old Folio block | every stale difference was frozen into the new run | current account; updater passes no override |
+| applier, recovery, or trial | the updater/rescue process block | updater-process differences survived | current account; the existing argv keeps its update meaning only |
+| launch-wire receiver | no new process; the resident Folio may be old | the resident process's differences survived | current account at the received pane's birth |
+| Explorer command | Explorer's long-lived block | Explorer/account differences survived | current account |
+| quake/hotkey | no new process; the resident Folio may be old | resident differences survived | current account at pane birth |
+| autostart | the logon runner's block | runner/account differences survived | current account |
+| terminal start | that terminal's rewritten and possibly stale block | every difference was called deliberate | current account; no value is called deliberate without a separate input |
+
+On macOS and other Unix hosts `fresh_logon_environment` still answers no block, so pane birth retains Folio's inherited environment. A launch-wire or hotkey pane can therefore be as stale as the resident process, and a terminal start retains both its deliberate and stale values. The macOS updater starts the application through LaunchServices (`open -a`), so the new application does not directly inherit the old Folio block, but it still receives LaunchServices' login-session environment rather than a newly read account block. Linux has ordinary parent inheritance. This ticket changes no `cfg(unix)` implementation: those platforms have no authoritative account-block door comparable to `CreateEnvironmentBlock`, and inventing one from a shell or a process diff would repeat the defect.
+
+**The PSReadLine question.** `psreadline::run_probe` now uses the same `powershell_probe_command` and contained runner as the parse and profile probes: the named Windows PowerShell, no inherited `PSModulePath`, and the shared five-second deadline. A successful version and non-`Unknown` policy is process-lifetime state. Spawn, deadline, exit, wait, or unrecognised-policy failure leaves the answer unknown, releases the in-flight claim, wakes the view, and is asked again only at the next real reader edge (another 5.1 pane or a later opening of the Terminal page). While unknown the row continues to say it is checking, and its install action stays unavailable.
+
+| Other process site | Environment before this round | Environment the question needs | Disposition |
+|---|---|---|---|
+| PowerShell parse and profile observations | Folio's block, with `PSModulePath` explicitly removed | each edition's computed module path | already correct; shares the same owner and deadline |
+| PSReadLine version/policy | Folio's complete inherited block | Windows PowerShell's computed module path | fixed here; same owner, containment, and deadline |
+| console-membership helper | Folio's block | no environment answer; it inspects one named process tree | unchanged |
+| Copilot version | Folio's block; the shim was resolved before spawn | the resolved installation and its ordinary command environment | unchanged; no account-state conclusion is drawn from its environment |
+| Git observations | Folio's block plus the command's explicit locale and safety rows | the repository command's reviewed environment | recorded unchanged; refreshing Git's HOME/PATH is a separate policy decision |
+| macOS locale, identity, and update-tool probes | Folio's block | system-tool answers, with their existing explicit arguments | recorded unchanged; no pane/account environment is inferred |
+| updater, recovery, trial, Explorer, browser, Finder, and elevation starts | the starting process's block | a hand-off that may outlive its starter | unchanged at the start sites; Windows panes refresh at their later birth |
+
+Pinned by `bt_pty::tests::{a_panes_module_path_is_the_fresh_logons_not_folios_parents,every_start_road_uses_current_account_values_and_only_explicit_overrides,a_restart_to_update_does_not_freeze_the_old_folios_path,opposite_powershell_launchers_do_not_cross_their_module_paths_into_panes}`, `psreadline::tests::{an_unknown_probe_is_asked_again_on_the_next_edge,the_psreadline_probe_uses_the_contained_powershell_deadline,a_probe_under_a_pwsh7_launcher_environment_answers_the_true_policy}`, and the existing PowerShell probe-door pin `shell_integration::tests::a_probe_powershell_computes_its_own_module_path`.
+
+### 2026-10-05 — A named folder outranks a profile's starting place, About → Version names every update state, About's doors answer Enter, and a download is given up only when it stops moving
+
+A pane's seed now says how it came by its folder: `profiles::SeedPlace::Named` for a folder somebody named for this launch (`Open in Folio`, `folio <folder>`, `--cwd`, `folio-here.cmd`, a launch handed over, a Dock or Service folder, `New terminal in folder…`, `New terminal here`) and `Carried` for one inherited by the `+`, Duplicate, a split, Restart shell, a saved session or a Recent row. `profiles::place_for` owns the order — named, then the profile's `StartAt`, then (Inherit only) carried, then home — so a Home or fixed-folder profile no longer throws an Explorer folder away (GitHub issue #16); the carried roads keep their rule. Pinned by `a_folder_named_for_the_launch_outranks_the_profiles_starting_place` and `every_road_that_names_a_folder_opens_there_whatever_the_profile_says`.
+
+About → Version says `Verifying <tag>` (Staged), `<tag> ready` with `Restart…` (Verified, which raises the Ready card) and `Restarting…` (Quitting, Committing), with the bar full (`VersionControl::Downloaded`) and no verb while nothing can be pressed; pinned by `about_version_says_what_every_job_state_is_doing` and `the_ready_row_restarts_through_its_card`. `SettingsPanel::activate` gains the missing `Link` arm, so Enter presses About's doors and Version's control, and `SettingsPanel::keep_focus_on_a_stop`, run on every Settings layout, moves a focus that stopped being a stop where `keep_focus_reachable` sends every vanished stop; pinned by `the_keyboard_presses_its_door_and_never_rests_on_a_control_that_is_not_a_stop`.
+
+The update download's 10-minute whole-call budget is gone: `https_download::Deadlines` gives a download up when it stops moving — 30 s with nothing heard, or a 30 s stretch of its body carrying fewer than `DOWNLOAD_FLOOR_BYTES` — and `longest_download` (what macOS's resource timer is set to) follows from the ceiling. Self-update design note revision (i). Pinned on a composed clock by `a_download_is_given_up_when_it_stops_moving_and_never_for_its_length`, and over loopback by `redirect_loop_and_trickle_body_hit_deadlines`.
+
+### 2026-10-05 — A pane born in a named folder keeps it for its next shells, and a vanished Settings stop hands the focus to its neighbour
+
+`profiles::place_for` also answers whether its place was a named folder (`SpawnPlace::named`); the leaf holds it (`LeafSession::born_named`, runtime only) and `LeafSession::seed_place_for_a_new_shell` hands its folder on as `SeedPlace::Named` to Restart shell, Duplicate tab, Duplicate pane and the splits, so a pane opened by the Explorer verb, `folio <folder>`, `--cwd`, `New terminal in folder…` or a hand-over keeps starting its next shells there whatever the profile's starting place; the `+` and picker rows still carry. The session document has no field for it, so a restored pane follows its profile. Pinned by `a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profile_says` and the born-named rows of `every_road_that_names_a_folder_opens_there_whatever_the_profile_says`.
+
+`SettingsPanel::keep_focus_reachable` no longer sends a focus whose control stopped being a stop to the dialog's `×`: it goes to the nearest stop after it in the order it stood in (`SettingsPanel::seen_order`), else the nearest before it, and to the `×` only on a page with no stop. Pinned by `enter_on_check_then_enter_again_does_not_close_settings` and the neighbour assertion of `the_keyboard_presses_its_door_and_never_rests_on_a_control_that_is_not_a_stop`.
+
+### 2026-10-05 — A vanished Settings stop hands the focus to the stop before it, so a second Enter never reaches a bigger verb
+
+`SettingsPanel::keep_focus_reachable` now looks before the control that stopped being a stop first (`nearest_stop`), then after it, then the `×` only on a page with no stop. On Shortcuts the last `↺` is followed by `Restore all`, which resets every binding without asking; Enter on that `↺` now lands on its own row's Record, and a second Enter records instead of restoring all. About ▸ Version's Check has nothing before it and still lands on Automatic check; a disabled Retry beside Details lands on Details. Pinned by `enter_on_the_last_reset_then_enter_again_does_not_restore_all`, `enter_on_check_then_enter_again_does_not_close_settings` and the harness in `the_keyboard_presses_its_door_and_never_rests_on_a_control_that_is_not_a_stop`. The `+` and picker rows' carried folder is now `LeafSession::place_for_a_new_tab_beside`, pinned in `a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profile_says` and `every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder`.
+
+### 2026-10-05 — The `$PROFILE` line is offered only where every session of the edition loads it, what its write created goes with it, and an uninstall never purges before it has decided
+
+The one-click `$PROFILE` fallback now asks two sessions: an ordinary session of the edition (the scopes without a row's arguments, its Process scope the `PSExecutionPolicyPreference` of the account's fresh logon environment, `ProfileObservation::ordinary_process`) and the clicked row (its own `-ExecutionPolicy`). `shell_integration::edition_cause` combines them (`both_sessions`: Group Policy, then the row's own Process scope, then the ordinary session's cause), the row model, the click's re-check and the "Enabled" state all read it, and a question that got no answer is `PolicyCause::Undetermined` (said as such, asked again on the next Profiles visit, parse questions included past their birth limit). Before writing, `profile_marks::ProfileFiles` (`integration-profile-files.json`, beside the marks record, under its lock, a separate file so the previous version's `deny_unknown_fields` record is untouched) records the edition, whether Folio is creating the file and its folders, and the one copy of a file that was there; every removal road (`apply_recorded`, Undo) then `retire`s: the copy is deleted, and a Folio-created file holding only whitespace is deleted with its empty folders. Removals take no copy. The Settings remover is offered only for a line in a form Folio owns.
+
+Removals locate `$PROFILE` from that record, ask an unrecorded edition only for the variable (`PROFILE_PATH_COMMAND`, no command discovery) with `REMOVAL_PROBE_DEADLINE`, keep no failed answer, and report a silent edition as `Fate::Unlocated`, which is not a refusal. The uninstall door's order is claims and preflight, removal rows, the program's step (`ProgramStep`), then the purge, which runs only when nothing refused. A managed copy's command joins the cleanup with `cmd /c "… && …"` and its row says to close Folio first; Homebrew's `--zap` runs the cleanup itself. A profile row's button stands only where the `default` badge still fits before it.
+
+Pinned by `the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_load_it`, `after_enable_and_undo_an_ordinary_restricted_session_prints_nothing` (a real Windows PowerShell 5.1 under `Restricted`), `what_folios_profile_writes_created_goes_with_its_line_and_nothing_else_does`, `every_removal_road_retires_what_the_write_created`, `a_power_loss_between_the_record_and_the_write_is_retired`, `a_profile_no_shell_located_is_said_and_refuses_nothing`, `the_remover_stands_only_for_a_line_it_can_prove_is_folios`, `a_failed_parse_question_is_undetermined_and_a_visit_asks_it_again`, `shell_integration_profile_path_askers_share_an_answer_and_ask_again_after_a_failure`, `a_refusal_before_the_purge_keeps_the_data_and_the_purge_comes_last`, `a_managed_copy_is_left_to_its_manager` and `the_default_badge_and_the_rows_button_never_overlap`.
 
 ### 2026-10-06 — Patched clipboard crates have a Linux CI gate
 

@@ -675,7 +675,7 @@ impl Runtime<'_> {
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
-        let seed = restart_seed(&leaf.profile, leaf.place_for_a_new_shell().as_deref());
+        let seed = restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell());
         // **The replacement is born at the old view's rung** (ticket 37): *Restart shell* keeps
         // the pane, so it keeps its text size, and the constructor is handed the rung rather
         // than the new leaf being repaired to it afterwards. Nothing else of the old view is

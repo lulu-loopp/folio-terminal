@@ -825,8 +825,8 @@ impl DownloadTransport {
 /// outcome an `Err` naming its stage, with nothing left in the directory. No
 /// retries and no resumption: see [`crate::https_download`].
 ///
-/// Blocks for as long as the transfer takes, up to `budget`: a worker's call,
-/// never the window thread's.
+/// Blocks for as long as the transfer keeps moving (`HttpsDownload::longest` at
+/// most): a worker's call, never the window thread's.
 ///
 /// **Where a stage begins, on this stack.** `NSURLSession` reports nothing
 /// between starting the task and handing over the response, and it hands the
@@ -848,7 +848,7 @@ pub fn https_download(request: &HttpsDownload<'_>) -> Result<Downloaded, Downloa
 /// [`https_download`] at [`fetch`]'s seam, for [`fetch`]'s reason.
 ///
 /// The session's own two timeouts are set **past** this module's deadlines,
-/// as backstops: the wait below checks the idle and budget clocks every
+/// as backstops: the wait below checks the silence and the floor every
 /// `DOWNLOAD_CANCEL_LATENCY`, and it is its sentence a caller reads, not
 /// Foundation's `The request timed out.`
 fn download_from(url: &NSURL, request: &HttpsDownload<'_>) -> Result<Downloaded, DownloadError> {
@@ -858,14 +858,14 @@ fn download_from(url: &NSURL, request: &HttpsDownload<'_>) -> Result<Downloaded,
         stirred: Condvar::new(),
     });
     let transport = DownloadTransport::new(Arc::clone(&download));
-    let mut deadlines = Deadlines::start(request.idle_timeout, request.budget);
+    let mut deadlines = Deadlines::start(request.idle_timeout, request.floor);
 
     let configuration = NSURLSessionConfiguration::ephemeralSessionConfiguration();
     configuration.setTimeoutIntervalForRequest(
         (request.idle_timeout + Duration::from_secs(1)).as_secs_f64(),
     );
     configuration
-        .setTimeoutIntervalForResource((request.budget + request.idle_timeout).as_secs_f64());
+        .setTimeoutIntervalForResource((request.longest() + request.idle_timeout).as_secs_f64());
     configuration.setHTTPShouldSetCookies(false);
     configuration.setRequestCachePolicy(NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData);
     configuration.setHTTPMaximumConnectionsPerHost(1);
@@ -1194,12 +1194,11 @@ mod tests {
             DownloadError, DownloadMonitor, DownloadStage, Downloaded, HttpsDownload, download_from,
         };
         use crate::https_download::{
-            DOWNLOAD_BUDGET, DOWNLOAD_IDLE_TIMEOUT,
+            DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
             loopback::{Step, begun, body, head, ok, serve},
         };
 
         const IDLE: Duration = Duration::from_secs(5);
-        const BUDGET: Duration = Duration::from_secs(20);
 
         fn scratch(name: &str) -> PathBuf {
             let directory = std::env::temp_dir()
@@ -1229,7 +1228,7 @@ mod tests {
             port: u16,
             directory: &Path,
             ceiling: u64,
-            deadlines: (Duration, Duration),
+            deadlines: (Duration, u64),
             monitor: &Arc<DownloadMonitor>,
         ) -> Result<Downloaded, DownloadError> {
             let composed = format!("http://127.0.0.1:{port}/folio-0.4.6-aarch64.dmg");
@@ -1245,7 +1244,7 @@ mod tests {
                     file_name: "folio.dmg",
                     ceiling,
                     idle_timeout: deadlines.0,
-                    budget: deadlines.1,
+                    floor: deadlines.1,
                     monitor,
                 },
             )
@@ -1269,8 +1268,14 @@ mod tests {
                 vec![Step::Send(ok(&served, Some(served.len())))]
             });
             let monitor = quiet();
-            let done =
-                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &monitor).expect("the body");
+            let done = fetch(
+                port,
+                &directory,
+                1 << 20,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &monitor,
+            )
+            .expect("the body");
             assert_eq!(done.bytes, 300_000);
             assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
             assert_eq!(entries(&directory), vec!["folio.dmg".to_owned()]);
@@ -1290,8 +1295,14 @@ mod tests {
             let port = serve(1, move |_| {
                 vec![Step::Send(ok(&served, Some(served.len())))]
             });
-            let done =
-                fetch(port, &directory, 70_000, (IDLE, BUDGET), &quiet()).expect("at the ceiling");
+            let done = fetch(
+                port,
+                &directory,
+                70_000,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .expect("at the ceiling");
             assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
         }
 
@@ -1310,8 +1321,14 @@ mod tests {
             let served = body(70_001);
             let port = serve(1, move |_| vec![Step::Send(ok(&served, None))]);
             let monitor = quiet();
-            let error = fetch(port, &directory, 70_000, (IDLE, BUDGET), &monitor)
-                .expect_err("one byte over");
+            let error = fetch(
+                port,
+                &directory,
+                70_000,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &monitor,
+            )
+            .expect_err("one byte over");
             assert_eq!(error.stage, DownloadStage::Body, "{error}");
             assert_eq!(error.reason, "the body passed the ceiling of 70000 bytes");
             assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
@@ -1332,8 +1349,14 @@ mod tests {
                 ]
             });
             let started = Instant::now();
-            let error =
-                fetch(port, &directory, 70_000, (IDLE, BUDGET), &quiet()).expect_err("too long");
+            let error = fetch(
+                port,
+                &directory,
+                70_000,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .expect_err("too long");
             assert_eq!(error.stage, DownloadStage::Headers, "{error}");
             assert_eq!(
                 error.reason,
@@ -1360,8 +1383,14 @@ mod tests {
                 bytes.extend_from_slice(&body(40_000));
                 vec![Step::Send(bytes)]
             });
-            let error =
-                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("cut short");
+            let error = fetch(
+                port,
+                &directory,
+                1 << 20,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .expect_err("cut short");
             assert_eq!(error.stage, DownloadStage::Body, "{error}");
             assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
         }
@@ -1384,8 +1413,14 @@ mod tests {
                 bytes.extend_from_slice(page);
                 vec![Step::Send(bytes)]
             });
-            let error =
-                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("404");
+            let error = fetch(
+                port,
+                &directory,
+                1 << 20,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .expect_err("404");
             assert_eq!(error.stage, DownloadStage::Status);
             assert_eq!(error.reason, "the server answered 404");
             assert!(entries(&directory).is_empty());
@@ -1421,20 +1456,27 @@ mod tests {
                     vec![Step::Send(ok(&served, Some(served.len())))]
                 }
             });
-            let error =
-                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("refused");
+            let error = fetch(
+                port,
+                &directory,
+                1 << 20,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .expect_err("refused");
             assert_eq!(error.stage, DownloadStage::Status, "{error}");
             assert_eq!(error.reason, "the server answered 302");
             assert!(entries(&directory).is_empty());
         }
 
-        /// RED (U-7) — **a trickling body ends at the budget, which nothing
-        /// resets, and leaves no file.**
+        /// RED (U-7; 047-EXPERIENCE) — **a trickling body ends at the floor —
+        /// fewer than `DOWNLOAD_FLOOR_BYTES` in a stretch of the idle length —
+        /// and leaves no file.**
         ///
         /// §F Transport: `redirect_loop_and_trickle_body_hit_deadlines` (the
         /// loop half is `follows`'s count, which the check already carries).
         ///
-        /// MUTATION: reset `started` in `Deadlines::heard`.
+        /// MUTATION: drop the floor's refusal from `Deadlines::check_at`.
         #[test]
         fn redirect_loop_and_trickle_body_hit_deadlines() {
             let directory = scratch("trickle");
@@ -1445,13 +1487,19 @@ mod tests {
                 ]
             });
             let started = Instant::now();
-            let budget = Duration::from_millis(1_500);
-            let error =
-                fetch(port, &directory, 1 << 20, (IDLE, budget), &quiet()).expect_err("the budget");
+            let stretch = Duration::from_millis(1_500);
+            let error = fetch(
+                port,
+                &directory,
+                1 << 20,
+                (stretch, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .expect_err("the floor");
             let took = started.elapsed();
             assert_eq!(error.stage, DownloadStage::Body, "{error}");
-            assert!(error.reason.contains("inside its budget"), "{error}");
-            assert!(took < budget + Duration::from_secs(1), "{took:?}");
+            assert!(error.reason.contains("stalled"), "{error}");
+            assert!(took < stretch * 2 + Duration::from_secs(1), "{took:?}");
             assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
         }
 
@@ -1478,7 +1526,7 @@ mod tests {
                 port,
                 &directory,
                 1 << 20,
-                (DOWNLOAD_IDLE_TIMEOUT, DOWNLOAD_BUDGET),
+                (DOWNLOAD_IDLE_TIMEOUT, DOWNLOAD_FLOOR_BYTES),
                 &monitor,
             )
             .expect_err("cancelled");
