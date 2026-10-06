@@ -30583,7 +30583,7 @@ mod tests {
             assert_eq!(
                 alpha_representation(
                     WindowTargetKind::MetalLayerOnOwnedView,
-                    wgpu::CompositeAlphaMode::PostMultiplied,
+                    wgpu::CompositeAlphaMode::PostMultiplied
                 ),
                 Some(SurfaceAlphaRepresentation::Premultiplied),
                 "the pixels are the same pixels DirectComposition is given"
@@ -30624,7 +30624,7 @@ mod tests {
                 wgpu::CompositeAlphaMode::Opaque
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::Hwnd, wgpu::CompositeAlphaMode::Opaque,),
+                alpha_representation(WindowTargetKind::Hwnd, wgpu::CompositeAlphaMode::Opaque),
                 Some(SurfaceAlphaRepresentation::Opaque)
             );
             assert_eq!(
@@ -30634,7 +30634,7 @@ mod tests {
             assert_eq!(
                 alpha_representation(
                     WindowTargetKind::CompositionVisual,
-                    wgpu::CompositeAlphaMode::PreMultiplied,
+                    wgpu::CompositeAlphaMode::PreMultiplied
                 ),
                 Some(SurfaceAlphaRepresentation::Premultiplied)
             );

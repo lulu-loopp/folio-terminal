@@ -806,19 +806,18 @@ impl ImeSystemCaret {
     pub fn destroy(&mut self) {}
 }
 
-// ── the directory watch (M2-1 for everything but macOS) ────────────────────
+// ── the Linux directory adapter and unsupported-platform refusal ────────────
 //
-// M2-1 gave macOS a real arm over FSEvents (`macos_watch.rs`), so the three
-// doors below are now what a third platform meets and nothing else. They keep
-// the shape rather than the behaviour: the contracts are three constructors and
-// the enum is not part of the interface, which is what a Linux arm will have to
-// preserve when it is written.
+// Windows owns its implementation in `windows_impl`, macOS uses FSEvents in
+// `macos_watch.rs`, and Linux uses inotify in `linux_watch.rs`. This wrapper
+// keeps the same three constructor contracts for Linux and for platforms that
+// still have no watch backend.
 
 /// **What one completion of the watch said changed.**
 ///
-/// The same two answers FSEvents gives — named entries, or *more than I could
-/// write down* — which is why the enum travels unchanged. M2-1 owns all three
-/// of the contracts the three constructors carry.
+/// The backends share two answers: named entries or *more than I could write
+/// down*. The enum travels unchanged because all three constructors carry the
+/// same tree, shallow and named-shallow contracts.
 #[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirChange<'a> {
@@ -829,18 +828,12 @@ pub enum DirChange<'a> {
     Unknown,
 }
 
-/// **A subscription to a directory, before FSEvents** (M2-1).
+/// **The Linux watcher or an explicit refusal when this target has no backend.**
 ///
-/// The three contracts — `Tree`, `HereOnly`, named `HereOnly` — are three
-/// constructors here as on Windows, and M2-1 must preserve all three rather
-/// than folding them: the inventory's §6 ⑤ notes that the depth enum is not
-/// part of the public interface, so the contracts *are* the doors.
-///
-/// Refused rather than silently never waking, because the caller's failure
-/// policy is already "log it, and the watch is absent": a files column that is
-/// not being watched is a files column that needs refreshing by hand, and a
-/// reader is better served by one line saying so than by a tree that quietly
-/// stops agreeing with the disk.
+/// The three contracts — `Tree`, `HereOnly`, named `HereOnly` — remain separate
+/// constructors. Linux wraps `linux_watch::Subscription`; unsupported targets
+/// keep the same doors but refuse rather than silently never waking, so a files
+/// column can report that its folder is not being watched.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct DirWatch {
     #[cfg(target_os = "linux")]
@@ -852,15 +845,30 @@ pub struct DirWatch {
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl DirWatch {
+    /// Take a deferred Linux watch-start failure.
     #[cfg(target_os = "linux")]
     pub fn take_failure(&mut self) -> Option<std::io::Error> {
         self._inner.take_failure()
     }
 
+    /// Whether the Linux watcher has armed its subscription.
     #[cfg(target_os = "linux")]
     #[must_use]
     pub fn is_armed(&self) -> bool {
         self._inner.is_armed()
+    }
+
+    /// Whether a successfully created subscription remains armed.
+    #[cfg(not(target_os = "linux"))]
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        match self._never {}
+    }
+
+    /// Take a subscription failure when one is available.
+    #[cfg(not(target_os = "linux"))]
+    pub fn take_failure(&mut self) -> Option<std::io::Error> {
+        match self._never {}
     }
     /// The tree contract. Refused; M2-1.
     pub fn start(path: &Path, wake: impl Fn() + Send + 'static) -> Result<Self, std::io::Error> {

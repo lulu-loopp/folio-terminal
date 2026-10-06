@@ -51,11 +51,7 @@ use std::{
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{
-    AppEvent,
-    dir_news::{take_watch_failure, watch_is_armed},
-    watch_clock::WatchClock,
-};
+use crate::{AppEvent, watch_clock::WatchClock};
 
 /// One repository's subscription, and the clock its notifications feed.
 struct Watched {
@@ -185,7 +181,7 @@ impl GitWatch {
         }
         for entry in self.watched.values_mut() {
             entry.watches.retain_mut(|subscription| {
-                let Some(error) = take_watch_failure(&mut subscription.watch) else {
+                let Some(error) = subscription.watch.take_failure() else {
                     return true;
                 };
                 trace(&format!(
@@ -231,7 +227,7 @@ impl GitWatch {
                     entry
                         .watches
                         .iter()
-                        .any(|subscription| watch_is_armed(&subscription.watch))
+                        .any(|subscription| subscription.watch.is_armed())
                 })
                 .count(),
         )

@@ -55100,10 +55100,26 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
         asked < request,
         "the question is asked after the payload read was queued"
     );
-    let delivery = squeezed_body("Runtime", "apply_clipboard_payload");
+    let read = door
+        .find("bt_platform::clipboard_payload()")
+        .expect("the door reads the clipboard");
+    let applied = door
+        .find("self.apply_clipboard_payload(target,payload)")
+        .expect("the door applies its clipboard payload");
     assert!(
-        delivery.contains("self.deliver_paste("),
-        "the async result uses the shared paste delivery door"
+        asked < read && read < applied,
+        "the question is asked before the read and the apply follows the read"
+    );
+    let apply = squeezed_body("Runtime", "apply_clipboard_payload");
+    let recipient = apply
+        .find("leaf.paste_recipient.clone()")
+        .expect("the apply step resolves the recipient");
+    let delivered = apply
+        .find("self.deliver_paste(")
+        .expect("the apply step delivers the paste");
+    assert!(
+        recipient < delivered,
+        "delivery follows recipient resolution"
     );
     // And the terminal menu's Paste goes through that door, not around it.
     assert!(

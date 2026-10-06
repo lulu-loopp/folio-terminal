@@ -90,11 +90,7 @@ use std::{
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{
-    AppEvent,
-    dir_news::{take_watch_failure, watch_is_armed},
-    watch_clock::WatchClock,
-};
+use crate::{AppEvent, watch_clock::WatchClock};
 
 /// **What a file looked like the last time this window read it.**
 ///
@@ -367,7 +363,7 @@ impl PreviewWatch {
         }
         let mut failed = Vec::new();
         for (directory, watch) in &mut self.folders {
-            if let Some(error) = take_watch_failure(watch) {
+            if let Some(error) = watch.take_failure() {
                 trace(&format!("cannot watch {}: {error}", directory.display()));
                 failed.push(directory.clone());
             }
@@ -490,7 +486,7 @@ impl PreviewWatch {
             self.files.len(),
             self.folders
                 .values()
-                .filter(|watch| watch_is_armed(watch))
+                .filter(|watch| watch.is_armed())
                 .count(),
         )
     }
