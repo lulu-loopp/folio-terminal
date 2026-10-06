@@ -72,11 +72,13 @@ pub fn begin_startup_migration() {
     }
     let data = persist::storage_dir();
     let programs = installed_powershells();
-    spawn_profile_observation(data, programs);
+    spawn_profile_observation(data, programs, Vec::new());
 }
 
 /// Refresh the two edition facts when the Profiles page opens. This is an edge
-/// trigger supplied by Settings, not a polling loop; a second visit asks again.
+/// trigger supplied by Settings, not a polling loop; a second visit asks again —
+/// the observation, a failed `$PROFILE` path, and every parse question that got
+/// no answer (release read m2).
 pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
     let mut resolved = installed_powershells();
     for profile in profiles::table().profiles() {
@@ -87,15 +89,16 @@ pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
             resolved.push(program);
         }
     }
-    spawn_profile_observation(persist::storage_dir(), resolved);
+    spawn_profile_observation(persist::storage_dir(), resolved, parse_questions(programs));
 }
 
-fn spawn_profile_observation(data: PathBuf, programs: Vec<PathBuf>) {
+fn spawn_profile_observation(data: PathBuf, programs: Vec<PathBuf>, questions: Vec<ParseQuestion>) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-observation",
         bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| {
-            let report = observe_profile_lines(&data, &programs);
+        move |worker| {
+            let report = observe_profile_lines(worker, &data, &programs);
+            ask_failed_parse_questions_again(questions);
             for refusal in report.refusals() {
                 eprintln!(
                     "BT_SHELL_PROFILE {}: {}",
@@ -120,19 +123,55 @@ fn profile_bytes_carry_the_line(bytes: &[u8]) -> bool {
     Decoded::read(bytes).is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text))
 }
 
+/// **Whether the Settings remover has anything to remove here**: a line in one of the exact
+/// forms the removal owns ([`Forms::owns`]) — never the looser test above, which also
+/// recognises a line somebody wrote by hand and the remover cannot prove is Folio's (census
+/// item 5: the verb stood on screen and did nothing). A hand-written line still integrates the
+/// edition, and its row says so; it offers no verb.
+fn profile_carries_an_owned_line(path: &Path, forms: &Forms) -> bool {
+    bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path).is_ok_and(
+        |bytes| {
+            Decoded::read(&bytes)
+                .is_ok_and(|decoded| decoded.text.lines().any(|line| forms.owns(line)))
+        },
+    )
+}
+
+/// The forms a removal owns, for the record `marks` and the data root `data`.
+fn owned_forms(marks: &Marks, data: &Path) -> Forms {
+    let mut scripts = marks.powershell_scripts.clone();
+    let script = script_at(data);
+    if !scripts.contains(&script) {
+        scripts.push(script);
+    }
+    Forms::new(&scripts)
+}
+
 /// Read-only startup discovery for the conditional Settings remover. Legacy marks remain useful
 /// as candidate locations, but no migration is allowed to rewrite a profile now that integration
 /// is process-scoped.
-fn observe_profile_lines(data: &Path, programs: &[PathBuf]) -> Report {
-    warm_profile_answers();
-    for program in programs {
-        if let Some(mut observed) = probe_profile_observation(program) {
-            observed.line_present = profile_line_is_present(&observed.path);
-            publish_profile_observation(program, observed);
+fn observe_profile_lines(
+    worker: &bt_platform::admission::WorkerCtx,
+    data: &Path,
+    programs: &[PathBuf],
+) -> Report {
+    let answers = profile_answers(data, POWERSHELL_PROBE_DEADLINE);
+    if !profile_sandboxed() {
+        for program in programs {
+            match probe_profile_observation(worker, program) {
+                Some(mut observed) => {
+                    observed.line_present = profile_line_is_present(&observed.path);
+                    publish_profile_observation(program, observed);
+                }
+                None => publish_profile_observation_failed(program),
+            }
         }
     }
-    let marks = match Marks::read(data) {
-        Ok(marks) => marks,
+    let (marks, files) = match Marks::read(data).and_then(|marks| {
+        let files = ProfileFiles::read(data)?;
+        Ok((marks, files))
+    }) {
+        Ok(read) => read,
         Err(error) => {
             publish_powershell_profile_line_present(false);
             return Report {
@@ -143,12 +182,25 @@ fn observe_profile_lines(data: &Path, programs: &[PathBuf]) -> Report {
             };
         }
     };
-    let (paths, report) = candidates(&marks);
-    publish_powershell_profile_line_present(paths.iter().any(|path| profile_line_is_present(path)));
+    let forms = owned_forms(&marks, data);
+    let (paths, report) = candidates(&marks, &files, answers);
+    publish_powershell_profile_line_present(
+        paths
+            .iter()
+            .any(|path| profile_carries_an_owned_line(path, &forms)),
+    );
     report
 }
 
-fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
+/// What each installed PowerShell answered about where its `$PROFILE` is: `None` for one that
+/// did not answer.
+type PathAnswers = Vec<(PathBuf, Option<PathBuf>)>;
+
+/// Every `$PROFILE` a removal must look at: the sandbox's alone when it is set; otherwise every
+/// recorded path ([`Marks`], [`ProfileFiles`]) and every path an edition named in `answers`.
+/// An edition that did not answer is reported [`Fate::Unlocated`] — not a refusal: what Folio
+/// recorded is removed whatever any shell says (release read M1).
+fn candidates(marks: &Marks, files: &ProfileFiles, answers: PathAnswers) -> (Vec<PathBuf>, Report) {
     let mut report = Report::default();
     match sandbox_profile() {
         Ok(Some(path)) => return (vec![path], report),
@@ -168,6 +220,7 @@ fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
         .powershell_profiles
         .iter()
         .chain(marks.profile_refusals.iter().map(|refusal| &refusal.path))
+        .chain(files.profiles.iter().map(|entry| &entry.profile))
     {
         if !recorded_profile_is_usable(path) {
             report.files.push(FileReport {
@@ -178,8 +231,8 @@ fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
             paths.push(path.clone());
         }
     }
-    for program in installed_powershells() {
-        match cached_profile_answer(&program) {
+    for (program, answer) in answers {
+        match answer {
             Some(path) => {
                 if !paths.contains(&path) {
                     paths.push(path);
@@ -187,7 +240,7 @@ fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
             }
             None => report.files.push(FileReport {
                 path: program,
-                fate: Fate::Refused(Text::ShellProfileProbeFailed.text().to_owned()),
+                fate: Fate::Unlocated,
             }),
         }
     }
@@ -210,47 +263,69 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
     // A door, by the name on it: this is `--uninstall-cleanup`'s road, and it has
     // already refused if a Folio is running. Only a run that will ask the machine
     // where its profiles are pays for asking.
-    if profiles.is_none() {
-        warm_profile_answers();
-    }
+    let answers = match profiles {
+        None => profile_answers(data, REMOVAL_PROBE_DEADLINE),
+        Some(_) => Vec::new(),
+    };
     operate_with(
         data,
         Asker::Door,
         Action::Remove,
         Ok(MANAGED_LINE),
-        |marks| {
+        |marks, files| {
             profiles.map_or_else(
-                || candidates(marks),
+                || candidates(marks, files, answers),
                 |paths| (paths.to_vec(), Report::default()),
             )
         },
     )
 }
 
-/// **Ask the machine its slow question before the record is locked.**
+/// **Ask the machine its slow question before the record is locked** — where each installed
+/// PowerShell keeps `$PROFILE`, for every edition the record does not already locate.
 ///
-/// [`candidates`] asks each installed PowerShell where its own `$PROFILE` is,
-/// and that answer costs a child process with a five-second deadline apiece.
-/// Asked where it used to be asked — inside [`operate_with`], under the lock —
-/// one of Folio's own writers could hold the record for ten seconds while two
-/// shells started, which is the difference between a turn worth waiting for and
-/// a wait nobody can be asked to make on a window thread. The answer is a
-/// property of the installation and not of the record, and
-/// `cached_profile_answer` keeps it for the life of the process, so asking it
-/// here leaves `candidates` reading a cache it would have filled anyway.
-fn warm_profile_answers() {
+/// The answer costs a child process apiece. Asked where it used to be asked — inside
+/// [`operate_with`], under the lock — one of Folio's own writers could hold the record while
+/// shells started, which is the difference between a turn worth waiting for and a wait nobody can
+/// be asked to make on a window thread. An edition the record locates
+/// ([`ProfileFiles::located`], written when Folio wrote its line) is not asked: the probe is the
+/// fallback for a line an older Folio wrote without that record (release read M1). `patience` is
+/// the asker's ([`POWERSHELL_PROBE_DEADLINE`], [`REMOVAL_PROBE_DEADLINE`]). The record is read here without
+/// the lock — to decide only which editions to ask; the removal reads it again under the lock.
+fn profile_answers(data: &Path, patience: std::time::Duration) -> PathAnswers {
     // The sandbox door replaces the whole candidate set, so no shell is asked.
     if profile_sandboxed() {
-        return;
+        return Vec::new();
     }
-    for program in installed_powershells() {
-        let _ = cached_profile_answer(&program);
-    }
+    answers_for(
+        &ProfileFiles::read(data).unwrap_or_default(),
+        installed_powershells(),
+        |program| cached_profile_answer(program, patience),
+    )
+}
+
+/// [`profile_answers`]'s one decision: ask each program whose edition the record does not
+/// locate, and only those.
+fn answers_for(
+    files: &ProfileFiles,
+    programs: Vec<PathBuf>,
+    mut ask: impl FnMut(&Path) -> Option<PathBuf>,
+) -> PathAnswers {
+    programs
+        .into_iter()
+        .filter(|program| files.located(powershell_edition(program)).is_none())
+        .map(|program| {
+            let answer = ask(&program);
+            (program, answer)
+        })
+        .collect()
 }
 
 fn operate(data: &Path, asker: Asker, action: Action) -> Report {
-    warm_profile_answers();
-    operate_with(data, asker, action, Ok(MANAGED_LINE), candidates)
+    let answers = profile_answers(data, REMOVAL_PROBE_DEADLINE);
+    operate_with(data, asker, action, Ok(MANAGED_LINE), |marks, files| {
+        candidates(marks, files, answers)
+    })
 }
 
 fn operate_with(
@@ -258,7 +333,7 @@ fn operate_with(
     asker: Asker,
     action: Action,
     managed: io::Result<&'static str>,
-    discover: impl FnOnce(&Marks) -> (Vec<PathBuf>, Report),
+    discover: impl FnOnce(&Marks, &ProfileFiles) -> (Vec<PathBuf>, Report),
 ) -> Report {
     let record_path = data.join(RECORD_FILE);
     let refused_record = |error: io::Error| Report {
@@ -281,6 +356,10 @@ fn operate_with(
         Ok(marks) => marks,
         Err(e) => return refused_record(e),
     };
+    let mut files = match ProfileFiles::read(data) {
+        Ok(files) => files,
+        Err(e) => return refused_record(e),
+    };
     let managed = match managed {
         Ok(managed) => managed,
         Err(e) => return refused_record(e),
@@ -291,7 +370,7 @@ fn operate_with(
             return refused_record(e);
         }
     }
-    let (paths, mut report) = discover(&marks);
+    let (paths, mut report) = discover(&marks, &files);
     let script = script_at(data);
     let mut scripts = marks.powershell_scripts.clone();
     if !scripts.contains(&script) {
@@ -303,7 +382,7 @@ fn operate_with(
     // the applier's existing scan, before it can replace the profile. Retain old
     // record locations as historical retry candidates, never as edit authority.
     report.files.extend(
-        apply_recorded(&paths, &forms, action, |path| {
+        apply_recorded(&paths, &forms, action, &mut files, |path| {
             marks.remember(path, &script);
             if records { marks.write(data) } else { Ok(()) }
         })
@@ -311,7 +390,9 @@ fn operate_with(
     );
     if action != Action::Remove || asker == Asker::InApp {
         publish_powershell_profile_line_present(
-            paths.iter().any(|path| profile_line_is_present(path)),
+            paths
+                .iter()
+                .any(|path| profile_carries_an_owned_line(path, &forms)),
         );
     }
     // Probe refusals name executables, not profiles. They are reported on this
@@ -323,11 +404,14 @@ fn operate_with(
         .collect();
     // Merely discovering a hand-written installation must not create an
     // enabled record. Existing records and explicit Off decisions still persist.
-    if records
-        && (record_path.exists() || !marks.profile_refusals.is_empty())
-        && let Err(e) = marks.write(data)
-    {
-        report.files.extend(refused_record(e).files);
+    // What the removal retired is written back only where its record already is.
+    let written = [
+        (records && (record_path.exists() || !marks.profile_refusals.is_empty()))
+            .then(|| marks.write(data)),
+        (records && data.join(FILES_RECORD).exists()).then(|| files.write(data)),
+    ];
+    for error in written.into_iter().flatten().filter_map(Result::err) {
+        report.files.extend(refused_record(error).files);
     }
     report
 }
@@ -341,28 +425,41 @@ fn enable_record(data: &Path) -> io::Result<()> {
     marks.write(data)
 }
 
+/// **Write the managed line, recording first what the write brings into existence**
+/// ([`ProfileFiles::before_write`]): the file and its folders when there is none, or the one copy
+/// of a file Folio has not written into before. `edition` is the edition that named `profile`,
+/// recorded so a removal finds the file without asking it again; `None` where the caller does
+/// not know (a test, a fixture). A write that fails takes the record back to what it was
+/// ([`ProfileFiles::write_failed`]).
 pub fn install_recorded(
     profile: &Path,
     data: &Path,
     script: &Path,
     line: &'static str,
     at: std::time::SystemTime,
+    edition: Option<PowerShellEdition>,
 ) -> io::Result<ProfileWrite> {
     let profile = std::path::absolute(profile)?;
     let script = std::path::absolute(script)?;
     let _lock = lock(data, Asker::InApp)?;
     let mut marks = Marks::read(data)?;
+    let mut files = ProfileFiles::read(data)?;
     marks.powershell_state = PowerShellState::Enabled {};
     marks.remember(&profile, &script);
     marks.write(data)?;
+    let previous = files.entry(&profile).cloned();
+    let backup = files.before_write(&profile, edition, at);
+    files.write(data)?;
     let result = add_profile_with_forms(
         &profile,
         line,
         &Forms::new(&marks.powershell_scripts).targeting(line),
-        at,
+        backup.as_deref(),
     );
     marks.profile_refusals.retain(|r| r.path != profile);
     if let Err(e) = &result {
+        files.write_failed(previous, &profile);
+        files.write(data)?;
         marks.profile_refusals.push(Refusal {
             path: profile,
             reason: e.to_string(),
@@ -372,20 +469,23 @@ pub fn install_recorded(
     result
 }
 
-/// The click's own re-probe: the policy is asked again, for the row that was clicked (its own
-/// `-ExecutionPolicy` included), and a policy that would not load `$PROFILE` is refused with the
-/// sentence the row would show.
-fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<PathBuf> {
-    let mut observed = probe_profile_observation(program)
-        .ok_or_else(|| io::Error::other(Text::ShellProfileProbeFailed.text()))?;
+/// The click's own re-probe: the policy is asked again — for an ordinary session of the edition
+/// and for the row that was clicked, its own `-ExecutionPolicy` included ([`edition_cause`]) — and
+/// a cause that would keep `$PROFILE` from loading in either is refused with the sentence the row
+/// would show.
+fn install_for_program(
+    worker: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    arguments: &[OsString],
+) -> io::Result<PathBuf> {
+    let Some(mut observed) = probe_profile_observation(worker, program) else {
+        publish_profile_observation_failed(program);
+        return Err(io::Error::other(Text::ShellProfileProbeFailed.text()));
+    };
     observed.line_present = profile_line_is_present(&observed.path);
     publish_profile_observation(program, observed.clone());
-    if let Some(sentence) = policy_cause(
-        observed.scopes,
-        observed.remote_signed_loads(),
-        row_process_scope(program, arguments),
-    )
-    .sentence()
+    if let Some(sentence) =
+        edition_cause(&observed, row_process_scope(program, arguments)).sentence()
     {
         return Err(io::Error::other(sentence.text()));
     }
@@ -398,6 +498,7 @@ fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<Pat
         &script,
         MANAGED_LINE,
         std::time::SystemTime::now(),
+        Some(powershell_edition(program)),
     )?;
     observed.line_present = true;
     publish_profile_observation(program, observed.clone());
@@ -405,13 +506,21 @@ fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<Pat
     Ok(observed.path)
 }
 
-fn undo_profile_install(profile: &Path) -> io::Result<()> {
+/// **Undo of one click**: the managed line out of `profile`, then what the click's write brought
+/// into existence retired ([`ProfileFiles::retire`]) — the file and its folders when Folio created
+/// them and nothing else is in the file, and the copy. Under the marks lock, like the write.
+pub(super) fn undo_profile_install(profile: &Path, data: &Path) -> io::Result<()> {
+    let _lock = lock(data, Asker::InApp)?;
+    let mut files = ProfileFiles::read(data)?;
     let original = read_profile_for_edit(profile)?.unwrap_or_default();
     let forms = Forms::new(&[]).targeting(MANAGED_LINE);
-    let Some(bytes) = rewrite(&original, &forms, Action::Remove)? else {
-        return Ok(());
-    };
-    replace_profile(profile, &original, &bytes, std::time::SystemTime::now())?;
+    if let Some(bytes) = rewrite(&original, &forms, Action::Remove)? {
+        replace_profile(profile, &original, &bytes, None)?;
+    }
+    files.retire(profile, &forms)?;
+    if data.join(FILES_RECORD).exists() || !files.profiles.is_empty() {
+        files.write(data)?;
+    }
     Ok(())
 }
 
@@ -423,8 +532,8 @@ pub fn begin_profile_install(
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-install",
         bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| {
-            let outcome = match install_for_program(&program, &arguments) {
+        move |worker| {
+            let outcome = match install_for_program(worker, &program, &arguments) {
                 Ok(profile) => ProfileInstallOutcome::Installed { program, profile },
                 Err(error) => ProfileInstallOutcome::Refused(error.to_string()),
             };
@@ -441,15 +550,11 @@ pub fn begin_profile_install_undo(
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-install-undo",
         bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| {
-            let outcome = match undo_profile_install(&profile) {
+        move |worker| {
+            let data = persist::storage_dir();
+            let outcome = match undo_profile_install(&profile, &data) {
                 Ok(()) => {
-                    if let Some(mut observed) = probe_profile_observation(&program) {
-                        observed.line_present = profile_line_is_present(&observed.path);
-                        publish_profile_observation(&program, observed);
-                    }
-                    let _ =
-                        observe_profile_lines(&persist::storage_dir(), &installed_powershells());
+                    let _ = observe_profile_lines(worker, &data, &[program]);
                     ProfileInstallOutcome::Undone
                 }
                 Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
@@ -567,6 +672,7 @@ mod tests {
             &script,
             MANAGED_LINE,
             std::time::UNIX_EPOCH,
+            None,
         )
         .expect("one click writes the managed line");
         assert_eq!(wrote.profile, std::path::absolute(&profile).unwrap());
@@ -581,8 +687,406 @@ mod tests {
                 .contains(&wrote.profile)
         );
 
-        undo_profile_install(&profile).expect("Undo removes the managed line");
-        assert_eq!(fs::read(&profile).unwrap(), b"");
+        undo_profile_install(&profile, &data).expect("Undo removes the managed line");
+        assert!(
+            !profile.exists() && !profile.parent().unwrap().exists(),
+            "the file and the folder this click created are gone with its line"
+        );
+    }
+
+    /// Every file a directory holds, by name, sorted.
+    fn names(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// One install of the managed line into `profile`, recorded for Windows PowerShell.
+    fn enable(profile: &Path, data: &Path) -> ProfileWrite {
+        let script = data.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1);
+        install_recorded(
+            profile,
+            data,
+            &script,
+            MANAGED_LINE,
+            std::time::UNIX_EPOCH,
+            Some(PowerShellEdition::WindowsPowerShell),
+        )
+        .expect("the managed line is written")
+    }
+
+    /// PIN (release read B1, M5) — **what Folio's writes into `$PROFILE` brought into existence
+    /// goes with its line, and nothing else does.** One case per kind of file Folio can meet:
+    ///
+    /// * no file and no folder: Enable creates both, recording them first; Undo takes the line
+    ///   out, then the empty file, then the folder — an empty `$PROFILE` is itself refused under
+    ///   `Restricted`, so leaving it would leave every session's error;
+    /// * a file of the person's own: one copy, taken before Folio's first write and not again on a
+    ///   second; the line's removal leaves the file and deletes the copy;
+    /// * a file Folio created that the person has since added to: it stays, folder and all;
+    /// * an empty file the person had: it stays — Folio did not create it;
+    /// * a folder that was there, with no file: the file goes, the folder stays.
+    ///
+    /// Every case leaves no `.bak-` copy behind, and the record keeps only the edition's location.
+    ///
+    /// RED (mutations: `retire_keeps_file` — `retire` skips the file's deletion: the first case
+    /// keeps an empty `$PROFILE`; `whitespace_any` — the content test dropped: the third case
+    /// deletes the person's line; `created_ignored` — `created_file` not consulted: the fourth
+    /// case deletes the person's empty file; `backup_every_write` — `before_write` takes a copy on
+    /// every write: two copies; `backup_kept` — `retire` leaves the copy).
+    #[test]
+    fn what_folios_profile_writes_created_goes_with_its_line_and_nothing_else_does() {
+        let root = super::super::tests::temp_dir("profile-created-files");
+        let data = root.join("data");
+        let edition = PowerShellEdition::WindowsPowerShell;
+
+        // No file, no folder.
+        let created = root
+            .join("文档 one")
+            .join("WindowsPowerShell")
+            .join("profile.ps1");
+        enable(&created, &data);
+        let entry = ProfileFiles::read(&data)
+            .unwrap()
+            .entry(&created)
+            .cloned()
+            .unwrap();
+        assert!(entry.created_file);
+        assert_eq!(
+            entry.created_folders,
+            [
+                root.join("文档 one"),
+                root.join("文档 one").join("WindowsPowerShell")
+            ]
+        );
+        assert_eq!(entry.backup, None, "there was nothing to copy");
+        undo_profile_install(&created, &data).unwrap();
+        assert!(!created.exists(), "the empty file Folio created is gone");
+        assert!(
+            !root.join("文档 one").exists(),
+            "and both folders it created"
+        );
+        let files = ProfileFiles::read(&data).unwrap();
+        assert_eq!(files.located(edition), Some(created.as_path()));
+        let entry = files.entry(&created).unwrap();
+        assert!(!entry.created_file && entry.created_folders.is_empty() && entry.backup.is_none());
+
+        // A file of the person's own.
+        let theirs = root.join("theirs").join("profile.ps1");
+        fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+        let mine = "Set-Location D:\\项目\r\n";
+        fs::write(&theirs, mine).unwrap();
+        let first = enable(&theirs, &data);
+        let copy = first
+            .backup
+            .clone()
+            .expect("one copy before the first write");
+        assert_eq!(fs::read_to_string(&copy).unwrap(), mine);
+        assert_eq!(enable(&theirs, &data).backup, None, "no second copy");
+        assert_eq!(
+            names(theirs.parent().unwrap()).len(),
+            2,
+            "the file and its one copy"
+        );
+        undo_profile_install(&theirs, &data).unwrap();
+        assert!(
+            fs::read_to_string(&theirs).unwrap().starts_with(mine),
+            "the person's file stays"
+        );
+        assert_eq!(
+            names(theirs.parent().unwrap()),
+            ["profile.ps1"],
+            "the copy is gone"
+        );
+
+        // A file Folio created, added to since.
+        let added = root.join("added").join("profile.ps1");
+        enable(&added, &data);
+        let with_line = fs::read_to_string(&added).unwrap();
+        fs::write(&added, format!("{with_line}Write-Host 'mine 中'\r\n")).unwrap();
+        undo_profile_install(&added, &data).unwrap();
+        assert_eq!(
+            fs::read_to_string(&added).unwrap(),
+            "Write-Host 'mine 中'\r\n"
+        );
+
+        // An empty file the person had.
+        let empty = root.join("empty").join("profile.ps1");
+        fs::create_dir_all(empty.parent().unwrap()).unwrap();
+        fs::write(&empty, b"").unwrap();
+        enable(&empty, &data);
+        undo_profile_install(&empty, &data).unwrap();
+        assert_eq!(fs::read(&empty).unwrap(), b"", "Folio did not create it");
+        assert_eq!(names(empty.parent().unwrap()), ["profile.ps1"]);
+
+        // A folder that was there, with no file.
+        let folder = root.join("folder");
+        fs::create_dir_all(&folder).unwrap();
+        let in_folder = folder.join("profile.ps1");
+        enable(&in_folder, &data);
+        assert!(
+            ProfileFiles::read(&data)
+                .unwrap()
+                .entry(&in_folder)
+                .unwrap()
+                .created_folders
+                .is_empty()
+        );
+        undo_profile_install(&in_folder, &data).unwrap();
+        assert!(!in_folder.exists() && folder.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// PIN (census item 5) — **the Settings remover stands only for a line it can prove is
+    /// Folio's.** A hand-written line that dot-sources `folio.ps1` still integrates the edition
+    /// (the observation's "present", which keeps Enable away), but no exact form the removal owns
+    /// is in it, so the remover row is not offered — it would press and remove nothing. Each
+    /// managed and literal legacy form is offered.
+    ///
+    /// RED (mutation: `loose_remover` — the remover's presence reads `profile_line_is_present`,
+    /// as it did: the hand-written line shows a verb that does nothing).
+    #[test]
+    fn the_remover_stands_only_for_a_line_it_can_prove_is_folios() {
+        let root = super::super::tests::temp_dir("profile-owned-line");
+        let data = root.join("data");
+        let forms = owned_forms(&Marks::default(), &data);
+        let profile = root.join("profile.ps1");
+        for (text, integrates, removable) in [
+            (". 'D:\\工具\\folio.ps1'\r\n", true, false),
+            (
+                "# . \"$env:APPDATA\\Folio\\shell-integration\\folio.ps1\"\r\n",
+                false,
+                false,
+            ),
+            (format!("# mine\r\n{MANAGED_LINE}\r\n").as_str(), true, true),
+            (format!("{LEGACY_LINE}\n").as_str(), true, true),
+            (
+                format!(". \"{}\"\r\n", script_at(&data).display()).as_str(),
+                true,
+                true,
+            ),
+        ] {
+            fs::write(&profile, text).unwrap();
+            assert_eq!(profile_line_is_present(&profile), integrates, "{text}");
+            assert_eq!(
+                profile_carries_an_owned_line(&profile, &forms),
+                removable,
+                "{text}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// PIN (release read B1, M5) — **every removal road retires the same way as Undo**: the
+    /// Settings remover, `--remove-shell-integration` and both uninstall verbs go through
+    /// `operate_with`, which retires each profile whose line it took out (or found absent), and
+    /// never one whose removal was refused.
+    ///
+    /// RED (mutations: `apply_skips_retire` — `apply_recorded` does not retire: the created file
+    /// stays; `retire_on_refusal` — it retires after a refused removal too: the copy of the
+    /// read-only file is deleted while its line stays).
+    #[test]
+    fn every_removal_road_retires_what_the_write_created() {
+        let root = super::super::tests::temp_dir("profile-removal-retires");
+        let data = root.join("data");
+        let created = root.join("PowerShell").join("profile.ps1");
+        enable(&created, &data);
+        let locked = root.join("locked").join("profile.ps1");
+        fs::create_dir_all(locked.parent().unwrap()).unwrap();
+        fs::write(&locked, "# 我的\r\n").unwrap();
+        let copy = enable(&locked, &data).backup.unwrap();
+        let permissions = fs::metadata(&locked).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&locked, readonly).unwrap();
+        let report = operate_with(
+            &data,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |marks, files| candidates(marks, files, Vec::new()),
+        );
+        assert_eq!(report.exit_code(), 1, "the read-only file refuses");
+        assert!(!created.exists() && !root.join("PowerShell").exists());
+        assert!(copy.exists(), "a refused removal keeps its copy");
+        fs::set_permissions(&locked, permissions).unwrap();
+        let report = operate_with(
+            &data,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |marks, files| candidates(marks, files, Vec::new()),
+        );
+        assert_eq!(report.exit_code(), 0, "{}", report.text(true));
+        assert!(!copy.exists(), "the copy goes with the line");
+        assert!(
+            fs::read_to_string(&locked)
+                .unwrap()
+                .starts_with("# 我的\r\n")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// PIN (release read B1) — **a power loss between the record and the write leaves nothing
+    /// unknown**: the record names folders made and a file not yet written, and the next removal
+    /// retires them — the folders (each only if empty) and the entry's claim. A write that failed
+    /// takes the record back to what it was and removes the copy it took.
+    ///
+    /// RED (mutations: `missing_file_kept` — `retire` returns early when the file is missing:
+    /// the folders stay; `failed_write_kept` — `write_failed` leaves the attempted entry: the
+    /// record claims a file Folio never created).
+    #[test]
+    fn a_power_loss_between_the_record_and_the_write_is_retired() {
+        let root = super::super::tests::temp_dir("profile-power-loss");
+        let data = root.join("data");
+        let profile = root.join("a").join("b").join("profile.ps1");
+        {
+            let _lock = lock(&data, Asker::InApp).unwrap();
+            let mut files = ProfileFiles::read(&data).unwrap();
+            assert_eq!(
+                files.before_write(&profile, None, std::time::UNIX_EPOCH),
+                None
+            );
+            files.write(&data).unwrap();
+        }
+        // The write's own `create_dir_all` ran; the power went before the file did.
+        fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        undo_profile_install(&profile, &data).unwrap();
+        assert!(
+            !root.join("a").exists(),
+            "the folders the record names are retired"
+        );
+        assert!(
+            ProfileFiles::read(&data).unwrap().entry(&profile).is_none(),
+            "an entry with nothing left and no edition is dropped"
+        );
+
+        // A write that fails: the file is read-only, so the write refuses before it starts.
+        let theirs = root.join("theirs.ps1");
+        fs::write(&theirs, "# 原样\r\n").unwrap();
+        let permissions = fs::metadata(&theirs).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&theirs, readonly).unwrap();
+        let script = data.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1);
+        assert!(
+            install_recorded(
+                &theirs,
+                &data,
+                &script,
+                MANAGED_LINE,
+                std::time::UNIX_EPOCH,
+                None
+            )
+            .is_err()
+        );
+        fs::set_permissions(&theirs, permissions).unwrap();
+        assert_eq!(ProfileFiles::read(&data).unwrap().entry(&theirs), None);
+        assert_eq!(names(&root), ["data", "theirs.ps1"], "no copy is left");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// PIN (release read review F3) — **a copy is deleted only while it is the copy Folio wrote.**
+    /// The record names the copy and its bytes' SHA-256 before the copy is written; a power loss
+    /// between the two, and a file of exactly that name appearing afterwards with other bytes,
+    /// leaves a file Folio did not make — the removal keeps it, and clears the record. The copy
+    /// Folio did write (same bytes) is deleted as before.
+    ///
+    /// RED (mutation: `copy_unchecked` — `remove_our_copy` deletes whatever stands at the
+    /// recorded name: the stranger's file is gone).
+    #[test]
+    fn a_recorded_copy_is_deleted_only_while_it_holds_the_bytes_folio_wrote() {
+        let root = super::super::tests::temp_dir("profile-copy-digest");
+        let data = root.join("data");
+        let profile = root.join("profile.ps1");
+        let mine = "Set-Location D:\\工作\r\n";
+        fs::write(&profile, mine).unwrap();
+        let copy = {
+            let _lock = lock(&data, Asker::InApp).unwrap();
+            let mut files = ProfileFiles::read(&data).unwrap();
+            let copy = files
+                .before_write(&profile, None, std::time::UNIX_EPOCH)
+                .expect("a file that was there gets one copy");
+            files.write(&data).unwrap();
+            copy
+        };
+        // The power went before the copy was written; a file of that name appears later.
+        fs::write(&copy, "not Folio's 不是\r\n").unwrap();
+        undo_profile_install(&profile, &data).unwrap();
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            "not Folio's 不是\r\n",
+            "a file Folio did not write stays"
+        );
+        assert!(ProfileFiles::read(&data).unwrap().entry(&profile).is_none());
+        fs::remove_file(&copy).unwrap();
+
+        // The copy Folio did write goes with the line.
+        let written = enable(&profile, &data).backup.expect("one copy");
+        assert_eq!(fs::read_to_string(&written).unwrap(), mine);
+        undo_profile_install(&profile, &data).unwrap();
+        assert!(!written.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// PIN (release read M1) — **a PowerShell that does not say where its `$PROFILE` is refuses
+    /// nothing**: the line Folio recorded is removed whatever any shell answers, the silent
+    /// edition is named with what is left there, and the run's exit code is 0 — so the uninstall
+    /// that runs it goes on to the program. An edition the record locates is not asked at all.
+    ///
+    /// RED (mutations: `unlocated_refuses` — `candidates` reports a silent edition as
+    /// `Fate::Refused`: exit 1; `located_asked` — `answers_for` asks every program).
+    #[test]
+    fn a_profile_no_shell_located_is_said_and_refuses_nothing() {
+        let root = super::super::tests::temp_dir("profile-unlocated");
+        let data = root.join("data");
+        let profile = root.join("WindowsPowerShell").join("profile.ps1");
+        enable(&profile, &data);
+        let files = ProfileFiles::read(&data).unwrap();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let answers = answers_for(
+            &files,
+            vec![
+                PathBuf::from("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"),
+                PathBuf::from("C:/Program Files/PowerShell/7/pwsh.exe"),
+            ],
+            |program| {
+                asked.borrow_mut().push(program.to_path_buf());
+                None
+            },
+        );
+        assert_eq!(
+            *asked.borrow(),
+            [PathBuf::from("C:/Program Files/PowerShell/7/pwsh.exe")],
+            "the located edition is not asked"
+        );
+        let report = operate_with(
+            &data,
+            Asker::Door,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |marks, files| candidates(marks, files, answers),
+        );
+        assert_eq!(report.exit_code(), 0, "{}", report.text(true));
+        assert!(
+            !profile.exists(),
+            "the recorded line, and the file Folio made, are gone"
+        );
+        let said = report.text(false);
+        assert!(
+            said.contains(&format!(
+                "C:/Program Files/PowerShell/7/pwsh.exe: {}",
+                Text::ShellProfileUnlocated.text()
+            )),
+            "{said}"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// PIN — **two clicks in flight from two windows are two answers** (review C-4 of
@@ -635,7 +1139,7 @@ mod tests {
             Asker::InApp,
             Action::Remove,
             Ok(MANAGED_LINE),
-            |marks| (marks.powershell_profiles.clone(), Report::default()),
+            |marks, _| (marks.powershell_profiles.clone(), Report::default()),
         );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(fs::read(&profile).unwrap(), original);
@@ -654,7 +1158,7 @@ mod tests {
             Asker::InApp,
             Action::Migrate,
             Ok(MANAGED_LINE),
-            |_| (vec![profile.clone()], Report::default()),
+            |_, _| (vec![profile.clone()], Report::default()),
         );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.files[0].fate, Fate::Unchanged);
@@ -674,7 +1178,7 @@ mod tests {
             Asker::InApp,
             Action::Remove,
             Ok(MANAGED_LINE),
-            |_| (vec![profile.clone()], Report::default()),
+            |_, _| (vec![profile.clone()], Report::default()),
         );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.files[0].fate, Fate::Unchanged);
@@ -706,7 +1210,7 @@ mod tests {
             Asker::InApp,
             Action::Migrate,
             managed_line_for(&data, &root),
-            |_| (vec![profile.clone()], Report::default()),
+            |_, _| (vec![profile.clone()], Report::default()),
         );
         assert_eq!(report.exit_code(), 0);
         let after = fs::read_to_string(&profile).unwrap();
@@ -761,6 +1265,7 @@ mod tests {
                 &script,
                 MANAGED_LINE,
                 std::time::UNIX_EPOCH,
+                None,
             )
             .unwrap();
         }
@@ -775,6 +1280,7 @@ mod tests {
             &script,
             MANAGED_LINE,
             std::time::UNIX_EPOCH,
+            None,
         )
         .unwrap();
         let reread = Marks::read(&data).unwrap();
@@ -820,7 +1326,8 @@ mod tests {
                     &root,
                     &root.join("folio.ps1"),
                     "new",
-                    std::time::UNIX_EPOCH
+                    std::time::UNIX_EPOCH,
+                    None,
                 )
                 .is_err()
             );
@@ -861,6 +1368,7 @@ mod tests {
             &script_at(&root),
             MANAGED_LINE,
             std::time::UNIX_EPOCH,
+            None,
         )
         .expect_err("a foreign holder is a refusal, not a wait without end");
         assert!(
@@ -880,6 +1388,7 @@ mod tests {
             &script_at(&root),
             MANAGED_LINE,
             std::time::UNIX_EPOCH,
+            None,
         )
         .unwrap();
         assert_eq!(fs::read(&profile).unwrap(), MANAGED_LINE.as_bytes());
@@ -915,6 +1424,7 @@ mod tests {
                     &script,
                     MANAGED_LINE,
                     std::time::UNIX_EPOCH,
+                    None,
                 )
             });
             let enabler = scope.spawn(|| enable_record(&root));
@@ -1061,7 +1571,7 @@ mod tests {
             Asker::InApp,
             Action::Migrate,
             Ok(MANAGED_LINE),
-            |_| (profiles.to_vec(), Report::default()),
+            |_, _| (profiles.to_vec(), Report::default()),
         );
         assert_eq!(report.exit_code(), 1);
         assert_eq!(report.files[0].fate, Fate::Migrated);
@@ -1076,7 +1586,7 @@ mod tests {
             Asker::InApp,
             Action::Remove,
             Ok(MANAGED_LINE),
-            |marks| {
+            |marks, _| {
                 let mut paths = marks.powershell_profiles.clone();
                 paths.extend(marks.profile_refusals.iter().map(|r| r.path.clone()));
                 (paths, Report::default())
@@ -1092,7 +1602,7 @@ mod tests {
             Asker::InApp,
             Action::Remove,
             Ok(MANAGED_LINE),
-            |marks| (marks.powershell_profiles.clone(), Report::default()),
+            |marks, _| (marks.powershell_profiles.clone(), Report::default()),
         );
         assert!(report.files.iter().all(|f| f.fate == Fate::Unchanged));
     }

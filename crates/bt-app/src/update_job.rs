@@ -850,7 +850,7 @@ impl Transport for ReleaseDownload {
         fetching: &Fetching,
     ) -> Result<std::path::PathBuf, String> {
         use bt_platform::https_download::{
-            DOWNLOAD_BUDGET, DOWNLOAD_CEILING_LIMIT, DOWNLOAD_IDLE_TIMEOUT, DownloadMonitor,
+            DOWNLOAD_CEILING_LIMIT, DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT, DownloadMonitor,
             HttpsDownload,
         };
         let report = Arc::clone(&fetching.report);
@@ -878,7 +878,7 @@ impl Transport for ReleaseDownload {
             file_name: &request.file_name,
             ceiling: DOWNLOAD_CEILING_LIMIT,
             idle_timeout: DOWNLOAD_IDLE_TIMEOUT,
-            budget: DOWNLOAD_BUDGET,
+            floor: DOWNLOAD_FLOOR_BYTES,
             monitor: &monitor,
         })
         .map(|downloaded| downloaded.path)
