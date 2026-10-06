@@ -851,6 +851,7 @@ impl AppEvent {
             | Self::NativeHotkeyActivated { .. } => Station::Chrome,
             #[cfg(target_os = "linux")]
             Self::NativeDisplayReady { .. } => Station::Chrome,
+            #[cfg(target_os = "linux")]
             Self::WindowCloseRequested(_) => Station::EventClose,
             Self::PreviewReady => Station::Preview,
             Self::MathReady => Station::Math,
@@ -63038,6 +63039,8 @@ impl FolioApp {
     /// after - a `SetForegroundWindow` on a window that is not on the screen yet
     /// is a request Windows has no reason to honour.
     fn summon_quake(&mut self, pointer: Option<(i32, i32)>) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = pointer;
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
