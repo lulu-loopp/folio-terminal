@@ -73176,6 +73176,7 @@ fn choose_window_posture(minimized: Option<bool>, maximized: Option<bool>) -> Wi
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct WindowMaximizeIntent {
     observed: Option<bool>,
@@ -73183,12 +73184,14 @@ pub(crate) struct WindowMaximizeIntent {
     toggle_while_unknown: bool,
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowMaximizeAction {
     Request(bool),
     WaitForObservation,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl WindowMaximizeIntent {
     pub(crate) const fn observed(&self) -> Option<bool> {
         self.observed
