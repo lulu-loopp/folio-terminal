@@ -14211,8 +14211,28 @@ The deterministic fake X11 server sends a real Setup reply, receives the worker'
 
 ### 2026-10-06 — The last Linux display helper callers use the same worker
 
-`DragGuard` now samples `VirtualScreenRect` through `bt-linux-display`. Each reply must match the active broker generation and request; an unknown, changed, or refused rectangle cancels the drag through its existing source-home path. A broker records which event-delivered pointer its last aim used. Release is allowed after the sample has been consumed when that aim still matches the captured release point and no newer screen request is pending. A pending query or changed pointer refuses the handoff; a reply never changes the broker's pointer or aim.
+`DragGuard` now samples `VirtualScreenRect` through `bt-linux-display`. Each reply must match the active broker generation and request; an unknown, changed, or refused rectangle cancels the drag through its existing source-home path. A release with no valid screen observation cannot spend a stale cross-window aim, and the reply never changes the broker's event-delivered pointer.
 
 Restored-window monitor inputs remain the Winit bounds, scale and primary-first order. The first window still falls back to full monitor bounds because its restore runs before Linux backend installation. Later saved secondary windows submit one batch of center-point work-area requests through the existing display lane. The answer carries X11 monitor bounds and primary bounds with the work areas. A matching topology uses the actual worker answers; an individual work-area refusal keeps that monitor's full-bounds fallback. If the topology or observed scale-input generation changed, placement keeps the saved size and forfeits its position. The answer handler does not re-query Winit. Windows and macOS retain their previous synchronous monitor restoration and drag-guard code.
 
 Pinned by `cross_window_drag_tests::one_guard_answers_every_way_a_cross_window_gesture_is_taken_away`, `cross_window_drag_tests::delayed_drag_guard_answers_need_the_same_broker_and_observed_screen`, `cross_window_drag_tests::linux_drag_guard_and_restore_reads_resume_from_display_answers`, and `cross_window_drag_tests::async_restore_work_areas_require_the_captured_topology_and_primary`. §5.3 row 29a stays open for the adjacent Winit intrinsic getter migration and root review.
+
+### 2026-10-06 — Consuming a drag sample preserves its confirmed aim
+
+The broker records the event-delivered pointer used by its last confirmed aim.
+Consuming the screen sample authorizes one broker turn; it does not revoke the
+release. Release uses that recorded pointer, the captured release point, the
+known screen baseline and the absence of a same-generation pending query. A
+changed pointer or pending query returns the payload home. Late answers cannot
+rewrite the aim or pointer. The production-state regression exercises answer,
+sample consumption, aim and release, and keeps the original nonlocal target.
+
+### 2026-10-06 — Requested window allocation is not a native observation
+
+Linux layout, rendering and input use delivered resize dimensions or the
+configured surface allocation. Initial surface configuration uses the explicit
+opening request. Native geometry and resize observations start as `None`;
+only winit events or an addressed native answer fill them. A saved or tear-out
+request no longer initializes the observed geometry cache. Windows and macOS
+keep their original size getters. Pinned by
+`clipboard_path_tests::linux_runtime_sizes_do_not_read_x11_on_the_window_thread`.
