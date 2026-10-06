@@ -5783,7 +5783,7 @@ impl Runtime<'_> {
             {
                 self.refuse_pending_linux_pointer_actions()?;
             }
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         {

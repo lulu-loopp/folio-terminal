@@ -519,11 +519,7 @@ impl Runtime<'_> {
         #[cfg(target_os = "linux")]
         let opening_bounds = initial_rect
             .map(|rect| persisted_window_bounds(rect, scale_factor))
-            .or_else(|| {
-                plan.saved
-                    .as_ref()
-                    .map(|saved| saved.placement.bounds.clone())
-            })
+            .or_else(|| plan.saved.as_ref().map(|saved| saved.placement.bounds))
             .unwrap_or_else(|| WindowStateV1::default().bounds);
         #[cfg(not(target_os = "linux"))]
         let opening_bounds = persisted_window_bounds(stood_at, scale_factor);

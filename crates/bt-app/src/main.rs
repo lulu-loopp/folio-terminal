@@ -12323,6 +12323,12 @@ enum Announce {
     OnlyFailures,
 }
 
+#[cfg(target_os = "linux")]
+type PendingWindowLook = (
+    Option<WindowId>,
+    Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+);
+
 /// **What is true of this program, whatever window you are looking at**
 /// (multiwindow slice B, `docs/spikes/spike-multiwindow.md` 片 B).
 ///
@@ -12842,10 +12848,7 @@ struct App {
     #[cfg(target_os = "linux")]
     pending_new_window_display: Option<PendingNewWindowDisplay>,
     #[cfg(target_os = "linux")]
-    pending_new_window_like: Option<(
-        Option<WindowId>,
-        Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
-    )>,
+    pending_new_window_like: Option<PendingWindowLook>,
     #[cfg(target_os = "linux")]
     pending_new_window_restore_placement: Option<(Option<WindowId>, Option<RestoredPlacement>)>,
     #[cfg(target_os = "linux")]
@@ -61955,22 +61958,19 @@ impl FolioApp {
                 } else {
                     return Ok(());
                 };
-                match request {
-                    Ok(request) => {
-                        let Some(app) = self.app.as_mut() else {
-                            return Ok(());
-                        };
-                        app.pending_new_window_display = Some(PendingNewWindowDisplay {
-                            plan,
-                            request,
-                            like,
-                            input_generation: app.display_input_generation,
-                            kind: PendingNewWindowDisplayKind::TearOut,
-                        });
-                        app.pending_new_windows.extend(plans);
+                if let Ok(request) = request {
+                    let Some(app) = self.app.as_mut() else {
                         return Ok(());
-                    }
-                    Err(_) => {}
+                    };
+                    app.pending_new_window_display = Some(PendingNewWindowDisplay {
+                        plan,
+                        request,
+                        like,
+                        input_generation: app.display_input_generation,
+                        kind: PendingNewWindowDisplayKind::TearOut,
+                    });
+                    app.pending_new_windows.extend(plans);
+                    return Ok(());
                 }
             }
             #[cfg(target_os = "linux")]
@@ -63050,7 +63050,7 @@ impl FolioApp {
                     request,
                 });
             }
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -63280,13 +63280,12 @@ impl FolioApp {
         else {
             return Ok(());
         };
-        if let Some(mut runtime) = self.runtime(id) {
-            if !runtime.apply_linux_display_ready(ready)?
-                && !runtime.apply_linux_work_area_ready(ready)?
-                && !runtime.apply_linux_window_rect_ready(ready)?
-            {
-                let _ = runtime.apply_linux_pointer_display_ready(ready)?;
-            }
+        if let Some(mut runtime) = self.runtime(id)
+            && !runtime.apply_linux_display_ready(ready)?
+            && !runtime.apply_linux_work_area_ready(ready)?
+            && !runtime.apply_linux_window_rect_ready(ready)?
+        {
+            let _ = runtime.apply_linux_pointer_display_ready(ready)?;
         }
         Ok(())
     }
