@@ -93,8 +93,8 @@ impl HandoffLane {
         Self::start(
             |ctx| {
                 let shell = bt_platform::ShellThread::enter(ctx);
-                move |worker: &WorkerCtx, window: NativeWindow, handoff: &Handoff| {
-                    shell.hand_over(worker, window, handoff)
+                move |_worker: &WorkerCtx, window: NativeWindow, handoff: &Handoff| {
+                    shell.hand_over(window, handoff)
                 }
             },
             wake,
@@ -539,7 +539,7 @@ mod tests {
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
                 let shell = bt_platform::ShellThread::enter(ctx);
-                requests.map(|request| shell.hand_over(ctx, window(), &request))
+                requests.map(|request| shell.hand_over(window(), &request))
             },
         )
         .expect("the door starts a thread")

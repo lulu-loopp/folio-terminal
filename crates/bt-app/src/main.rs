@@ -269,6 +269,8 @@ use bt_viewport::{
 // seen" rule under the name this crate has always called it by.
 use bt_workbench::attention;
 use bt_workbench::attention::is_consumed as attention_is_consumed;
+#[cfg(any(windows, target_os = "macos"))]
+use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
@@ -279,7 +281,7 @@ use winit::{
     // needs the second: `Ctrl+Shift+1` produces `!` on a US keyboard and `1` on layouts that put
     // the digit behind Shift, and the binding is meant to be the digit either way.
     platform::modifier_supplement::KeyEventExtModifierSupplement,
-    raw_window_handle::{HasWindowHandle, RawWindowHandle},
+    raw_window_handle::HasWindowHandle,
     window::{Theme as OsTheme, Window, WindowAttributes, WindowId},
 };
 
@@ -42143,7 +42145,6 @@ impl Runtime<'_> {
         // opens a second window is the one that will have somewhere to put it.
         let opened_at = dpi_snapshot(&window)?;
         stand_the_window_at(
-            &window,
             native,
             startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
             "restore the first window's outer rectangle",
@@ -62595,7 +62596,7 @@ impl FolioApp {
             app.quake.shown_over(previous);
         }
         if let Some(runtime) = self.runtime(id)
-            && let Err(error) = runtime.take_keyboard_focus()
+            && let Err(error) = runtime.give_foreground_with_retry()
         {
             // Said to the log and never to the reader: there is nothing a person
             // can do about a foreground lock, and a card over their editor
@@ -68386,7 +68387,7 @@ mod floated_page_tests {
     /// seat that had been closed by `pop_out_preview`, and
     /// `settle_the_web_keyboard` — which runs every frame precisely so a page
     /// that has stopped being the typing target gives the keys back — read that
-    /// `false` and called `take_keyboard_focus` on the window. The engine held
+    /// `false` and called `bt_platform::take_keyboard_focus` on the window. The engine held
     /// the keyboard for less than one frame, every frame.
     ///
     /// Read off the file for this module's standing reason: a page holding the
@@ -68712,6 +68713,24 @@ mod floated_page_tests {
             "the foreground is read after the window is up, by which time it is \
              the window:\n{up}"
         );
+        let focus = up
+            .find("runtime.give_foreground_with_retry()")
+            .expect("the summon retries giving foreground to its window");
+        assert!(
+            show < focus,
+            "the foreground retry must follow showing the summon: {up}"
+        );
+        let runtime_focus = method_body("Runtime", "give_foreground_with_retry");
+        assert!(
+            runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
+            "the runtime focus helper does not use its owned-window path: {runtime_focus}"
+        );
+        let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
+        assert!(
+            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
+            "the foreground helper no longer uses the platform foreground door: {foreground}"
+        );
+
         let down = method_body("FolioApp", "dismiss_quake");
         let hide = down
             .find("hide_quake_window()")
@@ -69845,12 +69864,10 @@ fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
 /// one available, and the plan's §4.4 says which of the two a deferred service
 /// owes its caller.
 fn stand_the_window_at(
-    window: &Window,
     native: bt_platform::NativeWindow,
     rect: bt_platform::WindowRect,
     what: &str,
 ) {
-    let _ = window;
     if let Err(error) = bt_platform::set_window_outer_rect(native, rect) {
         eprintln!("BT_WINDOW {what}: {error}");
     }
@@ -70142,7 +70159,6 @@ fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
         Err(anyhow!("the window could not take the keyboard"))
     }
 }
-
 fn restore_minimized_window(window: &Window) -> Result<()> {
     if window.is_minimized() == Some(true) {
         window.set_minimized(false);
@@ -70159,8 +70175,7 @@ fn bring_owned_window_forward(window: &Window) -> Result<()> {
     }
 }
 
-fn request_owned_window_close(window: &Window, proxy: &EventLoopProxy<AppEvent>) -> Result<()> {
-    let _ = proxy;
+fn request_owned_window_close(window: &Window) -> Result<()> {
     bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
 }
 
@@ -70169,11 +70184,7 @@ fn minimize_owned_window(window: &Window) -> Result<()> {
     Ok(())
 }
 
-fn press_owned_title_bar(
-    window: &Window,
-    frame: &bt_platform::CustomWindowFrame,
-) -> Result<(), String> {
-    let _ = window;
+fn press_owned_title_bar(frame: &bt_platform::CustomWindowFrame) -> Result<(), String> {
     frame.press_title_bar()
 }
 
@@ -75118,6 +75129,17 @@ mod edit_menu_clipboard_tests {
             "the name box spells its own paste chord"
         );
         let door = method_body("Runtime", "paste_into_field");
+        let read = door
+            .find("bt_platform::clipboard_text()")
+            .expect("the door reads the clipboard");
+        let applied = door
+            .find("self.apply_clipboard_text_to_field(field, &text)")
+            .expect("the door applies its clipboard text");
+        assert!(
+            read < applied,
+            "the field apply step must follow the clipboard read"
+        );
+        let apply = method_body("Runtime", "apply_clipboard_text_to_field");
         for insert in [
             "self.search_ime(",
             "self.graph_search_ime(",
@@ -75127,7 +75149,7 @@ mod edit_menu_clipboard_tests {
             "self.paste_into_settings_field(",
         ] {
             assert!(
-                door.contains(insert),
+                apply.contains(insert),
                 "a field's paste skips its own insert: {insert}"
             );
         }
@@ -76778,11 +76800,31 @@ mod clipboard_path_tests {
             "the board is read in one place the product compiles"
         );
         let paste = method_body("Runtime", "paste_from_clipboard_into");
-        assert!(paste.contains("bt_platform::clipboard_payload()"));
+        let read = paste
+            .find("bt_platform::clipboard_payload()")
+            .expect("the terminal door reads the clipboard");
+        let applied = paste
+            .find("self.apply_clipboard_payload(target, payload)")
+            .expect("the terminal door applies the clipboard payload");
+        assert!(
+            read < applied,
+            "the payload apply step must follow the clipboard read"
+        );
         assert!(paste.contains("hang_watch::Station::ClipboardRead"));
-        assert!(paste.contains("leaf.paste_recipient.clone()"));
+        assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
         assert!(!paste.contains("set_focus("));
         assert!(!paste.contains("set_files_keyboard("));
+        let apply = method_body("Runtime", "apply_clipboard_payload");
+        let recipient = apply
+            .find("leaf.paste_recipient.clone()")
+            .expect("the apply step resolves the recipient");
+        let delivered = apply
+            .find("self.deliver_paste(")
+            .expect("the apply step delivers the paste");
+        assert!(
+            recipient < delivered,
+            "delivery must use the resolved recipient"
+        );
         let k144 = method_body("Runtime", "insert_path_into_terminal");
         assert!(k144.contains("shell_literal::paths_text("));
         assert!(k144.contains("set_files_keyboard(None"));

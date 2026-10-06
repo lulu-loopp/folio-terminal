@@ -326,31 +326,24 @@ impl ShellThread {
     ///     |ctx| {
     ///         let shell = bt_platform::ShellThread::enter(ctx);
     ///         shell.hand_over(
-    ///             ctx,
     ///             bt_platform::NativeWindow::stand_in(0),
     ///             &bt_platform::Handoff::FontsPage,
     ///         )
     ///     },
     /// );
     /// ```
-    pub fn hand_over(
-        &self,
-        worker: &WorkerCtx,
-        window: NativeWindow,
-        request: &Handoff,
-    ) -> Result<(), String> {
+    pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            objc2::rc::autoreleasepool(|_| Self::door(worker, window, request))
+            objc2::rc::autoreleasepool(|_| Self::door(window, request))
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Self::door(worker, window, request)
+            Self::door(window, request)
         }
     }
 
-    fn door(worker: &WorkerCtx, window: NativeWindow, request: &Handoff) -> Result<(), String> {
-        let _ = worker;
+    fn door(window: NativeWindow, request: &Handoff) -> Result<(), String> {
         match request {
             Handoff::Open(path) => open_local_path(window, path),
             Handoff::OpenVerified(path, target) => {
@@ -894,11 +887,8 @@ use macos_handoff::{
     reveal_in_explorer, reveal_verified, shell_execute,
 };
 
-// PR1 carries the hoist so the second Unix caller can arrive in one piece; on
-// Linux the caller (the platform's own file doors) is still one PR away, so the
-// helper is briefly dead there rather than duplicated in `macos_handoff`.
-#[cfg(unix)]
-#[allow(dead_code)]
+/// Check lexical requirements before passing a Unix path to a native API.
+#[cfg(target_os = "macos")]
 pub(crate) fn openable_unix_path(path: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
@@ -2876,11 +2866,7 @@ mod tests {
                     Handoff::Reveal(scratch.clone()),
                     Handoff::Open(file.clone()),
                 ] {
-                    assert_eq!(
-                        shell.hand_over(ctx, window, &request),
-                        Ok(()),
-                        "{request:?}"
-                    );
+                    assert_eq!(shell.hand_over(window, &request), Ok(()), "{request:?}");
                     let calls = windows_handoff::recorded::take();
                     assert_eq!(calls.len(), 2, "one grant, one hand-off: {calls:?}");
                     assert_eq!(
@@ -2893,7 +2879,7 @@ mod tests {
                 // the refusal is the door's and comes before the call.
                 let program = scratch.join("payload.exe");
                 assert_eq!(
-                    shell.hand_over(ctx, window, &Handoff::Open(program)),
+                    shell.hand_over(window, &Handoff::Open(program)),
                     Err(PROGRAM_REFUSED.to_owned())
                 );
                 assert!(windows_handoff::recorded::take().is_empty());
@@ -2926,7 +2912,6 @@ mod tests {
         type HandOver = dyn Fn(&WorkerCtx) -> Result<(), String>;
         fn through_a_pointer(ctx: &WorkerCtx) -> Result<(), String> {
             ShellThread::enter(ctx).hand_over(
-                ctx,
                 crate::NativeWindow::stand_in(0),
                 &Handoff::Open(PathBuf::from("relative-name.md")),
             )
@@ -2937,7 +2922,6 @@ mod tests {
             |ctx| {
                 let boxed: Box<HandOver> = Box::new(|ctx| {
                     ShellThread::enter(ctx).hand_over(
-                        ctx,
                         crate::NativeWindow::stand_in(0),
                         &Handoff::Open(PathBuf::from("relative-name.md")),
                     )
