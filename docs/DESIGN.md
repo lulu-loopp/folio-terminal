@@ -14246,3 +14246,8 @@ Cross-window drag coordinates use the display worker's actual X11 client-to-root
 ### Linux background monitor read — 2026-10-06
 
 The background-image worker reads X11 monitor dimensions before decoding, using its existing WorkerCtx and the independent display connection. The window thread captures only the current client-size fallback. Missing monitors retain that fallback; a native query error records a diagnostic. Wayland and the other platforms keep their Winit monitor path. This avoids the X11 monitor-cache miss reaching RandR from the background-image admission call and adds no worker.
+
+
+### Linux drag origin loss — 2026-10-06
+
+A Linux cross-window drag starts only with an observed client origin. If move or resize invalidates that origin during the gesture, the source withdraws the cross-window broker and keeps its local drag. It does not convert local coordinates into a guessed screen point or retain the previous foreign aim.

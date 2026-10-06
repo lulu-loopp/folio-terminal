@@ -49915,6 +49915,12 @@ impl Runtime<'_> {
     /// closed on the window, and where the hand closed does not move because the
     /// tab list scrolled underneath it.
     fn open_broker(&mut self, source: &DragSource, position: PhysicalPosition<f64>) {
+        #[cfg(target_os = "linux")]
+        let Some(pointer) = self.to_screen(position) else {
+            return;
+        };
+        #[cfg(not(target_os = "linux"))]
+        let pointer = self.to_screen(position).unwrap_or((position.x, position.y));
         let scale = self.window.renderer.scale_factor().max(0.01);
         let size = self.client_size();
         let window = self.window_id();
@@ -49934,7 +49940,7 @@ impl Runtime<'_> {
             cargo_tree: None,
             cargo_pane: None,
             guest_mini: None,
-            pointer: self.to_screen(position).unwrap_or((position.x, position.y)),
+            pointer,
             grip: TearGrip {
                 grab_logical: ((position.x / scale) as f32, (position.y / scale) as f32),
                 size_logical: (
