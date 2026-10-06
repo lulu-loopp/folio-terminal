@@ -896,10 +896,8 @@ impl Runtime<'_> {
         // Un-minimised first: `focus_window` on an iconified window brings it forward without
         // restoring it on some configurations, and a restored window that never came forward is
         // the same click going unanswered twice.
-        let restored = self.window.window.is_minimized() == Some(true);
-        if restored {
-            self.window.window.set_minimized(false);
-        }
+        let minimized_before = self.window_minimized_state();
+        crate::restore_minimized_window(&self.window.window)?;
         // An owner-thread door (`doors::FocusWindow`, whose station the meter enters). A refusal
         // opens the route without taking focus.
         let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::FocusWindow, _>(
@@ -910,9 +908,8 @@ impl Runtime<'_> {
         if !self.window.tabs[index].sessions.contains_key(&seat) {
             attention_trace::line(|| {
                 format!(
-                    "open tab={index} seat={seat:?} id={} by=toast restored={} leave=no-seat",
-                    route.tab,
-                    u8::from(restored)
+                    "open tab={index} seat={seat:?} id={} by=toast minimized_before={:?} leave=no-seat",
+                    route.tab, minimized_before
                 )
             });
             return Ok(());
@@ -924,9 +921,8 @@ impl Runtime<'_> {
         // `toast` line that raised it.
         attention_trace::line(|| {
             format!(
-                "open tab={index} seat={seat:?} id={} by=toast restored={}",
-                route.tab,
-                u8::from(restored)
+                "open tab={index} seat={seat:?} id={} by=toast minimized_before={:?}",
+                route.tab, minimized_before
             )
         });
         if self.window.tabs[index].focused_leaf != seat {

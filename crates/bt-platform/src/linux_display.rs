@@ -422,19 +422,6 @@ pub fn get_window_rect(window: NativeWindow) -> Result<WindowRect, String> {
     })
 }
 
-/// Read the largest native monitor dimensions on the background-image worker.
-pub fn monitor_ceiling_on_worker(
-    _worker: &crate::admission::WorkerCtx,
-) -> Result<Option<(u32, u32)>, String> {
-    with_x11("reading the background image monitor ceiling", |session| {
-        let monitors = monitor_list(session, session.root)?;
-        let ceiling = monitors.iter().fold((0, 0), |(width, height), monitor| {
-            (width.max(monitor.width_px), height.max(monitor.height_px))
-        });
-        Ok((ceiling.0 > 0 && ceiling.1 > 0).then_some(ceiling))
-    })
-}
-
 /// Read a window's geometry and EWMH posture on the display worker.
 pub fn get_window_facts(window: NativeWindow) -> Result<LinuxWindowFacts, String> {
     with_x11("reading a window's rectangle and state", |session| {
