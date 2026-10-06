@@ -79852,14 +79852,18 @@ mod clipboard_path_tests {
             assert!(body.contains(needle), "{reason}:\n{body}");
         }
         let measure = snapshot_apply
-            .find("then(rect).flatten()")
+            .find(".then(rect)")
             .expect("the persistence body measures only the supplied normal rect");
-        let persist = snapshot_apply
+        let after_measure = &snapshot_apply[measure..];
+        let flatten = after_measure
+            .find(".flatten()")
+            .expect("the normal-posture option is flattened before persistence");
+        let persist = after_measure
             .find("persisted_window_bounds(rect, scale)")
             .expect("the measured close-time rect reaches the saved placement");
         assert!(
-            measure < persist,
-            "the snapshot must measure its supplied rect before persisting it:\n{snapshot_apply}"
+            flatten < persist,
+            "the snapshot must flatten only its normal rect before persistence:\n{snapshot_apply}"
         );
         let queue = method_body("Runtime", "queue_linux_window_rect_snapshot");
         let pending = queue
