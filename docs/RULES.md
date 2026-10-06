@@ -1420,12 +1420,20 @@ nothing before it refused; a run that refused keeps the data and says so on each
 data row, for both verbs. A managed copy's row names the manager's command with the
 cleanup joined before it by `cmd /c "… && …"` where the manager runs none, and
 says to close Folio first. `--uninstall-cleanup` is otherwise unchanged, for the
-managers' hooks.
+managers' hooks. **A process has gone when it has let go of what it held** (0.4.7
+uninstall fix): the door waiting for the Folio that asked, and the remover waiting
+for the processes it outlives, wait on Windows until the process object is
+signalled — its handles closed, its data-directory claim with them, and its image
+unmapped — and not merely until its exit code can be read, which comes first. And
+`uninstall.cmd` is a batch file `cmd.exe` reads: CRLF lines, no byte-order mark,
+nothing past ASCII before its `chcp 65001`, and no command before its question
+that reads the script's input.
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
 states that it rules, together with its closure addendum; the owner's ruling of
 2026-09-27 at the end of `docs/plans/design/self-update-2026-09-16.md`; trailing
-entry 2026-09-29 *One press uninstalls Folio* (T-UNINSTALL-UX).
+entry 2026-09-29 *One press uninstalls Folio* (T-UNINSTALL-UX); trailing entry
+2026-10-06 *The uninstall waits for its asker to let go, and its script is CRLF*.
 **Overrides.** §6 supersedes §§2–5 wherever they disagree: §3's ownership rule is
 replaced by §6's two-kinds-of-mark rule, and §6 corrects revision 1's harm
 ranking and its claim about which removal code was new.

@@ -48,6 +48,8 @@ Nothing yet.
 
 ### Fixed
 
+- On Windows, Settings ▸ About ▸ Uninstall no longer stops with "A Folio instance is running" after Folio has quit: it waits until the quitting Folio has fully gone, then removes Folio.
+- The zip's `uninstall.cmd` no longer runs pieces of its own lines when the console uses UTF-8, and an `n` answer handed to it from a file or a pipe now removes settings and data as asked.
 - "Enable via $PROFILE" is offered only when your other PowerShell windows would load the profile too; on a machine whose policy refuses scripts it offers the command that allows them, so enabling it can no longer make every PowerShell window print an error.
 - Undo, removing the `$PROFILE` line and uninstalling also remove the profile file and folder Folio created and the one backup copy it kept; a file you had, or added to, stays.
 - Uninstalling no longer stops because a PowerShell was slow to start; it says which profile it could not check and goes on, and with "remove settings and data" on, nothing is deleted unless every other step succeeded.
