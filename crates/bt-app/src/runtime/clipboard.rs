@@ -19,10 +19,8 @@ use std::time::Instant;
 use winit::event::Ime;
 
 impl Runtime<'_> {
-    /// **`Copy` on a row whose execution policy the user can change**: put the one command on
-    /// the clipboard and say so only after the platform's clipboard path accepts it. Linux holds
-    /// the toast as a lane effect until native ownership is confirmed; other platforms keep the
-    /// synchronous clipboard write.
+    /// **`Copy` on a row whose execution policy the user can change**: put the command on the
+    /// clipboard and say so only after the platform accepts the write.
     pub(crate) fn copy_policy_command(&mut self) -> Result<()> {
         match copy_policy_command_with(crate::write_terminal_clipboard_text) {
             Some(said) => self.toast(toast::ToastKind::Ok, toast::ToastAnchor::Window, None, said),
@@ -30,9 +28,8 @@ impl Runtime<'_> {
         }
     }
 
-    /// Submit one copy using the platform's clipboard path. Linux admission
-    /// moves this action's immutable text into the process lane; other
-    /// platforms keep their current synchronous write.
+    /// Submit one copy through the platform's clipboard path, and apply its
+    /// effect only after the write succeeds.
     pub(crate) fn submit_clipboard_write(
         &mut self,
         text: String,
@@ -57,6 +54,8 @@ impl Runtime<'_> {
             return false;
         };
         if let Err(error) = write_terminal_clipboard_text(&text) {
+            // Recoverable on `recoverable_clipboard_write`'s terms: the
+            // selection stays standing so the reader can try again.
             eprintln!("recoverable preview copy failure: {error:#}");
             return false;
         }
@@ -91,6 +90,10 @@ impl Runtime<'_> {
         })
         .map_err(|error| anyhow!(error))
         .context("copy original LaTeX source to clipboard");
+        // **Only a copy that landed says it landed** (owner ruling 2026-09-14 ②).
+        // The bool this helper already returned was being thrown away, and a tick on a
+        // clipboard the window could not reach would be the one acknowledgement in this
+        // product that confirms nothing.
         if recoverable_clipboard_write(result, "formula copy") {
             self.window.math_copied = Some((anchor.clone(), Instant::now()));
         }

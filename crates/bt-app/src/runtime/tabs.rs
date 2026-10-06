@@ -8,11 +8,10 @@ use crate::{
     RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
     TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_into_layout, absorb_tab_into_strip, attention, blank_page_return, create_tab_state,
-    expire_leaf_attention, float, new_tab_leaf_seed, notify, pane_can_become_a_tab,
-    pane_into_tab, pane_strip_landing, presentation_physical_size, profiles,
-    recoverable_wheel_scroll_amount, restore, row_strip_landing, scrollback_quota, seats, seed,
-    settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
-    tear_pane_into_tab, two_tabs_mut, webnav,
+    expire_leaf_attention, float, new_tab_leaf_seed, notify, pane_can_become_a_tab, pane_into_tab,
+    pane_strip_landing, presentation_physical_size, profiles, recoverable_wheel_scroll_amount,
+    restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
+    strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -58,7 +57,7 @@ impl Runtime<'_> {
     /// day the seed grows a third field.
     ///
     /// **The pair travels together and is taken from one leaf**, which is the
-    /// rule [`new_tab_cwd`] already states: a profile from one pane and a folder
+    /// rule [`new_tab_leaf_seed`] already states: a profile from one pane and a folder
     /// from another describes a pane that does not exist.
     pub(in crate::runtime) fn new_tab_seeded_from(
         &mut self,

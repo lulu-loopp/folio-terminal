@@ -3,6 +3,7 @@
 
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -18,6 +19,10 @@ OSC_A = b"\x1b]133;A\x07"
 OSC_B = b"\x1b]133;B\x07"
 OSC_C = b"\x1b]133;C\x07"
 OSC_D_FAILED = b"\x1b]133;D;1\x07"
+OSC_MARKER = re.compile(rb"\x1b\](7;[^\x07]*|133;[^\x07]*)\x07")
+INITIAL_PROMPT_TRACE = (b"7", OSC_A, OSC_B)
+COMMAND_PROMPT_TRACE = (OSC_C, OSC_D_FAILED, b"7", OSC_A, OSC_B)
+ONE_COMMAND_TRACE = INITIAL_PROMPT_TRACE + COMMAND_PROMPT_TRACE
 
 
 def read_until(fd, marker):
@@ -118,6 +123,31 @@ def require(condition, message, output=b""):
         raise AssertionError(f"{message}; output={output!r}")
 
 
+def marker_trace(output):
+    return tuple(
+        b"7" if marker.startswith(b"7;") else b"\x1b]" + marker + b"\x07"
+        for marker in OSC_MARKER.findall(output)
+    )
+
+
+def verify_prompt_trace(first, action, prompt_name):
+    require(
+        marker_trace(first) == INITIAL_PROMPT_TRACE,
+        f"{prompt_name}: ordered initial prompt markers",
+        first,
+    )
+    require(
+        marker_trace(action) == COMMAND_PROMPT_TRACE,
+        f"{prompt_name}: ordered command and returned-prompt markers",
+        action,
+    )
+    require(
+        marker_trace(first + action) == ONE_COMMAND_TRACE,
+        f"{prompt_name}: ordered one-command marker trace",
+        first + action,
+    )
+
+
 def path_uri(path):
     encoded = quote(str(path), safe="/:@!$&'()*+,;=-._~")
     return ("file://" + encoded).encode("ascii")
@@ -131,7 +161,7 @@ def shell_command(cwd):
     )
 
 
-def verify_command_turn(action, cwd, hook, prompt_name):
+def verify_command_turn(action, cwd, hooks, prompt_name):
     expected_cwd = b"\x1b]7;" + path_uri(cwd) + b"\x07"
     require(action.count(OSC_C) == 1, f"{prompt_name}: one command-start marker", action)
     require(action.count(OSC_D_FAILED) == 1, f"{prompt_name}: exit status 1", action)
@@ -140,7 +170,8 @@ def verify_command_turn(action, cwd, hook, prompt_name):
     require(expected_cwd in action, f"{prompt_name}: OSC 7 reports changed cwd", action)
     require(b"USER_COMMAND_RAN" in action, f"{prompt_name}: typed command ran", action)
     require(b"COMMAND_CWD:" + os.fsencode(cwd) in action, f"{prompt_name}: shell cwd changed", action)
-    require(hook in action, f"{prompt_name}: user's prompt hook ran", action)
+    for hook in hooks:
+        require(action.count(hook) == 1, f"{prompt_name}: user's prompt hook {hook!r} ran once", action)
 
 
 def plain_shell_command(name, cwd):
@@ -236,38 +267,55 @@ def main():
         if bash_program:
             bash_file = integration / "folio.bash"
             shutil.copyfile(scripts_dir / "folio.bash", bash_file)
-            user_hook = "USER_BASH_HOOK"
             prompt = b"BASH_PTY> "
-            hook_definition = "mark_user_prompt() { printf 'USER_BASH_HOOK\\n'; }\nPROMPT_COMMAND=mark_user_prompt\n"
             bash_rc = home / ".bashrc"
             bash_profile = home / ".bash_profile"
             bash_login = home / ".bash_login"
             profile = home / ".profile"
-            bash_rc.write_text("printf 'USER_BASHRC\\n'\nPS1='BASH_PTY> '\n" + hook_definition)
-            bash_profile.write_text("printf 'USER_BASH_PROFILE\\n'\nPS1='BASH_PTY> '\n" + hook_definition)
             bash_login.write_text("printf 'WRONG_BASH_LOGIN\\n'\n")
             profile.write_text("printf 'WRONG_PROFILE\\n'\n")
             bash_files = [bash_rc, bash_profile, bash_login, profile]
-            before = {path: path.read_bytes() for path in bash_files}
-
-            for mode, expected_marker, forbidden in (
+            hook_cases = (
+                (
+                    "scalar PROMPT_COMMAND",
+                    "mark_user_prompt() { printf 'USER_BASH_HOOK_ONE\\n'; }\n"
+                    "PROMPT_COMMAND=mark_user_prompt\n",
+                    (b"USER_BASH_HOOK_ONE",),
+                ),
+                (
+                    "array PROMPT_COMMAND",
+                    "mark_user_prompt() { printf 'USER_BASH_HOOK_ONE\\n'; }\n"
+                    "mark_user_prompt_tail() { printf 'USER_BASH_HOOK_TWO\\n'; }\n"
+                    "PROMPT_COMMAND=(mark_user_prompt mark_user_prompt_tail)\n",
+                    (b"USER_BASH_HOOK_ONE", b"USER_BASH_HOOK_TWO"),
+                ),
+            )
+            startup_modes = (
                 ("interactive", b"USER_BASHRC", (b"USER_BASH_PROFILE",)),
                 ("login", b"USER_BASH_PROFILE", (b"USER_BASHRC", b"WRONG_BASH_LOGIN", b"WRONG_PROFILE")),
-            ):
-                env = dict(environment, BT_SHELL_INTEGRATION=mode)
-                pid, fd = spawn(bash_program, ["--init-file", str(bash_file), "-i"], env, home)
-                try:
-                    first, action, _, _ = stop_at_prompt(pid, fd, command, prompt)
-                    require(expected_marker in first, f"Bash {mode}: expected startup file", first)
-                    require(user_hook.encode() in first, f"Bash {mode}: initial user prompt hook", first)
-                    require(not any(marker in first + action for marker in forbidden), f"Bash {mode}: did not source another startup chain", first + action)
-                    require(first.count(OSC_A) == 1 and first.count(OSC_B) == 1, f"Bash {mode}: one initial prompt pair", first)
-                    verify_command_turn(action, cwd, user_hook.encode(), f"Bash {mode}")
-                finally:
-                    os.close(fd)
-                    reap(pid)
-            require(before == {path: path.read_bytes() for path in bash_files}, "Bash startup files were not edited")
-            print("Bash interactive and login startup, hook, OSC 133 status, OSC 7 cwd: PASS")
+            )
+            for hook_form, hook_definition, hooks in hook_cases:
+                bash_rc.write_text("printf 'USER_BASHRC\\n'\nPS1='BASH_PTY> '\n" + hook_definition)
+                bash_profile.write_text("printf 'USER_BASH_PROFILE\\n'\nPS1='BASH_PTY> '\n" + hook_definition)
+                before = {path: path.read_bytes() for path in bash_files}
+                for mode, expected_marker, forbidden in startup_modes:
+                    prompt_name = f"Bash {mode}, {hook_form}"
+                    env = dict(environment, BT_SHELL_INTEGRATION=mode)
+                    pid, fd = spawn(bash_program, ["--init-file", str(bash_file), "-i"], env, home)
+                    try:
+                        first, action, _, _ = stop_at_prompt(pid, fd, command, prompt)
+                        require(expected_marker in first, f"{prompt_name}: expected startup file", first)
+                        for hook in hooks:
+                            require(first.count(hook) == 1, f"{prompt_name}: initial prompt hook {hook!r} ran once", first)
+                        require(not any(marker in first + action for marker in forbidden), f"{prompt_name}: did not source another startup chain", first + action)
+                        require(first.count(OSC_A) == 1 and first.count(OSC_B) == 1, f"{prompt_name}: one initial prompt pair", first)
+                        verify_prompt_trace(first, action, prompt_name)
+                        verify_command_turn(action, cwd, hooks, prompt_name)
+                    finally:
+                        os.close(fd)
+                        reap(pid)
+                require(before == {path: path.read_bytes() for path in bash_files}, f"Bash {hook_form} startup files were not edited")
+            print("Bash interactive and login startup, scalar and array prompt hooks, ordered OSC 133 trace, OSC 7 cwd: PASS")
         else:
             print("skipped Bash: no installed bash")
 
@@ -300,7 +348,8 @@ def main():
                 for marker in (b"USER_ZSHENV", b"USER_ZPROFILE", b"USER_ZSHRC", b"USER_ZLOGIN", b"USER_ZSH_HOOK"):
                     require(marker in first, f"Zsh login: startup marker {marker.decode()}", first)
                 require(first.count(OSC_A) == 1 and first.count(OSC_B) == 1, "Zsh: one initial prompt pair", first)
-                verify_command_turn(action, cwd, b"USER_ZSH_HOOK", "Zsh login")
+                verify_prompt_trace(first, action, "Zsh login")
+                verify_command_turn(action, cwd, (b"USER_ZSH_HOOK",), "Zsh login")
             finally:
                 os.close(fd)
                 reap(pid)

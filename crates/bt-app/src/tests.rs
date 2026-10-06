@@ -55092,17 +55092,23 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
     let read = door
         .find("bt_platform::clipboard_payload()")
         .expect("the door reads the clipboard");
+    let applied = door
+        .find("self.apply_clipboard_payload(target,payload)")
+        .expect("the door applies its clipboard payload");
     assert!(
-        asked < read,
-        "the question is asked after the clipboard was read"
+        asked < read && read < applied,
+        "the question is asked before the read and the apply follows the read"
     );
-    // PR1's extraction (the port split) moved the delivery into
-    // `apply_clipboard_payload`; the Linux async read rewrites this pin in PR4
-    // of the split. The paste still leaves through the one door every paste's
-    // notices leave by.
+    let apply = squeezed_body("Runtime", "apply_clipboard_payload");
+    let recipient = apply
+        .find("leaf.paste_recipient.clone()")
+        .expect("the apply step resolves the recipient");
+    let delivered = apply
+        .find("self.deliver_paste(")
+        .expect("the apply step delivers the paste");
     assert!(
-        squeezed_body("Runtime", "apply_clipboard_payload").contains("self.deliver_paste("),
-        "and delivers the paste"
+        recipient < delivered,
+        "delivery follows recipient resolution"
     );
     // And the terminal menu's Paste goes through that door, not around it.
     assert!(
