@@ -91,20 +91,35 @@ command line above 32,766 UTF-16 code units are left byte-for-byte unchanged;
 Settings projects that same current answer. A probe failure is unknown, not
 invalid: the next birth may schedule another question on the background worker,
 but no birth waits for it, and one exact executable and argv may start at most
-three parser probes in a process. Startup and every profile-table change ask all
+three parser probes from births in a process; a visit to the Profiles page asks a
+failed question once more, and the row says "could not be determined" while the
+last answer is a failure. Startup and every profile-table change ask all
 command-bearing PowerShell rows on the existing background preparation worker;
 a birth with no answer yet still starts as written and never waits. The loader
 reads Folio's own `shell-integration/folio.ps1`. Restart, split, duplicate,
 restore and Recent all use that same seam. A row which cannot be composed may
 offer one Settings action which writes the guarded managed line to that edition's
-`$PROFILE.CurrentUserCurrentHost`; rows with `NoProfile` or a script-refusing
-execution policy do not. The installed fact and policy are observed per edition,
-once on each Profiles-page visit, and Undo removes only the managed line. The
-PowerShell script returns outside `TERM_PROGRAM=Folio`, so that line is inert
-in other terminals; a nested PowerShell inherits the declaration intentionally.
+`$PROFILE.CurrentUserCurrentHost`; rows with `NoProfile` do not, and neither does
+any row unless both an ordinary session of the edition (the scopes without a row's
+arguments, its Process scope the account's fresh environment's) and the row
+itself (its own `-ExecutionPolicy`) would load that file — the file every session
+of the edition reads (release read B1). A present line is "loaded via $PROFILE"
+under the same two conditions only. The installed fact and policy are observed per
+edition, once on each Profiles-page visit; a question that got no answer is said as
+undetermined and asked again on the next visit. Before writing, Folio records in
+`integration-profile-files.json`, under the marks lock, the edition, whether it is
+creating the file and its folders, and the one copy it takes of a file that was
+there before its first write; Undo, the Settings remover, `--remove-shell-integration`
+and both uninstall verbs remove the managed line, then the copy, then — only when
+Folio created it and nothing but whitespace is left — the file and each empty
+folder it created. A removal takes no copy. A PowerShell that does not say where
+its `$PROFILE` is, and that the record does not locate, is reported with what is
+left there and refuses nothing. The Settings remover is offered only for a line in
+a form Folio owns. The PowerShell script returns outside `TERM_PROGRAM=Folio`, so
+that line is inert in other terminals; a nested PowerShell is integrated only where
+its `$PROFILE` carries the line, by inheriting the declaration.
 The bash and zsh scripts act wherever they are sourced.
-The one existing Settings remover, `--remove-shell-integration`, or
-`--uninstall-cleanup` removes a managed line. No path changes execution policy.
+No path changes execution policy.
 Every writer of that
 record takes the advisory lock with an explicit asker: `Asker::InApp` waits
 behind Folio's own writers with no deadline, and up to `OUR_TURN` for a holder
@@ -891,6 +906,22 @@ live*, which reverses §7.1.6c-6's explicit statement that the file is not watch
 the 2026-09-26 entry *on macOS the shipped `zsh`, `bash` and `sh` rows start a login
 shell* (issue #12), which supersedes the Mac port's Q8 for macOS: a login shell is a
 row's `login` switch, and the `Program` field takes a program and never a command line.
+**Where a new pane starts** (2026-10-05, GitHub issue #16): a folder named for this
+launch — `Open in Folio`, `folio <folder>`, `--cwd`, `folio-here.cmd`, a second launch
+handed over, a folder given to the Dock icon or a Service, `New terminal in folder…`,
+a folder row's `New terminal here` — always wins; otherwise the profile's
+`Starting directory` (Home, or a fixed folder); otherwise, for "the current pane's
+folder", the folder carried from the pane it was opened beside, a restart, a duplicate
+or a saved session; otherwise the profile's home. A named Windows folder is crossed
+into a WSL profile's namespace as before. `profiles::place_for` is the one owner of
+this order; a seed only says whether its folder is named (`SeedPlace::Named`) or
+carried (`SeedPlace::Carried`). **A pane born in a named folder hands its folder on as
+named** (coordinator's ruling 2026-10-05, with the owner's 2026-10-04 "Restart shell goes
+back to the folder the pane was first opened in"): its Restart shell, Duplicate tab,
+Duplicate pane and splits start where it stands (its last reported folder, else that named
+folder) whatever the profile's starting place; its `+` and picker rows do not. That fact
+lives on the pane for the life of the process only — the session document has no field for
+it, so a restored pane's folder is carried and its next shells follow its profile.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration
@@ -907,6 +938,15 @@ asks this machine once, at launch.
 *Environment* — audience: whoever can already run programs as this user; carries
 diagnostics only and grants no privilege; read at process start with no reload;
 **set-but-empty is off**, and a name containing `TRACE` keeps the console.
+This configuration entrance is not a pane's inherited process block. On Windows
+each pane birth reads the current account block and then applies only launcher
+overrides a caller identified explicitly, followed by Folio's declarations and
+the profile's. A difference from Folio's inherited environment is never itself
+an override: the parent may be a terminal, Explorer, a resident hotkey process,
+or the old build handing off an update. No current product start road identifies
+an override. If the account read fails, that birth alone uses ordinary process
+inheritance and the next birth asks again. On non-Windows hosts the platform has
+no fresh-account block and pane birth retains ordinary inheritance.
 **The contrast that matters**: `profiles.json` and the pins are watched live
 through the storage watch on the data directory, re-read behind the shared quiet
 window and compared field by field, with an unparseable mid-run file leaving the
@@ -1076,7 +1116,14 @@ the one update surface: its line is `Folio <version> (<commit>) · <state>`, and
 its single control is read from the job's actionable state and route, never
 from the check's offer alone — `Pending` names its state and has no verb; an
 eligible offer has **Update and restart** (the card's Update); a download shows
-its progress; `Verified` raises its card again; a managed copy names its
+`Downloading <tag>` and its progress; past the download the line says what the job
+is doing — `Verifying <tag>` (`Staged`), `<tag> ready` with **Restart…**, which
+raises the Ready card again (`Verified`), `Restarting…` (`Quitting`,
+`Committing`) — with the bar full and no verb while nothing can be pressed (all
+2026-10-05); the control is a keyboard stop only while it is enabled. A focus on any
+Settings control that stops being a stop goes to the nearest stop before it on the page,
+else the nearest after it, and to the dialog's `×` only when the page has no stop
+(2026-10-05); a managed copy names its
 manager's command with **Copy command**; every other ineligible answer (not
 ours, unknown, no updater flag, no release file here, offers off in this build)
 opens the releases page. A release links to that tag's notes. A failure stays
@@ -1308,8 +1355,9 @@ Entries: the attention plan's endpoint section; §7.51; §13.37.
 
 ### 41. The uninstall doors — `folded`
 **Rule.** Folio must undo classes of thing outside its own folder — edits to
-other programs' files (agent hooks and the patched module), historical `$PROFILE`
-lines that current Folio only detects/removes,
+other programs' files (agent hooks and the patched module), the `$PROFILE` line
+(written again since T-INTEGRATION-INJECT-4 by the one-click fallback, §4) with the
+file, folders and one copy its write recorded,
 system registrations (the Explorer verb, the sparse package, the toast identity),
 and its own data roots — and **every one of them must be inert and silent when
 `folio.exe` is missing, and must have a non-interactive undo owned by the module
@@ -1355,7 +1403,14 @@ script) says otherwise, and after a cleanup that completed hands the program's
 own files to a remover that takes them once the process that asked has gone —
 on Windows only the files the release installed and then the folder if empty, on
 macOS the bundle; a link among them refuses the removal, and a managed copy is
-left to its manager. `--uninstall-cleanup` is unchanged, for the managers' hooks.
+left to its manager. **Nothing irreversible precedes a step that can refuse**
+(release read M1): the claims and the purge's preflight, then every removal row,
+then the program's step, and the purge of settings and data last — only when
+nothing before it refused; a run that refused keeps the data and says so on each
+data row, for both verbs. A managed copy's row names the manager's command with the
+cleanup joined before it by `cmd /c "… && …"` where the manager runs none, and
+says to close Folio first. `--uninstall-cleanup` is otherwise unchanged, for the
+managers' hooks.
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
 states that it rules, together with its closure addendum; the owner's ruling of

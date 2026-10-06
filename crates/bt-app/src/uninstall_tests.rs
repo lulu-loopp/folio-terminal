@@ -144,13 +144,23 @@ fn system_absent(_: Remover) -> Vec<Entry> {
 // Windows claims are kernel objects keyed only to the injected path. Unix's default
 // claim also creates a runtime file outside the sandbox, so these tests inject the gate.
 fn execute(scope: &Scope, purge: bool, system: impl FnMut(Remover) -> Vec<Entry>) -> Report {
+    execute_then(scope, purge, system, None)
+}
+
+/// [`execute`] with `--uninstall`'s program step, as `run_within` hands it.
+fn execute_then(
+    scope: &Scope,
+    purge: bool,
+    system: impl FnMut(Remover) -> Vec<Entry>,
+    program: Option<ProgramStep<'_>>,
+) -> Report {
     #[cfg(windows)]
     {
-        super::execute(scope, purge, system)
+        super::execute(scope, purge, system, program)
     }
     #[cfg(not(windows))]
     {
-        super::execute_with_claim(scope, purge, system, |_| Some(()))
+        super::execute_with_claim(scope, purge, system, |_| Some(()), program)
     }
 }
 
@@ -359,6 +369,7 @@ fn uninstall_running_claim_refuses_before_any_remover() {
         true,
         |_| panic!("must not reach a system remover"),
         |_| None::<()>,
+        None,
     );
     assert_eq!(report.code, 2);
     // **The door's sentence, byte for byte.** The refusal a script reads when a
@@ -1746,7 +1757,7 @@ fn the_uninstall_keeps_settings_and_data_and_hands_the_program_to_the_remover() 
                 &scope,
                 None,
                 AFTER_PID_WITHIN,
-                |scope| execute(scope, false, system_absent),
+                |scope, program| execute_then(scope, false, system_absent, Some(program)),
                 |scope| {
                     remove_the_program(
                         worker,
@@ -1818,7 +1829,7 @@ fn the_uninstall_with_remove_data_removes_the_data_roots_and_the_program() {
                 &scope,
                 None,
                 AFTER_PID_WITHIN,
-                |scope| execute(scope, true, system_absent),
+                |scope, program| execute_then(scope, true, system_absent, Some(program)),
                 |scope| {
                     remove_the_program(
                         worker,
@@ -1841,6 +1852,95 @@ fn the_uninstall_with_remove_data_removes_the_data_roots_and_the_program() {
     assert!(!scope.data[0].exists(), "the data root is removed");
     assert!(scheduled.load(std::sync::atomic::Ordering::Relaxed));
     fs::remove_dir_all(root).unwrap();
+}
+
+/// PIN (release read M1) — **nothing irreversible happens before every step that can refuse has
+/// been decided**: with `--remove-data`, a removal row that refused keeps the program *and* the
+/// data, and every data row says it was kept; a program step that refused keeps the data too;
+/// and when the purge does run, the program's step has already been decided — the data root is
+/// still there when the program's step is asked.
+///
+/// RED (mutations: `purge_regardless` — the purge runs whatever was refused before it, as it did:
+/// the data root is gone beside a kept program; `purge_before_program` — the purge runs before
+/// the program's step: the step finds the data root gone).
+#[test]
+fn a_refusal_before_the_purge_keeps_the_data_and_the_purge_comes_last() {
+    let refusing = |remover| match remover {
+        Remover::Explorer => vec![Entry::new(
+            "Explorer registrations (injected)",
+            Fate::Refused(Why::Other("held by another program".to_owned())),
+        )],
+        _ => system_absent(remover),
+    };
+    for (row_refuses, program_refuses) in [(true, false), (false, true), (false, false)] {
+        let (root, scope) = sandbox("uninstall-order");
+        seed(&scope, &scope.exe);
+        settings_speaking(&scope, bt_persist::LanguageV1::English);
+        let scope = std::sync::Arc::new(scope);
+        let data = scope.data[0].clone();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (code, stdout) = {
+            let (scope, asked, data) = (scope.clone(), asked.clone(), data.clone());
+            on_a_worker(move |worker| {
+                let report = uninstall(
+                    worker,
+                    &scope,
+                    None,
+                    AFTER_PID_WITHIN,
+                    |scope, program| {
+                        if row_refuses {
+                            execute_then(scope, true, refusing, Some(program))
+                        } else {
+                            execute_then(scope, true, system_absent, Some(program))
+                        }
+                    },
+                    |scope| {
+                        asked.store(true, std::sync::atomic::Ordering::SeqCst);
+                        assert!(data.exists(), "the program's step comes before the purge");
+                        vec![Entry::new(
+                            program_label(scope.lang),
+                            if program_refuses {
+                                Fate::Refused(Why::Said(Text::CleanupLink))
+                            } else {
+                                Fate::Scheduled
+                            },
+                        )]
+                    },
+                );
+                (report.code, report.stdout())
+            })
+        };
+        let case = format!("row refuses {row_refuses}, program refuses {program_refuses}");
+        if row_refuses || program_refuses {
+            assert_eq!(code, 1, "{case}: {stdout}");
+            assert!(data.exists(), "{case}: the data is kept: {stdout}");
+            assert!(
+                stdout.contains(&format!(
+                    "{}: kept (the cleanup did not complete)\n",
+                    data.display()
+                )),
+                "{case}: {stdout}"
+            );
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::SeqCst),
+                !row_refuses,
+                "{case}"
+            );
+            if row_refuses {
+                assert!(
+                    stdout.ends_with(
+                        "Program files (per-copy): kept (the cleanup did not complete)\n"
+                    ),
+                    "{case}: {stdout}"
+                );
+            }
+        } else {
+            assert_eq!(code, 0, "{case}: {stdout}");
+            assert!(!data.exists(), "{case}: the data is purged last");
+            assert!(asked.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// RED (T-UNINSTALL-UX) — **a link among the program's files refuses the whole removal: nothing
@@ -1869,7 +1969,7 @@ fn a_link_among_the_programs_files_refuses_the_removal() {
                 &scope,
                 None,
                 AFTER_PID_WITHIN,
-                |scope| execute(scope, false, system_absent),
+                |scope, program| execute_then(scope, false, system_absent, Some(program)),
                 |scope| {
                     remove_the_program(
                         worker,
@@ -2155,8 +2255,8 @@ fn a_managed_copy_is_left_to_its_manager() {
         lines,
         [
             "Program files (per-copy): left to the package manager: scoop uninstall folio\n",
-            "Program files (per-copy): left to the package manager: folio --uninstall-cleanup; \
-             winget uninstall --id WeiyiShi.Folio --exact\n",
+            "Program files (per-copy): left to the package manager: cmd /c \"folio \
+             --uninstall-cleanup && winget uninstall --id WeiyiShi.Folio --exact\"\n",
         ]
     );
     fs::remove_dir_all(root).unwrap();
@@ -2178,7 +2278,7 @@ fn a_cleanup_that_did_not_complete_keeps_the_program() {
                 &scope,
                 None,
                 AFTER_PID_WITHIN,
-                |_| {
+                |_, _| {
                     Report::new(vec![Entry::new(
                         "Claude Code hooks (per-copy)",
                         Fate::Refused(Why::Said(Text::CleanupRecorded)),
@@ -2220,12 +2320,13 @@ fn a_running_folio_is_exit_two_and_nothing_is_removed() {
                 &scope,
                 None,
                 AFTER_PID_WITHIN,
-                |scope| {
+                |scope, program| {
                     super::execute_with_claim(
                         scope,
                         false,
                         |_| panic!("must not reach a system remover"),
                         |_| None::<()>,
+                        Some(program),
                     )
                 },
                 |_| panic!("a running Folio keeps the program"),
@@ -2279,7 +2380,7 @@ fn the_door_waits_for_the_folio_that_asked_before_it_touches_anything() {
                         release_rx.recv().unwrap();
                         true
                     },
-                    |scope| {
+                    |scope, _| {
                         touched.store(true, std::sync::atomic::Ordering::SeqCst);
                         Report::new(Vec::new()).in_lang(scope.lang)
                     },
@@ -2309,7 +2410,7 @@ fn the_door_waits_for_the_folio_that_asked_before_it_touches_anything() {
                     assert_eq!(process, asker);
                     false
                 },
-                |_| panic!("nothing is touched when the identity-safe wait reaches its bound"),
+                |_, _| panic!("nothing is touched when the identity-safe wait reaches its bound"),
                 |_| panic!("nothing is touched when the identity-safe wait reaches its bound"),
             )
             .code

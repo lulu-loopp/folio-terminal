@@ -122,3 +122,49 @@ T-B now writes the three `agent_config_roots` lists through
 intent before updating its config, preserves `powershell_state`, and refuses
 when the record cannot be safely extended. See [agent integration marks](agent-integration-marks.md)
 for adapter ownership, take-over, and the T-C1 removal API.
+
+## `integration-profile-files.json`, version 1
+
+Owner: `shell_integration::profile_marks::ProfileFiles`. Beside `integration-marks.json` in the
+same data directory, read and written under the same lock (`integration-marks.lock`). It records
+what Folio's own `$PROFILE` writes brought into existence, written **before** each write it
+describes, so a power loss leaves an entry naming something that is not there — which the next
+removal clears — and never a file nobody knows is Folio's.
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "profile": "C:\Users\me\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1",
+      "edition": "windows_powershell",
+      "created_file": false,
+      "created_folders": [],
+      "backup": "C:\Users\me\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1.bak-20261005",
+      "backup_sha256": "<64 hex digits>"
+    }
+  ]
+}
+```
+
+- `edition` — `windows_powershell` or `powershell_7`: the edition that named this file its
+  `$PROFILE.CurrentUserCurrentHost`, so a removal finds the file without asking that edition.
+- `created_file` — no file stood there before Folio's write.
+- `created_folders` — the folders Folio created for it, outermost first.
+- `backup` and `backup_sha256` — the one copy of a file that was there, taken before Folio's first
+  write into it, and the SHA-256 of the bytes it holds.
+
+Every path is checked on reading, as `integration-marks.json`'s are: the profile is an absolute
+`.ps1` with no `..`; each folder is an ancestor of it; the copy stands beside it and is named
+`<profile>.bak-…`. A record that fails a check, an unknown field, or any version but 1 is refused,
+and the removal that read it refuses with it, touching no profile. A removal that takes Folio's line
+out (or finds none) deletes the copy while it still holds the recorded bytes, and deletes a file
+Folio created when nothing but whitespace is left in it, then each created folder that is empty; an
+entry left with nothing but its edition keeps that, and one with no edition is dropped.
+
+**Why a file of its own**: `integration-marks.json` is read by the previous version as well, with
+unknown fields refused (RULES §41: every mark keeps a format the previous version reads), so a field
+added there would make an update's rollback refuse the record and leave the old build unable to
+remove its own line. The previous version ignores this file; after a rollback it removes the line as
+it always did, and the file and copy this record names are taken by the next removal of a version
+that reads it.
