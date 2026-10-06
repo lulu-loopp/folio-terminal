@@ -186,6 +186,7 @@ bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerC
 bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-app	[target_os = "linux"]	crate::join_linux_desktop_retirement	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	DesktopRetire
+bt-app	[target_os = "linux"]	crate::wait_linux_display_retirement	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-app	[target_os = "linux"]	crate::linux_clipboard_lane::ClipboardLane::shutdown	std::thread::JoinHandle::join 1, std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-app	[target_os = "linux"]	crate::linux_clipboard_lane::run_clipboard_worker	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	[target_os = "linux"]	crate::trash_lane::TrashLane::shutdown	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	

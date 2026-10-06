@@ -71440,14 +71440,7 @@ fn retire_linux_desktop(
                 let watches = bt_platform::shutdown_watches(ctx);
                 let hotkeys = bt_platform::linux_hotkey::shutdown_hotkey_worker(ctx);
                 let system_settings = bt_platform::shutdown_system_settings(ctx);
-                while !bt_platform::linux_display::display_service_stopped() {
-                    if Instant::now() >= cutoff {
-                        return Err(
-                            "Linux display retirement reached the desktop cutoff".to_owned()
-                        );
-                    }
-                    std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
-                }
+                let display = wait_linux_display_retirement(ctx, cutoff);
                 clipboard
                     .and(trash)
                     .and(clipboard_owners)
@@ -71456,10 +71449,25 @@ fn retire_linux_desktop(
                     .and(watches)
                     .and(hotkeys)
                     .and(system_settings)
+                    .and(display)
             },
         )
         .context("start desktop retirement worker")?;
     join_linux_desktop_retirement(token, worker, cutoff)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_linux_display_retirement(
+    _worker: &bt_platform::admission::WorkerCtx,
+    cutoff: Instant,
+) -> std::result::Result<(), String> {
+    while !bt_platform::linux_display::display_service_stopped() {
+        if Instant::now() >= cutoff {
+            return Err("Linux display retirement reached the desktop cutoff".to_owned());
+        }
+        std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
