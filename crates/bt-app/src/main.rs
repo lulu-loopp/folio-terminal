@@ -62106,8 +62106,8 @@ impl FolioApp {
             Some(app) => std::mem::take(&mut app.pending_new_windows),
             None => return Ok(()),
         };
-        let mut plans = plans.into_iter();
-        while let Some(plan) = plans.next() {
+        let mut plans = std::collections::VecDeque::from(plans);
+        while let Some(plan) = plans.pop_front() {
             // The rail the asking window is wearing, read before the borrow is
             // handed to the door: since schema v9 there is no single answer in
             // the file, so a window a verb asked for copies the window that
@@ -72800,6 +72800,7 @@ struct RestoreMonitor {
     bottom: f64,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RestoreMonitorInput {
     full: bt_platform::WindowRect,
@@ -74188,7 +74189,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 35] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 36] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -74207,6 +74208,8 @@ mod platform_gate_tests {
         "git_panel.rs",
         // Linux hands process work its WorkerCtx; the other hand-off doors are synchronous.
         "handoff_lane.rs",
+        // The Linux drop notice is compiled with its native consumer and every translation test.
+        "i18n.rs",
         // First-window display and clipboard identities are strict; optional
         // service failures remain local to their operation.
         "main.rs",

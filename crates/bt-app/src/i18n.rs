@@ -433,8 +433,9 @@ text_entries! {
     UninstallCardCancel,
 
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
-        /// A pending drop lost the pointer or target state it was requested for.
-            DropLocationUnconfirmed,
+    /// A pending drop lost the pointer or target state it was requested for.
+    #[cfg(any(target_os = "linux", test))]
+    DropLocationUnconfirmed,
     PastePathEncoding,
     PastePathControl,
     PastePathPowerShellQuote,
@@ -3087,6 +3088,7 @@ impl Text {
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
             ),
+            #[cfg(any(target_os = "linux", test))]
             Self::DropLocationUnconfirmed => pick(
                 lang,
                 "Folio could not confirm where the drop landed. Drop the files again.",
