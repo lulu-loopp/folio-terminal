@@ -71442,7 +71442,9 @@ fn retire_linux_desktop(
                 let system_settings = bt_platform::shutdown_system_settings(ctx);
                 while !bt_platform::linux_display::display_service_stopped() {
                     if Instant::now() >= cutoff {
-                        return Err("Linux display retirement reached the desktop cutoff".to_owned());
+                        return Err(
+                            "Linux display retirement reached the desktop cutoff".to_owned()
+                        );
                     }
                     std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
                 }
