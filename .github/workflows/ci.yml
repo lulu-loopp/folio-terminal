@@ -1102,7 +1102,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers \
+            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers libxkbcommon-x11-0 \
             fonts-noto-cjk fonts-noto-mono fonts-dejavu-core
 
       # The same fifteen crates `core-macos` checks and in the same order,
