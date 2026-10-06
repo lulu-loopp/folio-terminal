@@ -1924,7 +1924,8 @@ impl<W: Copy + Eq> Job<W> {
         });
         // **The offer does not wait for a window to be minted** (U-32, the
         // macOS rehearsal's first row): the window directory this reads is
-        // published once a turn (`FolioApp::publish_window_directory`), and a
+        // published at each turn's head and as each window opens
+        // (`FolioApp::publish_window_directory`), and a
         // check that settles before the first turn — a local release feed, a
         // fast network, the macOS loop delivering its first user events before
         // its first `about_to_wait` — found no window, left the job `Idle`,

@@ -52157,7 +52157,8 @@ mod launch_landing_tests {
     ///
     /// MUTATIONS: drop the `publish_window_directory` call after the
     /// registry's `insert` in `open_pending_window` (the card is seated in the
-    /// older window); write the log line before `settle_update_card` or from
+    /// older window), or the one in `resumed` (the first window is unnamed
+    /// until the turn's head); write the log line before `settle_update_card` or from
     /// `raised` alone (the line no longer says where the card is).
     #[test]
     fn a_window_is_in_the_directory_from_the_door_that_opens_it() {
@@ -52169,6 +52170,15 @@ mod launch_landing_tests {
             matches!((insert, publish, tear_out), (Some(i), Some(p), Some(t)) if i < p && p < t),
             "a window opened this turn is missing from the directory the doors              after it read:
 {door}"
+        );
+        let first =
+            item_body(&ItemQuery::method("FolioApp", "resumed").of_trait("ApplicationHandler"));
+        let insert = first.find("self.windows.insert(id, window);");
+        let publish = first.find("self.publish_window_directory();");
+        assert!(
+            matches!((insert, publish), (Some(i), Some(p)) if i < p),
+            "the first window is missing from the directory until the turn's              head walks it:
+{first}"
         );
         let tell = method_body("FolioApp", "tell_the_update_job");
         let settle = tell.find("self.settle_update_card()?;");
@@ -61454,11 +61464,14 @@ impl FolioApp {
     /// **Write down every window this process has open** (B9, user ruling
     /// 2026-08-25), for the menu that names them.
     ///
-    /// Once a turn, before any window takes its own: the row a menu draws has to
-    /// be true of the run as it stands this frame, and a directory each of the
-    /// four window doors kept up to date would be one invariant living in four
-    /// places. A handful of windows walked once a turn is cheaper than that
-    /// bookkeeping and cannot go stale.
+    /// At each turn's head, before any window takes its own, and again
+    /// wherever a window enters the registry (the window door and the first
+    /// window): the row a menu draws has to be true of the run as it stands
+    /// this frame, the doors later in a turn read it too, and a directory each
+    /// of the four window doors kept up to date entry by entry would be one
+    /// invariant living in four places. Walking a handful of windows is cheaper
+    /// than that bookkeeping. A window closed mid-turn stays named until the
+    /// next turn's walk.
     fn publish_window_directory(&mut self) {
         // **A window that has been closed is not open** (§7.35). It stays in the
         // registry until its engines let go, and for that handful of seconds a
