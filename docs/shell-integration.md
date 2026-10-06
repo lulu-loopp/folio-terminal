@@ -213,41 +213,105 @@ cache entry, so an edited row must answer a new question. File, CommandWithArgs,
 NonInteractive, unknown or invalid argv, an unavailable parse answer, and an overlong Windows
 command line are left unchanged. A failed probe is an unavailable answer rather than an invalid
 command: a later birth may schedule the next background attempt, up to three attempts for the
-exact executable and argv in one process, and the birth never waits. The Settings capability
-sentence reads that same answer.
+exact executable and argv in one process, and the birth never waits; each visit to the Profiles
+page asks a failed question once more. The Settings capability sentence reads that same answer,
+and says "could not be determined" while the last attempt failed.
 
 When a PowerShell row must instead be spawned as written (`File`, `CommandWithArgs`, stdin,
 `NonInteractive`, or an unknown/invalid host line), Settings > Profiles offers one **Enable via
-profile** button for that edition. One click uses the existing managed-line writer and backup to
-add Folio's guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation is interposed, and
-the success toast offers Undo. The installed fact is per edition, so every such row for that
+profile** button for that edition. One click uses the existing managed-line writer to add Folio's
+guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation is interposed, and the success
+toast offers Undo. The line takes effect in panes started after it; the pane that showed the
+button keeps running without it. The installed fact is per edition, so every such row for that
 edition changes to the ordinary capability sentence together. The one existing **PowerShell
-`$PROFILE` line** row remains the only lasting removal surface. No button is offered when the row
-has any accepted `NoProfile` spelling, or when the execution policy that row would run under refuses
-profile scripts. Nor is it offered before that edition's first profile/policy observation has
-landed, or off Windows, where there is no profile probe. A missing profile file is created with only
-the managed line.
+`$PROFILE` line** row remains the only lasting removal surface, and it stands only while a line in
+one of the exact forms Folio writes is there: a line somebody wrote by hand that sources
+`folio.ps1` integrates the edition just the same, but Folio cannot prove it is its own, so no
+removal is offered for it. No button is offered when the row has any accepted `NoProfile` spelling,
+or when the execution policy refuses profile scripts (below). Nor is it offered before that
+edition's first profile/policy observation has landed, or off Windows, where there is no profile
+probe. A missing profile file is created with only the managed line.
 
-The policy is read per row from the scope list the probe reports (`Get-ExecutionPolicy -List`), in
+**The line is per edition, so two sessions decide** (release read B1). The file is the edition's
+`$PROFILE.CurrentUserCurrentHost`, which **every** session of that edition reads — Folio's other
+rows, Windows Terminal, the Start menu's PowerShell, an editor's terminal. A file an ordinary
+session refuses makes every such session print "cannot be loaded because running scripts is
+disabled" in red, and under `Restricted` an *empty* profile is refused just the same. So the button
+is offered only when both of these load it:
+
+* **an ordinary session of the edition**: the scopes without any row's arguments, with the Process
+  scope every session inherits — the `PSExecutionPolicyPreference` of the account's fresh logon
+  environment (usually none). The probe's own Process scope is Folio's environment, which no other
+  session shares, and does not count here;
+* **the clicked row**: the same scopes with the row's own `-ExecutionPolicy` (any spelling, its last
+  occurrence as both binders take it) as its Process scope.
+
+The click re-asks both before it writes. A line that is already there is "loaded via $PROFILE" only
+where both load it; under a policy an ordinary session refuses — a line an older Folio, or the user,
+wrote before the policy tightened — the row shows the policy's sentence instead (with Copy where
+the user can change it), and the **PowerShell `$PROFILE` line** row removes a line Folio wrote.
+When the account's environment cannot be read, or PowerShell does not answer, the row says
+integration could not be determined, and the next visit to the Profiles page asks again — the
+observation, a `$PROFILE` path, and every parse question that got no answer.
+
+The policy is read from the scope list the probe reports (`Get-ExecutionPolicy -List`), in
 PowerShell's precedence order — MachinePolicy, UserPolicy, Process, CurrentUser, LocalMachine, then
-the default — with the row's own `-ExecutionPolicy` (any spelling) as its Process scope. A refusing
+the default. When one of the two sessions refuses, its cause is the row's; when both do, Group
+Policy comes first, then the row's own Process scope, then the ordinary session's cause. A refusing
 policy is one of three cases, and the capability sentence says which:
 
 * **Set by the user's own scopes** (CurrentUser, LocalMachine or the default decides, nothing above
   CurrentUser is set). `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, which needs no
-  elevation, would decide the effective policy, so the row offers one **Copy** button in the place
-  of the Enable button; it puts exactly that command on the clipboard and the window says what was
-  copied. Folio never runs it.
-
-Either button stands in the row only while the text column can spare it (at most the share of the
-row a picker may take on any other page); at narrow dialog widths it is not drawn, and the row's
-`⋯` menu, which offers the same verb first on every row that has one, is the way to it.
+  elevation, would decide the effective policy for every session of the account, so the row offers
+  one **Copy** button in the place of the Enable button; it puts exactly that command on the
+  clipboard and the window says what was copied. Folio never runs it. This is also the case of a
+  row whose own `-ExecutionPolicy Bypass` would load the file on a machine whose ordinary sessions
+  refuse it: the command is what makes the line safe for the other sessions.
 * **Set by the organisation** (MachinePolicy or UserPolicy, i.e. Group Policy). No command and no
   button: the user cannot change it.
-* **Set for the process** (a refusing Process scope: the row's own `-ExecutionPolicy`, its last
-  occurrence as both binders take it, or a `PSExecutionPolicyPreference` in the environment). It
-  outranks CurrentUser, so the command would not help; the sentence says the policy set for this
-  process refuses `$PROFILE`, with no button.
+* **Set for the process** (a refusing Process scope: the row's own `-ExecutionPolicy`, or a
+  `PSExecutionPolicyPreference` every session of the account inherits). It outranks CurrentUser, so
+  the command would not help; the sentence says the policy set for this process refuses `$PROFILE`,
+  with no button.
+
+Either button stands in the row only while the text column can spare it (at most the share of the
+row a picker may take on any other page) and leaves room for the row's `default` badge; at narrow
+dialog widths it is not drawn, and the row's `⋯` menu, which offers the same verb first on every row
+that has one, is the way to it.
+
+**What Folio's profile writes leave, and how each goes** (release read B1, M5). Before it writes,
+Folio records — in `integration-profile-files.json` beside its marks record, under the same lock —
+which edition named the file, whether it is creating the file and which folders it is creating for
+it, and, for a file that was there, the one copy it takes before its first write into that file
+(`<profile>.bak-YYYYMMDD[-n]`), with the SHA-256 of the bytes it will hold. A later write while
+the line is installed takes no further copy, and a removal takes none: it takes out the managed
+line and its own line ending and keeps every other byte, including any edit made since. It does not
+take out the blank line Enable put in front of the managed line when the file already held text, so
+a file that was there before keeps one more blank line than it had — inert to PowerShell, and the
+one byte-level difference a removal leaves. When the line is taken out — by Undo, by the Settings
+row, by `--remove-shell-integration` or by either uninstall verb — the copy is deleted, since the
+write it guarded is undone, but only while it still holds the recorded bytes: a file of that name
+Folio did not write stays; a file Folio
+created is deleted when nothing but whitespace is left in it, and then each folder it created, if
+empty. A file that was there before, or that holds anything else, is never deleted. In the terms of
+the uninstall inventory:
+
+| Artefact | Writer, when | Removed by | Left on these roads |
+|---|---|---|---|
+| `$PROFILE` managed line | Enable via $PROFILE; older 0.4.x writers | Undo, the Settings row, `--remove-shell-integration`, `--uninstall`, `--uninstall-cleanup` | deleting Folio by hand; winget without the cleanup (the line is inert there) |
+| the `$PROFILE` file and its folders, when Folio created them | Enable, when no file was there | the same roads, when nothing but whitespace is left | the same; never a file that was there or holds anything else |
+| `<profile>.bak-YYYYMMDD[-n]`, at most one per profile | Enable into a file that was there, before Folio's first write | the same roads, with the line | the same; copies older versions made are not recorded and stay |
+
+A power loss between the record and the write leaves an entry naming a file or a copy that is not
+there, which the next removal clears; the other order would leave a file nobody knows is Folio's.
+
+**Where each edition's `$PROFILE` is, for a removal.** The record above names it for every edition
+Folio wrote into, so a removal finds the file without asking. An edition the record does not name
+(a line an older Folio wrote) is asked once, with no command run — the variable alone, so a cold
+module cache does not slow it — and with a minute's patience on the removal roads (five seconds on
+the Profiles page). One that still does not answer is reported with what is left — "this PowerShell
+did not say where its $PROFILE is, so a Folio line there, if any, stays" — and refuses nothing: the
+uninstall goes on to the program. A failed answer is not kept; the next removal asks again.
 
 Two more cases offer nothing:
 
@@ -280,8 +344,10 @@ with no polling loop.
 
 The PowerShell script, and only it, first verifies `TERM_PROGRAM=Folio`: Folio itself adds its line
 to `$PROFILE`, and that line must be inert when the same profile is read in another terminal. A
-nested PowerShell started inside a Folio pane inherits the declaration and is deliberately
-integrated. The process-scoped launch paths set the same declaration, so this guard does not
+nested PowerShell typed in a Folio pane is **not** integrated by default: Folio composes only the
+pane's own command line, and the nested shell's output is the outer command's. It is integrated
+only where the edition's `$PROFILE` carries the line, because it inherits the declaration — and so
+is a window started from a pane (`start powershell`). The process-scoped launch paths set the same declaration, so this guard does not
 distinguish automatic composition from the opted-in profile line. Known limit: a PowerShell session
 on another host reached by ssh from a Folio pane, whose profile sources `folio.ps1`, is inert
 unless the ssh connection forwards `TERM_PROGRAM` (`SendEnv` on the client and `AcceptEnv` on the
@@ -679,8 +745,8 @@ idempotent within one shell, and does nothing at all in a non-interactive one.
 The process loader preserves the prompt and PSReadLine implementation that exist when it runs, then
 the owned script wraps them with standard A/B/C/D markers. The script is idempotent within one shell
 process and works in both PowerShell 7 (`pwsh`) and Windows PowerShell 5.1 (`powershell.exe`). It
-returns before doing anything unless `TERM_PROGRAM` is exactly `Folio`; nested PowerShell sessions
-inside Folio inherit that value and are intentionally integrated. It
+returns before doing anything unless `TERM_PROGRAM` is exactly `Folio`; a nested PowerShell inside
+Folio inherits that value, and is integrated only when its `$PROFILE` loads the script. It
 requires PSReadLine. PowerShell 7 may revive only its already-loaded in-box PSReadLine assembly when
 execution policy prevented module registration; Windows PowerShell does not take that path. A
 missing PSReadLine installation, non-FullLanguage session, refused argv, failed preparation or

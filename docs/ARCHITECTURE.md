@@ -48,11 +48,11 @@ drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |
 |---|---|---|
-| thread-spawn sites | **53** — `bt-app` 35, `bt-platform` 14, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **49** — `bt-app` 35, `bt-platform` 14; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
+| thread-spawn sites | **52** — `bt-app` 34, `bt-platform` 14, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **48** — `bt-app` 34, `bt-platform` 14; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site; T-ENV-REFRESH round 4 removes the launch-snapshot worker). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
 | bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
 | of those through the door, in a door process rather than the window process | **4**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`), and `folio-remover-ready` (`deferred_removal::schedule`'s readiness pipe); each process's main thread waits as a worker, entered once through `enter_standalone_main`. The uninstaller and copied-remover doors enter once for their whole runs, so their process waits and retry backoff through `wait::sleep_within` are workers' waits too | `enter_standalone_main\(` |
-| named sites / distinct names | **50 / 46**, besides the pool | the first argument, or `.name(…)` |
+| named sites / distinct names | **49 / 45**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **34** — 28 `mpsc::channel`, 6 `mpsc::sync_channel`; `bt-app` 27 (T-KEYBOARD-CTRLALT adds the layout-table request and answer pair), `bt-platform` 7 (T-UNINSTALL-UX adds the remover readiness pipe) — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **34** (T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
@@ -568,7 +568,7 @@ does not have to find it later.
 
 ### 5.1 Execution lanes
 
-The §0.1 census records fifty-three production thread-spawn sites across three crates (`bt-app` 35,
+The §0.1 census records fifty-two production thread-spawn sites across three crates (`bt-app` 34,
 `bt-platform` 14, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1).
 All but `bt-pty`'s four go through the thread door (0.4.6, A1c). T-PROBE-CHILD
 adds the probe-output reader site.
@@ -618,13 +618,15 @@ stays in the process owner book for the existing continue-shutdown path. See
 [`linux-clipboard-read.md`](plans/design/linux-clipboard-read.md)
 and [`linux-clipboard-write.md`](plans/design/linux-clipboard-write.md).
 
-**A shell birth has two short-lived workers** (T-ENV-REFRESH). At process
-startup `bt-environment-snapshot` captures one fresh current-user environment;
-the first `bt-pty-birth` worker joins that snapshot worker, and every birth
-worker asks the platform again, composes the child block, and owns PTY/process
-creation. The window thread enters the existing `PtyBirth` admission and joins
-the birth worker; it never calls the environment door. On non-Windows hosts the
-door returns no block and `bt-pty` retains ordinary process inheritance.
+**A shell birth has one short-lived worker** (T-ENV-REFRESH round 4).
+`bt-pty-birth` asks the platform for the current-user environment, composes the
+child block, and owns PTY/process creation. Its layers are the current account
+block, launcher overrides a caller identified explicitly, Folio declarations,
+and profile declarations. No product start road currently identifies a launcher
+override; inherited differences are not evidence of one. The window thread
+enters the existing `PtyBirth` admission and joins the worker; it never calls the
+environment door. On non-Windows hosts the door returns no block and `bt-pty`
+retains ordinary process inheritance.
 
 **The storage worker has a second job** (0.4.6 U-13): besides `session.json`, the
 `SessionWriter` thread (`session-writer`) writes an update trial's receipt,

@@ -2,13 +2,13 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    FilesFocusArrival, Popup, Runtime, cli, i18n, launch_wire, persist, profile_menu_anchor,
-    profiles, seats, settings, shell_integration, text_field, toast,
+    FilesFocusArrival, LeafSession, Popup, Runtime, cli, i18n, launch_wire, persist,
+    profile_menu_anchor, profiles, seats, settings, shell_integration, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 impl Runtime<'_> {
@@ -91,7 +91,7 @@ impl Runtime<'_> {
         // one 丙2 added — see [`Self::new_tab_seeded_from`].
         let source_cwd = self
             .focused()
-            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
+            .and_then(LeafSession::place_for_a_new_tab_beside);
         let source_profile = self.session_profile();
         self.new_tab_seeded_from(profile, place, &source_profile, source_cwd)
     }

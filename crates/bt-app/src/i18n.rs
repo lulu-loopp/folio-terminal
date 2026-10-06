@@ -1199,6 +1199,9 @@ text_entries! {
     CapPowerShellPolicyProcess,
     /// `$PROFILE` is stored where `RemoteSigned` refuses it, or where this edition cannot tell.
     CapPowerShellPolicyLocation,
+    /// A question the row depends on (the parse answer, the edition's observation) got no
+    /// answer; the next visit to the Profiles page asks again (release read m2).
+    CapPowerShellUndetermined,
     /// WSL. The same everything, and the same honest condition — a `zsh` or
     /// `fish` login never reads the init file the launcher was handed.
     CapWslBash,
@@ -2857,6 +2860,9 @@ text_entries! {
     ShellProfileRemoved,
     ShellProfileRefused,
     ShellProfileProbeFailed,
+    /// A removal's row for a PowerShell that did not say where its `$PROFILE` is and that no
+    /// record locates: what stays, after the program's path (release read M1).
+    ShellProfileUnlocated,
     ShellProfileLink,
     ShellProfileHardLink,
     ShellProfileReadOnly,
@@ -2946,7 +2952,6 @@ text_entries! {
     UpdateCardRestored,
     /// After the reason, when the rollback did not finish; the journal's folder follows.
     UpdateCardIncomplete,
-    // zh: pending U-35
     UpdateCardTrial,
     /// The trial over a `Stuck` transaction committed forward after its card said *Update incomplete.* (U-32).
     UpdateCardUpdated,
@@ -2964,6 +2969,14 @@ text_entries! {
     /// Value-carrying templates for About > Version.
     VersionAvailable,
     VersionDownloading,
+    /// Both files are on disk and the job is checking them (`update_job::State::Staged`).
+    VersionVerifying,
+    /// Verified and waiting for the restart (`update_job::State::Verified`).
+    VersionReady,
+    /// The verb beside [`Self::VersionReady`]: it raises the Ready card, which asks first.
+    VersionRestart,
+    /// Folio is quitting to put the update in place (`State::Quitting`, `State::Committing`).
+    VersionRestarting,
     VersionManaged,
     /// A failed update that stopped before anything installed moved (`update_card::Outcome::NothingChanged`).
     VersionFailed,
@@ -3001,7 +3014,6 @@ text_entries! {
     UpdateFailedSpace,
     /// The new build did not prove itself and a rollback followed (`update_job::Failure::RolledBack`, `Incomplete`; U-29).
     UpdateFailedTrial,
-    // zh: pending U-35
     UpdateFailedTrialRunning,
     /// The update stopped before the new build ever ran and the old one is back (`update_job::Failure::Interrupted`; U-42a).
     UpdateFailedInterrupted,
@@ -3881,6 +3893,11 @@ impl Text {
                 lang,
                 "PowerShell integration is not provided for these arguments. $PROFILE is stored where the execution policy may refuse it.",
                 "自定义启动参数，不提供 PowerShell 整合。$PROFILE 所在位置可能被执行策略拒绝。",
+            ),
+            Self::CapPowerShellUndetermined => pick(
+                lang,
+                "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
+                "自定义启动参数，PowerShell 整合状态未知。再次打开此页时重新检测。",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -4828,8 +4845,8 @@ impl Text {
             ),
             Self::ShellProfileAddedToast => pick(
                 lang,
-                "Added one line to $PROFILE. It takes effect only in Folio.",
-                "已在 $PROFILE 添加一行，仅在 Folio 中生效。",
+                "Written to $PROFILE. Takes effect in new panes.",
+                "已写入 $PROFILE，新窗格中生效。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -5007,7 +5024,11 @@ impl Text {
                 "On removes settings, sessions and web data too. Off keeps them.",
                 "开：一并移除设置、会话和网页数据。关：保留。",
             ),
-            Self::DescUninstallBy => pick(lang, "Run {command}.", "运行 {command}。"),
+            Self::DescUninstallBy => pick(
+                lang,
+                "Close Folio, then run {command}.",
+                "关闭 Folio 后运行 {command}。",
+            ),
             Self::UninstallCardHeading => pick(lang, "Uninstall Folio?", "卸载 Folio？"),
             Self::UninstallCardKeeps => pick(lang, "Settings and data stay.", "设置和数据保留。"),
             Self::UninstallCardRemoves => pick(
@@ -5631,6 +5652,11 @@ impl Text {
                 "Could not query this PowerShell profile within five seconds.",
                 "五秒内未能查到此 PowerShell 的 $PROFILE。",
             ),
+            Self::ShellProfileUnlocated => pick(
+                lang,
+                "this PowerShell did not say where its $PROFILE is, so a Folio line there, if any, stays",
+                "此 PowerShell 未报告 $PROFILE 位置，Folio 整合行（如有）保留。",
+            ),
             Self::ShellProfileLink => pick(
                 lang,
                 "Symbolic links and reparse points are not edited.",
@@ -5729,6 +5755,10 @@ impl Text {
             Self::VersionDetails => pick(lang, "Details", "详情"),
             Self::VersionAvailable => pick(lang, "{version} available", "有新版 {version}"),
             Self::VersionDownloading => pick(lang, "Downloading {version}", "正在下载 {version}"),
+            Self::VersionVerifying => pick(lang, "Verifying {version}", "正在校验 {version}"),
+            Self::VersionReady => pick(lang, "{version} ready", "{version} 已就绪"),
+            Self::VersionRestart => pick(lang, "Restart…", "重启…"),
+            Self::VersionRestarting => pick(lang, "Restarting…", "重启中…"),
             Self::VersionManaged => pick(
                 lang,
                 "{version} available · {command}",
@@ -6199,6 +6229,20 @@ pub fn version_available_in(lang: Lang, version: &str) -> String {
 #[must_use]
 pub fn version_downloading_in(lang: Lang, version: &str) -> String {
     Text::VersionDownloading
+        .in_lang(lang)
+        .replace("{version}", version)
+}
+
+#[must_use]
+pub fn version_verifying_in(lang: Lang, version: &str) -> String {
+    Text::VersionVerifying
+        .in_lang(lang)
+        .replace("{version}", version)
+}
+
+#[must_use]
+pub fn version_ready_in(lang: Lang, version: &str) -> String {
+    Text::VersionReady
         .in_lang(lang)
         .replace("{version}", version)
 }

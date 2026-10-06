@@ -49,7 +49,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::i18n::{self, Text};
 
@@ -323,9 +323,61 @@ impl Probe {
     }
 }
 
-static PROBE: OnceLock<Probe> = OnceLock::new();
+#[derive(Default)]
+struct ProbeState {
+    answer: Option<Probe>,
+    in_flight: bool,
+}
 
-/// Start the probe, once per process, on a thread of its own.
+struct ProbeSlot(Mutex<ProbeState>);
+
+impl ProbeSlot {
+    const fn new() -> Self {
+        Self(Mutex::new(ProbeState {
+            answer: None,
+            in_flight: false,
+        }))
+    }
+
+    fn state(&self) -> MutexGuard<'_, ProbeState> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn claim(&self) -> bool {
+        let mut state = self.state();
+        if state.answer.is_some() || state.in_flight {
+            return false;
+        }
+        state.in_flight = true;
+        true
+    }
+
+    fn settle(&self, answer: Option<Probe>) {
+        let mut state = self.state();
+        if state.answer.is_none() {
+            state.answer = answer;
+        }
+        state.in_flight = false;
+    }
+
+    fn install(&self, answer: Probe) {
+        let mut state = self.state();
+        if state.answer.is_none() {
+            state.answer = Some(answer);
+        }
+        state.in_flight = false;
+    }
+
+    fn answer(&self) -> Option<Probe> {
+        self.state().answer
+    }
+}
+
+static PROBE: ProbeSlot = ProbeSlot::new();
+
+/// Start the probe, once per successful answer, on a thread of its own.
 ///
 /// **Two triggers, and both are "somebody is in a position to ask"**: the first
 /// `Windows PowerShell` pane opening, and — since §7.1.6c-5 — the settings
@@ -340,18 +392,19 @@ static PROBE: OnceLock<Probe> = OnceLock::new();
 /// is a one-shot, so only the call that actually spawns the thread could carry
 /// a callback — and the caller that spawns it is the pane, while the caller that
 /// needs the repaint is the dialog, which may open minutes later while the probe
-/// is still running.
+/// is still running. A failed query remains unknown and releases the claim so a
+/// later reader edge can try again.
 pub fn begin_probe() {
-    if PROBE.get().is_some() || probing_started() {
+    if !PROBE.claim() {
         return;
     }
     // In the workers' band: this starts a PowerShell to ask a question about a
     // module, and it must never be the reason a frame was late.
-    bt_platform::spawn_at_priority(
+    if bt_platform::spawn_at_priority(
         "psreadline-probe",
         bt_platform::ThreadPriority::BelowNormal,
         |_ctx| {
-            let _ = PROBE.set(run_probe());
+            PROBE.settle(run_probe());
             // After the answer is published, never before: a wake that raced the
             // `set` would send the loop to read a row that is still `Probing`,
             // and there is no second wake coming.
@@ -360,7 +413,10 @@ pub fn begin_probe() {
             }
         },
     )
-    .ok();
+    .is_err()
+    {
+        PROBE.settle(None);
+    }
 }
 
 /// Every answer this module publishes out of band is published on a thread with
@@ -381,16 +437,10 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
 }
 
-static PROBE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn probing_started() -> bool {
-    PROBE_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst)
-}
-
 /// What the probe found, or `None` while it is still running.
 #[must_use]
 pub fn probe() -> Option<Probe> {
-    PROBE.get().copied()
+    PROBE.answer()
 }
 
 /// Seed the probe's answer directly.
@@ -421,8 +471,7 @@ pub fn probe_override_from_env() -> Option<Probe> {
 /// Install the override, if one was asked for, before anything reads the probe.
 pub fn install_probe_override() {
     if let Some(probe) = probe_override_from_env() {
-        let _ = PROBE.set(probe);
-        probing_started();
+        PROBE.install(probe);
     }
 }
 
@@ -442,35 +491,36 @@ if ($m) { $m.Version.ToString() } else { '' }; \
 (Get-ExecutionPolicy).ToString()";
 
 #[cfg(windows)]
-fn run_probe() -> Probe {
-    // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
-    // window opens on screen every time a PowerShell pane is opened for the
-    // first time in a session.
-    //
-    // **By name and therefore by absolute path** (R1-17): `CreateProcess` reads
-    // the process's working directory before it reads `PATH`, and a
-    // `powershell.exe` left in a folder somebody cloned is not the PowerShell
-    // this probe is asking about. `quiet_command_named` looks where a program
-    // is supposed to live and nowhere else; nothing found there means no
-    // answer, never a bare name to fall back on.
-    let Some(mut command) =
-        bt_platform::quiet_command_named(std::path::Path::new("powershell.exe"))
-    else {
-        return Probe::default();
-    };
-    command.args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND]);
-    let output = bt_platform::probe_output(command).inspect(|output| {
-        bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, output)
-    });
-    let Ok(output) = output else {
-        return Probe::default();
-    };
-    parse_probe_output(&String::from_utf8_lossy(&output.stdout))
+fn run_probe() -> Option<Probe> {
+    run_probe_with(|program, command, deadline| {
+        crate::shell_integration::run_powershell_probe(program, command, None, deadline)
+    })
+}
+
+#[cfg(windows)]
+fn run_probe_with(
+    ask: impl FnOnce(
+        &Path,
+        &str,
+        std::time::Duration,
+    ) -> Result<
+        crate::shell_integration::ProbeOutput,
+        crate::shell_integration::ParseProbeFailure,
+    >,
+) -> Option<Probe> {
+    let output = ask(
+        Path::new("powershell.exe"),
+        PROBE_COMMAND,
+        crate::shell_integration::POWERSHELL_PROBE_DEADLINE,
+    )
+    .ok()?;
+    let answer = parse_probe_output(&String::from_utf8_lossy(&output.stdout));
+    (answer.policy != ExecutionPolicy::Unknown).then_some(answer)
 }
 
 #[cfg(not(windows))]
-fn run_probe() -> Probe {
-    Probe::default()
+fn run_probe() -> Option<Probe> {
+    None
 }
 
 /// Read the two lines the probe command writes.
@@ -1892,6 +1942,123 @@ fn apply_with(
 pub(crate) mod tests {
     use super::*;
     use bt_persist::PsReadLineInviteV1 as State;
+
+    /// A failed machine question is not an answer. Its claim is released so the next pane or
+    /// Terminal-page open can ask again; a successful answer remains final for this process.
+    ///
+    /// RED (mutation `keep_failed_claim`: leave `in_flight` set when `settle(None)` runs).
+    #[test]
+    fn an_unknown_probe_is_asked_again_on_the_next_edge() {
+        let slot = ProbeSlot::new();
+        assert!(slot.claim(), "the first reader edge asks");
+        assert!(
+            !slot.claim(),
+            "a concurrent reader does not start a second child"
+        );
+        slot.settle(None);
+        assert!(slot.answer().is_none(), "failure remains unknown");
+        assert!(slot.claim(), "the next reader edge retries");
+        let answer = Probe {
+            version: Version::parse("2.0.0"),
+            policy: ExecutionPolicy::RemoteSigned,
+        };
+        slot.settle(Some(answer));
+        assert_eq!(slot.answer(), Some(answer));
+        assert!(
+            !slot.claim(),
+            "a successful answer is process-lifetime state"
+        );
+    }
+
+    /// The deadline is an input to the contained child door, not a sleep in this test. A
+    /// deadline failure remains unknown and therefore retryable by the state test above.
+    ///
+    /// RED (mutation `unbounded_psreadline_probe`: pass any duration other than the shared
+    /// PowerShell-probe deadline).
+    #[cfg(windows)]
+    #[test]
+    fn the_psreadline_probe_uses_the_contained_powershell_deadline() {
+        let answer = run_probe_with(|program, command, deadline| {
+            assert_eq!(program, Path::new("powershell.exe"));
+            assert_eq!(command, PROBE_COMMAND);
+            assert_eq!(
+                deadline,
+                crate::shell_integration::POWERSHELL_PROBE_DEADLINE
+            );
+            Err(crate::shell_integration::ParseProbeFailure::Deadline {
+                stdout: "[]".to_owned(),
+                stderr: "[]".to_owned(),
+            })
+        });
+        assert_eq!(answer, None);
+    }
+
+    /// A Windows PowerShell probe started from a PowerShell 7-shaped environment removes the
+    /// launcher's module path before the real child starts. That lets 5.1 resolve both PSReadLine
+    /// and `Get-ExecutionPolicy`, and the returned policy is therefore not the unsafe `Unknown`.
+    ///
+    /// The two real shells are created through `bt_pty::test_shell`: no profile, history, or
+    /// account application-data directory is touched.
+    ///
+    /// RED (mutation `inherit_pwsh7_module_path`: replace the final `env_remove` with the
+    /// PowerShell 7 value).
+    #[cfg(windows)]
+    #[test]
+    fn a_probe_under_a_pwsh7_launcher_environment_answers_the_true_policy() {
+        use bt_pty::test_shell::Hygiene;
+        let hygiene = Hygiene::new();
+        let launcher = hygiene
+            .command("pwsh.exe", bt_platform::quiet_command)
+            .args([
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.Write($env:PSModulePath)",
+            ])
+            .output()
+            .expect("PowerShell 7 starts through the test-shell door");
+        assert!(
+            launcher.status.success(),
+            "PowerShell 7 reports its environment"
+        );
+        let launcher_module_path = String::from_utf8_lossy(&launcher.stdout).into_owned();
+        assert!(
+            !launcher_module_path.trim().is_empty(),
+            "PowerShell 7 supplies the inherited module path under test"
+        );
+
+        let answer = run_probe_with(|program, script, deadline| {
+            assert_eq!(
+                deadline,
+                crate::shell_integration::POWERSHELL_PROBE_DEADLINE
+            );
+            let product = crate::shell_integration::powershell_probe_command(program)?;
+            let mut command = hygiene.command(program, |_| product);
+            command
+                .env("PSModulePath", &launcher_module_path)
+                .env_remove("PSModulePath")
+                .args(["-NonInteractive", "-Command", script]);
+            let output = command.output().map_err(|error| {
+                crate::shell_integration::ParseProbeFailure::Spawn(error.to_string())
+            })?;
+            if !output.status.success() {
+                return Err(crate::shell_integration::ParseProbeFailure::Exit {
+                    code: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+            }
+            Ok(crate::shell_integration::ProbeOutput {
+                stdout: output.stdout,
+                stderr: output.stderr,
+            })
+        })
+        .expect("Windows PowerShell resolves its inbox module and policy command");
+        assert!(
+            answer.version.is_some(),
+            "PSReadLine resolves in Windows PowerShell"
+        );
+        assert_ne!(answer.policy, ExecutionPolicy::Unknown);
+    }
 
     /// **Stand Folio's own older PSReadLine in `documents`**, as the launch's
     /// upgrade finds it — for a test elsewhere that runs a start's writers
