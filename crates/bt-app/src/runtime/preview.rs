@@ -736,21 +736,6 @@ impl Runtime<'_> {
             "background-picture",
             bt_platform::ThreadPriority::BelowNormal,
             move |_ctx| {
-                #[cfg(target_os = "linux")]
-                let ceiling = if bt_platform::linux_display::active_backend()
-                    == Some(bt_platform::linux_window::Backend::X11)
-                {
-                    match bt_platform::linux_display::monitor_ceiling_on_worker(_ctx) {
-                        Ok(Some(native)) => native,
-                        Ok(None) => ceiling,
-                        Err(error) => {
-                            eprintln!("BT_BACKGROUND monitor ceiling: {error}");
-                            ceiling
-                        }
-                    }
-                } else {
-                    ceiling
-                };
                 let result = bt_term::decode_background_image(&path, ceiling).map(|decoded| {
                     Arc::new(bt_render::BackgroundImage {
                         key: decoded.key,
@@ -774,9 +759,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// The monitor ceiling, or the window-size fallback, in physical pixels.
-    /// X11 reads the native ceiling on the decode worker and captures only its
-    /// fallback here; the other backends enumerate their Winit monitors here.
+    /// The largest texture the ground will ever resolve, in physical pixels.
     ///
     /// **The biggest monitor attached to this machine**, and not the window: the
     /// ground quad covers the window, so the most texels anything can resolve
@@ -789,13 +772,6 @@ impl Runtime<'_> {
     /// A machine that reports no monitors at all falls back to this window's own
     /// physical size, which is the only other fact available and is never zero.
     fn background_picture_ceiling(&self) -> (u32, u32) {
-        #[cfg(target_os = "linux")]
-        if bt_platform::linux_display::active_backend()
-            == Some(bt_platform::linux_window::Backend::X11)
-        {
-            let inner = self.client_size();
-            return (inner.width.max(1), inner.height.max(1));
-        }
         let mut ceiling = (0_u32, 0_u32);
         for monitor in self.window.window.available_monitors() {
             let size = monitor.size();

@@ -14256,3 +14256,8 @@ A Linux cross-window drag starts only with an observed client origin. If move or
 ### Linux origin refresh is independent of persistence — 2026-10-06
 
 Showing an X11 window and each native move or resize event request current window facts. Requests coalesce through the existing pending request and owed-refresh flag. Origin recovery does not wait for a session mutation or save. Wayland skips unsupported native rectangle queries, and closing windows stop admission.
+
+
+### Correction to the background monitor read — 2026-10-06
+
+The preceding background-monitor decision is withdrawn. Winit 0.30.13 caches its X11 monitor list, populates it during window creation, and refreshes it inside the RandR handler before delivering application callbacks. `DISABLE_MONITOR_LIST_CACHING` is a constant false. The application background-image path therefore keeps the existing monitor cache; it does not add fresh native queries to its decode worker. The client-origin migration remains necessary because Winit inner_position performs a live translation on every call.
