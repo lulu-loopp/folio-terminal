@@ -422,6 +422,8 @@ where
     /// Linux trash and shutdown PR (PR5 of the port split). Until then the
     /// retirement has no caller, so the dead-code lint is silenced rather than
     /// the shutdown deferred; the lane's own tests exercise it in the meantime.
+    // T-LINUX-CLIPBOARD until 2026-10-07: PR22 connects desktop retirement;
+    // this layer already tests the bounded lane shutdown.
     #[allow(dead_code)]
     pub(crate) fn shutdown(mut self, _worker: &WorkerCtx, cutoff: Instant) -> Result<(), String> {
         self.signal_shutdown();
