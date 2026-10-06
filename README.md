@@ -37,6 +37,10 @@ brew install --cask lulu-loopp/folio/folio
 
 <!-- winget: add when live -->
 
+**Linux development build** — build from source for native X11 or Wayland.
+The [Linux guide](docs/linux.md) gives the build, install and uninstall commands
+and lists the current limits.
+
 [`docs/install.md`](docs/install.md) has the rest: what is in the archive, what
 the first run asks, and what to do if the system puts a panel in front of you.
 

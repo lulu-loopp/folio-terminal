@@ -566,14 +566,14 @@ does not have to find it later.
 
 ## 5. Execution lanes
 
-### 5.1 The seven lanes
+### 5.1 Execution lanes
 
-Fifty-three production thread-spawn sites exist across three crates (`bt-app` 35,
+The §0.1 census records fifty-three production thread-spawn sites across three crates (`bt-app` 35,
 `bt-platform` 14, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1).
 All but `bt-pty`'s four go through the thread door (0.4.6, A1c). T-PROBE-CHILD
 adds the probe-output reader site.
-**The thread count is not the defect; the absence of a contract
-is.** `MathWorker::spawn` starts path verification and image scaling as well as
+**The thread count is not the defect; the absence of a contract is.**
+`MathWorker::spawn` starts path verification and image scaling as well as
 math and returns all three through one `MathWorkerResult` — a historical hosting
 decision wearing a subsystem's name. `Runtime::apply_psreadline` performs an
 installation synchronously while `profile_runtime::begin_enable` spawns a
@@ -591,6 +591,7 @@ per row.
 | **Session transport and lifecycle** | PTY birth, input and output transport, ordered resize, close, retirement | per-session incarnation and operation order; bounded input admission; no driver call while holding a lock the window needs |
 | **Presentation** | surface acquisition, submission and presentation of an admitted frame | surface lease and frame identity; bounded pending picture; asynchronous completion; shared GPU preparation lifetime explicitly serialized |
 | **Ingress and diagnostics** | endpoint listening and admission, watch delivery, trace writing, independent hang observation | publish before waking; explicit capacity and loss policy; the watchdog must stay able to observe a blocked owner |
+| **Linux clipboard read/write** | one process-owned `linux_clipboard_lane::ClipboardLane` owns lazy native reads and writes, one mixed FIFO and result publication | eight waiting operations, one active operation and one held result; one four-second deadline starts at admission; FIFO preserves read→copy→read and Copy→Paste; the window applies or discards each result, then acknowledges its exact request id before the next operation starts |
 
 The seams that already implement this shape: `bt-app::main::run_path_verify_worker`
 (*one question, one call, one answer, and nothing else runs here*),
@@ -599,6 +600,23 @@ The seams that already implement this shape: `bt-app::main::run_path_verify_work
 coalescing, completion as the door's own `Result`),
 `bt-pty::PtySession`, `bt-app::persist::SessionWriter`,
 `bt-app::trace_sink::Queue`, `bt-app::main::Runtime::present_seats_and_commit`.
+
+**The Linux clipboard lane** starts through `spawn_at_priority` on first
+admission. A read pins one X11 selection interval or Wayland offer and uses it
+for every MIME rung. Read text and URI bytes are bounded at 8 MiB, PNG at 256
+MiB, and local file lists at 4,096 entries; writes keep the source's owned text
+snapshot without a new byte cap. X11 and Wayland writes retain independent
+serving candidates and report success only after a same-connection server
+barrier. An unconfirmed claim stays joinable and is reconciled before a later
+native read or write. The held result blocks the next operation until the
+window applies or discards it and acknowledges the matching id. Destination
+retirement signals read cancellation; adoption checks the window, destination
+instance, and current keyboard owner. Shutdown closes admission and cancels the
+lane, passing one existing desktop-retirement cutoff through lane and owner
+reaping. Finished workers are joined; any owner still serving at the cutoff
+stays in the process owner book for the existing continue-shutdown path. See
+[`linux-clipboard-read.md`](plans/design/linux-clipboard-read.md)
+and [`linux-clipboard-write.md`](plans/design/linux-clipboard-write.md).
 
 **A shell birth has two short-lived workers** (T-ENV-REFRESH). At process
 startup `bt-environment-snapshot` captures one fresh current-user environment;
@@ -841,7 +859,10 @@ visibility, title and cursor** — `focus_window`, `set_visible`, `set_title`,
 `set_cursor`, `request_redraw`.
 
 Clipboard acquisition needs a platform-specific contract, not an assumption that
-every clipboard object can move to a generic worker. **Short owner work may
+every clipboard object can move to a generic worker. Linux reads use the worker
+contract in §5.1; request admission and destination adoption stay on the window
+thread. Windows and macOS retain their existing read paths; the Windows open
+retry remains row 26. **Short owner work may
 stay**: accepting completions, model transitions, bounded input admission, hit
 testing, and producing frame candidates.
 
@@ -1060,6 +1081,7 @@ happen" has one answer and a guard can hold it.
 |---|---|---|
 | restoring the program-owned mode state of one terminal pane | `TerminalAdapter::reset_program_modes(PtyTransport)`, reached only through the owning `DualPlaneSession::reset_program_modes`, which applies the screen switch through the session's own `apply_events` and moves `screen_revision`; the one app caller is `Runtime::reset_terminal_modes` (pane menu and command palette), which names the transport from the pane's `ConPtyKind`. It mutates the session-owned terminal on the thread that owns the session, writes no bytes to the child, starts no process and waits on no thread | `reset_program_modes_restores_the_shell_without_writing_to_it`, `reset_program_modes_leaves_focus_reporting_where_the_transport_keeps_it`, `a_reset_during_an_open_resize_survives_the_reconcile`, `a_reset_session_is_back_on_the_primary_screen_and_hears_the_next_prompt` in `bt-term`; the pane-menu and palette pins in `bt-app` |
 | reading file bytes | `bt_platform::file_reads` — thirteen named lanes (U-13 added `UpdateJournal`, the trial's watch; U-14 added `Update`, the archive and its manifest), `Lane`, `Ledger::add`, the process-wide `LEDGER` | `file_reads_doors.txt` admits items as a set of keys, without per-site counts, plus a source guard |
+| acquiring or writing Linux clipboard data | `bt_platform::clipboard_payload_on_worker`, `clipboard_text_on_worker`, and `set_clipboard_text_on_worker`, each requiring `&WorkerCtx`; the `ClipboardLane` supplies backend, deadline, cancellation and owned copy text | the mixed process-wide contract in §5.1; `window_waits.tsv` records lane wait/join and the worker-only native doors; native transport polling and owner barriers stay off the window thread |
 | reading who owns an install folder, and the macOS install-marker attribute | `bt_platform::install_evidence` — `owner_of`, `current_account`, `attribute` (read-only: `GetNamedSecurityInfoW` and the process token on Windows, `stat`, `geteuid` and `getxattr` on Unix); the attribute's bytes are charged to `file_reads`' `Lane::Install` | its own module, one function per read; its one caller is `install_channel::read` |
 | reading a resource out of an executable without running it (E-14) | `bt_platform::pe_resource::read_rcdata(path, name, limit)` (U-14) — `LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE \| LOAD_LIBRARY_AS_IMAGE_RESOURCE)`, `FindResourceW(RT_RCDATA)`, a copy, `FreeLibrary`; charged to `file_reads`' `Lane::Update` as one opaque load; `Unsupported` off Windows | its own module; its one caller is `update_archive::EmbeddedManifest` |
 | reading a keyboard layout's Shift table | `bt_platform::keyboard_layout_shift_table(&WorkerCtx, layout)` (T-KEYBOARD-CTRLALT round 4) — `RegGetValueW` reads the layout's `Layout File`, `LoadLibraryExW(LOAD_LIBRARY_SEARCH_SYSTEM32)` loads it, `GetProcAddress(KbdLayerDescriptor)` exposes its tables, and the copied Shift column outlives `FreeLibrary`; Windows only, worker only | `window_waits.tsv`'s `worker-door-body` effect row and `GetProcAddress` owner; the `WorkerCtx` parameter is the refusal pin, `layout_tables` has the one product call, and no §5.3 window-thread row is added |
@@ -1223,14 +1245,26 @@ has the §7.1 table yet.
   `main.rs` that sequence them. The ordering `flush_pending_pty_resize`
   represents is the contract.
 - **Paste** — `runtime/clipboard.rs`'s `paste_from_clipboard` →
-  `bt_platform::clipboard_payload`, **synchronous on the window thread**
-  (`Station::ClipboardRead`) → `prepare_clipboard_paste` (paths through
+  on Linux, `request_clipboard_read` → the process-owned `ClipboardLane`
+  → `bt_platform::clipboard_payload_on_worker` → publish result before
+  `AppEvent::LinuxClipboardReady` → `drain_clipboard_lane` →
+  `apply_clipboard_read_result`, which validates the live destination;
+  on Windows and macOS, the existing synchronous `bt_platform::clipboard_payload`
+  on the window thread (`Station::ClipboardRead`). Both routes continue through
+  `prepare_clipboard_paste` (paths through
   `shell_literal`) → `deliver_paste` → `stage_paste` (send, the input line, or
   held behind the multi-line card) → `send_paste` → `paste_text` →
   `bt-term::input::paste_bytes` (bracketed or not) → `offer_pty_input` →
   `PtySession::write_with_reason` → `InputRing::try_push` → `pump_pty_input` on
   the pane's writer thread. Contract: `docs/RULES.md` §9 and `deliver_paste`'s
   doc comment ("all four doors arrive here").
+- **Linux Copy** — copy callers snapshot an owned `String` at admission and
+  `Runtime::submit_clipboard_write` queues it in the same `ClipboardLane` as
+  reads. `bt_platform::set_clipboard_text_on_worker` retains the candidate on
+  its native serving thread and returns only after server confirmation;
+  `drain_clipboard_lane` applies a still-live selection/formula/git effect,
+  logs errors through the recoverable clipboard path, and acknowledges the
+  request id. A following Paste therefore observes the confirmed copy.
 - **Preview** — `open_preview_file` → `open_preview_source_on` → the
   `PreviewWorker` on `bt-preview-worker` (the `file_reads` lane `Preview`) →
   `AppEvent::PreviewReady` → `drain_preview_answers` → `apply_preview_results`
@@ -1589,7 +1623,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
 | `attention.rs` | 27 | toasts, pane notices, the Agents rows, terminal and turn-end notifications; raising, answering, marking seen and jumping to an attention request | ingress (the ledger the endpoint feeds, §7.2 — `bt_workbench::attention` since 2026-09-25, §12.1) | none; `notify::desktop_reach` and `interruption` decide what reaches the desktop |
-| `clipboard.rs` | 19 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
+| `clipboard.rs` | 19 at the §0.1 census | copy, copy on select, the paste target and its delivery, the multi-line paste card | Linux clipboard acquisition (request and result adoption); session (bytes into `InputRing`) | Linux reads on the process reader worker; Windows/macOS keep their window-thread reads (§7.2) |
 | `configuration.rs` | 10 | Settings ▸ About ▸ Export… and Import…, each imported part through its own door (§9) | — | `file_reads` (the settings lane, through `bt_persist::read_export`); store writes, row 20 |
 | `diagnostics.rs` | 5 | the OS theme change, application-change notes, the trace drain, grid-change scheduling | ingress (trace) | — |
 | `dpi.rs` | 11 | window resize, scale-factor change, DPI settling | session | row 12 (`flush_pending_pty_resize`) |
