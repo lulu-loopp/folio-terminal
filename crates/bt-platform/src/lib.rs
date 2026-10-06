@@ -3690,7 +3690,11 @@ mod probe_child_tests {
             return;
         }
         let mut go = String::new();
-        std::io::stdin().read_line(&mut go).expect("start signal");
+        // End of input means the test that started this helper is gone: start
+        // nothing, so a dead test leaves no probe behind.
+        if std::io::stdin().read_line(&mut go).expect("start signal") == 0 {
+            return;
+        }
         let mut probe = spawn_probe(&mut helper_command()).expect("start contained probe");
         let pids = announced(probe.take_stdout().expect("probe stdout"), "ready");
         let mut later = quiet_command(std::env::current_exe().expect("test executable"));
