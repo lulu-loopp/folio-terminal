@@ -913,7 +913,22 @@ use macos_handoff::{
     reveal_in_explorer, reveal_verified, shell_execute,
 };
 
-/// Check lexical requirements before passing a Unix path to a native API.
+/// **The shape gate every Unix path handed to a native API keeps**, and it is
+/// three lines because a POSIX path has three ways of not being one.
+///
+/// The Windows twin, [`validate_openable_path`], is long because Win32 has a
+/// path *grammar*: drive letters, UNC shares, verbatim prefixes that turn
+/// normalisation off, a trailing-dot trim that makes two spellings one file.
+/// None of that exists here. A POSIX path is bytes with `/` between them, it is
+/// absolute when the first byte is `/`, and the one byte it may never contain
+/// is NUL — because that is the terminator of the C string the kernel is
+/// handed, so a path carrying one would reach the file system cut short at a
+/// different file.
+///
+/// **Relative is refused rather than resolved**, for `program_in_directories`'
+/// reason: what a relative path resolves against is this process's working
+/// directory, which is whatever folder the shell that started Folio was
+/// standing in — not something a reader pointed at.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn openable_unix_path(path: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
@@ -1010,23 +1025,6 @@ mod macos_handoff {
     use crate::NativeWindow;
     use crate::macos_files::file_url;
 
-    /// **The shape gate every path this module hands to the workspace keeps**,
-    /// and it is three lines because a POSIX path has three ways of not being
-    /// one.
-    ///
-    /// The Windows twin, [`super::validate_openable_path`], is long because
-    /// Win32 has a path *grammar*: drive letters, UNC shares, verbatim prefixes
-    /// that turn normalisation off, a trailing-dot trim that makes two
-    /// spellings one file. None of that exists here. A POSIX path is bytes with
-    /// `/` between them, it is absolute when the first byte is `/`, and the one
-    /// byte it may never contain is NUL — because that is the terminator of the
-    /// C string the kernel is handed, so a path carrying one would reach the
-    /// file system cut short at a different file.
-    ///
-    /// **Relative is refused rather than resolved**, for `program_in_directories`'
-    /// reason one floor down: what a relative path resolves against is this
-    /// process's working directory, which is whatever folder the shell that
-    /// started Folio was standing in — not something a reader pointed at.
     use super::openable_unix_path;
 
     /// The narrower gate the image lane keeps: absolute, and a picture.

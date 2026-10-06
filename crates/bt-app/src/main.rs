@@ -19878,6 +19878,8 @@ struct ClipboardTargetToken {
     destination: ClipboardDestination,
 }
 
+/// What a clipboard write should say once the platform's clipboard path has
+/// accepted it.
 enum ClipboardWriteEffect {
     None,
     #[cfg(target_os = "linux")]
