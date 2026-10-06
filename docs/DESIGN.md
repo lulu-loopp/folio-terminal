@@ -14230,3 +14230,46 @@ Geometry from a saved position or a tear-out answer seeds the window cache; wini
 Winit supplies an external file drop's path without its Xdnd position. The worker query therefore resolves the point off-thread, and the result applies only while the window has not observed a cursor, tab, layout, viewport, focused-shell or shell-incarnation change. A changed context produces the localized re-drop notice. The path list stays pending until that notice is accepted, and a refused multi-file drop remains closed through the batch's turn boundary. An internal path drag carries its original drag plan and uses the same addressed answer; a refusal never redirects to a later query result.
 
 The deterministic fake X11 server sends a real Setup reply, receives the worker's first `InternAtom`, and withholds its reply while the child window-side request returns. `linux_display::stalled_server_tests::a_window_thread_query_returns_while_the_x11_server_withholds_its_reply` is the red/green regression seam. `stop_display_service` stops admission and drops unanswered work after an active X11 call returns; `display_service_stopped` reports exit without joining on the window thread. PR22 connects those gates to the existing desktop-retirement budget.
+
+### 2026-10-06 — The last Linux display helper callers use the same worker
+
+`DragGuard` now samples `VirtualScreenRect` through `bt-linux-display`. Each reply must match the active broker generation and request; an unknown, changed, or refused rectangle cancels the drag through its existing source-home path. A release with no valid screen observation cannot spend a stale cross-window aim, and the reply never changes the broker's event-delivered pointer.
+
+Restored-window monitor inputs remain the Winit bounds, scale and primary-first order. The first window still falls back to full monitor bounds because its restore runs before Linux backend installation. Later saved secondary windows submit one batch of center-point work-area requests through the existing display lane. The answer carries X11 monitor bounds and primary bounds with the work areas. A matching topology uses the actual worker answers; an individual work-area refusal keeps that monitor's full-bounds fallback. If the topology or observed scale-input generation changed, placement keeps the saved size and forfeits its position. The answer handler does not re-query Winit. Windows and macOS retain their previous synchronous monitor restoration and drag-guard code.
+
+Pinned by `cross_window_drag_tests::one_guard_answers_every_way_a_cross_window_gesture_is_taken_away`, `cross_window_drag_tests::delayed_drag_guard_answers_need_the_same_broker_and_observed_screen`, `cross_window_drag_tests::linux_drag_guard_and_restore_reads_resume_from_display_answers`, and `cross_window_drag_tests::async_restore_work_areas_require_the_captured_topology_and_primary`. §5.3 row 29a stays open for the adjacent Winit intrinsic getter migration and root review.
+
+### 2026-10-06 — Consuming a drag sample preserves its confirmed aim
+
+The broker records the event-delivered pointer used by its last confirmed aim.
+Consuming the screen sample authorizes one broker turn; it does not revoke the
+release. Release uses that recorded pointer, the captured release point, the
+known screen baseline and the absence of a same-generation pending query. A
+changed pointer or pending query returns the payload home. Late answers cannot
+rewrite the aim or pointer. The production-state regression exercises answer,
+sample consumption, aim and release, and keeps the original nonlocal target.
+
+### 2026-10-06 — Requested window allocation is not a native observation
+
+Linux layout, rendering and input use delivered resize dimensions or the
+configured surface allocation. Initial surface configuration uses the explicit
+opening request. Native geometry and resize observations start as `None`;
+only winit events or an addressed native answer fill them. A saved or tear-out
+request no longer initializes the observed geometry cache. Windows and macOS
+keep their original size getters. Pinned by
+`clipboard_path_tests::linux_runtime_sizes_do_not_read_x11_on_the_window_thread`.
+
+
+### Linux client-origin observation — 2026-10-06
+
+Cross-window drag coordinates use the display worker's actual X11 client-to-root translation, separately from the outer frame rectangle. Move and resize events invalidate that origin until a matching current geometry answer arrives. An unavailable translation is not replaced by an outer-frame guess. Windows and macOS retain their Winit inner-position read; Wayland retains the absence of global window coordinates. This uses the existing display request and does not start another worker.
+
+
+### Linux background monitor read — 2026-10-06
+
+The background-image worker reads X11 monitor dimensions before decoding, using its existing WorkerCtx and the independent display connection. The window thread captures only the current client-size fallback. Missing monitors retain that fallback; a native query error records a diagnostic. Wayland and the other platforms keep their Winit monitor path. This avoids the X11 monitor-cache miss reaching RandR from the background-image admission call and adds no worker.
+
+
+### Linux drag origin loss — 2026-10-06
+
+A Linux cross-window drag starts only with an observed client origin. If move or resize invalidates that origin during the gesture, the source withdraws the cross-window broker and keeps its local drag. It does not convert local coordinates into a guessed screen point or retain the previous foreign aim.

@@ -5,14 +5,13 @@ use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
     HoverFloat, IN_PANE_SURFACES_TOP_FIRST, InPaneSurface, LeafId, MathHoverExit, MouseRoute,
-    OVER_IN_PANE_TOP_FIRST, OverInPane, OverWheel, OwnPress, PanePress, PasteTarget,
-    PendingExternalDrop, PendingPastePath, PointerTarget, Popup, PressAfterBlur, PressedCellTarget,
-    PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject, RowActivation, RowHost, RowPayload,
-    RowPayloadKind, RowPress, Runtime, SpringGate, TabClick, TerminalReference, UserInputKind,
-    WebHeadVerb, WheelAxis, WheelBurst, WheelRoute, a_right_press_is_on_the_pane_menus_head,
-    answered_once, button_router_position, crumb_segments, drain_whole_units, files,
-    files_row_activation, first_run, float, float_grasp, float_sizing_of, formula_tools,
-    glass_allows_a_drop, hang_watch, i18n, image_zoom_notch, input, landing_for_aim,
+    OVER_IN_PANE_TOP_FIRST, OverInPane, OverWheel, OwnPress, PanePress, PointerTarget, Popup,
+    PressAfterBlur, PressedCellTarget, PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject,
+    RowActivation, RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
+    TerminalReference, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst, WheelRoute,
+    a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
+    drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
+    formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
     live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
     pan_on_the_wheel_road, platform_pointer_of, pointer_cursor, press_after_blur, press_files_node,
     press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
@@ -22,6 +21,8 @@ use crate::{
     web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
     write_pty_input,
 };
+#[cfg(target_os = "linux")]
+use crate::{PasteTarget, PendingExternalDrop, PendingPastePath, i18n};
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
 use anyhow::Result;
@@ -5783,7 +5784,7 @@ impl Runtime<'_> {
             {
                 self.refuse_pending_linux_pointer_actions()?;
             }
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         {
