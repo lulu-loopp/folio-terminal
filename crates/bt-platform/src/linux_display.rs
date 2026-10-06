@@ -58,6 +58,17 @@ pub struct LinuxDisplayReady {
     pub generation: u64,
 }
 
+/// The X11 monitor bounds observed with a batch of work-area answers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonitorWorkAreas {
+    /// Native monitor rectangles at the time of the worker query.
+    pub monitor_bounds: Vec<WindowRect>,
+    /// The primary monitor rectangle, or the first monitor when X11 has no primary output.
+    pub primary_bounds: WindowRect,
+    /// One result for each requested point, in request order.
+    pub work_areas: Vec<Result<WindowRect, String>>,
+}
+
 /// A query whose X11 connection and replies are owned by the display worker.
 #[derive(Clone, Debug)]
 pub enum LinuxDisplayQuery {
@@ -83,6 +94,10 @@ pub enum LinuxDisplayQuery {
     WindowRect { window: NativeWindow },
     /// Read the native work area for one window.
     WindowWorkArea { window: NativeWindow },
+    /// Read work areas for captured monitor-center points in one worker turn.
+    MonitorWorkAreasAt(Vec<(i32, i32)>),
+    /// Read the current X11 virtual screen rectangle without substituting an empty rectangle.
+    VirtualScreenRect,
 }
 
 /// One answer from the X11 display worker.
@@ -104,6 +119,10 @@ pub enum LinuxDisplayAnswer {
     WindowRect(Result<WindowRect, String>),
     /// The work-area read's native answer or its original refusal.
     WindowWorkArea(Result<WindowRect, String>),
+    /// The native topology signature and one result for each requested point.
+    MonitorWorkAreasAt(Result<MonitorWorkAreas, String>),
+    /// The X11 virtual-screen rectangle, or the platform refusal.
+    VirtualScreenRect(Result<WindowRect, String>),
 }
 
 /// A pending query. Its receiver never waits; the matching ready event means its answer is parked.
@@ -338,6 +357,12 @@ fn run_display_query(query: LinuxDisplayQuery) -> LinuxDisplayAnswer {
         LinuxDisplayQuery::WindowWorkArea { window } => {
             LinuxDisplayAnswer::WindowWorkArea(get_work_area(window))
         }
+        LinuxDisplayQuery::MonitorWorkAreasAt(points) => {
+            LinuxDisplayAnswer::MonitorWorkAreasAt(monitor_work_areas_at(&points))
+        }
+        LinuxDisplayQuery::VirtualScreenRect => {
+            LinuxDisplayAnswer::VirtualScreenRect(virtual_screen_rect_result())
+        }
     }
 }
 
@@ -396,15 +421,62 @@ pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
     })
 }
 
+fn monitor_work_areas_at(points: &[(i32, i32)]) -> Result<MonitorWorkAreas, String> {
+    with_x11("reading a set of monitor work areas", |session| {
+        let monitors = monitor_list(session, session.root)?;
+        let primary_output = if session
+            .randr_version
+            .is_some_and(|version| version >= (1, 3))
+        {
+            Some(
+                session
+                    .connection
+                    .randr_get_output_primary(session.root)
+                    .map_err(|error| request_error("querying the primary X11 display", error))?
+                    .reply()
+                    .map_err(|error| reply_error("querying the primary X11 display", error))?
+                    .output,
+            )
+        } else {
+            None
+        };
+        let primary_bounds = primary_output
+            .and_then(|primary| {
+                monitors
+                    .iter()
+                    .find(|monitor| monitor.output == Some(primary))
+                    .map(|monitor| monitor.bounds)
+            })
+            .or_else(|| monitors.first().map(|monitor| monitor.bounds))
+            .ok_or_else(|| "the X11 server reports no active display".to_owned())?;
+        let work_areas = points
+            .iter()
+            .map(|(x, y)| {
+                let monitor = nearest_monitor(&monitors, *x, *y)
+                    .ok_or_else(|| "the X11 server reports no active display".to_owned())?;
+                work_area_for_monitor(session, session.root, monitor)
+            })
+            .collect();
+        Ok(MonitorWorkAreas {
+            monitor_bounds: monitors.iter().map(|monitor| monitor.bounds).collect(),
+            primary_bounds,
+            work_areas,
+        })
+    })
+}
+
 #[must_use]
 pub fn virtual_screen_rect() -> WindowRect {
+    virtual_screen_rect_result().unwrap_or(EMPTY_RECT)
+}
+
+fn virtual_screen_rect_result() -> Result<WindowRect, String> {
     with_x11("reading the virtual screen rectangle", |session| {
         let monitors = monitor_list(session, session.root)?;
         Ok(union_rectangles(
             monitors.iter().map(|monitor| monitor.bounds),
         ))
     })
-    .unwrap_or(EMPTY_RECT)
 }
 
 #[must_use]
@@ -585,6 +657,7 @@ impl Atoms {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Monitor {
     bounds: WindowRect,
+    output: Option<randr::Output>,
     name: Option<String>,
     width_px: u32,
     height_px: u32,
@@ -645,6 +718,7 @@ fn monitor_list(session: &X11Session, root: Window) -> Result<Vec<Monitor>, Stri
                 i32::from(crtc_info.width),
                 i32::from(crtc_info.height),
             ),
+            output: Some(crtc_info.outputs[0]),
             name: String::from_utf8(output_info.name).ok(),
             width_px: u32::from(crtc_info.width),
             height_px: u32::from(crtc_info.height),
@@ -669,6 +743,7 @@ fn root_monitor(session: &X11Session, root: Window) -> Result<Monitor, String> {
         .map_err(|error| reply_error("querying the X11 root geometry", error))?;
     Ok(Monitor {
         bounds: rect_from_origin_size(0, 0, i32::from(geometry.width), i32::from(geometry.height)),
+        output: None,
         name: None,
         width_px: u32::from(geometry.width),
         height_px: u32::from(geometry.height),
@@ -1507,6 +1582,7 @@ mod tests {
                 right,
                 bottom,
             },
+            output: None,
             name: None,
             width_px: (right - left) as u32,
             height_px: (bottom - top) as u32,
