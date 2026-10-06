@@ -1,4 +1,4 @@
-// MODIFIED BY THE FOLIO CONTRIBUTORS: verify owned-copy cancellation after replacement.
+// MODIFIED BY THE FOLIO CONTRIBUTORS: verify owned-copy retirement and server-barrier reconciliation.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -193,7 +193,7 @@ fn owned_copy_waits_for_a_server_barrier_and_reconciles_before_reading() {
     };
     state.create_seats(&server);
     let socket_name = server.socket_name().to_owned();
-    server.run_with_flush_gate(state, Arc::clone(&hold_flush));
+    let mut flush_gate = server.run_with_flush_gate(state, Arc::clone(&hold_flush));
 
     let mut options = Options::new();
     options.foreground(true);
@@ -212,6 +212,7 @@ fn owned_copy_waits_for_a_server_barrier_and_reconciles_before_reading() {
         .unwrap()
         .iter()
         .any(|mime_type| mime_type == "text/plain"));
+    flush_gate.wait_until_held();
 
     let operation_cancelled = AtomicBool::new(false);
     assert!(matches!(
@@ -220,9 +221,10 @@ fn owned_copy_waits_for_a_server_barrier_and_reconciles_before_reading() {
     ));
 
     // The server installed the source, but the client has not received its
-    // sync reply. Release the flush gate; reconciliation sends a later barrier
-    // on this connection before a paste opens another connection.
-    hold_flush.store(false, std::sync::atomic::Ordering::Release);
+    // sync reply. Release the acknowledged flush gate and wake its event loop;
+    // reconciliation must receive its server barrier before a paste opens a
+    // separate connection.
+    flush_gate.release();
     assert_eq!(
         owner.reconcile_until(
             Instant::now() + Duration::from_secs(4),
