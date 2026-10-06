@@ -1099,6 +1099,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             xvfb weston libgl1-mesa-dri mesa-vulkan-drivers \
+            xfce4-clipman dbus-x11 python3-xlib \
             fonts-noto-cjk fonts-noto-mono fonts-dejavu-core \
             ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
@@ -1164,6 +1165,12 @@ jobs:
 
       - name: test Linux platform providers and installed fonts
         run: cargo test -p bt-platform --locked -j 2
+
+      # The Wayland suite uses Linux epoll, so these path dependencies stay
+      # outside the cross-platform workspace. Both upstream suites run here;
+      # X11 persistence is tested with a real manager on an owned display.
+      - name: test the patched clipboard crates on private displays
+        run: python3 scripts/ci/linux-vendor-clipboard-tests.py
 
       - name: recover Linux rendering after real device loss
         run: cargo test -p bt-render --lib --locked -j 2 a_lost_device -- --test-threads=1
