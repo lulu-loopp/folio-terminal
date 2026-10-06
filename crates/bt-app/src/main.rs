@@ -62776,6 +62776,10 @@ impl FolioApp {
         let blurred = app.quake.take_dismiss();
         let showing = app.quake.is_showing();
         let summoned_window = app.quake.window();
+        #[cfg(target_os = "linux")]
+        let pending_summon = app.pending_quake_summon.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let pending_summon = false;
         if !pressed && !blurred {
             return Ok(());
         }
@@ -62795,8 +62799,16 @@ impl FolioApp {
                 .get_mut(id)
                 .is_some_and(|window| window.window_focused)
         });
-        if pressed && quake::summon_move(showing, focused) == quake::SummonMove::Dismiss {
-            return self.dismiss_quake();
+        if pressed {
+            match quake::summon_move(showing, focused, pending_summon) {
+                quake::SummonMove::Dismiss => return self.dismiss_quake(),
+                quake::SummonMove::CancelPending => {
+                    #[cfg(target_os = "linux")]
+                    app.pending_quake_summon.take();
+                    return Ok(());
+                }
+                quake::SummonMove::Raise => {}
+            }
         }
         if pressed {
             if summoned_window.is_none() {
@@ -62834,12 +62846,7 @@ impl FolioApp {
         };
         #[cfg(target_os = "linux")]
         {
-            let previous = self
-                .app
-                .as_mut()
-                .and_then(|app| app.pending_quake_summon.take())
-                .map(|pending| pending.previous)
-                .unwrap_or_else(bt_platform::hotkey::foreground_holder);
+            let previous = bt_platform::hotkey::foreground_holder();
             let Some(mut runtime) = self.runtime(id) else {
                 return Ok(());
             };
@@ -69228,40 +69235,65 @@ mod floated_page_tests {
     #[test]
     fn the_foreground_is_read_before_the_summon_and_handed_back_after_it() {
         let up = method_body("FolioApp", "summon_quake");
-        let read = up
+        let linux = up
+            .split("#[cfg(target_os = \"linux\")]")
+            .nth(1)
+            .expect("the Linux summon path is present")
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux summon path ends before the portable path");
+        let read = linux
             .find("foreground_holder()")
-            .expect("the summon reads who had the keyboard");
-        let restored = up
+            .expect("the Linux summon reads the foreground before queuing work");
+        let request = linux
+            .find("runtime.request_quake_screen(pointer)?")
+            .expect("the Linux summon requests its display facts");
+        assert!(
+            read < request,
+            "the foreground read follows the Linux query: {linux}"
+        );
+
+        let request = method_body("Runtime", "request_quake_screen");
+        assert!(!request.contains("restore_minimized_window()"));
+
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        let restore = ready
             .find("runtime.restore_minimized_window()?")
-            .expect("the Linux summon restores its minimized window");
-        let show = up
-            .find("show_quake_window()")
-            .expect("the summon shows the window");
+            .expect("the Linux completion restores before showing");
+        let show = ready
+            .find("runtime.show_quake_window_at(")
+            .expect("the Linux completion shows after restore");
+        let finish = ready
+            .find("self.finish_summon_quake(pending.window, pending.previous)")
+            .expect("the Linux completion finishes after showing");
         assert!(
-            read < restored && restored < show,
-            "the summon restores a minimized window after reading and before showing it"
+            restore < show && show < finish,
+            "Linux restore/show/finish order changed: {ready}"
         );
+
+        let portable = up
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .expect("the Windows and macOS summon path is present");
+        let read = portable
+            .find("foreground_holder()")
+            .expect("the portable summon reads the foreground");
+        let show = portable
+            .find("runtime.show_quake_window()?")
+            .expect("the portable summon shows its window");
+        let finish = portable
+            .find("self.finish_summon_quake(id, previous)")
+            .expect("the portable summon hands off after showing");
         assert!(
-            read < show,
-            "the foreground is read after the window is up, by which time it is \
-             the window:\n{up}"
+            read < show && show < finish,
+            "portable read/show/finish order changed: {portable}"
         );
-        let focus = up
-            .find("runtime.give_foreground_with_retry()")
-            .expect("the summon retries giving foreground to its window");
-        assert!(
-            show < focus,
-            "the foreground retry must follow showing the summon: {up}"
-        );
+
         let runtime_focus = method_body("Runtime", "give_foreground_with_retry");
-        assert!(
-            runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
-            "the runtime focus helper does not use its owned-window path: {runtime_focus}"
-        );
+        assert!(runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"));
         let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
         assert!(
-            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
-            "the foreground helper no longer uses the platform foreground door: {foreground}"
+            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)")
         );
 
         let down = method_body("FolioApp", "dismiss_quake");
@@ -69278,6 +69310,18 @@ mod floated_page_tests {
         );
     }
 
+    /// A press during an unanswered Linux summon cancels that hidden request.
+    #[test]
+    fn a_second_hotkey_press_cancels_a_pending_linux_summon() {
+        let settle = method_body("FolioApp", "settle_quake");
+        assert!(settle.contains("pending_quake_summon.is_some()"));
+        assert!(settle.contains("SummonMove::CancelPending"));
+        assert!(settle.contains("app.pending_quake_summon.take()"));
+
+        let movement = item_body(&ItemQuery::function("summon_move"));
+        assert!(movement.contains("pending && !showing"));
+        assert!(movement.contains("SummonMove::CancelPending"));
+    }
     /// RED (§7.54) — **a window nobody can see does not keep the run alive.**
     ///
     /// The hazard the summoned terminal introduces, and it is a real one: it is
@@ -78278,7 +78322,6 @@ mod clipboard_path_tests {
         let ready = method_body("FolioApp", "apply_linux_display_ready");
         assert!(ready.contains("find(|id| u64::from(*id) == ready.owner)"));
     }
-
 
     /// **A file row let go over a terminal's middle is spelled exactly as a file
     /// dropped from Explorer or Finder is** (§7.1.1, user ruling 2026-09-16).
