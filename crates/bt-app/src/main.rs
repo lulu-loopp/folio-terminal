@@ -61575,6 +61575,10 @@ impl FolioApp {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
+        #[cfg(target_os = "linux")]
+        if let Some(app) = self.app.as_mut() {
+            app.pending_quake_summon.take();
+        }
         if self.is_leaving(id) {
             return Ok(());
         }
@@ -63131,6 +63135,14 @@ impl FolioApp {
             None
         };
         if let Some(pending) = pending {
+            if self.is_leaving(pending.window)
+                || self.app.as_ref().is_none_or(|app| {
+                    app.quake.window() != Some(pending.window)
+                        || app.quit.as_ref().is_some_and(quit::Quit::is_retiring)
+                })
+            {
+                return Ok(());
+            }
             let answer = pending.request.try_take().map_err(|error| {
                 anyhow!("the Linux display worker woke without an answer: {error}")
             })?;
@@ -69749,6 +69761,42 @@ mod floated_page_tests {
         assert!(movement.contains("pending && !showing"));
         assert!(movement.contains("SummonMove::CancelPending"));
     }
+    /// Retiring a summon withdraws its request before close; late completions cannot show it.
+    #[test]
+    fn a_retiring_linux_summon_discards_its_pending_display_answer() {
+        let retire = method_body("FolioApp", "retire_the_summon_with_the_run");
+        let withdraw = retire
+            .find("app.pending_quake_summon.take()")
+            .expect("retirement withdraws the pending summon");
+        let close = retire
+            .find("runtime.close_window(true)")
+            .expect("the summon follows ordinary window close");
+        assert!(
+            withdraw < close,
+            "the request survives window close: {retire}"
+        );
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        let leaving = ready
+            .find("self.is_leaving(pending.window)")
+            .expect("late completion checks the window lifecycle");
+        let active = ready
+            .find("app.quake.window() != Some(pending.window)")
+            .expect("late completion checks the active summon");
+        let quitting = ready
+            .find("quit::Quit::is_retiring")
+            .expect("late completion checks process retirement");
+        let consume = ready
+            .find("pending.request.try_take()")
+            .expect("an active request consumes its addressed answer");
+        let restore = ready
+            .find("runtime.restore_minimized_window()?")
+            .expect("an active summon restores before show");
+        assert!(
+            leaving < consume && active < consume && quitting < consume && consume < restore,
+            "late facts can restore a retired window: {ready}"
+        );
+    }
+
     /// RED (§7.54) — **a window nobody can see does not keep the run alive.**
     ///
     /// The hazard the summoned terminal introduces, and it is a real one: it is
