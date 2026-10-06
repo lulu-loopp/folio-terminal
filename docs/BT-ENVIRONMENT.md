@@ -154,7 +154,14 @@ temporary folder. `BT_U37_WATCH_CHILD` names the private folder `bt-app`'s
 sets on the copy of its own test binary that runs a trial's watch and records its
 hand-back line into that folder; `BT_U37_PARENT_TEST_CHILD` names the file
 `bt-platform`'s `install_flip::tests::this_process_names_its_parent_by_pid_and_an_earlier_start`
-sets on the copy of its own test binary that writes the parent it finds there. `BT_U37_ROAD_CHILD`, `BT_U37_ROAD_ROOT` and `BT_U37_ROAD_LINE` name the part
+sets on the copy of its own test binary that writes the parent it finds there. `BT_EXIT_CLAIM_CHILD` and
+`BT_EXIT_CLAIM_GRANDCHILD` name the private data folder and the stand-in program
+`bt-platform`'s `install_flip::tests::a_process_runs_until_its_handles_are_closed_not_until_its_exit_code_is_said`
+sets on the copy of its own test binary that claims that folder, starts the stand-in
+and leaves; `BT_UNINSTALL_ASKER_CHILD` names the sandbox data folder `bt-app`'s
+`uninstall::tests::the_door_waits_until_the_asker_has_let_go_of_its_claim` sets on the
+copy of its own test binary that claims it and leaves as a Folio does. Only those
+tests' child halves read them, and they write only into the test's own temporary folder. `BT_U37_ROAD_CHILD`, `BT_U37_ROAD_ROOT` and `BT_U37_ROAD_LINE` name the part
 (`trial` or `rescue`), the private folder and the hand-back line `bt-app`'s
 `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`
 sets on the copies of its own test binary that play the trial and the recovery. Only

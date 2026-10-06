@@ -48,6 +48,8 @@ Nothing yet.
 
 ### Fixed
 
+- On Windows, Settings ▸ About ▸ Uninstall no longer stops with "A Folio instance is running" after Folio has quit: it waits until the quitting Folio has fully gone, then removes Folio.
+- The zip's `uninstall.cmd` no longer runs pieces of its own lines when the console uses UTF-8, and an `n` answer handed to it from a file or a pipe now removes settings and data as asked.
 - "Enable via $PROFILE" is offered only when your other PowerShell windows would load the profile too; on a machine whose policy refuses scripts it offers the command that allows them, so enabling it can no longer make every PowerShell window print an error.
 - Undo, removing the `$PROFILE` line and uninstalling also remove the profile file and folder Folio created and the one backup copy it kept; a file you had, or added to, stays.
 - Uninstalling no longer stops because a PowerShell was slow to start; it says which profile it could not check and goes on, and with "remove settings and data" on, nothing is deleted unless every other step succeeded.
@@ -126,6 +128,9 @@ Nothing yet.
 - About → Version says what an update is doing after the download: Verifying,
   then ready with Restart…, then Restarting…, instead of Downloading again or
   offering Update and restart for an update already downloaded.
+- Update and restart in About → Version now restarts Folio once the update is
+  downloaded and checked, instead of stopping at a second Restart button.
+  An update downloaded from the update card still asks before it restarts.
 - In Settings, Enter on About's buttons presses them, and when a focused
   button stops being pressable the focus moves to the nearest control before
   it on the page (after it when none is before) instead of staying on it with no
@@ -136,6 +141,11 @@ Nothing yet.
 
 ### Known issues
 
+- Windows: if Folio is ended from outside (Task Manager, `Stop-Process`) or
+  crashes at the moment it is starting one of the commands it runs to learn
+  about the machine, that command can stay behind, paused, until it is ended in
+  Task Manager. macOS: after a force quit or a crash, such a command finishes
+  on its own instead of being stopped.
 - When updating from 0.4.6 to any later version, a new version whose start
   could not be recorded (its record kept out by another program, or a folder
   made read-only) runs without saving what it changes until the next start or

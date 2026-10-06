@@ -246,8 +246,18 @@ A machine probe is not in that set: no descendant may outlive its probe owner.
 wait, early drop and unwind. Output readers drain both pipes concurrently; once
 the direct child exits, the owner ends descendants before collecting those readers,
 so an inherited pipe cannot hold a no-deadline probe open. Windows closes job
-handles at process exit. The Unix non-unwinding exit door holds the same registry
+handles at process exit, a hard termination included, and no child inherits one.
+The Unix non-unwinding exit door holds the same registry
 lock while it signals every group, then clears the registry before releasing it.
+
+Two ends of Folio are outside that promise, and both are named rather than
+counted. On Windows, a termination while `CreateProcess` is still returning a
+probe (5–8 ms per start on a fast desktop, nearly all of it inside
+`CreateProcess`) leaves that child suspended outside every job: it is born
+before its handle exists to assign, and a child born in its job needs
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`, which `std` offers only unstably. On Unix, a
+`SIGKILL` or crash takes no exit door, so the groups run to their own end; no
+Unix handle ends a process group when it closes.
 
 ---
 

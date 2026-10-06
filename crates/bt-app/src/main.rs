@@ -12844,8 +12844,12 @@ struct App {
     ///
     /// **Refreshed rather than maintained.** Windows open and close through four
     /// doors and a directory kept up to date by each of them is four places one
-    /// invariant lives; walking a handful of windows once a turn costs nothing
-    /// and cannot go stale.
+    /// invariant lives; walking a handful of windows costs nothing. It is
+    /// walked at each turn's head and again wherever a window enters the
+    /// registry (the window door, the first window), because the doors later
+    /// in a turn read it: a window opened this turn and missing from it is a
+    /// window those readers move away from. A window closed this turn stays
+    /// named until the next turn's walk.
     windows_open: Vec<OpenWindow>,
     /// **The windows of this run, oldest visit first** (§7.59).
     ///
@@ -51432,6 +51436,20 @@ impl App {
         self.ask_to_quit();
         Ok(())
     }
+
+    /// **The restart About → Version's *Update and restart* asked for, once it
+    /// is due** (N10, the owner's ruling of 2026-10-06): when the job reaches
+    /// `Verified` for the transaction that press started
+    /// ([`update_job::Job::take_asked_restart`]), the application restarts
+    /// through [`Self::restart_for_update`] — the Ready card's Restart, with
+    /// every refusal it has. A refused restart leaves the job at `Verified`:
+    /// its Ready card is up and Version says `<tag> ready` with `Restart…`.
+    fn restart_when_asked(&mut self) {
+        if self.update_job.take_asked_restart() {
+            // The refusal is the card's own answer for this state; nothing moves.
+            let _ = self.restart_for_update();
+        }
+    }
 }
 
 /// **Every open window, in the order they opened** (multiwindow slice C).
@@ -52135,6 +52153,55 @@ mod launch_landing_tests {
         assert!(
             tell.contains("self.settle_update_card()"),
             "the card waits for some later turn's comparison:\n{tell}"
+        );
+    }
+
+    /// **RED (047-U36-CARD) — the window door names a window in the directory
+    /// as it opens it, and the report's log line is said from where the card
+    /// was placed.**
+    ///
+    /// The clean-VM row N15: the launch's window opened after the turn's head
+    /// had walked the directory, so the card settle that followed the telling
+    /// read a directory without it, took the card for one whose window had
+    /// closed and seated it in the older window, behind the new one — and the
+    /// log said it was raised. What the settle does with each directory is
+    /// `launch_wire`'s
+    /// `a_report_landing_in_a_window_of_its_own_is_up_there_after_the_settle`;
+    /// this is the window thread's half, which needs a live window.
+    ///
+    /// MUTATIONS: drop the `publish_window_directory` call after the
+    /// registry's `insert` in `open_pending_window` (the card is seated in the
+    /// older window), or the one in `resumed` (the first window is unnamed
+    /// until the turn's head); write the log line before `settle_update_card` or from
+    /// `raised` alone (the line no longer says where the card is).
+    #[test]
+    fn a_window_is_in_the_directory_from_the_door_that_opens_it() {
+        let door = method_body("FolioApp", "open_pending_window");
+        let insert = door.find("self.windows.insert(id, window);");
+        let publish = door.find("self.publish_window_directory();");
+        let tear_out = door.find("self.settle_tear_out(errand, id)?");
+        assert!(
+            matches!((insert, publish, tear_out), (Some(i), Some(p), Some(t)) if i < p && p < t),
+            "a window opened this turn is missing from the directory the doors              after it read:
+{door}"
+        );
+        let first =
+            item_body(&ItemQuery::method("FolioApp", "resumed").of_trait("ApplicationHandler"));
+        let insert = first.find("self.windows.insert(id, window);");
+        let publish = first.find("self.publish_window_directory();");
+        assert!(
+            matches!((insert, publish), (Some(i), Some(p)) if i < p),
+            "the first window is missing from the directory until the turn's              head walks it:
+{first}"
+        );
+        let tell = method_body("FolioApp", "tell_the_update_job");
+        let settle = tell.find("self.settle_update_card()?;");
+        let line = tell.find("LaunchRequest::told_line(");
+        assert!(
+            matches!((settle, line), (Some(s), Some(l)) if s < l)
+                && tell.contains("app.update_shown.card"),
+            "the log line is not said from where the settle placed the card:
+{tell}"
         );
     }
 
@@ -61411,11 +61478,14 @@ impl FolioApp {
     /// **Write down every window this process has open** (B9, user ruling
     /// 2026-08-25), for the menu that names them.
     ///
-    /// Once a turn, before any window takes its own: the row a menu draws has to
-    /// be true of the run as it stands this frame, and a directory each of the
-    /// four window doors kept up to date would be one invariant living in four
-    /// places. A handful of windows walked once a turn is cheaper than that
-    /// bookkeeping and cannot go stale.
+    /// At each turn's head, before any window takes its own, and again
+    /// wherever a window enters the registry (the window door and the first
+    /// window): the row a menu draws has to be true of the run as it stands
+    /// this frame, the doors later in a turn read it too, and a directory each
+    /// of the four window doors kept up to date entry by entry would be one
+    /// invariant living in four places. Walking a handful of windows is cheaper
+    /// than that bookkeeping. A window closed mid-turn stays named until the
+    /// next turn's walk.
     fn publish_window_directory(&mut self) {
         // **A window that has been closed is not open** (§7.35). It stays in the
         // registry until its engines let go, and for that handful of seconds a
@@ -61576,6 +61646,12 @@ impl FolioApp {
             let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
             let door = opened_at.elapsed();
             self.windows.insert(id, window);
+            // **The directory names the window from the moment it exists**: the
+            // doors after this one in the same turn read it — the launch that
+            // opened it seats the update card it carried there, and a second
+            // launch in the turn lands beside it — and a window missing from the
+            // list is a window they move away from.
+            self.publish_window_directory();
             // **The tear-out's second half, in the turn its first half ran in**
             // (F1c). The window is standing at the rectangle the hand named and
             // **has not been shown**, so the stand-in tab it opened holding is
@@ -61671,7 +61747,10 @@ impl FolioApp {
     /// **And the card follows in this turn**: [`Self::settle_update_card`]
     /// runs at the turn's head, before this, so it is asked again here; the
     /// card is drawn in its window and every window's About → Version row is
-    /// repainted by that one comparison.
+    /// repainted by that one comparison. A window the launch opened is already
+    /// in the directory that settle reads ([`Self::open_pending_window`] names
+    /// it as it opens it); were it not, the settle would take the card for one
+    /// whose window had closed and seat it in another.
     fn tell_the_update_job(
         &mut self,
         request: &launch_wire::LaunchRequest,
@@ -61683,12 +61762,14 @@ impl FolioApp {
         let Some(raised) = request.told(&mut app.update_job, landed) else {
             return Ok(());
         };
-        diagnostics::note(if raised {
-            "Folio: update job — a launch handed over reports an earlier update's failure; its card is raised"
-        } else {
-            "Folio: update job — a launch handed over reports an earlier update's failure; the running update keeps the card"
-        });
-        self.settle_update_card()
+        self.settle_update_card()?;
+        // **Said from where the card was placed**, not from what the job was
+        // asked: the window the settle left it in is the one that draws it.
+        if let Some(app) = self.app.as_ref() {
+            let shown = app.update_shown.card.as_ref().map(|(window, _)| *window);
+            diagnostics::note(launch_wire::LaunchRequest::told_line(raised, landed, shown));
+        }
+        Ok(())
     }
 
     /// **One request, landed**, and the window it landed in.
@@ -63785,9 +63866,9 @@ impl FolioApp {
             return;
         }
         // **The directory before anything reads it** (B9): a menu drawn this
-        // turn names the windows this turn has, and the doors below can open one
-        // or close one — which the next turn's walk will say, exactly as it says
-        // every other change to the run.
+        // turn names the windows this turn has. A window the doors below open is
+        // named by the window door as it opens it; one they close is taken out
+        // by the next turn's walk.
         self.publish_window_directory();
         // **Whether a page is open anywhere** (ticket 60), for the spare's stage.
         let pages_open = self
@@ -64256,6 +64337,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let id = window.window.id();
                 self.app = Some(app);
                 self.windows.insert(id, window);
+                // Named in the directory from the moment it exists, as the
+                // window door names every later one.
+                self.publish_window_directory();
                 // **The bar, once, and here** (M3-2): the shortcut table it is
                 // built from was read a statement ago, and this is the first
                 // moment there is an application to hang a bar on. Off macOS it
@@ -64427,6 +64511,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::UpdateJobProgress => {
                 if let Some(app) = self.app.as_mut() {
                     app.update_job.drain_progress();
+                    app.restart_when_asked();
                 }
                 Ok(())
             }

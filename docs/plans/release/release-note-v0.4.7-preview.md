@@ -4,8 +4,7 @@
 
 **Download:** [zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.7-preview/folio-0.4.7-windows-x64.zip) (Windows 10 1809+ / 11, 64-bit) · [dmg](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.7-preview/Folio-0.4.7-macos-arm64.dmg) (macOS 14+, Apple silicon)
 
-<!-- DRAFT: the Chinese download line and the link to the Chinese note go here, written by the translation lane
-     (shape of 0.4.6: "**下载：** … [中文版发布说明](…/release-note-v0.4.7-preview.zh-CN.md)"). Remove this comment. -->
+**下载：** 上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/main/docs/plans/release/release-note-v0.4.7-preview.zh-CN.md)
 
 ## Highlights
 
@@ -110,6 +109,11 @@
   Folio is running has them.
 - Rarely, Folio's first window waits a moment at launch while it looks up the
   programs installed on the machine.
+- Windows: if Folio is ended from outside (Task Manager, `Stop-Process`) or
+  crashes at the moment it is starting one of the commands it runs to learn
+  about the machine, that command can stay behind, paused, until it is ended in
+  Task Manager. macOS: after a force quit or a crash, such a command finishes
+  on its own instead of being stopped.
 
 <details>
 <summary>Install notes (SmartScreen, Gatekeeper, checksums)</summary>

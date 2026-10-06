@@ -1037,6 +1037,91 @@ fn uninstall_archive_has_ten_files_and_a_one_press_wrapper() {
     }
 }
 
+/// RED (0.4.7 uninstall fix) — **the shipped `uninstall.cmd`, run by the real `cmd.exe`, asks
+/// its one question and starts the `folio.exe` beside it with `--uninstall` — and
+/// `--remove-data` only on `n` — whatever code page the console had when it started.**
+///
+/// The script is the archive's own bytes; the `folio.exe` beside it is a stand-in whose exit code
+/// is the length of the command line it was started with
+/// (`trust_harness::Behaviour::SaysItsCommandLineLength`), which the script hands back as its own.
+/// It runs once in the console's own code page and once after `chcp 65001`, as the clean-VM
+/// rehearsal ran it; the answer is read from a file, as a typed line is.
+///
+/// The clean-VM rehearsal of 0.4.7 met the script shipped with LF line endings: `cmd.exe` reads a
+/// batch file a line at a time and finds its place again by offset, and in a file of LF-only
+/// lines holding UTF-8 text it lost its place — fragments of lines ran as commands, and
+/// `folio.exe` was never started.
+///
+/// MUTATION: write the script with its CRs removed (the shipped bytes before this fix); the
+/// stand-in is not started with the expected line.
+#[test]
+#[cfg(windows)]
+fn the_shipped_uninstall_script_answers_its_question_in_the_real_cmd() {
+    let (root, _) = sandbox("uninstall-cmd");
+    let folder = root.join("folio");
+    fs::create_dir_all(&folder).unwrap();
+    let stand_in = folder.join("folio.exe");
+    bt_platform::trust_harness::program(
+        &stand_in,
+        bt_platform::trust::FileVersion([0, 4, 7, 0]),
+        bt_platform::trust_harness::Behaviour::SaysItsCommandLineLength,
+    )
+    .unwrap();
+    let script = folder.join("uninstall.cmd");
+    fs::write(&script, include_bytes!("../../../packaging/uninstall.cmd")).unwrap();
+    let answer = root.join("answer.txt");
+    // The test shell's door: `cmd.exe` with its AutoRun refused (`/d`), under a temporary home.
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    // A script `cmd.exe` mis-reads runs fragments of its lines as commands — on the clean VM,
+    // `Folio` among them. So it finds programs in the system folder alone (where `chcp` is) and
+    // starts in a folder with nothing in it: no fragment reaches a program on this machine's
+    // `PATH`, such as the `folio.exe` a build puts there.
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let empty = root.join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let run = |typed: &str, first: &str| {
+        use std::os::windows::process::CommandExt;
+        fs::write(&answer, format!("{typed}\r\n")).unwrap();
+        let output = hygiene
+            .command("cmd.exe", bt_platform::quiet_command)
+            .arg("/c")
+            // `cmd /c` takes away the first and the last quote of a line that begins with one.
+            .raw_arg(format!("\"{first}\"{}\"\"", script.display()))
+            .env("PATH", &system)
+            .current_dir(&empty)
+            .stdin(fs::File::open(&answer).unwrap())
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+    // `cmd.exe` starts a program with the program as the line wrote it, a space, and the rest of
+    // the line as written — its leading space included, and the space an empty `%remove%` leaves.
+    let started_with = |rest: &str| {
+        let line = format!("\"{}\" {rest}", stand_in.display());
+        i32::try_from(2 * line.encode_utf16().count()).unwrap()
+    };
+    for first in ["", "chcp 65001 >nul <nul & "] {
+        for (typed, tail) in [
+            ("", " --uninstall "),
+            ("Y", " --uninstall "),
+            ("n", " --uninstall --remove-data"),
+        ] {
+            let (code, stdout) = run(typed, first);
+            assert_eq!(
+                code,
+                Some(started_with(tail)),
+                "{first:?} {typed:?}:
+{stdout}"
+            );
+            assert!(stdout.contains("Keep settings and data? [Y/n]"), "{stdout}");
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// An uninstaller must not bring anything into existence. An account that never ran
 /// Folio has no marks to remove, and the door has to be able to say so without writing
 /// the record — or its lock, or the data root — to say it.
@@ -2345,6 +2430,99 @@ fn the_door_waits_for_the_folio_that_asked_before_it_touches_anything() {
     });
     assert_eq!(code, 2);
     fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (0.4.7 uninstall fix) — **the door waits for the Folio that asked until that process has
+/// let go of what it held, not until it has said its exit code.**
+///
+/// The asker is a real process — a copy of this test binary — that takes the data directory's
+/// claim the way a Folio does (`persist::is_writer_of`) and leaves by Folio's own way out
+/// (`leave_process`). It is held at its end (`trust_harness::stopped_at_exit`): its exit code
+/// said, its claim not yet let go. There the door, with the real wait (`waited_for`) at a bound of
+/// nothing and the real cleanup (`execute`, the kernel claim), answers that a Folio is running
+/// **from its wait**, before any claim is asked — and nothing is touched. Once the asker has gone,
+/// the same door completes and reaches the program's step.
+///
+/// This is the clean-VM rehearsal's failure (two of two in-app uninstalls): the door saw the
+/// asker's exit code, took the asker for gone, and was refused the claim the asker still held —
+/// "A Folio instance is running" with "Program files (per-copy): kept". No earlier test met it:
+/// every door test handed the wait a seam or no asker, and none had a real process holding the
+/// claim while it left.
+///
+/// MUTATION: in `bt_platform::install_flip`'s Windows arm, `creation_of` asks the exit code
+/// instead of whether the process object is signalled; the door then answers from the claim, with
+/// the program row "kept".
+#[test]
+#[cfg(windows)]
+fn the_door_waits_until_the_asker_has_let_go_of_its_claim() {
+    if let Ok(data) = std::env::var("BT_UNINSTALL_ASKER_CHILD") {
+        // The asker: the data directory's claim, as a Folio takes it; its identity; Folio's way
+        // out.
+        assert!(crate::persist::is_writer_of(Path::new(&data)));
+        let me = std::process::id();
+        let started = bt_platform::install_flip::started_of(me).unwrap();
+        fs::write(Path::new(&data).join("asker"), format!("{me} {started}")).unwrap();
+        bt_platform::leave_process(0);
+    }
+    let (root, scope) = sandbox("uninstall-asker");
+    fs::create_dir_all(&scope.data[0]).unwrap();
+    let scope = std::sync::Arc::new(scope);
+    let mut command = bt_platform::quiet_command(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "uninstall::tests::the_door_waits_until_the_asker_has_let_go_of_its_claim",
+            "--nocapture",
+        ])
+        .env("BT_UNINSTALL_ASKER_CHILD", &scope.data[0])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let asker = || {
+        let said = fs::read_to_string(scope.data[0].join("asker")).unwrap();
+        let (pid, started) = said.split_once(' ').unwrap();
+        Running {
+            pid: pid.parse().unwrap(),
+            started: started.parse().unwrap(),
+        }
+    };
+    let door = |within: Duration| {
+        let scope = scope.clone();
+        let asker = asker();
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let report = {
+            let reached = reached.clone();
+            on_a_worker(move |worker| {
+                uninstall(
+                    worker,
+                    &scope,
+                    Some(asker),
+                    within,
+                    |scope, program| super::execute(scope, false, system_absent, Some(program)),
+                    |_| {
+                        reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Vec::new()
+                    },
+                )
+            })
+        };
+        (
+            report.code,
+            report.stdout(),
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    };
+    let (at_its_end, status) =
+        bt_platform::trust_harness::stopped_at_exit(&mut command, |_, _| door(Duration::ZERO))
+            .unwrap();
+    assert_eq!(status.code(), Some(0));
+    let running = Report::blocked(Why::Said(Text::CleanupRunning))
+        .in_lang(scope.lang)
+        .stdout();
+    assert_eq!(at_its_end, (2, running, false));
+    let (code, stdout, reached) = door(AFTER_PID_WITHIN);
+    assert_eq!((code, reached), (0, true), "{stdout}");
+    fs::remove_dir_all(&root).unwrap();
 }
 
 /// RED (T-UNINSTALL-UX) — **the door's lines are in the language `settings.json` names; with no

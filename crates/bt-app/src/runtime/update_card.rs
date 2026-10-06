@@ -30,10 +30,15 @@ pub(crate) enum VersionEffect {
 /// (T-UPDATE-ON-ABOUT round 2, R1–R3).
 ///
 /// *Restart…* raises the card again for a job waiting at `Verified`
-/// (`Job::reopen`, as the row's foot always did) — and so does an *Update and
-/// restart* drawn before the job got there; *Update and restart* presses the card's `Update`
-/// on an `Available` offer, and from `Idle` first raises the asked offer
-/// (`Job::offer_again`) in `window`. *Retry* closes a failed card that is still
+/// (`Job::reopen`, as the row's foot always did). *Update and restart* presses
+/// the card's `Update` on an `Available` offer, and from `Idle` first raises the
+/// asked offer (`Job::offer_again`) in `window` — and **it asks for the restart
+/// too** (N10, the owner's ruling of 2026-10-06: the button does what it says):
+/// the transaction it started restarts when it is verified, without the Ready
+/// card asking again (`Job::ask_restart_when_ready`; the application spends it
+/// through `App::restart_when_asked`). An *Update and restart* drawn before the
+/// job got to `Verified` raises the Ready card in `window` and asks the same
+/// restart, so that a refused restart leaves that card up. *Retry* closes a failed card that is still
 /// up (its Later), raises the asked offer and presses `Update` — one new
 /// attempt, and nothing at all while the job cannot raise it. A free function
 /// over the job, the driver and the transport, so the dispatcher's roads run
@@ -52,12 +57,13 @@ pub(crate) fn dispatch_version_control<W: Copy + Eq>(
         update_card::VersionControl::UpdateAndRestart => {
             if matches!(job.state(), update_job::State::Verified(_)) {
                 job.reopen(window);
-                return VersionEffect::None;
+            } else {
+                job.offer_again(window, known_offer);
+                if matches!(job.state(), update_job::State::Available(_)) {
+                    let _ = job.answer_verb(update_job::Verb::Press, driver, transport);
+                }
             }
-            job.offer_again(window, known_offer);
-            if matches!(job.state(), update_job::State::Available(_)) {
-                let _ = job.answer_verb(update_job::Verb::Press, driver, transport);
-            }
+            job.ask_restart_when_ready();
             VersionEffect::None
         }
         update_card::VersionControl::Retry { enabled: true } => {
@@ -362,6 +368,9 @@ impl Runtime<'_> {
             }
             VersionEffect::None => {}
         }
+        // A press at `Verified` is due at once; a download's is due when its
+        // report lands (`AppEvent::UpdateJobProgress`).
+        self.app.restart_when_asked();
         Ok(())
     }
 }
@@ -381,8 +390,8 @@ mod tests {
     use crate::update::CheckView;
     use crate::update_card::{VersionControl, VersionRow, version_row};
     use crate::update_job::{
-        Driver, Failure, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters, Refused,
-        SharedTransport, State, Step, Stop, Verb,
+        Abandon, Driver, Failure, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters,
+        Progress, Refused, SharedTransport, State, Step, Stop, Verb,
     };
     use crate::update_txn::TxnId;
 
@@ -607,10 +616,11 @@ mod tests {
         }
     }
 
-    /// RED (T-UPDATE-ON-ABOUT round 2, R2) — **a job waiting at Verified is
-    /// raised again, not restarted, by Update and restart** (the row's foot's
-    /// road before this ticket): the card comes up in the pressed window and
-    /// the job stays Verified.
+    /// RED (T-UPDATE-ON-ABOUT round 2, R2; N10) — **an Update and restart
+    /// drawn before the job got to Verified asks the restart at once, over its
+    /// Ready card**: nothing is downloaded again, the card is up in the pressed
+    /// window (what a refused restart leaves standing), and the restart is due
+    /// now.
     ///
     /// MUTATION: drop the `Verified` arm so the press falls through to
     /// `offer_again`; the card stays where it was.
@@ -632,6 +642,183 @@ mod tests {
         assert!(matches!(job.state(), State::Verified(_)));
         assert_eq!(job.card_window(), Some(3));
         assert_eq!(driver.count.get(), 0);
+        assert!(job.take_asked_restart(), "the press's restart is due now");
+    }
+
+    /// The offer put away with Later, then About → Version's *Update and
+    /// restart* pressed in window 2: the road N10 was found on.
+    fn pressed_from_about(driver: &Starts) -> Job<u32> {
+        let mut job = offered();
+        job.answer_verb(Verb::Later, driver, &no_door())
+            .expect("Later");
+        let shown = row(&job, "v0.4.7");
+        assert_eq!(shown.control, VersionControl::UpdateAndRestart);
+        assert!(shown.value.ends_with("v0.4.7 available"), "{}", shown.value);
+        dispatch_version_control(
+            &mut job,
+            2,
+            &shown.control,
+            Some("v0.4.7"),
+            driver,
+            &no_door(),
+        );
+        assert!(matches!(job.state(), State::Downloading(..)));
+        job
+    }
+
+    /// RED (N10, the owner's ruling A of 2026-10-06) — **About → Version's
+    /// Update and restart downloads, verifies and then restarts without asking
+    /// again**; Version says what the job is doing all the way: `Downloading`,
+    /// `Verifying`, then `Restarting…`. The restart is due exactly once, at
+    /// `Verified`, and goes through the Ready card's own Restart
+    /// (`Job::restart`, what `App::restart_for_update` moves). The card's own
+    /// Update is the other road: it stops at the Ready card, as before.
+    ///
+    /// MUTATIONS, observed red: (a) drop `job.ask_restart_when_ready()` from
+    /// the `UpdateAndRestart` arm of `dispatch_version_control` — nothing is due
+    /// at `Verified`; (b) make `Job::take_asked_restart` answer `false` always.
+    #[test]
+    fn update_and_restart_on_about_restarts_once_the_download_is_verified() {
+        let driver = Starts::default();
+        let mut job = pressed_from_about(&driver);
+        assert!(job.restart_is_asked());
+        let downloading = row(&job, "v0.4.7");
+        assert!(
+            downloading.value.ends_with("Downloading v0.4.7"),
+            "{}",
+            downloading.value
+        );
+        assert!(!job.take_asked_restart(), "not due while downloading");
+
+        let poster = driver.posters.borrow()[0].clone();
+        poster.post(Step::Staged);
+        assert_eq!(job.drain_progress(), 0);
+        let verifying = row(&job, "v0.4.7");
+        assert!(
+            verifying.value.ends_with("Verifying v0.4.7"),
+            "{}",
+            verifying.value
+        );
+        assert_eq!(verifying.control, VersionControl::Downloaded);
+        assert!(!job.take_asked_restart(), "not due while verifying");
+
+        poster.post(Step::Verified);
+        assert_eq!(job.drain_progress(), 0);
+        assert!(matches!(job.state(), State::Verified(_)));
+        assert!(job.take_asked_restart(), "due at Verified");
+        assert!(!job.take_asked_restart(), "and only once");
+        job.restart().expect("the Ready card's Restart");
+        let restarting = row(&job, "v0.4.7");
+        assert!(
+            restarting.value.ends_with("Restarting…"),
+            "{}",
+            restarting.value
+        );
+        assert_eq!(restarting.control, VersionControl::Downloaded);
+        assert_eq!(job.card_window(), None, "no Ready card asks again");
+
+        // The card's own Update: the Ready card asks, and nothing is due.
+        let driver = Starts::default();
+        let mut job = offered();
+        job.answer_verb(Verb::Press, &driver, &no_door())
+            .expect("the card's Update");
+        let poster = driver.posters.borrow()[0].clone();
+        poster.post(Step::Staged);
+        poster.post(Step::Verified);
+        assert_eq!(job.drain_progress(), 0);
+        assert!(matches!(job.state(), State::Verified(_)));
+        assert!(!job.take_asked_restart(), "the card road asks first");
+        assert_eq!(job.card_window(), Some(1), "the Ready card is up");
+    }
+
+    /// RED (N10) — **a restart the application refuses falls back to the Ready
+    /// card**: the ask is spent, the job stays `Verified`, the card is up in the
+    /// window the row was pressed in — even after the download's card was put
+    /// away with Later — and Version says `v0.4.7 ready` with `Restart…`. The
+    /// same holds when the quit itself gives the update up (Cancel on its card):
+    /// the job is back at `Verified` and nothing restarts by itself again.
+    ///
+    /// MUTATION, observed red: drop `self.restart_asked = None` from
+    /// `Job::take_asked_restart` — the refused restart stays due and would fire
+    /// again on the next report.
+    #[test]
+    fn a_refused_asked_restart_falls_back_to_the_ready_card() {
+        let driver = Starts::default();
+        let mut job = pressed_from_about(&driver);
+        job.answer_verb(Verb::Later, &driver, &no_door())
+            .expect("Escape on the download card");
+        assert_eq!(job.card_window(), None);
+        assert!(
+            job.restart_is_asked(),
+            "putting the card away keeps the ask"
+        );
+        let poster = driver.posters.borrow()[0].clone();
+        poster.post(Step::Staged);
+        poster.post(Step::Verified);
+        assert_eq!(job.drain_progress(), 0);
+
+        // `App::restart_for_update` refused (a quit already asked for): the
+        // job is not moved.
+        assert!(job.take_asked_restart());
+        let ready = |job: &Job<u32>| {
+            let shown = row(job, "v0.4.7");
+            assert!(shown.value.ends_with("v0.4.7 ready"), "{}", shown.value);
+            assert_eq!(shown.control, VersionControl::Restart);
+            assert_eq!(job.card_window(), Some(2), "the Ready card, where pressed");
+        };
+        ready(&job);
+        assert!(!job.take_asked_restart(), "the ask is spent");
+        assert!(!job.restart_is_asked());
+
+        // Restart taken, then the quit gave the update up.
+        job.restart().expect("the Ready card's Restart");
+        let txn = job.state().offer().map(Offer::txn).expect("an offer");
+        job.apply(Progress {
+            txn,
+            step: Step::QuitAbandoned(Abandon::Cancelled),
+        });
+        assert!(matches!(job.state(), State::Verified(_)));
+        ready(&job);
+        assert!(
+            !job.take_asked_restart(),
+            "nothing restarts by itself again"
+        );
+    }
+
+    /// RED (N10) — **the ask does not outlive the press's transaction**: a
+    /// failed download, a Cancel, and another offer each let it go — the next
+    /// transaction, reached by the card's own Update, stops at the Ready card.
+    ///
+    /// MUTATION, observed red: empty
+    /// `Job::keep_the_asked_restart_in_its_transaction` — the failure and the
+    /// Cancel keep the ask.
+    #[test]
+    fn the_asked_restart_is_let_go_on_failure_cancel_and_another_offer() {
+        // Failure.
+        let driver = Starts::default();
+        let mut job = pressed_from_about(&driver);
+        driver.posters.borrow()[0].post(Step::Stopped(Stop::Download));
+        assert_eq!(job.drain_progress(), 0);
+        assert!(matches!(job.state(), State::Failed(..)));
+        assert!(!job.restart_is_asked(), "a failure lets it go");
+
+        // Cancel, then another offer started by the card's own Update.
+        let driver = Starts::default();
+        let mut job = pressed_from_about(&driver);
+        job.answer_verb(Verb::Cancel, &driver, &no_door())
+            .expect("Cancel");
+        assert!(!job.restart_is_asked(), "a Cancel lets it go");
+        consider(&mut job, "v0.4.8");
+        assert!(job.offer_again(1, Some("v0.4.8")));
+        job.answer_verb(Verb::Press, &driver, &no_door())
+            .expect("the card's Update");
+        assert!(!job.restart_is_asked(), "another offer is not asked");
+        let poster = driver.posters.borrow()[1].clone();
+        poster.post(Step::Staged);
+        poster.post(Step::Verified);
+        assert_eq!(job.drain_progress(), 0);
+        assert!(matches!(job.state(), State::Verified(offer) if offer.tag() == "v0.4.8"));
+        assert!(!job.take_asked_restart(), "its Ready card asks");
     }
 
     /// RED (047-EXPERIENCE) — **the row a verified job draws is `Restart…`, and pressing it
