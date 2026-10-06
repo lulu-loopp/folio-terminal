@@ -2986,6 +2986,20 @@ impl Runtime<'_> {
     /// stands inside two other functions, and a name it kept would be charged to
     /// the keystroke or the turn that came after it.
     pub(crate) fn flush_dropped_files(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let refused_batch = self
+                .window
+                .pending_external_drop
+                .as_mut()
+                .is_some_and(|pending| {
+                    pending.batch_open = false;
+                    pending.refused
+                });
+            if refused_batch {
+                self.window.pending_external_drop = None;
+            }
+        }
         let Some(batch) = self.window.dropped_files.take() else {
             return Ok(());
         };
