@@ -1758,8 +1758,8 @@ pub enum RenderError {
         context: wgpu::TextureFormat,
         surface: wgpu::TextureFormat,
     },
-    /// The adapter did not offer a supported composite alpha mode for this
-    /// target.
+    /// The adapter did not offer the one composite alpha mode this target has to
+    /// be configured with.
     ///
     /// An error and never a substitution, for the same reason as
     /// [`RenderError::FormatMismatch`]: a composition-visual surface quietly
@@ -1767,7 +1767,7 @@ pub enum RenderError {
     /// have destroyed the property the whole slice exists to establish, with no
     /// symptom until a web preview is asked to show through it.
     #[error(
-        "the {target:?} surface cannot use a supported alpha mode (primary {required:?}); this adapter offered {offered:?}"
+        "a {target:?} surface must be configured {required:?}, and this adapter offered {offered:?}"
     )]
     AlphaModeUnavailable {
         target: WindowTargetKind,
