@@ -32,10 +32,8 @@ use std::time::Instant;
 use winit::event::Ime;
 
 impl Runtime<'_> {
-    /// **`Copy` on a row whose execution policy the user can change**: put the one command on
-    /// the clipboard and say so only after the platform's clipboard path accepts it. Linux holds
-    /// the toast as a lane effect until native ownership is confirmed; other platforms keep the
-    /// synchronous clipboard write.
+    /// **`Copy` on a row whose execution policy the user can change**: put the command on the
+    /// clipboard and say so only after the platform accepts the write.
     pub(crate) fn copy_policy_command(&mut self) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
@@ -60,9 +58,8 @@ impl Runtime<'_> {
         }
     }
 
-    /// Submit one copy using the platform's clipboard path. Linux admission
-    /// moves this action's immutable text into the process lane; other
-    /// platforms keep their current synchronous write.
+    /// Submit one copy through the platform's clipboard path, and apply its
+    /// effect only after the write succeeds.
     pub(crate) fn submit_clipboard_write(
         &mut self,
         text: String,
@@ -133,6 +130,8 @@ impl Runtime<'_> {
         #[cfg(not(target_os = "linux"))]
         {
             if let Err(error) = write_terminal_clipboard_text(&text) {
+                // Recoverable on `recoverable_clipboard_write`'s terms: the
+                // selection stays standing so the reader can try again.
                 eprintln!("recoverable preview copy failure: {error:#}");
                 return false;
             }
@@ -163,6 +162,9 @@ impl Runtime<'_> {
         else {
             return;
         };
+        // **Only a copy that landed says it landed** (owner ruling 2026-09-14 ②).
+        // Linux applies its acknowledgement after confirmed native publication;
+        // the synchronous platforms apply it after their write succeeds.
         #[cfg(target_os = "linux")]
         {
             let effect = ClipboardWriteEffect::MathCopied {

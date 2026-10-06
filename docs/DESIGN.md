@@ -14198,3 +14198,21 @@ Pinned by `the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_l
 **剪贴板读写归一条 lane 所有。** Linux 的每次复制与粘贴都离开窗口线程,进一条进程级 `linux_clipboard_lane::ClipboardLane`(设计与评审记录在 `docs/plans/design/linux-clipboard-read.md`、`linux-clipboard-write.md` 及其 review)。首次 admission 时经 `spawn_at_priority` 启动;预算是八条等待操作、一条活跃操作、一份持守结果;一条四秒的 deadline 从 admission 起算。FIFO 保住 read→copy→read 与 Copy→Paste 的次序;窗口 apply 或 discard 每条结果、并按确切的 request id 确认之后,下一条操作才开始。read 钉一个 X11 selection 区间或一个 Wayland offer,在其上逐级要 MIME;文本与 URI 以 8 MiB、PNG 以 256 MiB、本地文件列表以 4,096 条为界;write 保留源文本的 owned 快照,X11 与 Wayland 各自保有自己的 serving candidate,直到同连接的 server barrier 才报成功。destination retirement 触发 read 取消;adoption 复核窗口、destination 实例与当前 keyboard owner。shutdown 关闭 admission、取消 lane,借现有的 desktop-retirement cutoff 收割 lane 与 owner:完成的 worker 被 join,cutoff 之后仍在 serving 的 owner 留在进程 owner 名册里走原有的 continue-shutdown 路径。
 
 **退出时的桌面收割是本移植的设计选择(this port's design choice)。** 事件循环返回、`drop(application)` 之后,`fn main` 起一个 retirement worker 接手剪贴板与 trash 等 owner,退出线程自己最多等 `SESSION_SAVE_BUDGET`(3 s):只在 worker 报告完成时 join,超时写一条诊断、丢下 join handle、继续 `UpdateLeave` 与进程退出,不重试也不再等。这条选择的内容是复用 Windows session-writer 的 close policy(`T-QUIT-HAS-A-DEADLINE`、`T-QUIT-TIMEOUT-PROCEEDS`):两个平台在一条契约下退出,retirement 留在它的 worker 上,退出线程最多等 `SESSION_SAVE_BUDGET`,卡死的 worker 永远挂不住进程退出。同样的措辞已记录在 `window_waits.tsv` 的 row 30 与 `ARCHITECTURE.md` 注册表的 row 30。Pinned by `linux_desktop_retirement_tests::an_unfinished_retirement_worker_is_left_running_at_the_exit_budget`,它把一只受控 worker 拦在 barrier 上、用零测试预算走一遍 exit 门,先验证超时返回、再放行 worker 让它体面收场。
+
+### 2026-10-06 — Patched clipboard crates have a Linux CI gate
+
+The port keeps `arboard` and `wl-clipboard-rs` as patched path dependencies outside the cross-platform workspace. The Wayland test server uses Linux epoll and cannot join the Windows or macOS workspace test commands. Instead, `core-linux` runs both complete suites through `scripts/ci/linux-vendor-clipboard-tests.py`, using each crate's retained lockfile. Arboard runs on private Xvfb with a real clipboard manager so its ownership-after-drop assertion is tested. The Wayland suite creates protocol servers under a private runtime directory. The harness owns its HOME, XDG directories, display and D-Bus session; it retires its recorded process groups on success or failure. This is the port's choice for review in PR #21; upstreaming the patches remains possible without removing this test gate.
+
+The local run passed Arboard's four unit tests and three documentation tests, and wl-clipboard-rs's 49 unit tests and 18 documentation tests. Windows and macOS keep their existing workspace membership and test commands.
+
+### 2026-10-06 — Current path for the policy-command clipboard pin
+
+The pin named in the 2026-10-04 policy note moved with its implementation. Its current path is `runtime::clipboard::tests::copy_puts_exactly_the_policy_command_on_the_clipboard`; the earlier entry is retained as written.
+
+### 2026-10-06 — Linux summons restore the minimized window before showing it
+
+On Linux, `FolioApp::summon_quake` reads the previous foreground, restores a minimized window through `Runtime::restore_minimized_window`, then shows it and runs the foreground retry. The other platforms keep the existing summon sequence. Pinned by `floated_page_tests::the_foreground_is_read_before_the_summon_and_handed_back_after_it`.
+
+### 2026-10-06 — Linux hand-offs retain the lane worker
+
+Linux dispatches file and address requests through `ShellThread::hand_over_on_worker`, carrying the handoff lane's `WorkerCtx` into the Linux file and process doors.
