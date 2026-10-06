@@ -20,18 +20,18 @@ reading it on, and every row below that has two answers gives both.
 ### The update check
 
 Folio asks GitHub whether a newer release exists. The check itself does nothing
-else with the answer: it draws a mark on the settings gear and a line in
-Settings > General. The answer can also bring up a card offering the newer
-release; nothing is downloaded until you press **Update** on it.
+else with the answer: it draws a mark on the settings gear and a line on the
+**Version** row in Settings > About. The answer can also bring up a card offering
+the newer release; nothing is downloaded until you press **Update** on it.
 
 | | |
 | --- | --- |
 | **Address** | `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` |
 | **Method** | `GET`. No query string, no request body. |
 | **What is sent** | One header: `User-Agent: Folio`. No version, no build, no operating system, no identifier, no cookie. GitHub refuses a request with no user agent at all, which is why the header is not empty. |
-| **How often** | At most once every 24 hours, across every Folio window on the machine — at launch, and again each day while Folio stays open. A failure — no network, a proxy, a rate limit — counts as the attempt for that day and is not retried until the day has passed. |
-| **Where the answer goes** | `update-check.json` in the settings directory below: when the page last answered, when a request last got no answer, the tag it named, the tag you have already been shown, and the tag you chose to skip. |
-| **How to switch it off** | Settings > General > **Update check**, or `"update_check": false` in `settings.json`. On a machine that has never run Folio it is also the first row of the first-run card, where it arrives on and can be switched off before it has ever run. Off, no thread is started, no request is made and `update-check.json` is never written. |
+| **How often** | Automatically, at most once every 24 hours, across every Folio window on the machine — at launch, and again each day while Folio stays open. A failure — no network, a proxy, a rate limit — counts as the attempt for that day and is not retried until the day has passed. And once each time you press **Check** on the Version row, whether or not the automatic check is on. |
+| **Where the answer goes** | `update-check.json` in the settings directory below: when the page last answered, when a request last got no answer, the tag it named, the tag you have already been shown, and the tag you chose to skip. A start with `--update-feed` (below) also marks the stamp and the tag as the local feed's, so a start without it asks the page again. While one request is under way, `update-check.lock` beside it holds the time it started, so a second window does not ask too; it is removed when the request ends. |
+| **How to switch it off** | Settings > About > **Automatic check**, or `"update_check": false` in `settings.json`. On a machine that has never run Folio it is also the first row of the first-run card, where it arrives on and can be switched off before it has ever run. Off, Folio makes no request on its own: nothing at launch and nothing each day. Pressing **Check** still asks once and writes `update-check.json`, and an offer already found, and a download already under way, stay. |
 
 GitHub receives the request the way it receives any request: your IP address and
 the time. Folio adds nothing to that. The request goes through the operating
@@ -51,8 +51,8 @@ the same signer.
 On Windows, when a newer release is published and this copy is one you
 unpacked yourself, a card offers it: **Update**, **Later**, **Skip**. Nothing is
 fetched until you press **Update**. Once the new version is ready, **Restart**
-on the card restarts Folio into it (the **Restart to update** row in Settings >
-General brings the card back); if the new version does not start, the previous
+on the card restarts Folio into it (the **Version** row in Settings > About
+brings the card back); if the new version does not start, the previous
 one is put back. A copy that scoop
 or winget installed gets no card: its row names the manager's own command, with
 a **Copy** button, and the manager does the updating.
@@ -64,7 +64,7 @@ a **Copy** button, and the manager does the updating.
 | **What is checked** | The archive against its checksum, and every signed file in it against the signer of the Folio you are running. Anything else is refused and nothing is changed. |
 | **Where it goes** | A `.folio-update` folder inside Folio's own folder, beside `folio.exe`: the download, the new files, a copy of the running version to fall back on, the update's journal and its log. It goes with the folder. |
 | **What is written outside Folio's folder** | While the new files are being swapped in, one value, `FolioUpdate-<id>`, under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`: it finishes or reverses, at your next logon, an update cut off by a power loss. The update removes it when it ends, and `folio.exe --uninstall-cleanup` removes one left behind for this copy. If the Explorer menu's package is registered, it is registered again at the new version (the Explorer row's own undo, below, covers it). |
-| **How to switch it off** | Switch the update check off (above): no check, no card. |
+| **How to switch it off** | Switch the automatic check off (above): Folio then asks nothing on its own, so no new card comes unless you press **Check**. |
 
 ### Updating (macOS)
 
@@ -84,7 +84,7 @@ releases page.
 | **What is checked** | The image against its checksum; the `Folio.app` inside it against the signature of the Folio you are running (the same Developer ID), its version against the offer and its architecture against this Mac — once on the image and again after it is copied. Anything else is refused and nothing is changed. |
 | **Where it goes** | A hidden folder beside the application, `.Folio.app.folio-update` (in `/Applications` for a copy installed there): the new `Folio.app`, a copy of the running one to fall back on, the update's journal and its log. The image is attached there while it is read and detached after; the download itself is removed once it is read. |
 | **What is written outside that folder** | The application itself, replaced whole in one step with the new one. While that happens, one file, `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`: it finishes or reverses, at your next login, an update cut off by a crash or a power loss. While it exists, macOS may tell you that software from Folio's developer can run in the background. The update removes it when it ends, and `Folio.app/Contents/MacOS/folio --uninstall-cleanup` removes one left behind, together with the hidden folder. |
-| **How to switch it off** | Switch the update check off (above): no check, no card. |
+| **How to switch it off** | Switch the automatic check off (above): Folio then asks nothing on its own, so no new card comes unless you press **Check**. |
 
 ### Settings and session
 
@@ -104,7 +104,7 @@ Delete it and Folio starts as it did the first time.
 | `schemes` | Colour schemes you added. |
 | `session.json`, `session.lock` | The windows, tabs and panes to restore. See below. |
 | `pins.json` | Pinned folders, files and addresses. |
-| `update-check.json` | When the releases page was last asked, the two version tags that answer whether the gear wears a mark, and the version you chose to skip. Written only while the update check is on. |
+| `update-check.json` | When the releases page was last asked, the two version tags that answer whether the gear wears a mark, and the version you chose to skip. Written by the automatic check and by **Check**; `update-check.lock` stands beside it while a request is under way. |
 | `shell-integration` | The scripts Folio writes for the PowerShell, bash and zsh integrations. On Windows the PowerShell one is referenced from a line added to your own `$PROFILE`; the bash and zsh ones are handed to the shell as Folio starts it and touch no file of yours. |
 | `diagnostics.log`, `diagnostics.prev.log` | Program output for a run started without a console. Checked once at startup: at 4 MiB the current log becomes `.prev.log`, replacing the older one. |
 | `hang-reports` | Written only when the window stops answering. Module names and offsets, not stack contents — and on macOS not even those: the entry says that a stack capture is a Windows facility and records the times instead. |
@@ -286,17 +286,17 @@ Folio 记住的一切都在本机，分在两个目录里。
 ### 更新检查
 
 Folio 向 GitHub 询问是否存在更新的版本。检查本身对答案只做一件事：在设置齿轮上画一个标
-记，并在设置 > 常规里显示一行。答案还可能弹出一张卡片提供较新的版本；在你按下
-**Update** 之前不会下载任何内容。
+记，并在设置 > 关于中的**版本**行显示一行。答案还可能弹出一张卡片提供较新的版本；在你
+按下 **Update** 之前不会下载任何内容。
 
 | | |
 | --- | --- |
 | **地址** | `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` |
 | **方法** | `GET`。无 query，无请求体。 |
 | **发送的内容** | 一个请求头：`User-Agent: Folio`。不含版本号、构建号、操作系统、任何标识符或 cookie。GitHub 拒绝不带 user agent 的请求，这是该请求头不为空的原因。 |
-| **频率** | 每 24 小时至多一次，本机所有 Folio 窗口合计。失败——无网络、代理、限流——计入当天的那一次，不重试。 |
-| **答案存放位置** | 下文那个设置目录里的 `update-check.json`：上次询问的时间、返回的 tag，以及你已看到过的 tag。 |
-| **如何关闭** | 设置 > 常规 > **检查新版**，或在 `settings.json` 中写 `"update_check": false`；在从未运行过 Folio 的机器上，它也是初次设置卡的第一行，在那里它默认开启，且可在第一次请求之前关掉。关闭后不启动线程、不发出请求，也不写 `update-check.json`。 |
+| **频率** | 自动检查每 24 小时至多一次，本机所有 Folio 窗口合计——启动时，以及 Folio 保持打开时每天一次。失败——无网络、代理、限流——计入当天的那一次，过一天才重试。此外，每次按下版本行的**检查**都会询问一次，不论自动检查是否开启。 |
+| **答案存放位置** | 下文那个设置目录里的 `update-check.json`：上次收到答案的时间、上次请求未得到答案的时间、返回的 tag、你已看到过的 tag，以及你选择跳过的 tag。使用 `--update-feed`（见下文）启动时，时间戳和 tag 会标记为来自本地源，之后不带该参数启动时重新询问发布页。请求进行期间，旁边的 `update-check.lock` 记录请求开始的时间，防止第二个窗口重复询问；请求结束时删除。 |
+| **如何关闭** | 设置 > 关于 > **自动检查**，或在 `settings.json` 中写 `"update_check": false`。在从未运行过 Folio 的机器上，它也是初次设置卡的第一行，在那里它默认开启，且可在第一次请求之前关掉。关闭后 Folio 不再主动请求：启动时不查，每天也不查。按下**检查**仍会询问一次并写入 `update-check.json`，已找到的版本和正在进行的下载保持不变。 |
 
 GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 不额外附加任何内容。请求通过操作系统自身的 HTTP 栈发出——Windows 上是 WinHTTP，macOS 上是 `NSURLSession`——因此遵循本机已有的代理设置、证书存储和吊销检查，Folio 不携带自己的 HTTP 客户端和证书。macOS 上使用临时会话，每次检查后即销毁，请求之间不缓存任何内容。
 
@@ -304,7 +304,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 
 ### 更新（Windows）
 
-在 Windows 上，当有较新版本发布且当前副本是你自行解压的，会弹出一张卡片：**Update**、**Later**、**Skip**。在你按下 **Update** 之前不会下载任何内容。新版本就绪后，卡片上的 **Restart** 将 Folio 重启到新版本（设置 > 常规中的 **Restart to update** 行可重新调出卡片）；若新版本未能启动，自动恢复到前一版本。通过 scoop 或 winget 安装的副本不会看到卡片：对应行显示包管理器自己的命令和一个 **Copy** 按钮，由包管理器负责更新。
+在 Windows 上，当有较新版本发布且当前副本是你自行解压的，会弹出一张卡片：**Update**、**Later**、**Skip**。在你按下 **Update** 之前不会下载任何内容。新版本就绪后，卡片上的 **Restart** 将 Folio 重启到新版本（设置 > 关于中的**版本**行可重新调出卡片）；若新版本未能启动，自动恢复到前一版本。通过 scoop 或 winget 安装的副本不会看到卡片：对应行显示包管理器自己的命令和一个 **Copy** 按钮，由包管理器负责更新。
 
 | | |
 | --- | --- |
@@ -313,7 +313,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 | **验证内容** | 压缩包与校验值比对，包内每个已签名文件与当前 Folio 的签名者比对。不符则拒绝，不改动任何文件。 |
 | **存放位置** | Folio 自身目录内的 `.folio-update` 文件夹，与 `folio.exe` 同级：下载文件、新版文件、用于回退的旧版副本、更新日志与记录。随目录一起走。 |
 | **目录外写入** | 替换文件期间，在 `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` 下写入一个 `FolioUpdate-<id>` 值：若更新被断电中断，下次登录时由它完成或回滚。更新结束时删除；`folio.exe --uninstall-cleanup` 可清理残留值。若已注册资源管理器菜单的包，则以新版本重新注册（撤销方式见下文资源管理器行）。 |
-| **如何关闭** | 关闭更新检查（上文）：不检查就没有卡片。 |
+| **如何关闭** | 关闭自动检查（上文）：Folio 不再主动询问，因此不会弹出新卡片，除非你按下**检查**。 |
 
 ### 更新（macOS）
 
@@ -326,7 +326,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 | **验证内容** | 映像与校验值比对；映像内的 `Folio.app` 与当前 Folio 的签名者比对（同一 Developer ID），版本与 offer 比对，架构与本机比对——在映像上验一次，拷贝后再验一次。不符则拒绝，不改动任何文件。 |
 | **存放位置** | 应用旁边的隐藏文件夹 `.Folio.app.folio-update`（安装在 `/Applications` 的副本即在该目录下）：新的 `Folio.app`、用于回退的当前版本副本、更新日志与记录。映像在读取期间挂载于此，读完即卸载；下载文件读完即删除。 |
 | **目录外写入** | 应用本身，以新版本一步整体替换。替换期间写入一个文件：`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`——若更新被崩溃或断电中断，下次登录时由它完成或回滚。该文件存在期间，macOS 可能提示你 Folio 开发者的软件可在后台运行。更新结束时删除；`Folio.app/Contents/MacOS/folio --uninstall-cleanup` 可清理残留文件及隐藏文件夹。 |
-| **如何关闭** | 关闭更新检查（上文）：不检查就没有卡片。 |
+| **如何关闭** | 关闭自动检查（上文）：Folio 不再主动询问，因此不会弹出新卡片，除非你按下**检查**。 |
 
 ### 设置与会话
 
@@ -345,7 +345,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 | `schemes\` | 你添加的配色。 |
 | `session.json`、`session.lock` | 待恢复的窗口、标签与窗格。见下。 |
 | `pins.json` | 收藏的文件夹、文件与地址。 |
-| `update-check.json` | 上次询问发布页的时间，以及决定齿轮是否带标记的两个版本 tag。仅在更新检查开启时写入。 |
+| `update-check.json` | 上次询问发布页的时间、决定齿轮是否带标记的两个版本 tag，以及你选择跳过的版本。由自动检查和**检查**写入；请求进行期间，旁边有一个 `update-check.lock`。 |
 | `shell-integration\` | Folio 为 PowerShell 与 bash 整合写出的脚本。 |
 | `diagnostics.log`、`diagnostics.prev.log` | 无控制台启动时的程序输出。只在启动时查一次：到 4 MiB 就把当前这份转成 `.prev.log`，顶掉上一代。 |
 | `hang-reports\` | 只在窗口失去响应时写。记模块名与偏移，不记栈内容。 |

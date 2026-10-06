@@ -578,12 +578,329 @@ pub(crate) mod queue_watch {
     }
 }
 
+/// **What Folio's own `$PROFILE` writes brought into existence**, one entry per profile file:
+/// whether Folio created the file and which folders it created for it, the one copy taken before
+/// its first write into a file that was there, and which edition named that file as its
+/// `$PROFILE` (release read B1, M1, M5).
+///
+/// Recorded **before** the write it describes, under the marks lock, in a file of its own beside
+/// [`RECORD_FILE`]: [`Marks`] is read by the previous version too, with `deny_unknown_fields`
+/// (RULES §41: every mark keeps a format the previous version reads), so a field there would
+/// make an update's rollback refuse the record. A power loss after the record and before the
+/// write leaves an entry naming a file or a copy that is not there, which [`ProfileFiles::retire`]
+/// clears; the other order would leave a file nobody knows is Folio's.
+///
+/// **What the record is used for, and what it never permits.** When Folio takes its line out of a
+/// profile (Undo, the Settings remover, `--remove-shell-integration`, both uninstall verbs),
+/// [`ProfileFiles::retire`] deletes the copy, and deletes the file — then the folders, each only
+/// if empty — when Folio created it and nothing but whitespace is left. A file that was there
+/// before, or that holds anything else, is never deleted. A recorded path is data, never
+/// authority: every one is checked for its shape on reading ([`ProfileFiles::read`]).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileFiles {
+    pub version: u32,
+    pub profiles: Vec<ProfileFile>,
+}
+
+pub const FILES_RECORD: &str = "integration-profile-files.json";
+const FILES_RECORD_VERSION: u32 = 1;
+
+impl Default for ProfileFiles {
+    fn default() -> Self {
+        Self {
+            version: FILES_RECORD_VERSION,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+/// One profile file's entry in [`ProfileFiles`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileFile {
+    pub profile: PathBuf,
+    /// The edition that named this file its `$PROFILE.CurrentUserCurrentHost` when Folio wrote
+    /// into it, so a removal finds the file without asking that edition again.
+    #[serde(default)]
+    pub edition: Option<PowerShellEdition>,
+    /// No file stood here before Folio's write.
+    #[serde(default)]
+    pub created_file: bool,
+    /// The folders Folio created for the file, outermost first.
+    #[serde(default)]
+    pub created_folders: Vec<PathBuf>,
+    /// The copy of the file as it stood before Folio's first write into it — at most one.
+    #[serde(default)]
+    pub backup: Option<PathBuf>,
+    /// The SHA-256 of the bytes that copy holds, recorded with its name before it is written: the
+    /// copy is deleted only while it still holds exactly those bytes, so a file of that name
+    /// that Folio did not write — after a crash between the record and the copy — is never
+    /// Folio's to delete (release read review F3).
+    #[serde(default)]
+    pub backup_sha256: Option<String>,
+}
+
+impl ProfileFile {
+    fn new(profile: &Path) -> Self {
+        Self {
+            profile: profile.to_path_buf(),
+            edition: None,
+            created_file: false,
+            created_folders: Vec::new(),
+            backup: None,
+            backup_sha256: None,
+        }
+    }
+
+    /// Whether every path this entry names has the one shape it can legitimately have: the
+    /// profile a usable `.ps1` ([`recorded_profile_is_usable`]); each folder an ancestor of it;
+    /// the copy beside it, named `<profile>.bak-…` — so a planted record cannot name anything
+    /// else for deletion.
+    fn is_usable(&self) -> bool {
+        let Some(name) = self.profile.file_name() else {
+            return false;
+        };
+        let mut copy = name.to_os_string();
+        copy.push(".bak-");
+        recorded_profile_is_usable(&self.profile)
+            && self.created_folders.iter().all(|folder| {
+                folder.is_absolute()
+                    && folder.parent().is_some()
+                    && !folder
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+                    && self.profile.starts_with(folder)
+                    && *folder != self.profile
+            })
+            && self.backup.as_ref().is_none_or(|backup| {
+                backup.parent() == self.profile.parent()
+                    && backup.file_name().is_some_and(|backup| {
+                        backup
+                            .to_string_lossy()
+                            .starts_with(copy.to_string_lossy().as_ref())
+                    })
+            })
+    }
+}
+
+impl ProfileFiles {
+    pub fn read(data: &Path) -> io::Result<Self> {
+        let path = data.join(FILES_RECORD);
+        super::refuse_profile_path(&path)?;
+        match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e),
+            Ok(bytes) => {
+                let files: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                if files.version != FILES_RECORD_VERSION {
+                    return Err(io::Error::other(Text::ShellMarksVersion.text()));
+                }
+                if !files.profiles.iter().all(ProfileFile::is_usable) {
+                    return Err(io::Error::other(Text::ShellMarksPath.text()));
+                }
+                Ok(files)
+            }
+        }
+    }
+
+    /// Written only under the marks lock ([`lock`]), which has made the data root.
+    pub fn write(&self, data: &Path) -> io::Result<()> {
+        let path = data.join(FILES_RECORD);
+        super::refuse_profile_path(&path)?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
+        bt_persist::atomic_write(&path, &bytes).map_err(io::Error::other)
+    }
+
+    /// The entry for `profile`, if there is one.
+    pub fn entry(&self, profile: &Path) -> Option<&ProfileFile> {
+        self.profiles.iter().find(|entry| entry.profile == profile)
+    }
+
+    fn entry_mut(&mut self, profile: &Path) -> &mut ProfileFile {
+        let index = match self
+            .profiles
+            .iter()
+            .position(|entry| entry.profile == profile)
+        {
+            Some(index) => index,
+            None => {
+                self.profiles.push(ProfileFile::new(profile));
+                self.profiles.len() - 1
+            }
+        };
+        &mut self.profiles[index]
+    }
+
+    /// The profile file a recorded edition named, for every edition the record knows.
+    pub fn located(&self, edition: PowerShellEdition) -> Option<&Path> {
+        self.profiles
+            .iter()
+            .find(|entry| entry.edition == Some(edition))
+            .map(|entry| entry.profile.as_path())
+    }
+
+    /// **Record what the write about to happen will bring into existence** — the file and its
+    /// missing folders when there is no file, or the one copy of a file Folio has not yet
+    /// written into — and answer where that copy goes (`None`: no copy). Called under the marks
+    /// lock, and written before the write.
+    pub fn before_write(
+        &mut self,
+        profile: &Path,
+        edition: Option<PowerShellEdition>,
+        at: std::time::SystemTime,
+    ) -> Option<PathBuf> {
+        let exists = fs::symlink_metadata(profile).is_ok();
+        let entry = self.entry_mut(profile);
+        if edition.is_some() {
+            entry.edition = edition;
+        }
+        if !exists {
+            entry.created_file = true;
+            let mut missing: Vec<PathBuf> = profile
+                .ancestors()
+                .skip(1)
+                .filter(|folder| !folder.as_os_str().is_empty())
+                .take_while(|folder| {
+                    fs::symlink_metadata(folder).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+                })
+                .map(Path::to_path_buf)
+                .collect();
+            missing.reverse();
+            for folder in missing {
+                if folder.parent().is_some() && !entry.created_folders.contains(&folder) {
+                    entry.created_folders.push(folder);
+                }
+            }
+            return None;
+        }
+        if entry.created_file || entry.backup.is_some() {
+            return None;
+        }
+        // The bytes the copy will hold — the file as it stands now, which the write checks again
+        // before it copies; a file that changes in between leaves a copy whose bytes differ, and
+        // that copy is never deleted.
+        let Ok(Some(bytes)) = super::read_profile_for_edit(profile) else {
+            return None;
+        };
+        let copy = super::free_backup_path(profile, at);
+        entry.backup = Some(copy.clone());
+        entry.backup_sha256 = Some(sha256(&bytes));
+        Some(copy)
+    }
+
+    /// **A write recorded by [`Self::before_write`] did not happen**: the entry goes back to what
+    /// it was, keeping any folder the attempt made (each is removed later only if empty), and a
+    /// copy the attempt took is removed — it backs up nothing.
+    pub fn write_failed(&mut self, previous: Option<ProfileFile>, profile: &Path) {
+        let attempted = self.entry(profile).cloned();
+        let mut restored = previous
+            .clone()
+            .unwrap_or_else(|| ProfileFile::new(profile));
+        if let Some(attempted) = attempted {
+            restored.edition = attempted.edition.or(restored.edition);
+            for folder in attempted.created_folders {
+                if !restored.created_folders.contains(&folder) && folder.is_dir() {
+                    restored.created_folders.push(folder);
+                }
+            }
+            if let Some(copy) = attempted.backup
+                && previous.as_ref().and_then(|p| p.backup.as_ref()) != Some(&copy)
+            {
+                let _ = remove_our_copy(&copy, attempted.backup_sha256.as_deref());
+            }
+        }
+        if restored == ProfileFile::new(profile) {
+            self.profiles.retain(|entry| entry.profile != profile);
+        } else {
+            *self.entry_mut(profile) = restored;
+        }
+    }
+
+    /// **Folio's line is out of `profile`; take back what its writes brought into existence**
+    /// (release read B1, M5). Called after a removal of the line succeeded or found no line —
+    /// never after a refused one. The copy is deleted: it existed to undo Folio's write, and the
+    /// write is undone. The file is deleted when Folio created it and nothing but whitespace is
+    /// left — an empty `$PROFILE` is itself refused under `Restricted`, so leaving it would leave
+    /// every session's error — and then each folder Folio created, deepest first, if it is
+    /// empty. A file holding anything else, or one that was there before, stays. Idempotent: a
+    /// file already gone retires its folders; an entry with nothing left keeps only the edition.
+    pub fn retire(&mut self, profile: &Path, forms: &Forms) -> io::Result<()> {
+        let Some(index) = self.profiles.iter().position(|e| e.profile == profile) else {
+            return Ok(());
+        };
+        let remaining = super::read_profile_for_edit(profile)?;
+        if let Some(bytes) = &remaining {
+            let decoded = Decoded::read(bytes).ok();
+            if decoded
+                .as_ref()
+                .is_some_and(|decoded| decoded.text.lines().any(|line| forms.owns(line)))
+            {
+                return Ok(());
+            }
+            let entry = &self.profiles[index];
+            if entry.created_file && decoded.is_some_and(|decoded| decoded.text.trim().is_empty()) {
+                fs::remove_file(profile)?;
+                remove_empty_folders(&entry.created_folders);
+            }
+        } else {
+            remove_empty_folders(&self.profiles[index].created_folders);
+        }
+        let entry = &mut self.profiles[index];
+        if let Some(copy) = entry.backup.take() {
+            if let Err(e) = remove_our_copy(&copy, entry.backup_sha256.as_deref()) {
+                entry.backup = Some(copy);
+                return Err(e);
+            }
+            entry.backup_sha256 = None;
+        }
+        entry.created_file = false;
+        entry.created_folders.clear();
+        if entry.edition.is_none() {
+            self.profiles.remove(index);
+        }
+        Ok(())
+    }
+}
+
+/// SHA-256, lower-case hex.
+fn sha256(bytes: &[u8]) -> String {
+    bt_winres::digest::hex(&bt_winres::digest::sha256(bytes))
+}
+
+/// **Delete a copy Folio recorded, only while it is the copy Folio wrote**: a file at that name
+/// holding exactly the recorded bytes. A name with no file is nothing to do; a file whose bytes
+/// differ — or a record with no digest — is not provably Folio's and stays.
+fn remove_our_copy(copy: &Path, expected: Option<&str>) -> io::Result<()> {
+    let bytes = match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, copy) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if expected.is_some_and(|expected| sha256(&bytes) == expected) {
+        fs::remove_file(copy)?;
+    }
+    Ok(())
+}
+
+/// Each folder, deepest first, removed only if it is empty: a folder somebody has put anything
+/// in stays, whatever the reason the removal gives.
+fn remove_empty_folders(folders: &[PathBuf]) {
+    for folder in folders.iter().rev() {
+        let _ = fs::remove_dir(folder);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fate {
     Unchanged,
     Migrated,
     Removed,
     Refused(String),
+    /// This PowerShell (the report's path is the program) did not say where its `$PROFILE` is,
+    /// and no record names it: a Folio line there, if there is one, stays (release read M1). Not
+    /// a refusal — nothing Folio recorded was left — so it changes no exit code.
+    Unlocated,
 }
 
 #[derive(Clone, Debug)]
@@ -628,6 +945,14 @@ impl Report {
                     Fate::Migrated => (Text::ShellProfileMigrated, ""),
                     Fate::Removed => (Text::ShellProfileRemoved, ""),
                     Fate::Refused(reason) => (Text::ShellProfileRefused, reason.as_str()),
+                    // The program first, then what is left there: the door's own row shape.
+                    Fate::Unlocated => {
+                        return format!(
+                            "{}: {}\n",
+                            f.path.display(),
+                            Text::ShellProfileUnlocated.text()
+                        );
+                    }
                 };
                 format!(
                     "{}: {}{}{}\n",
@@ -710,10 +1035,16 @@ fn plan_recorded(
         .collect()
 }
 
+/// Apply `action` to every path, then — for a removal that succeeded or found nothing — retire
+/// what Folio's writes brought into existence there ([`ProfileFiles::retire`]). No copy is taken:
+/// a removal puts the file back to what Folio's write found, byte for byte outside the line
+/// (`shell_integration_rewrite_table_preserves_every_other_byte`), and the one copy of a file is
+/// taken before Folio's first write into it ([`ProfileFiles::before_write`]).
 pub fn apply_recorded(
     paths: &[PathBuf],
     forms: &Forms,
     action: Action,
+    files: &mut ProfileFiles,
     mut record_owned: impl FnMut(&Path) -> io::Result<()>,
 ) -> Report {
     let mut report = Report::default();
@@ -733,11 +1064,15 @@ pub fn apply_recorded(
         .unwrap();
         if let Some(bytes) = replacement {
             let original = before.unwrap().unwrap_or_default();
-            let result =
-                super::replace_profile(path, &original, &bytes, std::time::SystemTime::now());
-            if let Err(e) = result {
+            if let Err(e) = super::replace_profile(path, &original, &bytes, None) {
                 file.fate = Fate::Refused(e.to_string());
             }
+        }
+        if action == Action::Remove
+            && matches!(file.fate, Fate::Removed | Fate::Unchanged)
+            && let Err(e) = files.retire(path, forms)
+        {
+            file.fate = Fate::Refused(e.to_string());
         }
         report.files.push(file);
     }
@@ -758,6 +1093,7 @@ mod tests {
             std::slice::from_ref(&profile),
             &Forms::new(&[]),
             Action::Migrate,
+            &mut ProfileFiles::default(),
             |path| {
                 calls += 1;
                 assert_eq!(path, profile);
@@ -792,6 +1128,7 @@ mod tests {
                 &script,
                 line,
                 std::time::UNIX_EPOCH,
+                None,
             )
             .unwrap();
             assert_eq!(fs::read_to_string(&profile).unwrap(), line);

@@ -483,7 +483,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn download(folder: &Folder, path: &str, name: &str) -> PathBuf {
     use crate::https_download::{
-        DOWNLOAD_BUDGET, DOWNLOAD_IDLE_TIMEOUT, DownloadMonitor, HttpsDownload,
+        DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT, DownloadMonitor, HttpsDownload,
     };
     let monitor = std::sync::Arc::new(DownloadMonitor::new(|| {}));
     crate::http::https_download(&HttpsDownload {
@@ -494,7 +494,7 @@ fn download(folder: &Folder, path: &str, name: &str) -> PathBuf {
         file_name: name,
         ceiling: 200 * 1024 * 1024,
         idle_timeout: DOWNLOAD_IDLE_TIMEOUT,
-        budget: DOWNLOAD_BUDGET,
+        floor: DOWNLOAD_FLOOR_BYTES,
         monitor: &monitor,
     })
     .unwrap_or_else(|error| panic!("{path}: {error:?}"))
