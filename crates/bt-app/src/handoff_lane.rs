@@ -93,9 +93,7 @@ impl HandoffLane {
         Self::start(
             |ctx| {
                 let shell = bt_platform::ShellThread::enter(ctx);
-                move |_worker: &WorkerCtx, window: NativeWindow, handoff: &Handoff| {
-                    shell.hand_over(window, handoff)
-                }
+                move |window: NativeWindow, handoff: &Handoff| shell.hand_over(window, handoff)
             },
             wake,
         )
@@ -106,7 +104,7 @@ impl HandoffLane {
     fn start<M, E, W>(make_executor: M, wake: W) -> Result<Self>
     where
         M: FnOnce(&WorkerCtx) -> E + Send + 'static,
-        E: FnMut(&WorkerCtx, NativeWindow, &Handoff) -> Result<(), String>,
+        E: FnMut(NativeWindow, &Handoff) -> Result<(), String>,
         W: Fn() + Clone + Send + 'static,
     {
         let (request_tx, request_rx) = mpsc::sync_channel::<Request>(CAPACITY);
@@ -184,16 +182,17 @@ fn run_handoff_lane(
     worker: &WorkerCtx,
     requests: mpsc::Receiver<Request>,
     answers: mpsc::Sender<Completion>,
-    mut execute: impl FnMut(&WorkerCtx, NativeWindow, &Handoff) -> Result<(), String>,
+    mut execute: impl FnMut(NativeWindow, &Handoff) -> Result<(), String>,
     wake: impl Fn(),
 ) {
+    let _ = worker;
     while let Ok(Request {
         id,
         window,
         handoff,
     }) = requests.recv()
     {
-        let outcome = execute(worker, window, &handoff);
+        let outcome = execute(window, &handoff);
         if answers.send(Completion { id, outcome }).is_err() {
             return;
         }
@@ -318,9 +317,7 @@ mod tests {
         let log = Arc::clone(&seen);
         let lane = HandoffLane::start(
             move |_ctx| {
-                move |_worker: &bt_platform::admission::WorkerCtx,
-                      _window: NativeWindow,
-                      handoff: &Handoff| {
+                move |_window: NativeWindow, handoff: &Handoff| {
                     let count = {
                         let mut log = log.lock().expect("the log");
                         log.push(handoff.clone());
@@ -674,9 +671,7 @@ pub(crate) mod contract_adapter {
         let wake = Arc::clone(&probe);
         let lane = HandoffLane::start(
             move |_ctx| {
-                move |_worker: &bt_platform::admission::WorkerCtx,
-                      _window: NativeWindow,
-                      handoff: &Handoff| {
+                move |_window: NativeWindow, handoff: &Handoff| {
                     door.pass(question_of(handoff));
                     Ok(())
                 }
