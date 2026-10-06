@@ -72467,7 +72467,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 18] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 17] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -72476,9 +72476,6 @@ mod platform_gate_tests {
         // The fixture for "an argument is not text", and nothing else — see the
         // module's own note above.
         "cli.rs",
-        // Linux arming and start failures are asynchronous; this owner applies
-        // them to each folder's wake and error policy.
-        "dir_news.rs",
         // The Explorer verb itself, which has no counterpart off Windows.
         "explorer_menu.rs",
         // Drive roots, the recycle bin, and the reveal.
