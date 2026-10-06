@@ -55455,7 +55455,7 @@ fn esc_under_the_restore_card_closes_it_unanswered_and_reaches_nothing_beneath()
     // The unanswered tabs go back to the file: the snapshot carries the window's pending list,
     // and only an answer (the loop's `settle_restore_answer`) clears the application's question.
     assert!(
-        squeezed_body("Runtime", "window_snapshot")
+        squeezed_body("Runtime", "window_snapshot_with_rect")
             .contains(".extend(self.window.pending_restore.iter().map(|tab|TabV1{pinned:false,"),
         "an unanswered question no longer folds back into the session"
     );
