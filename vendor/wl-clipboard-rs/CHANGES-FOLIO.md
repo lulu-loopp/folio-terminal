@@ -63,8 +63,10 @@ enable rustix's `net` feature for the safe nonblocking connection API.
 - Adds an unread-pipe test that fills a transfer pipe, requests cancellation, and joins the owner;
   an external `timeout` process contains the deliberately blocking pre-fix probe.
 - Adds a flush-gated compositor fixture that installs the selection but withholds server replies;
-  the copy remains unconfirmed until same-connection reconciliation, after which a separate read
-  gets the copied text.
+  the test waits until the server loop acknowledges that it withheld a flush, then releases and
+  wakes that loop through a control pipe. The copy remains unconfirmed until same-connection
+  reconciliation, after which a separate read gets the copied text. The fixture no longer relies
+  on the owner deadline or an unrelated Wayland request to wake the compositor.
 
 ### `Cargo.toml` and `Cargo.toml.orig`
 
