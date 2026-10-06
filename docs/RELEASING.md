@@ -70,8 +70,9 @@ is set at the build invocation and cannot be added later by packaging or
 signing: `build-release.yml` sets it on a `v*` tag push, and on a dispatch only
 when given `-f updater=true` (a release dispatched by ref, or the updater-test
 candidate); the macOS release build below carries it on its `cargo build` line;
-`release.yml`, `ci.yml` and every candidate leave it unset. `smoke.ps1` reads the
-answer from the `diagnostics.log` header (`updater on` / `updater off`):
+`release.yml`, `linux-release.yml`, `ci.yml` and every candidate leave it
+unset. `smoke.ps1` reads the answer from the `diagnostics.log` header
+(`updater on` / `updater off`):
 `-ExpectSigned` requires `on`, a signed candidate is smoked with
 `-ExpectSigned -Updater off`, and CI's two smoke runs pass `-Updater off`. It is
 a capability the bytes carry, not proof of where they came from, and it is only
@@ -114,9 +115,26 @@ disagree about the compiler again. The release job passes it `cache: false`: wha
 this job produces is what people run, and a cache is a set of files from another
 run that nothing here verifies.
 
-## The three scripts
+### Linux workflow artifact
 
-The release workflow runs three scripts in this order, and each of them can be
+`.github/workflows/linux-release.yml` runs on `v*` tag pushes and
+`workflow_dispatch`. A dispatch builds the selected branch as a workflow
+artifact without claiming a tag; the version still comes from the workspace
+manifest. The workflow uses the same pinned `toolchain` and `claimed-version`
+actions, builds on `ubuntu-24.04`, runs the licensing gates and the private Xvfb
+and Weston terminal smoke checks, then uploads
+`folio-<version>-linux-x86_64.tar.gz` as a workflow artifact. It does not sign
+the files or attach them to a GitHub Release. `BUILD-INFO.txt` records the
+runner's glibc version and the highest GLIBC symbol version referenced by that
+build; those are measurements for the artifact, not a project-wide supported
+minimum. The packager hashes every shipped file in `SHA256SUMS`, sorts archive
+members, normalizes ownership, sets member times from the source commit, and
+uses a timestamp-free gzip header. The same staged files, build information and
+source commit produce the same archive bytes.
+
+## The Windows archive scripts
+
+The Windows archive workflow runs three scripts in this order, and each can be
 run by hand exactly as it runs there:
 
 | script | what it produces |

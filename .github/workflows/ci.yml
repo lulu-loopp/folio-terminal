@@ -1110,6 +1110,9 @@ jobs:
             gst-inspect-1.0 "$element" >/dev/null
           done
 
+      - name: test Linux installation directory choices
+        run: python3 scripts/release/linux-install-tests.py
+
       # The same fifteen crates `core-macos` checks and in the same order,
       # because they are the same promise: `scripts/check-portable-core.ps1`'s
       # thirteen, plus the vendored terminal they are all downstream of, plus
