@@ -34,6 +34,17 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 impl Runtime<'_> {
+    pub(crate) fn client_size(&self) -> winit::dpi::PhysicalSize<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.last_winit_size.unwrap_or_else(|| {
+                presentation_physical_size(self.window.renderer.presentation_geometry())
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.window.window.inner_size()
+    }
+
     pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
         crate::take_owned_keyboard_focus(&self.window.window)
     }
@@ -98,13 +109,12 @@ impl Runtime<'_> {
             .then_some(plan.saved.as_deref())
             .flatten()
             .and_then(|saved| restore_window_placement(event_loop, saved));
-        let attributes = opening_window_attributes(
-            profiles::title(default_profile),
-            placement.map_or(
-                LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
-                |placement| placement.size,
-            ),
+        let requested_size = placement.map_or(
+            LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+            |placement| placement.size,
         );
+        let attributes =
+            opening_window_attributes(profiles::title(default_profile), requested_size);
         let attributes = match placement.and_then(|placement| placement.position) {
             Some(position) => attributes.with_position(position),
             None => attributes,
@@ -275,7 +285,7 @@ impl Runtime<'_> {
             stood_at,
             "state the new window's outer rectangle",
         );
-        let physical = window.inner_size();
+        let physical = crate::opening_client_allocation(&window, requested_size, initial_rect);
         let scale_factor = dpi_snapshot(&window, initial_rect)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's
         // shape, once per window, because a `Compositor` is parameterised by the
@@ -531,8 +541,6 @@ impl Runtime<'_> {
             custom_window_frame,
             compositor,
             window,
-            #[cfg(target_os = "linux")]
-            winit_rect: initial_rect,
             math_context_menu,
             folder_picker,
             image_picker,
@@ -2118,6 +2126,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn note_winit_size(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         #[cfg(target_os = "linux")]
         {
+            self.window.last_winit_size = Some(size);
             if size.width > 0
                 && size.height > 0
                 && let Some(rect) = self.window.last_winit_rect.as_mut()

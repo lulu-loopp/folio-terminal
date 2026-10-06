@@ -280,7 +280,7 @@ impl Runtime<'_> {
         )?;
         // **The base moved; every pane keeps its rung** (ticket 37) and is re-derived from it.
         self.apply_every_leaf_metrics()?;
-        let physical = self.window.window.inner_size();
+        let physical = self.client_size();
         if physical.width > 0 && physical.height > 0 {
             let render_physical =
                 presentation_physical_size(self.window.renderer.presentation_geometry());
