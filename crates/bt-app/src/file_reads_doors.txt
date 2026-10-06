@@ -90,10 +90,17 @@ shell_integration.rs: replace_profile: .open
 shell_integration/profile_marks.rs: lock: .open
 shell_integration/profile_marks.rs: lock: .read
 shell_integration/profile_marks.rs: rewrite_recorded: Decoded::read
+shell_integration/profile_marks.rs: retire: Decoded::read
 attention_ownership.rs: record: Marks::read
 shell_integration/profile_runtime.rs: operate_with: Marks::read
 shell_integration/profile_runtime.rs: install_recorded: Marks::read
+shell_integration/profile_runtime.rs: install_recorded: ProfileFiles::read
+shell_integration/profile_runtime.rs: operate_with: ProfileFiles::read
+shell_integration/profile_runtime.rs: profile_answers: ProfileFiles::read
+shell_integration/profile_runtime.rs: profile_carries_an_owned_line: Decoded::read
+shell_integration/profile_runtime.rs: undo_profile_install: ProfileFiles::read
 observe_profile_lines: Marks::read
+observe_profile_lines: ProfileFiles::read
 profile_bytes_carry_the_line: Decoded::read
 trace.rs: append: .open
 trace.rs: create: .open

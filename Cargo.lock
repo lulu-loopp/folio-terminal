@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bt-app"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "bt-corpus"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "bt-pty",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "bt-detect"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "bt-doc"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-transcript",
  "thiserror 2.0.18",
@@ -332,14 +332,14 @@ dependencies = [
 
 [[package]]
 name = "bt-layout"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-source",
 ]
 
 [[package]]
 name = "bt-lint-probe"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-platform",
  "bt-pty",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "bt-math"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-doc",
  "bt-platform",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "bt-persist"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-platform",
  "serde",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "bt-platform"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "block2 0.6.2",
  "bt-pty",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "bt-pty"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-platform",
  "bt-pty",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "bt-render"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-detect",
  "bt-doc",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "bt-source"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "proc-macro2",
  "syn 2.0.119",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "bt-term"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "bt-transcript"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bitflags 2.13.0",
  "bt-unicode",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "bt-unicode"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "ttf-parser",
  "unicode-segmentation",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "bt-viewport"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -509,11 +509,11 @@ dependencies = [
 
 [[package]]
 name = "bt-winres"
-version = "0.4.6"
+version = "0.4.7"
 
 [[package]]
 name = "bt-workbench"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bt-layout",
 ]

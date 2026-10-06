@@ -3,12 +3,12 @@
 
 use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
-    FolderPick, FormulaSwitches, HandoverInto, LeafId, LeafSeed, MathHoverExit, MenuPaint,
-    NewWindowPlan, PaneArrival, PaneMotion, Popup, PreviewRestore, PreviewSurface, RenameExit,
-    RenameSubject, RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId,
-    TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
+    FolderPick, FormulaSwitches, HandoverInto, LeafId, MathHoverExit, MenuPaint, NewWindowPlan,
+    PaneArrival, PaneMotion, Popup, PreviewRestore, PreviewSurface, RenameExit, RenameSubject,
+    RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
+    TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_into_layout, absorb_tab_into_strip, attention, blank_page_return, create_tab_state,
-    expire_leaf_attention, float, native_window, new_tab_cwd, notify, pane_can_become_a_tab,
+    expire_leaf_attention, float, native_window, new_tab_leaf_seed, notify, pane_can_become_a_tab,
     pane_into_tab, pane_strip_landing, presentation_physical_size, profiles,
     recoverable_wheel_scroll_amount, restore, row_strip_landing, scrollback_quota, seats, seed,
     settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
@@ -65,7 +65,7 @@ impl Runtime<'_> {
         profile: &str,
         place: Option<PathBuf>,
         source_profile: &str,
-        source_cwd: Option<PathBuf>,
+        source_cwd: Option<profiles::SeedPlace>,
     ) -> Result<()> {
         // No assertion that the table still holds this id, and that is the point
         // of the id: `Duplicate tab` names the profile the source pane is
@@ -76,25 +76,18 @@ impl Runtime<'_> {
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let wake = &self.window.pty_wake;
         let id = self.app.tab_ids.mint();
-        let cwd = new_tab_cwd(
-            profile,
-            place.as_deref(),
-            source_profile,
-            source_cwd.as_deref(),
-        );
         // A lone terminal is `Seats::lone_terminal`'s own seat id, so the map is
         // that one entry — or empty, when the shell you are looking at has never
         // named a folder.
         let seats = seats::Seats::lone_terminal();
         let leaves = BTreeMap::from([(
             seats.identity(),
-            LeafSeed {
-                profile: profile.to_owned(),
-                cwd,
-                unknown_profile_id: None,
-                card_skip: 0,
-                prefill: None,
-            },
+            new_tab_leaf_seed(
+                profile,
+                place.as_deref(),
+                source_profile,
+                source_cwd.as_ref(),
+            ),
         )]);
         let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
         let (tab, _) = create_tab_state(
@@ -1294,7 +1287,7 @@ impl Runtime<'_> {
         let profile = leaf.profile.clone();
         // §7.1.4's ladder, the one `Restart shell` reads: a shell that never reported is in the
         // folder it was put down in.
-        let cwd = leaf.place_for_a_new_shell();
+        let cwd = leaf.seed_place_for_a_new_shell();
         // The source profile *is* the target profile, so `cwd_for_spawn` has no
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the

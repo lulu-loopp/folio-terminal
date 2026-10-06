@@ -7027,6 +7027,10 @@ pub struct SettingsPanel {
     /// **The Profiles rows whose button the latest layout placed** ([`Self::note_placed`]) —
     /// what the keyboard walk is handed, so a button the layout did not place is not a stop.
     placed_buttons: Vec<usize>,
+    /// **The focus order the focus last stood in** ([`Self::keep_focus_reachable`]), so that when
+    /// the control under the focus stops being a stop the focus can go to its neighbour in that
+    /// order — the one fact about where it stood that the new order no longer holds.
+    seen_order: Vec<SettingsTarget>,
     /// **The gear's update mark, carried onto the page it led to** (0.4.6
     /// T-GEAR-MARK-LANDS). Set by [`Self::carry_update_mark`] on the frame this
     /// visit to `About` shows the Version row while the gear is lit — the frame
@@ -7852,6 +7856,21 @@ impl SettingsPanel {
         }
     }
 
+    /// **Every frame's half of [`Self::keep_focus_reachable`]** (047-EXPERIENCE): the placement
+    /// the frame's layout made, and a focus that is no longer a stop put on one.
+    ///
+    /// A stop can stop being one while nobody presses anything — About's Version control is a stop
+    /// only while it is enabled, and a check or a download disables it — and the ring is drawn
+    /// only on a stop. The runtime calls this on the road every draw comes through
+    /// (`Runtime::settings_layout`). A dialog nobody has put a focus in is left with none, so
+    /// the first `Tab` still lands on the first stop.
+    pub fn keep_focus_on_a_stop(&mut self, content: SettingsContent<'_>, placed: Vec<usize>) {
+        self.note_placed(placed);
+        if self.focus.is_some() {
+            self.keep_focus_reachable(content);
+        }
+    }
+
     /// Put the focus back on something the dialog still holds.
     ///
     /// The row list is conditional ([`visible_rows`]), so choosing `Horizontal`
@@ -7933,6 +7952,7 @@ impl SettingsPanel {
         }
         let order = focus_order(content, self.category, &self.placed_buttons);
         if self.focus.is_some_and(|focus| order.contains(&focus)) {
+            self.seen_order = order;
             return;
         }
         // A picker open on a row that just vanished goes with it, and so does a
@@ -7948,8 +7968,39 @@ impl SettingsPanel {
         {
             self.recording = None;
         }
-        self.focus = order.first().copied();
+        // **A control that stopped being a stop hands the focus to its neighbour on the page**
+        // (coordinator's rulings 2026-10-05): the nearest stop before it in the order it stood
+        // in, else the nearest after it, and the dialog's `×` only when the page has no stop at
+        // all. Before first, because what follows a control can be a bigger verb than it — the
+        // last `↺` on Shortcuts is followed by `Restore all` — and a habitual second Enter must
+        // not reach it; and never the `×`, so Enter on Check and Enter again does not close
+        // Settings.
+        let page = page_order(content, self.category, &self.placed_buttons);
+        self.focus = match self.focus {
+            Some(lost) => nearest_stop(&self.seen_order, lost, &page)
+                .or_else(|| page.first().copied())
+                .or_else(|| order.first().copied()),
+            None => order.first().copied(),
+        };
+        self.seen_order = order;
     }
+}
+
+/// The stop of `page` nearest to `lost` in `seen` — the order `lost` stood in: the last one
+/// before it, else the first one after it. `None` when `lost` was not in `seen` or no neighbour
+/// of it is on `page`.
+fn nearest_stop(
+    seen: &[SettingsTarget],
+    lost: SettingsTarget,
+    page: &[SettingsTarget],
+) -> Option<SettingsTarget> {
+    let at = seen.iter().position(|target| *target == lost)?;
+    seen[..at]
+        .iter()
+        .rev()
+        .find(|target| page.contains(target))
+        .or_else(|| seen[at + 1..].iter().find(|target| page.contains(target)))
+        .copied()
 }
 
 /// One key press, in the dialog's own vocabulary.
@@ -8399,6 +8450,11 @@ impl SettingsPanel {
                 | SettingsTarget::EditorRestore
                 | SettingsTarget::EditorDelete),
             ) => SettingsKeyVerdict::Chose(target),
+            // **A door opens on `Enter` as it does under the pointer** (047-EXPERIENCE): the
+            // About page's doors and Version's control are stops because pressing them is an
+            // action, and the press leaves through `apply_settings_choice`'s `Link` arm on both
+            // roads. This arm was missing, so the keyboard reached every door and opened none.
+            Some(target @ SettingsTarget::Link(_)) => SettingsKeyVerdict::Chose(target),
             // A field has already taken its own `Enter` before the walk got
             // here (`Runtime::settings_field_key`), so reaching this arm means
             // the field is not the focus after all.
@@ -9569,6 +9625,7 @@ impl ProfileButton {
             | Fallback::PolicyProcess
             | Fallback::PolicyLocation
             | Fallback::Unreadable
+            | Fallback::Undetermined
             | Fallback::Unsupported => None,
         }
     }
@@ -12189,11 +12246,27 @@ pub fn layout_for_menus(
             // before the button — the Shortcuts row's rule, where the chord ends
             // one gap before the button that changes it. A button laid over the
             // run would answer every press aimed at a verb.
+            //
+            // **And the badge keeps its room** (census item 9): the badge hangs off the title
+            // in the same text column, so the button stands only where the badge still fits
+            // before it, and the title gives way to the badge — never the other way round, and
+            // no two boxes of the row overlap.
+            let badge_margin = px(PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX);
+            let badge_width = badge_text(line).map(|text| {
+                measure(text, px(PROFILE_BADGE_FONT_LOGICAL_PX))
+                    + px(PROFILE_BADGE_TRACKING_EM * PROFILE_BADGE_FONT_LOGICAL_PX)
+                        * text.chars().count() as f32
+                    + 2.0 * px(PROFILE_BADGE_PADDING_X_LOGICAL_PX)
+            });
             let button = ProfileButton::of(line.profile_fallback).and_then(|kind| {
                 let label = measure(kind.label(), px(BUTTON_FONT_LOGICAL_PX));
                 let width = (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + label).ceil();
                 let right = columns.text.1;
-                profile_button_fits(width, columns.text).then_some((
+                let badge_fits = badge_width.is_none_or(|badge| {
+                    columns.text.0 + badge_margin + badge
+                        <= right - width - px(PROFILE_ROW_GAP_LOGICAL_PX)
+                });
+                (profile_button_fits(width, columns.text) && badge_fits).then_some((
                     kind,
                     [
                         right - width,
@@ -12215,18 +12288,18 @@ pub fn layout_for_menus(
             });
 
             let title_width = measure(line.title, px(ROW_TITLE_FONT_LOGICAL_PX));
+            let title_right =
+                text_column_right - badge_width.map_or(0.0, |badge| badge_margin + badge);
             let title = [
                 text_column_left,
                 top,
-                (text_column_left + title_width).min(text_column_right),
+                (text_column_left + title_width)
+                    .min(title_right)
+                    .max(text_column_left),
                 top + px(ROW_TITLE_LINE_LOGICAL_PX),
             ];
-            let badge = badge_text(line).map(|text| {
-                let width = measure(text, px(PROFILE_BADGE_FONT_LOGICAL_PX))
-                    + px(PROFILE_BADGE_TRACKING_EM * PROFILE_BADGE_FONT_LOGICAL_PX)
-                        * text.chars().count() as f32
-                    + 2.0 * px(PROFILE_BADGE_PADDING_X_LOGICAL_PX);
-                let left = title[2] + px(PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX);
+            let badge = badge_width.map(|width| {
+                let left = title[2] + badge_margin;
                 let height = px(PROFILE_BADGE_HEIGHT_LOGICAL_PX);
                 let badge_top = ((title[1] + title[3] - height) / 2.0).round();
                 [left, badge_top, left + width, badge_top + height]
@@ -14242,19 +14315,24 @@ pub fn build(
                     && let Some(door) = layout.update_door
                 {
                     let target = SettingsTarget::Link(placed.row);
-                    if let crate::update_card::VersionControl::Progress(bytes) =
-                        values.version_update.control
-                    {
+                    // The download's bar, or — once every byte is on disk — the same bar, full.
+                    let share = match values.version_update.control {
+                        crate::update_card::VersionControl::Progress(bytes) => Some(
+                            bytes
+                                .total
+                                .filter(|total| *total > 0)
+                                .map_or(0.35, |total| bytes.received as f32 / total as f32)
+                                .clamp(0.0, 1.0),
+                        ),
+                        crate::update_card::VersionControl::Downloaded => Some(1.0),
+                        _ => None,
+                    };
+                    if let Some(share) = share {
                         content_stack.quads.push(OverlayQuad {
                             rect: door,
                             color: palette.dialog_hover,
                             alpha: 1.0,
                         });
-                        let share = bytes
-                            .total
-                            .filter(|total| *total > 0)
-                            .map_or(0.35, |total| bytes.received as f32 / total as f32)
-                            .clamp(0.0, 1.0);
                         content_stack.quads.push(OverlayQuad {
                             rect: [
                                 door[0],
@@ -32531,12 +32609,30 @@ mod tests {
         scale: f32,
         scroll: f32,
     ) -> Option<SettingsLayout> {
+        page_with(
+            &pressable_profile_lines(),
+            category,
+            editor,
+            width,
+            scale,
+            scroll,
+        )
+    }
+
+    /// [`page_at`] over the profile rows `lines`.
+    fn page_with(
+        lines: &[crate::profiles::ProfileLine],
+        category: SettingsCategory,
+        editor: Option<EditorSubject>,
+        width: f32,
+        scale: f32,
+        scroll: f32,
+    ) -> Option<SettingsLayout> {
         let rows = visible_rows(TabLayoutMode::Vertical);
         let shortcuts = shortcut_lines();
-        let lines = pressable_profile_lines();
         let content = match editor {
-            Some(subject) => editing_content(&rows, &lines, subject),
-            None => profiles_content(&rows, &shortcuts, &lines),
+            Some(subject) => editing_content(&rows, lines, subject),
+            None => profiles_content(&rows, &shortcuts, lines),
         };
         layout_for_menu(
             width,
@@ -32703,12 +32799,433 @@ mod tests {
                             if editor.is_some() { " editor" } else { "" }
                         );
                         every_press_is_inside_what_is_drawn(placed, &what);
+                        no_two_boxes_of_a_profile_row_overlap(placed, &what);
                         let stops = page_stops(category, editor, placed);
                         every_stop_is_a_drawn_pressable_box(placed, &stops, &what);
                     }
                 }
             }
         }
+    }
+
+    /// **No two drawn boxes of a profile row overlap**: the title, the badge, the button, the
+    /// sentences and the verb run (census item 9 — the `default` badge ran under the Enable
+    /// button at narrow widths).
+    fn no_two_boxes_of_a_profile_row_overlap(placed: &SettingsLayout, what: &str) {
+        let overlap =
+            |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+        for row in &placed.profiles {
+            let mut boxes: Vec<(&str, [f32; 4])> = vec![
+                ("title", row.title),
+                ("description", row.desc),
+                ("up", row.up),
+                ("down", row.down),
+                ("edit", row.edit),
+                ("more", row.more),
+            ];
+            boxes.extend(row.badge.map(|badge| ("badge", badge)));
+            boxes.extend(row.button.map(|(_, button)| ("button", button)));
+            if let Some([first, second]) = row.caps {
+                boxes.push(("capability 1", first));
+                boxes.push(("capability 2", second));
+            }
+            // And the button has its column to itself: nothing of the text column — the title,
+            // the badge hanging off it, the sentences — reaches into the button's width, above or
+            // below it.
+            if let Some((_, button)) = row.button {
+                for (name, text) in boxes.iter().filter(|(name, _)| {
+                    matches!(
+                        *name,
+                        "title" | "badge" | "description" | "capability 1" | "capability 2"
+                    )
+                }) {
+                    assert!(
+                        text[2] <= button[0],
+                        "{what}: row {}'s {name} {text:?} reaches into its button's column {button:?}",
+                        row.index
+                    );
+                }
+            }
+            for (at, (name, a)) in boxes.iter().enumerate() {
+                for (other, b) in &boxes[at + 1..] {
+                    assert!(
+                        !overlap(*a, *b),
+                        "{what}: row {}'s {name} {a:?} overlaps its {other} {b:?}",
+                        row.index
+                    );
+                }
+            }
+        }
+    }
+
+    /// RED (047-EXPERIENCE) — **`Enter` presses the door the ring is on, and the keyboard never
+    /// rests on a control that is not a stop.**
+    ///
+    /// Two halves of one walk. Every About door — Version's control among them — answers `Enter`
+    /// with the press the pointer makes; the arm was missing, so the keyboard reached every door
+    /// and opened none. And on every page the harness walks, with the ring on each of its stops,
+    /// About's Version control then disabling itself (a check in flight, a download, verifying,
+    /// a recovery Retry cannot race): the frame's rule
+    /// ([`SettingsPanel::keep_focus_on_a_stop`]) leaves the focus on a stop of the new order —
+    /// on its nearest neighbour in the order it stood in (before it, else after it), never the ×.
+    ///
+    /// MUTATIONS, each observed red: delete the `Link` arm of `SettingsPanel::activate` — every
+    /// door answers `Inert`; make `keep_focus_on_a_stop` only note the placement — the focus
+    /// stays on the disabled Version control.
+    #[test]
+    fn the_keyboard_presses_its_door_and_never_rests_on_a_control_that_is_not_a_stop() {
+        use crate::update_card::{VersionControl, VersionRow};
+        use crate::update_job::Bytes;
+
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        let lines = pressable_profile_lines();
+        let about = profiles_content(&rows, &shortcuts, &lines);
+        let doors: Vec<SettingsTarget> = page_order(about, SettingsCategory::About, &[])
+            .into_iter()
+            .filter(|stop| matches!(stop, SettingsTarget::Link(_)))
+            .collect();
+        assert!(
+            doors.contains(&SettingsTarget::Link(SettingsRow::AboutVersion)),
+            "the fixture's Version control is enabled"
+        );
+        for door in doors {
+            let mut panel = SettingsPanel::default();
+            panel.toggle(about);
+            panel.select_category(SettingsCategory::About);
+            panel.focus_to(door);
+            assert_eq!(
+                panel.key(SettingsKey::Activate, about, about.values),
+                SettingsKeyVerdict::Chose(door),
+                "Enter on {door:?} presses it"
+            );
+        }
+
+        let busy = [
+            VersionControl::Check { enabled: false },
+            VersionControl::Progress(Bytes::default()),
+            VersionControl::Downloaded,
+            VersionControl::Retry { enabled: false },
+        ];
+        for (category, editor) in pressable_pages() {
+            let placed = page_at(category, editor, (SURFACE.0).round(), 1.0, 0.0)
+                .expect("the fixture's surface opens the dialog");
+            let content = match editor {
+                Some(subject) => editing_content(&rows, &lines, subject),
+                None => profiles_content(&rows, &shortcuts, &lines),
+            };
+            let buttons = placed.placed_profile_buttons();
+            let before = focus_order(content, category, &buttons);
+            for control in &busy {
+                let changed = SettingsContent {
+                    values: Box::leak(Box::new(SettingsValues {
+                        version_update: VersionRow {
+                            control: control.clone(),
+                            ..VersionRow::default()
+                        },
+                        ..SettingsValues::sample()
+                    })),
+                    ..content
+                };
+                let after = focus_order(changed, category, &buttons);
+                for stop in &before {
+                    let mut panel = SettingsPanel::default();
+                    panel.toggle(content);
+                    panel.select_category(category);
+                    panel.focus_to(*stop);
+                    // The frame before: the focus stood on a stop of the old order.
+                    panel.keep_focus_on_a_stop(content, buttons.clone());
+                    panel.keep_focus_on_a_stop(changed, buttons.clone());
+                    let focus = panel.focus().expect("a placed focus is kept somewhere");
+                    assert!(
+                        after.contains(&focus),
+                        "{category:?}: the ring was on {stop:?}, the Version control became \
+                         {control:?}, and the focus rests on {focus:?}, which is no stop"
+                    );
+                    if !after.contains(stop) {
+                        // The nearest stop of the page before it, else after it; `×` only for a
+                        // page with no stop.
+                        let page = page_order(changed, category, &buttons);
+                        let at = before.iter().position(|seen| seen == stop).expect("a stop");
+                        let neighbour = before[..at]
+                            .iter()
+                            .rev()
+                            .find(|seen| page.contains(seen))
+                            .or_else(|| before[at + 1..].iter().find(|seen| page.contains(seen)))
+                            .or(after.first());
+                        assert_eq!(Some(&focus), neighbour, "{category:?}: {stop:?}");
+                        assert_ne!(
+                            focus,
+                            SettingsTarget::Close,
+                            "{category:?}: a page with stops never sends the focus to the ×"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// PIN (census item 9) — **the `default` badge and the row's button never overlap**: the
+    /// badged default row offering Enable or Copy, at every width from the narrowest the dialog
+    /// admits to the wide surface, at 100/150/200%. Where the badge would not fit before the
+    /// button, the button is behind the row's `⋯`; the title gives way to the badge.
+    ///
+    /// RED (mutations: `badge_unclamped` — the title is not shortened for the badge;
+    /// `button_ignores_badge` — the button stands without the badge's room).
+    #[test]
+    fn the_default_badge_and_the_rows_button_never_overlap() {
+        for (fallback, automatic) in [
+            (
+                crate::shell_integration::PowerShellProfileFallback::Offer,
+                false,
+            ),
+            (
+                crate::shell_integration::PowerShellProfileFallback::Offer,
+                true,
+            ),
+            (
+                crate::shell_integration::PowerShellProfileFallback::PolicyChangeable,
+                false,
+            ),
+            (
+                crate::shell_integration::PowerShellProfileFallback::PolicyChangeable,
+                true,
+            ),
+        ] {
+            let mut lines = pressable_profile_lines();
+            lines[0].profile_fallback = fallback;
+            // `automatic default`, the longer of the two badges.
+            lines[0].default_is_automatic = automatic;
+            // A long title, so the badge hanging off it reaches the button's place.
+            lines[0].title = "Developer PowerShell for Visual Studio 2022 · 开发者命令行";
+            let mut stood = 0;
+            for scale in PRESS_SCALES {
+                let mut width = narrowest_admitted(scale);
+                while width <= (SURFACE.0 * scale).round() {
+                    let placed =
+                        page_with(&lines, SettingsCategory::Profiles, None, width, scale, 0.0)
+                            .expect("an admitted width opens");
+                    assert!(
+                        placed.profiles[0].badge.is_some(),
+                        "the default row is badged"
+                    );
+                    no_two_boxes_of_a_profile_row_overlap(
+                        &placed,
+                        &format!("{fallback:?} at {scale}x, {width}px"),
+                    );
+                    stood += usize::from(placed.profiles[0].button.is_some());
+                    width += 7.0 * scale;
+                }
+            }
+            // The walk reached the case: at the wide widths the button stands beside the badge.
+            assert!(stood > 0, "{fallback:?}: the button never stood");
+        }
+    }
+
+    /// RED (coordinator's rulings 2026-10-05) — **Enter on Check, then Enter again, does not close
+    /// Settings**: the Version control stops being a stop while the check runs, and the focus
+    /// goes to its nearest neighbour on the About page, not to the dialog's `×`. Nothing stands
+    /// before Check, so the neighbour is the stop after it (Automatic check); with a failed
+    /// update's Details link standing before the control, the neighbour is Details, whose Enter
+    /// raises the failed card again.
+    ///
+    /// MUTATIONS, each observed red: give `keep_focus_reachable` back its old answer
+    /// (`order.first()`, the `×`) — the second Enter closes Settings; look after the lost stop
+    /// before looking before it in `nearest_stop` — the Details case lands on Automatic check.
+    #[test]
+    fn enter_on_check_then_enter_again_does_not_close_settings() {
+        use crate::update_card::{VersionControl, VersionLink, VersionRow};
+
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        let lines = pressable_profile_lines();
+        let with = |control: VersionControl, link: Option<VersionLink>| SettingsContent {
+            values: Box::leak(Box::new(SettingsValues {
+                version_update: VersionRow {
+                    control,
+                    link,
+                    ..VersionRow::default()
+                },
+                ..SettingsValues::sample()
+            })),
+            ..profiles_content(&rows, &shortcuts, &lines)
+        };
+        let version = SettingsTarget::Link(SettingsRow::AboutVersion);
+        let auto_check = SettingsTarget::Combo(SettingsRow::AutoCheck);
+        let details = SettingsTarget::MenuAction(SettingsRow::AboutVersion);
+        for (before, after, next, what) in [
+            (
+                with(VersionControl::Check { enabled: true }, None),
+                with(VersionControl::Check { enabled: false }, None),
+                auto_check,
+                "Check, then Checking…",
+            ),
+            (
+                with(
+                    VersionControl::Retry { enabled: true },
+                    Some(VersionLink::Details),
+                ),
+                with(
+                    VersionControl::Retry { enabled: false },
+                    Some(VersionLink::Details),
+                ),
+                details,
+                "Retry beside Details, then Retry disabled",
+            ),
+        ] {
+            let mut panel = SettingsPanel::default();
+            panel.toggle(before);
+            panel.select_category(SettingsCategory::About);
+            panel.focus_to(version);
+            assert_eq!(
+                panel.key(SettingsKey::Activate, before, before.values),
+                SettingsKeyVerdict::Chose(version),
+                "{what}: Enter presses the control"
+            );
+            // The press changed the job; the runtime's press ends with this rule.
+            panel.keep_focus_reachable(after);
+            assert_eq!(
+                panel.focus(),
+                Some(next),
+                "{what}: the nearest stop of the page"
+            );
+            assert_ne!(
+                panel.key(SettingsKey::Activate, after, after.values),
+                SettingsKeyVerdict::Closed,
+                "{what}: a second Enter does not close Settings"
+            );
+            assert!(panel.is_open(), "{what}");
+        }
+    }
+
+    /// RED (merge of RELEASE-READ-profile with 047-EXPERIENCE) — **a `$PROFILE` verb that takes
+    /// itself away hands the focus to its own row, and a second Enter there changes nothing.**
+    /// Two verbs disappear after their own press: the Profiles row's Enable button (the
+    /// worker's answer makes the row `Enabled`, which has no button) and the Terminal page's
+    /// remover row (the line is gone, so the row is). Under the focus rule the ring goes to the
+    /// nearest stop before the lost one:
+    ///
+    /// * Enable → that profile's own row; Enter there opens its editor — no write, no close;
+    /// * the remover → the shell-integration picker above it; Enter there opens the picker on
+    ///   its current value — no write, no close.
+    ///
+    /// MUTATION, observed red: `nearest_stop` looks after the lost stop first — the Enable case
+    /// lands on the row's `↑`, whose Enter would reorder the profiles.
+    #[test]
+    fn a_profile_verb_that_takes_itself_away_leaves_the_focus_on_its_own_row() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        // Enable → Enabled, on the wide surface where the button stands.
+        let before = pressable_profile_lines();
+        let mut after = before.clone();
+        after[1].profile_fallback = crate::shell_integration::PowerShellProfileFallback::Enabled;
+        let placed = page_at(
+            SettingsCategory::Profiles,
+            None,
+            (SURFACE.0).round(),
+            1.0,
+            0.0,
+        )
+        .expect("the fixture's surface opens the dialog");
+        let buttons = placed.placed_profile_buttons();
+        assert!(buttons.contains(&1), "the Enable button stands");
+        let with_button = profiles_content(&rows, &shortcuts, &before);
+        let without = profiles_content(&rows, &shortcuts, &after);
+        let enable = SettingsTarget::ProfileEnable(1);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(with_button);
+        panel.select_category(SettingsCategory::Profiles);
+        panel.keep_focus_on_a_stop(with_button, buttons.clone());
+        panel.focus_to(enable);
+        panel.keep_focus_on_a_stop(with_button, buttons.clone());
+        assert_eq!(
+            panel.key(SettingsKey::Activate, with_button, with_button.values),
+            SettingsKeyVerdict::Chose(enable)
+        );
+        panel.keep_focus_on_a_stop(without, buttons.clone());
+        assert_eq!(panel.focus(), Some(SettingsTarget::ProfileRow(1)));
+        assert_eq!(
+            panel.key(SettingsKey::Activate, without, without.values),
+            SettingsKeyVerdict::Chose(SettingsTarget::ProfileEdit(1)),
+            "a second Enter opens the row's editor"
+        );
+        assert!(panel.is_open());
+
+        // The remover row, after the line it removes is gone.
+        let mut with_line = rows.clone();
+        retain_powershell_profile_remover(&mut with_line, true);
+        let mut gone = rows.clone();
+        retain_powershell_profile_remover(&mut gone, false);
+        let remover = SettingsTarget::Link(SettingsRow::PowerShellProfileLine);
+        let present = profiles_content(&with_line, &shortcuts, &before);
+        let absent = profiles_content(&gone, &shortcuts, &before);
+        let category = SettingsRow::PowerShellProfileLine.category();
+        if !page_order(present, category, &[]).contains(&remover) {
+            // A platform with no PowerShell has no remover row to lose.
+            return;
+        }
+        let mut panel = SettingsPanel::default();
+        panel.toggle(present);
+        panel.select_category(category);
+        panel.keep_focus_on_a_stop(present, Vec::new());
+        panel.focus_to(remover);
+        panel.keep_focus_on_a_stop(present, Vec::new());
+        assert_eq!(
+            panel.key(SettingsKey::Activate, present, present.values),
+            SettingsKeyVerdict::Chose(remover)
+        );
+        panel.keep_focus_on_a_stop(absent, Vec::new());
+        let landed = panel.focus().expect("the focus stays on the page");
+        assert_eq!(landed, SettingsTarget::Combo(SettingsRow::ShellIntegration));
+        assert_eq!(
+            panel.key(SettingsKey::Activate, absent, absent.values),
+            SettingsKeyVerdict::Moved,
+            "a second Enter opens the picker and writes nothing"
+        );
+        assert!(panel.is_open());
+    }
+
+    /// RED (coordinator's ruling 2026-10-05, review of 047-EXPERIENCE) — **Enter on the last row's
+    /// `↺`, then Enter again, does not restore every shortcut.** The `↺` stops being a stop once
+    /// its row is back at its default; the focus goes to the stop before it — that row's own
+    /// Record — not to `Restore all` after it, which resets every binding with no question.
+    ///
+    /// MUTATION, observed red: look after the lost stop before looking before it in
+    /// `nearest_stop` — the focus lands on `Restore all` and the second Enter chooses it.
+    #[test]
+    fn enter_on_the_last_reset_then_enter_again_does_not_restore_all() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let mut overridden = shortcut_lines();
+        let last = overridden
+            .iter()
+            .rposition(|line| line.recordable)
+            .expect("a recordable line");
+        overridden[last].overridden = true;
+        let defaults = shortcut_lines();
+        let before = content(&rows, &overridden);
+        let after = content(&rows, &defaults);
+        let reset = SettingsTarget::RestoreRow(last);
+        assert_eq!(
+            page_order(before, SettingsCategory::Shortcuts, &[]).last(),
+            Some(&SettingsTarget::RestoreAll),
+            "Restore all follows the last ↺"
+        );
+        let mut panel = SettingsPanel::default();
+        panel.toggle(before);
+        panel.select_category(SettingsCategory::Shortcuts);
+        panel.focus_to(reset);
+        assert_eq!(
+            panel.key(SettingsKey::Activate, before, before.values),
+            SettingsKeyVerdict::Chose(reset)
+        );
+        // The runtime's restore ends with this rule (`apply_shortcut_edit`).
+        panel.keep_focus_reachable(after);
+        assert_eq!(panel.focus(), Some(SettingsTarget::Record(last)));
+        assert_ne!(
+            panel.key(SettingsKey::Activate, after, after.values),
+            SettingsKeyVerdict::Chose(SettingsTarget::RestoreAll),
+            "a second Enter does not restore every shortcut"
+        );
     }
 
     /// PIN — **the one door: a box that reaches past the page's clip answers no press, on either

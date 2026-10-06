@@ -66,12 +66,18 @@
 //! before the first byte, a `Content-Length` over it refused at the headers, a
 //! count checked before each chunk is written, a temporary name renamed only
 //! when the body ended where the transport said, and every failure named by
-//! its stage. **The bound on a download is restated for it**: `idle_timeout` of
-//! silence ([`crate::https_download::DOWNLOAD_IDLE_TIMEOUT`], 30 s) and
-//! `budget` end to end ([`crate::https_download::DOWNLOAD_BUDGET`], 10 min),
-//! both on the monotonic clock, and a cancel lands within
+//! its stage. **The bound on a download is restated for it**: it is given up
+//! when it stops moving — `idle_timeout` of silence
+//! ([`crate::https_download::DOWNLOAD_IDLE_TIMEOUT`], 30 s), or a stretch of
+//! that length whose body carried fewer than `floor` bytes
+//! ([`crate::https_download::DOWNLOAD_FLOOR_BYTES`]) — never for how long the
+//! whole takes, on the monotonic clock, and a
+//! [`crate::https_download::DownloadMonitor::cancel`] lands within
 //! [`crate::https_download::DOWNLOAD_CANCEL_LATENCY`] in every phase —
-//! connecting, waiting for headers, and inside the body.
+//! connecting, waiting for headers, and inside the body. When that call is made
+//! is the caller's: the update job's transport passes its job's cancel on to
+//! the monitor from the monitor's progress wake, so a job cancelled while the
+//! transfer is wholly silent stops at the idle timeout, not at this latency.
 //!
 //! That last sentence is why the download runs WinHTTP in **asynchronous
 //! mode** and the check above does not. A synchronous call blocks inside
@@ -317,8 +323,8 @@ pub use crate::https_download::{
 /// the temporary one. No retries and no resumption: see
 /// [`crate::https_download`].
 ///
-/// Blocks for as long as the transfer takes, up to `budget`: a worker's call,
-/// never the window thread's.
+/// Blocks for as long as the transfer keeps moving (`HttpsDownload::longest` at
+/// most): a worker's call, never the window thread's.
 ///
 /// # Errors
 ///
@@ -655,7 +661,7 @@ fn download_from(
     request: &HttpsDownload<'_>,
 ) -> Result<Downloaded, DownloadError> {
     let monitor: &DownloadMonitor = request.monitor;
-    let mut deadlines = Deadlines::start(request.idle_timeout, request.budget);
+    let mut deadlines = Deadlines::start(request.idle_timeout, request.floor);
     let connect = |why: String| DownloadError::at(DownloadStage::Connect, why);
     let headers = |why: String| DownloadError::at(DownloadStage::Headers, why);
     let body = |why: String| DownloadError::at(DownloadStage::Body, why);
@@ -810,11 +816,12 @@ mod tests {
         download_from,
     };
     use crate::https_download::{
-        DOWNLOAD_BUDGET, DOWNLOAD_IDLE_TIMEOUT,
+        DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
         loopback::{Step, begun, body, head, ok, serve},
     };
 
     const IDLE: Duration = Duration::from_secs(5);
+    /// Longer than any of these exchanges takes: the redirect loop's bound.
     const BUDGET: Duration = Duration::from_secs(20);
 
     fn scratch(name: &str) -> PathBuf {
@@ -848,7 +855,7 @@ mod tests {
         port: u16,
         directory: &Path,
         ceiling: u64,
-        deadlines: (Duration, Duration),
+        deadlines: (Duration, u64),
         monitor: &Arc<DownloadMonitor>,
     ) -> Result<Downloaded, DownloadError> {
         download_from(
@@ -865,7 +872,7 @@ mod tests {
                 file_name: "folio.zip",
                 ceiling,
                 idle_timeout: deadlines.0,
-                budget: deadlines.1,
+                floor: deadlines.1,
                 monitor,
             },
         )
@@ -894,7 +901,14 @@ mod tests {
             vec![Step::Send(ok(&served, Some(served.len())))]
         });
         let monitor = quiet();
-        let done = fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &monitor).expect("the body");
+        let done = fetch(
+            port,
+            &directory,
+            1 << 20,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &monitor,
+        )
+        .expect("the body");
         assert_eq!(done.bytes, 300_000);
         assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
         assert_eq!(entries(&directory), vec!["folio.zip".to_owned()]);
@@ -915,8 +929,14 @@ mod tests {
         let port = serve(1, move |_| {
             vec![Step::Send(ok(&served, Some(served.len())))]
         });
-        let done =
-            fetch(port, &directory, 70_000, (IDLE, BUDGET), &quiet()).expect("at the ceiling");
+        let done = fetch(
+            port,
+            &directory,
+            70_000,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &quiet(),
+        )
+        .expect("at the ceiling");
         assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
     }
 
@@ -935,8 +955,14 @@ mod tests {
         let served = body(70_001);
         let port = serve(1, move |_| vec![Step::Send(ok(&served, None))]);
         let monitor = quiet();
-        let error =
-            fetch(port, &directory, 70_000, (IDLE, BUDGET), &monitor).expect_err("one byte over");
+        let error = fetch(
+            port,
+            &directory,
+            70_000,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &monitor,
+        )
+        .expect_err("one byte over");
         assert_eq!(error.stage, DownloadStage::Body, "{error}");
         assert_eq!(error.reason, "the body passed the ceiling of 70000 bytes");
         assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
@@ -962,8 +988,14 @@ mod tests {
             ]
         });
         let started = Instant::now();
-        let error =
-            fetch(port, &directory, 70_000, (IDLE, BUDGET), &quiet()).expect_err("too long");
+        let error = fetch(
+            port,
+            &directory,
+            70_000,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &quiet(),
+        )
+        .expect_err("too long");
         assert_eq!(error.stage, DownloadStage::Headers, "{error}");
         assert_eq!(
             error.reason,
@@ -993,8 +1025,14 @@ mod tests {
             bytes.extend_from_slice(&body(40_000));
             vec![Step::Send(bytes)]
         });
-        let error =
-            fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("cut short");
+        let error = fetch(
+            port,
+            &directory,
+            1 << 20,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &quiet(),
+        )
+        .expect_err("cut short");
         assert_eq!(error.stage, DownloadStage::Body, "{error}");
         assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
     }
@@ -1017,7 +1055,14 @@ mod tests {
             bytes.extend_from_slice(page);
             vec![Step::Send(bytes)]
         });
-        let error = fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("404");
+        let error = fetch(
+            port,
+            &directory,
+            1 << 20,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &quiet(),
+        )
+        .expect_err("404");
         assert_eq!(error.stage, DownloadStage::Status);
         assert_eq!(error.reason, "the server answered 404");
         assert!(
@@ -1060,19 +1105,27 @@ mod tests {
                 vec![Step::Send(ok(&served, Some(served.len())))]
             }
         });
-        let done = fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect("followed");
+        let done = fetch(
+            port,
+            &directory,
+            1 << 20,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &quiet(),
+        )
+        .expect("followed");
         assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
     }
 
-    /// RED (U-7) — **a trickling body and a redirect loop each end inside the
-    /// budget, and neither leaves a file.**
+    /// RED (U-7; 047-EXPERIENCE) — **a trickling body and a redirect loop each
+    /// end, and neither leaves a file.**
     ///
     /// §F Transport: `redirect_loop_and_trickle_body_hit_deadlines`. The
-    /// trickle sends a byte every 50 ms, so the idle timeout never fires; the
-    /// budget, which nothing resets, is what ends it.
+    /// trickle sends a byte every 50 ms, so the silence clock never fires; the
+    /// floor — fewer than `DOWNLOAD_FLOOR_BYTES` in a stretch of the idle
+    /// length — is what ends it, one stretch after the body began.
     ///
-    /// MUTATION: reset `started` in `Deadlines::heard`, and the trickle runs
-    /// until the server gives up.
+    /// MUTATION: drop the floor's refusal from `Deadlines::check_at`, and the
+    /// trickle runs until the server gives up.
     #[test]
     fn redirect_loop_and_trickle_body_hit_deadlines() {
         let directory = scratch("trickle");
@@ -1083,13 +1136,19 @@ mod tests {
             ]
         });
         let started = Instant::now();
-        let budget = Duration::from_millis(1_500);
-        let error =
-            fetch(port, &directory, 1 << 20, (IDLE, budget), &quiet()).expect_err("the budget");
+        let stretch = Duration::from_millis(1_500);
+        let error = fetch(
+            port,
+            &directory,
+            1 << 20,
+            (stretch, DOWNLOAD_FLOOR_BYTES),
+            &quiet(),
+        )
+        .expect_err("the floor");
         let took = started.elapsed();
         assert_eq!(error.stage, DownloadStage::Body, "{error}");
-        assert!(error.reason.contains("inside its budget"), "{error}");
-        assert!(took < budget + Duration::from_secs(1), "{took:?}");
+        assert!(error.reason.contains("stalled"), "{error}");
+        assert!(took < stretch * 2 + Duration::from_secs(1), "{took:?}");
         assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
 
         let directory = scratch("loop");
@@ -1104,7 +1163,14 @@ mod tests {
             ))]
         });
         let started = Instant::now();
-        let error = fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("a loop");
+        let error = fetch(
+            port,
+            &directory,
+            1 << 20,
+            (IDLE, DOWNLOAD_FLOOR_BYTES),
+            &quiet(),
+        )
+        .expect_err("a loop");
         assert!(started.elapsed() < BUDGET, "{:?}", started.elapsed());
         assert!(entries(&directory).is_empty(), "{error}");
     }
@@ -1143,7 +1209,7 @@ mod tests {
             port,
             &directory,
             1 << 20,
-            (DOWNLOAD_IDLE_TIMEOUT, DOWNLOAD_BUDGET),
+            (DOWNLOAD_IDLE_TIMEOUT, DOWNLOAD_FLOOR_BYTES),
             &monitor,
         )
         .expect_err("cancelled");
