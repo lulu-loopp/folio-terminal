@@ -352,7 +352,7 @@ impl Runtime<'_> {
             .resize(&self.app.gpu, physical.width, physical.height)
             .context("synchronize renderer swapchain with resized physical client")?;
         self.reconcile_authoritative_dpi("resized")?;
-        let requested_physical = self.window.window.inner_size();
+        let requested_physical = self.client_size();
         if requested_physical.width == 0 || requested_physical.height == 0 {
             return Ok(());
         }
@@ -431,7 +431,7 @@ impl Runtime<'_> {
         self.window.dpi_rectangle.announced();
         self.defer_preview_resample(Instant::now());
         self.reconcile_authoritative_dpi("scale-factor-changed")?;
-        self.resize(self.window.window.inner_size())
+        self.resize(self.client_size())
     }
 
     /// **A rectangle from the OS**, and the one road on which a pane's grid may
@@ -522,7 +522,7 @@ impl Runtime<'_> {
         &mut self,
         stage: &'static str,
     ) -> Result<bool> {
-        let physical = self.window.window.inner_size();
+        let physical = self.client_size();
         // **The second reader of the same rectangle**, held to the same rule
         // ([`resize_worth_solving`]): `inner_size()` on an iconic window is the icon's client
         // area, and every geometry step below — the swapchain, the solve, the per-leaf grids —
