@@ -14279,3 +14279,8 @@ A Linux summon captures the previous foreground before its display request. Its 
 ### Linux application display-read debt is repaid — 2026-10-06
 
 Window-wait row 29a now records the completed application migration. Native X11 display, client-origin and posture facts are read on the display worker; geometry events invalidate and refresh observations, and closing windows reject late results. Layout uses event or configured sizes. Winit's own window construction and event processing remain its responsibility, and its populated monitor cache is retained. The previous open-row notes describe earlier checkpoints.
+
+
+### 2026-10-06 — Linux application display reads close row 29a
+
+Row 29a is done: application X11 display, client-origin and posture observations run on the display worker. The window thread uses addressed answers, event geometry and Winit's populated monitor cache. This records the completed migration described above; it does not replace Winit window construction or event processing.
