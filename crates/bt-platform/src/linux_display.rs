@@ -2,7 +2,9 @@
 
 use std::collections::HashSet;
 use std::env;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::thread::JoinHandle;
 
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
@@ -43,6 +45,300 @@ pub fn install_backend(backend: Backend) -> Result<(), String> {
 #[must_use]
 pub fn active_backend() -> Option<Backend> {
     BACKEND.get().copied()
+}
+
+/// One X11 display query delivered back to the window loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxDisplayReady {
+    /// The window-side owner token supplied with the request.
+    pub owner: u64,
+    /// The request within that owner's operation generation.
+    pub request_id: u64,
+    /// The owner's generation at submission time.
+    pub generation: u64,
+}
+
+/// A query whose X11 connection and replies are owned by the display worker.
+#[derive(Clone, Debug)]
+pub enum LinuxDisplayQuery {
+    /// Read the same point, work area, monitor name and scale used to summon the quake window.
+    SummonScreen {
+        window: NativeWindow,
+        cached_dpi: u32,
+    },
+    /// Use the root point carried by the activating X11 key press.
+    SummonScreenAt {
+        window: NativeWindow,
+        cached_dpi: u32,
+        x: i32,
+        y: i32,
+    },
+    /// Read the scale and work area used to place a torn out window at this point.
+    TearOutScreen { x: i32, y: i32 },
+    /// Read the rectangle, display name and scale used to remember a hand placed summon.
+    SummonedArrangement { window: NativeWindow },
+    /// Read the current pointer position in one window's client coordinates.
+    PointerInWindow { window: NativeWindow },
+    /// Read a window rectangle; callers retain their existing winit fallback on refusal.
+    WindowRect { window: NativeWindow },
+    /// Read the native work area for one window.
+    WindowWorkArea { window: NativeWindow },
+}
+
+/// One answer from the X11 display worker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinuxDisplayAnswer {
+    /// The summon query's matched display facts, including its existing fallbacks.
+    SummonScreen {
+        work: WindowRect,
+        monitor_id: Option<String>,
+        dpi: u32,
+    },
+    /// The tear out query's work area and scale at the captured pointer point.
+    TearOutScreen { work: WindowRect, dpi: u32 },
+    /// The new arrangement if native geometry and a display name were available.
+    SummonedArrangement(Option<(WindowRect, String, u32)>),
+    /// The actual pointer in the window, or no answer from the platform.
+    PointerInWindow(Option<(i32, i32)>),
+    /// Native geometry, or the same refusal the old synchronous query returned.
+    WindowRect(Result<WindowRect, String>),
+    /// The work-area read's native answer or its original refusal.
+    WindowWorkArea(Result<WindowRect, String>),
+}
+
+/// A pending query. Its receiver never waits; the matching ready event means its answer is parked.
+pub struct LinuxDisplayRequest {
+    ready: LinuxDisplayReady,
+    answer: mpsc::Receiver<LinuxDisplayAnswer>,
+}
+
+impl LinuxDisplayRequest {
+    /// The event-loop correlation id for this request.
+    #[must_use]
+    pub const fn ready(&self) -> LinuxDisplayReady {
+        self.ready
+    }
+
+    /// Take the worker's answer after its ready event, without waiting.
+    pub fn try_take(&self) -> Result<LinuxDisplayAnswer, mpsc::TryRecvError> {
+        self.answer.try_recv()
+    }
+}
+
+type DisplayWake = Box<dyn Fn(LinuxDisplayReady) + Send + Sync + 'static>;
+static DISPLAY_WAKE: OnceLock<DisplayWake> = OnceLock::new();
+static DISPLAY_SERVICE: OnceLock<Mutex<Option<DisplayService>>> = OnceLock::new();
+static DISPLAY_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static DISPLAY_WORKER_STOPPED: AtomicBool = AtomicBool::new(false);
+static NEXT_DISPLAY_REQUEST: AtomicU64 = AtomicU64::new(0);
+const DISPLAY_THREAD: &str = "bt-linux-display";
+
+struct DisplayService {
+    sender: mpsc::Sender<DisplayCommand>,
+    _worker: JoinHandle<()>,
+}
+
+enum DisplayCommand {
+    Stop,
+    Query {
+        query: LinuxDisplayQuery,
+        ready: LinuxDisplayReady,
+        answer: mpsc::Sender<LinuxDisplayAnswer>,
+    },
+}
+
+/// Stop accepting display queries without waiting for the worker to finish.
+///
+/// A worker already blocked on X11 drops its pending answer when that call returns. The
+/// desktop-retirement owner can poll [`display_service_stopped`] within its existing budget;
+/// this function never joins the worker.
+pub fn stop_display_service() {
+    DISPLAY_STOP_REQUESTED.store(true, Ordering::Release);
+    let Some(service) = DISPLAY_SERVICE.get() else {
+        DISPLAY_WORKER_STOPPED.store(true, Ordering::Release);
+        return;
+    };
+    let current = service
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(service) = current.as_ref() {
+        let _ = service.sender.send(DisplayCommand::Stop);
+    } else {
+        DISPLAY_WORKER_STOPPED.store(true, Ordering::Release);
+    }
+}
+
+/// Whether the display worker has exited after [`stop_display_service`].
+#[must_use]
+pub fn display_service_stopped() -> bool {
+    DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) && DISPLAY_WORKER_STOPPED.load(Ordering::Acquire)
+}
+
+/// Install the event-loop wake before any Linux display query can be submitted.
+pub fn install_display_wake(
+    wake: impl Fn(LinuxDisplayReady) + Send + Sync + 'static,
+) -> Result<(), String> {
+    DISPLAY_WAKE
+        .set(Box::new(wake))
+        .map_err(|_| "the Linux display wake has already been installed".to_owned())
+}
+
+/// Submit one addressed query without waiting for X11 connection setup or a server reply.
+pub fn request_display(
+    owner: u64,
+    generation: u64,
+    query: LinuxDisplayQuery,
+) -> Result<LinuxDisplayRequest, String> {
+    if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+        return Err("the Linux display worker is stopping".to_owned());
+    }
+    if BACKEND.get().is_none() {
+        return Err("the Linux display backend has not been installed".to_owned());
+    }
+    if DISPLAY_WAKE.get().is_none() {
+        return Err("the Linux display event-loop wake is not installed".to_owned());
+    }
+    let sender = display_sender()?;
+    if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+        return Err("the Linux display worker is stopping".to_owned());
+    }
+    let request_id = NEXT_DISPLAY_REQUEST
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+    let ready = LinuxDisplayReady {
+        owner,
+        request_id,
+        generation,
+    };
+    let (answer, receiver) = mpsc::channel();
+    sender
+        .send(DisplayCommand::Query {
+            query,
+            ready,
+            answer,
+        })
+        .map_err(|_| "the Linux display worker stopped".to_owned())?;
+    if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+        return Err("the Linux display worker is stopping".to_owned());
+    }
+    Ok(LinuxDisplayRequest {
+        ready,
+        answer: receiver,
+    })
+}
+
+fn display_sender() -> Result<mpsc::Sender<DisplayCommand>, String> {
+    if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+        return Err("the Linux display worker is stopping".to_owned());
+    }
+    let service = DISPLAY_SERVICE.get_or_init(|| Mutex::new(None));
+    let mut current = service
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+        return Err("the Linux display worker is stopping".to_owned());
+    }
+    if let Some(service) = current.as_ref() {
+        return Ok(service.sender.clone());
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    let worker = crate::spawn_at_priority(
+        DISPLAY_THREAD,
+        crate::ThreadPriority::BelowNormal,
+        move |ctx| display_worker(receiver, ctx),
+    )
+    .map_err(|error| format!("could not start the Linux display worker: {error}"))?;
+    *current = Some(DisplayService {
+        sender: sender.clone(),
+        _worker: worker,
+    });
+    Ok(sender)
+}
+
+fn display_worker(receiver: mpsc::Receiver<DisplayCommand>, _worker: &crate::admission::WorkerCtx) {
+    loop {
+        if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+            break;
+        }
+        let command = match receiver.recv() {
+            Ok(command) => command,
+            Err(_) => break,
+        };
+        if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+            break;
+        }
+        let DisplayCommand::Query {
+            query,
+            ready,
+            answer,
+        } = command
+        else {
+            break;
+        };
+        let result = run_display_query(query);
+        if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+            break;
+        }
+        let _ = answer.send(result);
+        if DISPLAY_STOP_REQUESTED.load(Ordering::Acquire) {
+            break;
+        }
+        if let Some(wake) = DISPLAY_WAKE.get() {
+            wake(ready);
+        }
+    }
+    DISPLAY_WORKER_STOPPED.store(true, Ordering::Release);
+}
+
+fn summon_screen_answer(
+    window: NativeWindow,
+    cached_dpi: u32,
+    pointer: Option<(i32, i32)>,
+) -> LinuxDisplayAnswer {
+    let work = pointer
+        .and_then(|(x, y)| work_area_at(x, y).ok())
+        .or_else(|| get_work_area(window).ok())
+        .unwrap_or_else(virtual_screen_rect);
+    LinuxDisplayAnswer::SummonScreen {
+        work,
+        monitor_id: pointer.and_then(|(x, y)| monitor_id_at(x, y)),
+        dpi: pointer.map_or(cached_dpi, |(x, y)| dpi_at(x, y)),
+    }
+}
+
+fn run_display_query(query: LinuxDisplayQuery) -> LinuxDisplayAnswer {
+    match query {
+        LinuxDisplayQuery::SummonScreen { window, cached_dpi } => {
+            summon_screen_answer(window, cached_dpi, pointer_position())
+        }
+        LinuxDisplayQuery::SummonScreenAt {
+            window,
+            cached_dpi,
+            x,
+            y,
+        } => summon_screen_answer(window, cached_dpi, Some((x, y))),
+        LinuxDisplayQuery::TearOutScreen { x, y } => LinuxDisplayAnswer::TearOutScreen {
+            dpi: dpi_at(x, y),
+            work: work_area_at(x, y).unwrap_or_else(|_| virtual_screen_rect()),
+        },
+        LinuxDisplayQuery::SummonedArrangement { window } => {
+            let arrangement = get_window_rect(window).ok().and_then(|rect| {
+                monitor_id_at(rect.left, rect.top)
+                    .map(|monitor| (rect, monitor, dpi_at(rect.left, rect.top)))
+            });
+            LinuxDisplayAnswer::SummonedArrangement(arrangement)
+        }
+        LinuxDisplayQuery::PointerInWindow { window } => {
+            LinuxDisplayAnswer::PointerInWindow(pointer_position_in_window(window))
+        }
+        LinuxDisplayQuery::WindowRect { window } => {
+            LinuxDisplayAnswer::WindowRect(get_window_rect(window))
+        }
+        LinuxDisplayQuery::WindowWorkArea { window } => {
+            LinuxDisplayAnswer::WindowWorkArea(get_work_area(window))
+        }
+    }
 }
 
 #[must_use]
@@ -1326,5 +1622,272 @@ mod tests {
         } else {
             value.to_be_bytes()
         }
+    }
+}
+
+#[cfg(test)]
+mod stalled_server_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::thread::JoinHandle;
+    use x11rb::protocol::xproto::{BackingStore, ImageOrder, Screen, Setup};
+    use x11rb::x11_utils::Serialize;
+
+    const CHILD_MARKER: &str = "FOLIO_PR20_X11_QUERY_RETURNED";
+    const CHILD_MARKER_ENV: &str = "FOLIO_PR20_X11_STALL_CHILD";
+
+    struct StalledX11Server {
+        display: u16,
+        port: u16,
+        stalled: Receiver<Result<(), String>>,
+        release: Option<Sender<()>>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl StalledX11Server {
+        fn start() -> Self {
+            let (display, port, listener) = (10_000_u16..=59_535)
+                .find_map(|display| {
+                    let port = 6000_u16.checked_add(display)?;
+                    TcpListener::bind(("127.0.0.1", port))
+                        .ok()
+                        .map(|listener| (display, port, listener))
+                })
+                .expect("bind an unused local X11 test port");
+            let (stalled_tx, stalled) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = serve_until_atom_reply(listener, &stalled_tx, &release_rx);
+                if let Err(error) = result {
+                    let _ = stalled_tx.send(Err(error));
+                }
+            });
+            Self {
+                display,
+                port,
+                stalled,
+                release: Some(release),
+                worker: Some(worker),
+            }
+        }
+
+        fn wait_until_stalled(&self) -> Result<(), String> {
+            self.stalled.recv().map_err(|error| {
+                format!("the client never reached the stalled X11 reply: {error}")
+            })?
+        }
+    }
+
+    impl Drop for StalledX11Server {
+        fn drop(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn serve_until_atom_reply(
+        listener: TcpListener,
+        stalled: &Sender<Result<(), String>>,
+        release: &Receiver<()>,
+    ) -> Result<(), String> {
+        let (mut stream, _) = listener
+            .accept()
+            .map_err(|error| format!("accepting the X11 client: {error}"))?;
+        let mut setup_request = [0; 12];
+        stream
+            .read_exact(&mut setup_request)
+            .map_err(|error| format!("reading the X11 setup request: {error}"))?;
+        stream
+            .write_all(&setup_packet())
+            .map_err(|error| format!("answering the X11 setup request: {error}"))?;
+
+        let mut request_header = [0; 4];
+        stream
+            .read_exact(&mut request_header)
+            .map_err(|error| format!("reading the first X11 request: {error}"))?;
+        if request_header[0] != 16 {
+            return Err(format!(
+                "expected InternAtom opcode 16, got {}",
+                request_header[0]
+            ));
+        }
+        let request_length =
+            usize::from(u16::from_le_bytes([request_header[2], request_header[3]]))
+                .saturating_mul(4);
+        if request_length < request_header.len() {
+            return Err(format!("invalid X11 request length {request_length}"));
+        }
+        let mut request_body = vec![0; request_length - request_header.len()];
+        stream
+            .read_exact(&mut request_body)
+            .map_err(|error| format!("reading the InternAtom request: {error}"))?;
+
+        stalled
+            .send(Ok(()))
+            .map_err(|error| format!("reporting the stalled reply: {error}"))?;
+        release
+            .recv()
+            .map_err(|error| format!("releasing the stalled X11 reply: {error}"))
+    }
+
+    fn setup_packet() -> Vec<u8> {
+        let mut setup = Setup {
+            status: 1,
+            protocol_major_version: 11,
+            protocol_minor_version: 0,
+            length: 0,
+            release_number: 1,
+            resource_id_base: 0x0010_0000,
+            resource_id_mask: 0x001f_ffff,
+            motion_buffer_size: 0,
+            maximum_request_length: u16::MAX,
+            image_byte_order: ImageOrder::LSB_FIRST,
+            bitmap_format_bit_order: ImageOrder::LSB_FIRST,
+            bitmap_format_scanline_unit: 8,
+            bitmap_format_scanline_pad: 8,
+            min_keycode: 8,
+            max_keycode: 255,
+            vendor: Vec::new(),
+            pixmap_formats: Vec::new(),
+            roots: vec![Screen {
+                root: 1,
+                default_colormap: 1,
+                white_pixel: 0x00ff_ffff,
+                black_pixel: 0,
+                width_in_pixels: 1920,
+                height_in_pixels: 1080,
+                width_in_millimeters: 0,
+                height_in_millimeters: 0,
+                min_installed_maps: 1,
+                max_installed_maps: 1,
+                root_visual: 1,
+                backing_stores: BackingStore::NOT_USEFUL,
+                save_unders: false,
+                root_depth: 24,
+                ..Screen::default()
+            }],
+        };
+        let length = setup.serialize().len();
+        setup.length = u16::try_from((length - 8) / 4).expect("setup length fits the protocol");
+        setup.serialize()
+    }
+
+    #[test]
+    fn client_child() {
+        if std::env::var_os(CHILD_MARKER_ENV).is_none() {
+            return;
+        }
+        assert!(crate::admission::enter_window_thread());
+        install_backend(Backend::X11).expect("select the fake X11 backend");
+        install_display_wake(|_| {}).expect("install the fake event-loop wake");
+        let window = crate::NativeWindow::from_x11(
+            std::num::NonZeroU32::new(1).expect("the fixture X11 window is nonzero"),
+        );
+        let _request = request_display(1, 1, LinuxDisplayQuery::PointerInWindow { window })
+            .expect("enqueue the X11 query off the window thread");
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(format!("{CHILD_MARKER}\n").as_bytes())
+            .expect("write the request-return marker");
+        stdout.flush().expect("flush the request-return marker");
+        let mut release = [0];
+        std::io::stdin()
+            .read_exact(&mut release)
+            .expect("the parent confirms the held reply before exit");
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn a_window_thread_query_returns_while_the_x11_server_withholds_its_reply() {
+        if std::env::var_os(CHILD_MARKER_ENV).is_some() {
+            return;
+        }
+        let server = StalledX11Server::start();
+        let authority = std::env::temp_dir().join(format!(
+            "folio-pr20-xauth-{}-{}",
+            std::process::id(),
+            server.display
+        ));
+        let stderr_path = std::env::temp_dir().join(format!(
+            "folio-pr20-x11-stderr-{}-{}",
+            std::process::id(),
+            server.display
+        ));
+        std::fs::write(&authority, []).expect("write empty Xauthority data");
+        let stderr_file = std::fs::File::create(&stderr_path).expect("capture child diagnostics");
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().expect("locate this test binary"))
+                .args([
+                    "--exact",
+                    "linux_display::stalled_server_tests::client_child",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD_MARKER_ENV, "1")
+                .env("DISPLAY", format!("127.0.0.1:{}", server.display))
+                .env("XAUTHORITY", &authority)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(stderr_file))
+                .spawn()
+                .expect("start an isolated window-thread client"),
+        );
+        let stdout = child.0.stdout.take().expect("capture the client marker");
+        let mut child_stdin = child
+            .0
+            .stdin
+            .take()
+            .expect("release the child after the barrier");
+        let (returned_tx, returned) = mpsc::channel();
+        let marker_reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) if line.contains(CHILD_MARKER) => {
+                        let _ = returned_tx.send(());
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+            }
+        });
+
+        server
+            .wait_until_stalled()
+            .expect("the X11 server received InternAtom");
+        let returned = returned.recv();
+        if returned.is_ok() {
+            child_stdin
+                .write_all(&[0])
+                .expect("release the child after the server withheld its reply");
+        } else {
+            let _ = child.0.kill();
+        }
+        let _ = child.0.wait();
+        let _ = marker_reader.join();
+        let _ = std::fs::remove_file(authority);
+        let child_stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        let _ = std::fs::remove_file(stderr_path);
+        assert!(
+            returned.is_ok(),
+            "the window-thread call must return while the X11 server withholds its InternAtom reply; child stderr: {child_stderr}"
+        );
     }
 }

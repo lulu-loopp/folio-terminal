@@ -28,7 +28,11 @@ pub enum LinuxHotkeyEvent {
     /// The actual X11 grab succeeded or failed.
     Ready { id: i32, generation: u64 },
     /// The grabbed chord was pressed.
-    Activated { id: i32, generation: u64 },
+    Activated {
+        id: i32,
+        generation: u64,
+        pointer: (i32, i32),
+    },
 }
 
 /// Whether the X11 server has accepted this claim.
@@ -665,6 +669,7 @@ fn handle_key_press(event: KeyPressEvent, active: &mut HashMap<i32, ActiveGrab>)
         wake(LinuxHotkeyEvent::Activated {
             id: *id,
             generation: grab.generation,
+            pointer: (i32::from(event.root_x), i32::from(event.root_y)),
         });
     }
 }
