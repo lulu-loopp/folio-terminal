@@ -294,6 +294,14 @@ function Test-BatchMember {
     $utf8From = -1
     $lines = $true
     for ($at = 0; $at -lt $Bytes.Length; $at++) {
+        if ($Bytes[$at] -eq 0x0D) {
+            if ($at + 1 -ge $Bytes.Length -or $Bytes[$at + 1] -ne 0x0A) {
+                $problems.Add("batch     : $Name line $line holds a CR that LF does not follow; cmd.exe reads batch lines that end in CRLF")
+                $lines = $false
+                break
+            }
+            continue
+        }
         if ($Bytes[$at] -ne 0x0A) { continue }
         if ($at -eq 0 -or $Bytes[$at - 1] -ne 0x0D) {
             $problems.Add("batch     : $Name line $line ends in LF alone; cmd.exe reads batch lines that end in CRLF")

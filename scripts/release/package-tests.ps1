@@ -273,11 +273,12 @@ Test-Case 'package_refuses_a_batch_member_with_lf_only_lines' {
 
 # RED (0.4.7 uninstall fix) — **what `Test-BatchMember` refuses, one shape at
 # a time**: a byte-order mark, a first line without `@`, a last line without
-# CRLF, and a byte past ASCII before `chcp 65001` — and the same text with the
+# CRLF, an LF alone, a CR alone (mid-line or last), and a byte past ASCII
+# before `chcp 65001` — and the same text with the
 # byte after it passes. A name that is not a batch file is not looked at.
 #
 # MUTATION: drop the code-page loop from `Test-BatchMember`; the Chinese line
-# before `chcp 65001` passes.
+# before `chcp 65001` passes. Drop the lone-CR arm; `echo a<CR>b` passes.
 Test-Case 'test_batch_member_refuses_each_shape_cmd_cannot_read' {
     $utf8 = New-Object Text.UTF8Encoding($false)
     $case = { param([string] $Text) @(Test-BatchMember -Name 'x.cmd' -Bytes $utf8.GetBytes($Text)) }
@@ -288,7 +289,9 @@ Test-Case 'test_batch_member_refuses_each_shape_cmd_cannot_read' {
             @("echo off`r`n", 'does not begin with @'),
             @("@echo off`r`necho x", 'does not end its last line'),
             @("@echo off`r`necho 保留`r`nchcp 65001 >nul`r`n", 'byte past ASCII before'),
-            @("@echo off`nchcp 65001 >nul`r`n", 'line 1 ends in LF alone'))) {
+            @("@echo off`nchcp 65001 >nul`r`n", 'line 1 ends in LF alone'),
+            @("@echo off`r`necho a`rb`r`n", 'line 2 holds a CR that LF does not follow'),
+            @("@echo off`r`necho a`r", 'line 2 holds a CR that LF does not follow'))) {
         $said = @(& $case $shape[0]) -join '; '
         if ($said -notmatch [regex]::Escape($shape[1])) { throw "expected '$($shape[1])', got '$said'" }
     }

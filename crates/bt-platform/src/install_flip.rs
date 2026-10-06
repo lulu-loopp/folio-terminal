@@ -1317,10 +1317,18 @@ mod tests {
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap();
+            // The stand-in's identity first, so the test can end it whatever
+            // happens after this line.
+            let stand_in = grandchild.id();
+            std::fs::write(
+                Path::new(&directory).join("stand-in"),
+                format!("{stand_in} {}", started_of(stand_in).unwrap()),
+            )
+            .unwrap();
             let me = std::process::id();
             std::fs::write(
-                Path::new(&directory).join("identities"),
-                format!("{me} {} {}", started_of(me).unwrap(), grandchild.id()),
+                Path::new(&directory).join("asker"),
+                format!("{me} {}", started_of(me).unwrap()),
             )
             .unwrap();
             // The stand-in outlives this process, and the test ends it by its
@@ -1339,6 +1347,37 @@ mod tests {
             crate::trust_harness::Behaviour::StaysUp,
         )
         .unwrap();
+        // **The stand-in ends with the test, on every road out of it** — an
+        // assertion that fails, here or inside the held exit, included: it is
+        // not debugged, so nothing else would end it. By its recorded pid and
+        // start instant, from its own image, so nothing else is touched.
+        struct EndsTheStandIn<'a> {
+            data: &'a Path,
+            program: &'a Path,
+        }
+        impl EndsTheStandIn<'_> {
+            fn running(&self) -> Option<Running> {
+                let said = std::fs::read_to_string(self.data.join("stand-in")).ok()?;
+                let (pid, started) = said.split_once(' ')?;
+                Some(Running {
+                    pid: pid.parse().ok()?,
+                    started: started.parse().ok()?,
+                })
+            }
+            fn end(&self) -> bool {
+                self.running()
+                    .is_some_and(|running| ask(running, &[self.program], Ask::End).unwrap_or(false))
+            }
+        }
+        impl Drop for EndsTheStandIn<'_> {
+            fn drop(&mut self) {
+                self.end();
+            }
+        }
+        let stand_in = EndsTheStandIn {
+            data: &data,
+            program: &program,
+        };
         let mut command = crate::quiet_command(std::env::current_exe().unwrap());
         command
             .args([
@@ -1351,20 +1390,16 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let identities = || -> (Running, u32) {
-            let said = std::fs::read_to_string(data.join("identities")).unwrap();
-            let words: Vec<&str> = said.split(' ').collect();
-            let pid = words[0].parse().unwrap();
-            (
-                Running {
-                    pid,
-                    started: words[1].parse().unwrap(),
-                },
-                words[2].parse().unwrap(),
-            )
+        let asker = || -> Running {
+            let said = std::fs::read_to_string(data.join("asker")).unwrap();
+            let (pid, started) = said.split_once(' ').unwrap();
+            Running {
+                pid: pid.parse().unwrap(),
+                started: started.parse().unwrap(),
+            }
         };
         let (at_exit, status) = crate::trust_harness::stopped_at_exit(&mut command, |pid, code| {
-            let (child, _) = identities();
+            let child = asker();
             assert_eq!(child.pid, pid);
             (
                 code,
@@ -1373,15 +1408,15 @@ mod tests {
             )
         })
         .unwrap();
-        let (child, grandchild) = identities();
-        let grandchild = Running {
-            pid: grandchild,
-            started: started_of(grandchild).expect("the process the child started runs"),
-        };
+        let child = asker();
+        assert!(
+            stand_in.running().is_some_and(still_running),
+            "the process the child started runs"
+        );
         // Asked while the process the child started still runs, which is
         // then ended before anything is asserted.
         let claim = crate::instance::claim_data_directory(&data);
-        assert!(ask(grandchild, &[&program], Ask::End).unwrap());
+        assert!(stand_in.end());
         assert_eq!(
             at_exit,
             (7, true, true),
