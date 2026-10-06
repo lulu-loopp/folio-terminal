@@ -1970,11 +1970,7 @@ impl Runtime<'_> {
             .as_ref()
             .is_some_and(|pending| pending.broker_generation == broker.guard_generation);
         #[cfg(target_os = "linux")]
-        if !crate::drag_guard_allows_release(
-            broker.guard.screen,
-            guard_request_pending,
-            broker.guard_sample_ready,
-        ) {
+        if !broker.guarded_release_is_current(guard_request_pending, broker.pointer) {
             self.settle_home(drag);
             return Ok(true);
         }
