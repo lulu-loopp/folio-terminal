@@ -69466,7 +69466,12 @@ mod floated_page_tests {
                 && door.contains("window.restored_quake_as_ordinary = restored_quake_as_ordinary;"),
             "the actual backend does not decide whether a saved summon is shown as ordinary:\n{door}"
         );
-        let snapshot = method_body("Runtime", "window_snapshot");
+        let snapshot_door = method_body("Runtime", "window_snapshot");
+        assert!(
+            snapshot_door.contains("self.window_snapshot_with_rect("),
+            "the snapshot must use the persistence body:\n{snapshot_door}"
+        );
+        let snapshot = method_body("Runtime", "window_snapshot_with_rect");
         assert!(
             snapshot.contains(
                 "let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;"
@@ -69784,7 +69789,11 @@ mod floated_page_tests {
         let door = item_body(
             &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
         );
-        let arm = door
+        let arms = door
+            .split("match event {")
+            .nth(1)
+            .expect("the receiving door dispatches the native event");
+        let arm = arms
             .split("WindowEvent::CloseRequested")
             .nth(1)
             .expect("the close arm is in the door that receives it");
