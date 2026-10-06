@@ -841,7 +841,6 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         // brings `bt-platform/src/linux_web_dirs.rs` (its writer source), which the
         // `include_str!` here would otherwise fail to find; the `LinuxCache` mark
         // itself and its writer string in the inventory are already recorded.
-
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio/clipboard"),
             include_str!("clipboard_picture.rs"),
