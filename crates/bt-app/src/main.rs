@@ -2133,6 +2133,14 @@ fn read_video_glance(worker: &bt_platform::admission::WorkerCtx, path: &Path) ->
     let metadata = std::fs::metadata(path).ok();
     let bytes = metadata.as_ref().map(std::fs::Metadata::len);
     let mtime = metadata.and_then(|meta| meta.modified().ok());
+    #[cfg(target_os = "linux")]
+    let frame = bt_platform::first_frame_on_worker(
+        worker,
+        path,
+        VIDEO_FRAME_FIT_PX.0,
+        VIDEO_FRAME_FIT_PX.1,
+    );
+    #[cfg(not(target_os = "linux"))]
     let frame = {
         let _ = worker;
         bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1)

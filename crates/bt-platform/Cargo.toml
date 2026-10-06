@@ -1184,6 +1184,9 @@ fontdb.workspace = true
 # `fontdb` already uses this parser; Linux SVG text uses its ordered installed
 # family aliases instead of an alias name that is absent from the font database.
 fontconfig-parser.workspace = true
+# Linux loads the installed GStreamer 1.x runtime at playback time. `libloading`
+# is already in the lock file and THIRD-PARTY-NOTICES.md; no dev headers are added.
+libloading.workspace = true
 # The desktop appearance is the XDG Settings portal's one process-wide fact.
 # zbus is pure Rust and stays Linux-scoped. Its Tokio integration runs on the
 # named worker's current-thread runtime, so the subscription adds no executor

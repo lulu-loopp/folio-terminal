@@ -138,6 +138,11 @@ image = { version = "=0.25.10", default-features = false, features = [
 # `Send`, and `crates/bt-app/src/animation.rs` needs a decoder that can be moved
 # to a worker and back to stream a long file a ring at a time.
 gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
+# **Exact pin (the port's dependency fix)**: `libloading` opens the installed
+# GStreamer 1.x runtime for Linux playback, and it is pinned the way the
+# workspace pins the packages a platform crate depends on, so a minor cannot
+# drift under it.
+libloading = "=0.8.9"
 # Exact for the same reason as the two lines above, and vendored for a reason of
 # its own: `mitex` and `mitex-parser` are where a formula's recursion is
 # *enforced* (`vendor/mitex-parser/src/depth.rs`). A 0.2.x out-resolving the

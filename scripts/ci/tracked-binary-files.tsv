@@ -176,6 +176,7 @@ tests/assets/folio-video-test.mkv	binary format contains NUL bytes
 tests/assets/folio-video-test.mov	binary format contains NUL bytes
 tests/assets/folio-video-test.mp4	binary format contains NUL bytes
 tests/assets/folio-video-test.wmv	binary format contains NUL bytes
+tests/assets/folio-video-unequal-streams.ts	binary format contains NUL bytes
 tests/assets/preview-samples/binary.bin	binary format contains NUL bytes
 tests/assets/preview-samples/sample.dat	binary format contains NUL bytes
 tests/corpus/cargo-build-flood.btcr	binary format contains NUL bytes

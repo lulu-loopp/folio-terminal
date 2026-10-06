@@ -56036,8 +56036,8 @@ fn a_door_answers_by_role_and_phase<D: bt_platform::admission::Door>(
 /// door, through the real thread door, for the doors the product now reaches only inside an
 /// admission.
 ///
-/// MUTATION: widen `DesktopRetire` to `Running` in `bt_platform::admission::doors`;
-/// the explicit row below goes red.
+/// MUTATION: widen `DesktopRetire` to `Running` or narrow `VideoShutdown` to
+/// `Exiting` in `bt_platform::admission::doors`; the two explicit rows below go red.
 #[test]
 fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     use bt_platform::admission::Phase::{Exiting, Running, Starting};
@@ -56066,12 +56066,14 @@ fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     a_door_answers_by_role_and_phase::<doors::WebRehost>(&[Running]);
     a_door_answers_by_role_and_phase::<doors::ImeCaretArea>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::GpuOpen>(&[Running]);
+    // Linux video workers may be retired while running or while shutdown drains.
+    a_door_answers_by_role_and_phase::<doors::VideoShutdown>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::FocusWindow>(&[Running]);
     a_door_answers_by_role_and_phase::<doors::SetVisible>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::SetCursor>(&[Running]);
     assert_eq!(
         doors::ALL.len(),
-        26,
+        27,
         "a door added to the registry is a door this list has to name"
     );
 }

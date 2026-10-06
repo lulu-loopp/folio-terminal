@@ -14094,6 +14094,10 @@ mod linux_notifications;
 #[cfg(target_os = "linux")]
 pub use linux_notifications::shutdown_notifications;
 #[cfg(target_os = "linux")]
+mod linux_video;
+#[cfg(target_os = "linux")]
+pub use linux_video::first_frame_on_worker;
+#[cfg(target_os = "linux")]
 pub mod linux_hotkey;
 #[cfg(target_os = "linux")]
 pub mod linux_window;
@@ -22142,10 +22146,11 @@ mod macos_attention_signature_tests {
 /// against whichever engine the machine built.
 #[cfg(test)]
 mod macos_player_signature_tests {
-    /// Media Foundation's engine, AVFoundation's, and the file that holds
-    /// everything off Windows which is neither.
+    /// Media Foundation's engine, AVFoundation's player, Linux's GStreamer
+    /// player, and the shared off-Windows refusal contracts.
     const WINDOWS_ARM: &str = include_str!("video/engine.rs");
     const MACOS_ARM: &str = include_str!("macos_player.rs");
+    const LINUX_ARM: &str = include_str!("linux_player.rs");
     const OFF_WINDOWS: &str = include_str!("video_portable.rs");
 
     /// One method of `Engine`, with its documentation and its whitespace taken
@@ -22234,7 +22239,9 @@ mod macos_player_signature_tests {
         ] {
             let windows = verb(WINDOWS_ARM, door);
             let macos = verb(MACOS_ARM, door);
+            let linux = verb(LINUX_ARM, door);
             assert_eq!(windows, macos, "`{door}` is two different doors");
+            assert_eq!(windows, linux, "`{door}` differs on Linux");
         }
     }
 

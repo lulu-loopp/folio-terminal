@@ -1091,19 +1091,24 @@ jobs:
       # it installs the pinned *version* against this runner's own host triple.
       - uses: ./.github/actions/toolchain
 
-      # `bt-platform`'s Linux suite deliberately reads the fonts a machine has
-      # installed — the Fontconfig enumeration is about real installed faces,
-      # and a runner with none would make the font doors lie by answering
-      # empty. Noto CJK and DejaVu give the monospace, CJK and fallback reads
-      # something true to find. The windowing and rendering steps below run on
-      # private displays: Xvfb and Weston, with Mesa's software drivers for
-      # wgpu's Vulkan and GLES backends.
+      # Linux-only runtime checks below exercise installed fonts, GStreamer
+      # playback and two private display servers. The app build links its own
+      # Rust code, while wgpu, Weston and Xvfb use Mesa's software drivers here.
       - name: install Linux desktop test runtimes
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             xvfb weston libgl1-mesa-dri mesa-vulkan-drivers \
-            fonts-noto-cjk fonts-noto-mono fonts-dejavu-core
+            fonts-noto-cjk fonts-noto-mono fonts-dejavu-core \
+            ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav
+
+      - name: check the GStreamer elements used by Linux playback
+        run: |
+          for element in appsink fakesink playbin qtdemux tsdemux avdec_h264; do
+            gst-inspect-1.0 "$element" >/dev/null
+          done
 
       # The same fifteen crates `core-macos` checks and in the same order,
       # because they are the same promise: `scripts/check-portable-core.ps1`'s
