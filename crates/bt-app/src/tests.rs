@@ -10121,6 +10121,27 @@ fn a_maximized_window_still_keeps_the_rectangle_it_had_while_normal() {
     assert!(maximized);
 }
 
+/// An unavailable native posture keeps both previously saved placement facts.
+#[test]
+fn unknown_native_posture_preserves_the_saved_window_placement() {
+    assert_eq!(choose_window_posture(None, None), WindowPosture::Unknown);
+    assert_eq!(
+        choose_window_posture(Some(false), None),
+        WindowPosture::Unknown
+    );
+    for saved_maximized in [false, true] {
+        assert_eq!(
+            recorded_window_placement(
+                WindowPosture::Unknown,
+                Some(ICONIC_BOUNDS),
+                CHOSEN_BOUNDS,
+                saved_maximized,
+            ),
+            (CHOSEN_BOUNDS, saved_maximized),
+        );
+    }
+}
+
 /// The posture that does record: a normal window's rectangle is the user's,
 /// and it is written exactly. The fallback to what was saved covers only the
 /// case where the rectangle could not be measured at all.
