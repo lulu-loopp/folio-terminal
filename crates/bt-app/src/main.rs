@@ -13790,7 +13790,7 @@ struct WindowRuntime {
     #[cfg(target_os = "linux")]
     native_client_origin: Option<(i32, i32)>,
     #[cfg(target_os = "linux")]
-    native_window_maximized: Option<bool>,
+    maximize_intent: WindowMaximizeIntent,
     #[cfg(target_os = "linux")]
     native_window_minimized: Option<bool>,
     /// The geometry changes the most recent layout commit produced (T230).
@@ -41329,7 +41329,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         #[cfg(target_os = "linux")]
         native_client_origin: None,
         #[cfg(target_os = "linux")]
-        native_window_maximized: None,
+        maximize_intent: WindowMaximizeIntent::default(),
         #[cfg(target_os = "linux")]
         native_window_minimized: None,
         #[cfg(target_os = "linux")]
@@ -62189,9 +62189,12 @@ impl FolioApp {
             });
             #[cfg(target_os = "linux")]
             if restore_placement.is_none() {
-                let saved = (plan.like.is_none() && plan.receives.is_none())
-                    .then_some(plan.saved.as_deref())
-                    .flatten();
+                let saved: Option<&SessionWindowV1> =
+                    if plan.like.is_none() && plan.receives.is_none() {
+                        plan.saved.as_deref()
+                    } else {
+                        None
+                    };
                 if let Some(saved) = saved {
                     let inputs = restore_monitor_inputs(event_loop);
                     if !saved.tabs.is_empty()
@@ -63178,6 +63181,10 @@ impl FolioApp {
         let blurred = app.quake.take_dismiss();
         let showing = app.quake.is_showing();
         let summoned_window = app.quake.window();
+        #[cfg(target_os = "linux")]
+        let pending_summon = app.pending_quake_summon.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let pending_summon = false;
         if !pressed && !blurred {
             return Ok(());
         }
@@ -63197,8 +63204,16 @@ impl FolioApp {
                 .get_mut(id)
                 .is_some_and(|window| window.window_focused)
         });
-        if pressed && quake::summon_move(showing, focused) == quake::SummonMove::Dismiss {
-            return self.dismiss_quake();
+        if pressed {
+            match quake::summon_move(showing, focused, pending_summon) {
+                quake::SummonMove::Dismiss => return self.dismiss_quake(),
+                quake::SummonMove::CancelPending => {
+                    #[cfg(target_os = "linux")]
+                    app.pending_quake_summon.take();
+                    return Ok(());
+                }
+                quake::SummonMove::Raise => {}
+            }
         }
         if pressed {
             if summoned_window.is_none() {
@@ -63231,19 +63246,12 @@ impl FolioApp {
     /// after - a `SetForegroundWindow` on a window that is not on the screen yet
     /// is a request Windows has no reason to honour.
     fn summon_quake(&mut self, pointer: Option<(i32, i32)>) -> Result<()> {
-        #[cfg(not(target_os = "linux"))]
-        let _ = pointer;
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
         #[cfg(target_os = "linux")]
         {
-            let previous = self
-                .app
-                .as_mut()
-                .and_then(|app| app.pending_quake_summon.take())
-                .map(|pending| pending.previous)
-                .unwrap_or_else(bt_platform::hotkey::foreground_holder);
+            let previous = bt_platform::hotkey::foreground_holder();
             let Some(mut runtime) = self.runtime(id) else {
                 return Ok(());
             };
@@ -63259,6 +63267,7 @@ impl FolioApp {
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = pointer;
             let previous = bt_platform::hotkey::foreground_holder();
             let Some(mut runtime) = self.runtime(id) else {
                 return Ok(());
@@ -69675,7 +69684,12 @@ mod floated_page_tests {
                 && door.contains("window.restored_quake_as_ordinary = restored_quake_as_ordinary;"),
             "the actual backend does not decide whether a saved summon is shown as ordinary:\n{door}"
         );
-        let snapshot = method_body("Runtime", "window_snapshot");
+        let snapshot_door = method_body("Runtime", "window_snapshot");
+        assert!(
+            snapshot_door.contains("self.window_snapshot_with_rect("),
+            "the snapshot must use the persistence body:\n{snapshot_door}"
+        );
+        let snapshot = method_body("Runtime", "window_snapshot_with_rect");
         assert!(
             snapshot.contains(
                 "let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;"
@@ -69860,40 +69874,65 @@ mod floated_page_tests {
     #[test]
     fn the_foreground_is_read_before_the_summon_and_handed_back_after_it() {
         let up = method_body("FolioApp", "summon_quake");
-        let read = up
+        let linux = up
+            .split("#[cfg(target_os = \"linux\")]")
+            .nth(1)
+            .expect("the Linux summon path is present")
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux summon path ends before the portable path");
+        let read = linux
             .find("foreground_holder()")
-            .expect("the summon reads who had the keyboard");
-        let restored = up
+            .expect("the Linux summon reads the foreground before queuing work");
+        let request = linux
+            .find("runtime.request_quake_screen(pointer)?")
+            .expect("the Linux summon requests its display facts");
+        assert!(
+            read < request,
+            "the foreground read follows the Linux query: {linux}"
+        );
+
+        let request = method_body("Runtime", "request_quake_screen");
+        assert!(!request.contains("restore_minimized_window()"));
+
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        let restore = ready
             .find("runtime.restore_minimized_window()?")
-            .expect("the Linux summon restores its minimized window");
-        let show = up
-            .find("show_quake_window()")
-            .expect("the summon shows the window");
+            .expect("the Linux completion restores before showing");
+        let show = ready
+            .find("runtime.show_quake_window_at(")
+            .expect("the Linux completion shows after restore");
+        let finish = ready
+            .find("self.finish_summon_quake(pending.window, pending.previous)")
+            .expect("the Linux completion finishes after showing");
         assert!(
-            read < restored && restored < show,
-            "the summon restores a minimized window after reading and before showing it"
+            restore < show && show < finish,
+            "Linux restore/show/finish order changed: {ready}"
         );
+
+        let portable = up
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .expect("the Windows and macOS summon path is present");
+        let read = portable
+            .find("foreground_holder()")
+            .expect("the portable summon reads the foreground");
+        let show = portable
+            .find("runtime.show_quake_window()?")
+            .expect("the portable summon shows its window");
+        let finish = portable
+            .find("self.finish_summon_quake(id, previous)")
+            .expect("the portable summon hands off after showing");
         assert!(
-            read < show,
-            "the foreground is read after the window is up, by which time it is \
-             the window:\n{up}"
+            read < show && show < finish,
+            "portable read/show/finish order changed: {portable}"
         );
-        let focus = up
-            .find("runtime.give_foreground_with_retry()")
-            .expect("the summon retries giving foreground to its window");
-        assert!(
-            show < focus,
-            "the foreground retry must follow showing the summon: {up}"
-        );
+
         let runtime_focus = method_body("Runtime", "give_foreground_with_retry");
-        assert!(
-            runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
-            "the runtime focus helper does not use its owned-window path: {runtime_focus}"
-        );
+        assert!(runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"));
         let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
         assert!(
-            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
-            "the foreground helper no longer uses the platform foreground door: {foreground}"
+            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)")
         );
 
         let down = method_body("FolioApp", "dismiss_quake");
@@ -69910,6 +69949,18 @@ mod floated_page_tests {
         );
     }
 
+    /// A press during an unanswered Linux summon cancels that hidden request.
+    #[test]
+    fn a_second_hotkey_press_cancels_a_pending_linux_summon() {
+        let settle = method_body("FolioApp", "settle_quake");
+        assert!(settle.contains("pending_quake_summon.is_some()"));
+        assert!(settle.contains("SummonMove::CancelPending"));
+        assert!(settle.contains("app.pending_quake_summon.take()"));
+
+        let movement = item_body(&ItemQuery::function("summon_move"));
+        assert!(movement.contains("pending && !showing"));
+        assert!(movement.contains("SummonMove::CancelPending"));
+    }
     /// RED (§7.54) — **a window nobody can see does not keep the run alive.**
     ///
     /// The hazard the summoned terminal introduces, and it is a real one: it is
@@ -69993,7 +70044,11 @@ mod floated_page_tests {
         let door = item_body(
             &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
         );
-        let arm = door
+        let arms = door
+            .split("match event {")
+            .nth(1)
+            .expect("the receiving door dispatches the native event");
+        let arm = arms
             .split("WindowEvent::CloseRequested")
             .nth(1)
             .expect("the close arm is in the door that receives it");
@@ -71448,9 +71503,22 @@ fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
     }
 }
 fn restore_minimized_window(window: &Window) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        match linux_window_backend(window)? {
+            bt_platform::linux_window::Backend::X11 => {
+                linux_window_request(window, bt_platform::linux_window::Operation::Restore)?;
+                window.set_minimized(false);
+            }
+            bt_platform::linux_window::Backend::Wayland => {
+                if window.is_minimized() == Some(true) {
+                    window.set_minimized(false);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     if window.is_minimized() == Some(true) {
-        #[cfg(target_os = "linux")]
-        linux_window_request(window, bt_platform::linux_window::Operation::Restore)?;
         window.set_minimized(false);
     }
     Ok(())
@@ -72494,6 +72562,65 @@ fn choose_window_posture(minimized: Option<bool>, maximized: Option<bool>) -> Wi
         (Some(false), Some(true)) => WindowPosture::Maximized,
         (Some(false), Some(false)) => WindowPosture::Normal,
         _ => WindowPosture::Unknown,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WindowMaximizeIntent {
+    observed: Option<bool>,
+    desired: Option<bool>,
+    toggle_while_unknown: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowMaximizeAction {
+    Request(bool),
+    WaitForObservation,
+}
+
+impl WindowMaximizeIntent {
+    pub(crate) const fn observed(&self) -> Option<bool> {
+        self.observed
+    }
+
+    fn posture_state(&self) -> Option<bool> {
+        let observed = self.observed();
+        if self
+            .desired
+            .is_some_and(|desired| Some(desired) != observed)
+        {
+            None
+        } else {
+            observed
+        }
+    }
+
+    pub(crate) fn request_initial(&mut self, desired: bool) {
+        self.desired = Some(desired);
+    }
+
+    pub(crate) fn toggle(&mut self) -> WindowMaximizeAction {
+        let Some(current) = self.desired.or(self.observed) else {
+            self.toggle_while_unknown = !self.toggle_while_unknown;
+            return WindowMaximizeAction::WaitForObservation;
+        };
+        let desired = !current;
+        self.desired = Some(desired);
+        WindowMaximizeAction::Request(desired)
+    }
+
+    pub(crate) fn observe(&mut self, observed: Option<bool>) -> Option<WindowMaximizeAction> {
+        self.observed = observed;
+        let observed = observed?;
+        if std::mem::take(&mut self.toggle_while_unknown) {
+            let desired = !observed;
+            self.desired = Some(desired);
+            return Some(WindowMaximizeAction::Request(desired));
+        }
+        if self.desired == Some(observed) {
+            self.desired = None;
+        }
+        None
     }
 }
 
@@ -74010,7 +74137,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 32] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 35] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -74043,12 +74170,16 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Linux's generation-checked native hotkey answers read the current claim here.
         "quake.rs",
+        // Linux notification restore consumes worker posture; the other platforms keep Winit reads.
+        "runtime/attention.rs",
         // Linux clipboard and path-drop replies apply only to their captured destination.
         "runtime/clipboard.rs",
         // Linux snapshots use event geometry and an asynchronous native rectangle answer.
         "runtime/dpi.rs",
         // A refused Linux external-drop batch remains closed through its event-turn boundary.
         "runtime/files.rs",
+        // Linux withdraws cross-window dragging when its observed client origin is invalidated.
+        "runtime/frame.rs",
         // Linux keeps its input method across a focus loss in this ladder.
         "runtime/keyboard.rs",
         // Linux's client frame starts a native resize from this pointer gesture.
@@ -74062,6 +74193,8 @@ mod platform_gate_tests {
         "runtime/quake.rs",
         // Linux tear-out plans carry the worker's work-area and DPI answer to window creation.
         "runtime/tabs.rs",
+        // Linux screen coordinates use the display worker's client translation.
+        "runtime/terminal.rs",
         // The Linux-only minimize restore bridge has only the Linux quake summon caller.
         "runtime/windows.rs",
         // Native failure fixture: Linux reports async watch-start failure; other starts refuse inline.
@@ -79059,8 +79192,8 @@ mod clipboard_path_tests {
             ),
             (
                 resized,
-                "window_rect_refresh_owed = true",
-                "a resize must invalidate an in-flight rectangle answer",
+                "self.queue_linux_window_rect_snapshot()",
+                "a resize must reach the coalescing geometry request",
             ),
             (
                 snapshot,
@@ -79075,9 +79208,30 @@ mod clipboard_path_tests {
         ] {
             assert!(body.contains(needle), "{reason}:\n{body}");
         }
+        let queue = method_body("Runtime", "queue_linux_window_rect_snapshot");
+        let pending = queue
+            .find("self.window.pending_window_rect.is_some()")
+            .expect("the refresh must observe an in-flight request");
+        let owed = queue
+            .find("self.window.window_rect_refresh_owed = true")
+            .expect("an event must invalidate the in-flight answer");
+        let fresh = queue
+            .find("bt_platform::linux_display::request_display(")
+            .expect("a window without a pending request asks for current facts");
+        assert!(
+            pending < owed && owed < fresh,
+            "a pending request must coalesce before new admission:\n{queue}"
+        );
         let stale = apply
             .find("self.window.window_rect_refresh_owed")
             .expect("an event can mark the native answer stale");
+        let closing = apply
+            .find("self.window.leaving.is_some()")
+            .expect("a closing window discards late native facts");
+        assert!(
+            closing < stale,
+            "a late native reply can be spent after close:\n{apply}"
+        );
         let write = apply
             .find("self.window.last_winit_rect = Some(facts.rect)")
             .expect("a current native answer refreshes the cache");
@@ -79092,16 +79246,61 @@ mod clipboard_path_tests {
     fn linux_window_posture_comes_from_worker_facts_and_keeps_unknown() {
         let applying = method_body("Runtime", "apply_linux_window_rect_ready");
         assert!(applying.contains("native_window_minimized = facts.minimized"));
-        assert!(applying.contains("native_window_maximized = facts.maximized"));
+        assert!(applying.contains("maximize_intent.observe(facts.maximized)"));
 
-        let posture = method_body("Runtime", "window_posture");
-        assert!(posture.contains("Backend::X11"));
-        assert!(posture.contains("Backend::Wayland"));
+        let minimized = method_body("Runtime", "window_minimized_state");
+        assert!(minimized.contains("Backend::X11"));
+        assert!(minimized.contains("Backend::Wayland"));
+        let maximized = method_body("Runtime", "window_maximized_state");
+        assert!(maximized.contains("maximize_intent.posture_state()"));
+        assert!(maximized.contains("Backend::Wayland"));
+        let posture = item_body(&ItemQuery::function("choose_window_posture"));
         assert!(posture.contains("WindowPosture::Unknown"));
 
         let snapshot = method_body("Runtime", "window_snapshot_with_rect");
         assert!(snapshot.contains("self.window_posture()"));
         assert!(!snapshot.contains("is_maximized()"));
+    }
+
+    /// The X11 maximize target stays window-owned and late state facts stay addressed.
+    #[test]
+    fn x11_maximize_intent_is_window_owned_and_late_answers_stay_addressed() {
+        let birth = item_body(&ItemQuery::function("new_window_runtime"));
+        assert!(birth.contains("maximize_intent: WindowMaximizeIntent::default()"));
+
+        let applying = method_body("Runtime", "apply_linux_window_rect_ready");
+        assert!(applying.contains("maximize_intent.observe(facts.maximized)"));
+
+        let state = method_body("Runtime", "window_maximized_state");
+        assert!(state.contains("maximize_intent.posture_state()"));
+        let restore = item_body(&ItemQuery::function("restore_minimized_window"));
+        let x11_restore = restore.split("Backend::Wayland").next().unwrap();
+        assert!(x11_restore.contains("Operation::Restore"));
+        assert!(!x11_restore.contains("is_minimized()"));
+
+        let notification = method_body("Runtime", "open_from_notification");
+        assert!(notification.contains("self.window_minimized_state()"));
+        assert!(!notification.contains("is_minimized()"));
+
+        let caption = method_body("Runtime", "chrome_mouse_input");
+        assert!(caption.contains("self.toggle_window_maximized()"));
+        assert!(!caption.contains("is_maximized()"));
+        let toggle = method_body("Runtime", "toggle_window_maximized");
+        let x11_toggle = toggle.split("Backend::Wayland").next().unwrap();
+        assert!(x11_toggle.contains("maximize_intent.toggle()"));
+        assert!(!x11_toggle.contains("is_maximized()"));
+        let edge = method_body("Runtime", "mouse_input");
+        assert!(edge.contains("window_maximized_state() == Some(false)"));
+        assert!(!edge.contains("is_maximized()"));
+
+        let request = method_body("Runtime", "request_linux_window_maximized");
+        assert!(request.contains("self.window.window.set_maximized(target)"));
+        assert!(request.contains("window_rect_refresh_owed = true"));
+
+        let close = method_body("Runtime", "close_window");
+        assert!(close.contains("self.let_go_of_this_window()"));
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        assert!(ready.contains("find(|id| u64::from(*id) == ready.owner)"));
     }
 
     /// **A file row let go over a terminal's middle is spelled exactly as a file

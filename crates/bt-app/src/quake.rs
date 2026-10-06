@@ -354,6 +354,8 @@ pub(crate) enum SummonMove {
     Raise,
     /// It is up and the reader is in it, so the press means "away".
     Dismiss,
+    /// A second key press cancels a summon that has not reached the screen.
+    CancelPending,
 }
 
 /// The rule, with no window and no Win32 in it.
@@ -362,8 +364,10 @@ pub(crate) enum SummonMove {
 /// the keyboard": a second Folio window in front of the summoned one is exactly
 /// as much *not this window* as somebody's editor is.
 #[must_use]
-pub(crate) const fn summon_move(showing: bool, focused: bool) -> SummonMove {
-    if showing && focused {
+pub(crate) const fn summon_move(showing: bool, focused: bool, pending: bool) -> SummonMove {
+    if pending && !showing {
+        SummonMove::CancelPending
+    } else if showing && focused {
         SummonMove::Dismiss
     } else {
         SummonMove::Raise
@@ -1051,23 +1055,24 @@ mod tests {
     #[test]
     fn the_chord_raises_a_visible_unfocused_summon_and_hides_a_focused_one() {
         assert_eq!(
-            summon_move(false, false),
+            summon_move(false, false, false),
             SummonMove::Raise,
             "nothing on the screen: the ordinary first press"
         );
         assert_eq!(
-            summon_move(true, false),
+            summon_move(true, false, false),
             SummonMove::Raise,
             "standing there while the reader works elsewhere: the press asks for it"
         );
         assert_eq!(
-            summon_move(true, true),
+            summon_move(true, true, false),
             SummonMove::Dismiss,
             "up, and the reader is in it: the press means away"
         );
         // A window that is hidden cannot hold the keyboard, so this pair says
         // nothing new — it is asserted so that the rule has no unexamined corner.
-        assert_eq!(summon_move(false, true), SummonMove::Raise);
+        assert_eq!(summon_move(false, true, false), SummonMove::Raise);
+        assert_eq!(summon_move(false, false, true), SummonMove::CancelPending);
     }
 
     /// RED (§7.54) — **the settings page speaks only for the refusal a reader can
