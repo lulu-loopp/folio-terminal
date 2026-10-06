@@ -14251,3 +14251,8 @@ The background-image worker reads X11 monitor dimensions before decoding, using 
 ### Linux drag origin loss — 2026-10-06
 
 A Linux cross-window drag starts only with an observed client origin. If move or resize invalidates that origin during the gesture, the source withdraws the cross-window broker and keeps its local drag. It does not convert local coordinates into a guessed screen point or retain the previous foreign aim.
+
+
+### Linux origin refresh is independent of persistence — 2026-10-06
+
+Showing an X11 window and each native move or resize event request current window facts. Requests coalesce through the existing pending request and owed-refresh flag. Origin recovery does not wait for a session mutation or save. Wayland skips unsupported native rectangle queries, and closing windows stop admission.

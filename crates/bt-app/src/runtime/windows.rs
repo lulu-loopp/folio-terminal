@@ -772,6 +772,8 @@ impl Runtime<'_> {
             .ime_report
             .trace_order(self.window.window.id(), "shown");
         self.window.window_shown = true;
+        #[cfg(target_os = "linux")]
+        self.queue_linux_window_rect_snapshot();
         // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
         // Query Win32 directly: winit's cached scale can race during initial monitor placement.
         self.reconcile_authoritative_dpi("show")?;
@@ -1295,6 +1297,12 @@ impl Runtime<'_> {
 
     #[cfg(target_os = "linux")]
     fn queue_linux_window_rect_snapshot(&mut self) {
+        if bt_platform::linux_display::active_backend()
+            != Some(bt_platform::linux_window::Backend::X11)
+            || self.window.leaving.is_some()
+        {
+            return;
+        }
         if self.window.pending_window_rect.is_some() {
             self.window.window_rect_refresh_owed = true;
             return;
@@ -2149,9 +2157,7 @@ impl Runtime<'_> {
                     bottom: position.y.saturating_add(height as i32),
                 });
             }
-            if self.window.pending_window_rect.is_some() {
-                self.window.window_rect_refresh_owed = true;
-            }
+            self.queue_linux_window_rect_snapshot();
             if self.window.pending_work_area.is_some() {
                 self.window.work_area_refresh_owed = true;
             }
@@ -2172,9 +2178,7 @@ impl Runtime<'_> {
                 rect.right = rect.left.saturating_add(size.width as i32);
                 rect.bottom = rect.top.saturating_add(size.height as i32);
             }
-            if self.window.pending_window_rect.is_some() {
-                self.window.window_rect_refresh_owed = true;
-            }
+            self.queue_linux_window_rect_snapshot();
         }
         #[cfg(not(target_os = "linux"))]
         let _ = size;
