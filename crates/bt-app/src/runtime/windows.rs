@@ -810,7 +810,8 @@ impl Runtime<'_> {
                         cwd: profiles::revived_cwd(
                             profiles::index_of_id(&profile_id),
                             Path::new(&cwd),
-                        ),
+                        )
+                        .map(profiles::SeedPlace::Carried),
                         unknown_profile_id: (!profiles::has_id(&profile_id))
                             .then(|| profile_id.clone()),
                         card_skip: 0,

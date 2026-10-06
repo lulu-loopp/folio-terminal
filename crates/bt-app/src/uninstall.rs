@@ -740,22 +740,40 @@ fn agent_fate(outcome: Outcome) -> Fate {
     }
 }
 
+/// **The program's step inside the cleanup** (`--uninstall`): handed the scope after every
+/// removal row has been decided and before any data is purged, and run only when no row refused
+/// (release read M1). `--uninstall-cleanup` has none.
+type ProgramStep<'a> = &'a mut dyn FnMut(&Scope) -> Vec<Entry>;
+
 /// Acquires and retains the existing instance claims BEFORE reading records or removing anything.
 /// A mock system callback is mandatory in unit tests; they never query the real registry.
-fn execute(scope: &Scope, purge: bool, system: impl FnMut(Remover) -> Vec<Entry>) -> Report {
+fn execute(
+    scope: &Scope,
+    purge: bool,
+    system: impl FnMut(Remover) -> Vec<Entry>,
+    program: Option<ProgramStep<'_>>,
+) -> Report {
     execute_with_claim(
         scope,
         purge,
         system,
         bt_platform::instance::claim_data_directory,
+        program,
     )
 }
 
+/// **The order of the door's steps, and the rule it keeps** (release read M1): nothing
+/// irreversible happens before every step that can refuse has succeeded or been decided. The
+/// claims and the purge's preflight refuse before anything is touched; then every removal row;
+/// then the program's step (`--uninstall`: the plan and its hand-over to the remover); and the
+/// purge of settings and data — the one step that cannot be undone — runs last, and only when
+/// nothing before it refused. A run that refused keeps the data, and each data row says so.
 fn execute_with_claim<T>(
     scope: &Scope,
     purge: bool,
     mut system: impl FnMut(Remover) -> Vec<Entry>,
     mut claim: impl FnMut(&Path) -> Option<T>,
+    program: Option<ProgramStep<'_>>,
 ) -> Report {
     let lang = scope.lang;
     if scope.data.is_empty() {
@@ -868,6 +886,7 @@ fn execute_with_claim<T>(
                                 ShellFate::Migrated => {
                                     Fate::Refused(Why::Said(Text::CleanupUnexpected))
                                 }
+                                ShellFate::Unlocated => Fate::Kept(Text::ShellProfileUnlocated),
                             },
                         ));
                     }
@@ -934,8 +953,22 @@ fn execute_with_claim<T>(
             Remover::Data(..) | Remover::RecoverySnapshots | Remover::RuntimeClaims => {}
         }
     }
+    let refused = |entries: &[Entry]| entries.iter().any(|e| matches!(e.fate, Fate::Refused(_)));
+    if let Some(program) = program
+        && !refused(&entries)
+    {
+        entries.extend(program(scope));
+    }
     if purge {
+        let complete = !refused(&entries);
         for ((mark, root), prepared) in scope.purge_roots.iter().zip(prepared) {
+            if !complete {
+                entries.push(Entry::new(
+                    format!("{}: {}", label(mark, lang), root.display()),
+                    Fate::Kept(Text::UninstallProgramKept),
+                ));
+                continue;
+            }
             let result = prepared.and_then(|_preflight| {
                 // The preflight decides whether the run may proceed; what the row
                 // reports is what was true at the check that decided the deletion.
@@ -1347,7 +1380,7 @@ fn run_within(worker: &WorkerCtx, door: crate::cli::UninstallDoor) -> i32 {
                 }
             };
             match asked {
-                None => execute(&scope, purge, |remover| system(&scope, remover)),
+                None => execute(&scope, purge, |remover| system(&scope, remover), None),
                 Some(after) => {
                     let lang = door_language(&scope, &bt_platform::os_ui_language());
                     // Every owner's own words too: the door's process speaks one language.
@@ -1364,7 +1397,14 @@ fn run_within(worker: &WorkerCtx, door: crate::cli::UninstallDoor) -> i32 {
                         &scope,
                         asker,
                         AFTER_PID_WITHIN,
-                        |scope| execute(scope, purge, |remover| system(scope, remover)),
+                        |scope, program| {
+                            execute(
+                                scope,
+                                purge,
+                                |remover| system(scope, remover),
+                                Some(program),
+                            )
+                        },
                         |scope| {
                             remove_the_program(
                                 worker,
@@ -1442,15 +1482,16 @@ fn waited_for(worker: &WorkerCtx, asker: Running, within: Duration) -> bool {
 
 /// **`--uninstall`, after its scope is known** (T-UNINSTALL-UX): the asker's
 /// end first, when one was named; then the cleanup (`cleanup`, the door's
-/// `execute`); then, only after a cleanup that completed, the program's own
-/// files (`program`). A cleanup that did not complete keeps the program — it
-/// is the one thing that can run the cleanup again — and says so.
+/// `execute`), which runs the program's own files (`program`) as its step
+/// after its removal rows and before any purge, only when no row refused. A
+/// cleanup that did not complete keeps the program — it is the one thing that
+/// can run the cleanup again — and says so.
 fn uninstall(
     worker: &WorkerCtx,
     scope: &Scope,
     asker: Option<Running>,
     within: Duration,
-    cleanup: impl FnOnce(&Scope) -> Report,
+    cleanup: impl FnOnce(&Scope, ProgramStep<'_>) -> Report,
     program: impl FnOnce(&Scope) -> Vec<Entry>,
 ) -> Report {
     uninstall_waiting(worker, scope, asker, within, waited_for, cleanup, program)
@@ -1465,7 +1506,7 @@ fn uninstall_waiting(
     asker: Option<Running>,
     within: Duration,
     wait: impl FnOnce(&WorkerCtx, Running, Duration) -> bool,
-    cleanup: impl FnOnce(&Scope) -> Report,
+    cleanup: impl FnOnce(&Scope, ProgramStep<'_>) -> Report,
     program: impl FnOnce(&Scope) -> Vec<Entry>,
 ) -> Report {
     if let Some(asker) = asker
@@ -1473,21 +1514,19 @@ fn uninstall_waiting(
     {
         return Report::blocked(Why::Said(Text::CleanupRunning)).in_lang(scope.lang);
     }
-    let mut report = cleanup(scope);
-    if report.code != 0 {
+    let mut program = Some(program);
+    let mut step = |scope: &Scope| {
+        program
+            .take()
+            .map_or_else(Vec::new, |program| program(scope))
+    };
+    let mut report = cleanup(scope, &mut step);
+    if program.is_some() && report.code != 0 {
         report.entries.push(Entry::new(
             program_label(scope.lang),
             Fate::Kept(Text::UninstallProgramKept),
         ));
-        return report;
     }
-    report.entries.extend(program(scope));
-    report.code = i32::from(
-        report
-            .entries
-            .iter()
-            .any(|entry| matches!(entry.fate, Fate::Refused(_))),
-    );
     report
 }
 
@@ -1514,19 +1553,31 @@ fn the_processes_to_outlive(asker: Option<Running>) -> Vec<Running> {
         .collect()
 }
 
-/// **The command a package manager uninstalls its copy with**, with the
-/// cleanup before it for a manager that runs none of its own (no uninstall
-/// hook).
+/// **The command a package manager uninstalls its copy with** (release read M6).
+///
+/// A manager with an uninstall hook runs the cleanup itself (scoop's
+/// `pre_uninstall`), and so does Homebrew's `--zap` (the cask's `zap` stanza runs
+/// it; the copy's marker says no hook because Homebrew runs uninstall steps on
+/// every upgrade). Otherwise — winget, which runs nothing of Folio's — the
+/// cleanup goes first, joined so that the manager runs **only when the cleanup
+/// completed**: the cleanup answers 1 when a removal was refused and 2 when a
+/// Folio is running (which the Settings row's own Folio is, so the row says to
+/// close it first), and a manager that ran after either would take the program
+/// and leave its marks — an Explorer verb and agent hooks naming a missing
+/// program. `&&` is that join in `cmd`; Windows PowerShell 5.1, the shell
+/// Windows Terminal opens by default, has no `&&` and runs everything after `;`
+/// whatever the exit code. So the line is handed to `cmd /c`, which reads it the
+/// same way pasted into `cmd`, Windows PowerShell 5.1 or PowerShell 7.
 pub(crate) fn manager_uninstall(manager: Manager, uninstall_hook: bool) -> String {
     let command = match manager {
         Manager::Scoop => "scoop uninstall folio",
         Manager::Homebrew => "brew uninstall --zap folio",
         Manager::Winget => "winget uninstall --id WeiyiShi.Folio --exact",
     };
-    if uninstall_hook {
+    if uninstall_hook || manager == Manager::Homebrew {
         command.to_owned()
     } else {
-        format!("folio --uninstall-cleanup; {command}")
+        format!("cmd /c \"folio --uninstall-cleanup && {command}\"")
     }
 }
 

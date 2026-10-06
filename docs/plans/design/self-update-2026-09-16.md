@@ -423,7 +423,9 @@ all failing rather than reaching `Verified`; a monotonic end-to-end deadline tha
 periodic bytes cannot defeat; and cancellation with a stated latency during DNS,
 headers, body, hashing and expansion, not merely between chunks. Progress carries
 **at most one pending wake**, so a stalled W cannot accumulate a backlog. Its
-timeouts are its own: 30 s idle, 10 min end-to-end.
+timeouts are its own: 30 s idle, and — since revision (i), 2026-10-05, which replaced
+"10 min end-to-end" — a 30 s stretch of the body carrying fewer than 64 KiB; nothing
+bounds the whole call but what those two imply from the ceiling.
 
 **The archive's real layout.** `package.ps1:472-497` calls `CreateFromDirectory(…, $true)`,
 so the zip contains `folio-<version>/<name>` — a versioned root, spelled with the
@@ -488,7 +490,7 @@ the crate's tests walk (`crates/bt-app/src/i18n.rs:5620` onward).
 | **`RunOnce` survivability** — whether the key is honoured after a hard power cut mid-flip, and whether security software strips it | force power loss at each boundary of C.4 on the Win11 clean VM and observe the next logon |
 | **Quarantine through the whole path** | `xattr -l` at every step of C.2–C.5 for a real downloaded dmg; if it appears, find which step applies it |
 | **A manual launch racing health** | start Folio by hand during the 90 s window, repeatedly, and assert the transaction completes rather than rolling back a healthy install |
-| **200 MB / 10 min / 90 s / 60 s are estimates** | measure the real asset sizes at the candidate release and the download time on a throttled 1 Mbit link; a release that outgrows the cap must fail the release gate, not the reader's machine |
+| **200 MB / 30 s · 64 KiB / 90 s / 60 s are estimates** (the 10-minute end-to-end figure is gone since revision (i)) | measure the real asset sizes at the candidate release and the download time on a throttled 1 Mbit link; a release that outgrows the cap must fail the release gate, not the reader's machine |
 | **MSIX registration after a version change** | on the Win11 VM with the first-page verb on, run a full transaction and read `msix::registered()` before and after. A repair failure must be visible, must not claim nothing changed, and must not leave a broken registration silently enabled |
 
 ## I. Review ledger
@@ -3175,3 +3177,19 @@ asserting both the recovery's decision and the exit guard's result:
 - **an unlistable candidate folder:** the result is `Deferred`.
 - **the recovery's own starter:** a live parent of the installed executable is not a candidate. A
   person's start at `Moving` with nothing else running still reaches `decide`.
+
+## Revision 2026-10-05 (i) — a download is given up when it stops moving, never for its length (047-EXPERIENCE)
+
+§E's "10 min end-to-end" failed every link slower than about 70 KB/s on a 42 MB archive: the
+download stopped with "Download stopped. / Nothing changed." and Retry failed the same way. What
+the end-to-end deadline protected against is a transfer that does not finish — one that falls
+silent, and one that holds the worker by trickling a byte just inside the idle timeout. Both are
+now one rule, `https_download::Deadlines`: a download is given up when it stops moving — 30 s
+with nothing heard (`DOWNLOAD_IDLE_TIMEOUT`, unchanged), or, once its body has begun, a 30 s
+stretch that carried fewer than `DOWNLOAD_FLOOR_BYTES` (64 KiB, about 2 KB/s). How long the whole
+takes is never a reason. The longest a download can run follows from its ceiling
+(`longest_download`: one stretch per floor of the ceiling, plus two), and that is what macOS's
+`timeoutIntervalForResource` is set to, so the stack's own whole-transfer timer never ends a
+download the rule keeps. The sentence "a monotonic end-to-end deadline that periodic bytes cannot
+defeat" above is replaced by this rule; cancel, the ceiling, the temporary file and progress are
+unchanged. It helps from 0.4.7 on: the 0.4.6 → 0.4.7 hop runs 0.4.6's downloader.

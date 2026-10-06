@@ -46,28 +46,21 @@ Take Folio out the way it came in:
 
 - **Windows zip** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio
   and double-click `uninstall.cmd` in its folder.
-- **scoop** — `scoop uninstall folio` runs the same cleanup for you.
+- **scoop** — quit Folio, then `scoop uninstall folio`; it runs the same
+  cleanup for you.
 - **macOS DMG** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio and
   run `/Applications/Folio.app/Contents/MacOS/folio --uninstall`. Either one
   removes Folio completely, the app included.
-- **Homebrew** — `brew uninstall --zap folio`.
+- **Homebrew** — quit Folio, then `brew uninstall --zap folio`.
 
-Folio's files are removed and its folder only if it is then empty.
+Only the files Folio installed are removed, and its folder only if nothing else
+is left in it; a file of your own in the folder stays, and the uninstall names it.
 
-Folio starts a copied remover through an internal, undocumented
-`--uninstall-remove` door; the door is not authenticated. At planning time and
-again immediately before each deletion, Folio checks that the file at the path
-is regular, has one hard link, and has the expected size and SHA-256. Both the
-check and deletion are by path. Another process running as the same account
-that deliberately swaps a file in that instant is outside what Folio defends
-against.
-
-If the remover is ended or power is lost during removal, some Folio files may
-remain and there may be no final report. If the installed Folio executable
-remains, run the uninstall again: it skips files already gone and plans the
-matching Folio files that remain. If that executable is already gone, remove
-the remaining Folio installation files and its folder manually, without
-removing unrelated files that share the folder.
+If something Folio set up cannot be removed — a file another program holds, for
+example — the uninstall says which, keeps the program so you can run it again,
+and keeps your settings and data even if you asked for them to go. If the
+computer loses power while the files are being removed, run the uninstall again
+from the same folder: it removes what is left.
 
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
 uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
@@ -75,8 +68,9 @@ There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
 and the cleanup unregisters it. -->
 
 The uninstall removes what Folio set up outside its folder — the Explorer or
-Finder menu, the line in your PowerShell profile, agent hooks — and keeps your
-settings and data. To remove those too, turn on **Also remove settings and
+Finder menu, the line it added to your PowerShell profile (with the profile file
+itself and the one copy it kept, when Folio made them), agent hooks — and keeps
+your settings and data. To remove those too, turn on **Also remove settings and
 data** in Settings, answer `n` in `uninstall.cmd`, or add `--remove-data`;
 Homebrew's `--zap` already removes the settings folder. Its lines are in the
 language Folio is set to. [`docs/install.md`](docs/install.md#uninstalling) says
@@ -131,8 +125,9 @@ Every feature is described in full, with the rules it follows, in [docs/features
 Folio collects nothing: no telemetry, no analytics, no crash reporting. Two
 things reach the network — a page you open in the web preview, and the update
 check, one `GET` of `https://api.github.com/repos/lulu-loopp/folio-terminal/releases`
-carrying no version and no identifier, which switches off at
-**Settings > General > Update check** or with `"update_check": false`.
+carrying no version and no identifier — once a day on its own, which
+**Settings > About > Automatic check** (or `"update_check": false`) turns off,
+and once each time you press **Check** on the Version row.
 Settings, profiles and sessions live on your own machine and go nowhere;
 [`docs/PRIVACY.md`](docs/PRIVACY.md) says what is in each file.
 
