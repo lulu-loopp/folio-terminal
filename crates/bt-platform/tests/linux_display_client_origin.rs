@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 #![cfg(target_os = "linux")]
 
 use bt_platform::linux_display::{self, LinuxDisplayAnswer, LinuxDisplayQuery, LinuxDisplayReady};
