@@ -71427,6 +71427,7 @@ fn retire_linux_desktop(
             "bt-desktop-retire",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
+                bt_platform::linux_display::stop_display_service();
                 let clipboard = clipboard_lane
                     .map(|lane| lane.shutdown(ctx, cutoff))
                     .unwrap_or(Ok(()));
@@ -71439,6 +71440,12 @@ fn retire_linux_desktop(
                 let watches = bt_platform::shutdown_watches(ctx);
                 let hotkeys = bt_platform::linux_hotkey::shutdown_hotkey_worker(ctx);
                 let system_settings = bt_platform::shutdown_system_settings(ctx);
+                while !bt_platform::linux_display::display_service_stopped() {
+                    if Instant::now() >= cutoff {
+                        return Err("Linux display retirement reached the desktop cutoff".to_owned());
+                    }
+                    std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
+                }
                 clipboard
                     .and(trash)
                     .and(clipboard_owners)
