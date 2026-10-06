@@ -79836,6 +79836,7 @@ mod clipboard_path_tests {
         let moved = method_body("Runtime", "window_moved");
         let resized = method_body("Runtime", "note_winit_size");
         let snapshot = method_body("Runtime", "window_snapshot");
+        let snapshot_apply = method_body("Runtime", "window_snapshot_with_rect");
         let apply = method_body("Runtime", "apply_linux_window_rect_ready");
         let close = method_body("Runtime", "close_window");
         for (body, needle, reason) in [
@@ -79855,6 +79856,11 @@ mod clipboard_path_tests {
                 "a close-time snapshot keeps event geometry while native facts are pending",
             ),
             (
+                snapshot,
+                "self.window_snapshot_with_rect(|| self.window.last_winit_rect)",
+                "the close-time geometry reaches the persistence body",
+            ),
+            (
                 close,
                 "self.mark_session_dirty(now)",
                 "the final snapshot is taken before the window is released",
@@ -79862,6 +79868,16 @@ mod clipboard_path_tests {
         ] {
             assert!(body.contains(needle), "{reason}:\n{body}");
         }
+        let measure = snapshot_apply
+            .find("then(rect).flatten()")
+            .expect("the persistence body measures only the supplied normal rect");
+        let persist = snapshot_apply
+            .find("persisted_window_bounds(rect, scale)")
+            .expect("the measured close-time rect reaches the saved placement");
+        assert!(
+            measure < persist,
+            "the snapshot must measure its supplied rect before persisting it:\n{snapshot_apply}"
+        );
         let queue = method_body("Runtime", "queue_linux_window_rect_snapshot");
         let pending = queue
             .find("self.window.pending_window_rect.is_some()")
