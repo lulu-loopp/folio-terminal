@@ -14283,3 +14283,15 @@ Showing an X11 window and each native move or resize event request current windo
 ### Correction to the background monitor read — 2026-10-06
 
 The preceding background-monitor decision is withdrawn. Winit 0.30.13 caches its X11 monitor list, populates it during window creation, and refreshes it inside the RandR handler before delivering application callbacks. `DISABLE_MONITOR_LIST_CACHING` is a constant false. The application background-image path therefore keeps the existing monitor cache; it does not add fresh native queries to its decode worker. The client-origin migration remains necessary because Winit inner_position performs a live translation on every call.
+
+
+### Linux window posture and summon retirement — 2026-10-06
+
+X11 caption toggles belong to one per-window maximize intent. Observed EWMH state remains separate from the desired request, and stale or unknown facts do not confirm a requested state. Notification restore and resize guards consume that window-owned observation; Wayland retains cached Winit state, and Windows/macOS retain their native paths.
+
+A Linux summon captures the previous foreground before its display request. Its addressed completion restores, shows and finishes the foreground handoff in that order. A second hotkey press while it is pending cancels the request. Closing the run withdraws the pending summon before closing its window; the completion also rejects a leaving, inactive or retiring target before consuming the answer or restoring the window.
+
+
+### Linux application display-read debt is repaid — 2026-10-06
+
+Window-wait row 29a now records the completed application migration. Native X11 display, client-origin and posture facts are read on the display worker; geometry events invalidate and refresh observations, and closing windows reject late results. Layout uses event or configured sizes. Winit's own window construction and event processing remain its responsibility, and its populated monitor cache is retained. The previous open-row notes describe earlier checkpoints.
