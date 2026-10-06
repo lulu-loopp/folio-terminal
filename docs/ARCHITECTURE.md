@@ -575,6 +575,24 @@ does not have to find it later.
 
 ### 5.1 Execution lanes
 
+The full-port thread census was measured on 2026-10-06 at `0a45b870`, using the
+same `bt-source` product-item filter as §0.1. Development-only features are
+excluded from the shipped-default rows; the rayon pool is counted separately.
+
+| Scope | `bt-app` | `bt-platform` | `bt-pty` | Explicit start sites |
+|---|---:|---:|---:|---:|
+| All source OS and feature branches permitted by the product filter | 47 | 30 | 5 | 82 |
+| Shipped default features across all OS branches | 47 | 29 | 4 | 80 |
+| Linux with shipped default features | 47 | 19 | 4 | 70 |
+
+The full Linux tree adds clipboard, trash, config migration, desktop retirement,
+video and web starts to the window-layer snapshot. Its platform count includes
+15 Linux-only providers, two Unix-shared sites and two unconditional sites.
+The default-feature name-expression count, including `pty-retirement` but not
+the pool, is 77 sites / 69 distinct expressions across OS branches and 67 / 65
+on Linux. Forwarded parameters and constants remain expressions, not resolved
+runtime name strings.
+
 The window-layer snapshot census is in §0.1. Linux adds nine platform-provider starts,
 including `bt-linux-display`; that snapshot has 60 explicit Linux start sites and
 one lazy rayon pool. The four `bt-pty` sites remain outside the thread door;
