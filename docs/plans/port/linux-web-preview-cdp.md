@@ -239,7 +239,8 @@ The actual Folio UI matrix used the immutable integration commit
 validation snapshot, not a release. The reproducible harness is
 [`scripts/ci/linux-web-policy-e2e.py`](../../../scripts/ci/linux-web-policy-e2e.py);
 raw logs, screenshots, the tested executable, and private browser/display tools
-are retained under `target/linux-port-team/web-final-evidence/`.
+were local artifacts under `target/linux-port-team/web-final-evidence/`. They
+were not committed to the repository.
 
 The Nothing-mint page rendered in the preview pane and loaded its permitted
 HTTP redirect/final script, same-page fetch, OOPIF document/script/image,

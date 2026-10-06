@@ -463,6 +463,13 @@ enum AppEvent {
     NativeHotkeyActivated {
         id: i32,
         generation: u64,
+        pointer: (i32, i32),
+    },
+    #[cfg(target_os = "linux")]
+    NativeDisplayReady {
+        owner: u64,
+        request_id: u64,
+        generation: u64,
     },
     /// A keyboard layout's copied Shift table landed from the worker road.
     /// The answer is in `App::layout_tables`; this event only breaks a parked
@@ -853,6 +860,7 @@ impl AppEvent {
             | Self::NativeHotkeyReady { .. }
             | Self::NativeHotkeyActivated { .. } => Station::Chrome,
             #[cfg(target_os = "linux")]
+            Self::NativeDisplayReady { .. } => Station::Chrome,
             Self::WindowCloseRequested(_) => Station::EventClose,
             Self::PreviewReady => Station::Preview,
             Self::MathReady => Station::Math,
@@ -12424,6 +12432,8 @@ struct App {
     /// window kept for itself would hand two windows the same name for two
     /// different pictures. A number minted here is unique wherever it is read.
     animation_serials: u64,
+    #[cfg(target_os = "linux")]
+    display_generation: u64,
     event_proxy: EventLoopProxy<AppEvent>,
     /// The one process-wide asynchronous owner for Linux clipboard ordering.
     #[cfg(target_os = "linux")]
@@ -12865,6 +12875,15 @@ struct App {
     /// and queues the other two, and an accepted restore prompt can queue as many
     /// as the file described.
     pending_new_windows: Vec<NewWindowPlan>,
+    #[cfg(target_os = "linux")]
+    pending_quake_summon: Option<PendingQuakeSummon>,
+    #[cfg(target_os = "linux")]
+    pending_new_window_display: Option<PendingNewWindowDisplay>,
+    #[cfg(target_os = "linux")]
+    pending_new_window_like: Option<(
+        Option<WindowId>,
+        Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+    )>,
     /// **The drag that is crossing a window boundary**, if one is (multiwindow
     /// slice F2/F4). See [`DragBroker`] for why the pointer needs a broker at all
     /// and why the clock is here rather than on either window.
@@ -13111,6 +13130,22 @@ struct TearOut {
     /// and the grip and [`tear_out_rect`] turns them into a rectangle at the
     /// target monitor's dpi.
     at: Option<((i32, i32), TearGrip)>,
+    #[cfg(target_os = "linux")]
+    screen: Option<(bt_platform::WindowRect, u32)>,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingQuakeSummon {
+    window: WindowId,
+    previous: Option<bt_platform::hotkey::Foreground>,
+    request: bt_platform::linux_display::LinuxDisplayRequest,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingNewWindowDisplay {
+    plan: NewWindowPlan,
+    request: bt_platform::linux_display::LinuxDisplayRequest,
+    like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
 }
 
 impl NewWindowPlan {
@@ -13750,6 +13785,8 @@ struct WindowRuntime {
     /// anything inside this window that wanted the keys.
     web_keyboard: Option<LeafId>,
     window: Arc<Window>,
+    #[cfg(target_os = "linux")]
+    last_winit_rect: Option<bt_platform::WindowRect>,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
     /// An outbox, replaced whole at each commit rather than appended to, because
@@ -13895,6 +13932,22 @@ struct WindowRuntime {
     ///
     /// `None` on every turn but the one after a drop.
     dropped_files: Option<DropBatch>,
+    #[cfg(target_os = "linux")]
+    pending_summoned_arrangement: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    #[cfg(target_os = "linux")]
+    summoned_arrangement_refresh_owed: bool,
+    #[cfg(target_os = "linux")]
+    pending_window_rect: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    #[cfg(target_os = "linux")]
+    window_rect_refresh_owed: bool,
+    #[cfg(target_os = "linux")]
+    pending_work_area: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    #[cfg(target_os = "linux")]
+    work_area_refresh_owed: bool,
+    #[cfg(target_os = "linux")]
+    pending_external_drop: Option<PendingExternalDrop>,
+    #[cfg(target_os = "linux")]
+    pending_paste_path: Option<PendingPastePath>,
     /// When the last present happened, so the trace can report the *interval*
     /// between two pictures rather than only the cost of making one. The cost of
     /// a frame is what a profiler measures; the gap between frames is what a
@@ -17396,6 +17449,8 @@ mod tab_identity_tests {
             // The menu row's own answer (F1c): a verb names no place. F2's drag
             // names one, and that is [`tear_out_rect`]'s own pin.
             at: None,
+            #[cfg(target_os = "linux")]
+            screen: None,
         };
         let carrying = NewWindowPlan::receiving(asker, errand);
         let carried = carrying.receives.expect("this window is opened to receive");
@@ -24801,28 +24856,22 @@ enum WheelBurst {
 ///
 /// **Why the point belongs to the batch and not to the flush.** The paste
 /// happens at the turn boundary, which is later — and "later" is enough:
-/// reading the cursor then asks where the hand is *now*, and on a window that is
-/// busy (a drain turn, a page coming up) the hand has had time to travel to
-/// another pane. It also used to prefer `pointer_position`, the window's own
-/// cached pointer, which during a drag from another application is not merely
-/// old but *from before the drag began* — no pointer event is delivered while
-/// another program's drag is over this window, so the cache is whatever the hand
-/// was doing last time it was in here. Either reading can name a pane the file
-/// was never dropped on, which is exactly the promise the changelog made.
+/// reading the cursor then asks where the hand is *now*, and on a busy window
+/// the hand has time to travel to another pane. The window's cached pointer is
+/// also from before an external drag began, because no pointer event arrives
+/// while another program's drag is over this window.
 ///
-/// So the point is taken **once, when the first file of the drop arrives** —
-/// [`Runtime::collect_dropped_file`] — and nothing later may replace it. That is
-/// the earliest this process can ask: `IDropTarget::Drop` and
-/// `performDragOperation:` are the platform telling us about the release, and
-/// the arm that fills this runs out of that same delivery. Earlier still would
-/// mean carrying the `POINTL` and the `draggingLocation` out of winit's
-/// backends, which is upstream's to give.
+/// The point is resolved once for the first file — [`Runtime::collect_dropped_file`]
+/// — and never replaced after the batch opens. Windows and macOS answer in their
+/// release callback. Linux requests the Xdnd pointer on its display worker and
+/// only accepts that answer while the window observes the same pointer, tab,
+/// layout and shell context; otherwise it says to re-drop.
 #[derive(Debug)]
 struct DropBatch {
-    /// Where the cursor stood when this drop opened, in this window's physical
-    /// pixels — [`bt_platform::pointer_position_in_window`]'s units, which are
-    /// `CursorMoved`'s. `None` when the platform would not say, which is the one
-    /// road left to the pane holding the keyboard.
+    /// The point used to resolve this drop, in this window's physical pixels —
+    /// [`bt_platform::pointer_position_in_window`]'s units, which are
+    /// `CursorMoved`'s. Linux attaches a worker answer only if the observed drop
+    /// context remains current. `None` means the platform did not answer.
     point: Option<PhysicalPosition<f64>>,
     /// **The shell this drop was aimed at**, resolved at the same instant as
     /// [`Self::point`] and for the same reason (review X-1 beside X-10).
@@ -24868,6 +24917,31 @@ impl DropBatch {
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+struct PendingExternalDrop {
+    request: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    paths: Vec<PathBuf>,
+    batch_open: bool,
+    refused: bool,
+    tab: TabId,
+    layout: SeatLayout,
+    viewport: LogicalRect,
+    focused_target: Option<PasteTarget>,
+    targets: Vec<PasteTarget>,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingPastePath {
+    request: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    drag: Drag,
+    plan: seats::DropPlan,
+    path: PathBuf,
+    tab: TabId,
+    layout: SeatLayout,
+    viewport: LogicalRect,
+    focused_target: Option<PasteTarget>,
 }
 
 impl WheelBurst {
@@ -40960,6 +41034,8 @@ struct NewWindowParts {
     custom_window_frame: bt_platform::CustomWindowFrame,
     compositor: bt_platform::Compositor,
     window: Arc<Window>,
+    #[cfg(target_os = "linux")]
+    winit_rect: Option<bt_platform::WindowRect>,
     math_context_menu: bt_platform::MathContextMenu,
     folder_picker: bt_platform::FolderPicker,
     image_picker: bt_platform::ImagePicker,
@@ -41026,6 +41102,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         compositor,
         window,
         math_context_menu,
+        #[cfg(target_os = "linux")]
+        winit_rect,
         folder_picker,
         image_picker,
         save_picker,
@@ -41170,6 +41248,24 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_burst: None,
         parked_pans,
         dropped_files: None,
+        #[cfg(target_os = "linux")]
+        last_winit_rect: winit_rect,
+        #[cfg(target_os = "linux")]
+        pending_summoned_arrangement: None,
+        #[cfg(target_os = "linux")]
+        summoned_arrangement_refresh_owed: false,
+        #[cfg(target_os = "linux")]
+        pending_window_rect: None,
+        #[cfg(target_os = "linux")]
+        window_rect_refresh_owed: false,
+        #[cfg(target_os = "linux")]
+        pending_work_area: None,
+        #[cfg(target_os = "linux")]
+        work_area_refresh_owed: false,
+        #[cfg(target_os = "linux")]
+        pending_external_drop: None,
+        #[cfg(target_os = "linux")]
+        pending_paste_path: None,
         last_present_at: None,
         present_diagnostics: present_diagnostics::State::default(),
         attention_sampled_at: None,
@@ -42320,15 +42416,18 @@ impl Runtime<'_> {
         // larger than the one it was torn from, and grows again on every
         // restart. Left as a note rather than as a helper because the slice that
         // opens a second window is the one that will have somewhere to put it.
-        let opened_at = dpi_snapshot(&window)?;
+        let opened_at = dpi_snapshot(&window, None)?;
+        let has_restored_position = restored.is_some();
+        let stood_at = startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale);
+        let initial_rect = has_restored_position.then_some(stood_at);
         stand_the_window_at(
             &window,
             native,
-            startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
+            stood_at,
             "restore the first window's outer rectangle",
         );
         let window_time = phase_started.elapsed();
-        let startup_dpi = dpi_snapshot(&window)?;
+        let startup_dpi = dpi_snapshot(&window, initial_rect)?;
         let physical = window.inner_size();
         let startup_scale_factor = startup_dpi.authoritative_scale;
         let phase_started = Instant::now();
@@ -42608,6 +42707,8 @@ impl Runtime<'_> {
             favicons_changed: false,
             tab_ids,
             animation_serials: 0,
+            #[cfg(target_os = "linux")]
+            display_generation: 0,
             event_proxy: proxy.clone(),
             #[cfg(target_os = "linux")]
             clipboard_lane: None,
@@ -42707,6 +42808,12 @@ impl Runtime<'_> {
             pending_restore_answer: None,
             pending_application_change: None,
             pending_new_windows: Vec::new(),
+            #[cfg(target_os = "linux")]
+            pending_quake_summon: None,
+            #[cfg(target_os = "linux")]
+            pending_new_window_display: None,
+            #[cfg(target_os = "linux")]
+            pending_new_window_like: None,
             drag_broker: None,
             pending_handover: None,
             quit_requested: false,
@@ -42784,6 +42891,8 @@ impl Runtime<'_> {
             compositor,
             window,
             math_context_menu,
+            #[cfg(target_os = "linux")]
+            winit_rect: initial_rect,
             folder_picker,
             image_picker,
             save_picker,
@@ -51608,6 +51717,12 @@ impl App {
     fn next_animation_serial(&mut self) -> u64 {
         self.animation_serials = self.animation_serials.saturating_add(1);
         self.animation_serials
+    }
+
+    #[cfg(target_os = "linux")]
+    fn next_display_generation(&mut self) -> u64 {
+        self.display_generation = self.display_generation.wrapping_add(1);
+        self.display_generation
     }
 
     /// What one window last said about itself, if it has said anything.
@@ -62153,15 +62268,51 @@ impl FolioApp {
     }
 
     fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.pending_new_window_display.is_some())
+        {
+            return Ok(());
+        }
         let plans = match self.app.as_mut() {
             Some(app) => std::mem::take(&mut app.pending_new_windows),
             None => return Ok(()),
         };
-        for plan in plans {
+        let mut plans = plans.into_iter();
+        while let Some(plan) = plans.next() {
             // The rail the asking window is wearing, read before the borrow is
             // handed to the door: since schema v9 there is no single answer in
             // the file, so a window a verb asked for copies the window that
             // asked. See `Runtime::open_window`.
+            #[cfg(target_os = "linux")]
+            let like_override = if let Some(app) = self.app.as_mut() {
+                let matches = app
+                    .pending_new_window_like
+                    .as_ref()
+                    .is_some_and(|(window, _)| *window == plan.like);
+                if matches {
+                    app.pending_new_window_like.take().map(|(_, like)| like)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            #[cfg(target_os = "linux")]
+            let like = match like_override {
+                Some(like) => like,
+                None => plan.like.and_then(|id| {
+                    self.windows.get_mut(id).map(|window| {
+                        (
+                            session_tab_layout(window.rail.layout),
+                            session_sidebar_mode(window.rail.mode),
+                        )
+                    })
+                }),
+            };
+            #[cfg(not(target_os = "linux"))]
             let like = plan.like.and_then(|id| {
                 self.windows.get_mut(id).map(|window| {
                     (
@@ -62170,6 +62321,40 @@ impl FolioApp {
                     )
                 })
             });
+            #[cfg(target_os = "linux")]
+            let display_point = plan.receives.as_ref().and_then(|errand| {
+                (errand.screen.is_none())
+                    .then(|| errand.at.map(|((x, y), _)| (errand.from, x, y)))
+                    .flatten()
+            });
+            #[cfg(target_os = "linux")]
+            if let Some((from, x, y)) = display_point {
+                let request = if let Some(app) = self.app.as_mut() {
+                    let generation = app.next_display_generation();
+                    bt_platform::linux_display::request_display(
+                        u64::from(from),
+                        generation,
+                        bt_platform::linux_display::LinuxDisplayQuery::TearOutScreen { x, y },
+                    )
+                } else {
+                    return Ok(());
+                };
+                match request {
+                    Ok(request) => {
+                        let Some(app) = self.app.as_mut() else {
+                            return Ok(());
+                        };
+                        app.pending_new_window_display = Some(PendingNewWindowDisplay {
+                            plan,
+                            request,
+                            like,
+                        });
+                        app.pending_new_windows.extend(plans);
+                        return Ok(());
+                    }
+                    Err(_) => {}
+                }
+            }
             let Some(app) = self.app.as_mut() else {
                 return Ok(());
             };
@@ -63098,6 +63283,10 @@ impl FolioApp {
             eprintln!("BT_HOTKEY capability unavailable: {reason}");
         }
         let pressed = app.quake.take_press();
+        #[cfg(target_os = "linux")]
+        let pressed_pointer = app.quake.take_press_pointer();
+        #[cfg(not(target_os = "linux"))]
+        let pressed_pointer = None;
         let blurred = app.quake.take_dismiss();
         let showing = app.quake.is_showing();
         let summoned_window = app.quake.window();
@@ -63132,7 +63321,7 @@ impl FolioApp {
                 app.pending_new_windows.push(NewWindowPlan::summoned());
                 self.open_pending_window(event_loop)?;
             }
-            return self.summon_quake();
+            return self.summon_quake(pressed_pointer);
         }
         // A blur that arrived after the window had already gone is a blur about
         // nothing: hiding it is what moved the focus in the first place.
@@ -63153,29 +63342,51 @@ impl FolioApp {
     /// keyboard is a separate statement from showing the window and is made
     /// after - a `SetForegroundWindow` on a window that is not on the screen yet
     /// is a request Windows has no reason to honour.
-    fn summon_quake(&mut self) -> Result<()> {
+    fn summon_quake(&mut self, pointer: Option<(i32, i32)>) -> Result<()> {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
-        let previous = bt_platform::hotkey::foreground_holder();
-        let Some(mut runtime) = self.runtime(id) else {
-            return Ok(());
-        };
         #[cfg(target_os = "linux")]
-        runtime.restore_minimized_window()?;
-        runtime.show_quake_window()?;
-        let native = native_window(&runtime.window.window).ok();
+        {
+            let previous = self
+                .app
+                .as_mut()
+                .and_then(|app| app.pending_quake_summon.take())
+                .map(|pending| pending.previous)
+                .unwrap_or_else(bt_platform::hotkey::foreground_holder);
+            let Some(mut runtime) = self.runtime(id) else {
+                return Ok(());
+            };
+            let request = runtime.request_quake_screen(pointer)?;
+            if let Some(app) = self.app.as_mut() {
+                app.pending_quake_summon = Some(PendingQuakeSummon {
+                    window: id,
+                    previous,
+                    request,
+                });
+            }
+            return Ok(());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let previous = bt_platform::hotkey::foreground_holder();
+            let Some(mut runtime) = self.runtime(id) else {
+                return Ok(());
+            };
+            runtime.show_quake_window()?;
+            self.finish_summon_quake(id, previous)
+        }
+    }
+
+    fn finish_summon_quake(
+        &mut self,
+        id: WindowId,
+        previous: Option<bt_platform::hotkey::Foreground>,
+    ) -> Result<()> {
+        let native = self
+            .runtime(id)
+            .and_then(|runtime| native_window(&runtime.window.window).ok());
         if let Some(app) = self.app.as_mut() {
-            // The window this one came down over is not remembered when it *is*
-            // this one: a summon pressed while the window already had the
-            // keyboard would otherwise record the window it is about to hide as
-            // the window it owes the keyboard to.
-            //
-            // **Asked of the holder rather than compared to it** (M4-8). On
-            // Windows it is the same handle comparison it always was; on macOS
-            // the holder is an application, this same case is refused one step
-            // earlier by `foreground_holder` answering `None` for ourselves, and
-            // `Foreground::is_window` says so.
             let previous =
                 previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
             app.quake.shown_over(previous);
@@ -63183,21 +63394,8 @@ impl FolioApp {
         if let Some(runtime) = self.runtime(id)
             && let Err(error) = runtime.give_foreground_with_retry()
         {
-            // Said to the log and never to the reader: there is nothing a person
-            // can do about a foreground lock, and a card over their editor
-            // reporting one would be a worse interruption than the one it reports.
             eprintln!("BT_QUAKE the summoned window could not take the keyboard: {error}");
         }
-        // **And the one command the reader asked to have run, on the first summon
-        // of this launch** (§7.54e ⑤). Taken here rather than at the door that
-        // opens the window, because the row's own sentence is 「首次唤出时」 and a
-        // launch that restored a summoned terminal has a window before it has a
-        // summon; taken through `Quake::take_startup_command`, which is what makes
-        // "once" a fact rather than a habit.
-        //
-        // It is *queued* on the pane and written at that pane's first prompt, down
-        // the very road a restored command takes — one door, and the `true` is the
-        // whole of the difference. See `quake::typed_into_a_prompt`.
         let command = self.app.as_mut().and_then(|app| {
             let row = app.settings_store.loaded().quake_startup_command.clone();
             app.quake.take_startup_command(&row)
@@ -63210,7 +63408,101 @@ impl FolioApp {
         Ok(())
     }
 
-    /// Send it back up, and give the keyboard to whoever had it.
+    #[cfg(target_os = "linux")]
+    fn apply_linux_display_ready(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<()> {
+        let pending = if let Some(app) = self.app.as_mut() {
+            let matches = app
+                .pending_quake_summon
+                .as_ref()
+                .is_some_and(|pending| pending.request.ready() == ready);
+            matches.then(|| app.pending_quake_summon.take()).flatten()
+        } else {
+            None
+        };
+        if let Some(pending) = pending {
+            let answer = pending.request.try_take().map_err(|error| {
+                anyhow!("the Linux display worker woke without an answer: {error}")
+            })?;
+            let bt_platform::linux_display::LinuxDisplayAnswer::SummonScreen {
+                work,
+                monitor_id,
+                dpi,
+            } = answer
+            else {
+                return Err(anyhow!(
+                    "the Linux display worker returned the wrong summon answer"
+                ));
+            };
+            let Some(mut runtime) = self.runtime(pending.window) else {
+                return Ok(());
+            };
+            runtime.restore_minimized_window()?;
+            runtime.show_quake_window_at(quake::SummonScreen {
+                work,
+                monitor_id,
+                dpi,
+            })?;
+            return self.finish_summon_quake(pending.window, pending.previous);
+        }
+        let pending_window = if let Some(app) = self.app.as_mut() {
+            let matches = app
+                .pending_new_window_display
+                .as_ref()
+                .is_some_and(|pending| pending.request.ready() == ready);
+            if matches {
+                app.pending_new_window_display.take()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(pending) = pending_window {
+            let answer = pending.request.try_take().map_err(|error| {
+                anyhow!("the Linux display worker woke without a tear-out answer: {error}")
+            })?;
+            let bt_platform::linux_display::LinuxDisplayAnswer::TearOutScreen { work, dpi } =
+                answer
+            else {
+                return Err(anyhow!(
+                    "the Linux display worker returned the wrong tear-out answer"
+                ));
+            };
+            let mut plan = pending.plan;
+            let Some(errand) = plan.receives.as_mut() else {
+                return Err(anyhow!("the pending tear-out plan has no receiving tab"));
+            };
+            errand.screen = Some((work, dpi));
+            let Some(app) = self.app.as_mut() else {
+                return Ok(());
+            };
+            app.pending_new_window_like = Some((plan.like, pending.like));
+            app.pending_new_windows.insert(0, plan);
+            return self.open_pending_window(event_loop);
+        }
+        let Some(id) = self
+            .windows
+            .order
+            .iter()
+            .copied()
+            .find(|id| u64::from(*id) == ready.owner)
+        else {
+            return Ok(());
+        };
+        if let Some(mut runtime) = self.runtime(id) {
+            if !runtime.apply_linux_display_ready(ready)?
+                && !runtime.apply_linux_work_area_ready(ready)?
+                && !runtime.apply_linux_window_rect_ready(ready)?
+            {
+                let _ = runtime.apply_linux_pointer_display_ready(ready)?;
+            }
+        }
+        Ok(())
+    }
     fn dismiss_quake(&mut self) -> Result<()> {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
@@ -63603,6 +63895,8 @@ impl FolioApp {
                             from,
                             promoted,
                             at: Some((pointer, grip)),
+                            #[cfg(target_os = "linux")]
+                            screen: None,
                         },
                     ));
                 }
@@ -65131,17 +65425,34 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            AppEvent::NativeHotkeyActivated { id, generation } => {
+            AppEvent::NativeHotkeyActivated {
+                id,
+                generation,
+                pointer,
+            } => {
                 if let Some(app) = self.app.as_mut()
                     && linux_hotkey_is_current(app.quake.claim(), id, generation)
                     && let Some(claim) = app.quake.claim()
                     && claim.status() == bt_platform::linux_hotkey::LinuxHotkeyStatus::Active
                     && claim.take_activation()
                 {
-                    app.quake.press();
+                    app.quake.press_at(pointer);
                 }
                 Ok(())
             }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeDisplayReady {
+                owner,
+                request_id,
+                generation,
+            } => self.apply_linux_display_ready(
+                event_loop,
+                bt_platform::linux_display::LinuxDisplayReady {
+                    owner,
+                    request_id,
+                    generation,
+                },
+            ),
             AppEvent::PreviewReady => {
                 let (mut batch, gone) = self.drain_preview_answers();
                 self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
@@ -65560,6 +65871,24 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.fail(event_loop, error);
                 return;
             }
+            #[cfg(target_os = "linux")]
+            if matches!(
+                event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::Moved(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
+                    | WindowEvent::CloseRequested
+            ) && let Err(error) = runtime.refuse_pending_linux_pointer_actions()
+            {
+                self.fail(event_loop, error);
+                return;
+            }
             // **And a drop is spent before anything that is not another file of the
             // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
             // The batch is one command line going into a shell, so an event that
@@ -65690,11 +66019,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
                 // one gesture over.
                 //
-                // **And the cursor is read here too, on the file that opens the
-                // batch** (release review 0.4.2 X-10): this arm runs inside the
-                // platform's delivery of the release, which is the only instant at
-                // which where the cursor is and where the file was let go of are the
-                // same point. See [`Runtime::collect_dropped_file`].
+                // **The point is requested here on the file that opens the batch**
+                // (release review 0.4.2 X-10). Winit supplies the path but not its
+                // Xdnd position, so Linux reads the native pointer on the display
+                // worker and refuses the drop if the window observes a move or a
+                // target change before the answer arrives. See
+                // [`Runtime::collect_dropped_file`].
                 //
                 // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
                 // They would be the drop affordance, and what an external drag
@@ -65705,10 +66035,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // the feedback that carries the ruling. Inventing a second set of
                 // zones here, for a gesture winit reports without a position, would
                 // be this window answering the harder half for itself.
-                WindowEvent::DroppedFile(path) => {
-                    runtime.collect_dropped_file(path);
-                    Ok(())
-                }
+                WindowEvent::DroppedFile(path) => runtime.collect_dropped_file(path),
                 WindowEvent::Resized(size) => runtime.resized(size),
                 // **The engine is told the window moved** (§7.7 ⑩, user report
                 // 2026-08-25). The pages are drawn through DirectComposition and
@@ -65719,7 +66046,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // than on a page's clock: a window can be dragged with nothing on
                 // the glass but a shell, and the engine still has to be right the
                 // next time a page is opened in it.
-                WindowEvent::Moved(_) => runtime.window_moved(),
+                WindowEvent::Moved(position) => runtime.window_moved(position),
                 WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
                 // The payload is deliberately dropped: `os_theme_changed` asks the
                 // one reader this process trusts rather than taking a second
@@ -66322,12 +66649,9 @@ fn prepare_clipboard_paste(
 /// give, and since 2026-09-17 it would also have taken the keyboard there and
 /// brought the window forward for it.
 ///
-/// **No platform is kept on the old road**, which was checked rather than
-/// assumed: `bt_platform::pointer_position_in_window` is implemented on both
-/// systems this product ships on — `GetCursorPos` through `ScreenToClient` on
-/// Windows, `NSEvent.mouseLocation` through the view on macOS — so `None` here
-/// is a window on a session with no desktop to read, and a refusal is the honest
-/// answer for it too.
+/// Windows and macOS supply this point synchronously in their drop callbacks;
+/// Linux supplies the same client-pixel coordinates from the display worker.
+/// `None` is not replaced by a focused pane: it is an unaimed drop.
 fn dropped_files_seat_at(
     layout: &SeatLayout,
     position: Option<PhysicalPosition<f64>>,
@@ -67996,12 +68320,15 @@ fn ensure_metrics_match_authoritative_scale(
 /// what a Windows machine that somehow could not answer should have done, and
 /// is the one behaviour this changes there: a window used to refuse to open.
 ///
-/// The rectangle follows the same rule and is read the same way winit reads it:
-/// the outer position and the outer size, which is what `GetWindowRect` hands
-/// back on Windows once `WM_NCCALCSIZE` has made the client the whole window.
-/// A window that has not been placed yet has no outer position, and an empty
-/// rectangle is what `startup_window_rect` already treats as "nothing known".
-fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
+/// On Linux the rectangle comes from the supplied saved/tear-out geometry or
+/// the cache of winit `Moved`/`Resized` events; `None` stays unknown. This path
+/// never asks winit for fresh X11 outer geometry on the window thread. On the
+/// other platforms the outer position and size follow the existing native-read
+/// and winit-fallback path.
+fn dpi_snapshot(
+    window: &Window,
+    cached_rect: Option<bt_platform::WindowRect>,
+) -> Result<DpiSnapshot> {
     let native = native_window(window)?;
     let winit_scale = window.scale_factor();
     let (win32_dpi, authoritative_scale) = match bt_platform::get_dpi_for_window(native) {
@@ -68011,9 +68338,20 @@ fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
             winit_scale,
         ),
     };
-    let rect = match bt_platform::get_window_rect(native) {
-        Ok(rect) => rect,
-        Err(_) => winit_outer_rect(window),
+    #[cfg(target_os = "linux")]
+    let rect = cached_rect.unwrap_or(bt_platform::WindowRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    });
+    #[cfg(not(target_os = "linux"))]
+    let rect = {
+        let _ = cached_rect;
+        match bt_platform::get_window_rect(native) {
+            Ok(rect) => rect,
+            Err(_) => winit_outer_rect(window),
+        }
     };
     Ok(DpiSnapshot {
         winit_scale,
@@ -68024,10 +68362,9 @@ fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
 }
 
 /// The window's outer rectangle as winit itself reports it, in physical pixels.
-///
-/// The fall-back half of [`dpi_snapshot`]. An empty rectangle for a window
-/// whose position the platform will not state — which every caller already
-/// reads as "no geometry is known about this window" rather than as a place.
+/// This remains the fallback for non-Linux platforms when their native rectangle
+/// helper refuses.
+#[cfg(not(target_os = "linux"))]
 fn winit_outer_rect(window: &Window) -> bt_platform::WindowRect {
     let Ok(position) = window.outer_position() else {
         return bt_platform::WindowRect {
@@ -71101,6 +71438,7 @@ fn retire_linux_desktop(
             "bt-desktop-retire",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
+                bt_platform::linux_display::stop_display_service();
                 let clipboard = clipboard_lane
                     .map(|lane| lane.shutdown(ctx, cutoff))
                     .unwrap_or(Ok(()));
@@ -71113,6 +71451,12 @@ fn retire_linux_desktop(
                 let watches = bt_platform::shutdown_watches(ctx);
                 let hotkeys = bt_platform::linux_hotkey::shutdown_hotkey_worker(ctx);
                 let system_settings = bt_platform::shutdown_system_settings(ctx);
+                while !bt_platform::linux_display::display_service_stopped() {
+                    if Instant::now() >= cutoff {
+                        return Err("Linux display retirement reached the desktop cutoff".to_owned());
+                    }
+                    std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
+                }
                 clipboard
                     .and(trash)
                     .and(clipboard_owners)
@@ -73461,14 +73805,29 @@ fn main() -> Result<()> {
         })
         .map_err(|error| anyhow!(error))?;
         let proxy = event_loop.create_proxy();
+        bt_platform::linux_display::install_display_wake(move |ready| {
+            let _ = proxy.send_event(AppEvent::NativeDisplayReady {
+                owner: ready.owner,
+                request_id: ready.request_id,
+                generation: ready.generation,
+            });
+        })
+        .map_err(|error| anyhow!(error))?;
+        let proxy = event_loop.create_proxy();
         bt_platform::linux_hotkey::install_hotkey_wake(move |event| {
             let event = match event {
                 bt_platform::linux_hotkey::LinuxHotkeyEvent::Ready { id, generation } => {
                     AppEvent::NativeHotkeyReady { id, generation }
                 }
-                bt_platform::linux_hotkey::LinuxHotkeyEvent::Activated { id, generation } => {
-                    AppEvent::NativeHotkeyActivated { id, generation }
-                }
+                bt_platform::linux_hotkey::LinuxHotkeyEvent::Activated {
+                    id,
+                    generation,
+                    pointer,
+                } => AppEvent::NativeHotkeyActivated {
+                    id,
+                    generation,
+                    pointer,
+                },
             };
             let _ = proxy.send_event(event);
         })
@@ -73680,7 +74039,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 36] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 39] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -73719,18 +74078,25 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Linux's generation-checked native hotkey answers read the current claim here.
         "quake.rs",
-        // Linux clipboard reads return on a later turn and are adopted by destination identity.
+        // Linux clipboard and path-drop replies apply only to their captured destination.
         "runtime/clipboard.rs",
-        // Linux recycle answers return through TrashLane and are adopted by the live file row.
+        // Linux snapshots use event geometry and an asynchronous native rectangle answer.
+        "runtime/dpi.rs",
+        // Linux trash and path-drop answers apply only to their original destination.
         "runtime/files.rs",
-        // Linux page input follows this runtime's shortcut and IME owner ladder.
+        // Linux keeps its input method across a focus loss in this ladder.
         "runtime/keyboard.rs",
         // Linux's client frame starts a native resize from this pointer gesture.
         "runtime/mouse.rs",
+        // Linux path drops and tear-out placement use worker answers; other platforms keep their
+        // existing synchronous gesture path.
+        "runtime/panes.rs",
         // Linux preview paste adopts its delayed text reply only at the original document instance.
         "runtime/preview.rs",
         // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
         "runtime/quake.rs",
+        // Linux tear-out plans carry the worker's work-area and DPI answer to window creation.
+        "runtime/tabs.rs",
         // Linux pages draw software frames; other native pages retain compositor holes.
         "runtime/web.rs",
         // The Linux-only minimize restore bridge has only the Linux quake summon caller.
@@ -78309,12 +78675,12 @@ mod clipboard_path_tests {
     fn a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary() {
         for (once, what) in [
             (
-                "runtime.collect_dropped_file(path);",
-                "the arm writes the path down and pastes nothing itself",
+                "WindowEvent::DroppedFile(path) => runtime.collect_dropped_file(path),",
+                "the arm submits the path to the runtime and pastes nothing itself",
             ),
             (
                 "DropBatch::collect(&mut self.window.dropped_files, path, point, target);",
-                "one drop is assembled in one place",
+                "the Linux answer and the W/M collector each assemble their batch",
             ),
             (
                 "self.window.dropped_files.take()",
@@ -78330,7 +78696,7 @@ mod clipboard_path_tests {
             ),
             (
                 "self.paste_target(seat)",
-                "and it is addressed — tab, seat and shell — as it arrives (X-1)",
+                "both platform paths address the tab, seat and shell (X-1)",
             ),
             (
                 ".and_then(bt_platform::pointer_position_in_window)",
@@ -78345,9 +78711,17 @@ mod clipboard_path_tests {
                 "and a turn spends whatever is still there",
             ),
         ] {
+            let expected = if once
+                == "DropBatch::collect(&mut self.window.dropped_files, path, point, target);"
+                || once == "self.paste_target(seat)"
+            {
+                2
+            } else {
+                1
+            };
             assert_eq!(
                 in_product_items(&found(needle!(Pattern::text(once)), View::Raw)),
-                1,
+                expected,
                 "`{once}` — {what}"
             );
         }
@@ -78356,7 +78730,7 @@ mod clipboard_path_tests {
         let arm = item_body(
             &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
         )
-        .split_once("            WindowEvent::DroppedFile(path) => {")
+        .split_once("WindowEvent::DroppedFile(path) =>")
         .expect("the dispatcher answers a dropped file")
         .1
         .split_once("            WindowEvent::Resized(size)")
@@ -78428,6 +78802,120 @@ mod clipboard_path_tests {
             !collecting.contains("pointer_position"),
             "a drop is routed by the window's cached pointer, which is a \
              different gesture's:\n{collecting}"
+        );
+    }
+
+    /// **A delayed X11 answer is spent only against the drop that asked for it** (PR20).
+    ///
+    /// The production runtime is not constructible in this source-pin harness, so this checks the
+    /// event wiring and the real state transitions that keep multi-file drops together, reject a
+    /// moved or changed target, and retain paths until the refusal notice succeeds.
+    #[test]
+    fn a_delayed_linux_drop_is_addressed_cancelled_and_observable() {
+        let collecting = method_body("Runtime", "collect_dropped_file");
+        assert!(collecting.contains("LinuxDisplayQuery::PointerInWindow"));
+        assert!(collecting.contains("pending.paths.push(path)"));
+        assert!(collecting.contains("batch_open: true"));
+        assert!(
+            !collecting.contains("platform_pointer_now()")
+                || collecting.contains("#[cfg(not(target_os = \"linux\"))]"),
+            "the Linux drop may not use a cached pointer as its release position: \
+             {collecting}"
+        );
+
+        let applying = method_body("Runtime", "apply_linux_pointer_display_ready");
+        for (needle, reason) in [
+            (
+                "pending.refused",
+                "a cancelled late answer cannot revive a drop",
+            ),
+            (
+                "request.ready() == ready",
+                "a reply must match its exact request",
+            ),
+            (
+                "tab.seat_layout == pending_layout",
+                "a changed layout refuses the drop",
+            ),
+            (
+                "self.window.seat_viewport == pending_viewport",
+                "a resized viewport refuses a late result",
+            ),
+            (
+                "current_focus == pending_focus",
+                "a changed focused shell refuses the drop",
+            ),
+            (
+                "target != target_at_that_seat",
+                "a replaced shell at the hit seat refuses it",
+            ),
+            (
+                "for path in pending.paths",
+                "all files stay in the same addressed batch",
+            ),
+            (
+                "self.refuse_pending_linux_pointer_actions()?",
+                "every asynchronous refusal uses the recoverable notice path",
+            ),
+        ] {
+            assert!(applying.contains(needle), "{reason}:\n{applying}");
+        }
+
+        let refusing = method_body("Runtime", "refuse_pending_linux_pointer_actions");
+        assert!(refusing.contains("self.window.pending_external_drop = dropped;"));
+        assert!(refusing.contains("self.window.pending_paste_path = pasted;"));
+        assert!(refusing.contains("dropped.refused = true;"));
+        assert!(refusing.contains("if dropped.batch_open"));
+
+        let dispatch = item_body(
+            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+        );
+        assert!(dispatch.contains("runtime.refuse_pending_linux_pointer_actions()"));
+        assert!(dispatch.contains("WindowEvent::CursorMoved { .. }"));
+    }
+
+    /// **A native rectangle read cannot overwrite a newer winit event or a close snapshot**
+    /// (PR20).
+    #[test]
+    fn a_stale_linux_window_rect_answer_is_discarded() {
+        let moved = method_body("Runtime", "window_moved");
+        let resized = method_body("Runtime", "note_winit_size");
+        let snapshot = method_body("Runtime", "window_snapshot");
+        let apply = method_body("Runtime", "apply_linux_window_rect_ready");
+        let close = method_body("Runtime", "close_window");
+        for (body, needle, reason) in [
+            (
+                moved,
+                "self.note_winit_position(position)",
+                "a move must update the cached geometry",
+            ),
+            (
+                resized,
+                "window_rect_refresh_owed = true",
+                "a resize must invalidate an in-flight rectangle answer",
+            ),
+            (
+                snapshot,
+                "self.window.last_winit_rect",
+                "a close-time snapshot keeps event geometry while native facts are pending",
+            ),
+            (
+                close,
+                "self.mark_session_dirty(now)",
+                "the final snapshot is taken before the window is released",
+            ),
+        ] {
+            assert!(body.contains(needle), "{reason}:\n{body}");
+        }
+        let stale = apply
+            .find("self.window.window_rect_refresh_owed")
+            .expect("an event can mark the native answer stale");
+        let write = apply
+            .find("self.window.last_winit_rect = Some(rect)")
+            .expect("a current native answer refreshes the cache");
+        assert!(
+            stale < write,
+            "a stale answer can overwrite newer geometry:\n{apply}"
         );
     }
 
@@ -78594,14 +79082,14 @@ mod clipboard_path_tests {
         // the live tree** (review 2026-09-17 P1-a). A `Runtime` is not
         // constructible here, so which calls stand in this function is what says
         // that the release does not simply believe the drag.
-        let kept = method_body("Runtime", "paste_offer_kept");
+        // The non-Linux release path still samples the platform at button-up,
+        // then shares the live-tree checks with Linux's worker-supplied point.
+        let native_release = method_body("Runtime", "paste_offer_kept");
+        assert!(native_release.contains("self.platform_pointer_now()"));
+        assert!(native_release.contains(".and_then(|released_at|"));
+        assert!(native_release.contains("self.paste_offer_kept_at(drag, plan, released_at)"));
+        let kept = method_body("Runtime", "paste_offer_kept_at");
         for (once, what) in [
-            (
-                "self.platform_pointer_now()?",
-                "the release asks the platform where the hand is, and refuses if \
-                 it will not say — the router's own position is the last delivered \
-                 motion's, which on Windows is from before the button came up",
-            ),
             (
                 "self.survey_drop(&drag.source, drag.home, released_at, &mut seam)",
                 "and aims again from there, against the tree as it stands now",
