@@ -443,6 +443,7 @@ impl Runtime<'_> {
     /// has arrived" by its own call would be told it by the very event that
     /// says it has not.
     pub(crate) fn resized(&mut self, physical: PhysicalSize<u32>) -> Result<()> {
+        self.note_winit_size(physical);
         self.window.dpi_rectangle.arrived();
         self.resize(physical)
     }
@@ -549,7 +550,11 @@ impl Runtime<'_> {
         if worth {
             self.resolve_seat_layout(render_physical);
         }
-        let snapshot = dpi_snapshot(&self.window.window)?;
+        #[cfg(target_os = "linux")]
+        let cached_rect = self.window.last_winit_rect;
+        #[cfg(not(target_os = "linux"))]
+        let cached_rect = None;
+        let snapshot = dpi_snapshot(&self.window.window, cached_rect)?;
         log_dpi_snapshot(
             stage,
             snapshot,
