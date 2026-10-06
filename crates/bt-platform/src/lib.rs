@@ -2972,7 +2972,15 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
 /// The immediate child and everything it starts are one unit: Windows keeps
 /// them in a per-probe kill-on-close job, while Unix keeps them in a process
 /// group led by the immediate child. Dropping this value, ending it explicitly,
-/// unwinding past it, or ending this process therefore ends the whole unit.
+/// or unwinding past it therefore ends the whole unit.
+///
+/// When this process ends without unwinding (`TerminateProcess`, a crash), the
+/// Windows kernel closes the job's one handle, which no child inherits, and the
+/// unit ends with it — except for a termination while [`spawn_probe`] is still
+/// inside `CreateProcess`, which leaves the child suspended outside every job
+/// (see there). On Unix only the exit door ends the unit at process exit
+/// (`end_probe_children_for_process_exit`); a `SIGKILL` or a crash runs no
+/// sweep, and the group runs to its own end.
 ///
 /// Like [`std::process::Child`], a probe is settled once: whichever of
 /// [`Self::try_wait`], [`Self::wait`] or [`Self::kill`] first learns that the
@@ -3201,9 +3209,12 @@ impl ProbeGroups {
 static PROBE_PROCESS_GROUPS: ProbeGroups = ProbeGroups::new();
 
 /// End every Unix probe group still owned by this process before the process
-/// takes its non-unwinding exit door. Windows needs no matching registry: the
-/// kernel closes every job handle when the process ends, including on a hard
-/// termination, and kill-on-close performs the same operation there.
+/// takes its non-unwinding exit door. A termination that takes no door — a
+/// `SIGKILL`, a crash — skips this sweep, and the groups run to their own end:
+/// Unix has no handle whose closing ends a process group. Windows needs no
+/// matching registry: the kernel closes every job handle when the process ends,
+/// including on a hard termination, and kill-on-close performs the same
+/// operation there.
 #[cfg(unix)]
 pub(crate) fn end_probe_children_for_process_exit() {
     PROBE_PROCESS_GROUPS.end_all();
@@ -3364,8 +3375,25 @@ fn reap_probe_leader(
 /// then found through the documented process-local snapshot API and resumed.
 /// Windows 10 1809, Folio's minimum, supports nested jobs; if job creation,
 /// configuration, or assignment is nevertheless refused, the child is resumed
-/// and the probe runs uncontained after one process-wide diagnostic. A refusal
-/// to resume is a start failure and the still-suspended child is ended.
+/// and the probe runs uncontained after one process-wide diagnostic (standard
+/// error, which in a resident run is `diagnostics.log`); its deadline still
+/// ends its immediate child. A refusal to resume is a start failure and the
+/// still-suspended child is ended.
+///
+/// The job handle is not inheritable, so the job closes when this process ends
+/// however it ends — with one interval excepted. The child exists in the kernel
+/// before `CreateProcess` returns its handle, and only then can it be assigned:
+/// a termination of this process in between leaves the child suspended, outside
+/// every job, until somebody ends it. Nearly all of that interval is
+/// `CreateProcess` itself (with whatever security software does inside it):
+/// 5.2–7.6 ms from the child's creation time to `spawn` returning on a 9950X
+/// desktop, against about 40 µs for the job's creation and assignment after it,
+/// so creating the job earlier would not shorten it. A child born in its job
+/// needs `PROC_THREAD_ATTRIBUTE_JOB_LIST`, which the standard library offers only
+/// behind the unstable `windows_process_extensions_raw_attribute`; a direct
+/// `CreateProcessW` would make this door's pipe ends inheritable outside the
+/// standard library's private spawn lock, where any concurrent spawn in this
+/// process could inherit them and hold a probe's output open.
 ///
 /// On Unix the command enters a new process group before `exec`, so there is no
 /// interval in which a descendant can escape its guard.
@@ -3652,6 +3680,37 @@ mod probe_child_tests {
         drop(grandchild);
     }
 
+    /// The owner helper: a process that holds one contained probe (whose
+    /// direct child has started a grandchild) and one ordinary child started
+    /// after it, which inherits every inheritable handle the owner has, then
+    /// waits to be terminated from outside.
+    #[test]
+    fn helper_owner_holds_a_probe_and_a_later_child() {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("owner") {
+            return;
+        }
+        let mut go = String::new();
+        std::io::stdin().read_line(&mut go).expect("start signal");
+        let mut probe = spawn_probe(&mut helper_command()).expect("start contained probe");
+        let pids = announced(probe.take_stdout().expect("probe stdout"), "ready");
+        let mut later = quiet_command(std::env::current_exe().expect("test executable"));
+        later
+            .args([
+                "--exact",
+                "probe_child_tests::helper_grandchild_waits",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "grandchild-inherits-output")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let later = later.spawn().expect("start the later child");
+        println!("owner {} {} {}", pids[0], pids[1], later.id());
+        std::io::stdout().flush().expect("flush readiness");
+        std::thread::park();
+        drop((probe, later));
+    }
+
     struct Witness(HANDLE);
 
     impl Witness {
@@ -3722,8 +3781,10 @@ mod probe_child_tests {
         command
     }
 
-    fn ready(child: &mut std::process::Child) -> (Witness, Witness) {
-        let mut output = BufReader::new(child.stdout.take().expect("helper stdout"));
+    /// The process ids a helper prints after `word` on its first line that
+    /// starts with it.
+    fn announced(output: impl std::io::Read, word: &str) -> Vec<u32> {
+        let mut output = BufReader::new(output);
         let line = loop {
             let mut line = String::new();
             assert_ne!(
@@ -3731,15 +3792,19 @@ mod probe_child_tests {
                 0,
                 "helper ended before readiness"
             );
-            if line.starts_with("ready ") {
+            if line.split_whitespace().next() == Some(word) {
                 break line;
             }
         };
-        let mut words = line.split_whitespace();
-        assert_eq!(words.next(), Some("ready"));
-        let direct = words.next().unwrap().parse::<u32>().unwrap();
-        let grandchild = words.next().unwrap().parse::<u32>().unwrap();
-        (Witness::of(direct), Witness::of(grandchild))
+        line.split_whitespace()
+            .skip(1)
+            .map(|pid| pid.parse::<u32>().expect("helper process id"))
+            .collect()
+    }
+
+    fn ready(child: &mut std::process::Child) -> (Witness, Witness) {
+        let pids = announced(child.stdout.take().expect("helper stdout"), "ready");
+        (Witness::of(pids[0]), Witness::of(pids[1]))
     }
 
     fn ready_probe(child: &mut ProbeChild) -> (Witness, Witness) {
@@ -3783,6 +3848,134 @@ mod probe_child_tests {
         let _ = child.wait().expect("settle direct child");
         assert!(child.guard.job.is_none(), "the settled probe kept its job");
         grandchild.wait_gone();
+    }
+
+    /// Start the owner helper — inside a fresh job of `outer` limits when
+    /// given, as a harness or a service host starts Folio — terminate it from
+    /// outside once it holds its probe, and answer the witnesses of the
+    /// probe's direct child, its grandchild and the owner's later child.
+    fn terminate_an_owner_holding_a_probe(
+        outer: Option<windows::Win32::System::JobObjects::JOB_OBJECT_LIMIT>,
+    ) -> (Witness, Witness, Witness) {
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
+        };
+
+        let mut owner = quiet_command(std::env::current_exe().expect("test executable"));
+        owner
+            .args([
+                "--exact",
+                "probe_child_tests::helper_owner_holds_a_probe_and_a_later_child",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "owner")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut owner = owner.spawn().expect("start the owner helper");
+        let _outer = outer.map(|flags| {
+            // SAFETY: an unnamed job owned by this test; the handle moves to
+            // `OwnedHandle` at once, the information class matches `limits`,
+            // and the owner's handle is live until it is reaped below.
+            unsafe {
+                let job = CreateJobObjectW(None, None).expect("create the outer job");
+                let job = OwnedHandle::from_raw_handle(job.0);
+                let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limits.BasicLimitInformation.LimitFlags = flags;
+                SetInformationJobObject(
+                    HANDLE(job.as_raw_handle()),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                        .expect("job information size fits u32"),
+                )
+                .expect("limit the outer job");
+                AssignProcessToJobObject(
+                    HANDLE(job.as_raw_handle()),
+                    HANDLE(owner.as_raw_handle()),
+                )
+                .expect("put the owner in the outer job");
+                job
+            }
+        });
+        owner
+            .stdin
+            .take()
+            .expect("owner stdin")
+            .write_all(b"go\n")
+            .expect("start the owner");
+        let pids = announced(owner.stdout.take().expect("owner stdout"), "owner");
+        let witnesses = (
+            Witness::of(pids[0]),
+            Witness::of(pids[1]),
+            Witness::of(pids[2]),
+        );
+        owner.kill().expect("terminate the owner from outside");
+        owner.wait().expect("the terminated owner is reaped");
+        witnesses
+    }
+
+    /// The owner ends by `TerminateProcess`, as `Stop-Process` and a crash end
+    /// Folio: no unwinding, no `Drop`, no exit sweep. Its child started after
+    /// the probe inherits every inheritable handle the owner had.
+    ///
+    /// RED mutations: in the Windows `probe_guard`, create the job with a
+    /// `SECURITY_ATTRIBUTES` whose `bInheritHandle` is true — the later child
+    /// holds the job open and the probe outlives its owner; or make it return
+    /// `ProbeChildGuard::uncontained()` — nothing ends the probe.
+    #[test]
+    fn terminating_the_owning_process_ends_its_probe_and_grandchild() {
+        let (direct, grandchild, later) = terminate_an_owner_holding_a_probe(None);
+        direct.wait_gone();
+        grandchild.wait_gone();
+        assert!(later.alive(), "an ordinary child is not the probe's");
+    }
+
+    /// The same termination with the owner itself inside a job, once with each
+    /// breakaway answer that job can give: the probe's job nests under it and
+    /// still closes with its owner.
+    ///
+    /// RED mutation: as for the bare owner, the uncontained `probe_guard`.
+    #[test]
+    fn terminating_an_owner_inside_a_job_ends_its_probe_and_grandchild() {
+        use windows::Win32::System::JobObjects::{
+            JOB_OBJECT_LIMIT, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+        for outer in [
+            JOB_OBJECT_LIMIT(0),
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        ] {
+            let (direct, grandchild, _later) = terminate_an_owner_holding_a_probe(Some(outer));
+            direct.wait_gone();
+            grandchild.wait_gone();
+        }
+    }
+
+    /// RED mutation: in `ProbeChild::kill`, drop the `self.child.kill()` the
+    /// uncontained arm runs; the direct child outlives its deadline.
+    #[test]
+    fn an_uncontained_probe_still_ends_its_direct_child_at_the_deadline() {
+        let mut command = helper_command();
+        let mut child = spawn_probe_with(&mut command, |_| {
+            Err(std::io::Error::other("injected assignment refusal"))
+        })
+        .expect("assignment failure degrades to an uncontained probe");
+        let (direct, grandchild) = ready_probe(&mut child);
+        // `kill` settles by waiting for the direct child, so it runs beside the
+        // witness: the witness's ceiling, not that wait, decides the verdict.
+        let deadline = std::thread::spawn(move || {
+            child
+                .kill()
+                .expect("end the uncontained probe at its deadline");
+        });
+        direct.wait_gone();
+        deadline
+            .join()
+            .expect("the deadline thread settles the probe");
+        assert!(grandchild.alive(), "nothing contains an uncontained probe");
     }
 
     /// RED mutation: propagate the injected assignment error from

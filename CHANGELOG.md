@@ -136,6 +136,11 @@ Nothing yet.
 
 ### Known issues
 
+- Windows: if Folio is ended from outside (Task Manager, `Stop-Process`) or
+  crashes at the moment it is starting one of the commands it runs to learn
+  about the machine, that command can stay behind, paused, until it is ended in
+  Task Manager. macOS: after a force quit or a crash, such a command finishes
+  on its own instead of being stopped.
 - When updating from 0.4.6 to any later version, a new version whose start
   could not be recorded (its record kept out by another program, or a folder
   made read-only) runs without saving what it changes until the next start or
