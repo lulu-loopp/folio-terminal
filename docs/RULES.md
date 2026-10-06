@@ -1115,12 +1115,22 @@ quit door with `Reason::UpdateRestart`), never the job alone. About → Version 
 the one update surface: its line is `Folio <version> (<commit>) · <state>`, and
 its single control is read from the job's actionable state and route, never
 from the check's offer alone — `Pending` names its state and has no verb; an
-eligible offer has **Update and restart** (the card's Update); a download shows
+eligible offer has **Update and restart** (the card's Update, and the restart
+too: the button's name is the consent — when the download it started is verified,
+Folio restarts as the Ready card's Restart does, through `App::restart_for_update`
+and every refusal it has, without the Ready card asking again; a refused restart
+leaves the Ready card up and the row at `<tag> ready` with **Restart…**; the ask
+is spent at `Verified` and let go when its transaction fails, is cancelled or is
+not the one running, `Job::ask_restart_when_ready`, N10 2026-10-06 — the Ready
+card still asks on every other road: the card's Update, a download put away and
+finished on its own); a download shows
 `Downloading <tag>` and its progress; past the download the line says what the job
 is doing — `Verifying <tag>` (`Staged`), `<tag> ready` with **Restart…**, which
 raises the Ready card again (`Verified`), `Restarting…` (`Quitting`,
 `Committing`) — with the bar full and no verb while nothing can be pressed (all
-2026-10-05); the control is a keyboard stop only while it is enabled. A focus on any
+2026-10-05); the state is one state, so `Last checked: <when>` — the state of a check
+that got no answer — is not shown beside an offer or a transaction (scheme 甲,
+2026-10-01); the control is a keyboard stop only while it is enabled. A focus on any
 Settings control that stops being a stop goes to the nearest stop before it on the page,
 else the nearest after it, and to the dialog's `×` only when the page has no stop
 (2026-10-05); a managed copy names its

@@ -126,6 +126,9 @@ Nothing yet.
 - About → Version says what an update is doing after the download: Verifying,
   then ready with Restart…, then Restarting…, instead of Downloading again or
   offering Update and restart for an update already downloaded.
+- Update and restart in About → Version now restarts Folio once the update is
+  downloaded and checked, instead of stopping at a second Restart button.
+  An update downloaded from the update card still asks before it restarts.
 - In Settings, Enter on About's buttons presses them, and when a focused
   button stops being pressable the focus moves to the nearest control before
   it on the page (after it when none is before) instead of staying on it with no

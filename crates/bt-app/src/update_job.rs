@@ -1363,6 +1363,15 @@ pub(crate) struct Job<W> {
     /// ([`Self::after_rollback`]). Read by [`Self::after_commit`] (U-32,
     /// U-35).
     said_incomplete: bool,
+    /// **The restart a press already asked for** (N10, the owner's ruling of
+    /// 2026-10-06): About → Version's *Update and restart* names its
+    /// transaction here, and when that transaction reaches `Verified` the
+    /// application restarts as the Ready card's Restart would
+    /// ([`Self::take_asked_restart`]). Held only while the job is downloading,
+    /// verifying or verified for that transaction; any other state —
+    /// a failure, a cancel, another offer — lets it go
+    /// ([`Self::keep_the_asked_restart_in_its_transaction`]).
+    restart_asked: Option<TxnId>,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
@@ -1421,6 +1430,7 @@ impl<W: Copy + Eq> Job<W> {
             running: None,
             launch: Launch::Done,
             said_incomplete: false,
+            restart_asked: None,
         }
     }
 
@@ -1775,9 +1785,9 @@ impl<W: Copy + Eq> Job<W> {
         self.presenter.filter(|_| drawn && !self.put_away)
     }
 
-    /// **About → Version asks for the card again** (`Update and restart` while
-    /// a job waits at `Verified`), in `window` — the window the row was pressed
-    /// in. Answers whether a card is now up there.
+    /// **About → Version asks for the card again** (`Restart…`, or `Update and
+    /// restart` drawn before the job got to `Verified`), in `window` — the
+    /// window the row was pressed in. Answers whether a card is now up there.
     pub(crate) fn reopen(&mut self, window: W) -> bool {
         if !matches!(self.state, State::Verified(_)) {
             return false;
@@ -1826,6 +1836,59 @@ impl<W: Copy + Eq> Job<W> {
         self.presenter = Some(window);
         self.put_away = false;
         true
+    }
+
+    /// **The press asked for the restart too** (N10): About → Version's
+    /// *Update and restart* — the button's name is the reader's consent to the
+    /// restart. The transaction the job is running now (downloading, verifying
+    /// or verified) restarts when it is verified, without the Ready card asking
+    /// again ([`Self::take_asked_restart`]). Nothing is asked in any other
+    /// state: a press the driver refused has already failed.
+    pub(crate) fn ask_restart_when_ready(&mut self) {
+        self.restart_asked = Self::running_txn(&self.state);
+    }
+
+    /// **The asked restart, now due** (N10): `true` once, when the job stands
+    /// at `Verified` for the transaction a press asked to restart — the
+    /// caller then asks the application's quit exactly as the Ready card's
+    /// Restart does (`App::restart_for_update`). The ask is spent either way:
+    /// a restart that is refused leaves the job at `Verified` with its Ready
+    /// card up ([`Self::apply`] raised it) and Version's `Restart…`, and the
+    /// next restart is the reader's.
+    pub(crate) fn take_asked_restart(&mut self) -> bool {
+        let due =
+            matches!(&self.state, State::Verified(offer) if Some(offer.txn) == self.restart_asked);
+        if due {
+            self.restart_asked = None;
+        }
+        due
+    }
+
+    /// Whether a press's restart is still asked for (N10).
+    #[cfg(test)]
+    pub(crate) const fn restart_is_asked(&self) -> bool {
+        self.restart_asked.is_some()
+    }
+
+    /// The transaction the job is running toward a restart: downloading,
+    /// verifying or verified.
+    fn running_txn(state: &State) -> Option<TxnId> {
+        match state {
+            State::Downloading(offer, _) | State::Staged(offer) | State::Verified(offer) => {
+                Some(offer.txn)
+            }
+            _ => None,
+        }
+    }
+
+    /// **The asked restart does not outlive its transaction** (N10): once the
+    /// job is anywhere but downloading, verifying or verified for the
+    /// transaction it names — failed, cancelled, quitting, or on another
+    /// offer — it is let go. Every move of the state ends here.
+    fn keep_the_asked_restart_in_its_transaction(&mut self) {
+        if self.restart_asked != Self::running_txn(&self.state) {
+            self.restart_asked = None;
+        }
     }
 
     /// **About → Version's `Details`**: the failed card in `window`. A failed
@@ -2028,6 +2091,7 @@ impl<W: Copy + Eq> Job<W> {
             self.last_failure = Some((offer.clone(), failure.clone()));
         }
         self.state = next;
+        self.keep_the_asked_restart_in_its_transaction();
         applied
     }
 }
@@ -2113,6 +2177,7 @@ impl<W: Copy + Eq> Job<W> {
             self.last_failure = Some((offer.clone(), failure.clone()));
         }
         self.state = next;
+        self.keep_the_asked_restart_in_its_transaction();
         outcome
     }
 }
