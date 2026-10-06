@@ -1,12 +1,15 @@
 // MODIFIED BY THE FOLIO CONTRIBUTORS: control compositor reply flushing in owner tests; see CHANGES-FOLIO.md.
 use std::ffi::OsStr;
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use os_pipe::{PipeReader, PipeWriter};
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll;
 use wayland_backend::server::ClientData;
@@ -22,6 +25,28 @@ pub struct TestServer<S: 'static> {
     pub display: Display<S>,
     pub socket: ListeningSocket,
     pub epoll: OwnedFd,
+}
+
+pub struct FlushGate {
+    gate: Arc<AtomicBool>,
+    wake: Option<PipeWriter>,
+    held: Receiver<()>,
+}
+
+impl FlushGate {
+    pub fn wait_until_held(&self) {
+        self.held
+            .recv()
+            .expect("the compositor reached its held-flush point");
+    }
+
+    pub fn release(&mut self) {
+        self.gate.store(false, std::sync::atomic::Ordering::Release);
+        if let Some(mut wake) = self.wake.take() {
+            wake.write_all(&[1])
+                .expect("wake the compositor after releasing the flush gate");
+        }
+    }
 }
 
 struct ClientCounter(AtomicU8);
@@ -70,21 +95,49 @@ impl<S: Send + 'static> TestServer<S> {
     }
 
     pub fn run(self, mut state: S) {
-        thread::spawn(move || self.run_internal(&mut state, None));
+        thread::spawn(move || self.run_internal(&mut state, None, None, None));
     }
 
-    pub fn run_with_flush_gate(self, mut state: S, gate: Arc<AtomicBool>) {
-        thread::spawn(move || self.run_internal(&mut state, Some(gate)));
+    pub fn run_with_flush_gate(self, mut state: S, gate: Arc<AtomicBool>) -> FlushGate {
+        let (wake_reader, wake_writer) = os_pipe::pipe().unwrap();
+        epoll::add(
+            &self.epoll,
+            &wake_reader,
+            epoll::EventData::new_u64(2),
+            epoll::EventFlags::IN,
+        )
+        .unwrap();
+        let (held_tx, held_rx) = sync_channel(1);
+        let server_gate = Arc::clone(&gate);
+        thread::spawn(move || {
+            self.run_internal(
+                &mut state,
+                Some(server_gate),
+                Some(wake_reader),
+                Some(held_tx),
+            )
+        });
+        FlushGate {
+            gate,
+            wake: Some(wake_writer),
+            held: held_rx,
+        }
     }
 
     pub fn run_mutex(self, state: Arc<Mutex<S>>) {
         thread::spawn(move || {
             let mut state = state.lock().unwrap();
-            self.run_internal(&mut *state, None);
+            self.run_internal(&mut *state, None, None, None);
         });
     }
 
-    fn run_internal(mut self, state: &mut S, flush_gate: Option<Arc<AtomicBool>>) {
+    fn run_internal(
+        mut self,
+        state: &mut S,
+        flush_gate: Option<Arc<AtomicBool>>,
+        mut flush_wake: Option<PipeReader>,
+        mut flush_held: Option<SyncSender<()>>,
+    ) {
         let mut waiting_for_first_client = true;
         let client_counter = Arc::new(ClientCounter(AtomicU8::new(0)));
 
@@ -109,6 +162,22 @@ impl<S: Send + 'static> TestServer<S> {
                     1 => {
                         // Try to dispatch client messages.
                         self.display.dispatch_clients(state).unwrap();
+                        if flush_gate
+                            .as_ref()
+                            .is_some_and(|gate| gate.load(std::sync::atomic::Ordering::Acquire))
+                        {
+                            if let Some(held) = flush_held.take() {
+                                let _ = held.send(());
+                            }
+                        } else {
+                            self.display.flush_clients().unwrap();
+                        }
+                    }
+                    2 => {
+                        let mut byte = [0];
+                        if let Some(reader) = flush_wake.as_mut() {
+                            let _ = reader.read(&mut byte);
+                        }
                         if !flush_gate
                             .as_ref()
                             .is_some_and(|gate| gate.load(std::sync::atomic::Ordering::Acquire))
