@@ -14080,7 +14080,7 @@ pub use linux_clipboard_x11::{
 pub use linux_files::recycle_on_worker;
 
 #[cfg(target_os = "linux")]
-mod linux_display;
+pub mod linux_display;
 #[cfg(target_os = "linux")]
 mod linux_fonts;
 #[cfg(target_os = "linux")]

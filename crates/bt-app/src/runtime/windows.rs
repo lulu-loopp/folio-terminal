@@ -201,7 +201,8 @@ impl Runtime<'_> {
         // this line opens one frame margin larger every time. Slice A1 left a
         // note at the first window's copy because there was nowhere else to put
         // the line; this is that somewhere.
-        let opened_at = dpi_snapshot(&window)?;
+        let opened_at = dpi_snapshot(&window, None)?;
+        let has_saved_position = placement.is_some();
         // **F5, and it is the *opening* rectangle rather than a move afterwards**
         // (user report 2026-08-27). This used to be stated in `settle_tear_out`,
         // after the window had been dressed, shown and presented **twice** — so
@@ -232,17 +233,19 @@ impl Runtime<'_> {
         let standing = plan
             .receives
             .as_ref()
-            .and_then(|errand| errand.at)
-            .map(|(pointer, grip)| {
-                let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
-                let work = bt_platform::work_area_at(pointer.0, pointer.1)
-                    .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
+            .and_then(|errand| {
+                #[cfg(target_os = "linux")]
+                let ((pointer, grip), (work, dpi)) = errand.at.zip(errand.screen)?;
+                #[cfg(not(target_os = "linux"))]
+                let (pointer, grip) = errand.at?;
+                #[cfg(not(target_os = "linux"))]
+                let (work, dpi) = {
+                    let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
+                    let work = bt_platform::work_area_at(pointer.0, pointer.1)
+                        .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
+                    (work, dpi)
+                };
                 let rect = tear_out_rect(pointer, grip, dpi, work);
-                // One line, on the same terms as `BT_DPI`'s: a tear-out's
-                // rectangle is a function of four things read off the machine,
-                // and a photograph of a window in the wrong place cannot say
-                // which of them was wrong. Printed only when a window is actually
-                // being placed, which is once per tear-out.
                 eprintln!(
                     "BT_TEAR_OUT pointer={},{} grab={:?} size={:?} dpi={dpi} work={},{} {}x{} rect={},{} {}x{}",
                     pointer.0,
@@ -258,13 +261,14 @@ impl Runtime<'_> {
                     rect.right - rect.left,
                     rect.bottom - rect.top,
                 );
-                rect
+                Some(rect)
             });
         // Kept, because this rectangle is also the one this window goes into the vault holding —
         // see the `record_window` below.
         let stood_at = standing.unwrap_or_else(|| {
             startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale)
         });
+        let initial_rect = standing.or_else(|| has_saved_position.then_some(stood_at));
         stand_the_window_at(
             &window,
             native,
@@ -272,7 +276,7 @@ impl Runtime<'_> {
             "state the new window's outer rectangle",
         );
         let physical = window.inner_size();
-        let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
+        let scale_factor = dpi_snapshot(&window, initial_rect)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's
         // shape, once per window, because a `Compositor` is parameterised by the
         // HWND it composes above. An owner-thread door (`doors::CompositorBirth`): a refusal is
@@ -491,11 +495,22 @@ impl Runtime<'_> {
         // The tabs are filled in a few lines below, by `mark_session_dirty` on a runtime that has
         // them; an entry with none is momentary and, were a write to catch it, `plan_windows`
         // drops a window with no tabs on the way back in.
+        #[cfg(target_os = "linux")]
+        let opening_bounds = initial_rect
+            .map(|rect| persisted_window_bounds(rect, scale_factor))
+            .or_else(|| {
+                plan.saved
+                    .as_ref()
+                    .map(|saved| saved.placement.bounds.clone())
+            })
+            .unwrap_or_else(|| WindowStateV1::default().bounds);
+        #[cfg(not(target_os = "linux"))]
+        let opening_bounds = persisted_window_bounds(stood_at, scale_factor);
         app.record_window(
             id,
             SessionWindowV1 {
                 placement: WindowStateV1 {
-                    bounds: persisted_window_bounds(stood_at, scale_factor),
+                    bounds: opening_bounds,
                     dpi: renderer.dpi_milli().get(),
                     maximized,
                     monitor_id: None,
@@ -516,6 +531,8 @@ impl Runtime<'_> {
             custom_window_frame,
             compositor,
             window,
+            #[cfg(target_os = "linux")]
+            winit_rect: initial_rect,
             math_context_menu,
             folder_picker,
             image_picker,
@@ -1136,16 +1153,69 @@ impl Runtime<'_> {
     /// succeeded is a different state with a different answer — no minimum at
     /// all, rather than a guess that could lock the user's window.
     pub(in crate::runtime) fn refresh_work_area(&mut self) {
-        let Ok(native) = native_window(&self.window.window) else {
-            return;
+        #[cfg(target_os = "linux")]
+        {
+            if self.window.pending_work_area.is_some() {
+                self.window.work_area_refresh_owed = true;
+                return;
+            }
+            let Ok(native) = native_window(&self.window.window) else {
+                return;
+            };
+            let generation = self.app.next_display_generation();
+            if let Ok(request) = bt_platform::linux_display::request_display(
+                u64::from(self.window.window.id()),
+                generation,
+                bt_platform::linux_display::LinuxDisplayQuery::WindowWorkArea { window: native },
+            ) {
+                self.window.pending_work_area = Some(request);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Ok(native) = native_window(&self.window.window) else {
+                return;
+            };
+            let Ok(rect) = bt_platform::get_work_area(native) else {
+                return;
+            };
+            let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
+            let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
+            let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
+            self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_linux_work_area_ready(
+        &mut self,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<bool> {
+        let matches = self
+            .window
+            .pending_work_area
+            .as_ref()
+            .is_some_and(|request| request.ready() == ready);
+        if !matches {
+            return Ok(false);
+        }
+        let Some(request) = self.window.pending_work_area.take() else {
+            return Ok(false);
         };
-        let Ok(rect) = bt_platform::get_work_area(native) else {
-            return;
-        };
-        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
-        let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
-        self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+        if std::mem::take(&mut self.window.work_area_refresh_owed) {
+            self.refresh_work_area();
+            return Ok(true);
+        }
+        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowWorkArea(Ok(rect))) =
+            request.try_take()
+        {
+            let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
+            let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
+            let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
+            self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+            self.apply_window_min_inner_size()?;
+        }
+        Ok(true)
     }
 
     /// Hand the OS the technical floor — one pane, whatever the tabs contain.
@@ -1193,7 +1263,74 @@ impl Runtime<'_> {
     /// rectangle, the rail's resting shape, the tabs and which one was on top.
     /// The theme, the cursor and the vault are the *process's* and are written by
     /// [`App::session_document`], once, over every window's answer to this.
-    pub(crate) fn window_snapshot(&self) -> SessionWindowV1 {
+    pub(crate) fn window_snapshot(&mut self) -> SessionWindowV1 {
+        #[cfg(target_os = "linux")]
+        {
+            self.queue_linux_window_rect_snapshot();
+            self.window_snapshot_with_rect(|| self.window.last_winit_rect)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.window_snapshot_with_rect(|| {
+                let native = native_window(&self.window.window).ok()?;
+                bt_platform::get_window_rect(native).ok()
+            })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn queue_linux_window_rect_snapshot(&mut self) {
+        if self.window.pending_window_rect.is_some() {
+            self.window.window_rect_refresh_owed = true;
+            return;
+        }
+        let Ok(native) = native_window(&self.window.window) else {
+            return;
+        };
+        let generation = self.app.next_display_generation();
+        if let Ok(request) = bt_platform::linux_display::request_display(
+            u64::from(self.window.window.id()),
+            generation,
+            bt_platform::linux_display::LinuxDisplayQuery::WindowRect { window: native },
+        ) {
+            self.window.pending_window_rect = Some(request);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_linux_window_rect_ready(
+        &mut self,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<bool> {
+        let matches = self
+            .window
+            .pending_window_rect
+            .as_ref()
+            .is_some_and(|request| request.ready() == ready);
+        if !matches {
+            return Ok(false);
+        }
+        let Some(request) = self.window.pending_window_rect.take() else {
+            return Ok(false);
+        };
+        if std::mem::take(&mut self.window.window_rect_refresh_owed) {
+            self.queue_linux_window_rect_snapshot();
+            return Ok(true);
+        }
+        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowRect(Ok(rect))) =
+            request.try_take()
+        {
+            self.window.last_winit_rect = Some(rect);
+            let snapshot = self.window_snapshot_with_rect(|| Some(rect));
+            self.app
+                .record_window(self.window.window.id(), snapshot, Instant::now());
+        }
+        Ok(true)
+    }
+    fn window_snapshot_with_rect(
+        &self,
+        rect: impl FnOnce() -> Option<bt_platform::WindowRect>,
+    ) -> SessionWindowV1 {
         // **Asked once for the paragraph**, because three things below read it and
         // one of them is a per-tab decision: which caption run this window wears is
         // not the question here, but which *kind* of window this is decides its
@@ -1218,9 +1355,9 @@ impl Runtime<'_> {
         // Measured only while the window is normal, because that is the only
         // posture whose rectangle is the user's; `recorded_window_placement`
         // states what the other two record instead.
-        let measured = native
-            .filter(|_| posture == WindowPosture::Normal)
-            .and_then(|native| bt_platform::get_window_rect(native).ok())
+        let measured = (posture == WindowPosture::Normal)
+            .then(rect)
+            .flatten()
             .map(|rect| persisted_window_bounds(rect, scale));
         // What this window last said about itself, which is what the two
         // postures that have no rectangle of their own fall back to. A window
@@ -1928,7 +2065,11 @@ impl Runtime<'_> {
     /// A refusal is said out loud and dropped: a page whose engine would not
     /// take the notice is a page whose context menu opens in the wrong place,
     /// which is not a reason to fail a window move.
-    pub(crate) fn window_moved(&mut self) -> Result<()> {
+    pub(crate) fn window_moved(
+        &mut self,
+        position: winit::dpi::PhysicalPosition<i32>,
+    ) -> Result<()> {
+        self.note_winit_position(position);
         self.remember_summoned_arrangement();
         // **The window may be on another panel now** (owner's report
         // 2026-09-18), and the two displays a window is dragged between are
@@ -1951,6 +2092,46 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    fn note_winit_position(&mut self, position: winit::dpi::PhysicalPosition<i32>) {
+        #[cfg(target_os = "linux")]
+        {
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+            if width > 0 && height > 0 {
+                self.window.last_winit_rect = Some(bt_platform::WindowRect {
+                    left: position.x,
+                    top: position.y,
+                    right: position.x.saturating_add(width as i32),
+                    bottom: position.y.saturating_add(height as i32),
+                });
+            }
+            if self.window.pending_window_rect.is_some() {
+                self.window.window_rect_refresh_owed = true;
+            }
+            if self.window.pending_work_area.is_some() {
+                self.window.work_area_refresh_owed = true;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = position;
+    }
+
+    pub(in crate::runtime) fn note_winit_size(&mut self, size: winit::dpi::PhysicalSize<u32>) {
+        #[cfg(target_os = "linux")]
+        {
+            if size.width > 0
+                && size.height > 0
+                && let Some(rect) = self.window.last_winit_rect.as_mut()
+            {
+                rect.right = rect.left.saturating_add(size.width as i32);
+                rect.bottom = rect.top.saturating_add(size.height as i32);
+            }
+            if self.window.pending_window_rect.is_some() {
+                self.window.window_rect_refresh_owed = true;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = size;
+    }
     /// **Whether a modal card or the settings sheet covers the whole window** — the one reading of
     /// "the window is asking and nothing under it answers". A hosted page is hidden under it, a
     /// wheel notch under it is nobody's once the first-run card and the settings sheet have had
