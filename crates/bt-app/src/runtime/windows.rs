@@ -4,18 +4,19 @@
 use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
-    PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RevealTween, Runtime, TabSeed,
-    TabState, WindowPosture, WindowRuntime, broker_verdict, create_tab_state, dpi_snapshot,
-    dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
-    first_term_leaf, float, focus_leaf_index, git, hang_watch, i18n, ime_outbound, ime_report,
-    install_page_ground_color, install_theme_class_background, let_the_system_translate_touch,
-    marks, mouse_trace, native_window, new_window_runtime, opening_window_attributes,
-    persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
-    preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
-    render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
-    revive_plan, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
-    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
-    tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
+    PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RestoredPlacement, RevealTween,
+    Runtime, TabSeed, TabState, WindowPosture, WindowRuntime, broker_verdict, create_tab_state,
+    dpi_snapshot, dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale,
+    ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
+    i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
+    let_the_system_translate_touch, marks, mouse_trace, native_window, new_window_runtime,
+    opening_window_attributes, persisted_preview_pages, persisted_window_bounds, plan_launch,
+    presentation_physical_size, preview, preview_source_of_recent, profiles, quit, rail_state_for,
+    recorded_window_placement, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
+    restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
+    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
+    startup_window_rect, tear_out_rect, toast, unsaved_line, window_minimum_changed,
+    window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door};
 use anyhow::Context;
@@ -89,6 +90,7 @@ impl Runtime<'_> {
         app: &mut App,
         plan: &NewWindowPlan,
         like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+        _resolved_restore_placement: Option<Option<RestoredPlacement>>,
     ) -> Result<(WindowId, WindowRuntime)> {
         let default_profile = profiles::default_profile(
             &app.settings_store.loaded().default_profile,
@@ -103,6 +105,15 @@ impl Runtime<'_> {
         // question this slice answers. The judgment is `restore_window_placement`'s
         // in both cases, so a saved rectangle no monitor can see forfeits its
         // corner here exactly as the first window's does.
+        #[cfg(target_os = "linux")]
+        let placement = _resolved_restore_placement.unwrap_or_else(|| {
+            plan.like
+                .is_none()
+                .then_some(plan.saved.as_deref())
+                .flatten()
+                .and_then(|saved| restore_window_placement(event_loop, saved))
+        });
+        #[cfg(not(target_os = "linux"))]
         let placement = plan
             .like
             .is_none()
@@ -508,11 +519,7 @@ impl Runtime<'_> {
         #[cfg(target_os = "linux")]
         let opening_bounds = initial_rect
             .map(|rect| persisted_window_bounds(rect, scale_factor))
-            .or_else(|| {
-                plan.saved
-                    .as_ref()
-                    .map(|saved| saved.placement.bounds.clone())
-            })
+            .or_else(|| plan.saved.as_ref().map(|saved| saved.placement.bounds))
             .unwrap_or_else(|| WindowStateV1::default().bounds);
         #[cfg(not(target_os = "linux"))]
         let opening_bounds = persisted_window_bounds(stood_at, scale_factor);
@@ -1325,16 +1332,43 @@ impl Runtime<'_> {
             self.queue_linux_window_rect_snapshot();
             return Ok(true);
         }
-        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowRect(Ok(rect))) =
+        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowRect(Ok(facts))) =
             request.try_take()
         {
-            self.window.last_winit_rect = Some(rect);
-            let snapshot = self.window_snapshot_with_rect(|| Some(rect));
+            self.window.last_winit_rect = Some(facts.rect);
+            self.window.native_client_origin = facts.client_origin;
+            self.window.native_window_minimized = facts.minimized;
+            self.window.native_window_maximized = facts.maximized;
+            let snapshot = self.window_snapshot_with_rect(|| Some(facts.rect));
             self.app
                 .record_window(self.window.window.id(), snapshot, Instant::now());
         }
         Ok(true)
     }
+    fn window_posture(&self) -> WindowPosture {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => crate::choose_window_posture(
+                    self.window.native_window_minimized,
+                    self.window.native_window_maximized,
+                ),
+                Ok(bt_platform::linux_window::Backend::Wayland) => crate::choose_window_posture(
+                    self.window.window.is_minimized(),
+                    Some(self.window.window.is_maximized()),
+                ),
+                Err(_) => WindowPosture::Unknown,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let minimized = native_window(&self.window.window)
+                .ok()
+                .map(bt_platform::is_window_minimized);
+            crate::choose_window_posture(minimized, Some(self.window.window.is_maximized()))
+        }
+    }
+
     fn window_snapshot_with_rect(
         &self,
         rect: impl FnOnce() -> Option<bt_platform::WindowRect>,
@@ -1348,14 +1382,7 @@ impl Runtime<'_> {
         let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let native = native_window(&self.window.window).ok();
-        let posture = if native.is_some_and(bt_platform::is_window_minimized) {
-            WindowPosture::Minimized
-        } else if self.window.window.is_maximized() {
-            WindowPosture::Maximized
-        } else {
-            WindowPosture::Normal
-        };
+        let posture = self.window_posture();
         // The window's *outer* rect, which the self-drawn frame has made the same
         // rectangle as its client area — the one thing `startup_window_rect` can
         // hand back to Win32 without anything in between adjusting it.
@@ -1960,6 +1987,17 @@ impl Runtime<'_> {
         if broker.source != self.window_id() {
             return Ok(false);
         }
+        #[cfg(target_os = "linux")]
+        let guard_request_pending = self
+            .app
+            .pending_drag_guard_screen
+            .as_ref()
+            .is_some_and(|pending| pending.broker_generation == broker.guard_generation);
+        #[cfg(target_os = "linux")]
+        if !broker.guarded_release_is_current(guard_request_pending, broker.pointer) {
+            self.settle_home(drag);
+            return Ok(true);
+        }
         let verdict = broker_verdict(&broker.cargo, &broker.aim);
         // The road's second station ([`Runtime::foreign_strip_landing`] is the
         // first): **what the release decided, and off which aim**. Formatted
@@ -2042,9 +2080,7 @@ impl Runtime<'_> {
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
     pub(in crate::runtime) fn window_is_iconic(&self) -> bool {
-        let iconic = native_window(&self.window.window)
-            .ok()
-            .is_some_and(bt_platform::is_window_minimized);
+        let iconic = self.window_posture() == WindowPosture::Minimized;
         self.window.diagnostic_minimized.set(iconic);
         iconic
     }
@@ -2103,6 +2139,7 @@ impl Runtime<'_> {
     fn note_winit_position(&mut self, position: winit::dpi::PhysicalPosition<i32>) {
         #[cfg(target_os = "linux")]
         {
+            self.window.native_client_origin = None;
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
             if width > 0 && height > 0 {
                 self.window.last_winit_rect = Some(bt_platform::WindowRect {
@@ -2126,6 +2163,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn note_winit_size(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         #[cfg(target_os = "linux")]
         {
+            self.window.native_client_origin = None;
             self.window.last_winit_size = Some(size);
             if size.width > 0
                 && size.height > 0
