@@ -1105,25 +1105,22 @@ impl PtyCommand {
     }
 }
 
-/// The three process-level inputs captured by the app's spawn worker.
+/// The two process-level inputs captured by the app's spawn worker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnvironmentRefresh {
     fresh: Vec<(OsString, OsString)>,
-    launch_snapshot: Vec<(OsString, OsString)>,
-    inherited: Vec<(OsString, OsString)>,
+    launch_overrides: Vec<(OsString, OsString)>,
 }
 
 impl EnvironmentRefresh {
     #[must_use]
     pub fn new(
         fresh: Vec<(OsString, OsString)>,
-        launch_snapshot: Vec<(OsString, OsString)>,
-        inherited: Vec<(OsString, OsString)>,
+        launch_overrides: Vec<(OsString, OsString)>,
     ) -> Self {
         Self {
             fresh,
-            launch_snapshot,
-            inherited,
+            launch_overrides,
         }
     }
 
@@ -1134,13 +1131,7 @@ impl EnvironmentRefresh {
     /// current account value it was meant to extend.
     #[must_use]
     pub fn before_folio(&self) -> Vec<(OsString, OsString)> {
-        spawn_environment(
-            &self.fresh,
-            &self.launch_snapshot,
-            &self.inherited,
-            &[],
-            &[],
-        )
+        spawn_environment(&self.fresh, &self.launch_overrides, &[], &[])
     }
 }
 
@@ -1148,22 +1139,12 @@ impl EnvironmentRefresh {
 #[must_use]
 pub fn spawn_environment(
     fresh: &[(OsString, OsString)],
-    launch_snapshot: &[(OsString, OsString)],
-    inherited: &[(OsString, OsString)],
+    launch_overrides: &[(OsString, OsString)],
     folio_vars: &[(OsString, OsString)],
     profile_env: &[(OsString, OsString)],
 ) -> Vec<(OsString, OsString)> {
     let mut environment = fresh.to_vec();
-    for (key, value) in inherited {
-        let launch_value = launch_snapshot
-            .iter()
-            .find(|(launch_key, _)| environment_key_eq(launch_key, key))
-            .map(|(_, launch_value)| launch_value);
-        if launch_value != Some(value) {
-            upsert_environment(&mut environment, key.clone(), value.clone());
-        }
-    }
-    for (key, value) in folio_vars.iter().chain(profile_env) {
+    for (key, value) in launch_overrides.iter().chain(folio_vars).chain(profile_env) {
         upsert_environment(&mut environment, key.clone(), value.clone());
     }
     environment
@@ -2223,8 +2204,7 @@ impl PtySession {
         let environment = command.environment_refresh.as_ref().map(|refresh| {
             spawn_environment(
                 &refresh.fresh,
-                &refresh.launch_snapshot,
-                &refresh.inherited,
+                &refresh.launch_overrides,
                 &folio_environment,
                 &profile_environment,
             )
@@ -2607,32 +2587,185 @@ mod tests {
     }
 
     /// PIN — **a pane's module path is the fresh logon's, not the one Folio's parent session
-    /// handed Folio** (T-INTEGRATION-INJECT-4 round 6). A Folio started from a PowerShell 7
-    /// session carries 7's `PSModulePath` in its own environment and in its launch snapshot
-    /// alike; that value is inherited, not an override, so a Windows PowerShell pane gets the
-    /// current user's logon value and computes its own module path from it — it does not load
-    /// 7's PSReadLine or 7's `Microsoft.PowerShell.Security`. A module path set for Folio's own
-    /// launch on purpose (differing from what Folio started with) still wins.
+    /// handed Folio**. A Folio started from a PowerShell 7 session carries 7's `PSModulePath` in
+    /// its process environment, but inherited differences are not launcher overrides: Windows
+    /// PowerShell therefore gets the current account value and does not load 7's PSReadLine or
+    /// `Microsoft.PowerShell.Security`. A value supplied through the explicit override input
+    /// still wins.
     ///
-    /// RED (mutation: take every inherited value whatever the launch snapshot says).
+    /// RED (mutation: pass the parent's module path as a launcher override).
     #[test]
     fn a_panes_module_path_is_the_fresh_logons_not_folios_parents() {
         let logon = r"C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules";
         let seven = r"D:\Documents\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules;C:\Program Files\WindowsPowerShell\Modules";
         let fresh = environment(&[("PSModulePath", logon)]);
-        let from_seven = environment(&[("PSModulePath", seven)]);
-        let composed = spawn_environment(&fresh, &from_seven, &from_seven, &[], &[]);
+        let composed = spawn_environment(&fresh, &[], &[], &[]);
         assert_eq!(
             composed_value(&composed, "PSModulePath"),
-            Some(OsStr::new(logon))
+            Some(OsStr::new(logon)),
+            "the parent-only value {seven:?} is not an input to the compositor"
         );
         let chosen = environment(&[("PSModulePath", r"E:\modules")]);
-        let composed = spawn_environment(&fresh, &from_seven, &chosen, &[], &[]);
+        let composed = spawn_environment(&fresh, &chosen, &[], &[]);
         assert_eq!(
             composed_value(&composed, "PSModulePath"),
             Some(OsStr::new(r"E:\modules")),
             "an explicit launch override still wins"
         );
+    }
+
+    /// Every Windows start road has the same compositor rule. A parent process can be hours old,
+    /// and neither an argv word nor a process-environment difference proves that the parent set a
+    /// value for this Folio start. Consequently each product road supplies no launch override;
+    /// only the explicit override input can replace the current account block.
+    ///
+    /// RED (mutation `updater_inheritance_is_a_launch_override`: give the update-restart row the
+    /// stale parent PATH).
+    #[test]
+    fn every_start_road_uses_current_account_values_and_only_explicit_overrides() {
+        let fresh = environment(&[("PATH", r"C:\Windows;C:\NewTool")]);
+        let stale_parent = r"C:\Windows";
+        for road in [
+            "ordinary cold start",
+            "restart to update",
+            "applier recovery or trial",
+            "launch-wire hand-over receiver",
+            "Explorer shell extension",
+            "quake hotkey in the resident process",
+            "autostart at logon",
+            "start from a long-lived terminal",
+        ] {
+            let composed = spawn_environment(&fresh, &[], &[], &[]);
+            assert_eq!(
+                composed_value(&composed, "PATH"),
+                Some(OsStr::new(r"C:\Windows;C:\NewTool")),
+                "{road} must not promote its stale parent PATH {stale_parent:?} into an override"
+            );
+        }
+
+        let explicit = environment(&[("PATH", r"D:\portable-toolchain")]);
+        let composed = spawn_environment(&fresh, &explicit, &[], &[]);
+        assert_eq!(
+            composed_value(&composed, "PATH"),
+            Some(OsStr::new(r"D:\portable-toolchain")),
+            "a launcher override is preserved only when a caller identifies it explicitly"
+        );
+    }
+
+    /// The update hand-off is the sharp start-road instance: its new Folio inherits the old
+    /// Folio's stale process environment, but that inherited PATH is not an identified launcher
+    /// override and therefore is not an input to a pane birth.
+    ///
+    /// RED (mutation `updater_inheritance_is_a_launch_override`: supply `stale_parent` as the
+    /// compositor's second layer).
+    #[test]
+    fn a_restart_to_update_does_not_freeze_the_old_folios_path() {
+        let fresh = environment(&[("PATH", r"C:\Windows;C:\NewlyInstalled")]);
+        let stale_parent = environment(&[("PATH", r"C:\Windows")]);
+        let pane = spawn_environment(&fresh, &[], &[], &[]);
+        assert_eq!(
+            composed_value(&pane, "PATH"),
+            Some(OsStr::new(r"C:\Windows;C:\NewlyInstalled"))
+        );
+        assert_ne!(
+            composed_value(&pane, "PATH"),
+            composed_value(&stale_parent, "PATH")
+        );
+    }
+
+    #[cfg(windows)]
+    fn powershell_facts(program: &str, module_path: Option<&OsStr>) -> (String, String, String) {
+        let hygiene = test_shell::Hygiene::new();
+        let mut command = hygiene.command(program, bt_platform::quiet_command);
+        match module_path {
+            Some(value) => {
+                command.env("PSModulePath", value);
+            }
+            None => {
+                command.env_remove("PSModulePath");
+            }
+        }
+        let output = command
+            .args([
+                "-NonInteractive",
+                "-Command",
+                "$m=Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Select-Object -First 1; [Console]::Out.WriteLine($env:PSModulePath); [Console]::Out.WriteLine((Get-ExecutionPolicy).ToString()); [Console]::Out.WriteLine($m.Version.ToString())",
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("{program} starts through the test-shell door: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} resolves its policy and PSReadLine: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "{program} reported {lines:?}");
+        (lines.remove(0), lines.remove(0), lines.remove(0))
+    }
+
+    #[cfg(windows)]
+    fn fresh_module_path_for(program: &str) -> Option<OsString> {
+        let hygiene = test_shell::Hygiene::new();
+        hygiene
+            .command(program, bt_platform::quiet_command)
+            .get_envs()
+            .find(|(key, _)| environment_key_eq(key, OsStr::new("PSModulePath")))
+            .and_then(|(_, value)| value.map(OsStr::to_owned))
+    }
+
+    /// Each edition starts from the current account's module-path input even when the opposite
+    /// edition launched Folio. The real target child then computes its edition-specific path,
+    /// resolves `Get-ExecutionPolicy`, and resolves PSReadLine.
+    ///
+    /// RED (mutations `pwsh7_parent_wins` and `windows_powershell_parent_wins`: put the observed
+    /// parent value in the launch-override layer for the corresponding row).
+    #[cfg(windows)]
+    #[test]
+    fn opposite_powershell_launchers_do_not_cross_their_module_paths_into_panes() {
+        for (parent, pane) in [
+            ("pwsh.exe", "powershell.exe"),
+            ("powershell.exe", "pwsh.exe"),
+        ] {
+            let (parent_path, _, _) =
+                powershell_facts(parent, fresh_module_path_for(parent).as_deref());
+            let fresh_value = fresh_module_path_for(pane);
+            let fresh = fresh_value
+                .as_ref()
+                .map(|value| vec![(OsString::from("PSModulePath"), value.clone())])
+                .unwrap_or_default();
+            let composed = spawn_environment(&fresh, &[], &[], &[]);
+            let pane_input = composed_value(&composed, "PSModulePath");
+            let (actual_path, policy, version) = powershell_facts(pane, pane_input);
+            let (expected_path, expected_policy, expected_version) =
+                powershell_facts(pane, fresh_value.as_deref());
+            // Each observation runs in its own temporary home, and PowerShell 7 puts that home's
+            // module folder first: the entries compared are the ones the home does not name.
+            let beyond_the_home = |path: &str| {
+                path.split(';')
+                    .filter(|entry| !entry.contains("folio-test-shell-"))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            };
+            let (actual_path, expected_path, parent_path) = (
+                beyond_the_home(&actual_path),
+                beyond_the_home(&expected_path),
+                beyond_the_home(&parent_path),
+            );
+            assert!(!actual_path.is_empty(), "{pane} reported a module path");
+            assert_eq!(actual_path, expected_path, "{parent} -> {pane}");
+            assert_eq!(policy, expected_policy, "{parent} -> {pane}");
+            assert_eq!(version, expected_version, "{parent} -> {pane}");
+            assert!(!policy.is_empty() && !policy.eq_ignore_ascii_case("Unknown"));
+            assert!(!version.is_empty(), "{pane} resolves PSReadLine");
+            assert_ne!(
+                actual_path, parent_path,
+                "{pane} must compute its own path instead of inheriting {parent}'s"
+            );
+        }
     }
 
     #[test]
@@ -2644,30 +2777,23 @@ mod tests {
             ("PROFILE_LAYER", "fresh"),
             ("CaseName", "fresh"),
         ]);
-        let snapshot = environment(&[
-            ("PATH", r"C:\Windows"),
-            ("REMOVED", "old-machine"),
-            ("APPDATA", r"C:\Users\me\AppData\Roaming"),
-        ]);
-        let inherited = environment(&[
-            ("PATH", r"C:\Windows;C:\NewTool"),
-            ("REMOVED", "old-machine"),
+        let launch_overrides = environment(&[
             ("APPDATA", r"D:\isolated\AppData"),
-            ("中文", "值=仍然完整"),
+            ("Δοκιμή", "τιμή=ολόκληρη"),
         ]);
         let folio = environment(&[("FOLIO_LAYER", "folio"), ("casename", "folio-case")]);
         let profile = environment(&[("PROFILE_LAYER", "profile"), ("CASENAME", "profile-case")]);
 
-        let composed = spawn_environment(&fresh, &snapshot, &inherited, &folio, &profile);
+        let composed = spawn_environment(&fresh, &launch_overrides, &folio, &profile);
         assert_eq!(
             composed_value(&composed, "PATH"),
-            Some(OsStr::new(r"C:\Windows;C:\NewTool")),
-            "MUTATION: taking fresh PATH loses a command installed after Folio opened"
+            Some(OsStr::new(r"C:\Windows")),
+            "MUTATION: taking a stale parent PATH hides a command installed after Folio opened"
         );
         assert_eq!(
             composed_value(&composed, "REMOVED"),
             None,
-            "MUTATION: restoring an unchanged inherited value resurrects a removed machine variable"
+            "MUTATION: taking parent inheritance resurrects a removed account variable"
         );
         assert_eq!(
             composed_value(&composed, "APPDATA"),
@@ -2696,8 +2822,8 @@ mod tests {
             "the winning source supplies the winning casing"
         );
         assert_eq!(
-            composed_value(&composed, "中文"),
-            Some(OsStr::new("值=仍然完整")),
+            composed_value(&composed, "Δοκιμή"),
+            Some(OsStr::new("τιμή=ολόκληρη")),
             "MUTATION: parsing or splitting a value at '=' damages Unicode data"
         );
     }
@@ -2708,20 +2834,17 @@ mod tests {
             .env("FOLIO", "yes")
             .refresh_environment(EnvironmentRefresh::new(
                 environment(&[("FRESH", "now")]),
-                environment(&[("OLD", "launch")]),
-                environment(&[("OLD", "launch")]),
+                environment(&[("LAUNCH", "chosen")]),
             ));
         let (folio, profile) = command.resolved_environment_layers();
         let refresh = command.environment_refresh.as_ref().expect("refresh seam");
-        let composed = spawn_environment(
-            &refresh.fresh,
-            &refresh.launch_snapshot,
-            &refresh.inherited,
-            &folio,
-            &profile,
-        );
+        let composed =
+            spawn_environment(&refresh.fresh, &refresh.launch_overrides, &folio, &profile);
         assert_eq!(composed_value(&composed, "FRESH"), Some(OsStr::new("now")));
-        assert_eq!(composed_value(&composed, "OLD"), None);
+        assert_eq!(
+            composed_value(&composed, "LAUNCH"),
+            Some(OsStr::new("chosen"))
+        );
         assert_eq!(composed_value(&composed, "FOLIO"), Some(OsStr::new("yes")));
     }
 
