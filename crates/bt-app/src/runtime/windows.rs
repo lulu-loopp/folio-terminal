@@ -1336,16 +1336,42 @@ impl Runtime<'_> {
             self.queue_linux_window_rect_snapshot();
             return Ok(true);
         }
-        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowRect(Ok(rect))) =
+        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowRect(Ok(facts))) =
             request.try_take()
         {
-            self.window.last_winit_rect = Some(rect);
-            let snapshot = self.window_snapshot_with_rect(|| Some(rect));
+            self.window.last_winit_rect = Some(facts.rect);
+            self.window.native_window_minimized = facts.minimized;
+            self.window.native_window_maximized = facts.maximized;
+            let snapshot = self.window_snapshot_with_rect(|| Some(facts.rect));
             self.app
                 .record_window(self.window.window.id(), snapshot, Instant::now());
         }
         Ok(true)
     }
+    fn window_posture(&self) -> WindowPosture {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => crate::choose_window_posture(
+                    self.window.native_window_minimized,
+                    self.window.native_window_maximized,
+                ),
+                Ok(bt_platform::linux_window::Backend::Wayland) => crate::choose_window_posture(
+                    self.window.window.is_minimized(),
+                    Some(self.window.window.is_maximized()),
+                ),
+                Err(_) => WindowPosture::Unknown,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let minimized = native_window(&self.window.window)
+                .ok()
+                .map(bt_platform::is_window_minimized);
+            crate::choose_window_posture(minimized, Some(self.window.window.is_maximized()))
+        }
+    }
+
     fn window_snapshot_with_rect(
         &self,
         rect: impl FnOnce() -> Option<bt_platform::WindowRect>,
@@ -1359,14 +1385,7 @@ impl Runtime<'_> {
         let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let native = native_window(&self.window.window).ok();
-        let posture = if native.is_some_and(bt_platform::is_window_minimized) {
-            WindowPosture::Minimized
-        } else if self.window.window.is_maximized() {
-            WindowPosture::Maximized
-        } else {
-            WindowPosture::Normal
-        };
+        let posture = self.window_posture();
         // The window's *outer* rect, which the self-drawn frame has made the same
         // rectangle as its client area — the one thing `startup_window_rect` can
         // hand back to Win32 without anything in between adjusting it.
@@ -2064,9 +2083,7 @@ impl Runtime<'_> {
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
     pub(in crate::runtime) fn window_is_iconic(&self) -> bool {
-        let iconic = native_window(&self.window.window)
-            .ok()
-            .is_some_and(bt_platform::is_window_minimized);
+        let iconic = self.window_posture() == WindowPosture::Minimized;
         self.window.diagnostic_minimized.set(iconic);
         iconic
     }

@@ -13766,6 +13766,10 @@ struct WindowRuntime {
     last_winit_rect: Option<bt_platform::WindowRect>,
     #[cfg(target_os = "linux")]
     last_winit_size: Option<PhysicalSize<u32>>,
+    #[cfg(target_os = "linux")]
+    native_window_maximized: Option<bool>,
+    #[cfg(target_os = "linux")]
+    native_window_minimized: Option<bool>,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
     /// An outbox, replaced whole at each commit rather than appended to, because
@@ -41238,6 +41242,10 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         last_winit_rect: None,
         #[cfg(target_os = "linux")]
         last_winit_size: None,
+        #[cfg(target_os = "linux")]
+        native_window_maximized: None,
+        #[cfg(target_os = "linux")]
+        native_window_minimized: None,
         #[cfg(target_os = "linux")]
         pending_summoned_arrangement: None,
         #[cfg(target_os = "linux")]
@@ -72245,15 +72253,24 @@ fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorA
     }
 }
 
-/// What the OS is currently doing with the window, as far as its rectangle is
-/// concerned. The three postures are exhaustive and mutually exclusive: Windows
-/// reports iconic and zoomed separately, and a window that is both is iconic —
-/// its rectangle is the icon's either way.
+/// The OS posture as far as the window rectangle is concerned.
+/// Windows reports iconic and zoomed separately, with iconic taking precedence.
+/// `Unknown` means no valid native or backend-cached state has arrived yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowPosture {
     Normal,
     Maximized,
     Minimized,
+    Unknown,
+}
+
+fn choose_window_posture(minimized: Option<bool>, maximized: Option<bool>) -> WindowPosture {
+    match (minimized, maximized) {
+        (Some(true), _) => WindowPosture::Minimized,
+        (Some(false), Some(true)) => WindowPosture::Maximized,
+        (Some(false), Some(false)) => WindowPosture::Normal,
+        _ => WindowPosture::Unknown,
+    }
 }
 
 /// The `(bounds, maximized)` pair a snapshot should record.
@@ -72281,6 +72298,7 @@ fn recorded_window_placement(
         WindowPosture::Normal => (measured.unwrap_or(saved_bounds), false),
         WindowPosture::Maximized => (saved_bounds, true),
         WindowPosture::Minimized => (saved_bounds, saved_maximized),
+        WindowPosture::Unknown => (saved_bounds, saved_maximized),
     }
 }
 
@@ -78786,12 +78804,29 @@ mod clipboard_path_tests {
             .find("self.window.window_rect_refresh_owed")
             .expect("an event can mark the native answer stale");
         let write = apply
-            .find("self.window.last_winit_rect = Some(rect)")
+            .find("self.window.last_winit_rect = Some(facts.rect)")
             .expect("a current native answer refreshes the cache");
         assert!(
             stale < write,
             "a stale answer can overwrite newer geometry:\n{apply}"
         );
+    }
+
+    /// A current Linux state reply keeps unknown posture facts unknown.
+    #[test]
+    fn linux_window_posture_comes_from_worker_facts_and_keeps_unknown() {
+        let applying = method_body("Runtime", "apply_linux_window_rect_ready");
+        assert!(applying.contains("native_window_minimized = facts.minimized"));
+        assert!(applying.contains("native_window_maximized = facts.maximized"));
+
+        let posture = method_body("Runtime", "window_posture");
+        assert!(posture.contains("Backend::X11"));
+        assert!(posture.contains("Backend::Wayland"));
+        assert!(posture.contains("WindowPosture::Unknown"));
+
+        let snapshot = method_body("Runtime", "window_snapshot_with_rect");
+        assert!(snapshot.contains("self.window_posture()"));
+        assert!(!snapshot.contains("is_maximized()"));
     }
 
     /// **A file row let go over a terminal's middle is spelled exactly as a file

@@ -116,13 +116,27 @@ pub enum LinuxDisplayAnswer {
     /// The actual pointer in the window, or no answer from the platform.
     PointerInWindow(Option<(i32, i32)>),
     /// Native geometry, or the same refusal the old synchronous query returned.
-    WindowRect(Result<WindowRect, String>),
+    WindowRect(Result<LinuxWindowFacts, String>),
     /// The work-area read's native answer or its original refusal.
     WindowWorkArea(Result<WindowRect, String>),
     /// The native topology signature and one result for each requested point.
     MonitorWorkAreasAt(Result<MonitorWorkAreas, String>),
     /// The X11 virtual-screen rectangle, or the platform refusal.
     VirtualScreenRect(Result<WindowRect, String>),
+}
+
+/// The native facts read together for one X11 window.
+///
+/// `None` means the window manager did not provide a valid `_NET_WM_STATE` property; it is not
+/// evidence that the window is normal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxWindowFacts {
+    /// The rectangle observed by the display worker.
+    pub rect: WindowRect,
+    /// Whether both maximize state atoms were present, or absent.
+    pub maximized: Option<bool>,
+    /// Whether the hidden state atom was present, or absent.
+    pub minimized: Option<bool>,
 }
 
 /// A pending query. Its receiver never waits; the matching ready event means its answer is parked.
@@ -352,7 +366,7 @@ fn run_display_query(query: LinuxDisplayQuery) -> LinuxDisplayAnswer {
             LinuxDisplayAnswer::PointerInWindow(pointer_position_in_window(window))
         }
         LinuxDisplayQuery::WindowRect { window } => {
-            LinuxDisplayAnswer::WindowRect(get_window_rect(window))
+            LinuxDisplayAnswer::WindowRect(get_window_facts(window))
         }
         LinuxDisplayQuery::WindowWorkArea { window } => {
             LinuxDisplayAnswer::WindowWorkArea(get_work_area(window))
@@ -406,6 +420,50 @@ pub fn get_window_rect(window: NativeWindow) -> Result<WindowRect, String> {
     })
 }
 
+/// Read a window's geometry and EWMH posture on the display worker.
+pub fn get_window_facts(window: NativeWindow) -> Result<LinuxWindowFacts, String> {
+    with_x11("reading a window's rectangle and state", |session| {
+        let rect = window_rect(session, window.as_x11_window())?;
+        let (maximized, minimized) = window_state_facts(session, window.as_x11_window());
+        Ok(LinuxWindowFacts {
+            rect,
+            maximized,
+            minimized,
+        })
+    })
+}
+
+fn window_state_facts(session: &X11Session, window: Window) -> (Option<bool>, Option<bool>) {
+    let values = match read_window_property32(
+        session,
+        window,
+        session.atoms.net_wm_state,
+        AtomEnum::ATOM.into(),
+        "_NET_WM_STATE",
+    ) {
+        Ok(Some(values)) => values,
+        Ok(None) => return (Some(false), Some(false)),
+        Err(_) => return (None, None),
+    };
+    window_state_from_atoms(
+        &values,
+        session.atoms.net_wm_state_hidden,
+        session.atoms.net_wm_state_maximized_horz,
+        session.atoms.net_wm_state_maximized_vert,
+    )
+}
+
+fn window_state_from_atoms(
+    values: &[Atom],
+    hidden: Atom,
+    maximized_horz: Atom,
+    maximized_vert: Atom,
+) -> (Option<bool>, Option<bool>) {
+    let horizontal = values.contains(&maximized_horz);
+    let vertical = values.contains(&maximized_vert);
+    let maximized = (horizontal == vertical).then_some(horizontal);
+    (maximized, Some(values.contains(&hidden)))
+}
 pub fn get_work_area(window: NativeWindow) -> Result<WindowRect, String> {
     with_x11("reading a window's display work area", |session| {
         let (bounds, root) = window_rect_and_root(session, window.as_x11_window())?;
@@ -598,6 +656,10 @@ struct Atoms {
     net_wm_window_type_dock: Atom,
     resource_manager: Atom,
     xsettings_settings: Atom,
+    net_wm_state: Atom,
+    net_wm_state_hidden: Atom,
+    net_wm_state_maximized_horz: Atom,
+    net_wm_state_maximized_vert: Atom,
 }
 
 impl Atoms {
@@ -617,6 +679,10 @@ impl Atoms {
             "_NET_WM_WINDOW_TYPE_DOCK",
             "RESOURCE_MANAGER",
             "_XSETTINGS_SETTINGS",
+            "_NET_WM_STATE",
+            "_NET_WM_STATE_HIDDEN",
+            "_NET_WM_STATE_MAXIMIZED_HORZ",
+            "_NET_WM_STATE_MAXIMIZED_VERT",
         ];
         let cookies = names
             .iter()
@@ -650,6 +716,10 @@ impl Atoms {
             net_wm_window_type_dock: atoms[11],
             resource_manager: atoms[12],
             xsettings_settings: atoms[13],
+            net_wm_state: atoms[14],
+            net_wm_state_hidden: atoms[15],
+            net_wm_state_maximized_horz: atoms[16],
+            net_wm_state_maximized_vert: atoms[17],
         })
     }
 }
@@ -1589,6 +1659,30 @@ mod tests {
             width_mm: 0,
             height_mm: 0,
         }
+    }
+
+    #[test]
+    fn ewmh_window_state_requires_a_complete_maximize_pair() {
+        const HIDDEN: Atom = 101;
+        const MAXIMIZED_HORZ: Atom = 102;
+        const MAXIMIZED_VERT: Atom = 103;
+        assert_eq!(
+            window_state_from_atoms(
+                &[HIDDEN, MAXIMIZED_HORZ, MAXIMIZED_VERT],
+                HIDDEN,
+                MAXIMIZED_HORZ,
+                MAXIMIZED_VERT
+            ),
+            (Some(true), Some(true))
+        );
+        assert_eq!(
+            window_state_from_atoms(&[MAXIMIZED_HORZ], HIDDEN, MAXIMIZED_HORZ, MAXIMIZED_VERT),
+            (None, Some(false))
+        );
+        assert_eq!(
+            window_state_from_atoms(&[], HIDDEN, MAXIMIZED_HORZ, MAXIMIZED_VERT),
+            (Some(false), Some(false))
+        );
     }
 
     #[test]
