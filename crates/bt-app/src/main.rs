@@ -79026,6 +79026,124 @@ mod clipboard_path_tests {
         );
     }
 
+    /// **The page uses the current X11 client origin, and a move or resize clears it** (PR20).
+    #[test]
+    fn linux_window_tests_use_current_client_origin_and_refresh_it() {
+        let position = method_body("Runtime", "note_winit_position");
+        let resized = method_body("Runtime", "note_winit_size");
+        for (event, body) in [("move", position), ("resize", resized)] {
+            let invalidated = body
+                .find("native_client_origin = None")
+                .unwrap_or_else(|| panic!("a {event} must clear the observed client origin"));
+            let refresh = body
+                .find("self.queue_linux_window_rect_snapshot()")
+                .unwrap_or_else(|| panic!("a {event} must request current client facts"));
+            assert!(
+                invalidated < refresh,
+                "a {event} must clear then refresh:\n{body}"
+            );
+        }
+
+        let shown = method_body("Runtime", "put_the_window_on_the_glass");
+        let visible = shown
+            .find("self.window.window_shown = true")
+            .expect("show marks the window visible");
+        let first_facts = shown
+            .find("self.queue_linux_window_rect_snapshot()")
+            .expect("show queues the first client-origin observation");
+        assert!(
+            visible < first_facts,
+            "show must mark then observe the window"
+        );
+
+        let queue = method_body("Runtime", "queue_linux_window_rect_snapshot");
+        let x11 = queue
+            .find("active_backend()")
+            .expect("only the X11 backend has a global client origin");
+        let leaving = queue
+            .find("self.window.leaving.is_some()")
+            .expect("closing windows do not request client facts");
+        let pending = queue
+            .find("self.window.pending_window_rect.is_some()")
+            .expect("an in-flight answer is coalesced");
+        let owed = queue
+            .find("self.window.window_rect_refresh_owed = true")
+            .expect("an event marks the in-flight answer stale");
+        let fresh = queue
+            .find("bt_platform::linux_display::request_display(")
+            .expect("a fresh request follows when no answer is pending");
+        assert!(
+            x11 < pending && leaving < pending && pending < owed && owed < fresh,
+            "only a live X11 window may coalesce or admit a fresh observation:\n{queue}"
+        );
+
+        let apply = method_body("Runtime", "apply_linux_window_rect_ready");
+        let addressed = apply
+            .find("request.ready() == ready")
+            .expect("the answer must match its current request");
+        let stale = apply
+            .find("self.window.window_rect_refresh_owed")
+            .expect("a newer event invalidates the answer");
+        let client_origin = apply
+            .find("self.window.native_client_origin = facts.client_origin")
+            .expect("the current worker answer supplies the client origin");
+        assert!(
+            addressed < stale && stale < client_origin,
+            "a stale or misaddressed answer can replace the client origin:\n{apply}"
+        );
+
+        let origin = method_body("Runtime", "client_origin_on_screen");
+        let linux = origin
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux client-origin path");
+        let other_platforms = origin
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .expect("the existing Windows and macOS path");
+        assert!(linux.contains("native_client_origin"));
+        assert!(!linux.contains("inner_position"));
+        assert!(other_platforms.contains("inner_position"));
+
+        let to_screen = method_body("Runtime", "to_screen");
+        assert!(to_screen.contains("self.client_origin_on_screen()?"));
+        let opening = method_body("Runtime", "open_broker");
+        let linux_opening = opening
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux broker-opening path");
+        let other_opening = opening
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .expect("the existing Windows and macOS broker-opening path");
+        assert!(linux_opening.contains("let Some(pointer) = self.to_screen(position) else"));
+        assert!(opening.contains("pointer,"));
+        assert!(!linux_opening.contains("unwrap_or"));
+        assert!(
+            other_opening.contains("self.to_screen(position).unwrap_or((position.x, position.y))")
+        );
+
+        let moving = method_body("Runtime", "publish_to_broker");
+        let unavailable = moving
+            .find("if screen.is_none()")
+            .expect("missing Linux origin withdraws the cross-window broker");
+        let withdraw = moving
+            .find("self.app.drag_broker = None")
+            .expect("the stale foreign aim is discarded");
+        let return_without_broker = moving
+            .find("return;")
+            .expect("the invalid cross-window move stops here");
+        let borrow = moving
+            .find("self.app.drag_broker.as_mut()")
+            .expect("a valid origin is required before using the broker");
+        assert!(
+            unavailable < withdraw
+                && withdraw < return_without_broker
+                && return_without_broker < borrow,
+            "an unavailable client origin must clear and stop before broker use:\n{moving}"
+        );
+    }
+
     /// A current Linux state reply keeps unknown posture facts unknown.
     #[test]
     fn linux_window_posture_comes_from_worker_facts_and_keeps_unknown() {
