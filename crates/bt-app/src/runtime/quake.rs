@@ -140,7 +140,6 @@ impl Runtime<'_> {
             crate::diagnostics::note(&message);
             return Err(anyhow::anyhow!(message));
         }
-        self.restore_minimized_window()?;
         let cached_dpi = self.window.renderer.dpi_milli().get() * 96 / 1000;
         let query = match pointer {
             Some((x, y)) => bt_platform::linux_display::LinuxDisplayQuery::SummonScreenAt {
