@@ -1520,14 +1520,20 @@ impl Runtime<'_> {
     /// pointer has to be added to before two windows can talk about it
     /// (multiwindow slice F2).
     ///
-    /// `inner_position` and not the outer rectangle: winit reports every pointer
-    /// in client coordinates, and this window's `WM_NCCALCSIZE` has made client
-    /// and outer the same rectangle anyway ([`bt_platform::CustomWindowFrame`]),
-    /// so the two are one origin here and only one of them stays right if that
-    /// ever stops being true.
+    /// Linux uses the display worker's client translation. Move and resize events
+    /// invalidate it until a current answer arrives. Other platforms use Winit's
+    /// `inner_position`; an outer frame rectangle is not a client origin.
     fn client_origin_on_screen(&self) -> Option<(f64, f64)> {
-        let origin = self.window.window.inner_position().ok()?;
-        Some((f64::from(origin.x), f64::from(origin.y)))
+        #[cfg(target_os = "linux")]
+        {
+            let (x, y) = self.window.native_client_origin?;
+            Some((f64::from(x), f64::from(y)))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let origin = self.window.window.inner_position().ok()?;
+            Some((f64::from(origin.x), f64::from(origin.y)))
+        }
     }
 
     /// A pointer of this window's, in screen physical pixels.
