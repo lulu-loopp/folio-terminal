@@ -19836,7 +19836,7 @@ enum TextFieldSeat {
 }
 
 /// What a clipboard write should say once the platform's clipboard path has
-/// accepted it. Linux grows the variants a lane can only land on a later turn.
+/// accepted it.
 enum ClipboardWriteEffect {
     None,
     Toast {
