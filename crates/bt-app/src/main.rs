@@ -73996,10 +73996,10 @@ mod platform_gate_tests {
         "git_panel.rs",
         // Linux hands process work its WorkerCtx; the other hand-off doors are synchronous.
         "handoff_lane.rs",
-        // First-window display identity is strict; optional service failures
-        // remain local to their operation.
         // The Linux drop notice is compiled with its native consumer and every translation test.
         "i18n.rs",
+        // First-window display identity is strict; optional service failures
+        // remain local to their operation.
         "main.rs",
         // The Linux focus door must refuse a Wayland focus request before calling winit.
         "owner_door.rs",
