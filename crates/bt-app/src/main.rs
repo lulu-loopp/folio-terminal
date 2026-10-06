@@ -268,7 +268,7 @@ use bt_viewport::{
 // seen" rule under the name this crate has always called it by.
 use bt_workbench::attention;
 use bt_workbench::attention::is_consumed as attention_is_consumed;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
