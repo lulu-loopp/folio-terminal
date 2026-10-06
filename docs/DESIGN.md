@@ -4600,7 +4600,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
   - `Runtime::hole_for(presence, floored)` 是那句裁决本身，纯函数：`Shown` 且 `floored` 才有洞。摆放失败只打 stderr 而洞照挖，正是修前的形状。
   - **每帧摆放的代价用第三个缓存抵掉**：`WebSeat::placed` 记住上次给 compositor 的矩形，没动就一次比较——和 `sized`、`presence` 是同一类东西，也和它们一起在 `take_address` 里跟着地址走。它在**唯一改变「地板+页」这一对**的地方被清掉：`InstallEvents` 里 visual 刚进树的那一句。
 - **红测三扇门**。`a_hole_is_only_cut_where_a_floor_already_stands`（bt-app，纯值）——让 `hole_for` 不看 `floored` 就红，而那正是用户拍到的那个 build。`a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine`（bt-platform，源钉）——把 `let Some(web) … else { return }` 挪到 `ensure_page_ground` 之前第一句红，给 `attach_web_visual` 塞回一次自己的 `create_page_ground` 最后一句红。上一片的 `a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone` 原样仍绿：一次调用摆两个、一次调用撤两个，这一片只是把「摆」提前到了引擎之前。
-- **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ ~~**引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。~~ **已结清（用户裁 2026-08-25）：画第六张卡，见 §7.7 ④′。** 纯地面色仍是**背景**（那条裁决没被翻），站在它上面的现在是一枚地球、一句 `The web engine did not start.`、一行 SDK 自己的错误码和一枚 `Retry`。**留下的那一半写清楚**：这张卡的触发是引擎**回了一个错**；引擎**一次都不回答**（环境或 controller 的回调永不到达）仍然是一块空地面色，因为本窗此刻手上没有任何事实可写，给它一个超时就是给它一个编出来的边界——那是另一张单。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
+- **挂账**。ⓐ `place_web_visual` 每帧新建 `IDCompositionRectangleClip` 的旧账（上一片的 ⓑ）**没有加重也没有清**：摆放现在按帧问，但 `placed` 让没动的帧一次都不进去，所以真正建 clip 的次数仍然是「矩形变了几次」。要清得把 clip 对象存下来原地改，那是另一张单。ⓑ ~~**引擎一直起不来的窗口**现在显示的是一块纯地面色的 pane，而不是桌面——这是裁决要的，但「页起不来该显示什么」（卡片？文案？）是 §7.7 ④ 那条道上的产品问题，本片不替它作答。~~ **已结清（用户裁 2026-08-25）：画第六张卡，见 §7.7 ④′。** 纯地面色仍是**背景**（那条裁决没被翻），站在它上面的现在是一枚地球、一句 `The web engine did not start.`、一行 SDK 自己的错误码和一枚 `Retry`。**留下的那一半写清楚**：这张卡的触发是引擎**回了一个错**；引擎**一次都不回答**（环境或 controller 的回调永不到达）仍然是一块空地面色，因为本窗此刻手上没有任何事实可写，给它一个超时就是给它一个编出来的边界——那是另一张单。ⓒ 本片顺手清掉了 `docs/DESIGN.md` 里 §7.14 那一段**遗留在仓库里的合并冲突标记**（`<<<<<<< HEAD` / `=======` / `>>>>>>> opaque-flight-and-web-ground`），因为要改的正是这一段；**第 84 行附近还有一组同样的标记没有动**，那不在本单范围里。
 
 ### 7.15 树里的一行有两张脸的菜单（files 列右键补全，2026-08-25，已落地；`crates/bt-app/src/{profiles,main,files,i18n}.rs`）
 
@@ -14281,14 +14281,11 @@ A Linux summon captures the previous foreground before its display request. Its 
 Window-wait row 29a now records the completed application migration. Native X11 display, client-origin and posture facts are read on the display worker; geometry events invalidate and refresh observations, and closing windows reject late results. Layout uses event or configured sizes. Winit's own window construction and event processing remain its responsibility, and its populated monitor cache is retained. The previous open-row notes describe earlier checkpoints.
 
 
-<<<<<<< HEAD
-### 2026-10-06 — Linux desktop retirement uses the shared cutoff
-
-Row 30 retains this port's recorded design choice: desktop cleanup runs on its worker after the application drops, and the exiting thread uses the existing three-second SESSION_SAVE_BUDGET. It joins only a finished worker and continues shutdown with a diagnostic at the cutoff. This reuses the Windows session-writer close policy and is not a separate maintainer ruling.
-=======
 ### 2026-10-06 — Linux application display reads close row 29a
 
 Row 29a is done: application X11 display, client-origin and posture observations run on the display worker. The window thread uses addressed answers, event geometry and Winit's populated monitor cache. This records the completed migration described above; it does not replace Winit window construction or event processing.
 
 
- / `
+### 2026-10-06 — Linux desktop retirement uses the shared cutoff
+
+Row 30 retains this port's recorded design choice: desktop cleanup runs on its worker after the application drops, and the exiting thread uses the existing three-second SESSION_SAVE_BUDGET. It joins only a finished worker and continues shutdown with a diagnostic at the cutoff. This reuses the Windows session-writer close policy and is not a separate maintainer ruling.
