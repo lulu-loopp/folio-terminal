@@ -73680,7 +73680,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 35] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 36] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -73752,6 +73752,9 @@ mod platform_gate_tests {
         "update_handoff.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
+        // Only the Linux startup-write fixture checks XDG migration and drains helper workers;
+        // production trial-write policy stays platform-blind.
+        "update_trial.rs",
         // Linux owns forwarded keys and software frame/caret generations in this web seat.
         "webhost.rs",
         // WSL.
