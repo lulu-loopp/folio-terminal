@@ -386,7 +386,18 @@ fn stop_child(
 
 fn discard_private(copy: &Path, private: &Path) {
     let _ = fs::remove_file(copy);
+    retire_private(private);
+}
+
+/// **The remover's folders go when nothing of them remains**: the private
+/// folder, then the per-user folder the door made for removers once no other
+/// remover's private folder is left in it. The one owner for both roads — a
+/// remover that finished and a schedule that was refused.
+fn retire_private(private: &Path) {
     let _ = fs::remove_dir(private);
+    if let Some(removers) = private.parent() {
+        let _ = fs::remove_dir(removers);
+    }
 }
 
 fn validate(removal: &Removal, private_root: &Path) -> io::Result<()> {
@@ -1010,12 +1021,7 @@ fn retire_self(private: &Path, expected: &FileIdentity) -> io::Result<()> {
         ));
     }
     self_delete(&executable)?;
-    let _ = fs::remove_dir(private);
-    if let Some(per_user_folio) = private.parent() {
-        // The per-user folder the door made for removers: it goes once no
-        // other remover's private folder is left in it.
-        let _ = fs::remove_dir(per_user_folio);
-    }
+    retire_private(private);
     Ok(())
 }
 
@@ -1172,6 +1178,41 @@ mod tests {
             Ok(answer) => answer,
             Err(panic) => std::panic::resume_unwind(panic),
         }
+    }
+
+    /// RED (T-UNINSTALL-SELFHOLD round 3) — **a refused schedule leaves nothing of the remover's
+    /// folders**: the copy, its private folder and the per-user folder made for it are gone when
+    /// the copy turns out to differ from the program it was copied from.
+    ///
+    /// MUTATION: in `retire_private`, leave the per-user folder — an empty `Folio-uninstall`
+    /// stays behind.
+    #[test]
+    fn a_refused_schedule_leaves_no_remover_folder() {
+        let root = sandbox("refused-schedule");
+        let program = root.join("folio.exe");
+        let other = root.join("other.exe");
+        fs::write(&program, b"the installed program").unwrap();
+        fs::write(&other, b"another program").unwrap();
+        let removers = root.join("Folio-uninstall");
+        let removal = Removal {
+            program_identity: identity(&other),
+            ..removal(
+                &program,
+                Item::File {
+                    path: program.clone(),
+                    expected: identity(&program),
+                },
+                None,
+            )
+        };
+        let private_root = removers.clone();
+        let error = on_worker(move |worker| schedule(worker, &removal, &private_root))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("differs"), "{error}");
+        assert!(!removers.exists(), "the remover's folder stayed");
+        assert_eq!(fs::read(&program).unwrap(), b"the installed program");
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// RED (T-UNINSTALL-UX round 2, mutation `skip_boundary_digest`) — a file

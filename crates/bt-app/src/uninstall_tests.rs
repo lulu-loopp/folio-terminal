@@ -789,6 +789,11 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             include_str!("main.rs"),
             "install_panic_log_hook",
         ),
+        (
+            Remover::Staging,
+            include_str!("../../bt-platform/src/deferred_removal.rs"),
+            "schedule",
+        ),
     ] {
         let mut functions = Functions::default();
         functions.visit_file(&syn::parse_file(source).unwrap());
@@ -846,7 +851,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 27);
+    assert_eq!(INVENTORY.len(), 28);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
     // is the one function that writes a `Run` value, and the row names it.
@@ -3130,4 +3135,70 @@ fn a_remove_data_run_purges_around_the_remover_it_started() {
     );
     drop(held);
     fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (T-UNINSTALL-SELFHOLD round 3) — **a remover's folder left behind is taken by the next
+/// purge, and the zap list names it.**
+///
+/// A remover ended before it could retire leaves its private folder and copy in the per-user
+/// folder (`REMOVER_HOME`). A later `--uninstall-cleanup --purge` — scoop's, winget's, or a
+/// person's — takes it with the data folders and says so on its own row. Homebrew's
+/// `brew uninstall --zap` does not run the purge, so the cask's own `trash` list names the same
+/// folder, as the code resolves it on macOS.
+///
+/// MUTATIONS: in `execute`, skip the remover's folder on every run (not only the run that started
+/// a remover) — the stale copy stays and its row is missing; remove
+/// `~/Library/Application Support/Folio-uninstall` from `packaging/homebrew/folio.rb`'s `trash`.
+#[test]
+fn a_purge_takes_a_removers_folder_left_behind() {
+    let (root, scope) = sandbox("stale-remover");
+    seed(&scope, &scope.exe);
+    let stale = scope
+        .remover_home
+        .join("uninstall-00000000000000000000000000000000");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("folio.exe"), b"a remover that never retired").unwrap();
+    let report = execute(&scope, true, system_absent);
+    let stdout = report.stdout();
+    assert_eq!(report.code, 0, "{stdout}");
+    assert!(!scope.remover_home.exists(), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "Uninstaller staging (data): {}: removed",
+            scope.remover_home.display()
+        )),
+        "{stdout}"
+    );
+    fs::remove_dir_all(root).unwrap();
+
+    let cask = include_str!("../../../packaging/homebrew/folio.rb");
+    let zap = &cask[cask.find("zap script:").expect("a zap script")..];
+    let trash = &zap[zap.find("trash:").expect("a trash list")..];
+    let trash = &trash[..trash.find(']').unwrap()];
+    // The cask spells the account's home `~`; the scope is resolved under a home of its own and
+    // read back below it.
+    let (home, _) = sandbox("zap-list");
+    let mapped = home.clone();
+    let mac = Scope::resolve(
+        home.join("Folio.app/Contents/MacOS/folio"),
+        HostPlatform::MacOs,
+        move |name| (name == "HOME").then(|| mapped.clone().into_os_string()),
+        home.join("temp"),
+        true,
+    )
+    .unwrap();
+    for folder in [&mac.data[0], &mac.remover_home] {
+        let below: Vec<_> = folder
+            .strip_prefix(&home)
+            .unwrap()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let spelled = format!("~/{}", below.join("/"));
+        assert!(
+            trash.contains(&format!("\"{spelled}\"")),
+            "the zap does not trash {spelled}:\n{trash}"
+        );
+    }
+    fs::remove_dir_all(home).unwrap();
 }

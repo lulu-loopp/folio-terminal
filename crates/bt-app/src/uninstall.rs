@@ -63,6 +63,8 @@ enum Remover {
     /// macOS: this bundle's installation home beside it (`update_txn::Home`).
     UpdateHome,
     Data(HostPlatform, Base, &'static str),
+    /// The native remover's per-user folder, `Scope::remover_home`.
+    Staging,
 }
 impl Remover {
     /// **A data mark's root on `platform`**: its base and the part Folio names,
@@ -308,6 +310,17 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio-panic.log"),
         writer: "main.rs:install_panic_log_hook",
+    },
+    // The native remover's per-user folder (`REMOVER_HOME`), purged like a data
+    // root except by the run that has just started a remover there: that
+    // remover removes it when it leaves it empty. A remover that was ended
+    // before it could leaves its copy here for the next purge.
+    Mark {
+        name: "Uninstaller staging",
+        says: Text::CleanupMarkRemoverHome,
+        kind: Kind::Data,
+        remover: Remover::Staging,
+        writer: "../bt-platform/src/deferred_removal.rs:schedule",
     },
 ];
 
@@ -808,9 +821,20 @@ fn execute_with_claim<T>(
         };
         claims.push(claim);
     }
+    // The remover's folder is purged with the data roots and is none of them
+    // (`REMOVER_HOME`).
+    let roots: Vec<(&Mark, PathBuf)> = scope
+        .purge_roots
+        .iter()
+        .map(|(mark, root)| (*mark, root.clone()))
+        .chain(std::iter::once((
+            mark_of(Remover::Staging),
+            scope.remover_home.clone(),
+        )))
+        .collect();
     let mut prepared = Vec::new();
     if purge {
-        for (_, root) in &scope.purge_roots {
+        for (_, root) in &roots {
             let result = prepare_tree(root, &scope.exe);
             if let Err(error) = &result
                 && let Some(held) = held_file(error)
@@ -968,7 +992,10 @@ fn execute_with_claim<T>(
             {
                 entries.push(Entry::new(label, Fate::Kept(Text::CleanupRuntime)));
             }
-            Remover::Data(..) | Remover::RecoverySnapshots | Remover::RuntimeClaims => {}
+            Remover::Data(..)
+            | Remover::RecoverySnapshots
+            | Remover::RuntimeClaims
+            | Remover::Staging => {}
         }
     }
     let refused = |entries: &[Entry]| entries.iter().any(|e| matches!(e.fate, Fate::Refused(_)));
@@ -979,7 +1006,12 @@ fn execute_with_claim<T>(
     }
     if purge {
         let complete = !refused(&entries);
-        for ((mark, root), prepared) in scope.purge_roots.iter().zip(prepared) {
+        // A remover this run started is running from its folder now.
+        let started_a_remover = entries.iter().any(|e| e.fate == Fate::Scheduled);
+        for ((mark, root), prepared) in roots.iter().zip(prepared) {
+            if mark.remover == Remover::Staging && started_a_remover {
+                continue;
+            }
             if !complete {
                 entries.push(Entry::new(
                     format!("{}: {}", label(mark, lang), root.display()),

@@ -409,6 +409,7 @@ text_entries! {
     CleanupMarkRuntimeClaims,
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
+    CleanupMarkRemoverHome,
     CleanupKindPerCopy,
     CleanupKindPerAccount,
     CleanupKindData,
@@ -4976,6 +4977,10 @@ impl Text {
             Self::CleanupMarkRuntimeClaims => pick(lang, "Unix runtime claims", "Unix 运行时锁"),
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
+            // zh: pending T-UNINSTALL-SELFHOLD
+            Self::CleanupMarkRemoverHome => {
+                pick(lang, "Uninstaller staging", "Uninstaller staging")
+            }
             Self::CleanupKindPerCopy => pick(lang, "per-copy", "按副本"),
             Self::CleanupKindPerAccount => pick(lang, "per-account", "按账户"),
             Self::CleanupKindData => pick(lang, "data", "数据"),
@@ -5996,7 +6001,10 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        (Self::CleanupMarkRemoverHome, HostPlatform::Windows),
+        (Self::CleanupMarkRemoverHome, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

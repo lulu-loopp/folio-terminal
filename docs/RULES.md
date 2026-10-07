@@ -1436,8 +1436,10 @@ name it, so no `diagnostics.log` handle reaches the door down a chain of Folio
 processes. The purge's probe therefore never meets the door's own handles. The
 native remover runs from a private folder below a per-user folder of its own,
 `Folio-uninstall` beside the data folders (`%LOCALAPPDATA%` on Windows,
-`~/Library/Application Support` on macOS), which no purge root contains and which
-the remover removes when it leaves it empty.
+`~/Library/Application Support` on macOS), which no purge root contains. The remover,
+and a schedule that was refused, remove it once nothing of it remains; a purge takes
+what an ended remover left there (its own row, "Uninstaller staging"), except on the
+run that has just started a remover from it, and the cask's `zap` trashes it.
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
 states that it rules, together with its closure addendum; the owner's ruling of
