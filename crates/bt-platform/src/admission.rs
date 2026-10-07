@@ -821,6 +821,8 @@ pub mod doors {
         TraceFlush => "17", 214, [Exiting];
         /// Row 29: an update's exit guard at the process's end, bounded (`UpdateLeave`).
         UpdateLeave => "29", 222, [Exiting];
+        /// Row 30: Linux desktop workers retired after the application owners drop.
+        DesktopRetire => "30", 223, [Exiting];
         /// Row 18: the launch handed to a running Folio, before the loop exists (`Starting`).
         LaunchHandOver => "18", 0, [Starting];
         /// Row 21: `CreateCoreWebView2CompositionController` (`WebController`).
@@ -833,6 +835,8 @@ pub mod doors {
         ImeCaretArea => "22", 54, [Running, Exiting];
         /// Row 23, pending: the first window's `pollster::block_on(GpuContext::open)` (`GpuOpen`).
         GpuOpen => "23", 215, [Running];
+        /// Row 25: the video worker's bounded retirement poll (`VideoShutdown`).
+        VideoShutdown => "25", 224, [Running, Exiting];
         /// §5.2: `Window::focus_window` (`WindowFocus`).
         FocusWindow => "§5.2", 186, [Running];
         /// §5.2: `Window::set_visible` (`WindowVisible`).

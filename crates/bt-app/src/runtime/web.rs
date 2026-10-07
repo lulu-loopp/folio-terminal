@@ -1,10 +1,14 @@
 //! `web` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+#[cfg(not(target_os = "linux"))]
+use crate::hole_for;
+#[cfg(target_os = "linux")]
+use crate::take_owned_keyboard_focus;
 use crate::{
     AppEvent, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime, TabRename, WebHeadVerb,
     WebPlacement, a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
-    a_retirement_happens_on_this_turn, hang_watch, hole_for, input, marks, native_window, preview,
+    a_retirement_happens_on_this_turn, hang_watch, input, marks, native_window, preview,
     preview_image_placement, restore, revived_page_of, seats, shown_address, web_mouse_button,
     web_trace, web_warmup, webhost, webnav, websheet,
 };
@@ -470,7 +474,10 @@ impl Runtime<'_> {
             // own face, which is drawn a whole overlay pass after the seats are.
             // A docked page keeps the older answer, `None`, which is under the
             // entire stack.
+            #[cfg(not(target_os = "linux"))]
             let above = floated.and_then(|id| self.float_hole_level(id));
+            #[cfg(target_os = "linux")]
+            let above = floated.map(|id| self.float_hole_level(id).unwrap_or(usize::MAX));
             // **One line per decision, and none while the answer stands still**
             // — `BT_WEB_TRACE`'s fourth station, and the one that separates the
             // ways a page comes up empty: it was never given a rectangle, it was
@@ -520,6 +527,7 @@ impl Runtime<'_> {
         // *takes* and nothing at all about the focus it should no longer have.
         self.settle_the_web_keyboard();
         let window = &mut *self.window;
+        #[cfg(not(target_os = "linux"))]
         let mut holes = Vec::new();
         for placement in placements {
             // **The placement is what answers the hole**, so it is asked for its
@@ -529,6 +537,8 @@ impl Runtime<'_> {
             // whole slice is about.
             let floored = match window.web.get_mut(&placement.leaf) {
                 Some(web) => {
+                    #[cfg(target_os = "linux")]
+                    web.set_frame_above(placement.above);
                     match web.place(
                         &window.compositor,
                         placement.presence,
@@ -544,9 +554,15 @@ impl Runtime<'_> {
                 }
                 None => false,
             };
+            #[cfg(not(target_os = "linux"))]
             holes.extend(hole_for(placement.presence, floored, placement.above));
+            #[cfg(target_os = "linux")]
+            let _ = floored;
         }
+        #[cfg(not(target_os = "linux"))]
         window.renderer.set_web_holes(holes);
+        #[cfg(target_os = "linux")]
+        window.renderer.set_web_holes(Vec::new());
         self.keep_what_the_modal_covers(keepsakes, now);
         hang_watch::at(leaving_station);
     }
@@ -566,11 +582,27 @@ impl Runtime<'_> {
         if self.page_is_the_typing_target(held) {
             return;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(web) = self.window.web.get_mut(&held) {
+            web.clear_web_input();
+        }
         self.window.web_keyboard = None;
+        #[cfg(target_os = "linux")]
+        if let Err(error) = take_owned_keyboard_focus(&self.window.window) {
+            eprintln!("BT_WEB focus return failed: {error}");
+        }
+        #[cfg(not(target_os = "linux"))]
         if let Ok(native) = native_window(&self.window.window)
             && let Err(error) = bt_platform::take_keyboard_focus(native)
         {
             eprintln!("BT_WEB focus return failed: {error}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clear_web_input(&mut self) {
+        for web in self.window.web.values_mut() {
+            web.clear_web_input();
         }
     }
 
@@ -603,7 +635,12 @@ impl Runtime<'_> {
         // Asked of `refresh_chrome` rather than tracked per field: it already
         // answers "did anything move", which is the same question and one
         // answer.
-        if self.refresh_chrome() {
+        let chrome_changed = self.refresh_chrome();
+        #[cfg(target_os = "linux")]
+        let changed = self.refresh_video_layers() || chrome_changed;
+        #[cfg(not(target_os = "linux"))]
+        let changed = chrome_changed;
+        if changed {
             self.present_chrome_change()?;
         }
         Ok(())

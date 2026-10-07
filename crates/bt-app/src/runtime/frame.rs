@@ -876,6 +876,11 @@ impl Runtime<'_> {
                 .map(bt_layout::LayoutNode::seat)
         });
         let screen = self.to_screen(position);
+        #[cfg(target_os = "linux")]
+        if screen.is_none() {
+            self.app.drag_broker = None;
+            return;
+        }
         let Some(broker) = self.app.drag_broker.as_mut() else {
             return;
         };
@@ -1135,7 +1140,7 @@ impl Runtime<'_> {
                 }
             })
             .collect();
-        let size = self.window.window.inner_size();
+        let size = self.client_size();
         present_gate::PresentSignature {
             renderer: self.window.renderer.present_state(),
             window_visible: self.window.window_shown
