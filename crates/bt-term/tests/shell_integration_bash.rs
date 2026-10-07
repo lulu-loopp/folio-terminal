@@ -214,13 +214,6 @@ fn git_bash_marks_every_command_region_and_reports_the_exit_code() {
     let bytes = session_bytes(&directory, "true\nfalse\nexit\n");
     let text = String::from_utf8_lossy(&bytes).into_owned();
 
-    for marker in [
-        "\u{1b}]133;A\u{7}",
-        "\u{1b}]133;B\u{7}",
-        "\u{1b}]133;C\u{7}",
-    ] {
-        assert!(text.contains(marker), "{marker:?} never arrived: {text:?}");
-    }
     let first_prompt = text.find("\u{1b}]133;A\u{7}").unwrap();
     assert!(
         text.find("\u{1b}]7;").unwrap() < first_prompt,
@@ -230,6 +223,30 @@ fn git_bash_marks_every_command_region_and_reports_the_exit_code() {
         first_prompt < text.find("\u{1b}]133;B\u{7}").unwrap(),
         "B opens the input the prompt A opened is asking for"
     );
+
+    let ordered_markers = [
+        "\u{1b}]7;",
+        "\u{1b}]133;A\u{7}",
+        "\u{1b}]133;B\u{7}",
+        "\u{1b}]133;C\u{7}",
+        "\u{1b}]133;D;0\u{7}",
+        "\u{1b}]7;",
+        "\u{1b}]133;A\u{7}",
+        "\u{1b}]133;B\u{7}",
+        "\u{1b}]133;C\u{7}",
+        "\u{1b}]133;D;1\u{7}",
+        "\u{1b}]7;",
+        "\u{1b}]133;A\u{7}",
+        "\u{1b}]133;B\u{7}",
+        "\u{1b}]133;C\u{7}",
+    ];
+    let mut cursor = 0;
+    for marker in ordered_markers {
+        let relative = text[cursor..].find(marker).unwrap_or_else(|| {
+            panic!("{marker:?} missing or out of order after byte {cursor}: {text:?}")
+        });
+        cursor += relative + marker.len();
+    }
     // `true` then `false`: the exit code is the command's own and not a constant.
     assert!(
         text.contains("\u{1b}]133;D;0\u{7}"),

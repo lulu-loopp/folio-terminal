@@ -14182,3 +14182,126 @@ The one-click `$PROFILE` fallback now asks two sessions: an ordinary session of 
 Removals locate `$PROFILE` from that record, ask an unrecorded edition only for the variable (`PROFILE_PATH_COMMAND`, no command discovery) with `REMOVAL_PROBE_DEADLINE`, keep no failed answer, and report a silent edition as `Fate::Unlocated`, which is not a refusal. The uninstall door's order is claims and preflight, removal rows, the program's step (`ProgramStep`), then the purge, which runs only when nothing refused. A managed copy's command joins the cleanup with `cmd /c "… && …"` and its row says to close Folio first; Homebrew's `--zap` runs the cleanup itself. A profile row's button stands only where the `default` badge still fits before it.
 
 Pinned by `the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_load_it`, `after_enable_and_undo_an_ordinary_restricted_session_prints_nothing` (a real Windows PowerShell 5.1 under `Restricted`), `what_folios_profile_writes_created_goes_with_its_line_and_nothing_else_does`, `every_removal_road_retires_what_the_write_created`, `a_power_loss_between_the_record_and_the_write_is_retired`, `a_profile_no_shell_located_is_said_and_refuses_nothing`, `the_remover_stands_only_for_a_line_it_can_prove_is_folios`, `a_failed_parse_question_is_undetermined_and_a_visit_asks_it_again`, `shell_integration_profile_path_askers_share_an_answer_and_ask_again_after_a_failure`, `a_refusal_before_the_purge_keeps_the_data_and_the_purge_comes_last`, `a_managed_copy_is_left_to_its_manager` and `the_default_badge_and_the_rows_button_never_overlap`.
+
+### 2026-10-06 — Patched clipboard crates have a Linux CI gate
+
+The port keeps `arboard` and `wl-clipboard-rs` as patched path dependencies outside the cross-platform workspace. The Wayland test server uses Linux epoll and cannot join the Windows or macOS workspace test commands. Instead, `core-linux` runs both complete suites through `scripts/ci/linux-vendor-clipboard-tests.py`, using each crate's retained lockfile. Arboard runs on private Xvfb with a real clipboard manager so its ownership-after-drop assertion is tested. The Wayland suite creates protocol servers under a private runtime directory. The harness owns its HOME, XDG directories, display and D-Bus session; it retires its recorded process groups on success or failure. This is the port's choice for review in PR #21; upstreaming the patches remains possible without removing this test gate.
+
+The local run passed Arboard's four unit tests and three documentation tests, and wl-clipboard-rs's 49 unit tests and 18 documentation tests. Windows and macOS keep their existing workspace membership and test commands.
+
+### 2026-10-06 — Current path for the policy-command clipboard pin
+
+The pin named in the 2026-10-04 policy note moved with its implementation. Its current path is `runtime::clipboard::tests::copy_puts_exactly_the_policy_command_on_the_clipboard`; the earlier entry is retained as written.
+
+### 2026-10-06 — Linux summons restore the minimized window before showing it
+
+On Linux, `FolioApp::summon_quake` reads the previous foreground, restores a minimized window through `Runtime::restore_minimized_window`, then shows it and runs the foreground retry. The other platforms keep the existing summon sequence. Pinned by `floated_page_tests::the_foreground_is_read_before_the_summon_and_handed_back_after_it`.
+
+### 2026-10-06 — Linux hand-offs retain the lane worker
+
+Linux dispatches file and address requests through `ShellThread::hand_over_on_worker`, carrying the handoff lane's `WorkerCtx` into the Linux file and process doors.
+
+### 2026-10-06 — The clipboard pin keeps its named test module
+
+The exact path is `runtime::clipboard::policy_command_tests::copy_puts_exactly_the_policy_command_on_the_clipboard`. This corrects the module name in the preceding path note.
+
+### 2026-10-06 — Addressed Linux display requests use a worker (PR20)
+
+PR20 moves quake summon/arrangement, tear-out placement, work-area and session-geometry snapshots, and pointer-drop reads onto `bt-linux-display`. Each request carries owner, request and generation identity; the worker parks its actual answer before posting `NativeDisplayReady`. Those callers never wait for X11 setup or replies, and there is no timeout or stale-cache success path. The hotkey worker carries the X11 KeyPress root point into summon placement, so the press is not re-aimed by a later pointer read. The shared Linux display helpers remain synchronous for two window-side callers: `DragGuard::sample` reads `virtual_screen_rect`, and `restore_monitors` reads `work_area_at` for each Winit monitor. §5.3 row 29a stays open for those follow-up moves.
+
+Geometry from a saved position or a tear-out answer seeds the window cache; winit `Moved`/`Resized` events refresh it. If no position is known, the cache stays empty rather than turning a missing rectangle into `(0, 0)`. Linux `dpi_snapshot` reads this cache and does not call winit's synchronous X11 outer-position or outer-size accessors. Session geometry and work-area refreshes use addressed worker requests; a refused native read leaves the last known geometry or work-area hint in place.
+
+Winit supplies an external file drop's path without its Xdnd position. The worker query therefore resolves the point off-thread, and the result applies only while the window has not observed a cursor, tab, layout, viewport, focused-shell or shell-incarnation change. A changed context produces the localized re-drop notice. The path list stays pending until that notice is accepted, and a refused multi-file drop remains closed through the batch's turn boundary. An internal path drag carries its original drag plan and uses the same addressed answer; a refusal never redirects to a later query result.
+
+The deterministic fake X11 server sends a real Setup reply, receives the worker's first `InternAtom`, and withholds its reply while the child window-side request returns. `linux_display::stalled_server_tests::a_window_thread_query_returns_while_the_x11_server_withholds_its_reply` is the red/green regression seam. `stop_display_service` stops admission and drops unanswered work after an active X11 call returns; `display_service_stopped` reports exit without joining on the window thread. PR22 connects those gates to the existing desktop-retirement budget.
+
+### 2026-10-06 — The last Linux display helper callers use the same worker
+
+`DragGuard` now samples `VirtualScreenRect` through `bt-linux-display`. Each reply must match the active broker generation and request; an unknown, changed, or refused rectangle cancels the drag through its existing source-home path. A release with no valid screen observation cannot spend a stale cross-window aim, and the reply never changes the broker's event-delivered pointer.
+
+Restored-window monitor inputs remain the Winit bounds, scale and primary-first order. The first window still falls back to full monitor bounds because its restore runs before Linux backend installation. Later saved secondary windows submit one batch of center-point work-area requests through the existing display lane. The answer carries X11 monitor bounds and primary bounds with the work areas. A matching topology uses the actual worker answers; an individual work-area refusal keeps that monitor's full-bounds fallback. If the topology or observed scale-input generation changed, placement keeps the saved size and forfeits its position. The answer handler does not re-query Winit. Windows and macOS retain their previous synchronous monitor restoration and drag-guard code.
+
+Pinned by `cross_window_drag_tests::one_guard_answers_every_way_a_cross_window_gesture_is_taken_away`, `cross_window_drag_tests::delayed_drag_guard_answers_need_the_same_broker_and_observed_screen`, `cross_window_drag_tests::linux_drag_guard_and_restore_reads_resume_from_display_answers`, and `cross_window_drag_tests::async_restore_work_areas_require_the_captured_topology_and_primary`. §5.3 row 29a stays open for the adjacent Winit intrinsic getter migration and root review.
+
+### 2026-10-06 — Consuming a drag sample preserves its confirmed aim
+
+The broker records the event-delivered pointer used by its last confirmed aim.
+Consuming the screen sample authorizes one broker turn; it does not revoke the
+release. Release uses that recorded pointer, the captured release point, the
+known screen baseline and the absence of a same-generation pending query. A
+changed pointer or pending query returns the payload home. Late answers cannot
+rewrite the aim or pointer. The production-state regression exercises answer,
+sample consumption, aim and release, and keeps the original nonlocal target.
+
+### 2026-10-06 — Requested window allocation is not a native observation
+
+Linux layout, rendering and input use delivered resize dimensions or the
+configured surface allocation. Initial surface configuration uses the explicit
+opening request. Native geometry and resize observations start as `None`;
+only winit events or an addressed native answer fill them. A saved or tear-out
+request no longer initializes the observed geometry cache. Windows and macOS
+keep their original size getters. Pinned by
+`clipboard_path_tests::linux_runtime_sizes_do_not_read_x11_on_the_window_thread`.
+
+
+### Linux client-origin observation — 2026-10-06
+
+Cross-window drag coordinates use the display worker's actual X11 client-to-root translation, separately from the outer frame rectangle. Move and resize events invalidate that origin until a matching current geometry answer arrives. An unavailable translation is not replaced by an outer-frame guess. Windows and macOS retain their Winit inner-position read; Wayland retains the absence of global window coordinates. This uses the existing display request and does not start another worker.
+
+
+### Linux background monitor read — 2026-10-06
+
+The background-image worker reads X11 monitor dimensions before decoding, using its existing WorkerCtx and the independent display connection. The window thread captures only the current client-size fallback. Missing monitors retain that fallback; a native query error records a diagnostic. Wayland and the other platforms keep their Winit monitor path. This avoids the X11 monitor-cache miss reaching RandR from the background-image admission call and adds no worker.
+
+
+### Linux drag origin loss — 2026-10-06
+
+A Linux cross-window drag starts only with an observed client origin. If move or resize invalidates that origin during the gesture, the source withdraws the cross-window broker and keeps its local drag. It does not convert local coordinates into a guessed screen point or retain the previous foreign aim.
+
+
+### Linux origin refresh is independent of persistence — 2026-10-06
+
+Showing an X11 window and each native move or resize event request current window facts. Requests coalesce through the existing pending request and owed-refresh flag. Origin recovery does not wait for a session mutation or save. Wayland skips unsupported native rectangle queries, and closing windows stop admission.
+
+
+### Correction to the background monitor read — 2026-10-06
+
+The preceding background-monitor decision is withdrawn. Winit 0.30.13 caches its X11 monitor list, populates it during window creation, and refreshes it inside the RandR handler before delivering application callbacks. `DISABLE_MONITOR_LIST_CACHING` is a constant false. The application background-image path therefore keeps the existing monitor cache; it does not add fresh native queries to its decode worker. The client-origin migration remains necessary because Winit inner_position performs a live translation on every call.
+
+
+### Linux window posture and summon retirement — 2026-10-06
+
+X11 caption toggles belong to one per-window maximize intent. Observed EWMH state remains separate from the desired request, and stale or unknown facts do not confirm a requested state. Notification restore and resize guards consume that window-owned observation; Wayland retains cached Winit state, and Windows/macOS retain their native paths.
+
+A Linux summon captures the previous foreground before its display request. Its addressed completion restores, shows and finishes the foreground handoff in that order. A second hotkey press while it is pending cancels the request. Closing the run withdraws the pending summon before closing its window; the completion also rejects a leaving, inactive or retiring target before consuming the answer or restoring the window.
+
+
+### Linux application display-read debt is repaid — 2026-10-06
+
+Window-wait row 29a now records the completed application migration. Native X11 display, client-origin and posture facts are read on the display worker; geometry events invalidate and refresh observations, and closing windows reject late results. Layout uses event or configured sizes. Winit's own window construction and event processing remain its responsibility, and its populated monitor cache is retained. The previous open-row notes describe earlier checkpoints.
+
+
+### 2026-10-06 — Linux application display reads close row 29a
+
+Row 29a is done: application X11 display, client-origin and posture observations run on the display worker. The window thread uses addressed answers, event geometry and Winit's populated monitor cache. This records the completed migration described above; it does not replace Winit window construction or event processing.
+
+
+### 2026-10-06 — Linux desktop retirement uses the shared cutoff
+
+Row 30 retains this port's recorded design choice: desktop cleanup runs on its worker after the application drops, and the exiting thread uses the existing three-second SESSION_SAVE_BUDGET. It joins only a finished worker and continues shutdown with a diagnostic at the cutoff. This reuses the Windows session-writer close policy and is not a separate maintainer ruling.
+
+### 2026-10-05 — Linux display/clipboard backend identity, `WindowTarget::LinuxWindow` alpha, fontconfig font discovery, and XDG data roots
+
+本条是 Linux 移植追加在文件末尾的一条记录:这份记录是 append-only 的,§13.8 的 ②/③、§13.18 与下面那条 "The rule now." 都保持原样,这里只引用它们、不改写它们;Linux 的决定按同一条规矩追加在这里。
+
+**后端身份只绑一次(§13.8 ② 的补记)。** Linux 首窗另有两项严格的后端身份绑定:`install_linux_display_backend` 和 `install_linux_clipboard_backend`。`Runtime::create` 从首个 winit 窗口的实际后端(`linux_window_backend` 读出的那个)写入两个进程级 `OnceLock`;这两项只绑定身份,不打开连接或探测可选服务。若身份冲突仍继续启动,后续原生请求会走错后端,因此必须停止;服务可用性仍由各自操作点报告。§13.8 ② 的 `the_m1_startup_path_has_no_fatal_platform_call_off_windows` 将它们列入 `LINUX_BACKEND_BINDINGS`,并把调用位置钉在 `Runtime::create` 的 Linux 分支中,不允许 `open_window` 再绑定一次;② 里那五个名字的清单照旧管它自己的门槛,这两个名字是 Linux 侧同形的另一条清单。
+
+**Linux 有了自己的 surface 变体(§13.8 ③ 的补记)。** `window_surface_target` 的那道缝在 Linux 上通向一个新的 `WindowTarget::LinuxWindow`。渲染器依据 surface capability 优先选择 `PreMultiplied`,没有该模式时接受 `Opaque`;只有 `PostMultiplied` 或 `Inherit` 时拒绝创建 surface。`SurfaceAlphaReport` 记录实际选中的模式及对应像素表示,供设置与启动路径报告。Windows 的 `Hwnd=Opaque`、`CompositionVisual=PreMultiplied`,以及 macOS 自有 layer 声明 `PostMultiplied` 但写入预乘像素的契约保持不变(X-1 量出的那条 Metal 事实不动,Folio 在所有平台继续写预乘像素)。
+
+**字体名单的第三个来源(§13.18 与 "The rule now." 的补记)。** `linux_fonts` 用 `fontdb` 读取 Fontconfig 配置中的字体目录,`monospace_font_families` 的 Linux 臂答机器的真实名单——§13.18 ⑥ 那句「别处是那份只有一行的名单」在 Linux 上不再是事实,原句按 append-only 的规矩保持原样,由本条补记。等宽名单只收字体库标记为等宽的字体面;CJK 覆盖先读 OS/2 语言位,没有声明时再检查 cmap 的完整字符块;函数保留字体库给出的 `PathBuf`,每次调用都会重扫字体目录。launch 的那次按名查找沿用 "The rule now." 的同一条派生:Linux 上 `monospace_family_named` 重读当前 Fontconfig 目录、按名匹配已安装的 family,walk 与 lookup 走同一个 `monospace_family_entry`,所以启动时载入的字体文件与 picker 行会载入的一致;Windows 的 `FindFamilyName` 与 macOS 的 `CTFontDescriptor` 两臂原样不动。
+
+**Linux 的配置与数据根。** `settings.json` 与 `keybindings.json` 的活跃路径从 data root 搬到 XDG config root(`$XDG_CONFIG_HOME/Folio/<data-directory-tag>/`,未设时回 `$HOME/.config`),目录沿用 `bt_platform::instance::directory_tag(data_root)`,不添新 hash、不加第二把锁;相等的数据目录身份共享一个 config 目录,仍受现有 data claim 保护。迁移是一次性的 worker(`start_linux_config_migration`):`copy_config_bytes_if_missing` 只拷 config root 里还缺的文档,原始字节原子写入、不解析不重排;config 里已有的文档是权威,绝不被 data-root 副本覆盖;config 缺失时 store 仍回读 data-root 的旧文件,迁移失败不丢可读性。data root 本身仍是 `storage_location(OtherUnix)` 的 `$XDG_DATA_HOME/Folio`(回退 `$HOME/.local/share`)规则:session、pins、schemes、shell/agent 记录与 Chromium 的 profile(`Chromium/`)住在那里;`$XDG_CACHE_HOME/Folio/<data-directory-tag>/Chromium/` 收磁盘缓存;Chromium 子进程拿 `$XDG_RUNTIME_DIR/Folio/` 下新建的私有目录当 `TMPDIR`。launch/attention socket 与 data claim 留在 `bt_platform::instance` 的稳定 per-user runtime 目录里——它们的身份不能依赖两次启动可能不一致的环境变量。
+
+**剪贴板读写归一条 lane 所有。** Linux 的每次复制与粘贴都离开窗口线程,进一条进程级 `linux_clipboard_lane::ClipboardLane`(设计与评审记录在 `docs/plans/design/linux-clipboard-read.md`、`linux-clipboard-write.md` 及其 review)。首次 admission 时经 `spawn_at_priority` 启动;预算是八条等待操作、一条活跃操作、一份持守结果;一条四秒的 deadline 从 admission 起算。FIFO 保住 read→copy→read 与 Copy→Paste 的次序;窗口 apply 或 discard 每条结果、并按确切的 request id 确认之后,下一条操作才开始。read 钉一个 X11 selection 区间或一个 Wayland offer,在其上逐级要 MIME;文本与 URI 以 8 MiB、PNG 以 256 MiB、本地文件列表以 4,096 条为界;write 保留源文本的 owned 快照,X11 与 Wayland 各自保有自己的 serving candidate,直到同连接的 server barrier 才报成功。destination retirement 触发 read 取消;adoption 复核窗口、destination 实例与当前 keyboard owner。shutdown 关闭 admission、取消 lane,借现有的 desktop-retirement cutoff 收割 lane 与 owner:完成的 worker 被 join,cutoff 之后仍在 serving 的 owner 留在进程 owner 名册里走原有的 continue-shutdown 路径。
+
+**退出时的桌面收割是本移植的设计选择(this port's design choice)。** 事件循环返回、`drop(application)` 之后,`fn main` 起一个 retirement worker 接手剪贴板与 trash 等 owner,退出线程自己最多等 `SESSION_SAVE_BUDGET`(3 s):只在 worker 报告完成时 join,超时写一条诊断、丢下 join handle、继续 `UpdateLeave` 与进程退出,不重试也不再等。这条选择的内容是复用 Windows session-writer 的 close policy(`T-QUIT-HAS-A-DEADLINE`、`T-QUIT-TIMEOUT-PROCEEDS`):两个平台在一条契约下退出,retirement 留在它的 worker 上,退出线程最多等 `SESSION_SAVE_BUDGET`,卡死的 worker 永远挂不住进程退出。同样的措辞已记录在 `window_waits.tsv` 的 row 30 与 `ARCHITECTURE.md` 注册表的 row 30。Pinned by `linux_desktop_retirement_tests::an_unfinished_retirement_worker_is_left_running_at_the_exit_budget`,它把一只受控 worker 拦在 barrier 上、用零测试预算走一遍 exit 门,先验证超时返回、再放行 worker 让它体面收场。

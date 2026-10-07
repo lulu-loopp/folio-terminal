@@ -1130,8 +1130,18 @@ reader fix plus a pure move, beside the rest of the split's second half.
   the order `flush_pending_pty_resize` represents is the contract. 0.4.7.
 - **D-50 · paste convergence.** `Runtime::prepare_clipboard_paste`,
   `paste_text`, `bt-term`'s `input::paste_bytes`, and the clipboard read on
-  the window thread. 0.4.6: tickets 02 and 03 changed `deliver_paste` and the
-  hops are fresh.
+  the window thread on Windows and macOS. Linux partially repays this debt:
+  one process-owned `ClipboardLane` serializes source-pinned reads and
+  server-confirmed writes in one FIFO, with eight waiting operations, one held
+  result and a four-second admission deadline. Copy snapshots its owned text
+  at admission; the window validates result targets and acknowledges each
+  outcome before the next operation starts. Unconfirmed native claims remain
+  joinable and reconcile before a later read or write. Cancellation and
+  retirement joins stay in the worker lane; see `docs/ARCHITECTURE.md` §5.1,
+  §5.2, §6 and §7.2. D-50 remains open for Windows/macOS and the remaining
+  cross-platform paste-chain convergence. 0.4.6: tickets 02 and 03 changed
+  `deliver_paste`; this Linux extension adds ordered copies to the existing
+  partial repayment.
 
 ### `docs/ARCHITECTURE.md` — ownership (§4)
 

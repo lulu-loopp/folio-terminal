@@ -2066,6 +2066,7 @@ mod tests {
             .env("APPDATA", root.join("roaming"))
             .env("LOCALAPPDATA", root.join("local"))
             .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("xdg"))
             .env("BT_POWERSHELL_PROFILE", root.join("profile.ps1"))
             .output()
@@ -2178,6 +2179,20 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn settle_linux_helper_workers() {
+        let shutdown = bt_platform::spawn_at_priority(
+            "update-trial-test-linux-helper-shutdown",
+            bt_platform::ThreadPriority::BelowNormal,
+            |worker| bt_platform::shutdown_helpers(worker),
+        )
+        .expect("start the Linux helper shutdown worker");
+        shutdown
+            .join()
+            .expect("the Linux helper shutdown worker joins")
+            .expect("the registered Linux helpers settle");
+    }
+
     /// **A start's durable writers, in `Runtime::create`'s order**, each driven
     /// through its own product entry and each asked to write something: the
     /// data folder, the stores and a change to each, the update check's state,
@@ -2187,28 +2202,51 @@ mod tests {
     /// runs on.
     ///
     /// Answers whether the marks' migration started (its worker's wake came).
-    fn run_the_start_writers(root: &Path) -> bool {
+    fn run_the_start_writers(root: &Path, _expect_linux_config_migration: bool) -> bool {
         let storage = persist::storage_dir();
         let now = std::time::Instant::now();
 
         let mut session = persist::SessionStore::open();
+        let mut settings = persist::SettingsStore::open();
+        let mut changed = settings.loaded().clone();
+        changed.update_check = !changed.update_check;
+        let mut profiles = persist::ProfilesStore::open();
+        let mut pins = crate::pins::PinsStore::open();
+        let mut keybindings = persist::KeybindingsStore::open();
+
+        #[cfg(target_os = "linux")]
+        {
+            persist::start_linux_config_migration().expect("start the real Linux config migration");
+            settle_linux_helper_workers();
+            if _expect_linux_config_migration {
+                let config = root
+                    .join("config")
+                    .join(persist::STORAGE_NAME)
+                    .join(bt_platform::instance::directory_tag(&storage));
+                for name in [persist::SETTINGS_FILE_NAME, persist::KEYBINDINGS_FILE_NAME] {
+                    let legacy = std::fs::read(storage.join(name))
+                        .unwrap_or_else(|error| panic!("read legacy {name}: {error}"));
+                    let migrated = std::fs::read(config.join(name))
+                        .unwrap_or_else(|error| panic!("read migrated {name}: {error}"));
+                    assert_eq!(
+                        migrated, legacy,
+                        "the startup migration copies {name} byte for byte"
+                    );
+                }
+            }
+        }
+
         let mut document = session.loaded().clone();
         document.cursor_style = bt_persist::SessionCursorStyleV1::Underline;
         session.record(document, now);
         session.flush();
 
-        let mut settings = persist::SettingsStore::open();
-        let mut changed = settings.loaded().clone();
-        changed.update_check = !changed.update_check;
         settings.store(changed);
-
-        let mut keybindings = persist::KeybindingsStore::open();
         keybindings.store(vec![
             serde_json::from_value(serde_json::json!({ "action": "new-tab", "chord": "Ctrl+T" }))
                 .unwrap(),
         ]);
 
-        let mut profiles = persist::ProfilesStore::open();
         profiles.store(bt_persist::ProfilesV1 {
             schema_version: bt_persist::PROFILES_SCHEMA_VERSION,
             profiles: vec![bt_persist::ProfileEntryV1 {
@@ -2217,7 +2255,6 @@ mod tests {
             }],
         });
 
-        let mut pins = crate::pins::PinsStore::open();
         pins.store(bt_persist::PinsV1 {
             pins: vec![
                 serde_json::from_value(serde_json::json!({ "kind": "folder", "target": root }))
@@ -2280,9 +2317,9 @@ mod tests {
     /// the data folder is not moved, no refused copy is kept, no sentinel is
     /// armed, and the migration never starts.
     ///
-    /// Run in a process of its own over a private `APPDATA`, local folder and
-    /// home, through each writer's product entry. `diagnostics.log` would be
-    /// exempt (F-7); nothing here opens it.
+    /// Run in a process of its own over private `APPDATA`, local, home, XDG data
+    /// and XDG config roots, through each writer's product entry.
+    /// `diagnostics.log` would be exempt (F-7); nothing here opens it.
     ///
     /// MUTATION: skip the gate in one writer — drop the
     /// `update_trial::defer(Writer::Settings)` from `SettingsStore::write_now`
@@ -2299,13 +2336,14 @@ mod tests {
                 Home::at(root.join("install").join(".folio-update"))
             ));
             assert!(
-                !run_the_start_writers(&root),
+                !run_the_start_writers(&root, false),
                 "the marks' migration started (ProfileMigration)"
             );
             let pending = GATE.pending();
             for writer in [
                 Writer::Session,
                 Writer::Settings,
+                Writer::Keybindings,
                 Writer::RefusedCopies,
                 Writer::UpdateCheck,
                 Writer::ProfileMigration,
@@ -2332,7 +2370,8 @@ mod tests {
 
     /// PIN (U-13) — **a start that is no trial writes as it always has**: the
     /// same writers over the same folder move the data folder to its new name
-    /// (where there was an old one), keep the refused `keybindings.json`, write
+    /// (where there was an old one), copy Linux settings and keybindings into
+    /// their config namespace, keep the refused `keybindings.json`, write
     /// the documents and the update check's state, start
     /// the marks' migration, write the scripts and replace the older
     /// PSReadLine.
@@ -2344,7 +2383,10 @@ mod tests {
         const SELECTOR: &str =
             "update_trial::tests::a_start_that_is_no_trial_writes_as_it_always_has";
         if let Some(root) = child_root(SELECTOR) {
-            assert!(run_the_start_writers(&root), "the migration starts");
+            assert!(
+                run_the_start_writers(&root, true),
+                "the marks migration starts"
+            );
             return;
         }
         let root = scratch("ordinary-start");
@@ -2361,16 +2403,24 @@ mod tests {
             }
             _ => seeded_data_folder(&root),
         };
+        let config = if cfg!(target_os = "linux") {
+            root.join("config")
+                .join(persist::STORAGE_NAME)
+                .join(bt_platform::instance::directory_tag(&data))
+        } else {
+            data.clone()
+        };
         let data = data.strip_prefix(&root).unwrap().to_path_buf();
-        for name in [
-            persist::SETTINGS_FILE_NAME,
-            persist::KEYBINDINGS_FILE_NAME,
-            persist::PROFILES_FILE_NAME,
-            "pins.json",
-            "session.json",
-            "update-check.json",
+        let config = config.strip_prefix(&root).unwrap().to_path_buf();
+        for (name, directory) in [
+            (persist::SETTINGS_FILE_NAME, &config),
+            (persist::KEYBINDINGS_FILE_NAME, &config),
+            (persist::PROFILES_FILE_NAME, &data),
+            ("pins.json", &data),
+            ("session.json", &data),
+            ("update-check.json", &data),
         ] {
-            let path = data.join(name);
+            let path = directory.join(name);
             assert!(
                 after.contains_key(&path) && before.get(&path) != after.get(&path),
                 "{name} is written"

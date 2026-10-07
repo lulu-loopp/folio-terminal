@@ -324,7 +324,7 @@ deliberately not added: `bt-pty` is a unix crate by construction.
 
 ### 4.3 `bt-app`'s platform gates are a named list, and the list is wrong today
 
-`bt-app` carries a platform `cfg` in eleven files — `psreadline.rs`,
+At the plan's 2026-09-12 baseline, `bt-app` carries a platform `cfg` in eleven files — `psreadline.rs`,
 `attention_copilot.rs`, `files.rs`, `explorer_menu.rs`, `wsl.rs`, `update.rs`,
 `shell_integration.rs`, `settings.rs`, `palette_index.rs`, `git_panel.rs`,
 `main.rs` — and names `bt_platform::` at **519 occurrences across 36 files**, 249
@@ -343,6 +343,45 @@ webview` and its siblings (`video`, `attention_pipe`, `launch_pipe`,
 `explorer_command`, `http`) become plain `pub mod` declarations whose bodies are
 `#[cfg(windows)] mod win`, `#[cfg(target_os = "macos")] mod mac` and a
 `not(any(...))` third body, re-exporting one set of names.
+
+#### Current source gate after the Linux port
+
+The eleven-file count above is the 2026-09-12 baseline. The live source gate
+`platform_gate_tests::only_the_named_files_decide_what_platform_this_is` now
+names 35 files: the prior 17 finite entries plus eighteen Linux entries below.
+The Linux additions are limited to application-owned asynchronous lifecycles,
+Linux window features, and one platform-specific test fixture. The gate checks
+both directions: an unlisted file fails, and a listed file with no platform
+`cfg` fails.
+
+| File | Reason it remains in the list |
+| --- | --- |
+| `dir_news.rs` | Linux reports watch arming and start failures asynchronously; `DirNews` owns applying each result to the folder's wake and error policy. |
+| `i18n.rs` | Compiles Linux-only config/cache cleanup labels for Linux and for translation tests on every platform. |
+| `input.rs` | Converts winit key and composition values into Linux software-page input; Windows and macOS retain native page delivery. |
+| `owner_door.rs` | The Linux focus door refuses unsupported Wayland focus before calling winit; other native backends use the ordinary focus call. |
+| `persist.rs` | Maps Linux configuration to its data writer's XDG namespace and migrates old bytes without changing Windows or macOS store paths. |
+| `quake.rs` | Linux sends generation-tagged hotkey ready and activation events, so the app checks them against the current Quake claim. |
+| `runtime/clipboard.rs` | Linux clipboard reads and writes return on a later app turn; the runtime owns destination identity checks and delayed adoption. |
+| `runtime/files.rs` | Linux trash answers arrive through `TrashLane`; the runtime checks that the original window, seat, root and row are still live. |
+| `runtime/keyboard.rs` | Selects Linux software-page input after the application's shortcut and IME owner rules. |
+| `runtime/mouse.rs` | Starts a Linux window-edge resize from its pointer gesture after the common button and hint rules. |
+| `runtime/preview.rs` | Linux preview paste carries a document instance across the asynchronous clipboard read; other backends read during the gesture. |
+| `runtime/quake.rs` | Wayland summon cannot reposition, restore or activate a hidden window; the app keeps the supported X11 path and reports the Wayland refusal. |
+| `runtime/web.rs` | Places Linux software frames and releases their input ownership; Windows and macOS retain native compositor holes. |
+| `runtime/windows.rs` | The Linux-only minimized-window bridge is consumed only by the Linux Quake summon path. |
+| `scheme_watch.rs` | Its fixture covers Linux's asynchronous watch-start failure and the synchronous refusal on Windows and macOS against one reporting rule. |
+| `text_field.rs` | Linux field identity rejects a delayed clipboard answer after the field instance has been replaced. |
+| `uninstall.rs` | Explicit Linux purge inventories only the config and cache paths belonging to the selected data namespace. |
+| `webhost.rs` | Holds Linux software frame and caret generations and pairs forwarded key transitions with the page that received them. |
+
+
+`main.rs` remains on the original list for a separate Linux invariant. `Runtime::create`
+derives the first process-wide display and clipboard backend identities from the
+live native window. The two installers only set `OnceLock`s: they do not connect
+to X11, Wayland or a clipboard owner. A mismatch makes later requests use a
+backend different from the native window, so it is fatal. Optional display and
+clipboard service refusals remain local to their operation.
 
 The executable gate now also admits `update_handoff.rs` for one Windows-only
 test fixture: it drives the real detached update hand-off and observes the

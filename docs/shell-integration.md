@@ -145,6 +145,7 @@ other:
 | PowerShell / Windows PowerShell | Windows | `file:///D:/src` | `$PWD.ProviderPath` |
 | Git Bash | Windows | `file:///D:/src` | `pwd -W`, the MSYS builtin for the Win32 spelling |
 | WSL | WSL | `file:///mnt/d/src`, `file:///home/weiyi` | `$PWD` |
+| Bash / zsh on Linux | POSIX | `file:///home/alice/src` | `$PWD` |
 | Command Prompt | Windows | `file:///D:\src`, `file:///C:\Program Files` | `$P`, in the `PROMPT` variable |
 
 Command Prompt's report is spelled with **backslashes and unencoded spaces**, and that is forced
@@ -392,6 +393,22 @@ session read your own directory with no trace of the arrangement left in the env
 keep your startup files somewhere other than `$HOME`, that directory reaches the script in
 `BT_USER_ZDOTDIR`, because `ZDOTDIR` itself has already been taken by the time zsh reads a line.
 
+**Linux Bash and zsh use those same doors.** Bash gets `--init-file` and
+`BT_SHELL_INTEGRATION=interactive` or `login`; the script sources the matching user startup chain.
+Zsh gets `ZDOTDIR` and `BT_USER_ZDOTDIR`, so it runs the user's files from their existing
+`ZDOTDIR` or `$HOME`. Folio does not edit those files. The scripts are stored in
+`$XDG_DATA_HOME/Folio/shell-integration/`, or `~/.local/share/Folio/shell-integration/` when
+`XDG_DATA_HOME` is unset. A fish profile keeps its own startup behavior and receives no OSC 133 or
+OSC 7 hooks.
+
+Run `python3 scripts/shell-integration/tests/linux-pty.py` from the repository to exercise the
+installed Bash and zsh hooks, plus the plain-shell boundary for `/bin/sh`, `dash` and fish, on real
+PTYs with isolated `HOME`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. It checks startup-file
+preservation, command execution, exit status, cwd reports and that shells without a Folio hook do
+not receive OSC 7/133. A raw PTY cannot answer fish's terminal capability queries, so its plain-shell
+probe uses `TERM=dumb`; the native-window input check uses Folio's normal terminal type. The probe
+skips a shell whose binary is not installed.
+
 **`sh` and `dash` get no door at all.** They accept `--init-file` and ignore it in silence, which is
 the one failure indistinguishable from a shell that has no integration, so the profile says so
 outright and the capability row reads `No shell integration`.
@@ -413,8 +430,11 @@ quotes, `$`, `|` and `;` comes apart on the way in. `wsl.exe -e` executes the pr
 argv for argv, which is also what makes handing the init file over as an argument work. Measured on
 Ubuntu-24.04, 2026-09-07.
 
-The script is written out to `%APPDATA%\Folio\shell-integration\` from a
-copy compiled into the binary, so the two halves of the OSC 133 agreement always ship together.
+The script is written from a copy compiled into the binary, so the two halves of the OSC 133
+agreement always ship together. Folio uses `%APPDATA%\Folio\shell-integration\` on Windows,
+`~/Library/Application Support/Folio/shell-integration/` on macOS, and
+`$XDG_DATA_HOME/Folio/shell-integration/` on Linux (defaulting to
+`~/.local/share/Folio/shell-integration/`).
 
 **What `--init-file` costs, and how it is paid back.** It replaces `~/.bashrc`, and because bash
 consults it only for a shell that is *not* a login shell, Folio also drops the `--login`
@@ -491,11 +511,14 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **Windows PowerShell** (5.1, script installed) | yes | yes | yes | yes | yes | `Windows PowerShell` | script | PSReadLine |
 | **either PowerShell** (script not installed or argv declined, profile fallback off) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
+| **Bash on Linux** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
+| **zsh on Linux** | yes | yes | yes | yes | yes | none, deliberately | yes | zsh's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
 | **WSL** (zsh login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | zsh's own |
 | **zsh** (on Windows, MSYS2 or similar) | yes | yes | yes | yes | yes | none, deliberately | yes | zsh's own |
 | **WSL** (fish or another login shell) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
 | **`sh` or `dash`** | no | no | no | no | no | — | yes | that shell's own |
+| **fish on Linux** | no | no | no | no | no | — | yes | fish's own |
 | **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
 

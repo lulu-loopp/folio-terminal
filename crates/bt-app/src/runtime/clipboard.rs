@@ -1,23 +1,241 @@
 //! `clipboard` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::hang_watch;
+#[cfg(target_os = "linux")]
 use crate::{
-    Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey, PasteOffer, PasteTarget,
-    PreparedClipboardPaste, Runtime, StagedPaste, TextFieldSeat, UserInputKind, copy_selection,
-    hang_watch, input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
-    paste_card_step, paste_offer_is_kept, paste_target_is_live, pending_paste_in,
-    prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name,
-    recoverable_clipboard_write, restore, seats, stage_paste, take_pending_paste, text_field,
-    toast, write_selection_text, write_terminal_clipboard_text,
+    ClipboardDestination, ClipboardFieldTarget, ClipboardTargetToken, ClipboardWriteTarget,
+    diagnostics,
+    linux_clipboard_lane::{self, ReadKind, ReadResult, ReadValue},
 };
-use anyhow::Result;
+use crate::{
+    ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
+    PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
+    TextFieldSeat, UserInputKind, input_line_needs_a_space_first, offer_pty_input,
+    paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept, paste_target_is_live,
+    pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name,
+    recoverable_clipboard_write, restore, seats, stage_paste, take_pending_paste, text_field,
+    toast,
+};
+#[cfg(not(target_os = "linux"))]
+use crate::{copy_selection, write_selection_text, write_terminal_clipboard_text};
+#[cfg(not(target_os = "linux"))]
+use anyhow::anyhow;
+use anyhow::{Context, Result};
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
+use bt_viewport::MathBlockAnchor;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use std::time::Instant;
+use winit::dpi::PhysicalPosition;
 use winit::event::Ime;
 
 impl Runtime<'_> {
+    /// **`Copy` on a row whose execution policy the user can change**: put the command on the
+    /// clipboard and say so only after the platform accepts the write.
+    pub(crate) fn copy_policy_command(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = self.submit_clipboard_write(
+                crate::shell_integration::POLICY_COMMAND.to_owned(),
+                "copy the execution policy command",
+                ClipboardWriteEffect::Toast {
+                    anchor: toast::ToastAnchor::Window,
+                    text: crate::i18n::graph_copied(crate::shell_integration::POLICY_COMMAND),
+                },
+            )?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            match copy_policy_command_with(crate::write_terminal_clipboard_text) {
+                Some(said) => {
+                    self.toast(toast::ToastKind::Ok, toast::ToastAnchor::Window, None, said)
+                }
+                None => Ok(()),
+            }
+        }
+    }
+
+    /// Submit one copy through the platform's clipboard path, and apply its
+    /// effect only after the write succeeds.
+    pub(crate) fn submit_clipboard_write(
+        &mut self,
+        text: String,
+        action: &'static str,
+        effect: ClipboardWriteEffect,
+    ) -> Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            let target = ClipboardWriteTarget {
+                window: self.window.window.id(),
+                window_identity: Arc::clone(&self.window.instance_identity),
+                effect,
+            };
+            let proxy = self.app.event_proxy.clone();
+            let admission = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+                let backend = match crate::linux_window_backend(&self.window.window)
+                    .map_err(|error| error.to_string())?
+                {
+                    bt_platform::linux_window::Backend::X11 => {
+                        bt_platform::LinuxClipboardBackend::X11
+                    }
+                    bt_platform::linux_window::Backend::Wayland => {
+                        bt_platform::LinuxClipboardBackend::Wayland
+                    }
+                };
+                let lane = self.app.clipboard_lane.get_or_insert_with(|| {
+                    linux_clipboard_lane::ClipboardLane::linux(move || {
+                        let _ = proxy.send_event(crate::AppEvent::LinuxClipboardReady);
+                    })
+                });
+                lane.request_write(text, action, target, backend)
+                    .map(drop)
+                    .map_err(|refusal| format!("{refusal:?}"))
+            })
+            .map_err(|error| anyhow::anyhow!(error))
+            .context("admit Linux clipboard write");
+            Ok(recoverable_clipboard_write(admission, action))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if recoverable_clipboard_write(write_terminal_clipboard_text(&text), action) {
+                self.apply_clipboard_write_effect(effect)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
+    /// Put a rendered page's selection on the clipboard, through the door the
+    /// terminal's own copy already uses.
+    pub(in crate::runtime) fn copy_preview_text_selection(
+        &mut self,
+        surface: PreviewSurface,
+    ) -> bool {
+        let Some(text) = self.preview_selected_text(surface) else {
+            return false;
+        };
+        #[cfg(target_os = "linux")]
+        {
+            self.submit_clipboard_write(
+                text,
+                "copy preview text selection",
+                ClipboardWriteEffect::None,
+            )
+            .is_ok_and(|accepted| accepted)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Err(error) = write_terminal_clipboard_text(&text) {
+                // Recoverable on `recoverable_clipboard_write`'s terms: the
+                // selection stays standing so the reader can try again.
+                eprintln!("recoverable preview copy failure: {error:#}");
+                return false;
+            }
+            true
+        }
+    }
+
+    /// **Asked of the pane the block is in.** This used to ask the *focused* one, and a right
+    /// press does not move the keyboard — the focus move lives inside the left-only route — so
+    /// copying from a formula in an unfocused pane asked a session where the anchor names nothing
+    /// and copied nothing, or, where that session happened to hold a block of the same shape,
+    /// copied the wrong formula. The seat comes from the press, like the other two verbs'.
+    pub(in crate::runtime) fn copy_math_latex(
+        &mut self,
+        target: PasteTarget,
+        anchor: &MathBlockAnchor,
+    ) {
+        // A block anchor names a place in a shell's transcript, so a tab with no
+        // shell has no anchor anybody could have clicked and nothing to copy
+        // (§7.1.6h) — the same `None` a stale anchor already answers with.
+        let Some(index) = self.live_paste_target(target) else {
+            return;
+        };
+        let Some(source) = self.window.tabs[index]
+            .sessions
+            .get(&target.seat)
+            .and_then(|leaf| leaf.session.math_source(anchor))
+        else {
+            return;
+        };
+        // **Only a copy that landed says it landed** (owner ruling 2026-09-14 ②).
+        // Linux applies its acknowledgement after confirmed native publication;
+        // the synchronous platforms apply it after their write succeeds.
+        #[cfg(target_os = "linux")]
+        {
+            let effect = ClipboardWriteEffect::MathCopied {
+                target,
+                anchor: anchor.clone(),
+            };
+            if let Err(error) =
+                self.submit_clipboard_write(source.to_owned(), "formula copy", effect)
+            {
+                eprintln!("clipboard copy effect failed: {error:#}");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+                bt_platform::set_clipboard_text(source)
+            })
+            .map_err(|error| anyhow!(error))
+            .context("copy original LaTeX source to clipboard");
+            if recoverable_clipboard_write(result, "formula copy") {
+                self.window.math_copied = Some((anchor.clone(), Instant::now()));
+            }
+        }
+    }
+
+    pub(crate) fn apply_clipboard_write_effect(
+        &mut self,
+        effect: ClipboardWriteEffect,
+    ) -> Result<()> {
+        match effect {
+            ClipboardWriteEffect::None => Ok(()),
+            #[cfg(target_os = "linux")]
+            ClipboardWriteEffect::ClearTerminalSelection { target, expected } => {
+                let Some(index) = self.window.tabs.iter().position(|tab| tab.id == target.tab)
+                else {
+                    return Ok(());
+                };
+                let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) else {
+                    return Ok(());
+                };
+                if leaf.incarnation != target.incarnation
+                    || leaf.session.view_selection().as_ref() != Some(&expected)
+                {
+                    return Ok(());
+                }
+                leaf.session.set_view_selection(None);
+                leaf.projection.set_selection(None);
+                self.publish_interaction_frame()
+            }
+            #[cfg(target_os = "linux")]
+            ClipboardWriteEffect::MathCopied { target, anchor } => {
+                let Some(index) = self.live_paste_target(target) else {
+                    return Ok(());
+                };
+                let still_names_formula = self.window.tabs[index]
+                    .sessions
+                    .get(&target.seat)
+                    .is_some_and(|leaf| leaf.session.math_source(&anchor).is_some());
+                if !still_names_formula {
+                    return Ok(());
+                }
+                self.window.math_copied = Some((anchor, Instant::now()));
+                self.publish_interaction_frame()
+            }
+            ClipboardWriteEffect::Toast { anchor, text } => {
+                self.toast(toast::ToastKind::Ok, anchor, None, text)
+            }
+        }
+    }
+
     /// **What a landing is promising to write into, read off the window as it
     /// stands this instant** (review 2026-09-17 P1-a) — or `None` when it is
     /// promising no text write at all.
@@ -98,24 +316,55 @@ impl Runtime<'_> {
     /// pasted somewhere this window does not control.
     pub(in crate::runtime) fn copy_path_to_clipboard(&mut self, path: &Path) -> Result<()> {
         let text = path.to_string_lossy().into_owned();
-        let result = write_terminal_clipboard_text(&text);
-        recoverable_clipboard_write(result, "copy a files row's path");
-        Ok(())
+        self.submit_clipboard_write(text, "copy a files row's path", ClipboardWriteEffect::None)
+            .map(drop)
     }
 
     pub(in crate::runtime) fn copy_selection(&mut self) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].focused_mut() else {
-            return Ok(());
-        };
-        if !copy_selection(
-            &mut leaf.session,
-            &mut leaf.projection,
-            write_terminal_clipboard_text,
-        ) {
-            return Ok(());
+        #[cfg(target_os = "linux")]
+        {
+            let active = self.window.active_tab;
+            let Some(tab) = self.window.tabs.get(active) else {
+                return Ok(());
+            };
+            let target_tab = tab.id;
+            let seat = tab.focused_leaf;
+            let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+                return Ok(());
+            };
+            let Some(text) = leaf.session.selection_text() else {
+                return Ok(());
+            };
+            let Some(expected) = leaf.session.view_selection() else {
+                return Ok(());
+            };
+            let target = PasteTarget {
+                tab: target_tab,
+                seat,
+                incarnation: leaf.incarnation,
+            };
+            self.submit_clipboard_write(
+                text,
+                "copy",
+                ClipboardWriteEffect::ClearTerminalSelection { target, expected },
+            )
+            .map(drop)
         }
-        self.publish_interaction_frame()
+        #[cfg(not(target_os = "linux"))]
+        {
+            let active = self.window.active_tab;
+            let Some(leaf) = self.window.tabs[active].focused_mut() else {
+                return Ok(());
+            };
+            if !copy_selection(
+                &mut leaf.session,
+                &mut leaf.projection,
+                write_terminal_clipboard_text,
+            ) {
+                return Ok(());
+            }
+            self.publish_interaction_frame()
+        }
     }
 
     /// Copy-on-select, from the pane the gesture began in.
@@ -123,11 +372,28 @@ impl Runtime<'_> {
     /// The text is that pane's, whatever pane the pointer let go over: it is the
     /// selection just made that the hand means, and there is only one pane it was
     /// ever made in.
-    pub(in crate::runtime) fn copy_selection_on_release(&self, seat: SeatId) {
-        let Some(leaf) = self.sessions.get(&seat) else {
-            return;
-        };
-        write_selection_text(&leaf.session, true, write_terminal_clipboard_text);
+    pub(in crate::runtime) fn copy_selection_on_release(&mut self, seat: SeatId) {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(leaf) = self.sessions.get(&seat) else {
+                return;
+            };
+            let Some(text) = leaf
+                .session
+                .selection_text()
+                .filter(|text| !text.is_empty())
+            else {
+                return;
+            };
+            let _ = self.submit_clipboard_write(text, "copy on select", ClipboardWriteEffect::None);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Some(leaf) = self.sessions.get(&seat) else {
+                return;
+            };
+            write_selection_text(&leaf.session, true, write_terminal_clipboard_text);
+        }
     }
 
     /// **The four questions a text write answers that no other drop has to**
@@ -183,15 +449,16 @@ impl Runtime<'_> {
     /// Answers the address to write to — the one **both** readings agree on —
     /// rather than a `bool`, so that no caller can take the verdict from here and
     /// the destination from somewhere older.
-    pub(in crate::runtime) fn paste_offer_kept(
+    /// **Check a path drop against the pointer answer already delivered** (release review 2026-09-17).
+    ///
+    /// The asynchronous X11 query supplies this point. The original offer, target shell, and plan
+    /// still have to agree before any bytes are written.
+    pub(in crate::runtime) fn paste_offer_kept_at(
         &self,
         drag: &Drag,
         plan: &seats::DropPlan,
+        released_at: PhysicalPosition<f64>,
     ) -> Option<PasteTarget> {
-        let released_at = self.platform_pointer_now()?;
-        // The seam latch is this gesture's and the runtime holds none of it; a
-        // copy is passed because this reading must not move the live one — the
-        // gesture is over.
         let mut seam = drag.seam;
         let at_release = self.survey_drop(&drag.source, drag.home, released_at, &mut seam);
         paste_offer_is_kept(
@@ -203,6 +470,17 @@ impl Runtime<'_> {
         )
     }
 
+    /// The synchronous native pointer road used where the platform returns from the release event.
+    #[cfg(not(target_os = "linux"))]
+    pub(in crate::runtime) fn paste_offer_kept(
+        &self,
+        drag: &Drag,
+        plan: &seats::DropPlan,
+    ) -> Option<PasteTarget> {
+        self.platform_pointer_now()
+            .and_then(|released_at| self.paste_offer_kept_at(drag, plan, released_at))
+    }
+
     /// **What the clipboard can put into a one-line field**, or nothing when
     /// the platform will not hand it over.
     ///
@@ -210,14 +488,30 @@ impl Runtime<'_> {
     /// clipboard another process is holding open is a condition that clears
     /// itself, and a box that raised a card about it would be interrupting a
     /// reader mid-query to report an event they can simply repeat.
-    pub(in crate::runtime) fn clipboard_line(&self) -> String {
-        hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        })
-        .ok()
-        .as_deref()
-        .map(text_field::one_line)
-        .unwrap_or_default()
+    pub(in crate::runtime) fn clipboard_line(&mut self) -> String {
+        #[cfg(target_os = "linux")]
+        {
+            if let crate::menubar::ClipboardSeat::Field(field) =
+                crate::menubar::paste_seat(self.clipboard_focus())
+                && let Err(error) = self.request_clipboard_text(field)
+            {
+                diagnostics::note(&format!("clipboard text read was not queued: {error}"));
+            }
+            // The palette and rename key handlers consume this return value on
+            // the input turn. Linux completes their insert from the tagged
+            // result instead, so an empty line prevents a synchronous fallback.
+            String::new()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            hang_watch::during(hang_watch::Station::ClipboardRead, || {
+                bt_platform::clipboard_text()
+            })
+            .ok()
+            .as_deref()
+            .map(text_field::one_line)
+            .unwrap_or_default()
+        }
     }
 
     /// **One paste into the text field that holds the keyboard** (B-AUDIT-046
@@ -230,25 +524,24 @@ impl Runtime<'_> {
     /// selection — and each of those doors already does what its field does
     /// after an insert (re-ask the search, re-filter the palette, write the
     /// setting through). One line of printable text for the five one-line
-    /// fields (`text_field::one_line`, as [`Self::clipboard_line`] cuts it);
+    /// fields (`text_field::one_line`, as [`Self::apply_clipboard_text_to_field`] cuts it);
     /// the settings dialog drops the line breaks instead, its own long-standing
     /// rule for a pasted path.
     pub(crate) fn paste_into_field(&mut self, field: TextFieldSeat) -> Result<()> {
-        let text = hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        })
-        .unwrap_or_default();
-        if text.is_empty() {
-            return Ok(());
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) = self.request_clipboard_text(field) {
+                diagnostics::note(&format!("clipboard text read was not queued: {error}"));
+            }
+            Ok(())
         }
-        let line = || Ime::Commit(text_field::one_line(&text));
-        match field {
-            TextFieldSeat::FindBar => self.search_ime(line()),
-            TextFieldSeat::GraphSearch => self.graph_search_ime(&line()),
-            TextFieldSeat::GitPrompt => self.git_prompt_ime(&line()),
-            TextFieldSeat::Palette => self.palette_ime(&line()),
-            TextFieldSeat::TabName => self.rename_ime(&line()),
-            TextFieldSeat::Settings => self.paste_into_settings_field(&text),
+        #[cfg(not(target_os = "linux"))]
+        {
+            let text = hang_watch::during(hang_watch::Station::ClipboardRead, || {
+                bt_platform::clipboard_text()
+            })
+            .unwrap_or_default();
+            self.apply_clipboard_text_to_field(field, &text)
         }
     }
 
@@ -293,11 +586,36 @@ impl Runtime<'_> {
             seat,
             incarnation: leaf.incarnation,
         };
+        #[cfg(target_os = "linux")]
+        {
+            let token = self.clipboard_target(ClipboardDestination::Terminal(target));
+            if let Err(error) = self.request_clipboard_read(token, ReadKind::Payload) {
+                return self.apply_clipboard_payload(target, Err(error));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
+            let payload = bt_platform::clipboard_payload();
+            hang_watch::at(leaving);
+            self.apply_clipboard_payload(target, payload)
+        }
+    }
+
+    fn apply_clipboard_payload(
+        &mut self,
+        target: PasteTarget,
+        payload: Result<bt_platform::ClipboardPayload, String>,
+    ) -> Result<()> {
+        let Some(active) = self.live_paste_target(target) else {
+            return Ok(());
+        };
+        let Some(leaf) = self.window.tabs[active].sessions.get(&target.seat) else {
+            return Ok(());
+        };
         let recipient = leaf.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
-        let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
-        let payload = bt_platform::clipboard_payload();
-        hang_watch::at(leaving);
         let mut prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
         // **The picture cannot travel down [`Self::deliver_paste`], because there is
         // no text yet** (§7.61): what a picture pastes is the path of a file nobody
@@ -315,6 +633,197 @@ impl Runtime<'_> {
             return Ok(());
         }
         self.save_clipboard_picture(target, offered)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(in crate::runtime) fn clipboard_target(
+        &self,
+        destination: ClipboardDestination,
+    ) -> ClipboardTargetToken {
+        ClipboardTargetToken {
+            window: self.window.window.id(),
+            window_identity: Arc::clone(&self.window.instance_identity),
+            destination,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_clipboard_field_target(&self, field: TextFieldSeat) -> Option<ClipboardFieldTarget> {
+        match field {
+            TextFieldSeat::TabName => self
+                .window
+                .rename
+                .as_ref()
+                .map(|editor| ClipboardFieldTarget::Rename(editor.field.clipboard_identity())),
+            TextFieldSeat::GitPrompt => self
+                .window
+                .git_menu
+                .as_ref()?
+                .prompt
+                .as_ref()
+                .map(|prompt| ClipboardFieldTarget::GitPrompt(prompt.field.clipboard_identity())),
+            TextFieldSeat::Palette => {
+                self.window.palette.as_ref().map(|palette| {
+                    ClipboardFieldTarget::Palette(palette.field().clipboard_identity())
+                })
+            }
+            TextFieldSeat::Settings => {
+                let target = self.window.settings.focus()?;
+                let identity = self
+                    .window
+                    .settings
+                    .text_field(target)?
+                    .clipboard_identity();
+                Some(ClipboardFieldTarget::Settings { target, identity })
+            }
+            TextFieldSeat::GraphSearch => {
+                let surface = self.preview_keyboard_surface()?;
+                if !self.graph_search_focused(surface) {
+                    return None;
+                }
+                let tab = self.window.tabs.get(self.window.active_tab)?;
+                let view = tab.git_graph_view.get(&surface)?;
+                Some(ClipboardFieldTarget::GraphSearch {
+                    tab: tab.id,
+                    surface,
+                    identity: view.search.clipboard_identity(),
+                })
+            }
+            TextFieldSeat::FindBar => {
+                if !self.window.search.is_focused() {
+                    return None;
+                }
+                let tab = self.window.tabs.get(self.window.active_tab)?;
+                Some(ClipboardFieldTarget::FindBar {
+                    tab: tab.id,
+                    seat: self.window.search.seat()?,
+                    identity: self.window.search.field().clipboard_identity(),
+                })
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_clipboard_text(&mut self, field: TextFieldSeat) -> Result<(), String> {
+        if crate::menubar::paste_seat(self.clipboard_focus())
+            != crate::menubar::ClipboardSeat::Field(field)
+        {
+            return Ok(());
+        }
+        let field = self
+            .current_clipboard_field_target(field)
+            .ok_or_else(|| "the clipboard destination field is no longer live".to_owned())?;
+        let target = self.clipboard_target(ClipboardDestination::Field(field));
+        self.request_clipboard_read(target, ReadKind::Text)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(in crate::runtime) fn request_clipboard_read(
+        &mut self,
+        target: ClipboardTargetToken,
+        kind: ReadKind,
+    ) -> Result<(), String> {
+        let backend = match crate::linux_window_backend(&self.window.window)
+            .map_err(|error| error.to_string())?
+        {
+            bt_platform::linux_window::Backend::X11 => bt_platform::LinuxClipboardBackend::X11,
+            bt_platform::linux_window::Backend::Wayland => {
+                bt_platform::LinuxClipboardBackend::Wayland
+            }
+        };
+        let proxy = self.app.event_proxy.clone();
+        let lane = self.app.clipboard_lane.get_or_insert_with(|| {
+            linux_clipboard_lane::ClipboardLane::linux(move || {
+                let _ = proxy.send_event(crate::AppEvent::LinuxClipboardReady);
+            })
+        });
+        lane.request(target, kind, backend)
+            .map(drop)
+            .map_err(|refusal| format!("{refusal:?}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clipboard_target_is_current(&mut self, target: &ClipboardTargetToken) -> bool {
+        if self.window.leaving.is_some()
+            || target.window != self.window.window.id()
+            || !Arc::ptr_eq(&target.window_identity, &self.window.instance_identity)
+        {
+            return false;
+        }
+        let seat = crate::menubar::paste_seat(self.clipboard_focus());
+        match &target.destination {
+            ClipboardDestination::Terminal(paste) => {
+                seat == crate::menubar::ClipboardSeat::Terminal
+                    && self.live_paste_target(*paste).is_some()
+            }
+            ClipboardDestination::Field(field) => {
+                let field_seat = field.text_field_seat();
+                seat == crate::menubar::ClipboardSeat::Field(field_seat)
+                    && self
+                        .current_clipboard_field_target(field_seat)
+                        .is_some_and(|current| clipboard_field_target_matches(&current, field))
+            }
+            ClipboardDestination::Preview {
+                surface,
+                source,
+                identity,
+            } => {
+                seat == crate::menubar::ClipboardSeat::PreviewDocument
+                    && self.preview_keyboard_surface() == Some(*surface)
+                    && self.preview_is_editable(*surface)
+                    && self.preview_pane(*surface).is_some_and(|pane| {
+                        pane.buffer.as_ref() == Some(source)
+                            && Arc::ptr_eq(identity, &pane.instance_identity)
+                    })
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_clipboard_read_result(
+        &mut self,
+        result: ReadResult<ClipboardTargetToken>,
+    ) -> Result<()> {
+        if !self.clipboard_target_is_current(&result.target) {
+            return Ok(());
+        }
+        match (result.target.destination, result.kind, result.value) {
+            (
+                ClipboardDestination::Terminal(target),
+                ReadKind::Payload,
+                ReadValue::Payload(payload),
+            ) => self.apply_clipboard_payload(target, payload),
+            (ClipboardDestination::Field(field), ReadKind::Text, ReadValue::Text(Ok(text))) => {
+                self.apply_clipboard_text_to_field(field.text_field_seat(), &text)
+            }
+            (ClipboardDestination::Preview { .. }, ReadKind::Text, ReadValue::Text(Ok(text))) => {
+                self.apply_clipboard_text_to_preview(&text)
+            }
+            (ClipboardDestination::Preview { .. }, ReadKind::Text, ReadValue::Text(Err(error))) => {
+                diagnostics::note(&format!("recoverable preview paste failure: {error}"));
+                Ok(())
+            }
+            (ClipboardDestination::Field(_), ReadKind::Text, ReadValue::Text(Err(_))) => Ok(()),
+            _ => Ok(()),
+        }
+    }
+
+    fn apply_clipboard_text_to_field(&mut self, field: TextFieldSeat, text: &str) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        if field == TextFieldSeat::Settings {
+            return self.paste_into_settings_field(text);
+        }
+        let line = Ime::Commit(text_field::one_line(text));
+        match field {
+            TextFieldSeat::FindBar => self.search_ime(line),
+            TextFieldSeat::GraphSearch => self.graph_search_ime(&line),
+            TextFieldSeat::GitPrompt => self.git_prompt_ime(&line),
+            TextFieldSeat::Palette => self.palette_ime(&line),
+            TextFieldSeat::TabName => self.rename_ime(&line),
+            TextFieldSeat::Settings => Ok(()),
+        }
     }
 
     /// **The same paste, with the paths already in hand** — what a drop onto a
@@ -640,5 +1149,141 @@ impl Runtime<'_> {
             },
         );
         Some(restore::paste_card_layout(&content, width, height, scale).with_ring(ring))
+    }
+}
+
+/// Put [`crate::shell_integration::POLICY_COMMAND`] on the clipboard through `write` — the app's
+/// synchronous clipboard door, or a test's — and return what the window says about it; `None`
+/// when the clipboard refused (the refusal is already logged by the shared door).
+#[cfg(any(test, not(target_os = "linux")))]
+fn copy_policy_command_with(write: impl FnOnce(&str) -> Result<()>) -> Option<String> {
+    crate::recoverable_clipboard_write(
+        write(crate::shell_integration::POLICY_COMMAND),
+        "copy the execution policy command",
+    )
+    .then(|| crate::i18n::graph_copied(crate::shell_integration::POLICY_COMMAND))
+}
+
+#[cfg(test)]
+mod policy_command_tests {
+    use super::copy_policy_command_with;
+    use crate::shell_integration::POLICY_COMMAND;
+
+    /// PIN — **`Copy` puts exactly the one command on the clipboard, and says it in full**
+    /// (T-INTEGRATION-INJECT-4 round 4). Through the clipboard seam, never the real clipboard.
+    ///
+    /// RED (mutation: copy `"Set-ExecutionPolicy RemoteSigned"`, the LocalMachine scope that
+    /// needs elevation, instead of the const).
+    #[test]
+    fn copy_puts_exactly_the_policy_command_on_the_clipboard() {
+        let mut written = Vec::new();
+        let said = copy_policy_command_with(|text| {
+            written.push(text.to_owned());
+            Ok(())
+        });
+        assert_eq!(
+            written,
+            ["Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"]
+        );
+        assert_eq!(written, [POLICY_COMMAND]);
+        assert_eq!(
+            said.as_deref(),
+            Some(crate::i18n::graph_copied(POLICY_COMMAND).as_str())
+        );
+        assert!(said.is_some_and(|said| said.contains(POLICY_COMMAND)));
+
+        let refused = copy_policy_command_with(|_| Err(anyhow::anyhow!("clipboard busy")));
+        assert_eq!(refused, None, "a refused copy says nothing was copied");
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ClipboardFieldTarget {
+    fn text_field_seat(&self) -> TextFieldSeat {
+        match self {
+            Self::Rename(_) => TextFieldSeat::TabName,
+            Self::GitPrompt(_) => TextFieldSeat::GitPrompt,
+            Self::Palette(_) => TextFieldSeat::Palette,
+            Self::Settings { .. } => TextFieldSeat::Settings,
+            Self::GraphSearch { .. } => TextFieldSeat::GraphSearch,
+            Self::FindBar { .. } => TextFieldSeat::FindBar,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clipboard_field_target_matches(
+    left: &ClipboardFieldTarget,
+    right: &ClipboardFieldTarget,
+) -> bool {
+    match (left, right) {
+        (ClipboardFieldTarget::Rename(left), ClipboardFieldTarget::Rename(right))
+        | (ClipboardFieldTarget::GitPrompt(left), ClipboardFieldTarget::GitPrompt(right))
+        | (ClipboardFieldTarget::Palette(left), ClipboardFieldTarget::Palette(right)) => {
+            Arc::ptr_eq(left, right)
+        }
+        (
+            ClipboardFieldTarget::Settings {
+                target: left_target,
+                identity: left,
+            },
+            ClipboardFieldTarget::Settings {
+                target: right_target,
+                identity: right,
+            },
+        ) => left_target == right_target && Arc::ptr_eq(left, right),
+        (
+            ClipboardFieldTarget::GraphSearch {
+                tab: left_tab,
+                surface: left_surface,
+                identity: left,
+            },
+            ClipboardFieldTarget::GraphSearch {
+                tab: right_tab,
+                surface: right_surface,
+                identity: right,
+            },
+        ) => left_tab == right_tab && left_surface == right_surface && Arc::ptr_eq(left, right),
+        (
+            ClipboardFieldTarget::FindBar {
+                tab: left_tab,
+                seat: left_seat,
+                identity: left,
+            },
+            ClipboardFieldTarget::FindBar {
+                tab: right_tab,
+                seat: right_seat,
+                identity: right,
+            },
+        ) => left_tab == right_tab && left_seat == right_seat && Arc::ptr_eq(left, right),
+        _ => false,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_clipboard_identity_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_field_targets_keep_instance_and_owner_context() {
+        let field = text_field::TextField::default();
+        let same_rename = ClipboardFieldTarget::Rename(field.clipboard_identity());
+        let same_instance = ClipboardFieldTarget::Rename(field.clipboard_identity());
+        let replacement =
+            ClipboardFieldTarget::Rename(text_field::TextField::default().clipboard_identity());
+        assert!(clipboard_field_target_matches(&same_rename, &same_instance));
+        assert!(!clipboard_field_target_matches(&same_rename, &replacement));
+
+        let search = ClipboardFieldTarget::FindBar {
+            tab: crate::TabId(7),
+            seat: SeatId(3),
+            identity: field.clipboard_identity(),
+        };
+        let moved_context = ClipboardFieldTarget::FindBar {
+            tab: crate::TabId(8),
+            seat: SeatId(3),
+            identity: field.clipboard_identity(),
+        };
+        assert!(!clipboard_field_target_matches(&search, &moved_context));
     }
 }

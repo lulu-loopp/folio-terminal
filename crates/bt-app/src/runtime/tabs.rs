@@ -8,15 +8,14 @@ use crate::{
     RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
     TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_into_layout, absorb_tab_into_strip, attention, blank_page_return, create_tab_state,
-    expire_leaf_attention, float, native_window, new_tab_leaf_seed, notify, pane_can_become_a_tab,
-    pane_into_tab, pane_strip_landing, presentation_physical_size, profiles,
-    recoverable_wheel_scroll_amount, restore, row_strip_landing, scrollback_quota, seats, seed,
-    settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
-    tear_pane_into_tab, two_tabs_mut, webnav,
+    expire_leaf_attention, float, new_tab_leaf_seed, notify, pane_can_become_a_tab, pane_into_tab,
+    pane_strip_landing, presentation_physical_size, profiles, recoverable_wheel_scroll_amount,
+    restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
+    strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_math::{MathRaster, MathRenderError};
 use bt_render::{FrameSource, FrameTrigger, Travel};
@@ -58,7 +57,7 @@ impl Runtime<'_> {
     /// day the seed grows a third field.
     ///
     /// **The pair travels together and is taken from one leaf**, which is the
-    /// rule [`new_tab_cwd`] already states: a profile from one pane and a folder
+    /// rule [`new_tab_leaf_seed`] already states: a profile from one pane and a folder
     /// from another describes a pane that does not exist.
     pub(in crate::runtime) fn new_tab_seeded_from(
         &mut self,
@@ -301,9 +300,7 @@ impl Runtime<'_> {
         }
         match tab_close_action(self.window.tabs.len(), self.window.active_tab, index) {
             TabCloseAction::CloseWindow => {
-                let native = native_window(&self.window.window)?;
-                bt_platform::request_window_close(native)
-                    .map_err(|error| anyhow!(error))
+                self.request_window_close()
                     .context("request close after the final tab")?;
             }
             TabCloseAction::Keep { active_tab } => {
@@ -1326,6 +1323,8 @@ impl Runtime<'_> {
             // where every other new window opens, because a reader who pressed a
             // *verb* pointed at a verb and not at a rectangle.
             at: None,
+            #[cfg(target_os = "linux")]
+            screen: None,
         };
         let like = self.window_id();
         self.app
