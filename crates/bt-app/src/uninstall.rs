@@ -64,6 +64,20 @@ enum Remover {
     UpdateHome,
     Data(HostPlatform, Base, &'static str),
 }
+impl Remover {
+    /// **A data mark's root on `platform`**: its base and the part Folio names,
+    /// or `None` where the mark is no data root — another platform's root (a
+    /// temporary-folder root is every platform's) or not a data mark at all.
+    /// The door resolves, purges and prints a data row only where this answers.
+    fn data_root_on(self, platform: HostPlatform) -> Option<(Base, &'static str)> {
+        match self {
+            Self::Data(host, base, relative) if host == platform || base == Base::Temp => {
+                Some((base, relative))
+            }
+            _ => None,
+        }
+    }
+}
 struct Mark {
     /// The mark's key, in the words `--uninstall-cleanup` has always printed.
     name: &'static str,
@@ -577,10 +591,7 @@ impl Scope {
         let mut data = Vec::new();
         for mark in INVENTORY {
             debug_assert!(!mark.writer.is_empty());
-            if let Remover::Data(host, base, relative) = mark.remover {
-                if host != platform && base != Base::Temp {
-                    continue;
-                }
+            if let Some((base, relative)) = mark.remover.data_root_on(platform) {
                 let head = match base {
                     Base::Roaming => named("APPDATA")?,
                     Base::Local => named("LOCALAPPDATA")?,

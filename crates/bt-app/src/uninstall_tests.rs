@@ -2588,17 +2588,39 @@ fn the_door_speaks_the_settings_language_and_the_os_language_without_one() {
     assert_eq!(lines(None, "en-US").0, Lang::English);
 }
 
-/// PIN (T-UNINSTALL-UX) — **`--uninstall-cleanup` still prints what it always printed: every
-/// mark's English is its name, and every kind's English is the word the door used to write.**
+/// PIN (T-UNINSTALL-UX) — **`--uninstall-cleanup` still prints what it always printed: on each
+/// platform, every mark the door prints there has its name as its English, and every kind's
+/// English is the word the door used to write.**
 ///
 /// The package managers' hooks read this transcript; the language arrived for `--uninstall`
-/// only.
+/// only. Per platform, because a row's English may differ by platform (`pick_platform`): "Local
+/// data (including WebView2)" is a Windows data root's row and is printed nowhere else, and the
+/// same text on macOS says "Local data". A data mark is checked where it is a data root
+/// (`Remover::data_root_on`); every other mark on every platform.
 ///
-/// MUTATION: change a mark's `says` to a row whose English differs from its `name`.
+/// MUTATIONS: change a mark's `says` to a row whose English differs from its `name`; or make
+/// `data_root_on` answer for every platform — the Windows-only Local data row is then checked on
+/// macOS, where its English is "Local data".
 #[test]
 fn the_cleanup_verb_prints_the_same_english_as_before() {
-    for mark in INVENTORY {
-        assert_eq!(english(mark.says), mark.name, "{}", mark.name);
+    for platform in [
+        HostPlatform::Windows,
+        HostPlatform::MacOs,
+        HostPlatform::OtherUnix,
+    ] {
+        for mark in INVENTORY {
+            if matches!(mark.remover, Remover::Data(..))
+                && mark.remover.data_root_on(platform).is_none()
+            {
+                continue;
+            }
+            assert_eq!(
+                mark.says.on(Lang::English, platform),
+                mark.name,
+                "{platform:?}: {}",
+                mark.name
+            );
+        }
     }
     for (text, word) in [
         (Text::CleanupKindPerCopy, "per-copy"),
