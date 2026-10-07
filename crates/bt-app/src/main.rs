@@ -71902,6 +71902,10 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
 }
 
 fn main() -> Result<()> {
+    // **What this process was handed is passed on only by name**, before any door can start a
+    // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
+    // down a chain of Folio processes is a holder there its probe refuses on.
+    bt_platform::make_standard_streams_uninheritable();
     // **The console-membership helper is checked first, before this process touches any console.**
     // It is a short-lived worker main whose one permitted attachment is the pane shell pid on its
     // exact private line; the resident GUI process never changes console state.

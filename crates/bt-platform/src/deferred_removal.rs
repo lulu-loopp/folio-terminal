@@ -1012,9 +1012,8 @@ fn retire_self(private: &Path, expected: &FileIdentity) -> io::Result<()> {
     self_delete(&executable)?;
     let _ = fs::remove_dir(private);
     if let Some(per_user_folio) = private.parent() {
-        // The default keep-data road leaves this non-empty. The remove-data
-        // road may have emptied it before scheduling us; do not recreate an
-        // otherwise-deleted data folder merely to host the remover.
+        // The per-user folder the door made for removers: it goes once no
+        // other remover's private folder is left in it.
         let _ = fs::remove_dir(per_user_folio);
     }
     Ok(())

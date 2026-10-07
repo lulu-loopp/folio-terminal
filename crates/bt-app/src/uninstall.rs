@@ -512,7 +512,9 @@ struct Scope {
     /// macOS: this bundle's installation home, `<parent>/.<Bundle>.folio-update`.
     update_home: Option<PathBuf>,
     /// A private random child directory is made below this per-user root for
-    /// the native remover. In a sandbox it stays below `BT_UNINSTALL_ROOT`.
+    /// the native remover ([`REMOVER_HOME`]). It is inside no purge root: the
+    /// remover is running from it when the purge runs. In a sandbox the
+    /// variables it is named from are below `BT_UNINSTALL_ROOT`.
     remover_home: PathBuf,
     sandbox: Option<PathBuf>,
     /// The language the door speaks: English for `--uninstall-cleanup`, the
@@ -633,14 +635,10 @@ impl Scope {
         } else {
             (None, None)
         };
-        let remover_home = if sandbox {
-            temp.join("Folio")
-        } else {
-            match platform {
-                HostPlatform::Windows => named("LOCALAPPDATA")?.join("Folio"),
-                HostPlatform::MacOs => home.join("Library/Application Support/Folio"),
-                HostPlatform::OtherUnix => temp.join("folio"),
-            }
+        let remover_home = match platform {
+            HostPlatform::Windows => named("LOCALAPPDATA")?.join(REMOVER_HOME),
+            HostPlatform::MacOs => home.join("Library/Application Support").join(REMOVER_HOME),
+            HostPlatform::OtherUnix => temp.join(REMOVER_HOME),
         };
         let mut agents: [Vec<PathBuf>; 3] = Default::default();
         for (index, (variable, default)) in [
@@ -671,6 +669,15 @@ impl Scope {
         })
     }
 }
+/// **The native remover's per-user folder's name**, beside Folio's data folders
+/// and never one of them. `--uninstall --remove-data` purges the data folders
+/// after the program's step has started the remover from its private folder
+/// here, and a purge root holding that folder would be refused the running
+/// remover's image on Windows (the clean-VM row N9: "Local data (including
+/// WebView2) … refused (Access is denied)") and would delete it from under the
+/// remover elsewhere. The remover removes this folder when it leaves it empty.
+const REMOVER_HOME: &str = "Folio-uninstall";
+
 /// **A purge root: the head the operating system names, resolved, and Folio's name below it as
 /// written.**
 ///
@@ -1975,6 +1982,14 @@ fn door_words(remove_data: bool, pid: u32) -> Vec<OsString> {
     words
 }
 
+/// **The door's process as the way out starts it**: through
+/// `quiet_breakaway_command`, so it outlives the asker's job and holds none of
+/// the asker's standard streams — a resident Folio's are its `diagnostics.log`,
+/// inside the data folder `--remove-data` removes.
+fn door_command(exe: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    bt_platform::quiet_breakaway_command(exe)
+}
+
 /// **The process's last act after *Uninstall* on the Settings card**: start its
 /// own executable as the door with `--after-pid` naming itself, and return —
 /// the door waits for this process to end before it touches anything. Nothing
@@ -1986,7 +2001,7 @@ pub(crate) fn leave_armed() {
         return;
     };
     let started = std::env::current_exe().and_then(|exe| {
-        bt_platform::quiet_breakaway_command(exe)
+        door_command(exe)
             .args(door_words(remove_data, std::process::id()))
             .spawn()
     });
