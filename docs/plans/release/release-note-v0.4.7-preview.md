@@ -109,11 +109,12 @@
   Folio is running has them.
 - Rarely, Folio's first window waits a moment at launch while it looks up the
   programs installed on the machine.
-- Windows: if Folio is ended from outside (Task Manager, `Stop-Process`) or
-  crashes at the moment it is starting one of the commands it runs to learn
-  about the machine, that command can stay behind, paused, until it is ended in
-  Task Manager. macOS: after a force quit or a crash, such a command finishes
-  on its own instead of being stopped.
+- Windows, with PowerShell 7 installed from the Microsoft Store: if Folio is
+  ended from outside or crashes at the moment it starts that PowerShell to
+  learn about it, the PowerShell can stay behind, paused, until it is ended in
+  Task Manager. macOS: after a force quit or a crash, a command Folio had
+  started to learn about the machine finishes on its own instead of being
+  stopped.
 
 <details>
 <summary>Install notes (SmartScreen, Gatekeeper, checksums)</summary>

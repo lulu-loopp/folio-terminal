@@ -63,6 +63,7 @@ Nothing yet.
 - A click on a pane's title-bar controls while the pane is moving lands only on a control that is drawn there.
 - In a narrow Settings window, a button whose edge is cut off no longer answers a click on the space beside it.
 - Commands Folio runs to learn about the machine no longer leave helper processes behind after a timeout or after Folio exits.
+- On Windows, ending Folio from outside (Task Manager, `Stop-Process`) or a crash no longer leaves behind a paused command that Folio had just started to learn about the machine.
 - PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
 - PowerShell's integration loader now keeps its PSReadLine reflection state process-wide and silently leaves the shell unchanged if its owned script cannot be read.
 - Folio left running now learns about a new version within a day.
@@ -144,11 +145,12 @@ Nothing yet.
 
 ### Known issues
 
-- Windows: if Folio is ended from outside (Task Manager, `Stop-Process`) or
-  crashes at the moment it is starting one of the commands it runs to learn
-  about the machine, that command can stay behind, paused, until it is ended in
-  Task Manager. macOS: after a force quit or a crash, such a command finishes
-  on its own instead of being stopped.
+- Windows, with PowerShell 7 installed from the Microsoft Store: if Folio is
+  ended from outside or crashes at the moment it starts that PowerShell to
+  learn about it, the PowerShell can stay behind, paused, until it is ended in
+  Task Manager. macOS: after a force quit or a crash, a command Folio had
+  started to learn about the machine finishes on its own instead of being
+  stopped.
 - When updating from 0.4.6 to any later version, a new version whose start
   could not be recorded (its record kept out by another program, or a folder
   made read-only) runs without saving what it changes until the next start or

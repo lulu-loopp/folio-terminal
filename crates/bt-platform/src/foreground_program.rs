@@ -148,7 +148,6 @@ mod imp {
         io::{Read, Write},
         mem::size_of,
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-        process::Stdio,
         time::{Duration, Instant},
     };
     use windows::Win32::{
@@ -178,12 +177,12 @@ mod imp {
     ) -> Option<BTreeSet<u32>> {
         let executable = std::env::current_exe().ok()?;
         let mut command = crate::quiet_command(executable);
-        command
-            .args([CONSOLE_MEMBERS_FLAG, &shell_pid.to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = crate::spawn_probe(&mut command).ok()?;
+        command.args([CONSOLE_MEMBERS_FLAG, &shell_pid.to_string()]);
+        let stdio = crate::ProbeStdio {
+            stderr: crate::ProbeStream::Null,
+            ..crate::ProbeStdio::ANSWER
+        };
+        let mut child = crate::spawn_probe(&mut command, stdio).ok()?;
         let deadline = Instant::now() + OBSERVATION_INTERVAL;
         let status = loop {
             match child.try_wait().ok()? {

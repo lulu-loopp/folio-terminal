@@ -3278,18 +3278,14 @@ pub(crate) fn run_powershell_probe(
     // `CreateProcess` out of the working directory before `PATH`. The probe
     // asks about the program a pane will run, so it asks about the one an
     // administrator installed.
-    use std::process::Stdio;
     let mut probe = powershell_probe_command(program)?;
-    probe
-        .args(["-NoProfile", "-NonInteractive", "-Command", command])
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = bt_platform::spawn_probe(&mut probe)
+    probe.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+    let stdio = if input.is_some() {
+        bt_platform::ProbeStdio::FED
+    } else {
+        bt_platform::ProbeStdio::ANSWER
+    };
+    let mut child = bt_platform::spawn_probe(&mut probe, stdio)
         .map_err(|error| ParseProbeFailure::Spawn(error.to_string()))?;
     if let Some(input) = input {
         let written = child.take_stdin().map_or_else(
@@ -4229,7 +4225,7 @@ mod tests {
             .expect("the item after that probe")
             .0;
         assert!(parse_probe.contains("POWERSHELL_PROBE_DEADLINE"));
-        assert!(probe.contains("Stdio::piped()"));
+        assert!(probe.contains("ProbeStdio::FED"));
         assert!(probe.contains("input.as_bytes()"));
         assert!(!probe.contains(".arg(input)"));
     }
@@ -8746,15 +8742,11 @@ mod tests {
         let said = "partial na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}";
         let hygiene = bt_pty::test_shell::Hygiene::new();
         let mut command = hygiene.command("/bin/sh", bt_platform::quiet_command);
-        command
-            .arg("-c")
-            .arg(format!(
-                "printf '%s' '{said}'; printf 'ready\\n' >&2; exec sleep 30"
-            ))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let mut child = bt_platform::spawn_probe(&mut command).expect("start the stand-in");
+        command.arg("-c").arg(format!(
+            "printf '%s' '{said}'; printf 'ready\\n' >&2; exec sleep 30"
+        ));
+        let mut child = bt_platform::spawn_probe(&mut command, bt_platform::ProbeStdio::ANSWER)
+            .expect("start the stand-in");
         let mut line = String::new();
         std::io::BufReader::new(child.take_stderr().expect("stderr was piped"))
             .read_line(&mut line)
