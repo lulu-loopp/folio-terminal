@@ -5783,17 +5783,14 @@ impl Text {
             Self::VersionDaysAgo => pick(lang, "{count} days ago", "{count} 天前"),
             // The singular of each unit. Chinese does not inflect a counted
             // noun, so its column is the plural entry's own.
-            // zh: pending T-ABOUT-NITS (review only: the Chinese column is shared with the plural)
             Self::VersionOneMinuteAgo => match lang {
                 Lang::English => "{count} minute ago",
                 Lang::Chinese => Self::VersionMinutesAgo.on(lang, platform),
             },
-            // zh: pending T-ABOUT-NITS (review only: the Chinese column is shared with the plural)
             Self::VersionOneHourAgo => match lang {
                 Lang::English => "{count} hour ago",
                 Lang::Chinese => Self::VersionHoursAgo.on(lang, platform),
             },
-            // zh: pending T-ABOUT-NITS (review only: the Chinese column is shared with the plural)
             Self::VersionOneDayAgo => match lang {
                 Lang::English => "{count} day ago",
                 Lang::Chinese => Self::VersionDaysAgo.on(lang, platform),
