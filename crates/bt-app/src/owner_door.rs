@@ -33,6 +33,15 @@ pub(crate) fn set_ime_cursor_area(
 /// `Window::focus_window` (§5.2), asked only by `Runtime::open_from_notification`.
 pub(crate) fn focus_window(token: WaitToken<'_, doors::FocusWindow>, window: &Window) {
     let _ = token;
+    #[cfg(target_os = "linux")]
+    {
+        match crate::window_focus_request_is_needed(window) {
+            Ok(true) => window.focus_window(),
+            Ok(false) => {}
+            Err(error) => crate::diagnostics::note(&format!("window focus refused: {error}")),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     window.focus_window();
 }
 

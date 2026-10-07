@@ -1082,11 +1082,37 @@ jobs:
     # nothing, so that a reader sees a decision instead of an omission.
     env:
       RUSTFLAGS: -C target-feature=-crt-static
+      # `bt-platform`'s Linux tests never open the desktop audio device; a sink
+      # that discards its input keeps any future playback probe honest too.
+      GST_AUDIO_SINK: fakesink
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The same composite action every other job comes through, and off Windows
       # it installs the pinned *version* against this runner's own host triple.
       - uses: ./.github/actions/toolchain
+
+      # Linux-only runtime checks below exercise installed fonts, GStreamer
+      # playback and two private display servers. The app build links its own
+      # Rust code, while wgpu, Weston and Xvfb use Mesa's software drivers here.
+      - name: install Linux desktop test runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers libxkbcommon-x11-0 \
+            xfce4-clipman dbus-x11 python3-xlib \
+            fonts-noto-cjk fonts-noto-mono fonts-dejavu-core \
+            ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav
+
+      - name: check the GStreamer elements used by Linux playback
+        run: |
+          for element in appsink fakesink playbin qtdemux tsdemux avdec_h264; do
+            gst-inspect-1.0 "$element" >/dev/null
+          done
+
+      - name: test Linux installation directory choices
+        run: python3 scripts/release/linux-install-tests.py
 
       # The same fifteen crates `core-macos` checks and in the same order,
       # because they are the same promise: `scripts/check-portable-core.ps1`'s
@@ -1094,16 +1120,7 @@ jobs:
       # `bt-platform` (M1-10). Two lists that mean one thing drift; a diff that
       # changes one and not the other is meant to be read as the mistake it is.
       #
-      # **`bt-platform` is here and `bt-app` is not, and the asymmetry is the
-      # point.** §4.6 of `docs/plans/port/macos-plan-2026-09-12.md` states the
-      # rule the remote server inherits: the macOS GUI dependencies are declared
-      # only for macOS targets, so a Linux build of this crate links *nothing* —
-      # `Cargo.toml`'s dependency table is empty outside the two platform
-      # sections. Checking it here is what turns that from a manifest one can
-      # read into a claim a machine has answered, and it is the only place in
-      # this file where it is answered at all. `bt-app` stays off: the server
-      # never depends on it (§4.6, unconditional), and a Linux build of the
-      # application is a milestone nobody has scheduled.
+      # The portable core and Linux desktop build are checked separately.
       - name: check the portable crates
         run: >
           cargo check --locked --all-targets
@@ -1136,3 +1153,36 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-transcript -p bt-viewport
           -p bt-pty -p bt-source -p bt-workbench -p alacritty_terminal
+
+      # The Linux platform providers get the same lint bar the `gates` job
+      # holds the workspace to: the Linux arms are compiled only here, so this
+      # is the one place a warning in them could hide.
+      - name: clippy the Linux platform crate
+        run: cargo clippy -p bt-platform --all-targets --locked -- -D warnings
+
+      - name: build the Linux desktop application
+        run: cargo build -p bt-app --locked -j 2
+
+      - name: test Linux platform providers and installed fonts
+        run: cargo test -p bt-platform --locked -j 2
+
+      # The Wayland suite uses Linux epoll, so these path dependencies stay
+      # outside the cross-platform workspace. Both upstream suites run here;
+      # X11 persistence is tested with a real manager on an owned display.
+      - name: test the patched clipboard crates on private displays
+        run: python3 scripts/ci/linux-vendor-clipboard-tests.py
+
+      - name: recover Linux rendering after real device loss
+        run: cargo test -p bt-render --lib --locked -j 2 a_lost_device -- --test-threads=1
+
+      - name: test Linux application source wiring
+        run: cargo test -p bt-app --bin folio --locked -j 2 linux_trash_app_source_tests
+
+      - name: test X11 and Wayland window handles
+        run: cargo test -p bt-app --bin folio --locked -j 2 linux_window_tests
+
+      - name: present terminal text on a private X11 display
+        run: python3 scripts/ci/linux-smoke.py x11 --exe target/debug/folio
+
+      - name: present terminal text on a private Wayland display
+        run: python3 scripts/ci/linux-smoke.py wayland --exe target/debug/folio

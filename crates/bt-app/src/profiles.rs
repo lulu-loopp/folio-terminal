@@ -17283,7 +17283,7 @@ mod tests {
             // half is asked only where the Unix arm is the one compiled — decided
             // at run time through the platform door, because this file is not one
             // of the few that may name a platform.
-            if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
+            if SeedPlatform::MacOs == SeedPlatform::of_this_build() {
                 let resolved = bt_pty::resolve_default_shell(&machine);
                 assert_eq!(
                     Path::new(&resolved.program),
@@ -17295,6 +17295,41 @@ mod tests {
                     "{what}: interactive and non-login is spelled by what is absent"
                 );
             }
+        }
+    }
+
+    /// The Other Unix profile table and `bt_pty` choose the same valid
+    /// `$SHELL`, including an unlisted shell such as fish.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_other_unix_default_profile_and_spawn_resolver_follow_shell() {
+        for shell in ["/usr/bin/zsh", "/usr/bin/fish"] {
+            let machine = FakeMachine::default()
+                .with_var("SHELL", shell)
+                .with_file(shell)
+                .with_file("/bin/bash")
+                .with_file("/bin/sh");
+            let rows = shipped_for(SeedPlatform::OtherUnix, &machine);
+            assert_eq!(rows[0].id, USER_SHELL_ID, "{shell}: its own row leads");
+            assert!(matches!(
+                &rows[0].program,
+                ProgramSource::Path(path) if path == Path::new(shell)
+            ));
+            assert_eq!(
+                automatic_row(SeedPlatform::OtherUnix, &machine),
+                USER_SHELL_ID
+            );
+            let resolved = bt_pty::resolve_default_shell(&machine);
+            assert_eq!(resolved.program, OsStr::new(shell));
+            assert_eq!(resolved.choice, bt_pty::ShellChoice::UserShell);
+            assert_eq!(
+                served_by(&rows[0]),
+                if shell.ends_with("zsh") {
+                    Integration::ZshDotDir
+                } else {
+                    Integration::None
+                }
+            );
         }
     }
 

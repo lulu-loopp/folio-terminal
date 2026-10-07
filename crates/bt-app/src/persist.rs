@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use std::{
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use bt_platform::admission::{WaitToken, admitted, doors};
 
 use bt_persist::{
@@ -394,7 +401,7 @@ const SESSION_DEBOUNCE: Duration = Duration::from_millis(1_500);
 pub(crate) const SESSION_SAVE_BUDGET: Duration = Duration::from_secs(3);
 
 /// How often a bounded join asks whether the writer thread has finished.
-const SESSION_JOIN_POLL: Duration = Duration::from_millis(2);
+pub(crate) const SESSION_JOIN_POLL: Duration = Duration::from_millis(2);
 
 /// What a store with nowhere to send a document says (release review X-9).
 ///
@@ -1436,10 +1443,12 @@ impl SettingsStore {
     /// be a worse product than one that starts with the default preferences.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let path = dir.join(SETTINGS_FILE_NAME);
-        make_data_folder(&dir);
-        let (settings, report) = read_settings_keeping(&path, crate::update_trial::keeping());
-        crate::update_trial::owe_copy(&report, &path, |path| {
+        let legacy_path = dir.join(SETTINGS_FILE_NAME);
+        let path = settings_write_path(&dir, SETTINGS_FILE_NAME);
+        make_data_folder(path.parent().unwrap_or(&dir));
+        let (settings, report, read_path) =
+            read_settings_with_legacy(&path, &legacy_path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &read_path, |path| {
             let _ = read_settings(path);
         });
         // §5.4 case 1 — no file yet — is the normal first run and must not alert.
@@ -1480,10 +1489,10 @@ impl SettingsStore {
     /// launch that asked in that instant would be refused, and would remember
     /// the refusal for its whole run.
     pub(crate) fn peek_language(directory: &Path) -> bt_persist::LanguageV1 {
-        let (settings, _) = read_settings_keeping(
-            &directory.join(SETTINGS_FILE_NAME),
-            bt_persist::Keeping::Owed,
-        );
+        let path = settings_write_path(directory, SETTINGS_FILE_NAME);
+        let legacy_path = directory.join(SETTINGS_FILE_NAME);
+        let (settings, _, _) =
+            read_settings_with_legacy(&path, &legacy_path, bt_persist::Keeping::Owed);
         settings.language
     }
 
@@ -1625,10 +1634,12 @@ impl KeybindingsStore {
     /// Read `keybindings.json`, falling back to *no overrides* on every failure.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let path = dir.join(KEYBINDINGS_FILE_NAME);
-        make_data_folder(&dir);
-        let (file, report) = read_keybindings_keeping(&path, crate::update_trial::keeping());
-        crate::update_trial::owe_copy(&report, &path, |path| {
+        let legacy_path = dir.join(KEYBINDINGS_FILE_NAME);
+        let path = settings_write_path(&dir, KEYBINDINGS_FILE_NAME);
+        make_data_folder(path.parent().unwrap_or(&dir));
+        let (file, report, read_path) =
+            read_keybindings_with_legacy(&path, &legacy_path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &read_path, |path| {
             let _ = read_keybindings(path);
         });
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
@@ -1932,6 +1943,242 @@ pub(crate) fn make_data_folder(dir: &Path) -> bool {
     std::fs::create_dir_all(dir).is_ok()
 }
 
+#[cfg(target_os = "linux")]
+fn config_home_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if let Some(explicit) = env("XDG_CONFIG_HOME") {
+        let path = PathBuf::from(explicit);
+        if !path.as_os_str().is_empty() && path.is_absolute() {
+            return Some(path);
+        }
+    }
+    let home = env("HOME").map(PathBuf::from)?;
+    if home.as_os_str().is_empty() || !home.is_absolute() {
+        return None;
+    }
+    Some(home.join(".config"))
+}
+
+#[cfg(target_os = "linux")]
+fn config_directory_for(data_root: &Path, config_home: &Path) -> PathBuf {
+    config_home
+        .join(STORAGE_NAME)
+        .join(bt_platform::instance::directory_tag(data_root))
+}
+
+/// The Linux settings namespace associated with the existing data claim.
+///
+/// The tag is the one already used by that claim. Config does not get a second
+/// identity or lock, and a launch with another XDG data root keeps its own
+/// settings.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_config_directory_for(data_root: &Path) -> Option<PathBuf> {
+    let home = config_home_from(|name: &str| std::env::var_os(name))?;
+    Some(config_directory_for(data_root, &home))
+}
+
+fn settings_write_path(data_root: &Path, file_name: &str) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let home = config_home_from(|name: &str| std::env::var_os(name));
+        settings_write_path_with_config_home(data_root, file_name, home.as_deref())
+    }
+    #[cfg(not(target_os = "linux"))]
+    data_root.join(file_name)
+}
+
+#[cfg(target_os = "linux")]
+fn settings_write_path_with_config_home(
+    data_root: &Path,
+    file_name: &str,
+    config_home: Option<&Path>,
+) -> PathBuf {
+    if let Some(config_home) = config_home {
+        return config_directory_for(data_root, config_home).join(file_name);
+    }
+    data_root.join(file_name)
+}
+
+fn read_settings_with_legacy(
+    path: &Path,
+    legacy_path: &Path,
+    keeping: bt_persist::Keeping,
+) -> (SettingsV1, ReadReport, PathBuf) {
+    let (settings, report) = read_settings_keeping(path, keeping);
+    if path != legacy_path && report == ReadReport::NotFound {
+        let (settings, report) = read_settings_keeping(legacy_path, keeping);
+        (settings, report, legacy_path.to_owned())
+    } else {
+        (settings, report, path.to_owned())
+    }
+}
+
+fn read_keybindings_with_legacy(
+    path: &Path,
+    legacy_path: &Path,
+    keeping: bt_persist::Keeping,
+) -> (KeybindingsV1, ReadReport, PathBuf) {
+    let (file, report) = read_keybindings_keeping(path, keeping);
+    if path != legacy_path && report == ReadReport::NotFound {
+        let (file, report) = read_keybindings_keeping(legacy_path, keeping);
+        (file, report, legacy_path.to_owned())
+    } else {
+        (file, report, path.to_owned())
+    }
+}
+
+/// Start the Linux-only, one-shot copy of existing settings into XDG config.
+///
+/// Call after the settings stores have created the config namespace. The worker
+/// is registered for retirement by the existing Linux desktop-helper owner, so
+/// startup does not wait and shutdown joins it away from the window thread.
+#[cfg(target_os = "linux")]
+pub(crate) fn start_linux_config_migration() -> std::io::Result<()> {
+    let data_root = storage_dir();
+    let worker = bt_platform::spawn_at_priority(
+        "folio-linux-config-migration",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            if let Err(error) = migrate_linux_config_on_worker(worker, &data_root) {
+                eprintln!("recoverable Linux config migration failure: {error}");
+            }
+        },
+    )?;
+    bt_platform::register_linux_helper_worker(worker);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn migrate_linux_config_on_worker(
+    worker: &bt_platform::admission::WorkerCtx,
+    data_root: &Path,
+) -> Result<(), String> {
+    let Some(config_root) = linux_config_directory_for(data_root) else {
+        return Ok(());
+    };
+    migrate_config_documents(worker, data_root, &config_root, crate::update_trial::defer)
+}
+
+#[cfg(target_os = "linux")]
+fn migrate_config_documents(
+    worker: &bt_platform::admission::WorkerCtx,
+    data_root: &Path,
+    config_root: &Path,
+    mut defer: impl FnMut(crate::update_trial::Writer) -> bool,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for (file_name, writer) in [
+        (SETTINGS_FILE_NAME, crate::update_trial::Writer::Settings),
+        (
+            KEYBINDINGS_FILE_NAME,
+            crate::update_trial::Writer::Keybindings,
+        ),
+    ] {
+        if defer(writer) {
+            continue;
+        }
+        let source = data_root.join(file_name);
+        let target = config_root.join(file_name);
+        match copy_config_bytes_if_missing(worker, &source, &target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("{}: {error}", source.display())),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn copy_config_bytes_if_missing(
+    worker: &bt_platform::admission::WorkerCtx,
+    source: &Path,
+    target: &Path,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    if target.exists() {
+        return Ok(());
+    }
+    let file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Settings, source)?;
+    if file.metadata()?.len() > bt_persist::MAX_DOCUMENT_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "legacy config document exceeds the persistence reader's 16 MiB limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(bt_persist::MAX_DOCUMENT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > bt_persist::MAX_DOCUMENT_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "legacy config document grew beyond the persistence reader's 16 MiB limit",
+        ));
+    }
+    install_config_bytes_if_missing(worker, target, &bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn install_config_bytes_if_missing(
+    _worker: &bt_platform::admission::WorkerCtx,
+    target: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::io;
+
+    if target.exists() {
+        return Ok(());
+    }
+    let parent = target.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "config target has no parent")
+    })?;
+    let temporary_name = target
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config"))
+        .to_os_string();
+    static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+    let temporary = loop {
+        let sequence = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+        let mut name = temporary_name.clone();
+        name.push(format!(".folio-copy-{}-{sequence}", std::process::id()));
+        let candidate = parent.join(name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                    drop(file);
+                    let _ = fs::remove_file(&candidate);
+                    return Err(error);
+                }
+                break candidate;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    // `hard_link` is an atomic no-replace install on the same directory. A
+    // concurrent user write wins if it created the config target first.
+    let installed = match fs::hard_link(&temporary, target) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    fs::remove_file(&temporary)?;
+    if installed {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// The directory this build wrote its files under before the product was named,
 /// and the only reason this module knows the old brand at all.
 ///
@@ -2017,6 +2264,17 @@ fn storage_location(
             }
         }
     }
+}
+
+/// Resolve Folio's existing data root without performing relocation or I/O.
+///
+/// Consumers that need only a path, including the Linux Chromium profile,
+/// share the same XDG_DATA_HOME and legacy-relative-path rules as `storage_dir`.
+pub(crate) fn storage_directory_in(
+    platform: bt_platform::HostPlatform,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> PathBuf {
+    storage_location(platform, env).directory
 }
 
 /// `%APPDATA%\Folio\` on Windows, `~/Library/Application Support/Folio` on
@@ -4198,5 +4456,376 @@ pub(crate) mod tests {
         );
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_xdg_tests {
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+
+    use bt_persist::{BindingOverrideV1, Keeping, KeybindingsV1, LanguageV1, SettingsV1};
+
+    use super::{
+        KEYBINDINGS_FILE_NAME, SETTINGS_FILE_NAME, config_directory_for, config_home_from,
+        copy_config_bytes_if_missing, install_config_bytes_if_missing, migrate_config_documents,
+        read_keybindings_with_legacy, read_settings_with_legacy,
+        settings_write_path_with_config_home, storage_directory_in,
+    };
+
+    fn on_worker<T: Send + 'static>(
+        work: impl FnOnce(&bt_platform::admission::WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        let (answer, wait) = mpsc::channel();
+        bt_platform::spawn_at_priority(
+            "folio-linux-config-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                let _ = answer.send(work(worker));
+            },
+        )
+        .expect("start the controlled migration worker");
+        wait.recv()
+            .expect("the migration worker returns its test result")
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let pairs = pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(*value)))
+            .collect::<std::collections::HashMap<_, _>>();
+        move |name| pairs.get(name).cloned()
+    }
+
+    fn test_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "folio-linux-xdg-{label}-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the isolated test root");
+        root
+    }
+
+    #[test]
+    fn config_home_uses_an_absolute_override_or_the_xdg_default() {
+        assert_eq!(
+            config_home_from(env(&[
+                ("XDG_CONFIG_HOME", "/home/dev/config-here"),
+                ("HOME", "/home/dev"),
+            ])),
+            Some(PathBuf::from("/home/dev/config-here"))
+        );
+        for invalid in ["", "relative/config"] {
+            assert_eq!(
+                config_home_from(env(&[("XDG_CONFIG_HOME", invalid), ("HOME", "/home/dev")])),
+                Some(PathBuf::from("/home/dev/.config"))
+            );
+        }
+        assert_eq!(
+            config_home_from(env(&[("HOME", "relative/home")])),
+            None,
+            "no absolute config home means the stores preserve their legacy data path"
+        );
+    }
+
+    #[test]
+    fn profile_data_path_keeps_the_existing_xdg_data_rule() {
+        assert_eq!(
+            storage_directory_in(
+                bt_platform::HostPlatform::OtherUnix,
+                env(&[("XDG_DATA_HOME", "relative/data"), ("HOME", "/home/dev"),])
+            ),
+            PathBuf::from("relative/data/Folio"),
+            "the profile seam keeps the existing relative XDG_DATA_HOME behavior"
+        );
+        assert_eq!(
+            storage_directory_in(
+                bt_platform::HostPlatform::OtherUnix,
+                env(&[("HOME", "/home/dev")])
+            ),
+            PathBuf::from("/home/dev/.local/share/Folio")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_keeps_non_utf8_home_bytes_and_reuses_the_data_claim_tag() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let home = OsString::from_vec(b"/home/dev/\xffconfig".to_vec());
+        let config_home = config_home_from(|name| match name {
+            "HOME" => Some(home.clone()),
+            _ => None,
+        })
+        .expect("absolute HOME gives the XDG config default");
+        assert_eq!(
+            config_home.as_os_str().as_bytes(),
+            b"/home/dev/\xffconfig/.config"
+        );
+        let data = Path::new("/home/dev/data-one/Folio");
+        let root = config_directory_for(data, &config_home);
+        assert_eq!(
+            root,
+            config_home
+                .join("Folio")
+                .join(bt_platform::instance::directory_tag(data))
+        );
+        assert_eq!(
+            root.as_os_str().as_bytes(),
+            config_home
+                .join("Folio")
+                .join(bt_platform::instance::directory_tag(data))
+                .as_os_str()
+                .as_bytes()
+        );
+    }
+
+    #[test]
+    fn two_data_roots_keep_distinct_config_namespaces_under_one_xdg_root() {
+        let home = Path::new("/home/dev/.config");
+        let left = config_directory_for(Path::new("/data/left/Folio"), home);
+        let right = config_directory_for(Path::new("/data/right/Folio"), home);
+        assert_ne!(left, right);
+        assert_eq!(left.parent(), right.parent());
+    }
+
+    #[test]
+    fn stores_write_config_when_resolved_and_keep_legacy_path_without_a_home() {
+        let data = Path::new("/home/dev/.local/share/Folio");
+        let config = Path::new("/home/dev/.config");
+        assert_eq!(
+            settings_write_path_with_config_home(data, SETTINGS_FILE_NAME, Some(config)),
+            config_directory_for(data, config).join(SETTINGS_FILE_NAME)
+        );
+        assert_eq!(
+            settings_write_path_with_config_home(data, SETTINGS_FILE_NAME, None),
+            data.join(SETTINGS_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn worker_migration_defers_and_then_copies_only_missing_documents() {
+        let root = test_root("worker-migration");
+        let data = root.join("data");
+        let config = root.join("config");
+        std::fs::create_dir_all(&data).expect("make legacy data directory");
+        std::fs::create_dir_all(&config).expect("make config directory");
+        let old_settings = b"legacy settings bytes";
+        let old_keybindings = b"legacy keybindings bytes";
+        std::fs::write(data.join(SETTINGS_FILE_NAME), old_settings)
+            .expect("write the old settings file");
+        std::fs::write(data.join(KEYBINDINGS_FILE_NAME), old_keybindings)
+            .expect("write the old keybindings file");
+
+        let data_for_worker = data.clone();
+        let config_for_worker = config.clone();
+        let deferred = on_worker(move |worker| {
+            let mut deferred = Vec::new();
+            migrate_config_documents(worker, &data_for_worker, &config_for_worker, |writer| {
+                deferred.push(writer);
+                true
+            })
+            .expect("a trial skips migration without error");
+            deferred
+        });
+        assert_eq!(
+            deferred,
+            vec![
+                crate::update_trial::Writer::Settings,
+                crate::update_trial::Writer::Keybindings
+            ]
+        );
+        assert!(!config.join(SETTINGS_FILE_NAME).exists());
+        assert!(!config.join(KEYBINDINGS_FILE_NAME).exists());
+
+        let user_settings = b"user wrote the new settings first";
+        std::fs::write(config.join(SETTINGS_FILE_NAME), user_settings)
+            .expect("simulate the new config winning before migration");
+        let data_for_worker = data.clone();
+        let config_for_worker = config.clone();
+        on_worker(move |worker| {
+            migrate_config_documents(worker, &data_for_worker, &config_for_worker, |_| false)
+                .expect("copy the still-missing legacy keybindings");
+        });
+        assert_eq!(
+            std::fs::read(config.join(SETTINGS_FILE_NAME)).expect("read user config"),
+            user_settings
+        );
+        assert_eq!(
+            std::fs::read(config.join(KEYBINDINGS_FILE_NAME)).expect("read migrated keybindings"),
+            old_keybindings
+        );
+        assert_eq!(
+            std::fs::read(data.join(SETTINGS_FILE_NAME)).expect("old settings remain"),
+            old_settings
+        );
+        assert_eq!(
+            std::fs::read(data.join(KEYBINDINGS_FILE_NAME)).expect("old keybindings remain"),
+            old_keybindings
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_read_config_first_and_only_fall_back_for_missing_config() {
+        let root = test_root("settings-read");
+        let data = root.join("data");
+        let config = root.join("config");
+        std::fs::create_dir_all(&data).expect("make legacy directory");
+        std::fs::create_dir_all(&config).expect("make config directory");
+        let legacy = data.join(SETTINGS_FILE_NAME);
+        let current = config.join(SETTINGS_FILE_NAME);
+        let old = SettingsV1 {
+            language: LanguageV1::Chinese,
+            ..SettingsV1::default()
+        };
+        bt_persist::write_settings_atomic(&legacy, &old).expect("write legacy fixture");
+
+        let (loaded, report, source) = read_settings_with_legacy(&current, &legacy, Keeping::Owed);
+        assert_eq!(loaded.language, LanguageV1::Chinese);
+        assert_eq!(report, bt_persist::ReadReport::Loaded);
+        assert_eq!(source, legacy);
+
+        let configured = SettingsV1 {
+            language: LanguageV1::English,
+            ..SettingsV1::default()
+        };
+        bt_persist::write_settings_atomic(&current, &configured)
+            .expect("write current config fixture");
+        let (loaded, report, source) = read_settings_with_legacy(&current, &legacy, Keeping::Owed);
+        assert_eq!(loaded.language, LanguageV1::English);
+        assert_eq!(report, bt_persist::ReadReport::Loaded);
+        assert_eq!(source, current);
+
+        std::fs::write(&current, b"not-json").expect("damage the authoritative config");
+        let (loaded, report, source) = read_settings_with_legacy(&current, &legacy, Keeping::Owed);
+        assert_ne!(report, bt_persist::ReadReport::NotFound);
+        assert_eq!(loaded.language, LanguageV1::System);
+        assert_eq!(
+            source, current,
+            "an unreadable config never revives old bytes"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keybindings_read_config_first_and_fall_back_only_when_missing() {
+        let root = test_root("keybindings-read");
+        let data = root.join("data");
+        let config = root.join("config");
+        std::fs::create_dir_all(&data).expect("make legacy directory");
+        std::fs::create_dir_all(&config).expect("make config directory");
+        let legacy = data.join(KEYBINDINGS_FILE_NAME);
+        let current = config.join(KEYBINDINGS_FILE_NAME);
+        let mut old = KeybindingsV1::default();
+        old.bindings.push(BindingOverrideV1 {
+            action: "legacy-action".to_owned(),
+            chord: Some("Ctrl+A".to_owned()),
+        });
+        bt_persist::write_keybindings_atomic(&legacy, &old).expect("write legacy fixture");
+
+        let (loaded, report, source) =
+            read_keybindings_with_legacy(&current, &legacy, Keeping::Owed);
+        assert_eq!(loaded.bindings[0].action, "legacy-action");
+        assert_eq!(report, bt_persist::ReadReport::Loaded);
+        assert_eq!(source, legacy);
+
+        let mut configured = KeybindingsV1::default();
+        configured.bindings.push(BindingOverrideV1 {
+            action: "config-action".to_owned(),
+            chord: Some("Ctrl+B".to_owned()),
+        });
+        bt_persist::write_keybindings_atomic(&current, &configured)
+            .expect("write current config fixture");
+        let (loaded, report, source) =
+            read_keybindings_with_legacy(&current, &legacy, Keeping::Owed);
+        assert_eq!(loaded.bindings[0].action, "config-action");
+        assert_eq!(report, bt_persist::ReadReport::Loaded);
+        assert_eq!(source, current);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_installs_original_bytes_without_replacing_a_user_target() {
+        let root = test_root("config-copy");
+        let target = root.join(SETTINGS_FILE_NAME);
+        let source = b"{\n  \"unknown\": [1, 2],\n  \"damaged-but-kept\": true\n}\n";
+        let install_target = target.clone();
+        on_worker(move |worker| install_config_bytes_if_missing(worker, &install_target, source))
+            .expect("atomically install old bytes");
+        assert_eq!(
+            std::fs::read(&target).expect("read installed bytes"),
+            source
+        );
+
+        let install_target = target.clone();
+        on_worker(move |worker| {
+            install_config_bytes_if_missing(worker, &install_target, b"migration loses")
+        })
+        .expect("an existing target is a successful no-op");
+        assert_eq!(
+            std::fs::read(&target).expect("read existing target"),
+            source
+        );
+        let user_edit = b"user edit wins";
+        std::fs::write(&target, user_edit).expect("simulate a later user edit");
+        let install_target = target.clone();
+        on_worker(move |worker| {
+            install_config_bytes_if_missing(worker, &install_target, b"migration still loses")
+        })
+        .expect("the worker does not replace later config either");
+        assert_eq!(std::fs::read(&target).expect("read user edit"), user_edit);
+        assert!(
+            std::fs::read_dir(&root)
+                .expect("inspect the temporary test namespace")
+                .all(|entry| entry.expect("read entry").file_name() == OsStr::new("settings.json")),
+            "successful migration leaves no helper file beside the config"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_atomic_install_leaves_legacy_source_readable() {
+        let root = test_root("config-copy-failure");
+        let source = root.join(SETTINGS_FILE_NAME);
+        let target = root.join("missing-config-dir").join(SETTINGS_FILE_NAME);
+        std::fs::write(&source, b"legacy bytes").expect("write existing legacy file");
+        let source_for_worker = source.clone();
+        let target_for_worker = target.clone();
+        let error = on_worker(move |worker| {
+            copy_config_bytes_if_missing(worker, &source_for_worker, &target_for_worker)
+        })
+        .expect_err("a missing config parent refuses the copy");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            std::fs::read(&source).expect("legacy source remains"),
+            b"legacy bytes"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_does_not_read_a_legacy_document_above_the_reader_limit() {
+        let root = test_root("config-copy-limit");
+        let source = root.join(SETTINGS_FILE_NAME);
+        let target = root.join("config").join(SETTINGS_FILE_NAME);
+        let bytes = vec![b'x'; bt_persist::MAX_DOCUMENT_BYTES as usize + 1];
+        std::fs::write(&source, &bytes).expect("write the over-limit legacy source");
+        let source_for_worker = source.clone();
+        let target_for_worker = target.clone();
+        let error = on_worker(move |worker| {
+            copy_config_bytes_if_missing(worker, &source_for_worker, &target_for_worker)
+        })
+        .expect_err("the bounded worker refuses over-limit input");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().len(),
+            bytes.len() as u64
+        );
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

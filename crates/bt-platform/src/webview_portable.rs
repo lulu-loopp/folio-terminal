@@ -17,8 +17,8 @@ use std::path::Path;
 
 use super::{
     NativeWindow, PageVisual, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WebChord,
-    WebColorScheme, WebDpiOwnership, WebEvent, WebInstallReport, WebMouseEvent,
-    WebNavigationVerdict, WebRequestVerdict,
+    WebColorScheme, WebDpiOwnership, WebEvent, WebFrame, WebImeEvent, WebInstallReport,
+    WebKeyEvent, WebMouseEvent, WebNavigationVerdict, WebRequestVerdict,
 };
 use crate::admission::{WaitToken, doors};
 use crate::{Compositor, EnvironmentAnswer, WebWarmUp};
@@ -40,7 +40,7 @@ fn no_engine(what: &str) -> String {
 pub struct WebHost {
     _gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
     _request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-    _wake: Box<dyn Fn()>,
+    _wake: Box<dyn Fn() + Send + Sync>,
     /// The colour scheme the seat said its pages prefer — kept, like the other two arms keep
     /// it, so that the seat's own record of what it said reads the same on every machine.
     color_scheme: Cell<Option<WebColorScheme>>,
@@ -53,7 +53,7 @@ impl WebHost {
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
         request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-        wake: Box<dyn Fn()>,
+        wake: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
             _gate: gate,
@@ -264,6 +264,24 @@ impl WebHost {
     ) -> Result<(), String> {
         let _ = (event, point, buttons_down);
         Ok(())
+    }
+
+    /// Forward a key to a hosted page. No page can stand on this platform.
+    pub fn send_key(&self, event: WebKeyEvent) -> Result<(), String> {
+        let _ = event;
+        Err(no_engine("the web preview"))
+    }
+
+    /// Forward an IME update to a hosted page. No page can stand on this platform.
+    pub fn send_ime(&self, event: WebImeEvent) -> Result<(), String> {
+        let _ = event;
+        Err(no_engine("the web preview"))
+    }
+
+    /// The page would draw in the native hierarchy; this arm has no engine.
+    #[must_use]
+    pub fn take_frame(&self) -> Option<WebFrame> {
+        None
     }
 
     /// A picture of the page, for the focus card. Unreachable.

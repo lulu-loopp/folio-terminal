@@ -64,6 +64,10 @@ pub enum TextMove {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TextField {
     text: String,
+    /// Stable identity for delayed clipboard replies. Clones keep the same
+    /// identity because they preserve the same editor instance.
+    #[cfg(target_os = "linux")]
+    clipboard_identity: std::sync::Arc<()>,
     /// Byte index, on a character boundary.
     caret: usize,
     /// The other end of the selection, also a byte index. **Equal to the caret
@@ -83,6 +87,12 @@ pub struct TextField {
 }
 
 impl TextField {
+    /// Identity of this editor instance, carried across asynchronous reads.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clipboard_identity(&self) -> std::sync::Arc<()> {
+        std::sync::Arc::clone(&self.clipboard_identity)
+    }
+
     /// A field already holding this text, caret at the end.
     ///
     /// At the end and not at the start, because what it is for is "restore what
@@ -96,6 +106,8 @@ impl TextField {
     #[must_use]
     pub fn holding(text: &str) -> Self {
         Self {
+            #[cfg(target_os = "linux")]
+            clipboard_identity: std::sync::Arc::default(),
             caret: text.len(),
             anchor: text.len(),
             text: text.to_owned(),
@@ -127,6 +139,8 @@ impl TextField {
             "a selection ends on a character boundary"
         );
         Self {
+            #[cfg(target_os = "linux")]
+            clipboard_identity: std::sync::Arc::default(),
             caret: selected,
             anchor: 0,
             text: text.to_owned(),
