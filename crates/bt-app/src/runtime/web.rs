@@ -2004,6 +2004,42 @@ struct WindowHandoff<'a> {
     answered: Option<&'static str>,
 }
 
+impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for WindowHandoff<'_> {
+    fn park(&mut self, seat: &mut webhost::WebSeat) {
+        seat.park_for_handoff();
+    }
+
+    fn rehost(
+        &mut self,
+        seat: &mut webhost::WebSeat,
+        parent: &bt_platform::SpareParent,
+    ) -> crate::web_spare::HandedOff {
+        use crate::web_spare::HandedOff;
+        let report = seat.rehost(
+            parent.compositor(),
+            self.to,
+            self.address,
+            false,
+            &mut self.outcomes,
+        );
+        let (word, handed) = match report {
+            webhost::RehostReport::Moved => ("Moved", HandedOff::Moved),
+            // A fit spare has a controller, so there is always something to hand over; an answer
+            // that moved nothing is a refusal like any other.
+            webhost::RehostReport::AddressOnly => (
+                "KeptSource",
+                HandedOff::SourceKept(String::from("nothing to hand over")),
+            ),
+            webhost::RehostReport::SourceKept(error) => {
+                ("KeptSource", HandedOff::SourceKept(error))
+            }
+            webhost::RehostReport::Rebuilding(error) => ("Lost", HandedOff::Lost(error)),
+        };
+        self.answered = Some(word);
+        handed
+    }
+}
+
 #[cfg(test)]
 mod transfer_focus_tests {
     use super::*;
@@ -2182,41 +2218,5 @@ mod transfer_focus_tests {
                 .expect("target page remains")
                 .focused
         );
-    }
-}
-
-impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for WindowHandoff<'_> {
-    fn park(&mut self, seat: &mut webhost::WebSeat) {
-        seat.park_for_handoff();
-    }
-
-    fn rehost(
-        &mut self,
-        seat: &mut webhost::WebSeat,
-        parent: &bt_platform::SpareParent,
-    ) -> crate::web_spare::HandedOff {
-        use crate::web_spare::HandedOff;
-        let report = seat.rehost(
-            parent.compositor(),
-            self.to,
-            self.address,
-            false,
-            &mut self.outcomes,
-        );
-        let (word, handed) = match report {
-            webhost::RehostReport::Moved => ("Moved", HandedOff::Moved),
-            // A fit spare has a controller, so there is always something to hand over; an answer
-            // that moved nothing is a refusal like any other.
-            webhost::RehostReport::AddressOnly => (
-                "KeptSource",
-                HandedOff::SourceKept(String::from("nothing to hand over")),
-            ),
-            webhost::RehostReport::SourceKept(error) => {
-                ("KeptSource", HandedOff::SourceKept(error))
-            }
-            webhost::RehostReport::Rebuilding(error) => ("Lost", HandedOff::Lost(error)),
-        };
-        self.answered = Some(word);
-        handed
     }
 }
