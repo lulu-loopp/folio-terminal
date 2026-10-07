@@ -30,8 +30,26 @@ impl Runtime<'_> {
     /// door that runs once. They are re-entrant because each of them is a
     /// statement of fact rather than a step: present what is composed, say the
     /// window has been on the glass, ask Win32 which monitor it is actually on.
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn show_quake_window(&mut self) -> Result<()> {
         let native = native_window(&self.window.window)?;
+        #[cfg(target_os = "linux")]
+        {
+            let backend = crate::linux_window_backend(&self.window.window)?;
+            let refusal = [
+                bt_platform::linux_window::Operation::SetGlobalPosition,
+                bt_platform::linux_window::Operation::Restore,
+                bt_platform::linux_window::Operation::RequestFocus,
+            ]
+            .into_iter()
+            .find_map(|operation| bt_platform::linux_window::refusal(backend, operation));
+            if let Some(reason) = refusal {
+                let message = format!("native Wayland summon is unavailable: {reason}");
+                crate::diagnostics::note(&message);
+                return Err(anyhow::anyhow!(message));
+            }
+            self.restore_minimized_window()?;
+        }
         // **The machine is read in one place and the rules are applied in one
         // place** (§7.54e ③, user ruling 2026-09-05: 「呼出规则唯一…写成一个函数,
         // 所有入口调它」). Which display, how big on it, and whether the reader has
@@ -44,6 +62,12 @@ impl Runtime<'_> {
             native,
             self.window.renderer.dpi_milli().get() * 96 / 1000,
         );
+        #[cfg(target_os = "linux")]
+        if screen.work.right <= screen.work.left || screen.work.bottom <= screen.work.top {
+            let message = "Linux summon placement is unavailable because the display work area could not be read";
+            crate::diagnostics::note(message);
+            return Err(anyhow::anyhow!(message));
+        }
         let settings = self.app.settings_store.loaded();
         let rect = self.app.quake.placement(&screen, settings);
         let work = screen.work;
@@ -62,21 +86,23 @@ impl Runtime<'_> {
             rect.right - rect.left,
             rect.bottom - rect.top,
         );
-        // **`stand_window_at` and not `set_window_outer_rect`** (§7.54, measured
-        // 2026-09-02). Every other caller places a window on the monitor it is
-        // already on; a summon routinely names a different one, and across a dpi
-        // seam a single `SetWindowPos` is not a move but the thing that raises
-        // `WM_DPICHANGED` — after which §7.50's ruling hands the rectangle to
-        // Windows for the length of that message and the summon's own request is
-        // resolved onto the system's suggestion. See that function for the two
-        // measurements and for why saying it again is the fix.
-        //
-        // A rectangle that would not be taken is said out loud and the window is
-        // shown anyway: it is standing somewhere, and a summon a few pixels off is
-        // enormously better than a summon that refused to come down.
+        // **Placement stays on the window-owning winit thread.** X11 uses
+        // `set_outer_position` after the actual backend preflight above; Windows
+        // uses `stand_window_at` so its dpi-seam readback can settle the frame.
+        // Wayland was refused before geometry or visibility changed.
+        #[cfg(target_os = "linux")]
+        self.window
+            .window
+            .set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+        #[cfg(not(target_os = "linux"))]
         if let Err(error) = bt_platform::stand_window_at(native, rect) {
             eprintln!("BT_QUAKE {error}");
         }
+        #[cfg(target_os = "linux")]
+        self.window
+            .window
+            .set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        #[cfg(not(target_os = "linux"))]
         if let Err(error) = bt_platform::set_window_topmost(native, true) {
             eprintln!("recoverable always-on-top failure: {error}");
         }
@@ -94,6 +120,84 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// Ask the display worker about the screen selected by the X11 key event.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn request_quake_screen(
+        &mut self,
+        pointer: Option<(i32, i32)>,
+    ) -> Result<bt_platform::linux_display::LinuxDisplayRequest> {
+        let native = native_window(&self.window.window)?;
+        let backend = crate::linux_window_backend(&self.window.window)?;
+        let refusal = [
+            bt_platform::linux_window::Operation::SetGlobalPosition,
+            bt_platform::linux_window::Operation::Restore,
+            bt_platform::linux_window::Operation::RequestFocus,
+        ]
+        .into_iter()
+        .find_map(|operation| bt_platform::linux_window::refusal(backend, operation));
+        if let Some(reason) = refusal {
+            let message = format!("native Wayland summon is unavailable: {reason}");
+            crate::diagnostics::note(&message);
+            return Err(anyhow::anyhow!(message));
+        }
+        let cached_dpi = self.window.renderer.dpi_milli().get() * 96 / 1000;
+        let query = match pointer {
+            Some((x, y)) => bt_platform::linux_display::LinuxDisplayQuery::SummonScreenAt {
+                window: native,
+                cached_dpi,
+                x,
+                y,
+            },
+            None => bt_platform::linux_display::LinuxDisplayQuery::SummonScreen {
+                window: native,
+                cached_dpi,
+            },
+        };
+        let generation = self.app.next_display_generation();
+        bt_platform::linux_display::request_display(
+            u64::from(self.window.window.id()),
+            generation,
+            query,
+        )
+        .map_err(|error| anyhow::anyhow!(error))
+    }
+
+    /// Place and show the summoned window after its display facts arrive.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn show_quake_window_at(&mut self, screen: quake::SummonScreen) -> Result<()> {
+        if screen.work.right <= screen.work.left || screen.work.bottom <= screen.work.top {
+            let message = "Linux summon placement is unavailable because the display work area could not be read";
+            crate::diagnostics::note(message);
+            return Err(anyhow::anyhow!(message));
+        }
+        let settings = self.app.settings_store.loaded();
+        let rect = self.app.quake.placement(&screen, settings);
+        let work = screen.work;
+        eprintln!(
+            "BT_QUAKE work={},{} {}x{} rect={},{} {}x{}",
+            work.left,
+            work.top,
+            work.right - work.left,
+            work.bottom - work.top,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        );
+        self.window
+            .window
+            .set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+        self.window
+            .window
+            .set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        let first_time = !self.window.window_shown;
+        self.put_the_window_on_the_glass(false)?;
+        if first_time {
+            self.revive_all_web_pages()?;
+        }
+        Ok(())
+    }
+
     /// **Send it back up** (§7.54), and say who is owed the keyboard.
     ///
     /// `set_visible(false)` and not a close: the window keeps its tabs, its
@@ -105,6 +209,22 @@ impl Runtime<'_> {
     /// visible present's dpi check reads — and a hidden window is not a window
     /// that was never shown.
     pub(crate) fn hide_quake_window(&mut self) -> Option<bt_platform::hotkey::Foreground> {
+        #[cfg(target_os = "linux")]
+        match crate::linux_window_backend(&self.window.window) {
+            Ok(bt_platform::linux_window::Backend::X11) => {}
+            Ok(bt_platform::linux_window::Backend::Wayland) => {
+                crate::diagnostics::note(
+                    "native Wayland summon was left visible because restore and activation are unsupported",
+                );
+                return None;
+            }
+            Err(error) => {
+                crate::diagnostics::note(&format!(
+                    "summoned window was left visible because its Linux backend is unknown: {error}"
+                ));
+                return None;
+            }
+        }
         // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
         // is a hide that had no effect.
         let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::SetVisible, _>(
@@ -231,22 +351,78 @@ impl Runtime<'_> {
         if !self.is_quake_window() || !self.window.custom_window_frame.in_size_move() {
             return;
         }
+        #[cfg(target_os = "linux")]
+        {
+            if self.window.pending_summoned_arrangement.is_some() {
+                self.window.summoned_arrangement_refresh_owed = true;
+                return;
+            }
+            self.queue_summoned_arrangement();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Ok(native) = native_window(&self.window.window) else {
+                return;
+            };
+            let Ok(rect) = bt_platform::get_window_rect(native) else {
+                return;
+            };
+            let Some(monitor) = bt_platform::monitor_id_at(rect.left, rect.top) else {
+                return;
+            };
+            let dpi = bt_platform::dpi_at(rect.left, rect.top);
+            let bounds = persisted_window_bounds(rect, f64::from(dpi.max(1)) / 96.0);
+            self.app.quake.remember(monitor, bounds);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn queue_summoned_arrangement(&mut self) {
         let Ok(native) = native_window(&self.window.window) else {
             return;
         };
-        let Ok(rect) = bt_platform::get_window_rect(native) else {
-            return;
+        let generation = self.app.next_display_generation();
+        if let Ok(request) = bt_platform::linux_display::request_display(
+            u64::from(self.window.window.id()),
+            generation,
+            bt_platform::linux_display::LinuxDisplayQuery::SummonedArrangement { window: native },
+        ) {
+            self.window.pending_summoned_arrangement = Some(request);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_linux_display_ready(
+        &mut self,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<bool> {
+        let matches = self
+            .window
+            .pending_summoned_arrangement
+            .as_ref()
+            .is_some_and(|request| request.ready() == ready);
+        if !matches {
+            return Ok(false);
+        }
+        let Some(request) = self.window.pending_summoned_arrangement.take() else {
+            return Ok(false);
         };
-        // The display the window is on *now*, asked at its own top-left rather
-        // than at the pointer: a person dragging a window across a seam has the
-        // pointer on the display they are dragging towards while most of the
-        // window is still on the one they are leaving, and the answer wanted is
-        // where the window came to rest.
-        let Some(monitor) = bt_platform::monitor_id_at(rect.left, rect.top) else {
-            return;
-        };
-        let dpi = bt_platform::dpi_at(rect.left, rect.top);
-        let bounds = persisted_window_bounds(rect, f64::from(dpi.max(1)) / 96.0);
-        self.app.quake.remember(monitor, bounds);
+        let answer = request.try_take();
+        if std::mem::take(&mut self.window.summoned_arrangement_refresh_owed) {
+            if self.is_quake_window() {
+                self.queue_summoned_arrangement();
+            }
+            return Ok(true);
+        }
+        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::SummonedArrangement(Some((
+            rect,
+            monitor,
+            dpi,
+        )))) = answer
+        {
+            let bounds = persisted_window_bounds(rect, f64::from(dpi.max(1)) / 96.0);
+            self.app.quake.remember(monitor, bounds);
+        }
+        Ok(true)
     }
 }

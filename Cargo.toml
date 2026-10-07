@@ -82,6 +82,12 @@ anyhow = "1"
 base64 = "0.22"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
+fontconfig-parser = "0.5"
+fontdb = "0.23"
+# **Exact pin (the port's dependency fix)**: `futures-util` only enters for the
+# Linux portal subscriptions, and it is pinned the way the workspace pins the
+# packages a platform crate depends on, so a minor cannot drift under it.
+futures-util = "=0.3.32"
 glyphon = "0.12"
 # The glance card's first page (`bt_app::pdf::first_page`, §7.10 ⑥). It was
 # **already in the lock file** transitively — `typst-svg` rasterises the PDFs a
@@ -138,7 +144,7 @@ gif = { version = "=0.14.2", default-features = false, features = ["std", "color
 # overflow — which no `catch_unwind` contains — back behind `cat evil.md`.
 mitex = "=0.2.4"
 mitex-parser = "=0.2.4"
-mitex-spec-gen = "=0.2.4"
+mitex-spec-gen = { version = "=0.2.4", features = ["prebuilt"] }
 pollster = "0.4"
 # Exact because a newer crates.io 0.9.x would otherwise out-resolve the local
 # loader patch and silently drop BetterTerminal's strict ConPTY sidecar policy.
@@ -244,9 +250,15 @@ unicode-width = "0.2"
 # dispatch arms for the kitty keyboard protocol and xterm's modifyOtherKeys
 # (`vendor/vte/CHANGES-FOLIO.md`), and a 0.15.x out-resolving the copy would
 # undo them.
+# **Exact pins (the port's dependency fix)**: `tokio` and `zbus` serve only the
+# Linux portal subscriptions today; both are pinned exactly, with the features
+# the subscriptions need and no default features, so their resolution cannot
+# drift independently of this lock file.
+tokio = { version = "=1.53.2", default-features = false, features = ["rt", "net", "time"] }
 vte = { version = "=0.15.0", default-features = false, features = ["std"] }
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 
 [profile.test]
 opt-level = 1

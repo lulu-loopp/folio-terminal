@@ -4147,7 +4147,12 @@ const PINNED: [Pinned; 41] = [
         body: ENGINE_WINDOWS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &["load", "take"],
+        // The reading is cfg-blind: every platform's arm is read on every host,
+        // and the X11 hotkey worker's own `CommandSender::send` is a first-party
+        // `send` a method call on a foreign channel resolves to once this file
+        // declares it. The engines' wake-up send is a leaf here for that reason,
+        // beside `take` and `load`.
+        leaves: &["load", "take", "send"],
     },
     Pinned {
         body: ENGINE_MACOS,
@@ -4159,7 +4164,12 @@ const PINNED: [Pinned; 41] = [
         body: ENGINE_MACOS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &["load", "take"],
+        // The reading is cfg-blind: every platform's arm is read on every host,
+        // and the X11 hotkey worker's own `CommandSender::send` is a first-party
+        // `send` a method call on a foreign channel resolves to once this file
+        // declares it. The engines' wake-up send is a leaf here for that reason,
+        // beside `take` and `load`.
+        leaves: &["load", "take", "send"],
     },
     Pinned {
         body: ENGINE_PORTABLE_SHUTDOWN,

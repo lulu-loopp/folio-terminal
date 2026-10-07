@@ -289,7 +289,12 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     });
     let (tasks, requests) = mpsc::channel();
     let (results, completions) = mpsc::channel();
-    let worker = std::thread::spawn(move || run_decoration_worker(requests, results, || {}));
+    let worker = bt_platform::spawn_at_priority(
+        "bt-test-decoration",
+        bt_platform::ThreadPriority::Normal,
+        move |ctx| run_decoration_worker(ctx, requests, results, || {}),
+    )
+    .expect("start decoration worker");
     let leaf = probe_leaf();
     let render = |source: &str, budget| {
         tasks
@@ -10110,6 +10115,77 @@ fn a_maximized_window_still_keeps_the_rectangle_it_had_while_normal() {
     );
     assert_eq!(bounds, CHOSEN_BOUNDS);
     assert!(maximized);
+}
+
+/// An unavailable native posture keeps both previously saved placement facts.
+#[test]
+fn unknown_native_posture_preserves_the_saved_window_placement() {
+    assert_eq!(choose_window_posture(None, None), WindowPosture::Unknown);
+    assert_eq!(
+        choose_window_posture(Some(false), None),
+        WindowPosture::Unknown
+    );
+    for saved_maximized in [false, true] {
+        assert_eq!(
+            recorded_window_placement(
+                WindowPosture::Unknown,
+                Some(ICONIC_BOUNDS),
+                CHOSEN_BOUNDS,
+                saved_maximized,
+            ),
+            (CHOSEN_BOUNDS, saved_maximized),
+        );
+    }
+}
+
+#[test]
+fn maximize_intent_keeps_desired_state_ahead_of_stale_answers() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+}
+
+#[test]
+fn maximize_intent_preserves_rapid_absolute_toggle_order() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+    assert_eq!(intent.posture_state(), Some(false));
+}
+
+#[test]
+fn maximize_intent_waits_for_unknown_state_and_cancels_even_toggles() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.posture_state(), Some(false));
+
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    let mut unknown = WindowMaximizeIntent::default();
+    assert_eq!(unknown.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(
+        unknown.observe(Some(true)),
+        Some(WindowMaximizeAction::Request(false))
+    );
+    assert_eq!(unknown.posture_state(), None);
+    assert_eq!(unknown.observe(Some(false)), None);
+    assert_eq!(unknown.posture_state(), Some(false));
+}
+
+#[test]
+fn an_initial_maximize_request_stays_desired_until_observed() {
+    let mut intent = WindowMaximizeIntent::default();
+    intent.request_initial(true);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.observe(Some(true)), None);
+    assert_eq!(intent.posture_state(), None);
 }
 
 /// The posture that does record: a normal window's rectangle is the user's,
@@ -55087,12 +55163,23 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
     let read = door
         .find("bt_platform::clipboard_payload()")
         .expect("the door reads the clipboard");
-    let delivered = door
-        .find("self.deliver_paste(")
-        .expect("and delivers the paste");
+    let applied = door
+        .find("self.apply_clipboard_payload(target,payload)")
+        .expect("the door applies its clipboard payload");
     assert!(
-        asked < read && read < delivered,
-        "the question is asked after the clipboard was read or the paste delivered"
+        asked < read && read < applied,
+        "the question is asked before the read and the apply follows the read"
+    );
+    let apply = squeezed_body("Runtime", "apply_clipboard_payload");
+    let recipient = apply
+        .find("leaf.paste_recipient.clone()")
+        .expect("the apply step resolves the recipient");
+    let delivered = apply
+        .find("self.deliver_paste(")
+        .expect("the apply step delivers the paste");
+    assert!(
+        recipient < delivered,
+        "delivery follows recipient resolution"
     );
     // And the terminal menu's Paste goes through that door, not around it.
     assert!(
@@ -55357,7 +55444,7 @@ fn esc_under_the_restore_card_closes_it_unanswered_and_reaches_nothing_beneath()
     // The unanswered tabs go back to the file: the snapshot carries the window's pending list,
     // and only an answer (the loop's `settle_restore_answer`) clears the application's question.
     assert!(
-        squeezed_body("Runtime", "window_snapshot")
+        squeezed_body("Runtime", "window_snapshot_with_rect")
             .contains(".extend(self.window.pending_restore.iter().map(|tab|TabV1{pinned:false,"),
         "an unanswered question no longer folds back into the session"
     );

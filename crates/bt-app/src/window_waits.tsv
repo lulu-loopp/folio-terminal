@@ -82,6 +82,7 @@ row	status	call	where	disposition
 27	open	the media session's quiet at exit: `Readers::quiet_within(MEDIA_QUIET_BUDGET)`, a `Condvar::wait_timeout` against one deadline, for first-frame readers still inside Media Foundation, before `MFShutdown`	`fn main` → `video::shutdown_media_session`, after the loop returns	**open** — found by the thread-door note's revision (k)9 and ruled interim (`DESIGN.md`, 2026-09-27, *five window-thread waits the thread-door survey found are registry rows 24–28*): retained on the window thread, with a configured wait deadline of 1.5 s (`MEDIA_QUIET_BUDGET`; the mutex taken first, the condition variable's reacquisition and scheduling can pass it, so it is not an elapsed-time guarantee, and the `MFShutdown` after it has no deadline); repaid by D-80's ticket as scope added to D-80's recorded one (reader quiescence and `MFShutdown`, amended by the thread-door note's revision (m), `DESIGN.md`, 2026-09-27, *the thread-door note's revision (m)*), unless the owner rules it stays as rows 15–17 do (version: owner); its door will be `MediaQuiet`, admitting the reader quiescence only
 28	open	an update's trial takes the data directory's claim: `update_trial::take_the_claim_within` tries every 100 ms until the old build lets go	`fn main`, before `LaunchHandOver` (trials only)	**open** — found by the thread-door note's revision (k)9 and ruled interim (`DESIGN.md`, 2026-09-27, *five window-thread waits the thread-door survey found are registry rows 24–28*): retained on the window thread before the loop, bounded by `CLAIM_WAIT` (30 s) plus one last try; repaid by B11's startup claim ownership, unless the owner rules it stays as row 18 does (version: owner); its door will be `TrialClaim`
 29	ruled to stay	an update's exit guard at the process's end: `update_handoff::leave_armed` runs the guard on a worker of its own and waits `recv_timeout(LEAVE_WITHIN)` (75 s) for its answer — the wait for the applier's decision, the election, the start, its acknowledgement, the fallback	`fn main`, after the loop (only after *Restart to update*)	**ruled to stay** (`DESIGN.md`, 2026-09-28, *every road process of an update leaves through one exit guard*): the loop has returned and every window is gone; the process must not end before the start that replaces it is delivered, and the wait is bounded; during it no window of this process exists, so the person sees Folio gone until the applier's trial or the replacement appears, and the message box appears when nothing was delivered: at the latest at the bound, earlier when every start has already failed. The box itself is shown on this thread after the wait (`bt_platform::standalone_alert`, U-32) and is synchronous: the process returns when it is answered or at the latest after `STANDALONE_ALERT_WITHIN` (15 min), when macOS takes its system alert away or Windows's ownerless `MessageBoxTimeoutW` returns
+29a	done	Linux display reads use blocking x11rb `.reply()` cookies behind one process-wide `X11_SESSION` mutex; the first request also connects, interns atoms and queries randr	PR20 moves application X11 display, client-origin and posture reads to the display worker; layout consumes event or configured sizes, and native monitor enumeration keeps Winit's populated cache	**done — application display reads do not wait for X11 replies on the window thread**. Requests carry owner, request and generation identity. Pointer drops reject changed context; DragGuard preserves the aimed pointer; saved restores use captured monitor inputs and worker work areas. Move and resize invalidate the observed client origin and coalesce a new facts request. Caption, notification and snapshot posture use observed or desired state without treating unknown facts as false. A closing window discards late facts; summon retirement withdraws its pending request. Windows/macOS foreground activation is unchanged. Winit native window construction and its event processing remain library work. (`DESIGN.md`, 2026-10-06, *Linux application display reads close row 29a*).
 
 # doors
 door	row	station	phases	call	minted at	measures
@@ -165,9 +166,12 @@ bt_platform::WebHost::rehost	WebRehost
 crate	arm	item	effects	kind	authority	door
 bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::handoff_lane::run_handoff_lane	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
 bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::read_video_glance	std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::run_decoration_worker	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
@@ -185,6 +189,21 @@ bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_dialogs::finish_helper	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_display::display_worker	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_files::command_output	std::process::Child::wait 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_files::openable_target	std::fs::canonicalize 1, std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_files::reveal_in_explorer	std::fs::canonicalize 1, std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_hotkey::shutdown_hotkey_worker	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_notifications::shutdown_notifications	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_process::kill_reap_and_join	std::process::Child::wait 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_process::shutdown_helpers	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_system_settings::shutdown_system_settings	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::install_descendants	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::retirement_loop	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::stop_and_join	libc::write 1, std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::shutdown_watches	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners

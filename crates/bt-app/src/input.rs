@@ -2830,6 +2830,7 @@ mod tests {
 
     const MAC: HostPlatform = HostPlatform::MacOs;
     const WINDOWS: HostPlatform = HostPlatform::Windows;
+    const OTHER_UNIX: HostPlatform = HostPlatform::OtherUnix;
     const CMD: ModifiersState = ModifiersState::SUPER;
 
     /// RED (M1-7, X-3 §4 ①) — **a Control chord is the child's on macOS**, byte
@@ -2925,13 +2926,34 @@ mod tests {
         );
 
         // And off macOS the answer never moves: Alt is Alt on a keyboard with an
-        // Alt key printed on it, whichever way the row is set.
-        for setting in [false, true] {
-            assert_eq!(
-                effective_modifiers(ModifiersState::ALT, setting, WINDOWS),
-                ModifiersState::ALT,
-            );
+        // Alt key printed on it, whichever way the row is set. This is also the
+        // Linux path from winit's XKB modifier state to the bytes the PTY hears.
+        for platform in [WINDOWS, OTHER_UNIX] {
+            for setting in [false, true] {
+                assert_eq!(
+                    effective_modifiers(ModifiersState::ALT, setting, platform),
+                    ModifiersState::ALT,
+                    "{platform:?}, Option-as-Alt={setting}"
+                );
+            }
         }
+        let linux_modifiers = effective_modifiers(ModifiersState::ALT, false, OTHER_UNIX);
+        assert_eq!(
+            keyboard_bytes(
+                &character("å"),
+                &character("å"),
+                KeyLocation::Standard,
+                linux_modifiers,
+                false,
+                UNASKED,
+                KeyOrigin {
+                    platform: OTHER_UNIX,
+                    ..NOWHERE
+                },
+            ),
+            Some(b"\x1b\xc3\xa5".to_vec()),
+            "the XKB-produced text and Alt modifier reach a Unix child together"
+        );
     }
 
     /// RED (T-MAC-LIVE, §13.33 ①) — **what this door answers is a question

@@ -1464,7 +1464,7 @@ struct Shared {
     /// this is only ever the belt: the same target is never rewritten twice in
     /// a row.
     rewriting_to: RefCell<Option<String>>,
-    wake: Box<dyn Fn()>,
+    wake: Box<dyn Fn() + Send + Sync>,
 }
 
 #[cfg(windows)]
@@ -1587,11 +1587,11 @@ impl WebHost {
     /// document names. `wake` is called after every event is queued and must get
     /// the event loop to call [`WebHost::drain`] — a callback that arrives while
     /// the window is idle would otherwise sit unread until somebody moved the
-    /// mouse.
+    /// mouse. Both policy closures stay on the window thread and are called by `drain`.
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
         request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-        wake: Box<dyn Fn()>,
+        wake: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
             shared: Rc::new(Shared {
@@ -4552,6 +4552,14 @@ pub use macos::{
     SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
     web_environment_epoch, webview2_runtime_version,
 };
+
+// TEMPORARY (2026-10-06, PR2 of the port split): `linux_process::shutdown_helpers`
+// rings this when the helper workers retire. The real shim — `webview_linux`'s
+// `mod linux` and its `shutdown_actor` — arrives with the Linux web actor (PR7 of
+// the port split); until then there is no browser actor to stop, so this is a
+// no-op.
+#[cfg(target_os = "linux")]
+pub(crate) fn shutdown_linux_actor() {}
 
 /// **The page host, on a platform whose engine has not been written yet.**
 ///
