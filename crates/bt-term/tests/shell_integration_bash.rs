@@ -214,6 +214,16 @@ fn git_bash_marks_every_command_region_and_reports_the_exit_code() {
     let bytes = session_bytes(&directory, "true\nfalse\nexit\n");
     let text = String::from_utf8_lossy(&bytes).into_owned();
 
+    let first_prompt = text.find("\u{1b}]133;A\u{7}").unwrap();
+    assert!(
+        text.find("\u{1b}]7;").unwrap() < first_prompt,
+        "the directory is reported before the prompt region it describes"
+    );
+    assert!(
+        first_prompt < text.find("\u{1b}]133;B\u{7}").unwrap(),
+        "B opens the input the prompt A opened is asking for"
+    );
+
     let ordered_markers = [
         "\u{1b}]7;",
         "\u{1b}]133;A\u{7}",
