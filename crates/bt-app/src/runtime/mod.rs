@@ -39,4 +39,4 @@ mod web;
 mod windows;
 
 pub(crate) use preview::carry_floated_preview_surface_state;
-pub(crate) use web::carry_web_keyboard_receipt;
+pub(crate) use web::{WebKeyboardTransfer, carry_transferred_web_keyboard};

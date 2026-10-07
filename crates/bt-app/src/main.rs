@@ -17460,11 +17460,13 @@ mod tab_identity_tests {
             "the preview owner must carry its surface-local state with the new id:\n{transfer_state}"
         );
         assert!(
-            commit.contains("carry_web_keyboard_receipt("),
+            commit.contains("carry_transferred_web_keyboard("),
             "the web module must carry its window-owned keyboard receipt"
         );
         assert!(
-            body.contains("source_web_keyboard") && body.contains("preview.page"),
+            body.contains("web_keyboard_transfer")
+                && body.contains("source_web_keyboard")
+                && body.contains("preview.page"),
             "a floated live page and its keyboard receipt must travel with the owning tab:\n{body}"
         );
     }
@@ -60850,6 +60852,11 @@ impl FolioApp {
         let source_web_keyboard = source
             .web_keyboard
             .filter(|leaf| moving.contains(leaf) && hosted_in_source.contains(leaf));
+        let front = source.tabs[index].seats.identity();
+        let front_page = LeafId { tab, seat: front };
+        let front_web_page = hosted_in_source.contains(&front_page).then_some(front_page);
+        let web_keyboard_transfer =
+            runtime::WebKeyboardTransfer::new(front_web_page, source_web_keyboard);
         let source_scale = source.renderer.scale_factor() as f32;
         let target_scale = target.renderer.scale_factor() as f32;
         let (target_width, target_height) = target.renderer.presentation_geometry().swapchain_size;
@@ -60868,7 +60875,6 @@ impl FolioApp {
         let mut outcomes = Vec::new();
         let mut refused = None;
         let source_window = native_window(&source.window)?;
-        let front = source.tabs[index].seats.identity();
         // Two disjoint fields of one window, borrowed apart, because the page
         // being handed over and the tree it is being handed out of are both the
         // source window's.
@@ -60893,10 +60899,7 @@ impl FolioApp {
                     },
                     window: target_window,
                 },
-                // **The keyboard goes with the tab**, and only for the pane the
-                // tab is standing on: a page in a background pane of a moved tab
-                // has not been pointed at by anybody.
-                front == leaf.seat || source_web_keyboard == Some(leaf),
+                web_keyboard_transfer.takes_focus(leaf),
                 &mut outcomes,
             );
             match report {
@@ -60981,9 +60984,12 @@ impl FolioApp {
                 target.video.put(to_surface, video);
             }
         }
-        if let Some(leaf) = source_web_keyboard {
-            runtime::carry_web_keyboard_receipt(source, target, leaf);
-        }
+        runtime::carry_transferred_web_keyboard(
+            &mut source.web_keyboard,
+            &mut target.web_keyboard,
+            &mut target.float,
+            web_keyboard_transfer,
+        );
         if source.active_tab >= source.tabs.len() {
             source.active_tab = source.tabs.len().saturating_sub(1);
         }

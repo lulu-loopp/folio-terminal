@@ -1636,6 +1636,25 @@ impl FloatHost {
         }
     }
 
+    /// Make the float carrying a transferred page the window's preview focus.
+    /// A docked page takes that focus away from every float.
+    pub(crate) fn focus_web_page(&mut self, page: LeafId) {
+        let float = self
+            .live_windows()
+            .find(|win| {
+                win.mode == FloatMode::Pinned
+                    && win
+                        .preview()
+                        .is_some_and(|preview| preview.page == Some(page))
+            })
+            .map(FloatWin::id);
+        if let Some(float) = float {
+            self.focus_only(float);
+        } else {
+            self.blur();
+        }
+    }
+
     /// **Take the keyboard back from every float** (§7.34, user ruling
     /// 2026-08-27).
     ///
