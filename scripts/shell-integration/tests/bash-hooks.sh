@@ -98,10 +98,16 @@ expect() {
 }
 
 # This helper pipes input into an interactive bash, so EOF can expand PS1 again
-# in a way a terminal does not. Keep the command-boundary assertion here; the
-# Linux PTY probe checks the exact A/B prompt sequence.
-command_region_trace='133;C
-133;D;0'
+# in a way a terminal does not. `markers` removes only that exact orphan A/B
+# redraw, leaving the prompt that returned after the command in the trace.
+one_command_trace='7
+133;A
+133;B
+133;C
+133;D;0
+7
+133;A
+133;B'
 
 # ---------------------------------------------------------------------------
 # R3-5 — an array-valued PROMPT_COMMAND (bash 5.1 and later)
@@ -122,7 +128,7 @@ PROMPT_COMMAND=(mark_one mark_two)
 EOF
     run_case "$home" "$home/rc" '' 'echo RUN'
     expect 'R3-5 an array PROMPT_COMMAND keeps one region per command' \
-        "$command_region_trace" "$(markers | sed -n '/^133;[CD]/p')"
+        "$one_command_trace" "$(markers)"
     expect 'R3-5 an array PROMPT_COMMAND runs each hook once per prompt' \
         '4' "$(grep -o 'HOOK[12]' "$transcript" | wc -l | tr -d ' ')"
 }
@@ -140,7 +146,7 @@ PROMPT_COMMAND='mark_one'
 EOF
     run_case "$home" "$home/rc" '' 'echo RUN'
     expect 'R3-5 a scalar PROMPT_COMMAND is still chained and still marked once' \
-        "$command_region_trace" "$(markers | sed -n '/^133;[CD]/p')"
+        "$one_command_trace" "$(markers)"
     expect 'R3-5 a scalar PROMPT_COMMAND runs once per prompt' \
         '2' "$(grep -o 'HOOK1' "$transcript" | wc -l | tr -d ' ')"
 }
