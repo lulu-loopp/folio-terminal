@@ -35,7 +35,11 @@ Needs an Apple silicon Mac running macOS 14 or newer. Or, with Homebrew:
 brew install --cask lulu-loopp/folio/folio
 ```
 
-<!-- winget: add when live -->
+On Windows, winget has it too:
+
+```sh
+winget install --id WeiyiShi.Folio --exact
+```
 
 [`docs/install.md`](docs/install.md) has the rest: what is in the archive, what
 the first run asks, and what to do if the system puts a panel in front of you.
@@ -48,6 +52,10 @@ Take Folio out the way it came in:
   and double-click `uninstall.cmd` in its folder.
 - **scoop** — quit Folio, then `scoop uninstall folio`; it runs the same
   cleanup for you.
+- **winget** — quit Folio, then
+  `cmd /c "folio --uninstall-cleanup && winget uninstall --id WeiyiShi.Folio --exact"`:
+  the cleanup first, winget only once it succeeded, since winget runs nothing of
+  Folio's. Settings ▸ About shows this line for a winget copy.
 - **macOS DMG** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio and
   run `/Applications/Folio.app/Contents/MacOS/folio --uninstall`. Either one
   removes Folio completely, the app included.
@@ -61,11 +69,6 @@ example — the uninstall says which, keeps the program so you can run it again,
 and keeps your settings and data even if you asked for them to go. If the
 computer loses power while the files are being removed, run the uninstall again
 from the same folder: it removes what is left.
-
-<!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
-uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
-There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
-and the cleanup unregisters it. -->
 
 The uninstall removes what Folio set up outside its folder — the Explorer or
 Finder menu, the line it added to your PowerShell profile (with the profile file
