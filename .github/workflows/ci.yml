@@ -903,6 +903,8 @@ jobs:
       # filter is required to select at least one test so a renamed module cannot turn this step
       # green by running nothing. E-12 is the one test that deliberately launches `/usr/bin/open`;
       # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
+      # The uninstall door runs here too: its bundle, LaunchAgents and Application Support rows are
+      # macOS product code, and its per-platform labels were red here with nothing running them.
       - name: test the macOS updater modules
         run: |
           set -euo pipefail
@@ -929,6 +931,7 @@ jobs:
           run_app_filter update_handoff
           run_app_filter update_trial
           run_app_filter update_startup
+          run_app_filter uninstall::
           log="$RUNNER_TEMP/macos-updater-install-flip.log"
           cargo test --locked -p bt-platform install_flip | tee "$log"
           grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {

@@ -4434,19 +4434,67 @@ pub fn attributes_of(metadata: &std::fs::Metadata) -> String {
 /// that the hand-off did not happen instead of reporting a detached child that
 /// the job will kill with its parent. Off Windows there is no inherited job
 /// object and this is the ordinary quiet child door.
+///
+/// **The child holds none of this process's standard streams**: all three are
+/// the null device unless the caller names others. A child built to outlive
+/// its parent would otherwise keep a duplicate of each, and a resident Folio's
+/// `stdout` and `stderr` are its `diagnostics.log`, inside the data folder; the
+/// uninstaller this door starts removes that folder, and on Windows its probe
+/// is refused by any handle there, its own included.
 #[must_use]
 pub fn quiet_breakaway_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[cfg(windows)]
-    {
+    let mut command = {
         use std::os::windows::process::CommandExt;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         let mut command = quiet_command(program);
         command.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
         command
-    }
+    };
     #[cfg(not(windows))]
+    let mut command = quiet_command(program);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+/// **Make the standard handles this process was started with not inheritable**:
+/// a child of this process then holds one only when its command names it.
+///
+/// On Windows a standard handle a process was handed is inheritable in it —
+/// `std::process::Command` duplicates an inherited stream for its child as
+/// inheritable, and the child keeps the flag — and `Command` starts every child
+/// with `bInheritHandles`, so each child also receives every inheritable handle
+/// its parent holds, under no standard slot of its own, where no code in it can
+/// find it to close. A Folio started by another Folio (an update's trial, a
+/// rescue, the uninstaller) would pass its parent's `diagnostics.log` down the
+/// chain that way, to children whose commands name other streams. Naming
+/// still works afterwards: `Command` duplicates a named stream afresh for each
+/// child it starts.
+///
+/// Off Windows there is nothing to do: a child receives descriptors 0–2 by
+/// position, every descriptor `std` opens is close-on-exec, and pointing 1 and
+/// 2 elsewhere (`dup2`) closes what they named.
+pub fn make_standard_streams_uninheritable() {
+    #[cfg(windows)]
     {
-        quiet_command(program)
+        use windows::Win32::Foundation::{HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation};
+        use windows::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        for slot in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: plain reads and a flag change on this process's own handles.
+            if let Ok(handle) = unsafe { GetStdHandle(slot) }
+                && !handle.is_invalid()
+            {
+                // A slot holding something that is not a kernel handle refuses the flag, and
+                // such a thing is not inherited either.
+                let _ =
+                    unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+            }
+        }
     }
 }
 
