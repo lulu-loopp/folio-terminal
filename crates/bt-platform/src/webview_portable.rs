@@ -40,7 +40,7 @@ fn no_engine(what: &str) -> String {
 pub struct WebHost {
     _gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
     _request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-    _wake: Box<dyn Fn()>,
+    _wake: Box<dyn Fn() + Send + Sync>,
     /// The colour scheme the seat said its pages prefer — kept, like the other two arms keep
     /// it, so that the seat's own record of what it said reads the same on every machine.
     color_scheme: Cell<Option<WebColorScheme>>,
@@ -53,7 +53,7 @@ impl WebHost {
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
         request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-        wake: Box<dyn Fn()>,
+        wake: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
             _gate: gate,

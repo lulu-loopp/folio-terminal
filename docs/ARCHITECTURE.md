@@ -42,18 +42,25 @@ Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
 `bt-install-channel` (ticket U-1), through the door. A1c (on `f2b31952`) moved the eighteen bare sites of `bt-app`
 and `bt-platform` through the door without adding or removing one. And one more after it: `update_trial::begin_watch`'s
 `folio-trial-watch` (0.4.6 U-13), through the door, started only in an update's trial. T-PROBE-CHILD adds one
-probe-output reader site, called once for each pipe, through the door. `crates/bt-platform/src/lib.rs` holds a NUL byte, so
-ripgrep skips it as binary; search it with `grep -a`. To re-count, grep the patterns in the last column and
-drop the test items; a number that moves edits this table and the pictures.
+probe-output reader site, called once for each pipe, through the door.
+
+The thread rows below were recounted with `bt-source` product items on 2026-10-06
+at `d4fbc2d7`. They include all OS branches but exclude the optional `trust-harness`
+and `test-shell` features. The Linux default build in that snapshot has 60 start sites:
+`bt-app` 43, `bt-platform` 13 and `bt-pty` 4, plus the separate rayon pool.
+Including both development features across all source branches gives 72 sites.
+The diagrams and non-thread rows retain the historical census above. Tracked
+source now passes the NUL-byte gate. Recounts use the product-item filter rather
+than raw text matches, which include comments and test bodies.
 
 | what | count | pattern |
 |---|---|---|
-| thread-spawn sites | **52** — `bt-app` 34, `bt-platform` 14, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **48** — `bt-app` 34, `bt-platform` 14; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site; T-ENV-REFRESH round 4 removes the launch-snapshot worker). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
+| thread-spawn sites | **70** across default-feature OS source — `bt-app` 43, `bt-platform` 23, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **66** across default-feature OS source — `bt-app` 43, `bt-platform` 23; each is a `Worker` by its name and its body is lent a `WorkerCtx`. The Linux default build has 56: `bt-app` 43 and `bt-platform` 13. The source guard `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` holds both crates to the door. | `spawn_at_priority` |
 | bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
 | of those through the door, in a door process rather than the window process | **4**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`), and `folio-remover-ready` (`deferred_removal::schedule`'s readiness pipe); each process's main thread waits as a worker, entered once through `enter_standalone_main`. The uninstaller and copied-remover doors enter once for their whole runs, so their process waits and retry backoff through `wait::sleep_within` are workers' waits too | `enter_standalone_main\(` |
-| named sites / distinct names | **49 / 45**, besides the pool | the first argument, or `.name(…)` |
-| `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
+| named sites / distinct source expressions | **67 / 59** across default-feature OS source, **57 / 55** on Linux; includes `pty-retirement`, excludes the pool. Forwarded parameters and constants count as source expressions, not resolved runtime strings. | the first argument, or `.name(…)` |
+| `spawn_blocking` | **0** explicit calls at the historical census | `spawn_blocking` |
 | channel constructions | **34** — 28 `mpsc::channel`, 6 `mpsc::sync_channel`; `bt-app` 27 (T-KEYBOARD-CTRLALT adds the layout-table request and answer pair), `bt-platform` 7 (T-UNINSTALL-UX adds the remover readiness pipe) — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **34** (T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
 | child-process construction | **one** `Command::new`, inside the doors `bt_platform::quiet_command` and `quiet_breakaway_command`, with **17** product callers — the existing probe, shell, Git, update, rescue and trial callers; `bt_platform::foreground_program` starts the private console-membership helper; `uninstall::leave_armed` starts `--uninstall [--remove-data] --after-pid <pid>`; and `bt_platform::deferred_removal::schedule` starts the internal native copy as `--uninstall-remove`. Both uninstall starts request `CREATE_BREAKAWAY_FROM_JOB` on Windows; a containing job that disallows breakaway makes creation fail and the caller reports failure instead of claiming a detached child exists. No command interpreter or mutable removal script is involved; besides this door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` remain | `quiet_command(_named)?\(`, `quiet_breakaway_command\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
@@ -568,10 +575,10 @@ does not have to find it later.
 
 ### 5.1 The seven lanes
 
-Fifty-two production thread-spawn sites exist across three crates (`bt-app` 34,
-`bt-platform` 14, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1).
-All but `bt-pty`'s four go through the thread door (0.4.6, A1c). T-PROBE-CHILD
-adds the probe-output reader site.
+The window-layer snapshot census is in §0.1. Linux adds nine platform-provider starts,
+including `bt-linux-display`; that snapshot has 60 explicit Linux start sites and
+one lazy rayon pool. The four `bt-pty` sites remain outside the thread door;
+the app and platform starts carry `WorkerCtx`.
 **The thread count is not the defect; the absence of a contract
 is.** `MathWorker::spawn` starts path verification and image scaling as well as
 math and returns all three through one `MathWorkerResult` — a historical hosting
@@ -913,6 +920,8 @@ A2e puts one `expect` on each; revision (k) allocates the rest.
 | 27 | open | the media session's quiet at exit: `Readers::quiet_within(MEDIA_QUIET_BUDGET)`, a `Condvar::wait_timeout` against one deadline, for first-frame readers still inside Media Foundation, before `MFShutdown` | `fn main` → `video::shutdown_media_session`, after the loop returns | **open** — found by the thread-door note's revision (k)9 and ruled interim (`DESIGN.md`, 2026-09-27, *five window-thread waits the thread-door survey found are registry rows 24–28*): retained on the window thread, with a configured wait deadline of 1.5 s (`MEDIA_QUIET_BUDGET`; the mutex taken first, the condition variable's reacquisition and scheduling can pass it, so it is not an elapsed-time guarantee, and the `MFShutdown` after it has no deadline); repaid by D-80's ticket as scope added to D-80's recorded one (reader quiescence and `MFShutdown`, amended by the thread-door note's revision (m), `DESIGN.md`, 2026-09-27, *the thread-door note's revision (m)*), unless the owner rules it stays as rows 15–17 do (version: owner); its door will be `MediaQuiet`, admitting the reader quiescence only |
 | 28 | open | an update's trial takes the data directory's claim: `update_trial::take_the_claim_within` tries every 100 ms until the old build lets go | `fn main`, before `LaunchHandOver` (trials only) | **open** — found by the thread-door note's revision (k)9 and ruled interim (`DESIGN.md`, 2026-09-27, *five window-thread waits the thread-door survey found are registry rows 24–28*): retained on the window thread before the loop, bounded by `CLAIM_WAIT` (30 s) plus one last try; repaid by B11's startup claim ownership, unless the owner rules it stays as row 18 does (version: owner); its door will be `TrialClaim` |
 | 29 | ruled to stay | an update's exit guard at the process's end: `update_handoff::leave_armed` runs the guard on a worker of its own and waits `recv_timeout(LEAVE_WITHIN)` (75 s) for its answer — the wait for the applier's decision, the election, the start, its acknowledgement, the fallback | `fn main`, after the loop (only after *Restart to update*) | **ruled to stay** (`DESIGN.md`, 2026-09-28, *every road process of an update leaves through one exit guard*): the loop has returned and every window is gone; the process must not end before the start that replaces it is delivered, and the wait is bounded; during it no window of this process exists, so the person sees Folio gone until the applier's trial or the replacement appears, and the message box appears when nothing was delivered: at the latest at the bound, earlier when every start has already failed. The box itself is shown on this thread after the wait (`bt_platform::standalone_alert`, U-32) and is synchronous: the process returns when it is answered or at the latest after `STANDALONE_ALERT_WITHIN` (15 min), when macOS takes its system alert away or Windows's ownerless `MessageBoxTimeoutW` returns |
+| 29a | done | Linux display reads use blocking x11rb `.reply()` cookies behind one process-wide `X11_SESSION` mutex; the first request also connects, interns atoms and queries randr | PR20 moves application X11 display, client-origin and posture reads to the display worker; layout consumes event or configured sizes, and native monitor enumeration keeps Winit's populated cache | **done — application display reads do not wait for X11 replies on the window thread**. Requests carry owner, request and generation identity. Pointer drops reject changed context; DragGuard preserves the aimed pointer; saved restores use captured monitor inputs and worker work areas. Move and resize invalidate the observed client origin and coalesce a new facts request. Caption, notification and snapshot posture use observed or desired state without treating unknown facts as false. A closing window discards late facts; summon retirement withdraws its pending request. Windows/macOS foreground activation is unchanged. Winit native window construction and its event processing remain library work. (`DESIGN.md`, 2026-10-06, *Linux application display reads close row 29a*). |
+| 30 | ruled to stay | Linux desktop workers joined after their application owners are dropped | `fn main`, after the event loop and `drop(application)` | The retirement work stays on its worker; the exiting thread polls for at most `SESSION_SAVE_BUDGET` (3 s), joins only if finished, and otherwise records a diagnostic and proceeds to `UpdateLeave` (this port's design choice, 2026-10-04: Linux reuses the Windows session-writer close policy — `T-QUIT-HAS-A-DEADLINE`, `T-QUIT-TIMEOUT-PROCEEDS` — so both platforms exit under one contract: retirement stays on its worker, the exiting thread waits at most `SESSION_SAVE_BUDGET`, and a stuck worker can never hang process exit) (`DESIGN.md`, 2026-10-06, *Linux desktop retirement uses the shared cutoff*). |
 
 **The doors** — one `bt_platform::admission::doors` type per line of the registry's `# doors` section; the station is the `hang_watch` station its meter enters. Every door takes its token by value, minted where the line says (A1d).
 
@@ -934,6 +943,7 @@ A2e puts one `expect` on each; revision (k) allocates the rest.
 | `SessionWriterRetire` | 16b | `SessionWriterRetire` | Exiting | `SessionWriter::close` | `SessionStore::close` | one call |
 | `TraceFlush` | 17 | `TraceFlush` | Exiting | `trace_sink::flush` | `fn main`; `trace_sink::Shutdown::drop` | one call |
 | `UpdateLeave` | 29 | `UpdateLeave` | Exiting | `update_handoff::leave_armed` | `fn main` | one call |
+| `DesktopRetire` | 30 | `DesktopRetire` | Exiting | `retire_linux_desktop` | `fn main` | one bounded retirement wait; join only after the worker finishes |
 | `LaunchHandOver` | 18 | `Starting` | Starting | `launch_wire::hand_over` | `fn main` | one call |
 | `WebController` | 21 | `WebController` | Running, Exiting | `WebHost::request_controller` | `WebSeat::step` | one call |
 | `WebEnvironment` | 21 | `WebEnvironment` | Running | `WebHost::request_environment` | `WebSeat::start_environment` | one call |

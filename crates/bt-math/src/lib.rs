@@ -1176,6 +1176,9 @@ fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
         // milliseconds, and it is paid on the lane that exists to keep tens of
         // milliseconds of typesetting off the window's thread.
         bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            #[cfg(target_os = "linux")]
+            bt_platform::load_svg_fonts(options.fontdb_mut());
+            #[cfg(not(target_os = "linux"))]
             options.fontdb_mut().load_system_fonts()
         });
         options
