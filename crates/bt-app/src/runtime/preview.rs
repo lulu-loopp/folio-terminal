@@ -71,6 +71,126 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
+impl TabState {
+    /// Re-key one preview surface when its tab enters another window.
+    ///
+    /// The buffer and document view belong to this tab (§7.1.3); the float id
+    /// belongs to its window. Keep the ownership rule beside the rest of the
+    /// preview's view-state writers so a surface migration does not become a
+    /// second module-author for tab-owned interaction state.
+    pub(crate) fn rekey_preview_surface(
+        &mut self,
+        from: PreviewSurface,
+        to: PreviewSurface,
+    ) -> bool {
+        if from == to {
+            return self.preview_panes.get(from).is_some();
+        }
+        let had_pane = self.preview_panes.rekey_surface(from, to);
+        if let Some(view) = self.git_graph_view.remove(&from) {
+            self.git_graph_view.remove(&to);
+            self.git_graph_view.insert(to, view);
+        }
+        if self.preview_edit_focus == Some(from) {
+            self.preview_edit_focus = Some(to);
+        }
+        if self
+            .preview_block_drag
+            .is_some_and(|drag| drag.surface == from)
+        {
+            self.preview_block_drag = None;
+        }
+        if self
+            .preview_block_hover
+            .is_some_and(|(surface, _)| surface == from)
+        {
+            self.preview_block_hover = None;
+        }
+        if self
+            .preview_body_drag
+            .is_some_and(|drag| drag.surface == from)
+        {
+            self.preview_body_drag = None;
+        }
+        if self
+            .preview_body_hover
+            .is_some_and(|(surface, _)| surface == from)
+        {
+            self.preview_body_hover = None;
+        }
+        if self
+            .preview_link_hover
+            .as_ref()
+            .is_some_and(|(surface, _)| *surface == from)
+        {
+            self.preview_link_hover = None;
+        }
+        if self.preview_selecting == Some(from) {
+            self.preview_selecting = None;
+        }
+        if self
+            .preview_text_drag
+            .as_ref()
+            .is_some_and(|drag| drag.surface == from)
+        {
+            self.preview_text_drag = None;
+        }
+        if self
+            .preview_image_drag
+            .is_some_and(|drag| drag.surface == from)
+        {
+            self.preview_image_drag = None;
+        }
+        if self
+            .preview_text_clicks
+            .last
+            .is_some_and(|(surface, _, _)| surface == from)
+        {
+            self.preview_text_clicks.interrupt();
+        }
+        if self
+            .preview_image_clicks
+            .last
+            .is_some_and(|(surface, _, _)| surface == from)
+        {
+            self.preview_image_clicks.last = None;
+        }
+        had_pane
+    }
+}
+
+/// Re-key the tab's preview model and transfer its window-owned preview
+/// interactions in their domain module. The source click chain and refusal
+/// notice name window-local float ids, so both are rebound with the host's new
+/// id here rather than written from `FolioApp`'s transaction coordinator.
+pub(crate) fn carry_floated_preview_surface_state(
+    tab: &mut TabState,
+    source: &mut WindowRuntime,
+    target: &mut WindowRuntime,
+    from: PreviewSurface,
+    to: PreviewSurface,
+) -> bool {
+    let rekeyed = tab.rekey_preview_surface(from, to);
+    if source
+        .preview_crumb_clicks
+        .last
+        .is_some_and(|(surface, _)| surface == from)
+    {
+        source.preview_crumb_clicks.interrupt();
+    }
+    if source
+        .preview_refusal
+        .is_some_and(|(surface, _)| surface == from)
+    {
+        let (_, at) = source
+            .preview_refusal
+            .take()
+            .expect("the refusal matched immediately above");
+        target.preview_refusal = Some((to, at));
+    }
+    rekeyed
+}
+
 impl Runtime<'_> {
     /// Prefer the live column's order, including watcher refreshes. A preview
     /// outside the tree uses the very same worker and comparator.

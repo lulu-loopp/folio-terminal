@@ -1,6 +1,9 @@
 # Tracked files that are intentionally binary. The integrity gates define text as strict UTF-8
 # containing no NUL byte. Each exact path must still violate that rule; a stale row fails.
 path	reason
+docs/plans/port/linux-preview-float-transfer-evidence/after-float-tab-transfer-green.png	PNG evidence of preview placement after tab transfer
+docs/plans/port/linux-preview-float-transfer-evidence/after-float-tab-transfer-red.png	PNG evidence of the failed preview-transfer reproduction
+docs/plans/port/linux-preview-float-transfer-evidence/before-float-tab-transfer.png	PNG evidence of previews before tab transfer
 assets/app-icon/folio-1024.png	binary format contains NUL bytes
 assets/app-icon/folio.ico	binary format contains NUL bytes
 assets/fonts/NotoColorEmoji_WindowsCompatible.ttf	binary format contains NUL bytes

@@ -898,12 +898,12 @@ jobs:
       - name: check the application, every target of it
         run: cargo check --locked --all-targets -p bt-app
 
-      # The application suite still contains Windows-fact fixtures, but these updater modules are
-      # macOS product code and must not wait for a manual re-entry run to compile and execute. Each
+      # The application suite still contains Windows-fact fixtures, but these updater and tab-focus
+      # regressions must execute on macOS rather than merely compile. Each
       # filter is required to select at least one test so a renamed module cannot turn this step
       # green by running nothing. E-12 is the one test that deliberately launches `/usr/bin/open`;
       # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
-      - name: test the macOS updater modules
+      - name: test the macOS updater and tab-focus regressions
         run: |
           set -euo pipefail
           skip=the_trial_is_launched_through_launch_services_and_found_by_its_image
@@ -929,6 +929,7 @@ jobs:
           run_app_filter update_handoff
           run_app_filter update_trial
           run_app_filter update_startup
+          run_app_filter runtime::web::transfer_focus_tests::
           log="$RUNNER_TEMP/macos-updater-install-flip.log"
           cargo test --locked -p bt-platform install_flip | tee "$log"
           grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {

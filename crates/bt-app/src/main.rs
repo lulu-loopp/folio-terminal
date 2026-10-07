@@ -5201,6 +5201,26 @@ impl PreviewPanes {
         Some(self.panes.remove(index).1)
     }
 
+    /// Give one surface the id its new window's host minted, preserving its
+    /// position in the tab's stable surface order. A stale entry already using
+    /// that receiving id gives way to the live surface being carried here.
+    fn rekey_surface(&mut self, from: PreviewSurface, to: PreviewSurface) -> bool {
+        if from == to {
+            return self.get(from).is_some();
+        }
+        let Some(mut source) = self.panes.iter().position(|(id, _)| *id == from) else {
+            return false;
+        };
+        if let Some(target) = self.panes.iter().position(|(id, _)| *id == to) {
+            self.panes.remove(target);
+            if target < source {
+                source -= 1;
+            }
+        }
+        self.panes[source].0 = to;
+        true
+    }
+
     /// Every surface, in the order they were first shown.
     fn iter(&self) -> impl Iterator<Item = (PreviewSurface, &PreviewPane)> {
         self.panes.iter().map(|(id, pane)| (*id, pane))
@@ -17025,6 +17045,184 @@ mod tab_identity_tests {
         assert_ne!(here, PreviewSurface::Float(2));
     }
 
+    /// A preview float gets a receiving-host id when its tab moves; the tab's
+    /// buffer view must keep its content and stable order under that new key.
+    #[test]
+    fn a_preview_float_rekey_keeps_its_tab_owned_view_state() {
+        let from = PreviewSurface::Float(5);
+        let to = PreviewSurface::Float(2);
+        let other = PreviewSurface::Seat(LeafId {
+            tab: TabId(1),
+            seat: SeatId(1),
+        });
+        let source = preview::PreviewSource::File(PathBuf::from("/fixture.md"));
+        let mut panes = PreviewPanes::default();
+        *panes.entry(from) = PreviewPane {
+            buffer: Some(source.clone()),
+            scroll: [12.0, 34.0],
+            ..PreviewPane::default()
+        };
+        *panes.entry(other) = PreviewPane::default();
+        *panes.entry(to) = PreviewPane {
+            buffer: Some(preview::PreviewSource::File(PathBuf::from("/stale.md"))),
+            ..PreviewPane::default()
+        };
+
+        assert!(panes.rekey_surface(from, to));
+        assert!(panes.get(from).is_none());
+        assert_eq!(
+            panes.get(to).and_then(|pane| pane.buffer.as_ref()),
+            Some(&source)
+        );
+        assert_eq!(panes.get(to).map(|pane| pane.scroll), Some([12.0, 34.0]));
+        assert!(panes.get(other).is_some());
+        assert_eq!(
+            panes.iter().map(|(surface, _)| surface).collect::<Vec<_>>(),
+            vec![to, other],
+            "the carried surface keeps its slot and replaces a stale target id"
+        );
+    }
+
+    /// A receiving host's id range must begin after every source id before the
+    /// first tab-owned pane is re-keyed. With source ids 1 and 6 and a target
+    /// epoch of 5, per-float migration would reuse 6 for the first float and
+    /// replace the second document's still-live view.
+    #[test]
+    fn a_batch_float_transfer_keeps_two_distinct_documents_when_ids_overlap() {
+        let tab_id = TabId(77);
+        let now = Instant::now();
+        let mut source_host = float::FloatHost::default();
+        let make_preview = |seat| {
+            float::FloatTenant::Preview(float::FloatPreview {
+                tab: tab_id,
+                page: Some(LeafId {
+                    tab: tab_id,
+                    seat: SeatId(seat),
+                }),
+            })
+        };
+        let make_files = || float::FloatTenant::Files(Box::default());
+        let make_frame = || [100.0, 140.0, 430.0, 320.0];
+        let first = source_host.open(
+            float::FloatMode::Pinned,
+            None,
+            make_preview(3),
+            make_frame(),
+            None,
+            now,
+        );
+        for _ in 0..4 {
+            source_host.open(
+                float::FloatMode::Pinned,
+                None,
+                make_files(),
+                make_frame(),
+                None,
+                now,
+            );
+        }
+        let second = source_host.open(
+            float::FloatMode::Pinned,
+            None,
+            make_preview(4),
+            make_frame(),
+            None,
+            now,
+        );
+
+        let mut target_host = float::FloatHost::default();
+        for _ in 0..5 {
+            target_host.open(
+                float::FloatMode::Pinned,
+                None,
+                make_files(),
+                make_frame(),
+                None,
+                now,
+            );
+        }
+        let migrated = source_host
+            .transfer_previews_to(
+                &mut target_host,
+                &[first, second],
+                1.0,
+                1.0,
+                [0.0, 80.0, 1200.0, 900.0],
+            )
+            .expect("both source preview floats are live and pinned");
+        assert_eq!(
+            migrated
+                .iter()
+                .map(|(from, to, preview)| (*from, *to, preview.page))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    first,
+                    7,
+                    Some(LeafId {
+                        tab: tab_id,
+                        seat: SeatId(3),
+                    }),
+                ),
+                (
+                    second,
+                    8,
+                    Some(LeafId {
+                        tab: tab_id,
+                        seat: SeatId(4),
+                    }),
+                ),
+            ],
+            "new ids are minted past the complete source range"
+        );
+
+        let first_source = preview::PreviewSource::File(PathBuf::from("/first.md"));
+        let second_source = preview::PreviewSource::File(PathBuf::from("/second.md"));
+        let mut panes = PreviewPanes::default();
+        panes.entry(PreviewSurface::Float(first)).buffer = Some(first_source.clone());
+        panes.entry(PreviewSurface::Float(second)).buffer = Some(second_source.clone());
+        let tab_seats = seats::Seats::lone_seat(&bt_layout::Seat::new(
+            SeatId(1),
+            bt_layout::SeatKind::Preview,
+        ))
+        .0;
+        let mut tab = assemble_tab_state(
+            tab_id,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            preview::PreviewPool::default(),
+            panes,
+            BTreeMap::new(),
+            SeatId(1),
+            TabSeed::default(),
+            tab_seats,
+            SeatLayout {
+                rects: Vec::new(),
+                stage: None,
+            },
+            None,
+        );
+        for (from, to, _) in migrated {
+            assert!(
+                tab.rekey_preview_surface(PreviewSurface::Float(from), PreviewSurface::Float(to),)
+            );
+        }
+        assert_eq!(
+            tab.preview_panes
+                .get(PreviewSurface::Float(7))
+                .and_then(|pane| pane.buffer.as_ref()),
+            Some(&first_source),
+            "the first document did not overwrite the second's old surface"
+        );
+        assert_eq!(
+            tab.preview_panes
+                .get(PreviewSurface::Float(8))
+                .and_then(|pane| pane.buffer.as_ref()),
+            Some(&second_source),
+            "the second document remains distinct after the whole batch"
+        );
+    }
+
     /// PIN (§7.12 ⓑ) — **a preview surface is read and written in the one tab
     /// that owns it.**
     ///
@@ -17189,6 +17387,91 @@ mod tab_identity_tests {
             "nothing in the commit may refuse: by then the strip has been cut and \
              a page has changed windows, and there is no way back that does not \
              have to be able to fail too"
+        );
+    }
+
+    /// RED — **a preview float is a surface of the tab it draws, and the tab's
+    /// move carries that surface to the receiving window.**
+    ///
+    /// The float chassis belongs to a window; its preview pane and its live page
+    /// belong to the tab. A tab transfer has to move the chassis entry, remap
+    /// the tab's old window-local surface id, and include a floated page in the
+    /// same rehost transaction as panes still in the tree.
+    #[test]
+    fn a_tab_transfer_carries_its_floated_preview_surface() {
+        let body = method_body("FolioApp", "transfer_tab");
+        let floated = body
+            .find("let floated_previews")
+            .expect("the transfer never collects the source tab's floated previews");
+        assert!(
+            body.contains(".live_windows()") && body.contains("preview.page"),
+            "floated page leaves are not included in the named transfer set:\n{body}"
+        );
+        let page_rehost = body
+            .find(".rehost(")
+            .expect("the page transfer has no rehost transaction");
+        assert!(
+            floated < page_rehost,
+            "floated page leaves must be included before the rehost transaction:\n{body}"
+        );
+        let commit = body
+            .split_once("── The model commit ")
+            .expect("the move has a model commit")
+            .1;
+        for (owed, why) in [
+            (
+                "transfer_previews_to(",
+                "the live preview floats must move as one id-safe batch into the target host",
+            ),
+            (
+                "carry_floated_preview_surface_state(",
+                "the preview owner must rekey tab and window interaction state in one place",
+            ),
+            (
+                "source.video.take(",
+                "a playing preview carried by the float must keep its engine and playhead",
+            ),
+        ] {
+            assert!(
+                commit.contains(owed),
+                "the preview-float transfer owes `{owed}`: {why}\n{commit}"
+            );
+        }
+        for (owed, why) in [
+            (
+                "target.renderer.presentation_geometry()",
+                "the moved frame must be clamped against the receiving window's geometry",
+            ),
+            (
+                "source_scale",
+                "the old physical frame must be read at its owning window's scale",
+            ),
+            (
+                "target_scale",
+                "the moved frame must keep its logical size at the receiving window's scale",
+            ),
+        ] {
+            assert!(
+                body.contains(owed),
+                "the preview-float prepare phase owes `{owed}`: {why}\n{body}"
+            );
+        }
+        let transfer_state = free_fn_body("carry_floated_preview_surface_state");
+        assert!(
+            transfer_state.contains("tab.rekey_preview_surface(")
+                && transfer_state.contains("preview_crumb_clicks")
+                && transfer_state.contains("preview_refusal"),
+            "the preview owner must carry its surface-local state with the new id:\n{transfer_state}"
+        );
+        assert!(
+            commit.contains("carry_transferred_web_keyboard("),
+            "the web module must carry its window-owned keyboard receipt"
+        );
+        assert!(
+            body.contains("web_keyboard_transfer")
+                && body.contains("source_web_keyboard")
+                && body.contains("preview.page"),
+            "a floated live page and its keyboard receipt must travel with the owning tab:\n{body}"
         );
     }
 
@@ -60603,14 +60886,48 @@ impl FolioApp {
         // ([`TabIds`]), so a moving tab's leaves differ from every other tab's in
         // this window and in the one it is moving into, whatever the seat
         // numbers are. The refusal is gone rather than made unreachable.
+        // A preview float is not in the layout tree, but its live page is still
+        // a leaf of this tab. Include that page in the same rehost transaction
+        // as the tab's docked pages before the source window can retire.
+        let floated_previews: Vec<(float::FloatId, float::FloatPreview)> = source
+            .float
+            .live_windows()
+            // `live_windows` includes the transient peek; only clicked, pinned
+            // previews are a tab-owned float transfer. Both production preview
+            // openers (`runtime/peek.rs::promote_file_peek` and
+            // `runtime/preview.rs::pop_out_preview`) create Pinned; transient
+            // hover peeks use the files tenant.
+            .filter(|win| win.mode == float::FloatMode::Pinned)
+            .filter_map(|win| {
+                let preview = win.preview()?;
+                (preview.tab == tab).then_some((win.id(), preview))
+            })
+            .collect();
         let moving: BTreeSet<LeafId> = source.tabs[index]
             .seats
             .tree()
             .seats_in_order()
             .into_iter()
             .map(|seat| LeafId { tab, seat: seat.id })
+            .chain(
+                floated_previews
+                    .iter()
+                    .filter_map(|(_, preview)| preview.page),
+            )
             .collect();
         let hosted_in_source: BTreeSet<LeafId> = source.web.keys().copied().collect();
+        let source_web_keyboard = source
+            .web_keyboard
+            .filter(|leaf| moving.contains(leaf) && hosted_in_source.contains(leaf));
+        let front = source.tabs[index].seats.identity();
+        let front_page = LeafId { tab, seat: front };
+        let front_web_page = hosted_in_source.contains(&front_page).then_some(front_page);
+        let web_keyboard_transfer =
+            runtime::WebKeyboardTransfer::new(front_web_page, source_web_keyboard);
+        let source_scale = source.renderer.scale_factor() as f32;
+        let target_scale = target.renderer.scale_factor() as f32;
+        let (target_width, target_height) = target.renderer.presentation_geometry().swapchain_size;
+        let target_float_viewport = float_viewport_rect(target_width, target_height, target_scale);
 
         // ── The platform handoff ──────────────────────────────────────────────
         // In seat order, so that the compensation below can be read as "the ones
@@ -60625,7 +60942,6 @@ impl FolioApp {
         let mut outcomes = Vec::new();
         let mut refused = None;
         let source_window = native_window(&source.window)?;
-        let front = source.tabs[index].seats.identity();
         // Two disjoint fields of one window, borrowed apart, because the page
         // being handed over and the tree it is being handed out of are both the
         // source window's.
@@ -60650,10 +60966,7 @@ impl FolioApp {
                     },
                     window: target_window,
                 },
-                // **The keyboard goes with the tab**, and only for the pane the
-                // tab is standing on: a page in a background pane of a moved tab
-                // has not been pointed at by anybody.
-                front == leaf.seat,
+                web_keyboard_transfer.takes_focus(leaf),
                 &mut outcomes,
             );
             match report {
@@ -60696,6 +61009,54 @@ impl FolioApp {
         // ── The model commit ──────────────────────────────────────────────────
         // From here nothing may fail.
         let mut carried = source.tabs.remove(index);
+        // `PreviewPane` and its buffers are already on `carried`; the float
+        // chassis and live page were window-owned. Move only the preview
+        // tenants named by this tab, assigning each the target host's id and
+        // changing every view key that named the old surface.
+        let source_float_ids: Vec<float::FloatId> =
+            floated_previews.iter().map(|(id, _)| *id).collect();
+        let transferred_previews = source
+            .float
+            .transfer_previews_to(
+                &mut target.float,
+                &source_float_ids,
+                source_scale,
+                target_scale,
+                target_float_viewport,
+            )
+            .expect("the live pinned previews collected during prepare remain transferable");
+        for (old_id, target_id, received) in transferred_previews {
+            debug_assert!(
+                floated_previews
+                    .iter()
+                    .any(|(source_id, preview)| *source_id == old_id
+                        && preview.tab == received.tab
+                        && preview.page == received.page)
+            );
+            debug_assert_eq!(received.tab, tab);
+            let from_surface = PreviewSurface::Float(old_id);
+            let to_surface = PreviewSurface::Float(target_id);
+            let rekeyed = runtime::carry_floated_preview_surface_state(
+                &mut carried,
+                source,
+                target,
+                from_surface,
+                to_surface,
+            );
+            debug_assert!(
+                rekeyed,
+                "a live preview float carries its tab-owned view state"
+            );
+            if let Some(video) = source.video.take(from_surface) {
+                target.video.put(to_surface, video);
+            }
+        }
+        runtime::carry_transferred_web_keyboard(
+            &mut source.web_keyboard,
+            &mut target.web_keyboard,
+            &mut target.float,
+            web_keyboard_transfer,
+        );
         if source.active_tab >= source.tabs.len() {
             source.active_tab = source.tabs.len().saturating_sub(1);
         }
@@ -60765,6 +61126,7 @@ impl FolioApp {
         };
         for id in settling {
             if let Some(mut runtime) = self.runtime(*id) {
+                runtime.forget_dead_float_gestures();
                 // **The carried panes are measured where they now stand** (ticket 37): each keeps
                 // its rung, and its metrics are derived again at the scale this window has
                 // recorded — no new sampling of where the window is — before the re-solve below
