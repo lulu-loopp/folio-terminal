@@ -403,6 +403,10 @@ text_entries! {
     CleanupMarkPreferences,
     CleanupMarkSavedState,
     CleanupMarkUnixData,
+    #[cfg(any(target_os = "linux", test))]
+    CleanupMarkUnixConfig,
+    #[cfg(any(target_os = "linux", test))]
+    CleanupMarkUnixCache,
     CleanupMarkRecovery,
     CleanupMarkUpdateEntrances,
     CleanupMarkUpdateHome,
@@ -433,6 +437,9 @@ text_entries! {
     UninstallCardCancel,
 
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
+    /// A pending drop lost the pointer or target state it was requested for.
+    #[cfg(any(target_os = "linux", test))]
+    DropLocationUnconfirmed,
     PastePathEncoding,
     PastePathControl,
     PastePathPowerShellQuote,
@@ -3085,6 +3092,12 @@ impl Text {
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
             ),
+            #[cfg(any(target_os = "linux", test))]
+            Self::DropLocationUnconfirmed => pick(
+                lang,
+                "Folio could not confirm where the drop landed. Drop the files again.",
+                "Folio 无法确认放置位置。请重新拖放文件。",
+            ),
             Self::PasteClipboardPicture => pick(
                 lang,
                 "The clipboard picture could not be saved. Copy again and retry.",
@@ -4962,6 +4975,12 @@ impl Text {
                 pick(lang, "Saved Application State", "Saved Application State")
             }
             Self::CleanupMarkUnixData => pick(lang, "Unix data", "Unix 数据"),
+            #[cfg(any(target_os = "linux", test))]
+            // zh: pending
+            Self::CleanupMarkUnixConfig => pick(lang, "Unix config", "Unix config"),
+            #[cfg(any(target_os = "linux", test))]
+            // zh: pending
+            Self::CleanupMarkUnixCache => pick(lang, "Unix cache", "Unix cache"),
             Self::CleanupMarkRecovery => {
                 pick(lang, "User configuration recovery copies", "用户配置备份")
             }
@@ -5996,7 +6015,12 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        (Self::CleanupMarkUnixConfig, HostPlatform::Windows),
+        (Self::CleanupMarkUnixConfig, HostPlatform::MacOs),
+        (Self::CleanupMarkUnixCache, HostPlatform::Windows),
+        (Self::CleanupMarkUnixCache, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

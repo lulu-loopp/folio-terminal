@@ -3923,9 +3923,9 @@ const ENGINE_MACOS: &str = "bt-platform crate::video::macos_player::<Engine as D
                             [not(windows)] [target_os = \"macos\"]";
 const ENGINE_MACOS_SHUTDOWN: &str = "bt-platform crate::video::macos_player::Engine::shutdown \
                                      [not(windows)] [target_os = \"macos\"]";
-const ENGINE_PORTABLE_SHUTDOWN: &str = "bt-platform crate::video::engine::no_player::Engine::\
-                                        shutdown [not(windows)] [not(target_os = \
-                                        \"macos\")]";
+const ENGINE_LINUX: &str = "bt-platform crate::video::linux_player::<Engine as Drop>::drop [not(windows)] [target_os = \"linux\"]";
+const ENGINE_LINUX_SHUTDOWN: &str = "bt-platform crate::video::linux_player::Engine::shutdown [not(windows)] [target_os = \"linux\"]";
+const ENGINE_LINUX_WAIT: &str = "bt-platform crate::video::linux_player::wait_for_shutdown [not(windows)] [target_os = \"linux\"]";
 const SEAT: &str = "bt-app crate::video_seat::<VideoSeat as Drop>::drop";
 const SEAT_SHUTDOWN: &str = "bt-app crate::video_seat::VideoSeat::shutdown";
 const SEATS: &str = "bt-app crate::video_seat::<VideoSeats as Drop>::drop";
@@ -3950,7 +3950,7 @@ const MACOS_TASKBAR: &str =
 
 /// **The exception table** (revision (e)3 as corrected by (f)2 and (g)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`.
-const EXCEPTIONS: [Exception; 14] = [
+const EXCEPTIONS: [Exception; 15] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -3988,6 +3988,10 @@ const EXCEPTIONS: [Exception; 14] = [
         drop: ENGINE_MACOS,
     },
     Exception {
+        row: "video::linux_player::Engine",
+        drop: ENGINE_LINUX,
+    },
+    Exception {
         row: "VideoSeat",
         drop: SEAT,
     },
@@ -4010,7 +4014,7 @@ const EXCEPTIONS: [Exception; 14] = [
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 41] = [
+const PINNED: [Pinned; 43] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
@@ -4147,7 +4151,12 @@ const PINNED: [Pinned; 41] = [
         body: ENGINE_WINDOWS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &["load", "take"],
+        // The reading is cfg-blind: every platform's arm is read on every host,
+        // and the X11 hotkey worker's own `CommandSender::send` is a first-party
+        // `send` a method call on a foreign channel resolves to once this file
+        // declares it. The engines' wake-up send is a leaf here for that reason,
+        // beside `take` and `load`.
+        leaves: &["load", "take", "send"],
     },
     Pinned {
         body: ENGINE_MACOS,
@@ -4159,13 +4168,38 @@ const PINNED: [Pinned; 41] = [
         body: ENGINE_MACOS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &["load", "take"],
+        // The reading is cfg-blind: every platform's arm is read on every host,
+        // and the X11 hotkey worker's own `CommandSender::send` is a first-party
+        // `send` a method call on a foreign channel resolves to once this file
+        // declares it. The engines' wake-up send is a leaf here for that reason,
+        // beside `take` and `load`.
+        leaves: &["load", "take", "send"],
     },
     Pinned {
-        body: ENGINE_PORTABLE_SHUTDOWN,
-        edges: &[],
+        body: ENGINE_LINUX,
+        edges: &[&[ENGINE_LINUX_SHUTDOWN]],
         effects: &[],
         leaves: &[],
+    },
+    Pinned {
+        body: ENGINE_LINUX_SHUTDOWN,
+        edges: &[&[ROLE], &[ADMITTED], &[ENGINE_LINUX_WAIT]],
+        effects: &[],
+        // The reading is cfg-blind: every platform's arm is read on every host,
+        // and the X11 hotkey worker's own `CommandSender::send` is a first-party
+        // `send` a method call on a foreign channel resolves to once this file
+        // declares it. The engine's wake-up send is a leaf here for that reason,
+        // beside `take`.
+        leaves: &["take", "send"],
+    },
+    Pinned {
+        body: ENGINE_LINUX_WAIT,
+        edges: &[],
+        effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
+        // The reading is cfg-blind: the stopped poll's `load` resolves to this
+        // file's own `GstApi::load` once linux_player.rs is in the world, the
+        // way the engines' wake-up send resolves to the hotkey worker's.
+        leaves: &["load"],
     },
     Pinned {
         body: SEAT,
@@ -4178,7 +4212,7 @@ const PINNED: [Pinned; 41] = [
         edges: &[&[
             ENGINE_WINDOWS_SHUTDOWN,
             ENGINE_MACOS_SHUTDOWN,
-            ENGINE_PORTABLE_SHUTDOWN,
+            ENGINE_LINUX_SHUTDOWN,
         ]],
         effects: &[],
         leaves: &[],

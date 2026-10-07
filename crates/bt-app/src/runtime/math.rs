@@ -2,20 +2,19 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AnimationEntry, AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
-    Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
-    PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
-    PreviewSurface, PreviewTextCommand, Runtime, TabState, adopt_animation_fill,
-    answer_one_formula, answers_for, dispatch_tab_decoration_tasks, document_formulas,
-    dump_overlay_frame, first_run, float_trigger_tip, foreground_program, formula_tools,
-    ground_overlay_layers, hang_watch, i18n, leaf_session_mut, marks, math_copy_window,
-    math_em_milli, new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command,
-    preview_trace, profiles, quit, rail_overlay_layer, recoverable_clipboard_write, restore,
-    retire_spent_math_copy, search, seats, settings, tooltip, trace_sink, window_layout_key,
-    write_terminal_clipboard_text,
+    AnimationEntry, AnimationFillOutcome, AnswerOwner, ClipboardWriteEffect,
+    DecorationWorkerCompletion, DocumentMath, Layered, MathHoverExit, MathWorkerRequest,
+    MathWorkerResult, ModalBand, Motion, OverlayStack, PasteTarget, Popup, PreviewDocument,
+    PreviewMathArtifact, PreviewMathKey, PreviewMathPicture, PreviewSurface, PreviewTextCommand,
+    Runtime, TabState, adopt_animation_fill, answer_one_formula, answers_for,
+    dispatch_tab_decoration_tasks, document_formulas, dump_overlay_frame, first_run,
+    float_trigger_tip, foreground_program, formula_tools, ground_overlay_layers, hang_watch, i18n,
+    leaf_session_mut, marks, math_copy_window, math_em_milli, new_tab_tip, nonzero_u32, preview,
+    preview_select, preview_text_command, preview_trace, profiles, quit, rail_overlay_layer,
+    restore, retire_spent_math_copy, search, seats, settings, tooltip, trace_sink,
+    window_layout_key,
 };
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger, MathHit, MathHitTarget, Travel};
 use bt_term::{SessionMathTask, normalized_local_image_path_key};
@@ -721,24 +720,6 @@ impl Runtime<'_> {
         let (start, end) = selection.range(&pieces);
         let text = preview_select::copy_text(&pieces, start, end);
         (!text.is_empty()).then_some(text)
-    }
-
-    /// Put a rendered page's selection on the clipboard, through the door the
-    /// terminal's own copy already uses.
-    pub(in crate::runtime) fn copy_preview_text_selection(
-        &mut self,
-        surface: PreviewSurface,
-    ) -> bool {
-        let Some(text) = self.preview_selected_text(surface) else {
-            return false;
-        };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
-            // Recoverable, on `recoverable_clipboard_write`'s own terms: the
-            // selection stays standing so the reader can try again.
-            eprintln!("recoverable preview copy failure: {error:#}");
-            return false;
-        }
-        true
     }
 
     /// **One key aimed at a rendered page's selection**, or `false` if it was
@@ -2571,43 +2552,6 @@ impl Runtime<'_> {
         }]
     }
 
-    /// **Asked of the pane the block is in.** This used to ask the *focused* one, and a right
-    /// press does not move the keyboard — the focus move lives inside the left-only route — so
-    /// copying from a formula in an unfocused pane asked a session where the anchor names nothing
-    /// and copied nothing, or, where that session happened to hold a block of the same shape,
-    /// copied the wrong formula. The seat comes from the press, like the other two verbs'.
-    pub(in crate::runtime) fn copy_math_latex(
-        &mut self,
-        target: PasteTarget,
-        anchor: &MathBlockAnchor,
-    ) {
-        // A block anchor names a place in a shell's transcript, so a tab with no
-        // shell has no anchor anybody could have clicked and nothing to copy
-        // (§7.1.6h) — the same `None` a stale anchor already answers with.
-        let Some(index) = self.live_paste_target(target) else {
-            return;
-        };
-        let Some(source) = self.window.tabs[index]
-            .sessions
-            .get(&target.seat)
-            .and_then(|leaf| leaf.session.math_source(anchor))
-        else {
-            return;
-        };
-        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-            bt_platform::set_clipboard_text(source)
-        })
-        .map_err(|error| anyhow!(error))
-        .context("copy original LaTeX source to clipboard");
-        // **Only a copy that landed says it landed** (owner's ruling 2026-09-14
-        // ②). The bool this helper already returned was being thrown away, and
-        // a tick on a clipboard the window could not reach would be the one
-        // acknowledgement in this product that confirms nothing.
-        if recoverable_clipboard_write(result, "formula copy") {
-            self.window.math_copied = Some((anchor.clone(), Instant::now()));
-        }
-    }
-
     pub(in crate::runtime) fn apply_math_context_menu_result(&mut self) {
         let Some(result) = self.window.math_context_menu.take_result() else {
             return;
@@ -2673,11 +2617,10 @@ impl Runtime<'_> {
     /// Put one string on the clipboard, through the door every other copy in
     /// this window uses.
     pub(in crate::runtime) fn copy_text_to_clipboard(&mut self, text: &str) {
-        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-            bt_platform::set_clipboard_text(text)
-        })
-        .map_err(|error| anyhow!(error))
-        .context("copy a refused address to the clipboard");
-        let _ = recoverable_clipboard_write(result, "web address copy");
+        let _ = self.submit_clipboard_write(
+            text.to_owned(),
+            "web address copy",
+            ClipboardWriteEffect::None,
+        );
     }
 }

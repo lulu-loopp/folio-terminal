@@ -1,6 +1,8 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+#[cfg(not(target_os = "linux"))]
+use crate::write_terminal_clipboard_text;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
@@ -45,15 +47,16 @@ use crate::{
     preview_rail_tip_text, preview_select, preview_selection_bands, preview_tab_index_among,
     preview_text, preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace,
     preview_viewport, preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns,
-    profiles, recoverable_clipboard_write, rename_would_replace_another_entry,
-    resolve_document_pictures, revealable_preview_file, scroll_bar_layer, scrollback_quota, seats,
-    settings, settle_attention, shown_address, source_opens_as_a_page, step_preview_caret_by_row,
-    strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
-    switcher_rows, tab_owes_frame, tab_trailing_targets, table_block, text_field,
-    tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key, video_seat,
-    video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
-    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    profiles, rename_would_replace_another_entry, resolve_document_pictures,
+    revealable_preview_file, scroll_bar_layer, scrollback_quota, seats, settings, settle_attention,
+    shown_address, source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due,
+    surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
+    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
+    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
+    webhost, webnav, wheel_points_sideways, window_taskbar_progress,
 };
+#[cfg(target_os = "linux")]
+use crate::{ClipboardDestination, linux_clipboard_lane::ReadKind};
 use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::Result;
@@ -780,7 +783,7 @@ impl Runtime<'_> {
             ceiling.1 = ceiling.1.max(size.height);
         }
         if ceiling.0 == 0 || ceiling.1 == 0 {
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             ceiling = (inner.width.max(1), inner.height.max(1));
         }
         ceiling
@@ -4018,9 +4021,12 @@ impl Runtime<'_> {
         if url.is_empty() {
             return Ok(());
         }
-        let result = write_terminal_clipboard_text(&url);
-        recoverable_clipboard_write(result, "copy a page's address");
-        Ok(())
+        self.submit_clipboard_write(
+            url,
+            "copy a page's address",
+            crate::ClipboardWriteEffect::None,
+        )
+        .map(drop)
     }
 
     /// **Stand the files column where this segment of the path is** (user ruling
@@ -7600,8 +7606,19 @@ impl Runtime<'_> {
         else {
             return;
         };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
-            eprintln!("recoverable preview copy failure: {error:#}");
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) =
+                self.submit_clipboard_write(text, "preview copy", crate::ClipboardWriteEffect::None)
+            {
+                eprintln!("recoverable preview copy failure: {error:#}");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Err(error) = write_terminal_clipboard_text(&text) {
+                eprintln!("recoverable preview copy failure: {error:#}");
+            }
         }
     }
 
@@ -7611,15 +7628,46 @@ impl Runtime<'_> {
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
     pub(in crate::runtime) fn paste_into_preview(&mut self) -> Result<()> {
-        let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        }) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!("recoverable preview paste failure: {error}");
+        #[cfg(target_os = "linux")]
+        {
+            let Some(surface) = self.preview_keyboard_surface() else {
+                return Ok(());
+            };
+            let Some(pane) = self.preview_pane(surface) else {
+                return Ok(());
+            };
+            let Some(source) = pane.buffer.clone() else {
+                return Ok(());
+            };
+            if !self.preview_is_editable(surface) {
                 return Ok(());
             }
-        };
+            let target = self.clipboard_target(ClipboardDestination::Preview {
+                surface,
+                source,
+                identity: Arc::clone(&pane.instance_identity),
+            });
+            if let Err(error) = self.request_clipboard_read(target, ReadKind::Text) {
+                diagnostics::note(&format!("recoverable preview paste failure: {error}"));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
+                bt_platform::clipboard_text()
+            }) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!("recoverable preview paste failure: {error}");
+                    return Ok(());
+                }
+            };
+            self.apply_clipboard_text_to_preview(&text)
+        }
+    }
+
+    pub(in crate::runtime) fn apply_clipboard_text_to_preview(&mut self, text: &str) -> Result<()> {
         if text.is_empty() {
             return Ok(());
         }
@@ -7628,7 +7676,7 @@ impl Runtime<'_> {
             .and_then(|surface| self.preview_buffer_on(surface))
             .and_then(|buffer| buffer.content.as_deref())
             .map_or("\n", preview_edit::eol_of);
-        let text = preview_edit::with_eol(&text, eol);
+        let text = preview_edit::with_eol(text, eol);
         self.insert_into_preview(&text)
     }
 

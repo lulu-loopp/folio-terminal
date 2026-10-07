@@ -94,7 +94,15 @@ impl StorageWatch {
     /// Fold in whatever the watcher thread has said and answer whether a re-read
     /// is due.
     pub fn due(&mut self, now: Instant) -> bool {
-        self.news.due(now)
+        let due = self.news.due(now);
+        if let Some(error) = self.news.take_failure() {
+            let directory = crate::persist::storage_dir();
+            eprintln!(
+                "recoverable storage watch failure on {}: {error}",
+                directory.display()
+            );
+        }
+        due
     }
 
     /// When the loop must wake to answer news it already has, if it has any.
