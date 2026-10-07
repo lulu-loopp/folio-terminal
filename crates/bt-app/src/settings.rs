@@ -11875,20 +11875,19 @@ pub fn layout_for_menus(
                 ];
                 // Plan A keeps the release/failure link on the Version value's
                 // first line. Give the link its own right-aligned box and make
-                // the value's wrapping width end before it; the height solve in
-                // `desc_lines` subtracts the same measured width.
+                // the value's wrapping width end one row gap before it; the
+                // height solve in `desc_lines` cedes the same width.
                 if row == SettingsRow::AboutVersion
                     && let Some(link) = &content_of.values.version_update.link
                 {
-                    let width = measure(link.text(), px(ROW_DESC_FONT_LOGICAL_PX))
-                        + px(COMBO_CHEVRON_BOX_LOGICAL_PX);
+                    let (width, ceded) = version_link_extent(link, scale, measure);
                     placed_version_link = Some([
                         desc[2] - width,
                         desc[1],
                         desc[2],
                         desc[1] + px(ROW_DESC_LINE_LOGICAL_PX),
                     ]);
-                    desc[2] -= width;
+                    desc[2] -= ceded;
                 }
                 placed_rows.push(RowLayout {
                     row,
@@ -12848,8 +12847,7 @@ impl StackMetrics {
         if row == SettingsRow::AboutVersion
             && let Some(link) = &values.version_update.link
         {
-            width -= measure(link.text(), ROW_DESC_FONT_LOGICAL_PX * self.scale)
-                + COMBO_CHEVRON_BOX_LOGICAL_PX * self.scale;
+            width -= version_link_extent(link, self.scale, measure).1;
         }
         description_lines(
             row.description(values),
@@ -13164,6 +13162,21 @@ fn page_combo_width(
     rows.iter()
         .map(|row| combo_width(*row, scale, border, row_span, measure))
         .fold(COMBO_MIN_WIDTH_LOGICAL_PX * scale, f32::max)
+}
+
+/// **How wide the Version value line's inline link is, and how much of the
+/// value's column it takes** (T-ABOUT-NITS): the label as
+/// [`crate::update_card::VersionLink::label`] words it, at the description's
+/// size, and that plus [`ROW_GAP_LOGICAL_PX`] — the gap every row keeps
+/// between its text and its control. The layout's box and the height solve
+/// both read this, so the value is wrapped and measured against one width.
+fn version_link_extent(
+    link: &crate::update_card::VersionLink,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> (f32, f32) {
+    let width = measure(&link.label(), ROW_DESC_FONT_LOGICAL_PX * scale);
+    (width, width + ROW_GAP_LOGICAL_PX * scale)
 }
 
 /// **How wide every door button on a page is** (owner question 2026-09-23:
@@ -14160,11 +14173,9 @@ pub fn build(
             && let (Some(link), Some(rect)) = (&values.version_update.link, layout.version_link)
         {
             let target = SettingsTarget::MenuAction(SettingsRow::AboutVersion);
-            let arrow = matches!(link, crate::update_card::VersionLink::WhatsNew { .. })
-                && !link.text().ends_with('↗');
             content_stack.labels.push(ChromeLabel {
                 mono: false,
-                text: format!("{}{}", link.text(), if arrow { " ↗" } else { "" }),
+                text: link.label(),
                 rect,
                 font_size_px: desc_font,
                 color: palette.accent,
@@ -33915,6 +33926,88 @@ mod tests {
             "the update row is in view: band {band:?}, viewport {:?}",
             placed.clip
         );
+    }
+
+    /// RED (T-ABOUT-NITS) — **the Version value stops one row gap short of its
+    /// inline link**, the gap the sibling `Automatic check` row keeps between
+    /// its text and its control, at 100, 150 and 200 %; the link's box is its
+    /// drawn label, and the height solve wraps the value at the width it is
+    /// painted in.
+    ///
+    /// MUTATION: return `(width, width)` from `version_link_extent`; the value's
+    /// column runs up to the link's first glyph (`v0.4.8-preview available`
+    /// straight into `What's new ↗`) and the gap assertion goes red.
+    #[test]
+    fn the_version_value_keeps_the_row_gap_before_its_link() {
+        let rows = flat_rows();
+        let mut visible = values();
+        visible.version_update = crate::update_card::VersionRow {
+            value: format!("{} · v0.4.8-preview available", crate::version::banner()),
+            control: crate::update_card::VersionControl::UpdateAndRestart,
+            link: Some(crate::update_card::VersionLink::WhatsNew {
+                tag: "v0.4.8-preview".to_owned(),
+            }),
+        };
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let held = SettingsContent {
+                values: &visible,
+                ..content(&rows, &[])
+            };
+            let placed = layout_for_menu(
+                SURFACE.0 * scale,
+                SURFACE.1 * scale,
+                scale,
+                None,
+                None,
+                held,
+                SettingsCategory::About,
+                UNSCROLLED,
+                MENU_UNSCROLLED,
+                &mut measure,
+            )
+            .expect("the About page fits");
+            let version = placed
+                .row(SettingsRow::AboutVersion)
+                .expect("About holds Version");
+            let sibling = placed
+                .row(SettingsRow::AutoCheck)
+                .expect("About holds Automatic check");
+            let sibling_gap = sibling.combo[0] - sibling.desc[2];
+            assert!(
+                (sibling_gap - ROW_GAP_LOGICAL_PX * scale).abs() < 0.01,
+                "scale {scale}: the sibling keeps the row gap ({sibling_gap})"
+            );
+            let link = placed.version_link.expect("What's new has an inline box");
+            assert!(
+                (link[0] - version.desc[2] - sibling_gap).abs() < 0.01,
+                "scale {scale}: the value ends one row gap before its link: \
+                 value {:?}, link {link:?}, sibling gap {sibling_gap}",
+                version.desc
+            );
+            let label = labels_of(&placed, None, &visible)
+                .into_iter()
+                .find(|label| label.text == "What's new ↗")
+                .expect("the link is drawn");
+            assert_eq!(
+                label.rect, link,
+                "scale {scale}: the link is drawn in its box"
+            );
+            assert!(
+                (link[2] - link[0] - measure(&label.text, label.font_size_px)).abs() < 0.01,
+                "scale {scale}: the link's box is its label"
+            );
+            assert_eq!(
+                version.desc_lines,
+                wrapped_description(
+                    SettingsRow::AboutVersion.description(&visible),
+                    version.desc[2] - version.desc[0],
+                    ROW_DESC_FONT_LOGICAL_PX * scale,
+                    &mut measure,
+                )
+                .len(),
+                "scale {scale}: the value is solved at the width it is painted in"
+            );
+        }
     }
 
     /// RED (T-UPDATE-ON-ABOUT) — the release-specific link is on Version's

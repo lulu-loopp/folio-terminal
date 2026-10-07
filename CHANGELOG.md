@@ -48,6 +48,7 @@ Nothing yet.
 
 ### Fixed
 
+- In Settings ▸ About, the Version row says "1 minute ago" (and "1 hour ago", "1 day ago") rather than "1 minutes ago", and an available update's version no longer runs into "What's new ↗".
 - On Windows, Settings ▸ About ▸ Uninstall no longer stops with "A Folio instance is running" after Folio has quit: it waits until the quitting Folio has fully gone, then removes Folio.
 - The zip's `uninstall.cmd` no longer runs pieces of its own lines when the console uses UTF-8, and an `n` answer handed to it from a file or a pipe now removes settings and data as asked.
 - "Enable via $PROFILE" is offered only when your other PowerShell windows would load the profile too; on a machine whose policy refuses scripts it offers the command that allows them, so enabling it can no longer make every PowerShell window print an error.
