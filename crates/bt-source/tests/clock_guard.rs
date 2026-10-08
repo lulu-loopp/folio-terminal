@@ -40,6 +40,9 @@
 //!   Instant};`, with or without `as`;
 //! * a nested import, `use std::{fmt, time::{Duration, Instant}};`;
 //! * a glob that brings them, `use std::time::*;`;
+//! * each import above written from the crate root, `use ::std::{time::Instant};`
+//!   — a leading `::` names the crate, so its first segment is matched against
+//!   `std` and its `extern crate` renames, never against a `use` alias;
 //! * an alias of the module or of `std` itself — `use std::time as t;` then
 //!   `t::Instant`, `use std as s;` then `s::time::Instant` — and a `pub`
 //!   re-export of either, which this file-by-file reading could not follow into
@@ -116,8 +119,13 @@ fn workspace_root() -> PathBuf {
 
 /// One `use` tree, flattened: the path it names and what it binds.
 struct Imported {
-    /// The segments, `std` first for `::std`.
+    /// The segments as written, without a leading `::`.
     path: Vec<syn::Ident>,
+    /// Written with a leading `::` (`use ::std::time::Instant;`), so the first
+    /// segment names a crate and never a `use` alias.
+    global: bool,
+    /// An `extern crate`, whose name is a crate name a leading `::` reaches.
+    extern_crate: bool,
     leaf: Leaf,
     public: bool,
 }
@@ -132,32 +140,36 @@ enum Leaf {
 fn flatten(
     tree: &syn::UseTree,
     prefix: &mut Vec<syn::Ident>,
+    global: bool,
     public: bool,
     out: &mut Vec<Imported>,
 ) {
     match tree {
         syn::UseTree::Path(path) => {
             prefix.push(path.ident.clone());
-            flatten(&path.tree, prefix, public, out);
+            flatten(&path.tree, prefix, global, public, out);
             prefix.pop();
         }
-        syn::UseTree::Name(name) => out.push(imported(prefix, &name.ident, None, public)),
+        syn::UseTree::Name(name) => out.push(imported(prefix, &name.ident, None, global, public)),
         syn::UseTree::Rename(rename) => {
             out.push(imported(
                 prefix,
                 &rename.ident,
                 Some(&rename.rename),
+                global,
                 public,
             ));
         }
         syn::UseTree::Glob(_) => out.push(Imported {
             path: prefix.clone(),
+            global,
+            extern_crate: false,
             leaf: Leaf::Glob,
             public,
         }),
         syn::UseTree::Group(group) => {
             for tree in &group.items {
-                flatten(tree, prefix, public, out);
+                flatten(tree, prefix, global, public, out);
             }
         }
     }
@@ -168,6 +180,7 @@ fn imported(
     prefix: &[syn::Ident],
     ident: &syn::Ident,
     rename: Option<&syn::Ident>,
+    global: bool,
     public: bool,
 ) -> Imported {
     let mut path = prefix.to_vec();
@@ -178,6 +191,8 @@ fn imported(
     Imported {
         leaf: Leaf::Name(bound.to_string()),
         path,
+        global,
+        extern_crate: false,
         public,
     }
 }
@@ -194,7 +209,13 @@ impl<'ast> syn::visit::Visit<'ast> for Imports {
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
         self.declarations += 1;
         let public = !matches!(item.vis, syn::Visibility::Inherited);
-        flatten(&item.tree, &mut Vec::new(), public, &mut self.uses);
+        flatten(
+            &item.tree,
+            &mut Vec::new(),
+            item.leading_colon.is_some(),
+            public,
+            &mut self.uses,
+        );
     }
 
     fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
@@ -202,6 +223,8 @@ impl<'ast> syn::visit::Visit<'ast> for Imports {
         if let Some((_, rename)) = &item.rename {
             self.uses.push(Imported {
                 path: vec![item.ident.clone()],
+                global: false,
+                extern_crate: true,
                 leaf: Leaf::Name(rename.to_string()),
                 public: !matches!(item.vis, syn::Visibility::Inherited),
             });
@@ -227,14 +250,24 @@ struct Reading {
 }
 
 /// The canonical `std`-rooted path an import names, if it is one.
+///
+/// A path written with a leading `::` starts at a crate name, so its first
+/// segment is looked up among the crates that are `std` and never among the
+/// file's `use` aliases; any other path may start at either.
 fn rooted(
-    path: &[syn::Ident],
+    import: &Imported,
+    std_crates: &BTreeSet<String>,
     std_names: &BTreeSet<String>,
     time_names: &BTreeSet<String>,
 ) -> Option<Vec<String>> {
-    let (first, rest) = path.split_first()?;
+    let (first, rest) = import.path.split_first()?;
     let first = first.to_string();
-    let mut canonical = if std_names.contains(&first) {
+    let mut canonical = if import.global {
+        if !std_crates.contains(&first) {
+            return None;
+        }
+        vec!["std".to_owned()]
+    } else if std_names.contains(&first) {
         vec!["std".to_owned()]
     } else if time_names.contains(&first) {
         vec!["std".to_owned(), "time".to_owned()]
@@ -246,14 +279,23 @@ fn rooted(
 }
 
 fn read_imports(imports: &Imports) -> Reading {
-    let mut std_names = BTreeSet::from(["std".to_owned()]);
+    let mut std_crates = BTreeSet::from(["std".to_owned()]);
+    for import in &imports.uses {
+        if let (true, [krate], Leaf::Name(bound)) =
+            (import.extern_crate, import.path.as_slice(), &import.leaf)
+            && krate == "std"
+        {
+            std_crates.insert(bound.clone());
+        }
+    }
+    let mut std_names = std_crates.clone();
     let mut time_names = BTreeSet::new();
     // Aliases can be written in any order and can chain (`use std as s; use
     // s::time as t;`), so the bindings are read to a fixed point first.
     loop {
         let before = (std_names.len(), time_names.len());
         for import in &imports.uses {
-            let Some(canonical) = rooted(&import.path, &std_names, &time_names) else {
+            let Some(canonical) = rooted(import, &std_crates, &std_names, &time_names) else {
                 continue;
             };
             match (&import.leaf, canonical.as_slice()) {
@@ -276,10 +318,15 @@ fn read_imports(imports: &Imports) -> Reading {
 
     let mut sites = Vec::new();
     for import in &imports.uses {
-        let Some(canonical) = rooted(&import.path, &std_names, &time_names) else {
+        let Some(canonical) = rooted(import, &std_crates, &std_names, &time_names) else {
             continue;
         };
         let spelled: Vec<String> = import.path.iter().map(ToString::to_string).collect();
+        let spelled = if import.global {
+            format!("::{}", spelled.join("::"))
+        } else {
+            spelled.join("::")
+        };
         let last = import.path.last().expect("a rooted path has a segment");
         let site = |what: String| Site {
             at: last.span().byte_range(),
@@ -289,15 +336,11 @@ fn read_imports(imports: &Imports) -> Reading {
             (Leaf::Name(_), [std, time, clock])
                 if std == "std" && time == "time" && CLOCKS.contains(&clock.as_str()) =>
             {
-                sites.push(site(format!(
-                    "`use {}` imports std::time::{clock}",
-                    spelled.join("::")
-                )));
+                sites.push(site(format!("`use {spelled}` imports std::time::{clock}")));
             }
             (Leaf::Glob, [std, time]) if std == "std" && time == "time" => {
                 sites.push(site(format!(
-                    "`use {}::*` imports std::time::{{Instant, SystemTime}}",
-                    spelled.join("::")
+                    "`use {spelled}::*` imports std::time::{{Instant, SystemTime}}"
                 )));
             }
             (Leaf::Name(bound), [std, time]) if import.public && std == "std" && time == "time" => {

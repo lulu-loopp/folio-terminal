@@ -296,18 +296,21 @@ jobs:
           }
           exit 0
 
-      # G3's three canaries. `clock-guard` reads source text, so each plant is a
+      # G3's four canaries. `clock-guard` reads source text, so each plant is a
       # line appended to a file and nothing is compiled but bt-source's test. A
       # qualified `std::time::Instant::now()` and a nested `use std::{time::{…}}`
-      # in a crate of the source set must each be refused by file; the same clock
-      # in bt-platform's `http` module, which is out of scope by name, must not be
-      # - the scope is the stated set and nothing outside it joins silently.
+      # in a crate of the source set must each be refused by file, and so must a
+      # nested import written from the crate root (`use ::std::{time::Instant}`,
+      # which no qualified-path reading sees); the same clock in bt-platform's
+      # `http` module, which is out of scope by name, must not be - the scope is
+      # the stated set and nothing outside it joins silently.
       - name: the clock guard can actually fail, and its scope is the stated one
         shell: pwsh
         run: |
           $plants = @(
             @{ file = "crates/bt-doc/src/lib.rs"; line = "pub fn _clock_guard_probe() -> u128 { std::time::Instant::now().elapsed().as_nanos() }"; refused = $true },
             @{ file = "crates/bt-layout/src/lib.rs"; line = "#[allow(unused_imports)] use std::{time::{SystemTime}};"; refused = $true },
+            @{ file = "crates/bt-viewport/src/lib.rs"; line = "#[allow(unused_imports)] use ::std::{time::Instant};"; refused = $true },
             @{ file = "crates/bt-platform/src/http.rs"; line = "pub fn _clock_guard_probe() -> u128 { std::time::Instant::now().elapsed().as_nanos() }"; refused = $false }
           )
           foreach ($plant in $plants) {
