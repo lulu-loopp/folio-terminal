@@ -4095,6 +4095,9 @@ pub fn capability_text_for_launch(
             crate::shell_integration::PowerShellProfileFallback::Enabled => {
                 return crate::i18n::Text::CapPowerShellViaProfile;
             }
+            crate::shell_integration::PowerShellProfileFallback::Constrained => {
+                return crate::i18n::Text::CapPowerShellConstrained;
+            }
             crate::shell_integration::PowerShellProfileFallback::PolicyChangeable
             | crate::shell_integration::PowerShellProfileFallback::PolicyManaged
             | crate::shell_integration::PowerShellProfileFallback::PolicyProcess

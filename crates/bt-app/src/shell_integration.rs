@@ -327,36 +327,94 @@ pub(crate) fn asks_for_login(arguments: &[String]) -> bool {
 
 /// Where the script is on this machine, written out on first use.
 ///
-/// `None` when it could not be written, and that is a whole, honest outcome
-/// rather than an error to report: a shell with no init file is a shell on the
-/// documented fallback path, which is where every bash pane was before this
-/// existed.
+/// `None` when it could not be written, and that is a whole, honest outcome for
+/// the pane asking: a shell with no init file is a shell on the documented
+/// fallback path, which is where every bash pane was before this existed. **It
+/// is not an answer for the process** (T-PROBE-NO-CACHED-FAILURE): only a path
+/// is kept, so the next pane's birth writes again — an antivirus hold or a
+/// volume that was full is gone by then — and the cause is said once in
+/// `diagnostics.log` ([`WriteNotice`]).
 ///
 /// **An update's trial writes nothing** (`update_trial`, F-7): it names the
 /// script the old build left, if there is one, and the commit writes this
 /// build's.
 pub fn script_path() -> Option<&'static Path> {
-    static INSTALLED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    static STANDING: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static INSTALLED: OnceLock<PathBuf> = OnceLock::new();
+    static STANDING: OnceLock<PathBuf> = OnceLock::new();
+    static NOTICE: WriteNotice = WriteNotice::new();
     if crate::update_trial::defer(crate::update_trial::Writer::BashScript) {
-        return STANDING
-            .get_or_init(|| {
-                let path = persist::storage_dir()
-                    .join(SCRIPT_DIRECTORY)
-                    .join(SCRIPT_FILE);
-                path.is_file().then_some(path)
-            })
-            .as_deref();
+        return kept_or_found(&STANDING, || {
+            let path = persist::storage_dir()
+                .join(SCRIPT_DIRECTORY)
+                .join(SCRIPT_FILE);
+            path.is_file().then_some(path)
+        });
     }
-    INSTALLED.get_or_init(install).as_deref()
+    kept_or_found(&INSTALLED, || {
+        NOTICE.said(
+            "the bash integration script",
+            install_script_at(
+                &persist::storage_dir().join(SCRIPT_DIRECTORY),
+                SCRIPT_FILE,
+                SCRIPT,
+            ),
+            &crate::diagnostics::note,
+        )
+    })
 }
 
-fn install() -> Option<PathBuf> {
-    install_script_at(
-        &persist::storage_dir().join(SCRIPT_DIRECTORY),
-        SCRIPT_FILE,
-        SCRIPT,
-    )
+/// **The path `kept` holds, or the one `find` finds now** — which is then kept. A `None` from
+/// `find` is not kept: the next caller finds again. The one rule [`script_path`] and
+/// [`zdotdir_path`] share.
+fn kept_or_found(
+    kept: &'static OnceLock<PathBuf>,
+    find: impl FnOnce() -> Option<PathBuf>,
+) -> Option<&'static Path> {
+    if let Some(path) = kept.get() {
+        return Some(path);
+    }
+    let found = find()?;
+    Some(kept.get_or_init(|| found))
+}
+
+/// **A script write that failed, said once** (T-PROBE-NO-CACHED-FAILURE): the first failure of
+/// a run of failures writes one `diagnostics.log` line with its cause; a repeat with the same
+/// cause says nothing (every pane's birth retries the write), a different cause is said, and a
+/// write that lands ends the run.
+struct WriteNotice(Mutex<Option<String>>);
+
+impl WriteNotice {
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// `written`, as an answer for the asker: the path, or `None` — and its cause said through
+    /// `note` unless it is the cause said last.
+    fn said(
+        &self,
+        what: &str,
+        written: std::io::Result<PathBuf>,
+        note: &dyn Fn(&str),
+    ) -> Option<PathBuf> {
+        let mut last = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        match written {
+            Ok(path) => {
+                *last = None;
+                Some(path)
+            }
+            Err(error) => {
+                let cause = error.to_string();
+                if last.as_deref() != Some(cause.as_str()) {
+                    note(&format!(
+                        "{what} could not be written ({cause}); panes start without it, and the \
+                         next one tries again"
+                    ));
+                    *last = Some(cause);
+                }
+                None
+            }
+        }
+    }
 }
 
 /// **One file of this build's, written into a directory, and kept current**
@@ -372,29 +430,31 @@ fn install() -> Option<PathBuf> {
 /// Rewritten *whenever* it differs, which is the half that was missing for
 /// PowerShell: an upgraded, deleted or truncated copy is the same finding as a
 /// copy that was never there.
-fn install_script_at(directory: &Path, name: &str, text: &str) -> Option<PathBuf> {
+fn install_script_at(directory: &Path, name: &str, text: &str) -> std::io::Result<PathBuf> {
     let path = directory.join(name);
-    std::fs::create_dir_all(directory).ok()?;
+    std::fs::create_dir_all(directory)?;
     // The launch worker and a pane birth can arrive together. A native
     // preserving replace may lose that race without changing the destination;
     // re-read and retry so at least one complete build copy wins, while a real
     // permission or volume failure still returns promptly and is never cached.
+    let mut failure = None;
     for _ in 0..3 {
         if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &path)
             .is_ok_and(|existing| existing == text)
         {
-            return Some(path);
+            return Ok(path);
         }
         let written = if path.exists() {
             bt_persist::atomic_replace_preserving(&path, text.as_bytes())
         } else {
             bt_persist::atomic_write(&path, text.as_bytes())
         };
-        if written.is_ok() {
-            return Some(path);
+        match written {
+            Ok(_) => return Ok(path),
+            Err(error) => failure = Some(std::io::Error::other(error)),
         }
     }
-    None
+    Err(failure.expect("the loop ran and every turn that did not return failed"))
 }
 
 /// The directory zsh is pointed at, written out on first use.
@@ -410,25 +470,30 @@ fn install_script_at(directory: &Path, name: &str, text: &str) -> Option<PathBuf
 /// directory the old build left, if it is whole, and the commit writes this
 /// build's.
 pub fn zdotdir_path() -> Option<&'static Path> {
-    static INSTALLED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    static STANDING: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static INSTALLED: OnceLock<PathBuf> = OnceLock::new();
+    static STANDING: OnceLock<PathBuf> = OnceLock::new();
+    static NOTICE: WriteNotice = WriteNotice::new();
     if crate::update_trial::defer(crate::update_trial::Writer::ZshScripts) {
-        return STANDING
-            .get_or_init(|| {
-                let directory = persist::storage_dir()
-                    .join(SCRIPT_DIRECTORY)
-                    .join(ZDOTDIR_DIRECTORY);
-                ZDOTDIR_FILES
-                    .iter()
-                    .all(|name| directory.join(name).is_file())
-                    .then_some(directory)
-            })
-            .as_deref();
+        return kept_or_found(&STANDING, || {
+            let directory = persist::storage_dir()
+                .join(SCRIPT_DIRECTORY)
+                .join(ZDOTDIR_DIRECTORY);
+            ZDOTDIR_FILES
+                .iter()
+                .all(|name| directory.join(name).is_file())
+                .then_some(directory)
+        });
     }
-    INSTALLED.get_or_init(install_zdotdir).as_deref()
+    kept_or_found(&INSTALLED, || {
+        NOTICE.said(
+            "the zsh integration directory",
+            install_zdotdir(),
+            &crate::diagnostics::note,
+        )
+    })
 }
 
-fn install_zdotdir() -> Option<PathBuf> {
+fn install_zdotdir() -> std::io::Result<PathBuf> {
     let directory = persist::storage_dir()
         .join(SCRIPT_DIRECTORY)
         .join(ZDOTDIR_DIRECTORY);
@@ -440,13 +505,13 @@ fn install_zdotdir() -> Option<PathBuf> {
         .is_ok_and(|existing| existing == SCRIPT_ZSH)
     });
     if !stale {
-        return Some(directory);
+        return Ok(directory);
     }
-    std::fs::create_dir_all(&directory).ok()?;
+    std::fs::create_dir_all(&directory)?;
     for name in ZDOTDIR_FILES {
-        std::fs::write(directory.join(name), SCRIPT_ZSH).ok()?;
+        std::fs::write(directory.join(name), SCRIPT_ZSH)?;
     }
-    Some(directory)
+    Ok(directory)
 }
 
 /// Where this build's installed integration assets are on this machine — **one
@@ -2111,6 +2176,8 @@ static DURABLE_POWERSHELL_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
 /// The script an update's trial names while its writes are held back (see
 /// [`powershell_script_for_birth`]).
 static TRIAL_POWERSHELL_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
+/// The cause of a failed `folio.ps1` preparation, said once ([`WriteNotice`]).
+static POWERSHELL_SCRIPT_NOTICE: WriteNotice = WriteNotice::new();
 static POWERSHELL_PROFILE_LINE_PRESENT: AtomicBool = AtomicBool::new(false);
 
 /// Publish the persisted answer for subsequent shell births.
@@ -2191,10 +2258,16 @@ pub fn is_powershell(program: &Path) -> bool {
 /// * `NoProcess=` — the effective policy once the probe's own Process scope is cleared (an
 ///   in-process change of the probe's own session; nothing persistent is written). When no other
 ///   scope is set this is the machine's default, which `Get-ExecutionPolicy` never names.
+/// * `Language=` — the language mode this edition gives `-Command` text, which is how the loader
+///   reaches a pane (`-NoExit -Command`): under Constrained Language Mode (an application-control
+///   policy) the loader does nothing ([`powershell_load_command`]'s guard) and the row says so
+///   ([`PowerShellProfileFallback::Constrained`]). Every earlier line is written before it, and
+///   in that mode the statements that need a .NET type fail on their own and say nothing on
+///   stdout, so the answer still parses.
 ///
 /// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
-const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; try { $z = [string][psobject].Assembly.GetType('System.Management.Automation.ClrFacade').GetMethod('GetFileSecurityZone', [Reflection.BindingFlags]'NonPublic,Static').Invoke($null, @([string]$p)) } catch { }; 'Zone=' + $z; $local = $false; try { $local = (-not ([Uri]$p).IsUnc) -and ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($p)).DriveType -eq [IO.DriveType]::Fixed) } catch { }; 'Local=' + $local; 'Marked=' + [bool](Get-Item -LiteralPath $p -Stream Zone.Identifier -ErrorAction SilentlyContinue); Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString()"#;
+const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; try { $z = [string][psobject].Assembly.GetType('System.Management.Automation.ClrFacade').GetMethod('GetFileSecurityZone', [Reflection.BindingFlags]'NonPublic,Static').Invoke($null, @([string]$p)) } catch { }; 'Zone=' + $z; $local = $false; try { $local = (-not ([Uri]$p).IsUnc) -and ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($p)).DriveType -eq [IO.DriveType]::Fixed) } catch { }; 'Local=' + $local; 'Marked=' + [bool](Get-Item -LiteralPath $p -Stream Zone.Identifier -ErrorAction SilentlyContinue); Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString(); 'Language=' + $ExecutionContext.SessionState.LanguageMode"#;
 
 /// **The one command a user may run to let PowerShell load `$PROFILE`**: the CurrentUser scope,
 /// which needs no elevation, set to `RemoteSigned`. Folio copies it on the user's click and
@@ -2339,7 +2412,8 @@ impl PowerShellProfileFallback {
             | Self::Offer
             | Self::Enabled
             | Self::NoProfile
-            | Self::Unsupported => None,
+            | Self::Unsupported
+            | Self::Constrained => None,
         }
     }
 }
@@ -2503,6 +2577,10 @@ struct ProfileObservation {
     /// be read: then what an ordinary session does is not known ([`PolicyCause::Undetermined`]).
     ordinary_process: Option<crate::psreadline::ExecutionPolicy>,
     line_present: bool,
+    /// **Whether the edition runs `-Command` text in `FullLanguage`** ([`PROFILE_COMMAND`]'s
+    /// `Language=`). Anything else — Constrained Language Mode under an application-control
+    /// policy — is a session the loader cannot integrate.
+    full_language: bool,
 }
 
 /// Where `$PROFILE` is, as far as public means can say: the fallback's two facts.
@@ -2526,6 +2604,33 @@ impl ProfileLocation {
 }
 
 impl ProfileObservation {
+    /// **An edition whose `-Command` text runs in Constrained Language Mode**: where `$PROFILE` is
+    /// and nothing else, because no policy or zone answer changes what the row says
+    /// ([`PowerShellProfileFallback::Constrained`]).
+    #[cfg(windows)]
+    fn constrained(path: PathBuf) -> Self {
+        use crate::psreadline::ExecutionPolicy::Unknown;
+        Self {
+            path,
+            scopes: PolicyScopes {
+                machine_policy: Unknown,
+                user_policy: Unknown,
+                process: Unknown,
+                current_user: Unknown,
+                local_machine: Unknown,
+                default: Unknown,
+            },
+            edition_says: None,
+            location: ProfileLocation {
+                local_fixed: false,
+                marked: false,
+            },
+            ordinary_process: None,
+            line_present: false,
+            full_language: false,
+        }
+    }
+
     /// [`remote_signed_loads`] for this observation.
     fn remote_signed_loads(&self) -> Option<bool> {
         remote_signed_loads(self.edition_says, self.location)
@@ -2615,6 +2720,11 @@ pub enum PowerShellProfileFallback {
     /// This platform has no `$PROFILE` probe ([`PROFILE_PROBE_EXISTS`]), so nothing is observed
     /// and nothing is offered.
     Unsupported,
+    /// **The edition runs `-Command` text in Constrained Language Mode** (its observation's
+    /// `Language=`): the loader does nothing there, and a `$PROFILE` line would load the script
+    /// into the same mode, so nothing is claimed and nothing offered — the pane is simply not
+    /// integrated (T-INTEGRATION-INJECT's ruling on Constrained Language Mode).
+    Constrained,
 }
 
 fn asks_for_no_profile(program: &Path, arguments: &[OsString]) -> bool {
@@ -2663,9 +2773,11 @@ pub fn powershell_profile_fallback(
         match observed {
             Heard::NotYet => Heard::NotYet,
             Heard::Failed => Heard::Failed,
-            Heard::Answer(observed) => {
-                Heard::Answer((edition_cause(&observed, row), observed.line_present))
-            }
+            Heard::Answer(observed) => Heard::Answer((
+                edition_cause(&observed, row),
+                observed.line_present,
+                observed.full_language,
+            )),
         },
     )
 }
@@ -2680,14 +2792,22 @@ pub fn powershell_profile_fallback(
 /// tightened — is the policy's row, with its sentence and, where the user can change it, its
 /// Copy button; the line's removal is the Settings row "PowerShell $PROFILE line", shown while
 /// the line is present.
+///
+/// **An edition observed in Constrained Language Mode is `Constrained` whatever else holds**, a
+/// composable row's included: its argv carries the loader and the shell does not run it.
 fn profile_fallback_from_parts(
     probe_exists: bool,
     integration_enabled: bool,
     composable: bool,
     no_profile: bool,
     parse: Heard<()>,
-    observed: Heard<(PolicyCause, bool)>,
+    observed: Heard<(PolicyCause, bool, bool)>,
 ) -> PowerShellProfileFallback {
+    // Ahead of the composable answer: the argv being safe says the loader is handed to the
+    // shell, not that the shell runs it.
+    if integration_enabled && matches!(observed, Heard::Answer((_, _, false))) {
+        return PowerShellProfileFallback::Constrained;
+    }
     if composable {
         return PowerShellProfileFallback::NotNeeded;
     }
@@ -2704,7 +2824,7 @@ fn profile_fallback_from_parts(
         (Heard::Failed, _) | (Heard::Answer(()), Heard::Failed) => {
             PowerShellProfileFallback::Undetermined
         }
-        (Heard::Answer(()), Heard::Answer((cause, line_present))) => match cause {
+        (Heard::Answer(()), Heard::Answer((cause, line_present, _))) => match cause {
             PolicyCause::Changeable => PowerShellProfileFallback::PolicyChangeable,
             PolicyCause::Organisation => PowerShellProfileFallback::PolicyManaged,
             PolicyCause::Process => PowerShellProfileFallback::PolicyProcess,
@@ -2894,11 +3014,23 @@ enum ParseAsker {
     Visit,
 }
 
+/// **Why a parse question was not asked**: an answer or an attempt is already there (nothing to
+/// say), or the background askers have spent their attempts on this row and back off until a
+/// visit asks (said in `diagnostics.log`, T-PROBE-NO-CACHED-FAILURE).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Unclaimed {
+    Held,
+    BackedOff { attempts: u8 },
+}
+
 /// Claim one bounded attempt before starting any worker or process. A failed
 /// answer remains unknown, and the next birth may claim the next attempt; a
 /// pending or grammatical answer starts nothing, and neither does an exhausted one unless a
 /// visit asks ([`ParseAsker::Visit`]).
-fn claim_parse_attempt(question: ParseQuestion, asker: ParseAsker) -> Option<ParseAttempt> {
+fn claim_parse_attempt(
+    question: ParseQuestion,
+    asker: ParseAsker,
+) -> Result<ParseAttempt, Unclaimed> {
     let number = {
         let mut answers = PARSE_ANSWERS
             .get_or_init(Default::default)
@@ -2911,12 +3043,14 @@ fn claim_parse_attempt(question: ParseQuestion, asker: ParseAsker) -> Option<Par
             {
                 attempts.saturating_add(1)
             }
-            Some(
-                ParseAnswer::Pending { .. }
-                | ParseAnswer::Valid
-                | ParseAnswer::Invalid
-                | ParseAnswer::Failed { .. },
-            ) => return None,
+            Some(ParseAnswer::Failed { attempts, .. }) => {
+                return Err(Unclaimed::BackedOff {
+                    attempts: *attempts,
+                });
+            }
+            Some(ParseAnswer::Pending { .. } | ParseAnswer::Valid | ParseAnswer::Invalid) => {
+                return Err(Unclaimed::Held);
+            }
         };
         answers.insert(
             question.key.clone(),
@@ -2924,7 +3058,33 @@ fn claim_parse_attempt(question: ParseQuestion, asker: ParseAsker) -> Option<Par
         );
         number
     };
-    Some(ParseAttempt { question, number })
+    Ok(ParseAttempt { question, number })
+}
+
+/// The `diagnostics.log` line for a background ask that backed off: the row is not asked again
+/// until the Profiles page opens, and it stays unintegrated meanwhile.
+fn backed_off_line(question: &ParseQuestion, attempts: u8) -> String {
+    format!(
+        "BT_SHELL_PARSE {}: the parse question failed {attempts} time(s) and is not asked again \
+         by a start, a table edit or a birth; the Profiles page asks it when it opens",
+        question.program.display()
+    )
+}
+
+/// [`claim_parse_attempt`], saying a back-off through `note`.
+fn claim_or_say(
+    question: ParseQuestion,
+    asker: ParseAsker,
+    note: &dyn Fn(&str),
+) -> Option<ParseAttempt> {
+    match claim_parse_attempt(question.clone(), asker) {
+        Ok(attempt) => Some(attempt),
+        Err(Unclaimed::BackedOff { attempts }) => {
+            note(&backed_off_line(&question, attempts));
+            None
+        }
+        Err(Unclaimed::Held) => None,
+    }
 }
 
 fn publish_parse_attempt(key: ParseKey, number: u8, result: Result<bool, ParseProbeFailure>) {
@@ -2952,22 +3112,31 @@ fn publish_parse_attempt(key: ParseKey, number: u8, result: Result<bool, ParsePr
     }
 }
 
-fn run_parse_attempt(attempt: ParseAttempt, parse: ParseProbe) {
-    let result = parse(&attempt.question.program, &attempt.question.text);
+fn run_parse_attempt(attempt: ParseAttempt, parse: ParseProbe, environment: &ProbeEnvironment) {
+    let result = parse(
+        &attempt.question.program,
+        &attempt.question.text,
+        environment,
+    );
     publish_parse_attempt(attempt.question.key, attempt.number, result);
 }
 
-fn ask_parse_question(question: ParseQuestion, asker: ParseAsker, parse: ParseProbe) {
-    if let Some(attempt) = claim_parse_attempt(question, asker) {
-        run_parse_attempt(attempt, parse);
+fn ask_parse_question(
+    question: ParseQuestion,
+    asker: ParseAsker,
+    parse: ParseProbe,
+    environment: &ProbeEnvironment,
+) {
+    if let Some(attempt) = claim_or_say(question, asker, &crate::diagnostics::note) {
+        run_parse_attempt(attempt, parse, environment);
     }
 }
 
 /// **The Profiles page's visit asks every failed parse question again** (release read m2), on
 /// the visit's own observation worker; a question with an answer, or one in flight, is not asked.
-fn ask_failed_parse_questions_again(questions: Vec<ParseQuestion>) {
+fn ask_failed_parse_questions_again(questions: Vec<ParseQuestion>, environment: &ProbeEnvironment) {
     for question in questions {
-        ask_parse_question(question, ParseAsker::Visit, run_parse_probe);
+        ask_parse_question(question, ParseAsker::Visit, run_parse_probe, environment);
     }
 }
 
@@ -2979,7 +3148,8 @@ fn request_parse_retry(
     question: ParseQuestion,
     start: impl FnOnce(ParseAttempt) -> Result<(), String>,
 ) {
-    let Some(attempt) = claim_parse_attempt(question, ParseAsker::Background) else {
+    let Some(attempt) = claim_or_say(question, ParseAsker::Background, &crate::diagnostics::note)
+    else {
         return;
     };
     let key = attempt.question.key.clone();
@@ -3093,14 +3263,19 @@ fn output_prefix(bytes: &[u8]) -> String {
 }
 
 /// How a parse question is put to a PowerShell: [`run_parse_probe`], or a test's stand-in.
-type ParseProbe = fn(&Path, &str) -> Result<bool, ParseProbeFailure>;
+type ParseProbe = fn(&Path, &str, &ProbeEnvironment) -> Result<bool, ParseProbeFailure>;
 
-fn run_parse_probe(program: &Path, text: &str) -> Result<bool, ParseProbeFailure> {
+fn run_parse_probe(
+    program: &Path,
+    text: &str,
+    environment: &ProbeEnvironment,
+) -> Result<bool, ParseProbeFailure> {
     let output = run_powershell_probe(
         program,
         PARSE_COMMAND,
         Some(text),
         POWERSHELL_PROBE_DEADLINE,
+        environment,
     )?;
     parse_probe_answer(output)
 }
@@ -3137,23 +3312,44 @@ fn profile_key(program: &Path) -> PathBuf {
 /// All aliases point at the same slot before any worker asks PowerShell. `deadline` is the
 /// asker's patience ([`POWERSHELL_PROBE_DEADLINE`] for the Profiles page, [`REMOVAL_PROBE_DEADLINE`] for a
 /// removal somebody asked for).
-fn cached_profile_answer(program: &Path, deadline: std::time::Duration) -> Option<PathBuf> {
-    let resolved = bt_platform::program_on_path(program).unwrap_or_else(|| program.to_path_buf());
+fn cached_profile_answer(
+    program: &Path,
+    deadline: std::time::Duration,
+    environment: &ProbeEnvironment,
+) -> Option<PathBuf> {
+    let (slot, resolved) = profile_slot(program, environment);
+    answer_once(&slot, || {
+        run_profile_path_probe(&resolved, deadline, environment)
+    })
+}
+
+/// **The slot `program` and every alias of it share**, and the program as `environment` resolves
+/// it.
+fn profile_slot(program: &Path, environment: &ProbeEnvironment) -> (ProfileAnswer, PathBuf) {
+    let resolved = environment
+        .program(program)
+        .unwrap_or_else(|| program.to_path_buf());
     let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
-    let slot = {
-        let mut answers = PROFILE_ANSWERS
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let original = answers.entry(profile_key(program)).or_default().clone();
-        let slot = answers
-            .entry(profile_key(&canonical))
-            .or_insert(original)
-            .clone();
-        answers.insert(profile_key(program), slot.clone());
-        slot
-    };
-    answer_once(&slot, || run_profile_path_probe(&resolved, deadline))
+    let mut answers = PROFILE_ANSWERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original = answers.entry(profile_key(program)).or_default().clone();
+    let slot = answers
+        .entry(profile_key(&canonical))
+        .or_insert(original)
+        .clone();
+    answers.insert(profile_key(program), slot.clone());
+    (slot, resolved)
+}
+
+/// **A newer answer about where `program` keeps `$PROFILE`**, heard by the edition observation
+/// (which asks the same edition the same question at every Profiles-page open,
+/// T-PROBE-NO-CACHED-FAILURE): it replaces the slot's, so a removal reads the newest any probe
+/// heard — a `Documents` folder moved while Folio runs is followed — and asks no shell of its own.
+fn file_profile_answer(program: &Path, path: PathBuf, environment: &ProbeEnvironment) {
+    let (slot, _) = profile_slot(program, environment);
+    *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(path);
 }
 
 /// The slot's answer, asking for it only when there is none: an answer is kept, a failure is
@@ -3170,16 +3366,15 @@ fn answer_once(
     held.clone()
 }
 
+/// Every PowerShell installed on this machine, as `environment` finds them: the shipped rows'
+/// discovery (PowerShell 7 outside `PATH` included) and the two names over its `PATH`.
 #[cfg(windows)]
-fn installed_powershells() -> Vec<PathBuf> {
+fn installed_powershells(environment: &ProbeEnvironment) -> Vec<PathBuf> {
     let mut programs = Vec::new();
     // Use the same installation discovery as the shipped panes, including
     // PowerShell 7 installed outside PATH. No Documents paths are composed.
-    let rows = profiles::shipped_for(
-        profiles::SeedPlatform::Windows,
-        &bt_pty::SystemShellEnvironment,
-    );
-    let resolved = profiles::ProfilePrograms::probe_rows(&rows, &bt_pty::SystemShellEnvironment);
+    let rows = profiles::shipped_for(profiles::SeedPlatform::Windows, environment);
+    let resolved = profiles::ProfilePrograms::probe_rows(&rows, environment);
     for id in ["pwsh", "winps"] {
         if let Some(program) = resolved.program(id).map(PathBuf::from)
             && is_powershell(&program)
@@ -3189,7 +3384,7 @@ fn installed_powershells() -> Vec<PathBuf> {
         }
     }
     for name in ["powershell.exe", "pwsh.exe"] {
-        if let Some(program) = bt_platform::program_on_path(Path::new(name))
+        if let Some(program) = environment.program(Path::new(name))
             && !programs.contains(&program)
         {
             programs.push(program);
@@ -3199,7 +3394,8 @@ fn installed_powershells() -> Vec<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn installed_powershells() -> Vec<PathBuf> {
+fn installed_powershells(environment: &ProbeEnvironment) -> Vec<PathBuf> {
+    let _ = environment;
     Vec::new()
 }
 
@@ -3217,35 +3413,157 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
 }
 
-/// **The probe's PowerShell finds its modules where a pane's would, not where Folio's parent
-/// put them.** A pane's environment is the fresh logon block on Windows (T-ENV-REFRESH), but a
-/// child of this door inherits Folio's own — and a Folio started from a PowerShell 7 session
-/// carries 7's `PSModulePath`, with which a Windows PowerShell probe loads 7's
-/// `Microsoft.PowerShell.Security` and finds no `Get-ExecutionPolicy` (measured 2026-10-05). Without
-/// the variable each edition computes its own module path; every command this door runs (the
-/// parser, `$PROFILE`, the policy cmdlets, the zone question) is answered by the edition's inbox
-/// modules, which that path always holds. Off Windows a pane inherits, and so does the probe.
+/// **The environment a probe's child runs in** (T-PROBE-NO-CACHED-FAILURE): the one a pane of the
+/// same PowerShell is born with, so the answer is about the shell the reader gets.
+///
+/// Inside a running Folio on Windows that is the account's **current** logon block
+/// ([`bt_platform::environment::fresh_logon_environment`], the door T-ENV-REFRESH's births, the
+/// program walk and the copilot probe read): a module path or a `PATH` entry set since Folio
+/// started is in it, and the variables of whatever started Folio are not. A Folio started from a
+/// PowerShell 7 session carries 7's `PSModulePath`, with which a Windows PowerShell probe loads
+/// 7's `Microsoft.PowerShell.Security`, finds no `Get-ExecutionPolicy` and reports 7's PSReadLine
+/// (measured 2026-10-05); the logon block holds the account's own module path, which each edition
+/// completes itself, as a pane's does.
+///
+/// [`Self::Inherited`] is this process's own environment less `PSModulePath` (for that same
+/// reason): off Windows, where a pane inherits too and there is no logon block; when the block
+/// cannot be read (said in `diagnostics.log`, the pane birth's rule); and for the command-line
+/// verbs (`--remove-shell-integration`, the uninstall cleanup), whose own environment is the
+/// current one of whoever ran them.
+#[derive(Clone, Debug)]
+pub enum ProbeEnvironment {
+    /// The account's current logon block.
+    Logon(Vec<(OsString, OsString)>),
+    /// This process's own environment, less `PSModulePath` on Windows.
+    Inherited,
+}
+
+impl ProbeEnvironment {
+    /// The environment a pane would be born with now, read on `worker`; `asker` names the probe
+    /// in the diagnostics line that says a block could not be read.
+    pub(crate) fn current(worker: &bt_platform::admission::WorkerCtx, asker: &str) -> Self {
+        Self::from_read(
+            bt_platform::environment::fresh_logon_environment(worker),
+            asker,
+            &crate::diagnostics::note,
+        )
+    }
+
+    /// [`Self::current`]'s one decision, over the read's result.
+    fn from_read(
+        read: std::io::Result<Option<Vec<(OsString, OsString)>>>,
+        asker: &str,
+        note: &dyn Fn(&str),
+    ) -> Self {
+        match read {
+            Ok(Some(block)) => Self::Logon(block),
+            Ok(None) => Self::Inherited,
+            Err(error) => {
+                note(&format!(
+                    "{asker}: the current environment could not be read ({error}); the probe \
+                     runs in the inherited one"
+                ));
+                Self::Inherited
+            }
+        }
+    }
+
+    /// The account's block, when this is one: what [`ordinary_process_scope`] reads.
+    fn block(&self) -> Option<&[(OsString, OsString)]> {
+        match self {
+            Self::Logon(block) => Some(block),
+            Self::Inherited => None,
+        }
+    }
+
+    /// **The program a name starts in this environment**: an absolute name as it stands; a bare
+    /// one looked up over this environment's `PATH` × `PATHEXT` (absolute entries only — an empty
+    /// or relative entry means the working directory to Windows), never in a working directory
+    /// (R1-17). [`Self::Inherited`] asks the platform's own lookup over this process's.
+    pub(crate) fn program(&self, name: &Path) -> Option<PathBuf> {
+        match self {
+            Self::Logon(_) => {
+                let directories: Vec<PathBuf> = self
+                    .var_os("PATH")
+                    .map(|path| {
+                        std::env::split_paths(&path)
+                            .filter(|entry| entry.is_absolute())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let pathext = self
+                    .var_os("PATHEXT")
+                    .map_or_else(String::new, |value| value.to_string_lossy().into_owned());
+                bt_platform::program_in_directories(name, &directories, &pathext, &|candidate| {
+                    candidate.is_file()
+                })
+            }
+            Self::Inherited => bt_platform::program_on_path(name),
+        }
+    }
+
+    /// **Lay this environment over a child**: every variable this process holds that the block
+    /// does not is removed, then the block is set, so the child sees the block and nothing of
+    /// Folio's own. [`Self::Inherited`] removes `PSModulePath` alone, on Windows.
+    pub(crate) fn apply(&self, command: &mut std::process::Command) {
+        match self {
+            Self::Logon(block) => {
+                for (name, _) in std::env::vars_os() {
+                    if !block.iter().any(|(held, _)| same_name(held, &name)) {
+                        command.env_remove(name);
+                    }
+                }
+                command.envs(block.iter().map(|(name, value)| (name, value)));
+            }
+            Self::Inherited => {
+                if cfg!(windows) {
+                    command.env_remove("PSModulePath");
+                }
+            }
+        }
+    }
+}
+
+impl ShellEnvironment for ProbeEnvironment {
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        match self {
+            Self::Logon(block) => block
+                .iter()
+                .find(|(name, _)| same_name(name, OsStr::new(key)))
+                .map(|(_, value)| value.clone()),
+            Self::Inherited => std::env::var_os(key),
+        }
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        bt_pty::SystemShellEnvironment.is_file(path)
+    }
+}
+
+/// Two variable names, compared as Windows compares them — in any case. A logon block exists only
+/// on Windows (`fresh_logon_environment` answers `None` elsewhere).
+fn same_name(left: &OsStr, right: &OsStr) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+/// **The command a PowerShell probe starts**: `program` as `environment` resolves it (the named
+/// door's rule, R1-17: a profile may spell its shell `pwsh.exe` with no path, and a bare name is
+/// never resolved out of a working directory), through the quiet door (§7.40 ①: no console
+/// window), in `environment` ([`ProbeEnvironment::apply`]).
 pub(crate) fn powershell_probe_command(
     program: &Path,
+    environment: &ProbeEnvironment,
 ) -> Result<std::process::Command, ParseProbeFailure> {
-    #[cfg(windows)]
-    {
-        bt_platform::quiet_command_named(program)
-            .map(|mut command| {
-                command.env_remove("PSModulePath");
-                command
-            })
-            .ok_or_else(|| {
-                ParseProbeFailure::Spawn(format!(
-                    "the named child-process door could not resolve {}",
-                    program.display()
-                ))
-            })
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(bt_platform::quiet_command(program))
-    }
+    let resolved = environment.program(program).ok_or_else(|| {
+        ParseProbeFailure::Spawn(format!(
+            "the named child-process door could not resolve {}",
+            program.display()
+        ))
+    })?;
+    let mut command = bt_platform::quiet_command(resolved);
+    environment.apply(&mut command);
+    Ok(command)
 }
 
 fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
@@ -3278,6 +3596,7 @@ pub(crate) fn run_powershell_probe(
     command: &str,
     input: Option<&str>,
     deadline_after: std::time::Duration,
+    environment: &ProbeEnvironment,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
@@ -3287,7 +3606,7 @@ pub(crate) fn run_powershell_probe(
     // `CreateProcess` out of the working directory before `PATH`. The probe
     // asks about the program a pane will run, so it asks about the one an
     // administrator installed.
-    let mut probe = powershell_probe_command(program)?;
+    let mut probe = powershell_probe_command(program, environment)?;
     probe.args(["-NoProfile", "-NonInteractive", "-Command", command]);
     let stdio = if input.is_some() {
         bt_platform::ProbeStdio::FED
@@ -3369,16 +3688,25 @@ const PROFILE_PATH_COMMAND: &str =
     "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $PROFILE.CurrentUserCurrentHost";
 
 #[cfg(windows)]
-fn run_profile_path_probe(program: &Path, patience: std::time::Duration) -> Option<PathBuf> {
+fn run_profile_path_probe(
+    program: &Path,
+    patience: std::time::Duration,
+    environment: &ProbeEnvironment,
+) -> Option<PathBuf> {
     if profile_sandboxed() {
         return None;
     }
-    let output = run_powershell_probe(program, PROFILE_PATH_COMMAND, None, patience).ok()?;
+    let output =
+        run_powershell_probe(program, PROFILE_PATH_COMMAND, None, patience, environment).ok()?;
     parse_profile_path(std::str::from_utf8(&output.stdout).ok()?)
 }
 
 #[cfg(not(windows))]
-fn run_profile_path_probe(_program: &Path, _patience: std::time::Duration) -> Option<PathBuf> {
+fn run_profile_path_probe(
+    _program: &Path,
+    _patience: std::time::Duration,
+    _environment: &ProbeEnvironment,
+) -> Option<PathBuf> {
     None
 }
 
@@ -3400,27 +3728,31 @@ fn parse_profile_path(stdout: &str) -> Option<PathBuf> {
 /// ([`profile_fallback_from_parts`]) offers no fallback there.
 const PROFILE_PROBE_EXISTS: bool = cfg!(windows);
 
+/// **One edition observed**, its child in `environment` — the block the ordinary session's Process
+/// scope is read out of too ([`ordinary_process_scope`]), so one read serves both.
 fn probe_profile_observation(
-    worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
+    environment: &ProbeEnvironment,
 ) -> Option<ProfileObservation> {
     probe_profile_observation_unless(profile_sandboxed(), || {
         #[cfg(windows)]
         {
-            let output =
-                run_powershell_probe(program, PROFILE_COMMAND, None, POWERSHELL_PROBE_DEADLINE)
-                    .ok()?;
+            let output = run_powershell_probe(
+                program,
+                PROFILE_COMMAND,
+                None,
+                POWERSHELL_PROBE_DEADLINE,
+                environment,
+            )
+            .ok()?;
             let mut observed =
                 parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)?;
-            let fresh = bt_platform::environment::fresh_logon_environment(worker)
-                .ok()
-                .flatten();
-            observed.ordinary_process = ordinary_process_scope(fresh.as_deref());
+            observed.ordinary_process = ordinary_process_scope(environment.block());
             Some(observed)
         }
         #[cfg(not(windows))]
         {
-            let _ = (worker, program);
+            let _ = (program, environment);
             None
         }
     })
@@ -3459,11 +3791,18 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
     if !path.is_absolute() {
         return None;
     }
-    let _effective = lines.next()?;
+    // The effective policy is the one line without a `=`, and nothing here reads it: the scopes
+    // it is decided from are read instead ([`policy_cause`]).
     let mut reported = BTreeMap::new();
     for line in lines {
-        let (key, value) = line.split_once('=')?;
-        reported.insert(key.trim().to_owned(), value.trim().to_owned());
+        if let Some((key, value)) = line.split_once('=') {
+            reported.insert(key.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    // A session the loader cannot integrate is that whatever else it said: under Constrained
+    // Language Mode the facts that need a .NET type may be missing, and none of them is read.
+    if reported.get("Language")? != "FullLanguage" {
+        return Some(ProfileObservation::constrained(path));
     }
     let scope = |name: &str| {
         reported
@@ -3487,6 +3826,7 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
         marked: fact("Marked")?,
     };
     Some(ProfileObservation {
+        full_language: true,
         scopes: PolicyScopes {
             machine_policy: scope("MachinePolicy")?,
             user_policy: scope("UserPolicy")?,
@@ -3576,8 +3916,11 @@ pub fn powershell_script_for_birth() -> Option<PathBuf> {
         if let Some(path) = TRIAL_POWERSHELL_SCRIPT.get().filter(|path| path.is_file()) {
             return Some(path.clone());
         }
-        let prepared =
-            powershell_script_in_trial(&durable, &trial_script_directory()?, SCRIPT_PS1)?;
+        let prepared = POWERSHELL_SCRIPT_NOTICE.said(
+            "the PowerShell integration script",
+            powershell_script_in_trial(&durable, &trial_script_directory()?, SCRIPT_PS1),
+            &crate::diagnostics::note,
+        )?;
         if !prepared.is_file() {
             return None;
         }
@@ -3590,7 +3933,11 @@ pub fn powershell_script_for_birth() -> Option<PathBuf> {
     {
         return Some(path.clone());
     }
-    let prepared = install_script_at(&durable, SCRIPT_FILE_PS1, SCRIPT_PS1)?;
+    let prepared = POWERSHELL_SCRIPT_NOTICE.said(
+        "the PowerShell integration script",
+        install_script_at(&durable, SCRIPT_FILE_PS1, SCRIPT_PS1),
+        &crate::diagnostics::note,
+    )?;
     if !prepared.is_file() {
         return None;
     }
@@ -3636,12 +3983,12 @@ fn powershell_script_in_trial(
     durable_directory: &Path,
     trial_directory: &Path,
     text: &str,
-) -> Option<PathBuf> {
+) -> std::io::Result<PathBuf> {
     let durable = durable_directory.join(SCRIPT_FILE_PS1);
     if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &durable)
         .is_ok_and(|existing| existing == text)
     {
-        return Some(durable);
+        return Ok(durable);
     }
     install_script_at(trial_directory, SCRIPT_FILE_PS1, text)
 }
@@ -3666,13 +4013,17 @@ enum PowershellPreparation {
 struct PreparationEffects {
     script: fn() -> Option<PathBuf>,
     parse: ParseProbe,
+    /// The environment the parse questions are asked in, read on the worker.
+    environment: fn(&bt_platform::admission::WorkerCtx) -> ProbeEnvironment,
 }
 
 impl PreparationEffects {
-    /// The product's: the durable script under the data folder, and a real PowerShell.
+    /// The product's: the durable script under the data folder, and a real PowerShell in the
+    /// current logon environment.
     const MACHINE: Self = Self {
         script: powershell_script_for_birth,
         parse: run_parse_probe,
+        environment: |worker| ProbeEnvironment::current(worker, "PowerShell parse probe"),
     };
 }
 
@@ -3683,15 +4034,24 @@ fn spawn_powershell_preparation(
     bt_platform::spawn_at_priority(
         "powershell-script-prepare",
         bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| match work {
+        move |ctx| match work {
             PowershellPreparation::ScriptAndQuestions(questions) => {
                 let _ = (effects.script)();
+                if questions.is_empty() {
+                    return;
+                }
+                let environment = (effects.environment)(ctx);
                 for question in questions {
-                    ask_parse_question(question, ParseAsker::Background, effects.parse);
+                    ask_parse_question(
+                        question,
+                        ParseAsker::Background,
+                        effects.parse,
+                        &environment,
+                    );
                 }
             }
             PowershellPreparation::ParseAttempt(attempt) => {
-                run_parse_attempt(attempt, effects.parse);
+                run_parse_attempt(attempt, effects.parse, &(effects.environment)(ctx));
             }
         },
     )
@@ -4035,6 +4395,290 @@ mod tests {
     use crate::profiles::{Origin, ProgramSource};
     use bt_source::{Index, Pattern, Search, View, needle};
 
+    // ── T-PROBE-NO-CACHED-FAILURE ───────────────────────────────────────────
+
+    /// A logon block a test writes: `PATH` names `directory` alone, and one variable Folio's own
+    /// environment does not hold.
+    fn logon_block(directory: &Path) -> ProbeEnvironment {
+        ProbeEnvironment::Logon(vec![
+            (OsString::from("Path"), directory.as_os_str().to_owned()),
+            (OsString::from("PATHEXT"), OsString::from(".COM;.EXE")),
+            (
+                OsString::from("FOLIO_B4_LOGON"),
+                OsString::from("登录 block, mixed 文字"),
+            ),
+        ])
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **a probe's child is given the current logon block, not
+    /// Folio's environment**: its program is looked up over the block's `PATH`, the block's
+    /// variables are set, and every variable of Folio's own that the block does not hold is
+    /// removed — `PSModulePath` among them, so a PowerShell 7 that started Folio lends nothing to
+    /// a Windows PowerShell probe. No child is started: the command is read, not run.
+    ///
+    /// MUTATIONS (observed red): ① `ProbeEnvironment::apply`'s `Logon` arm laying nothing over
+    /// the child (the inherited environment) — the block's variable is missing; ②
+    /// `ProbeEnvironment::program` asking `bt_platform::program_on_path` for a `Logon` block
+    /// (Folio's own `PATH`) — the program found is `System32`'s, not the block's.
+    #[test]
+    fn a_probe_child_is_given_the_current_logon_block_not_folios_environment() {
+        let directory = temp_dir("b4-logon-block 中文");
+        let program = directory.join("powershell.exe");
+        std::fs::write(&program, b"never started").unwrap();
+        let environment = logon_block(&directory);
+        let command = powershell_probe_command(Path::new("powershell.exe"), &environment)
+            .expect("the block's PATH names the program");
+        assert_eq!(Path::new(command.get_program()), program.as_path());
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().to_ascii_uppercase(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(
+            envs.contains(&(
+                "FOLIO_B4_LOGON".to_owned(),
+                Some("登录 block, mixed 文字".to_owned())
+            )),
+            "the block's own variable reaches the child: {:?}",
+            envs.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+        assert!(envs.contains(&(
+            "PATH".to_owned(),
+            Some(directory.to_string_lossy().into_owned())
+        )));
+        for (name, _) in std::env::vars_os() {
+            let name = name.to_string_lossy().to_ascii_uppercase();
+            if ["PATH", "PATHEXT", "FOLIO_B4_LOGON"].contains(&name.as_str()) {
+                continue;
+            }
+            assert!(
+                envs.contains(&(name.clone(), None)),
+                "Folio's own {name} is taken off the child"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A logon block that cannot be read is said, and the probe runs in the inherited
+    /// environment** — the pane birth's rule; no block on this platform is no line.
+    ///
+    /// RED (mutation: `from_read` answering `Inherited` for an error without the line).
+    #[test]
+    fn an_unreadable_logon_block_is_said_and_the_probe_inherits() {
+        let said = std::cell::RefCell::new(Vec::new());
+        let note = |line: &str| said.borrow_mut().push(line.to_owned());
+        assert!(matches!(
+            ProbeEnvironment::from_read(
+                Err(std::io::Error::other("access denied")),
+                "PSReadLine probe",
+                &note,
+            ),
+            ProbeEnvironment::Inherited
+        ));
+        assert!(matches!(
+            ProbeEnvironment::from_read(Ok(None), "PSReadLine probe", &note),
+            ProbeEnvironment::Inherited
+        ));
+        assert!(matches!(
+            ProbeEnvironment::from_read(Ok(Some(Vec::new())), "PSReadLine probe", &note),
+            ProbeEnvironment::Logon(_)
+        ));
+        let said = said.into_inner();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("PSReadLine probe: the current environment could not be read"));
+        assert!(said[0].contains("access denied"));
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **a background ask that backed off is said**: after
+    /// three failures a start, a table edit or a birth no longer asks the row's parse question,
+    /// and `diagnostics.log` says so each time one would have; the Profiles page still asks.
+    ///
+    /// MUTATION (observed red): `claim_or_say` saying nothing for `Unclaimed::BackedOff`.
+    #[test]
+    fn a_parse_question_that_backed_off_is_said_and_a_visit_still_asks() {
+        let directory = temp_dir("b4-backed-off");
+        let program = directory.join("pwsh.exe");
+        let question = ParseQuestion::new(
+            &program,
+            &os_words(&["-NoExit", "-Command", "Write-Host '回退 back-off'"]),
+            "Write-Host '回退 back-off'".to_owned(),
+        );
+        PARSE_ANSWERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(
+                question.key.clone(),
+                ParseAnswer::Failed {
+                    attempts: PARSE_PROBE_ATTEMPT_LIMIT,
+                    failure: ParseProbeFailure::Deadline {
+                        stdout: "[]".to_owned(),
+                        stderr: "[]".to_owned(),
+                    },
+                },
+            );
+        let said = std::cell::RefCell::new(Vec::new());
+        let note = |line: &str| said.borrow_mut().push(line.to_owned());
+        assert!(claim_or_say(question.clone(), ParseAsker::Background, &note).is_none());
+        let lines = said.borrow().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("failed 3 time(s)"), "{lines:?}");
+        assert!(
+            lines[0].contains(&program.display().to_string()),
+            "{lines:?}"
+        );
+        let visit = claim_or_say(question.clone(), ParseAsker::Visit, &note)
+            .expect("a visit asks a backed-off question");
+        assert_eq!(visit.number, PARSE_PROBE_ATTEMPT_LIMIT + 1);
+        assert!(
+            claim_or_say(question, ParseAsker::Background, &note).is_none(),
+            "a question in flight is not asked twice"
+        );
+        assert_eq!(said.borrow().len(), 1, "and that is not a back-off");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **the `$PROFILE` path a removal reads is the newest any
+    /// probe heard**: an answer the slot held is replaced by the observation's, so a `Documents`
+    /// folder that moved while Folio ran is followed without asking a shell again.
+    ///
+    /// MUTATION (observed red): `file_profile_answer` leaving a held answer alone (the slot kept
+    /// for the process) — the removal reads the old path.
+    #[test]
+    fn a_profile_path_heard_by_the_observation_replaces_the_one_held() {
+        let directory = temp_dir("b4-profile-path");
+        let program = directory.join("pwsh.exe");
+        let environment = ProbeEnvironment::Inherited;
+        let old = PathBuf::from(r"C:\Users\me\Documents\PowerShell\profile.ps1");
+        let moved = PathBuf::from(r"C:\Users\me\OneDrive\文档\PowerShell\profile.ps1");
+        let (slot, _) = profile_slot(&program, &environment);
+        assert_eq!(answer_once(&slot, || Some(old.clone())), Some(old));
+        file_profile_answer(&program, moved.clone(), &environment);
+        let (slot, _) = profile_slot(&program, &environment);
+        assert_eq!(
+            answer_once(&slot, || panic!("a held answer asks no shell")),
+            Some(moved)
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **an edition in Constrained Language Mode claims
+    /// nothing and offers nothing**, a composable row included: its observation's `Language=`
+    /// is read even when the lines that need a .NET type are missing, and the row says why.
+    ///
+    /// MUTATION (observed red): `profile_fallback_from_parts` without the `Constrained` check —
+    /// a composable row answers `NotNeeded`, the integration claim.
+    #[cfg(windows)]
+    #[test]
+    fn an_edition_in_constrained_language_mode_claims_nothing() {
+        let constrained = parse_profile_observation(
+            "C:\\Users\\me\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1\n\
+             MachinePolicy=Undefined\nZone=Unknown\nLocal=False\nMarked=False\n\
+             NoProcess=RemoteSigned\nLanguage=ConstrainedLanguage\n",
+        )
+        .expect("the path and the language mode are an answer");
+        assert!(!constrained.full_language);
+        let full = parse_profile_observation(
+            "C:\\Users\\me\\文档\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1\n\
+             RemoteSigned\nMachinePolicy=Undefined\nUserPolicy=Undefined\nProcess=Undefined\n\
+             CurrentUser=RemoteSigned\nLocalMachine=Undefined\nZone=MyComputer\nLocal=True\n\
+             Marked=False\nNoProcess=RemoteSigned\nLanguage=FullLanguage\n",
+        )
+        .expect("a full answer");
+        assert!(full.full_language);
+        for composable in [true, false] {
+            assert_eq!(
+                profile_fallback_from_parts(
+                    true,
+                    true,
+                    composable,
+                    false,
+                    Heard::Answer(()),
+                    Heard::Answer((PolicyCause::Allows, false, false)),
+                ),
+                PowerShellProfileFallback::Constrained,
+                "composable={composable}"
+            );
+        }
+        assert_eq!(
+            profile_fallback_from_parts(
+                true,
+                true,
+                true,
+                false,
+                Heard::Answer(()),
+                Heard::Answer((PolicyCause::Allows, false, true)),
+            ),
+            PowerShellProfileFallback::NotNeeded
+        );
+        assert_eq!(
+            crate::settings::ProfileButton::of(PowerShellProfileFallback::Constrained),
+            None
+        );
+        assert_eq!(PowerShellProfileFallback::Constrained.policy_cause(), None);
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **a script write that failed is tried again at the next
+    /// attempt, and its cause is said once**: only a path is kept; a write into a directory that
+    /// cannot be made fails, is said, fails again silently, then lands once the way is clear; a
+    /// later failure is said again.
+    ///
+    /// MUTATIONS (observed red): ① `kept_or_found` keeping the failure (an empty path kept and
+    /// answered as `None` thereafter) — the third attempt finds nothing; ② `WriteNotice::said`
+    /// saying every failure — two lines for one cause.
+    #[test]
+    fn a_script_write_that_failed_is_tried_again_and_its_cause_said_once() {
+        let root = temp_dir("b4-script-write");
+        let blocked = root.join("shell-integration");
+        std::fs::write(&blocked, b"a file where the folder goes").unwrap();
+        let kept: &'static OnceLock<PathBuf> = Box::leak(Box::new(OnceLock::new()));
+        let notice = WriteNotice::new();
+        let said = std::cell::RefCell::new(Vec::new());
+        let note = |line: &str| said.borrow_mut().push(line.to_owned());
+        let attempt = || {
+            kept_or_found(kept, || {
+                notice.said(
+                    "the bash integration script",
+                    install_script_at(&blocked, SCRIPT_FILE, "# 脚本 script\n"),
+                    &note,
+                )
+            })
+        };
+        assert_eq!(attempt(), None);
+        assert_eq!(attempt(), None);
+        assert_eq!(
+            said.borrow().len(),
+            1,
+            "one cause, said once: {:?}",
+            said.borrow()
+        );
+        assert!(said.borrow()[0].starts_with("the bash integration script could not be written ("));
+        std::fs::remove_file(&blocked).unwrap();
+        assert_eq!(
+            attempt(),
+            Some(blocked.join(SCRIPT_FILE).as_path()),
+            "the next attempt writes"
+        );
+        assert_eq!(
+            notice.said(
+                "the bash integration script",
+                Err(std::io::Error::other("disk full")),
+                &note
+            ),
+            None
+        );
+        assert_eq!(
+            said.borrow().len(),
+            2,
+            "a failure after a write is said again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// PIN (release read m2) — **concurrent askers share one answer, and a failure is not an
     /// answer**: eight askers of a profile path that is answered make one query; after a query
     /// that got no answer, the next asker asks again, and its answer is then kept.
@@ -4274,13 +4918,13 @@ mod tests {
         );
         let probe = source_for_profile_probe();
         let command = source_for_probe_command();
-        assert!(command.contains("quiet_command_named"));
-        assert!(command.contains("quiet_command(program)"));
+        assert!(command.contains("environment.program(program)"));
+        assert!(command.contains("bt_platform::quiet_command(resolved)"));
         assert!(probe.contains("-NoProfile"));
         assert!(include_str!("shell_integration.rs").contains("const POWERSHELL_PROBE_DEADLINE:"));
         assert!(REMOVAL_PROBE_DEADLINE > POWERSHELL_PROBE_DEADLINE);
         let parse_probe = include_str!("shell_integration.rs")
-            .split_once("fn run_parse_probe(program: &Path, text: &str)")
+            .split_once("fn run_parse_probe(")
             .expect("the Windows target parser probe")
             .1
             .split_once("fn profile_key")
@@ -4679,7 +5323,9 @@ mod tests {
                     } else {
                         Heard::Answer(())
                     },
-                    observed.map_or(Heard::NotYet, Heard::Answer),
+                    observed.map_or(Heard::NotYet, |(cause, present)| {
+                        Heard::Answer((cause, present, true))
+                    }),
                 )
             };
         assert_eq!(decide(true, false, false, None), NotNeeded);
@@ -4726,7 +5372,8 @@ mod tests {
             "\r\n{path}\r\nRemoteSigned\r\n\
              MachinePolicy=Undefined\r\nUserPolicy=Undefined\r\nProcess=Undefined\r\n\
              CurrentUser={current_user}\r\nLocalMachine=Undefined\r\n\
-             Zone={zone}\r\nLocal=True\r\nMarked=False\r\nNoProcess={no_process}\r\n"
+             Zone={zone}\r\nLocal=True\r\nMarked=False\r\nNoProcess={no_process}\r\n\
+             Language=FullLanguage\r\n"
         )
     }
 
@@ -4800,6 +5447,12 @@ mod tests {
         let without_zone = probe_answer(local, "Undefined", "MyComputer", "Restricted")
             .replace("Zone=MyComputer\r\n", "");
         assert!(parse_profile_observation(&without_zone).is_none());
+        let without_language = probe_answer(local, "Undefined", "MyComputer", "Restricted")
+            .replace("Language=FullLanguage\r\n", "");
+        assert!(
+            parse_profile_observation(&without_language).is_none(),
+            "no language mode, no answer"
+        );
         assert!(parse_profile_observation("profile.ps1\r\nBypass\r\n").is_none());
         assert!(parse_profile_observation("  \r\n").is_none());
     }
@@ -4988,7 +5641,8 @@ mod tests {
                 Heard::Answer(()),
                 Heard::Answer((
                     policy_cause(remote_signed, Some(true), RowProcessScope::Absent),
-                    true
+                    true,
+                    true,
                 )),
             ),
             PowerShellProfileFallback::Enabled
@@ -5088,12 +5742,17 @@ mod tests {
     /// PIN — **a probe's PowerShell computes its own module path** (round 6): the door does not
     /// hand it the module path of whatever session started Folio.
     ///
-    /// RED (mutation: drop the `env_remove("PSModulePath")` in `powershell_probe_command`).
+    /// In the inherited environment (a logon block that could not be read, the command-line
+    /// verbs); the logon block's own case is
+    /// `a_probe_child_is_given_the_current_logon_block_not_folios_environment`.
+    ///
+    /// RED (mutation: drop the `env_remove("PSModulePath")` in `ProbeEnvironment::apply`).
     #[cfg(windows)]
     #[test]
     fn a_probe_powershell_computes_its_own_module_path() {
-        let command = powershell_probe_command(Path::new("powershell.exe"))
-            .expect("Windows PowerShell is on every supported Windows");
+        let command =
+            powershell_probe_command(Path::new("powershell.exe"), &ProbeEnvironment::Inherited)
+                .expect("Windows PowerShell is on every supported Windows");
         assert!(
             command
                 .get_envs()
@@ -5151,7 +5810,7 @@ mod tests {
                     false,
                     false,
                     Heard::Answer(()),
-                    Heard::Answer((cause, false))
+                    Heard::Answer((cause, false, true))
                 ),
                 state
             );
@@ -5185,6 +5844,7 @@ mod tests {
         let program = Path::new("powershell.exe");
         let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
         let observed = |current_user| ProfileObservation {
+            full_language: true,
             path: PathBuf::from("profile.ps1"),
             scopes: scopes(Undefined, Undefined, Undefined, current_user, Undefined),
             edition_says: Some(true),
@@ -5376,6 +6036,7 @@ mod tests {
         };
         let none = Undefined;
         let observed = |scopes: PolicyScopes, ordinary, edition_says| ProfileObservation {
+            full_language: true,
             path: PathBuf::from(r"C:\Users\me\Documents\WindowsPowerShell\profile.ps1"),
             scopes,
             edition_says,
@@ -5514,6 +6175,7 @@ mod tests {
                 Heard::Answer((
                     edition_cause(session, row.unwrap_or(RowProcessScope::Absent)),
                     present,
+                    true,
                 )),
             )
         };
@@ -5724,9 +6386,9 @@ mod tests {
         for observed in [
             Heard::NotYet,
             Heard::Failed,
-            Heard::Answer((PolicyCause::Allows, false)),
-            Heard::Answer((PolicyCause::Allows, true)),
-            Heard::Answer((PolicyCause::Changeable, false)),
+            Heard::Answer((PolicyCause::Allows, false, true)),
+            Heard::Answer((PolicyCause::Allows, true, true)),
+            Heard::Answer((PolicyCause::Changeable, false, true)),
         ] {
             for parse in [Heard::Answer(()), Heard::NotYet, Heard::Failed] {
                 assert_eq!(
@@ -6087,7 +6749,7 @@ mod tests {
                 }),
             );
         }
-        assert!(claim_parse_attempt(question.clone(), ParseAsker::Background).is_none());
+        assert!(claim_parse_attempt(question.clone(), ParseAsker::Background).is_err());
         assert_eq!(cached_parse_answer(program, &arguments), None);
     }
 
@@ -6122,18 +6784,18 @@ mod tests {
         for _ in 1..PARSE_PROBE_ATTEMPT_LIMIT {
             fail(claim_parse_attempt(question.clone(), ParseAsker::Background).expect("bounded"));
         }
-        assert!(claim_parse_attempt(question.clone(), ParseAsker::Background).is_none());
+        assert!(claim_parse_attempt(question.clone(), ParseAsker::Background).is_err());
         let visit = claim_parse_attempt(question.clone(), ParseAsker::Visit)
             .expect("a visit asks a failed question again");
         assert_eq!(visit.number, PARSE_PROBE_ATTEMPT_LIMIT + 1);
         assert!(
-            claim_parse_attempt(question.clone(), ParseAsker::Visit).is_none(),
+            claim_parse_attempt(question.clone(), ParseAsker::Visit).is_err(),
             "a question in flight is not asked twice"
         );
         publish_parse_attempt(visit.question.key, visit.number, Ok(false));
         assert_eq!(heard_parse(program, &arguments), Heard::Answer(()));
         assert!(
-            claim_parse_attempt(question, ParseAsker::Visit).is_none(),
+            claim_parse_attempt(question, ParseAsker::Visit).is_err(),
             "an answered question is not asked again"
         );
         assert_eq!(
@@ -6329,7 +6991,7 @@ mod tests {
             .modified()
             .unwrap();
         assert_eq!(
-            powershell_script_in_trial(&durable, &trial, shipped),
+            powershell_script_in_trial(&durable, &trial, shipped).ok(),
             Some(durable.join(SCRIPT_FILE_PS1))
         );
         assert!(
@@ -6351,7 +7013,7 @@ mod tests {
                 Some(text) => std::fs::write(durable.join(SCRIPT_FILE_PS1), text).unwrap(),
                 None => std::fs::remove_file(durable.join(SCRIPT_FILE_PS1)).unwrap(),
             }
-            let named = powershell_script_in_trial(&durable, &trial, shipped);
+            let named = powershell_script_in_trial(&durable, &trial, shipped).ok();
             assert_eq!(named, Some(trial.join(SCRIPT_FILE_PS1)), "{stale:?}");
             assert_eq!(
                 std::fs::read_to_string(trial.join(SCRIPT_FILE_PS1)).unwrap(),
@@ -6370,7 +7032,7 @@ mod tests {
         // The commit's write, and every write outside a trial: the durable copy, repaired.
         std::fs::write(durable.join(SCRIPT_FILE_PS1), "# an older build\n").unwrap();
         assert_eq!(
-            install_script_at(&durable, SCRIPT_FILE_PS1, shipped),
+            install_script_at(&durable, SCRIPT_FILE_PS1, shipped).ok(),
             Some(durable.join(SCRIPT_FILE_PS1))
         );
         assert_eq!(
@@ -6468,13 +7130,13 @@ mod tests {
             .collect::<Vec<_>>();
         let installed = root.join(name);
         assert!(
-            outcomes.iter().any(Option::is_some),
+            outcomes.iter().any(Result::is_ok),
             "at least one competing replacement lands"
         );
         assert!(
             outcomes
                 .iter()
-                .all(|outcome| outcome.is_none() || outcome.as_deref() == Some(installed.as_path())),
+                .all(|outcome| outcome.as_ref().ok().is_none_or(|path| path == &installed)),
             "a refusal names nothing else: {outcomes:?}"
         );
         let final_text = std::fs::read_to_string(root.join(name)).unwrap();
@@ -6531,7 +7193,7 @@ mod tests {
     fn real_parse_answer(program: &Path, text: &str) -> bool {
         let mut failures = Vec::new();
         for attempt in 1..=PARSE_PROBE_ATTEMPT_LIMIT {
-            match run_parse_probe(program, text) {
+            match run_parse_probe(program, text, &ProbeEnvironment::Inherited) {
                 Ok(answer) => return answer,
                 Err(failure) => {
                     eprintln!(
@@ -7059,7 +7721,11 @@ mod tests {
         }
 
         /// The [`ParseProbe`] stand-in.
-        fn probe(program: &Path, _text: &str) -> Result<bool, ParseProbeFailure> {
+        fn probe(
+            program: &Path,
+            _text: &str,
+            _environment: &ProbeEnvironment,
+        ) -> Result<bool, ParseProbeFailure> {
             let mut state = NEVER_ANSWERS.state();
             state.arrived.push(program.to_path_buf());
             NEVER_ANSWERS.changed.notify_all();
@@ -7160,6 +7826,7 @@ mod tests {
             PreparationEffects {
                 script: no_script,
                 parse: NeverAnswers::probe,
+                environment: |_| ProbeEnvironment::Inherited,
             },
         );
         assert!(
@@ -8921,6 +9588,7 @@ mod tests {
         let answer = run_parse_probe(
             &program,
             "Write-Output 'na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}'",
+            &ProbeEnvironment::Inherited,
         );
         let _ = std::fs::remove_dir_all(&directory);
         assert_eq!(answer, Ok(true));
