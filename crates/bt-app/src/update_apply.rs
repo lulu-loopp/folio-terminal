@@ -585,8 +585,8 @@ pub(crate) fn commit_last_trial_as(
     )
 }
 
-/// [`commit_last_trial_as`] with the journal's read and the pause between
-/// two reads handed in. **A read that fails other than "no such file" is
+/// [`commit_last_trial_as`] with the journal's bytes (`journal_bytes`, one
+/// read of the file) and the pause between two reads handed in. **A read that fails other than "no such file" is
 /// asked again** within [`JOURNAL_WRITE_WITHIN`] — a scanner or a sync tool
 /// that holds `journal.json` lets go within moments, as the window election
 /// asks again ([`PhaseRead::NotRead`], E1 round 3) — and only a journal that
@@ -597,7 +597,7 @@ fn commit_last_trial_reading(
     home: &Home,
     (txn, nonce): (TxnId, Nonce),
     (pid, started): (u32, Option<u64>),
-    mut read: impl FnMut() -> io::Result<Vec<u8>>,
+    mut journal_bytes: impl FnMut() -> io::Result<Vec<u8>>,
     mut wait: impl FnMut(Duration) -> bool,
 ) -> Result<LastTrialCommit, String> {
     // Its own start instant is half of what its receipt must name (H.1): a
@@ -611,7 +611,7 @@ fn commit_last_trial_reading(
         Ok(None) => return Ok(LastTrialCommit::Pending),
         Err(failure) => return Err(failure.to_string()),
     };
-    let read_once = || match sight_of_read(read()) {
+    let read_once = || match sight_of_read(journal_bytes()) {
         Some(Sight::Unreadable(ParseRefusal::Unread(error))) => Err(error),
         seen => Ok(seen),
     };
