@@ -2168,6 +2168,14 @@ fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
 #[cfg(windows)]
 use windows_impl::file_identity;
 
+/// **The 8.3 spelling Windows keeps for an existing `path`** (`GetShortPathNameW`), each
+/// component that has a short name replaced by it — `C:\Users\alice\APPDAT~1\…` for
+/// `C:\Users\alice\AppData\…`, the kind of spelling a GitHub runner's `%TEMP%` arrives in. A
+/// component without a short name (a volume with 8.3 names off) keeps its long name, so the
+/// answer may equal `path`. An error when the path does not exist.
+#[cfg(windows)]
+pub use windows_impl::short_path_name;
+
 /// Where there is neither an inode nor a file id, nothing can be proved the same.
 #[cfg(not(any(unix, windows)))]
 fn file_identity(path: &std::path::Path) -> Option<()> {
@@ -12513,6 +12521,30 @@ mod windows_impl {
             info.VolumeSerialNumber,
             u128::from_le_bytes(info.FileId.Identifier),
         ))
+    }
+
+    /// See [`crate::short_path_name`].
+    pub fn short_path_name(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        use std::os::windows::ffi::OsStringExt as _;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        wide.push(0);
+        // The longest path the wide API can name, so one call always has room.
+        let mut buffer = vec![0u16; 32_768];
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call, and the
+        // output slice is exclusively borrowed for it; the call writes at most its length.
+        let written = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buffer)) };
+        let written = usize::try_from(written).unwrap_or(usize::MAX);
+        if written == 0 || written >= buffer.len() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            &buffer[..written],
+        )))
     }
 
     /// Paint this window's own background in `rgb`, or in **nothing** at all.

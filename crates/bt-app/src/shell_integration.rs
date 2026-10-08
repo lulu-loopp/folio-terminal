@@ -8934,4 +8934,220 @@ mod tests {
         let output = stopped_output(child);
         assert_eq!(String::from_utf8_lossy(&output.stdout), said);
     }
+
+    /// An environment whose home is a test shell's own.
+    #[cfg(windows)]
+    struct HomeIs(PathBuf);
+
+    #[cfg(windows)]
+    impl ShellEnvironment for HomeIs {
+        fn var_os(&self, key: &str) -> Option<OsString> {
+            (key == profiles::home_variable(profiles::SeedPlatform::of_this_build()))
+                .then(|| self.0.clone().into_os_string())
+        }
+
+        fn is_file(&self, _path: &Path) -> bool {
+            false
+        }
+    }
+
+    /// Feed `shell`'s output to `pane` until `done` holds, failing after a minute of it not.
+    #[cfg(windows)]
+    fn feed_until(
+        shell: &mut bt_pty::test_shell::TestShell,
+        pane: &mut bt_term::DualPlaneSession,
+        what: &str,
+        done: impl Fn(&bt_term::DualPlaneSession) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut seen = Vec::new();
+        while !done(pane) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: never reached; {}; output was {:?}",
+                shell.account(),
+                String::from_utf8_lossy(&seen)
+            );
+            let chunk = shell.read_output();
+            if chunk.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            pane.feed(&chunk).unwrap();
+            seen.extend(chunk);
+        }
+    }
+
+    /// Issue #28 through a real shell: a profile row whose starting folder is a fixed folder
+    /// (`profiles::place_for`, as `create_leaf_session` asks it), the shell started there by
+    /// `start`, its bytes read by a real session told its spawn directory as a pane is, and the
+    /// files card's folder (`crate::files_root_of`, the folder button's and `Ctrl+Shift+B`'s one
+    /// reader) asked at birth, at the first prompt and after `cd` into a subfolder.
+    ///
+    /// **What the card is compared with is what the product holds.** The pane keeps every folder
+    /// in the spelling it was given — the profile's folder as the profile names it, a report as
+    /// the shell spelled it — and does not canonicalise. A shell does not have to spell its folder
+    /// the way it was handed it: PowerShell answers `$PWD` with long names where its working
+    /// directory was given an 8.3 component (CI run 37739213188: handed the runner's account
+    /// folder by its 8.3 name, it reported the long name). So the card is the
+    /// profile's folder *as given* before the first report, and *the report itself* after it,
+    /// which must name the same directory (`bt_platform::same_file`). The folder is handed over
+    /// through an 8.3 component on every machine — a long-named folder, referred to by its short
+    /// name — so a comparison of spellings is red here and not only on a runner.
+    #[cfg(windows)]
+    fn files_card_follows_a_real_shell_from_its_fixed_starting_folder(
+        start: impl FnOnce(
+            bt_pty::test_shell::Hygiene,
+            Option<PathBuf>,
+        ) -> bt_pty::test_shell::TestShell,
+    ) {
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let home = hygiene.home();
+        let long = hygiene.root().join("a long folder name 长名");
+        std::fs::create_dir_all(long.join("sandbox 沙盒").join("sub 子")).unwrap();
+        let short = bt_platform::short_path_name(&long).unwrap();
+        assert_ne!(
+            short, long,
+            "the test folder's volume keeps 8.3 names, which the spelling under test needs"
+        );
+        let fixed = short.join("sandbox 沙盒");
+        let sub = fixed.join("sub 子");
+        let environment = HomeIs(home.clone());
+        let place = profiles::place_for(
+            &profiles::StartAt::Fixed(fixed.clone()),
+            &profiles::StartingDir::AccountHome,
+            profiles::PathNamespace::Windows,
+            None,
+            &environment,
+        );
+        assert_eq!(place.working_directory.as_deref(), Some(fixed.as_path()));
+        let mut shell = start(hygiene, place.working_directory.clone());
+        let mut pane = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(120).unwrap(),
+            std::num::NonZeroU32::new(30).unwrap(),
+        );
+        pane.set_spawn_directory(place.directory.clone());
+        let card = |pane: &bt_term::DualPlaneSession| {
+            PathBuf::from(crate::files_root_of(Some(pane), &environment))
+        };
+        assert_ne!(home, fixed);
+        assert_eq!(
+            card(&pane),
+            fixed,
+            "before the first prompt: the fixed folder"
+        );
+
+        feed_until(&mut shell, &mut pane, "the first report", |pane| {
+            pane.working_directory().is_some()
+        });
+        let reported = pane.working_directory().unwrap().to_path_buf();
+        assert!(
+            bt_platform::same_file(&reported, &fixed),
+            "the first report {reported:?} names the fixed folder {fixed:?}"
+        );
+        assert_eq!(
+            card(&pane),
+            reported,
+            "after the first prompt: the reported folder"
+        );
+
+        shell.write("cd \"sub 子\"\r".as_bytes()).unwrap();
+        feed_until(&mut shell, &mut pane, "the report after cd", |pane| {
+            pane.working_directory()
+                .is_some_and(|reported| bt_platform::same_file(reported, &sub))
+        });
+        let reported = pane.working_directory().unwrap().to_path_buf();
+        assert_eq!(card(&pane), reported, "after cd: the subfolder");
+        shell.write(b"exit\r").unwrap();
+        shell.shutdown().unwrap();
+    }
+
+    /// RED (issue #28) — **the reporter's configuration through a real PowerShell**: a PowerShell
+    /// row with Starting directory = a fixed folder and `-NoLogo` as its only argument, composed as
+    /// a birth composes it (`-NoLogo -NoExit -Command <loader>`). The files card shows the fixed
+    /// folder before the first prompt, the reported folder after it, and the subfolder after `cd`.
+    ///
+    /// Both editions, by the rule `bt-pty`'s `shell_integration_osc133` keeps: Windows PowerShell
+    /// is part of Windows and is never skipped, so this test cannot pass with no shell under it;
+    /// PowerShell 7 — the reporter's edition — is optional on a machine and is resolved the way the
+    /// product resolves it (`bt_pty::resolve_powershell_seven`), its arm skipped with a line on
+    /// stderr when there is none.
+    ///
+    /// MUTATION, observed red: `files_root_of` reads `DualPlaneSession::working_directory`
+    /// instead of `standing_folder` — the birth row answers the home folder.
+    #[cfg(windows)]
+    #[test]
+    fn the_files_card_follows_a_powershell_pane_from_its_fixed_starting_folder() {
+        let windows_powershell =
+            bt_platform::program_on_path(Path::new(bt_pty::WINDOWS_POWERSHELL))
+                .expect("Windows PowerShell is part of Windows");
+        let mut editions = vec![windows_powershell];
+        match bt_pty::resolve_powershell_seven(&bt_pty::SystemShellEnvironment) {
+            Some(pwsh) => editions.push(PathBuf::from(pwsh)),
+            None => eprintln!(
+                "files card, PowerShell 7 arm skipped: pwsh.exe is not installed \
+                 (the product's own resolver found none)"
+            ),
+        }
+        let root = temp_dir("files-card-powershell");
+        std::fs::create_dir_all(&root).unwrap();
+        let integration = root.join(SCRIPT_FILE_PS1);
+        std::fs::write(&integration, SCRIPT_PS1).unwrap();
+        for program in editions {
+            let arguments = composed_powershell_arguments(
+                &program,
+                &os_words(&["-NoLogo"]),
+                &integration,
+                None,
+            )
+            .expect("a `-NoLogo` row receives the loader");
+            assert_eq!(
+                arguments[..3],
+                os_words(&["-NoLogo", "-NoExit", "-Command"])
+            );
+            files_card_follows_a_real_shell_from_its_fixed_starting_folder(|hygiene, directory| {
+                let hygiene = hygiene.with_powershell_shape(test_shell_shape(&program, &arguments));
+                bt_pty::test_shell::TestShell::spawn_shell_in(
+                    hygiene,
+                    program.clone(),
+                    &arguments,
+                    &|| last_resort_arguments(false),
+                    &[],
+                    bt_pty::PtySize::cells(
+                        std::num::NonZeroU16::new(120).unwrap(),
+                        std::num::NonZeroU16::new(30).unwrap(),
+                    ),
+                    directory,
+                )
+                .unwrap()
+            });
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// RED (issue #28) — **the same through Command Prompt's `PROMPT`, unchanged**: `cmd.exe` with
+    /// the `PROMPT` a pane gives it, started in a fixed folder.
+    ///
+    /// MUTATION, observed red: the one named on
+    /// `the_files_card_follows_a_powershell_pane_from_its_fixed_starting_folder`.
+    #[cfg(windows)]
+    #[test]
+    fn the_files_card_follows_a_command_prompt_pane_from_its_fixed_starting_folder() {
+        let cmd = bt_platform::program_on_path(Path::new("cmd.exe")).expect("cmd.exe");
+        files_card_follows_a_real_shell_from_its_fixed_starting_folder(|hygiene, directory| {
+            bt_pty::test_shell::TestShell::spawn_shell_in(
+                hygiene,
+                cmd,
+                &[],
+                &|| last_resort_arguments(false),
+                &[(OsString::from(CMD_PROMPT), cmd_prompt(None))],
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(120).unwrap(),
+                    std::num::NonZeroU16::new(30).unwrap(),
+                ),
+                directory,
+            )
+            .unwrap()
+        });
+    }
 }

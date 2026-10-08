@@ -8,6 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Before a pane's shell reports its folder, everything that offers "where this pane is" uses the folder the pane was opened in: the pane's files card and a files column opened from it (which showed your home folder), the files column's folder menu, the place hints in the command palette, and the folder picker of New terminal in folder… in the pane menu and the new-tab menu — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
 - Every pasted picture's `[Image #N]` on an agent's input line can be opened, not only the last one.
 
 ## 0.4.7-preview — 2026-10-06

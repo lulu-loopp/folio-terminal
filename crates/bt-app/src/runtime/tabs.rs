@@ -1471,7 +1471,8 @@ impl Runtime<'_> {
     /// a popup nothing can dismiss.
     ///
     /// Where the chooser opens is the same courtesy every other door shows: the
-    /// folder the pane you are looking at last reported (OSC 7), and failing
+    /// folder the pane you are looking at is standing in (`standing_folder`: its
+    /// last OSC 7 report, else the folder it was opened in), and failing
     /// that the place a tab of the default profile would have started in anyway.
     /// The second half is asked of the profile rather than of this process,
     /// because "wherever Folio happens to be running from" is
@@ -1480,7 +1481,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn browse_for_new_tab_root(&mut self) {
         let start = self
             .focused()
-            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf))
+            .and_then(|leaf| leaf.session.standing_folder().map(Path::to_path_buf))
             .or_else(|| {
                 // `working_directory` and not the whole place: this is a Windows
                 // dialog, and that field is by construction the half of a
