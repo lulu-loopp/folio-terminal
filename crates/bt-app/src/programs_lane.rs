@@ -30,15 +30,20 @@
 //! `profiles::default_chain` and any pane waiting for its row), so a walk held up behind one slow
 //! entry has already answered what a launch's panes need.
 //!
-//! **The launch's walk runs at normal priority, every other walk below normal** (RULES 53's
-//! exception for this lane). The launch's walk is the one the first panes' births wait on, and on
-//! a cold machine it is not short — measured on a clean guest after boot, 1.2–2 s of `PATH`
-//! metadata while the antivirus scans the freshly unpacked program at normal priority (DESIGN
-//! 2026-10-08) — so it does not stand behind that work. Every later walk only refreshes what a
-//! menu or page shows and stays out of the frame's way. The band belongs to the request
-//! ([`Trigger::urgent`]); a request that replaces one not yet started keeps the more urgent band of
-//! the two, as it keeps its rows asked first. The one worker sets its own band at the start of
-//! each walk (`bt_platform::set_current_thread_priority`); no second thread and no wait.
+//! **A walk a pane waits on runs at normal priority, every other walk below normal** (RULES 53's
+//! exception for this lane). A pane in birth is waiting for a walk's answer, and on a cold machine
+//! that walk is not short — measured on a clean guest after boot, 1.2–2 s of `PATH` metadata while
+//! the antivirus scans the freshly unpacked program at normal priority (DESIGN 2026-10-08) — so it
+//! does not stand behind that work. A request is urgent when its trigger is one a pane waits on
+//! (the launch, whose panes are made from its answer, and a pane's birth that found its row
+//! unknown — [`Trigger::urgent`]) or when any pane is in birth as it is made ([`PaneWaits`], held
+//! by every pane in birth): a table edit or a broadcast then answers a waiting pane too. The
+//! opportunistic walks — a menu or page opening, the broadcast — with no pane waiting only refresh
+//! what is shown and stay out of the frame's way. A request that replaces one not yet started
+//! keeps the more urgent band of the two, as it keeps its rows asked first; and a walk already out
+//! below normal is raised after its next row when a pane starts waiting, because that pane lands on
+//! its answer. The one worker sets its own band (`bt_platform::set_current_thread_priority`); no
+//! second thread and no wait.
 //!
 //! **Who asks** (the triggers, and there is no timer): the launch; a table edit; a menu that lists
 //! programs opening (the new-tab menu, a pane's menu, a terminal's menu); the Profiles, Agents
@@ -85,11 +90,12 @@ impl Trigger {
         }
     }
 
-    /// **Whether a walk for this trigger runs at normal priority**: only the launch's, the walk
-    /// the first panes' births wait on. Every other walk runs below normal.
+    /// **Whether a pane waits on a walk for this trigger, whatever else is in birth**: the
+    /// launch's (its panes are made from the answer) and a birth's (the pane asking is in birth).
+    /// Every other trigger is urgent only while a pane is in birth ([`PaneWaits`]).
     #[must_use]
     pub const fn urgent(self) -> bool {
-        matches!(self, Self::Launch)
+        matches!(self, Self::Launch | Self::Birth)
     }
 }
 
@@ -301,6 +307,35 @@ struct Asks {
     out: Option<(u64, Trigger, u64)>,
     /// A worker thread is running (started by the first request, waiting for the next).
     worker: bool,
+    /// How many panes are in birth, each waiting on a walk's answer ([`PaneWaits`]).
+    panes_waiting: usize,
+}
+
+impl Asks {
+    /// Whether a walk out now has a pane waiting on it beyond what its own request said: a pane in
+    /// birth, or an urgent request standing behind it.
+    fn a_pane_waits(&self) -> bool {
+        self.panes_waiting > 0 || self.waiting.as_ref().is_some_and(|waiting| waiting.urgent)
+    }
+}
+
+/// **A pane in birth, counted by the lane while it waits** — held by the pane
+/// (`PaneBirth::_waits`, kept for its drop) from the moment it is made in birth until it is born
+/// or closed. While any is held, every request is urgent and a walk out below normal is raised.
+pub struct PaneWaits {
+    lane: &'static ProgramsLane,
+}
+
+impl std::fmt::Debug for PaneWaits {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PaneWaits")
+    }
+}
+
+impl Drop for PaneWaits {
+    fn drop(&mut self) {
+        self.lane.lock().panes_waiting -= 1;
+    }
 }
 
 /// **A request not yet started**: its number, the request, and whether its walk runs at normal
@@ -365,7 +400,7 @@ impl ProgramsLane {
         // newer request's own, and its urgency: a launch replaced by a menu's request before its
         // walk started is still the walk the first panes wait on.
         let mut first = request.first;
-        let mut urgent = request.trigger.urgent();
+        let mut urgent = request.trigger.urgent() || asks.panes_waiting > 0;
         if let Some(replaced) = asks.waiting.take() {
             urgent |= replaced.urgent;
             for id in replaced.request.first {
@@ -404,6 +439,12 @@ impl ProgramsLane {
         generation
     }
 
+    /// **Count a pane in birth until the answer is dropped.** One lock; never waits for the worker.
+    pub fn pane_waits(&'static self) -> PaneWaits {
+        self.lock().panes_waiting += 1;
+        PaneWaits { lane: self }
+    }
+
     /// **Everything published since the last drain.** One lock; never waits for the worker.
     pub fn take(&self) -> Answers {
         let mut mailbox = self.mailbox();
@@ -422,7 +463,7 @@ impl ProgramsLane {
             let Waiting {
                 generation,
                 request,
-                urgent,
+                mut urgent,
             } = {
                 let mut asks = self.lock();
                 let waiting = loop {
@@ -452,7 +493,15 @@ impl ProgramsLane {
                 ctx,
                 generation,
                 &request,
-                &mut |published| self.publish(published),
+                &mut |published| {
+                    self.publish(published);
+                    // A pane that started waiting while this walk was out lands on its answer:
+                    // the rest of the walk runs in a waiting pane's band.
+                    if !urgent && self.lock().a_pane_waits() {
+                        urgent = true;
+                        let _ = bt_platform::set_current_thread_priority(band(true));
+                    }
+                },
                 &*self.note,
             );
             std::mem::forget(guard);
@@ -584,6 +633,11 @@ pub fn request(trigger: Trigger, stored_default: &str, also_first: &[String]) ->
         first,
         trigger,
     })
+}
+
+/// [`ProgramsLane::pane_waits`] on the product's lane.
+pub fn pane_waits() -> PaneWaits {
+    LANE.pane_waits()
 }
 
 /// [`ProgramsLane::take`] on the product's lane.
@@ -900,25 +954,45 @@ pub(crate) mod tests {
         assert!(notes.try_recv().is_err(), "said once, not per request");
     }
 
-    /// RED — **the launch's walk runs at normal priority and every other walk below normal**, the
-    /// band read from inside each walk on the one worker; a launch replaced by a menu's request
-    /// before its walk started keeps the launch's band, and the walk after it is below normal again.
+    /// RED — **a walk a pane waits on runs at normal priority and every other walk below
+    /// normal**, the band read from inside each walk on the one worker. Waited on: the launch's
+    /// walk, a birth's walk, any walk asked while a pane is in birth (a table edit), a launch
+    /// replaced before its walk started (the replacing request keeps its band), and the rest of a
+    /// walk already out below normal when a pane starts waiting. Not waited on: a menu's or page's
+    /// walk, the broadcast's, with no pane in birth.
     ///
     /// MUTATIONS (observed red, each alone): `Trigger::urgent` answering `false` for the launch
     /// (walk 1 below normal); the worker spawned below normal and `serve` not setting the band
     /// (walk 1 below normal); `serve` not setting the band per walk (walk 2 stays at the launch's
-    /// normal); `request` dropping the replaced request's urgency (walk 4 below normal).
+    /// normal); `request` dropping the replaced request's urgency (walk 4 below normal);
+    /// `Trigger::urgent` answering `false` for a birth (walk 6 below normal); `Trigger::urgent`
+    /// answering `true` for every trigger (the menu's walk 2 normal); `request` not reading the
+    /// panes in birth (the table edit's walk 7 below normal); `PaneWaits::drop` not counting the
+    /// pane out (walk 8 normal); `serve` not raising a walk out when a pane starts waiting (walk
+    /// 9's second row below normal).
     ///
     /// Each band is expected as the platform reads it back from a thread started in it: on
     /// Windows the band itself; where a band is requested and not enforced (RULES 53) nothing,
     /// and the sequence is then all `None`.
     #[test]
-    fn the_launch_walk_runs_at_normal_priority_and_every_other_walk_below_normal() {
-        /// The fake machine, and the band each walk was in when it asked for its environment.
-        struct Banded(
-            FakeMachine,
-            Arc<Mutex<Vec<Option<bt_platform::ThreadPriority>>>>,
-        );
+    fn a_walk_a_pane_waits_on_runs_at_normal_priority_and_every_other_walk_below_normal() {
+        type Bands = Arc<Mutex<Vec<Option<bt_platform::ThreadPriority>>>>;
+        /// The fake machine, the band each walk was in when it asked for its environment, and the
+        /// band each file question was asked in.
+        struct Banded(FakeMachine, Bands, Bands);
+        struct BandedEnvironment(Box<dyn ShellEnvironment>, Bands);
+        impl ShellEnvironment for BandedEnvironment {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                self.0.var_os(key)
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                self.1
+                    .lock()
+                    .unwrap()
+                    .push(bt_platform::current_thread_priority());
+                self.0.is_file(path)
+            }
+        }
         impl Machine for Banded {
             fn environment(
                 &self,
@@ -929,7 +1003,10 @@ pub(crate) mod tests {
                     .lock()
                     .unwrap()
                     .push(bt_platform::current_thread_priority());
-                self.0.environment(ctx, note)
+                Box::new(BandedEnvironment(
+                    self.0.environment(ctx, note),
+                    Arc::clone(&self.2),
+                ))
             }
             fn wsl(&self) -> WslFacts {
                 self.0.wsl()
@@ -946,17 +1023,23 @@ pub(crate) mod tests {
         let normal = read_back(bt_platform::ThreadPriority::Normal);
         let below = read_back(bt_platform::ThreadPriority::BelowNormal);
         let machine = FakeMachine::with_path(&[bin_dir()]);
-        let bands = Arc::new(Mutex::new(Vec::new()));
-        let (lane, wakes, _) = lane(Banded(machine.clone(), Arc::clone(&bands)));
+        let bands: Bands = Arc::default();
+        let questions: Bands = Arc::default();
+        let (lane, wakes, _) = lane(Banded(
+            machine.clone(),
+            Arc::clone(&bands),
+            Arc::clone(&questions),
+        ));
         let rows = [row("rg", "rg.exe")];
         let banded = || bands.lock().unwrap().clone();
+        let walk_for = |trigger| {
+            let generation = lane.request(request(&rows, trigger));
+            answers_through(lane, &wakes, generation);
+        };
 
-        let launch = lane.request(request(&rows, Trigger::Launch));
-        answers_through(lane, &wakes, launch);
+        walk_for(Trigger::Launch);
         assert_eq!(banded(), [normal], "the launch's walk");
-
-        let menu = lane.request(request(&rows, Trigger::ProgramMenu));
-        answers_through(lane, &wakes, menu);
+        walk_for(Trigger::ProgramMenu);
         assert_eq!(
             banded(),
             [normal, below],
@@ -973,12 +1056,42 @@ pub(crate) mod tests {
         let replacing = lane.request(request(&rows, Trigger::ProgramMenu));
         machine.release();
         answers_through(lane, &wakes, replacing);
-        let environment = lane.request(request(&rows, Trigger::Environment));
-        answers_through(lane, &wakes, environment);
+        walk_for(Trigger::Environment);
         assert_eq!(
             banded(),
             [normal, below, below, normal, below],
             "the replaced launch's urgency is kept by the request that replaced it, and only by it"
+        );
+
+        walk_for(Trigger::Birth);
+        let in_birth = lane.pane_waits();
+        walk_for(Trigger::TableChanged);
+        drop(in_birth);
+        walk_for(Trigger::TableChanged);
+        assert_eq!(
+            banded()[5..],
+            [normal, normal, below],
+            "a birth's walk; a table edit while a pane is in birth; one after it was born"
+        );
+
+        // Walk 9, a menu's over two rows, is held in its first question; a pane starts waiting.
+        let two = [row("rg", "rg.exe"), row("fd", "fd.exe")];
+        questions.lock().unwrap().clear();
+        machine.hold();
+        let held = lane.request(request(&two, Trigger::ProgramMenu));
+        while lane.lock().out.is_none() {
+            std::thread::yield_now();
+        }
+        let in_birth = lane.pane_waits();
+        machine.release();
+        answers_through(lane, &wakes, held);
+        drop(in_birth);
+        assert_eq!(banded()[8..], [below], "walk 9 started below normal");
+        let asked = questions.lock().unwrap().clone();
+        assert_eq!(
+            [asked.first().copied(), asked.last().copied()],
+            [Some(below), Some(normal)],
+            "the rest of the walk runs in the waiting pane's band: {asked:?}"
         );
     }
 

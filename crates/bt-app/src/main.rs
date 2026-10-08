@@ -11860,6 +11860,9 @@ struct PaneBirth {
     seed: LeafSeed,
     probe_input: Option<Vec<u8>>,
     typed: std::cell::RefCell<Vec<u8>>,
+    /// The program walk counts this pane as waiting while it is held: every walk asked meanwhile
+    /// runs in the band of a walk a pane waits on (`programs_lane::PaneWaits`).
+    _waits: programs_lane::PaneWaits,
 }
 
 impl PaneBirth {
@@ -38676,6 +38679,7 @@ mod program_birth_tests {
             seed: seed_of(profiles::DEFAULT_IDENTITY),
             probe_input: None,
             typed: std::cell::RefCell::default(),
+            _waits: programs_lane::pane_waits(),
         };
         let first = offer_pty_input(PtyTarget::Birth(&birth), "git 状态".as_bytes(), "typed")
             .expect("held");
@@ -38707,6 +38711,7 @@ mod program_birth_tests {
             seed: seed_of(profiles::DEFAULT_IDENTITY),
             probe_input: None,
             typed: std::cell::RefCell::default(),
+            _waits: programs_lane::pane_waits(),
         }
     }
 
@@ -39357,6 +39362,7 @@ fn create_leaf_session(
             seed: seed.clone(),
             probe_input: probe_input.map(<[u8]>::to_vec),
             typed: std::cell::RefCell::default(),
+            _waits: programs_lane::pane_waits(),
         }),
     })
 }

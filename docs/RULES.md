@@ -1692,10 +1692,10 @@ role does not decide its band): the playback engines (`folio-video-engine`, both
 platforms), first-frame extraction (`folio-video-frame`), launch and attention
 ingress (`folio-launch-endpoint`, `folio-attention-endpoint`), clipboard saves
 (`clipboard-picture`) and the three standalone-process workers; and **one walk of one
-worker**: the `program-walk` worker serves the launch's walk at `Normal`, because the
-first panes' births wait on it, and every other walk below normal, the band set by the
-worker at the start of each walk from its request (2026-10-08, T-PROGRAMS-REFRESH
-round 3; measured in DESIGN). The observation
+worker**: the `program-walk` worker serves a walk a pane waits on at `Normal` — the
+launch's, a birth's, any walk asked or still out while a pane is in birth — and every
+other walk below normal, the band set by the worker from its request (2026-10-08,
+T-PROGRAMS-REFRESH rounds 3–4; measured in DESIGN). The observation
 and probe threads that start at `Normal` today — `bt-dir-watch`,
 `folio-video-prewarm`, `folio-video-canplay`, `folio-web-thumb`, the Explorer
 probe and deployment — move to the workers' band in a 0.4.7 ticket. Off Windows a

@@ -706,9 +706,11 @@ when that walk ends. A walk reads the **current logon environment**
 entry an installer wrote after Folio started is seen; it answers the rows the default's rule
 reads first and publishes row by row; it wakes the loop (`AppEvent::ProgramsAnswered`) after
 each row the request asked for first and at the walk's end, never for the other rows or the WSL and
-git facts, which the end's wake brings. The launch's walk runs at normal priority and every other
-walk below normal: the request carries its band, and the one worker sets it at the start of each
-walk (RULES 53's exception). Nothing waits for a walk and it has no deadline: on a warm machine
+git facts, which the end's wake brings. A walk a pane waits on runs at normal priority and every
+other walk below normal: the request carries its band — urgent for the launch, for a birth, and for
+any request made while a pane is in birth (`programs_lane::PaneWaits`, held by each pane in birth) —
+the one worker sets it at the start of each walk, and raises a walk already out when a pane starts
+waiting (RULES 53's exception). Nothing waits for a walk and it has no deadline: on a warm machine
 the launch's walk has answered before the first panes are made and the shell is running before the
 first frame; on a cold start the window opens first, the tab says "Terminal" and typed text is held
 until the shell starts (measured in DESIGN, 2026-10-08). A walk that
