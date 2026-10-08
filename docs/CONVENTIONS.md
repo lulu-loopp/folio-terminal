@@ -251,6 +251,17 @@ preparation worker's `PreparationEffects` is the shape). Reading source is allow
 window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
 guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
 
+### Where a test lives (K1)
+
+A test lives beside what it tests. A test written in a module's own scope is in that module's
+`mod tests` — inline, or a `#[path]` sibling `<module>_tests.rs`. A test written in the crate
+root's scope (it drives `App`, `Runtime`, `TabState` and the root's fixtures) is in a root-declared
+file in `src/` named for what it tests: `app_<theme>_tests.rs` for an item `main.rs` owns, by the
+theme sort of `docs/plans/bt-app-split-inventory-2026-09-15.md` §0.3, and `<module>_app_tests.rs`
+when its first assertion is about another module. A fixture two of those files use is in
+`test_support.rs`, `pub(crate)`. `tests.rs` holds only the tests something outside their body
+names as `tests::<name>`; a new test does not go there.
+
 ### 【预防】产品代码不留占位符
 
 `todo!()` / `unimplemented!()` 由 clippy deny（当前为 0，**没有**因它出过事故——这是预防，不是教训）。做不完就如实写 no-go。
