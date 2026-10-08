@@ -235,8 +235,18 @@ pub(crate) enum Outcome {
     Restored,
     /// `Update incomplete.` and the journal's folder — the rollback did not
     /// finish (`Failure::Incomplete`, U-29). No folder when a report handed
-    /// over named none this side accepts (U-36 round 2).
-    Incomplete { folder: Option<PathBuf> },
+    /// over named none this side accepts (U-36 round 2). `held`: and this
+    /// session's changes are not kept (0.4.8 E1).
+    Incomplete { folder: Option<PathBuf>, held: bool },
+    /// An update this build cannot read whole is not finished, and the
+    /// build that wrote it finishes it — at the next sign-in, or when the
+    /// later `version` it names is started (`Failure::Newer`, 0.4.8 E1).
+    /// `held` as for [`Outcome::Incomplete`].
+    Newer {
+        folder: Option<PathBuf>,
+        version: Option<String>,
+        held: bool,
+    },
     /// The unfinished update's new build is running as its recorded trial
     /// because neither recovery launch could be made (U-35).
     Trial { folder: PathBuf },
@@ -325,22 +335,38 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
 #[must_use]
 pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
     let (detail, folder, first) = match outcome {
-        Outcome::NothingChanged => (Text::UpdateCardNothingChanged, None, CardVerb::Releases),
-        Outcome::Restored => (Text::UpdateCardRestored, None, CardVerb::Releases),
-        // Show folder only with a folder to show: a report handed over without
-        // one offers the releases page, as the other failures do (U-36 round 2).
-        Outcome::Incomplete {
-            folder: Some(folder),
-        } => (
-            Text::UpdateCardIncomplete,
-            Some(folder.clone()),
-            CardVerb::ShowFolder,
+        Outcome::NothingChanged => (
+            Text::UpdateCardNothingChanged.text().to_owned(),
+            None,
+            CardVerb::Releases,
         ),
-        Outcome::Incomplete { folder: None } => {
-            (Text::UpdateCardIncomplete, None, CardVerb::Releases)
-        }
+        Outcome::Restored => (
+            Text::UpdateCardRestored.text().to_owned(),
+            None,
+            CardVerb::Releases,
+        ),
+        Outcome::Incomplete { folder, held } => (
+            not_kept(Text::UpdateCardIncomplete.text().to_owned(), *held),
+            folder.clone(),
+            folder_verb(folder.as_ref()),
+        ),
+        Outcome::Newer {
+            folder,
+            version,
+            held,
+        } => (
+            not_kept(
+                match version {
+                    Some(version) => i18n::update_card_newer(version),
+                    None => Text::UpdateCardNewerUnnamed.text().to_owned(),
+                },
+                *held,
+            ),
+            folder.clone(),
+            folder_verb(folder.as_ref()),
+        ),
         Outcome::Trial { folder } => (
-            Text::UpdateCardTrial,
+            Text::UpdateCardTrial.text().to_owned(),
             Some(folder.clone()),
             CardVerb::ShowFolder,
         ),
@@ -348,9 +374,29 @@ pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
     Paint {
         heading: Some(reason.to_owned()),
         bar: None,
-        detail: Some(detail.text().to_owned()),
+        detail: Some(detail),
         folder,
         verbs: vec![first, CardVerb::Close],
+    }
+}
+
+/// Show folder only with a folder to show: a report handed over without one
+/// offers the releases page, as the other failures do (U-36 round 2).
+fn folder_verb(folder: Option<&PathBuf>) -> CardVerb {
+    if folder.is_some() {
+        CardVerb::ShowFolder
+    } else {
+        CardVerb::Releases
+    }
+}
+
+/// `detail`, and when this session's writes are held (0.4.8 E1) the
+/// sentence that says its changes are not kept.
+fn not_kept(detail: String, held: bool) -> String {
+    if held {
+        i18n::update_card_not_kept(&detail)
+    } else {
+        detail
     }
 }
 
@@ -362,6 +408,7 @@ fn reason(failure: &Failure) -> String {
             Text::UpdateFailedUnsupported
         }
         Failure::Stopped(Stop::Busy) => Text::UpdateFailedBusy,
+        Failure::Stopped(Stop::Newer) => Text::UpdateFailedNewer,
         Failure::Stopped(Stop::Journal) => Text::UpdateFailedJournal,
         Failure::Stopped(Stop::Download | Stop::Cancelled) => Text::UpdateFailedStopped,
         Failure::Stopped(Stop::Sums) => Text::UpdateFailedSums,
@@ -373,6 +420,10 @@ fn reason(failure: &Failure) -> String {
         Failure::RolledBack | Failure::Incomplete { .. } => Text::UpdateFailedTrial,
         Failure::TrialIncomplete { .. } => Text::UpdateFailedTrialRunning,
         Failure::Interrupted => Text::UpdateFailedInterrupted,
+        Failure::Newer {
+            version: Some(_), ..
+        } => Text::UpdateFailedNewer,
+        Failure::Newer { version: None, .. } => Text::UpdateFailedUnreadable,
         Failure::Stopped(Stop::Space { short_by }) => {
             return i18n::update_failed_space(&needed_megabytes(*short_by));
         }
@@ -392,10 +443,26 @@ fn needed_megabytes(bytes: u64) -> String {
 /// the previous version back, or did not finish (U-29).
 fn outcome(failure: &Failure) -> Outcome {
     match failure {
+        // Another Folio's update holds the installation: it finishes it.
+        Failure::Stopped(Stop::Newer) => Outcome::Newer {
+            folder: None,
+            version: None,
+            held: false,
+        },
         Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
         Failure::RolledBack | Failure::Interrupted => Outcome::Restored,
-        Failure::Incomplete { folder } => Outcome::Incomplete {
+        Failure::Incomplete { folder, held } => Outcome::Incomplete {
             folder: folder.clone(),
+            held: *held,
+        },
+        Failure::Newer {
+            folder,
+            version,
+            held,
+        } => Outcome::Newer {
+            folder: folder.clone(),
+            version: version.clone(),
+            held: *held,
         },
         Failure::TrialIncomplete { folder } => Outcome::Trial {
             folder: folder.clone(),
@@ -834,7 +901,9 @@ pub(crate) fn version_failed_in(lang: Lang, outcome: &Outcome, version: &str) ->
     match outcome {
         Outcome::NothingChanged => Text::VersionFailed,
         Outcome::Restored => Text::VersionFailedRestored,
-        Outcome::Incomplete { .. } | Outcome::Trial { .. } => Text::VersionFailedIncomplete,
+        Outcome::Incomplete { .. } | Outcome::Newer { .. } | Outcome::Trial { .. } => {
+            Text::VersionFailedIncomplete
+        }
     }
     .in_lang(lang)
     .replace("{version}", version)
@@ -1217,6 +1286,7 @@ mod tests {
         let mut updated =
             considered(RUNNING, Channel::Ours).after_rollback(Some(Failure::Incomplete {
                 folder: Some(PathBuf::from("journal")),
+                held: false,
             }));
         assert!(
             updated.after_commit(RUNNING),
@@ -1325,6 +1395,7 @@ mod tests {
                 "failed, incomplete",
                 after(Failure::Incomplete {
                     folder: Some(PathBuf::from("journal")),
+                    held: false,
                 }),
                 CheckView::default(),
                 Some("v0.4.7"),
@@ -1409,6 +1480,7 @@ mod tests {
                 "incomplete",
                 after(Failure::Incomplete {
                     folder: Some(PathBuf::from("journal")),
+                    held: false,
                 }),
                 format!("{banner} · The update to v0.4.7 is incomplete."),
                 false,
@@ -2011,12 +2083,81 @@ mod tests {
             "The previous version could not be put back.",
             &Outcome::Incomplete {
                 folder: Some(folder.clone()),
+                held: false,
             },
         );
         assert_eq!(drawn.detail.as_deref(), Some("Update incomplete."));
         assert_eq!(drawn.folder, Some(folder));
         assert_eq!(drawn.verbs, vec![CardVerb::ShowFolder, CardVerb::Close]);
         assert_eq!(drawn.primary(), Some(CardVerb::ShowFolder));
+    }
+
+    /// RED (E1) — **the card of an update this build cannot read whole, and
+    /// of a session whose writes are held**: a newer Folio's unfinished
+    /// update names that Folio's version and when it finishes; one whose
+    /// record names no later build says the record cannot be read; a start
+    /// that continues with its writes held adds that this session's changes
+    /// are not kept, to the newer card and to *Update incomplete.* alike. The
+    /// buttons are the incomplete card's: Show folder with a folder, the
+    /// releases page without one, and Close.
+    ///
+    /// MUTATION: in `not_kept`, answer `detail` whatever `held` says (the held
+    /// sentence is never drawn).
+    #[test]
+    fn an_unfinished_update_by_another_folio_and_a_held_session_say_so() {
+        let folder = PathBuf::from(r"D:\工具\Folio 终端\.folio-update");
+        let drawn = |failure: Failure| {
+            paint(&State::Failed(None, failure)).expect("a failed job has a card")
+        };
+        for (failure, heading, detail) in [
+            (
+                Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: Some("0.4.9".to_owned()),
+                    held: false,
+                },
+                "An update by a newer Folio is not finished.",
+                "It finishes when you next sign in, or when you start Folio 0.4.9.",
+            ),
+            (
+                Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: None,
+                    held: false,
+                },
+                "The update record cannot be read.",
+                "It finishes when you next sign in.",
+            ),
+            (
+                Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: Some("0.4.9".to_owned()),
+                    held: true,
+                },
+                "An update by a newer Folio is not finished.",
+                "It finishes when you next sign in, or when you start Folio 0.4.9. Changes made in this session are not kept.",
+            ),
+            (
+                Failure::Incomplete {
+                    folder: Some(folder.clone()),
+                    held: true,
+                },
+                "The new version did not start.",
+                "Update incomplete. Changes made in this session are not kept.",
+            ),
+        ] {
+            let card = drawn(failure.clone());
+            assert_eq!(card.heading.as_deref(), Some(heading), "{failure:?}");
+            assert_eq!(card.detail.as_deref(), Some(detail), "{failure:?}");
+            assert_eq!(card.folder.as_ref(), Some(&folder), "{failure:?}");
+            assert_eq!(card.verbs, vec![CardVerb::ShowFolder, CardVerb::Close]);
+        }
+        let unnamed = drawn(Failure::Newer {
+            folder: None,
+            version: None,
+            held: false,
+        });
+        assert_eq!(unnamed.verbs, vec![CardVerb::Releases, CardVerb::Close]);
     }
 
     /// RED (U-35 round 2) — **the fallback trial's card says what happened,
@@ -2075,6 +2216,7 @@ mod tests {
             None,
             Failure::Incomplete {
                 folder: Some(folder.clone()),
+                held: false,
             },
         ))
         .expect("a failed job has a card");

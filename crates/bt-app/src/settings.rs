@@ -20148,6 +20148,7 @@ mod tests {
             crate::update_card::Outcome::Restored,
             crate::update_card::Outcome::Incomplete {
                 folder: Some(std::path::PathBuf::new()),
+                held: false,
             },
         ] {
             version_values.push(line(crate::update_card::version_failed_in(

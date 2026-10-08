@@ -71,10 +71,8 @@ use bt_platform::install_txn::{self, Held};
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::update_apply::{Contender, ExitGuard, Leave, Left, Window};
-use crate::update_txn::{
-    Class, Event, Header, HeaderOutcome, Home, Journal, Nonce, Refusal, TxnId,
-};
+use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, Window};
+use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, Role, TxnId};
 
 /// **What Prepare leaves the job holding** (U-20 / U-27 make it; the job keeps
 /// it from its `Verified` report until the process leaves): the installation
@@ -576,7 +574,7 @@ impl Leaving {
                 } else {
                     Duration::ZERO
                 },
-                Contender::Outgoing,
+                Outgoing,
             );
             match window {
                 Window::Mine(duty) => {
@@ -588,9 +586,6 @@ impl Leaving {
                     guard.owns_window(duty);
                 }
                 Window::Theirs(owner) => guard.not_mine(Some(owner.pid)),
-                Window::RoadTaken(phase) => {
-                    unreachable!("the outgoing build never reads the journal to elect ({phase:?})")
-                }
                 Window::Refused(refusal) => {
                     crate::diagnostics::note(&format!(
                         "Folio: the outgoing build's window election was refused: {}",
@@ -631,17 +626,23 @@ impl Leave for OldLeave<'_> {
         crate::diagnostics::note(line);
     }
 
+    /// A journal this build cannot read whole is read by its header's frozen
+    /// class when the header reads, and otherwise as `destructive` (0.4.8 E1,
+    /// [`crate::update_txn::Role::OutgoingExit`]): the start then continues past it with the
+    /// card, never plainly. A journal file that could not be read is such a
+    /// journal (E1 round 2); only one that is not there opens O plainly.
     fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         let words = self
             .home
             .filter(|home| {
                 self.election_failure.is_some()
-                    || file_reads::read(Lane::UpdateJournal, home.journal())
-                        .ok()
-                        .and_then(|bytes| Header::parse(&bytes).ok())
-                        .is_some_and(|header| {
-                            header.class == Class::Destructive
-                                || header.outcome == HeaderOutcome::RolledBack
+                    || Role::OutgoingExit
+                        .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
+                        .is_some_and(|seen| {
+                            seen.acting_header().is_none_or(|header| {
+                                header.class == Class::Destructive
+                                    || header.outcome == HeaderOutcome::RolledBack
+                            })
                         })
             })
             .map(|home| crate::update_apply::failed_words(home).to_vec())
@@ -667,13 +668,15 @@ impl Leave for OldLeave<'_> {
     }
 
     /// The rescue copy the journal names, with `--update-failed`: O's own
-    /// image, copied, whose own home holds no journal.
+    /// image, copied, whose own home holds no journal — the envelope's, when
+    /// this build cannot read the journal whole (0.4.8 E1).
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         let home = self.home?;
-        let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok()?;
-        let journal = Journal::parse(&bytes).ok()?;
+        let header = Role::OutgoingExit
+            .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))?
+            .acting_header()?;
         Some((
-            home.rescue_program(&journal.rescue),
+            home.rescue_program(&header.rescue),
             crate::update_apply::failed_words(home).to_vec(),
         ))
     }
@@ -2054,7 +2057,7 @@ mod tests {
             txn,
             Running { pid: 1, started: 1 },
             Duration::ZERO,
-            crate::update_apply::Contender::Applier,
+            crate::update_apply::Applier,
         );
         assert_eq!(
             crate::update_apply::window_holder(&staged.home, txn, Running { pid: 1, started: 1 },),
@@ -2074,7 +2077,7 @@ mod tests {
                     txn,
                     Running { pid: 1, started: 1 },
                     Duration::ZERO,
-                    crate::update_apply::Contender::Applier,
+                    crate::update_apply::Applier,
                 ),
                 Window::Refused(refusal) if refusal.contended()
             ),
@@ -2088,7 +2091,7 @@ mod tests {
                 txn,
                 Running { pid: 1, started: 1 },
                 Duration::ZERO,
-                crate::update_apply::Contender::Applier,
+                crate::update_apply::Applier,
             )
             .is_mine(),
             "only dropping the process's exit guard releases the retained lock"
@@ -2103,8 +2106,10 @@ mod tests {
     /// taken. An applier asking at the same state does read the journal, and
     /// stands down.
     ///
-    /// MUTATION: in `Leaving::leave`, elect as `Contender::Applier` (O reads
-    /// `Abandoned` as a road taken and starts nothing).
+    /// MUTATION: in `Leaving::leave`, elect as `Applier` (O would read
+    /// `Abandoned` as a road taken and start nothing): since E1-a2 the match
+    /// over its `Window<Applier>` no longer compiles, because that answer can
+    /// say the road was taken.
     #[test]
     fn an_outgoing_build_whose_applier_never_started_still_opens_folio() {
         let folder = Folder::new("applier-never-started");
@@ -2128,7 +2133,7 @@ mod tests {
                 txn,
                 Running { pid: 2, started: 2 },
                 Duration::ZERO,
-                crate::update_apply::Contender::Applier,
+                crate::update_apply::Applier,
             ),
             Window::RoadTaken(PhaseKind::Abandoned),
             "an applier reads the journal"
@@ -2223,7 +2228,7 @@ mod tests {
                     txn,
                     me,
                     Duration::ZERO,
-                    crate::update_apply::Contender::Applier,
+                    crate::update_apply::Applier,
                 )
             },
             |_| drop(holder.take()),
@@ -2265,7 +2270,7 @@ mod tests {
                 txn,
                 Running { pid: 1, started: 1 },
                 Duration::ZERO,
-                crate::update_apply::Contender::Applier,
+                crate::update_apply::Applier,
             ),
             Window::Theirs(me)
         );
@@ -2387,6 +2392,95 @@ mod tests {
                 (staged.home.rescue_program(&staged.journal.rescue), failed),
             ]
         );
+    }
+
+    /// RED (E1 round 2; role #15, O's exit, H7 and J10) — **a journal file O
+    /// cannot read at all is no absent journal**: O starts itself with
+    /// `--update-failed` (it continues past the journal with the card that
+    /// says its record cannot be read), and has no rescue to fall back to —
+    /// never itself plainly.
+    ///
+    /// MUTATION: in `OldLeave::opening`, map a read that failed other than
+    /// "no such file" back to no journal (`.ok()` before the sight).
+    #[test]
+    fn the_old_build_never_opens_itself_plainly_over_a_journal_it_cannot_read() {
+        let folder = Folder::new("o-unread");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let installed = folder.0.join("folio.exe");
+        let kind = crate::update_txn::a_journal_that_cannot_be_read(&staged.home.journal());
+        let mut starts = Starts {
+            die: true,
+            ..Starts::default()
+        };
+        let left = Leaving::over(&staged.home, txn, &folder.0).leave(
+            crate::update_apply::this_process(),
+            &installed,
+            &mut starts,
+            None,
+        );
+        assert!(matches!(left, Left::ShownHere(_)), "{kind:?}: {left:?}");
+        assert_eq!(
+            starts.calls,
+            vec![(
+                installed,
+                crate::update_apply::failed_words(&staged.home).to_vec()
+            )],
+            "{kind:?}"
+        );
+        assert!(staged.home.journal().is_dir(), "left as it is");
+    }
+
+    /// RED (E1; role #15, O's exit, sites H7 `OldLeave::opening` and J10
+    /// `OldLeave::fallback`) — **O leaves a journal it cannot read whole by the
+    /// header it acts on, and never opens itself plainly over it**: its own
+    /// executable with `--update-failed` (it continues past the journal with
+    /// the card), then the rescue copy the header names — the envelope's for
+    /// an unknown header word — and, when nothing reads, no rescue to name.
+    /// The journal is byte for byte as it was.
+    ///
+    /// MUTATION: in `OldLeave::opening`, read the header alone again
+    /// (`Header::parse(&bytes).ok()`): over an unknown header word, or bytes
+    /// of which nothing reads, O starts itself plainly.
+    #[test]
+    fn the_old_build_leaves_what_it_cannot_read_whole_by_its_header() {
+        let folder = Folder::new("o-beyond");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let handoff = staged
+            .journal
+            .advance(&crate::update_txn::Event::HandedOff { applier: nonce() })
+            .unwrap();
+        let installed = folder.0.join("folio.exe");
+        let failed = crate::update_apply::failed_words(&staged.home).to_vec();
+        let rescue = staged.home.rescue_program(&staged.journal.rescue);
+        for (index, (what, bytes)) in crate::update_txn::beyond_inputs(&handoff.encode())
+            .into_iter()
+            .enumerate()
+        {
+            install_txn::durable_write(&staged.home.journal(), &bytes).unwrap();
+            let mut starts = Starts {
+                die: true,
+                ..Starts::default()
+            };
+            let left = Leaving::over(&staged.home, txn, &folder.0).leave(
+                crate::update_apply::this_process(),
+                &installed,
+                &mut starts,
+                None,
+            );
+            assert!(matches!(left, Left::ShownHere(_)), "{what}: {left:?}");
+            let mut expected = vec![(installed.clone(), failed.clone())];
+            if index < 2 {
+                expected.push((rescue.clone(), failed.clone()));
+            }
+            assert_eq!(starts.calls, expected, "{what}");
+            assert_eq!(
+                std::fs::read(staged.home.journal()).unwrap(),
+                bytes,
+                "{what}"
+            );
+        }
     }
 
     /// RED (U-34, round 2; Codex's review, finding 5) — **O's panic road never
@@ -2610,7 +2704,7 @@ mod tests {
             txn,
             Running { pid: 1, started: 1 },
             Duration::ZERO,
-            crate::update_apply::Contender::Applier,
+            crate::update_apply::Applier,
         );
         release.send(()).unwrap();
         let first = first.join().unwrap();

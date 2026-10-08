@@ -2952,6 +2952,14 @@ text_entries! {
     UpdateCardTrial,
     /// The trial over a `Stuck` transaction committed forward after its card said *Update incomplete.* (U-32).
     UpdateCardUpdated,
+    /// After the reason, when a later Folio's unfinished update names its version
+    /// (`update_card::Outcome::Newer`; 0.4.8 E1); `{version}` is that version.
+    UpdateCardNewer,
+    /// After the reason, when an unfinished update names no later version (0.4.8 E1).
+    UpdateCardNewerUnnamed,
+    /// After the detail, when this session's writes are held (0.4.8 E1); `{detail}` is the
+    /// detail it follows.
+    UpdateCardNotKept,
     /// About > Version: no newer release is known.
     VersionUpToDate,
     /// About > Version controls and inline links.
@@ -3022,6 +3030,11 @@ text_entries! {
     UpdateFailedInterrupted,
     /// The release needs a newer updater than the running build (`update_job::Stop::TooOld`; U-42c).
     UpdateFailedTooOld,
+    /// A later Folio's update is not finished (`update_job::Failure::Newer`, `Stop::Newer`; 0.4.8 E1).
+    UpdateFailedNewer,
+    /// An update's journal cannot be read and names no later Folio (`update_job::Failure::Newer`
+    /// without a version; 0.4.8 E1).
+    UpdateFailedUnreadable,
 }
 
 impl Text {
@@ -5852,6 +5865,31 @@ impl Text {
                 "This version is too old to update itself. Download the new version.",
                 "此版本过旧，无法自行更新。下载新版本。",
             ),
+            Self::UpdateFailedNewer => pick(
+                lang,
+                "An update by a newer Folio is not finished.",
+                "An update by a newer Folio is not finished.", // zh: pending E1
+            ),
+            Self::UpdateFailedUnreadable => pick(
+                lang,
+                "The update record cannot be read.",
+                "The update record cannot be read.", // zh: pending E1
+            ),
+            Self::UpdateCardNewer => pick(
+                lang,
+                "It finishes when you next sign in, or when you start Folio {version}.",
+                "It finishes when you next sign in, or when you start Folio {version}.", // zh: pending E1
+            ),
+            Self::UpdateCardNewerUnnamed => pick(
+                lang,
+                "It finishes when you next sign in.",
+                "It finishes when you next sign in.", // zh: pending E1
+            ),
+            Self::UpdateCardNotKept => pick(
+                lang,
+                "{detail} Changes made in this session are not kept.",
+                "{detail} Changes made in this session are not kept.", // zh: pending E1
+            ),
         }
     }
 
@@ -5949,7 +5987,8 @@ impl Text {
     /// the *entry* would take the Windows half out of every completeness check
     /// to excuse the Mac half, which is how a translated sentence quietly stops
     /// being checked. The source marker beside each of these is `// zh: pending
-    /// opus46` on the literal itself — grep is how the copywriter finds them,
+    /// <TICKET>` on the literal itself, naming the ticket that left the
+    /// Chinese owed (`// zh: pending E1`) — grep is how the copywriter finds them,
     /// and this list is how the build refuses to forget them.
     /// **The entries no Mac ever draws** — the exemption list of
     /// `no_string_a_mac_reader_meets_names_a_windows_program` (§13.32 ②).
@@ -6018,7 +6057,19 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // 0.4.8 E1: the cards of an update another Folio left unfinished.
+        (Self::UpdateFailedNewer, HostPlatform::Windows),
+        (Self::UpdateFailedNewer, HostPlatform::MacOs),
+        (Self::UpdateFailedUnreadable, HostPlatform::Windows),
+        (Self::UpdateFailedUnreadable, HostPlatform::MacOs),
+        (Self::UpdateCardNewer, HostPlatform::Windows),
+        (Self::UpdateCardNewer, HostPlatform::MacOs),
+        (Self::UpdateCardNewerUnnamed, HostPlatform::Windows),
+        (Self::UpdateCardNewerUnnamed, HostPlatform::MacOs),
+        (Self::UpdateCardNotKept, HostPlatform::Windows),
+        (Self::UpdateCardNotKept, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6374,6 +6425,22 @@ pub fn uninstall_by_in(lang: Lang, command: &str) -> String {
 #[must_use]
 pub fn update_failed_space(megabytes: &str) -> String {
     Text::UpdateFailedSpace.text().replace("{size}", megabytes)
+}
+
+/// **The unfinished update card's line when a later Folio wrote it** — `It
+/// finishes when you next sign in, or when you start Folio 0.4.9.` (0.4.8 E1),
+/// filled from [`Text::UpdateCardNewer`].
+#[must_use]
+pub fn update_card_newer(version: &str) -> String {
+    Text::UpdateCardNewer.text().replace("{version}", version)
+}
+
+/// **A card's line with this session's changes said not to be kept** (0.4.8
+/// E1, a start that continues with its writes held), filled from
+/// [`Text::UpdateCardNotKept`].
+#[must_use]
+pub fn update_card_not_kept(detail: &str) -> String {
+    Text::UpdateCardNotKept.text().replace("{detail}", detail)
 }
 
 /// **The line beside the update card's determinate bar** — `12 / 41 MB`

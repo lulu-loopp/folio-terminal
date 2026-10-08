@@ -2180,6 +2180,68 @@ fn pane_menu_reset_terminal_modes_stops_mouse_motion_and_restores_legacy_keys() 
     assert_eq!(encoded, Some(vec![b'\r']), "Shift+Enter is legacy again");
 }
 
+/// RED (T-RESET-MODES, ruling 2026-10-08 (1); ledger #19) — **a program killed with the kitty
+/// protocol and modifyOtherKeys on no longer leaves `Ctrl+C` typing `[99;5u` at the prompt**: the
+/// shell's command end gives the key encoder its legacy bytes back, and pointer motion is Folio's
+/// again.
+///
+/// MUTATION: drop the `retire_dead_program_modes` call from the session's `D` arm — Ctrl+C
+/// encodes as `CSI 99;5u` and the motion is still forwarded.
+#[test]
+fn a_shells_command_end_gives_ctrl_c_back_to_the_prompt() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(4).unwrap());
+    session
+        .feed(
+            "\x1b]133;A\x07主屏 $ \x1b]133;B\x07agent\x1b]133;C\x07\r\n\
+             \x1b[?1003h\x1b[?1006h\x1b[>1u\x1b[>4;2m"
+                .as_bytes(),
+        )
+        .unwrap();
+    let ctrl_c = |session: &DualPlaneSession| {
+        let c = Key::Character("c".into());
+        input::keyboard_bytes(
+            &c,
+            &c,
+            winit::keyboard::KeyLocation::Standard,
+            ModifiersState::CONTROL,
+            session.application_cursor_mode(),
+            session.terminal_modes().keyboard,
+            input::KeyOrigin {
+                platform: bt_platform::HostPlatform::OtherUnix,
+                physical_key: winit::keyboard::PhysicalKey::Unidentified(
+                    winit::keyboard::NativeKeyCode::Unidentified,
+                ),
+                text_with_all_modifiers: None,
+                virtual_key_of_scan_code: |_| None,
+                virtual_key_is_dead: |_| false,
+                conpty: bt_pty::ConPtyKind::NotConPty,
+                shifted_character: input::ShiftedCharacter::Known(None),
+            },
+        )
+    };
+    assert_eq!(
+        ctrl_c(&session),
+        Some(b"\x1b[99;5u".to_vec()),
+        "the program's encoding, while it lives"
+    );
+
+    // Killed; the shell ends the command and draws its prompt.
+    session
+        .feed("\x1b]133;D;130\x07\x1b]133;A\x07主屏 $ \x1b]133;B\x07".as_bytes())
+        .unwrap();
+    assert_eq!(
+        ctrl_c(&session),
+        Some(vec![0x03]),
+        "Ctrl+C interrupts again"
+    );
+    assert_eq!(
+        route_forwarded_mouse_motion(None, session.terminal_modes(), ModifiersState::empty()),
+        None,
+        "pointer motion is Folio's again"
+    );
+}
+
 /// PIN (user ruling, 2026-08-20 — the repeal §7.1.5f wrote its own warrant
 /// for) — **the same verified target on the alternate screen is ours too.**
 ///

@@ -190,8 +190,8 @@ enum Pre {
 }
 use crate::update_prepare_windows::{Resume, staged_as_verified};
 use crate::update_txn::{
-    Action, Actor, Asker, Class, Digest, Disk, Effect, Event, Header, HeaderOutcome, Home,
-    Inventories, Journal, Layout, Located, Move, Nonce, Phase, PhaseKind, Place, Restore, Seen,
+    Action, Actor, Asker, Class, Digest, Disk, Effect, Event, HeaderOutcome, Home, Inventories,
+    Journal, Layout, Located, Move, Nonce, Phase, PhaseKind, Place, Restore, Role, Seen, Sight,
     TrialProcess, TxnId, decide,
 };
 
@@ -579,11 +579,15 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
         if !matches!(opens_now(self.road), Opens::Trial { .. }) {
             return Ok(None);
         }
-        let Some((txn, nonce)) =
-            crate::update_apply::reserve_last_trial(worker, &self.road.home, actor)?
-        else {
-            return Ok(None);
-        };
+        let (txn, nonce) =
+            match crate::update_apply::reserve_last_trial(worker, &self.road.home, actor)? {
+                crate::update_apply::Reserved::Trial(txn, nonce) => (txn, nonce),
+                crate::update_apply::Reserved::NotEligible => return Ok(None),
+                // Nothing is recorded over a journal this build cannot read
+                // whole, and no trial is started from it (E1): the guard
+                // shows its window.
+                crate::update_apply::Reserved::StoodAside(why) => return Err(why),
+            };
         let (program, mut words) = self.road.opening(&Opens::LastTrial { txn, nonce });
         words.extend_from_slice(self.handed);
         Ok(Some((program.to_path_buf(), words)))
@@ -721,6 +725,18 @@ pub(crate) fn apply(
             }
             guard.owns_window(duty);
         }
+        Window::StoodAside(why) => {
+            // The journal is one this build cannot read whole (E1): no mark,
+            // nothing recorded, and the window duty stays with the build
+            // that armed it, as for any applier that proved none.
+            guard.not_mine(None);
+            let left = guard.leave();
+            guard
+                .inner()
+                .world
+                .say(&format!("BT_UPDATE_APPLY {why}; {}", left.said()));
+            return Ended::StoodAside(why);
+        }
         other => {
             let owner = match &other {
                 Window::Theirs(owner) => Some(owner.pid),
@@ -804,9 +820,11 @@ fn under_the_lock(
     lock: install_txn::Held,
 ) -> (Ended, Option<Running>) {
     let journal = match read_journal(&road.home) {
-        Ok(Some(journal)) => journal,
-        Ok(None) => return (Ended::Refused("there is no journal".to_owned()), None),
-        Err(why) => return (Ended::Refused(why), None),
+        Some(Sight::Known(journal)) => journal,
+        Some(beyond) => {
+            return (Ended::StoodAside(beyond.said(Role::WindowsHolder)), None);
+        }
+        None => return (Ended::Refused("there is no journal".to_owned()), None),
     };
     if journal.txn != txn {
         return (
@@ -917,9 +935,9 @@ fn hold(road: &Road) -> Result<(Held, Journal), Ended> {
         Err(failure) => return Err(Ended::Failed(failure.to_string())),
     };
     match read_journal(&road.home) {
-        Ok(Some(journal)) => Ok((lock, journal)),
-        Ok(None) => Err(Ended::Left("there is no transaction".to_owned())),
-        Err(why) => Err(Ended::Left(why)),
+        Some(Sight::Known(journal)) => Ok((lock, journal)),
+        Some(beyond) => Err(Ended::StoodAside(beyond.said(Role::WindowsHolder))),
+        None => Err(Ended::Left("there is no transaction".to_owned())),
     }
 }
 
@@ -932,21 +950,28 @@ fn hold(road: &Road) -> Result<(Held, Journal), Ended> {
 /// `Opens::LastTrial`), which a start admits as that trial; the whole new set
 /// committed, or the whole old set → the installed build with
 /// `--update-failed`; neither whole set, or a journal whose layout cannot be
-/// read → the rescue copy with `--update-failed`.
+/// read → the rescue copy with `--update-failed`. **A journal this build
+/// cannot read whole** (0.4.8 E1, [`Role::WindowsExit`]) is answered by its
+/// header's frozen class when the header reads, and otherwise as a
+/// `destructive` transaction whose live set is not known — the rescue copy,
+/// never the installed build plainly. A journal file that could not be read
+/// at all is such a journal (E1 round 2); only one that is not there opens
+/// the installed build plainly.
 pub(crate) fn opens_now(road: &Road) -> Opens {
-    let bytes = file_reads::read(Lane::UpdateJournal, road.home.journal()).ok();
-    let Some(header) = bytes.as_deref().and_then(|bytes| Header::parse(bytes).ok()) else {
+    let Some(seen) =
+        Role::WindowsExit.sight_of_read(file_reads::read(Lane::UpdateJournal, road.home.journal()))
+    else {
         return Opens::Installed { failed: false };
+    };
+    let Some(header) = seen.acting_header() else {
+        return Opens::Rescue;
     };
     if header.class != Class::Destructive {
         return Opens::Installed {
             failed: header.outcome == HeaderOutcome::RolledBack,
         };
     }
-    let Some(journal) = bytes
-        .as_deref()
-        .and_then(|bytes| Journal::parse(bytes).ok())
-    else {
+    let Sight::Known(journal) = seen else {
         return Opens::Rescue;
     };
     let Layout::Members(inventories) = &journal.body.layout else {
@@ -1013,15 +1038,12 @@ fn live_set(inventories: &Inventories, install: &Path) -> Option<Live> {
     (old_whole && no_new_only).then_some(Live::Old)
 }
 
-/// The journal at `H\journal.json`: `None` when there is none.
-fn read_journal(home: &Home) -> Result<Option<Journal>, String> {
-    match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => Journal::parse(&bytes)
-            .map(Some)
-            .map_err(|refusal| format!("the journal: {refusal}")),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("the journal: {error}")),
-    }
+/// What the lock holder sees at `H\journal.json`: `None` when there is none.
+/// Anything but [`Sight::Known`] — a file that could not be read included
+/// (E1 round 2) — is stood aside from ([`Role::WindowsHolder`],
+/// [`Ended::StoodAside`]).
+fn read_journal(home: &Home) -> Option<Sight> {
+    Role::WindowsHolder.sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
 }
 
 /// **One transaction under its lock**, with its inventories.

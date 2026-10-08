@@ -39301,6 +39301,20 @@ fn create_leaf_session(
         profiles::index_of_id(&seed.profile),
         &bt_pty::SystemShellEnvironment,
     ));
+    // Which modes the carrier itself keeps on, for the two roads that reset a dead program's
+    // modes without a byte to the child: the person's verb and the session's own return from a
+    // stranded alternate screen. The pane's pseudoconsole is fixed here, at spawn.
+    session.set_pty_transport(
+        match pty.as_ref().map_or(
+            bt_pty::ConPtyKind::NotConPty,
+            bt_pty::PtySession::conpty_kind,
+        ) {
+            bt_pty::ConPtyKind::Shipped | bt_pty::ConPtyKind::Inbox => {
+                bt_term::PtyTransport::ConPty
+            }
+            bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
+        },
+    );
     let projection = session.new_projection(session.layout_key());
     Ok(LeafSession {
         incarnation: next_incarnation(),
