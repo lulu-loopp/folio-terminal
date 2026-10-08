@@ -70,8 +70,13 @@ struct Watched {
     /// anyway, holding no handles, so that the attempt is made once per time the
     /// page is opened rather than once per turn of the event loop. Retrying on a
     /// schedule is the poll this whole file exists to avoid.
-    watches: Vec<bt_platform::DirWatch>,
+    watches: Vec<PathWatch>,
     clock: WatchClock,
+}
+
+struct PathWatch {
+    path: PathBuf,
+    watch: bt_platform::DirWatch,
 }
 
 /// **Every repository some open window is showing, and which window shows it.**
@@ -158,7 +163,7 @@ impl<W: Ord + Copy> GitWatch<W> {
         &mut self,
         window: W,
         wanted: BTreeSet<PathBuf>,
-        open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>,
+        open: impl FnMut(&Path) -> Vec<PathWatch>,
     ) {
         if self.seats.want(window, wanted) {
             self.sync(open);
@@ -183,10 +188,10 @@ impl<W: Ord + Copy> GitWatch<W> {
     /// **Bring the subscriptions level with what the seats want** (rule 1).
     ///
     /// The union of every seat is the whole of the gate: a root that leaves it
-    /// has its handles dropped here, which cancels the read and joins the
-    /// thread. Nothing else in this file ever decides to watch or stop watching
-    /// anything.
-    fn sync(&mut self, open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>) -> bool {
+    /// has its subscriptions dropped here, which cancels the read and leaves
+    /// retirement to the platform. Nothing else in this file decides to watch or
+    /// stop watching anything.
+    fn sync(&mut self, open: impl FnMut(&Path) -> Vec<PathWatch>) -> bool {
         let wanted = self.seats.wanted();
         let changed = self.sync_with(&wanted, open);
         if changed {
@@ -208,7 +213,7 @@ impl<W: Ord + Copy> GitWatch<W> {
     fn sync_with(
         &mut self,
         wanted: &BTreeSet<PathBuf>,
-        mut open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>,
+        mut open: impl FnMut(&Path) -> Vec<PathWatch>,
     ) -> bool {
         // **With no Git page open in any window nothing is touched at all**, not
         // even the mailbox's lock. The mailbox can only hold news for a
@@ -218,8 +223,7 @@ impl<W: Ord + Copy> GitWatch<W> {
             return false;
         }
         let before = self.watched.len();
-        // Departures first, and the drop is the cancellation: `DirWatch::drop`
-        // sets the stop event and joins its thread.
+        // Departures first; dropping a subscription is the cancellation.
         self.watched.retain(|root, _| wanted.contains(root));
         let mut changed = self.watched.len() != before;
         for root in wanted {
@@ -253,6 +257,18 @@ impl<W: Ord + Copy> GitWatch<W> {
         if self.watched.is_empty() {
             return Vec::new();
         }
+        for entry in self.watched.values_mut() {
+            entry.watches.retain_mut(|subscription| {
+                let Some(error) = subscription.watch.take_failure() else {
+                    return true;
+                };
+                trace(&format!(
+                    "cannot watch {}: {error}",
+                    subscription.path.display()
+                ));
+                false
+            });
+        }
         for (root, at) in std::mem::take(&mut *lock(&self.news)) {
             if let Some(entry) = self.watched.get_mut(&root) {
                 entry.clock.note_event(at);
@@ -285,7 +301,12 @@ impl<W: Ord + Copy> GitWatch<W> {
             self.watched.len(),
             self.watched
                 .values()
-                .filter(|entry| !entry.watches.is_empty())
+                .filter(|entry| {
+                    entry
+                        .watches
+                        .iter()
+                        .any(|subscription| subscription.watch.is_armed())
+                })
                 .count(),
         )
     }
@@ -311,7 +332,7 @@ fn subscribe(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     proxy: &EventLoopProxy<AppEvent>,
     root: &Path,
-) -> Vec<bt_platform::DirWatch> {
+) -> Vec<PathWatch> {
     // The working tree, recursively — which already covers `.git` in the ordinary
     // case, because there it is a subdirectory of exactly this tree.
     let mut paths = vec![root.to_path_buf()];
@@ -335,7 +356,7 @@ fn subscribe(
                 let _ = proxy.send_event(AppEvent::GitChanged);
             });
             match started {
-                Ok(watch) => Some(watch),
+                Ok(watch) => Some(PathWatch { path, watch }),
                 Err(error) => {
                     // **Quietly** (rule 3). A network share, a `\\wsl$` mount, a
                     // folder this process may not open: the answer is to have no

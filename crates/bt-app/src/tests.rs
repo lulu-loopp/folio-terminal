@@ -289,7 +289,12 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     });
     let (tasks, requests) = mpsc::channel();
     let (results, completions) = mpsc::channel();
-    let worker = std::thread::spawn(move || run_decoration_worker(requests, results, || {}));
+    let worker = bt_platform::spawn_at_priority(
+        "bt-test-decoration",
+        bt_platform::ThreadPriority::Normal,
+        move |ctx| run_decoration_worker(ctx, requests, results, || {}),
+    )
+    .expect("start decoration worker");
     let leaf = probe_leaf();
     let render = |source: &str, budget| {
         tasks
@@ -55087,12 +55092,23 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
     let read = door
         .find("bt_platform::clipboard_payload()")
         .expect("the door reads the clipboard");
-    let delivered = door
-        .find("self.deliver_paste(")
-        .expect("and delivers the paste");
+    let applied = door
+        .find("self.apply_clipboard_payload(target,payload)")
+        .expect("the door applies its clipboard payload");
     assert!(
-        asked < read && read < delivered,
-        "the question is asked after the clipboard was read or the paste delivered"
+        asked < read && read < applied,
+        "the question is asked before the read and the apply follows the read"
+    );
+    let apply = squeezed_body("Runtime", "apply_clipboard_payload");
+    let recipient = apply
+        .find("leaf.paste_recipient.clone()")
+        .expect("the apply step resolves the recipient");
+    let delivered = apply
+        .find("self.deliver_paste(")
+        .expect("the apply step delivers the paste");
+    assert!(
+        recipient < delivered,
+        "delivery follows recipient resolution"
     );
     // And the terminal menu's Paste goes through that door, not around it.
     assert!(

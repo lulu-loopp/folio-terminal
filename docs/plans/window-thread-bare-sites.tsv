@@ -41,7 +41,6 @@ bt-app	-	crate::files::run_dir_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::git::run_git_with_input	std::thread::JoinHandle::join	2
 bt-app	-	crate::git::run_git_with_input	std::thread::sleep	1
 bt-app	-	crate::git::run_git_worker	std::sync::mpsc::Receiver::recv	1
-bt-app	-	crate::handoff_lane::run_handoff_lane	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::hang_watch::prune_reports	std::fs::read_dir	1
 bt-app	-	crate::hang_watch::watch_forever	std::thread::sleep	1
 bt-app	-	crate::hang_watch::write_report	std::fs::File::create	1
@@ -62,9 +61,7 @@ bt-app	-	crate::psreadline::install_checked	std::fs::create_dir_all	1
 bt-app	-	crate::psreadline::install_checked	std::fs::write	1
 bt-app	-	crate::psreadline::installed_disk::<System as Disk>::entries	std::fs::read_dir	1
 bt-app	-	crate::raster_peek_page	std::fs::metadata	1
-bt-app	-	crate::read_video_glance	std::fs::metadata	1
 bt-app	-	crate::revived_page_of	std::fs::canonicalize	1
-bt-app	-	crate::run_decoration_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::run_path_verify_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::run_scale_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::runtime::files::Runtime::rename_files_row	std::fs::rename	1

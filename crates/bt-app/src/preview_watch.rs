@@ -361,6 +361,17 @@ impl PreviewWatch {
         if self.files.is_empty() {
             return Vec::new();
         }
+        let mut failed = Vec::new();
+        for (directory, watch) in &mut self.folders {
+            if let Some(error) = watch.take_failure() {
+                trace(&format!("cannot watch {}: {error}", directory.display()));
+                failed.push(directory.clone());
+            }
+        }
+        for directory in failed {
+            self.folders.remove(&directory);
+            self.unwatchable.insert(directory);
+        }
         for (directory, at) in std::mem::take(&mut *lock(&self.news)) {
             for (path, entry) in &mut self.files {
                 if path.parent() == Some(directory.as_path()) {
@@ -471,7 +482,13 @@ impl PreviewWatch {
     /// line.
     #[must_use]
     pub fn counts(&self) -> (usize, usize) {
-        (self.files.len(), self.folders.len())
+        (
+            self.files.len(),
+            self.folders
+                .values()
+                .filter(|watch| watch.is_armed())
+                .count(),
+        )
     }
 }
 

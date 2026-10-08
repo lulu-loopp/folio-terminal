@@ -8,9 +8,8 @@ use crate::{
     composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
     input, keyboard_owner_is_a_shell, keyhint, marks, menubar, native_window, paste_card_key,
-    popup_takes_the_key, preedit_caret_byte, profiles, quit, recoverable_clipboard_write,
-    rename_key, rename_pastes, restore, settings, settings_key_of, shortcuts, toast,
-    window_ime_cursor_area, write_pty_input, write_terminal_clipboard_text,
+    popup_takes_the_key, preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore,
+    settings, settings_key_of, shortcuts, toast, window_ime_cursor_area, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -1408,8 +1407,12 @@ impl Runtime<'_> {
                 // row reach the clipboard by one route — and a clipboard another
                 // process is holding open is recoverable here for the reason it
                 // is everywhere else.
-                let result = write_terminal_clipboard_text(&copied);
-                recoverable_clipboard_write(result, "copy from the name editor");
+                self.submit_clipboard_write(
+                    copied,
+                    "copy from the name editor",
+                    crate::ClipboardWriteEffect::None,
+                )
+                .map(drop)?;
             }
             match verdict {
                 RenameVerdict::Commit => self.finish_rename(RenameExit::Submit)?,
