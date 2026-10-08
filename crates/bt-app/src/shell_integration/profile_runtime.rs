@@ -324,7 +324,7 @@ fn profile_answers(
     answers_for(
         &ProfileFiles::read(data).unwrap_or_default(),
         installed_powershells(environment),
-        |program| cached_profile_answer(program, patience, environment),
+        |program| cached_profile_answer(program, environment, ProfileQuestion::Ask(patience)),
     )
 }
 

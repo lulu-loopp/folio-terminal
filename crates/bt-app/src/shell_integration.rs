@@ -3308,48 +3308,56 @@ fn profile_key(program: &Path) -> PathBuf {
     }
 }
 
-/// Resolving executable aliases can touch disk, so it happens only on workers.
-/// All aliases point at the same slot before any worker asks PowerShell. `deadline` is the
-/// asker's patience ([`POWERSHELL_PROBE_DEADLINE`] for the Profiles page, [`REMOVAL_PROBE_DEADLINE`] for a
-/// removal somebody asked for).
-fn cached_profile_answer(
-    program: &Path,
-    deadline: std::time::Duration,
-    environment: &ProbeEnvironment,
-) -> Option<PathBuf> {
-    let (slot, resolved) = profile_slot(program, environment);
-    answer_once(&slot, || {
-        run_profile_path_probe(&resolved, deadline, environment)
-    })
+/// **What a caller brings to `program`'s `$PROFILE` slot**: a question to ask when the slot holds
+/// no answer, with the asker's patience ([`POWERSHELL_PROBE_DEADLINE`] for the Profiles page,
+/// [`REMOVAL_PROBE_DEADLINE`] for a removal somebody asked for), or an answer heard elsewhere.
+enum ProfileQuestion {
+    Ask(std::time::Duration),
+    /// **A newer answer**, heard by the edition observation (which asks the same edition the same
+    /// question at every Profiles-page open, T-PROBE-NO-CACHED-FAILURE): it replaces the slot's,
+    /// so a removal reads the newest any probe heard — a `Documents` folder moved while Folio
+    /// runs is followed — and asks no shell of its own.
+    Heard(PathBuf),
 }
 
-/// **The slot `program` and every alias of it share**, and the program as `environment` resolves
-/// it.
-fn profile_slot(program: &Path, environment: &ProbeEnvironment) -> (ProfileAnswer, PathBuf) {
+/// Resolving executable aliases can touch disk, so it happens only on workers.
+/// All aliases point at the same slot before any worker asks PowerShell.
+fn cached_profile_answer(
+    program: &Path,
+    environment: &ProbeEnvironment,
+    question: ProfileQuestion,
+) -> Option<PathBuf> {
     let resolved = environment
         .program(program)
         .unwrap_or_else(|| program.to_path_buf());
     let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
-    let mut answers = PROFILE_ANSWERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let original = answers.entry(profile_key(program)).or_default().clone();
-    let slot = answers
-        .entry(profile_key(&canonical))
-        .or_insert(original)
-        .clone();
-    answers.insert(profile_key(program), slot.clone());
-    (slot, resolved)
+    let slot = {
+        let mut answers = PROFILE_ANSWERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = answers.entry(profile_key(program)).or_default().clone();
+        let slot = answers
+            .entry(profile_key(&canonical))
+            .or_insert(original)
+            .clone();
+        answers.insert(profile_key(program), slot.clone());
+        slot
+    };
+    match question {
+        ProfileQuestion::Ask(deadline) => answer_once(&slot, || {
+            run_profile_path_probe(&resolved, deadline, environment)
+        }),
+        ProfileQuestion::Heard(path) => {
+            *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(path.clone());
+            Some(path)
+        }
+    }
 }
 
-/// **A newer answer about where `program` keeps `$PROFILE`**, heard by the edition observation
-/// (which asks the same edition the same question at every Profiles-page open,
-/// T-PROBE-NO-CACHED-FAILURE): it replaces the slot's, so a removal reads the newest any probe
-/// heard — a `Documents` folder moved while Folio runs is followed — and asks no shell of its own.
+/// [`ProfileQuestion::Heard`]: `path` becomes `program`'s answer.
 fn file_profile_answer(program: &Path, path: PathBuf, environment: &ProbeEnvironment) {
-    let (slot, _) = profile_slot(program, environment);
-    *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(path);
+    let _ = cached_profile_answer(program, environment, ProfileQuestion::Heard(path));
 }
 
 /// The slot's answer, asking for it only when there is none: an answer is kept, a failure is
@@ -3468,7 +3476,9 @@ impl ProbeEnvironment {
         }
     }
 
-    /// The account's block, when this is one: what [`ordinary_process_scope`] reads.
+    /// The account's block, when this is one: what [`ordinary_process_scope`] reads (Windows
+    /// only, like its reader).
+    #[cfg(windows)]
     fn block(&self) -> Option<&[(OsString, OsString)]> {
         match self {
             Self::Logon(block) => Some(block),
@@ -4555,14 +4565,17 @@ mod tests {
         let environment = ProbeEnvironment::Inherited;
         let old = PathBuf::from(r"C:\Users\me\Documents\PowerShell\profile.ps1");
         let moved = PathBuf::from(r"C:\Users\me\OneDrive\文档\PowerShell\profile.ps1");
-        let (slot, _) = profile_slot(&program, &environment);
-        assert_eq!(answer_once(&slot, || Some(old.clone())), Some(old));
+        let ask = || {
+            cached_profile_answer(
+                &program,
+                &environment,
+                ProfileQuestion::Ask(POWERSHELL_PROBE_DEADLINE),
+            )
+        };
+        file_profile_answer(&program, old.clone(), &environment);
+        assert_eq!(ask(), Some(old), "a held answer asks no shell");
         file_profile_answer(&program, moved.clone(), &environment);
-        let (slot, _) = profile_slot(&program, &environment);
-        assert_eq!(
-            answer_once(&slot, || panic!("a held answer asks no shell")),
-            Some(moved)
-        );
+        assert_eq!(ask(), Some(moved));
         let _ = std::fs::remove_dir_all(&directory);
     }
 
