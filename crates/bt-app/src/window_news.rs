@@ -75,10 +75,11 @@ impl<W: Ord + Copy, S: Ord + Clone> WindowSeats<W, S> {
     /// **What this window wants to hear about now.** A window with no seat is
     /// not open by the directory's word, and wants nothing.
     ///
-    /// Answers whether its wish changed. A subject it no longer wants is no
+    /// Answers whether its wish changed. A subject it stops wanting is no
     /// longer owed to it either: what it was told about a surface that has left
     /// the glass is answered by the reading that surface takes when it comes
-    /// back.
+    /// back. What it was told through [`Self::tell_all`] it never wanted, and
+    /// stays owed.
     pub fn want(&mut self, window: W, wanted: BTreeSet<S>) -> bool {
         let Some(seat) = self.seats.get_mut(&window) else {
             return false;
@@ -86,8 +87,9 @@ impl<W: Ord + Copy, S: Ord + Clone> WindowSeats<W, S> {
         if seat.wanted == wanted {
             return false;
         }
-        seat.owed.retain(|subject| wanted.contains(subject));
-        seat.wanted = wanted;
+        let before = std::mem::replace(&mut seat.wanted, wanted);
+        seat.owed
+            .retain(|subject| seat.wanted.contains(subject) || !before.contains(subject));
         true
     }
 
@@ -110,12 +112,53 @@ impl<W: Ord + Copy, S: Ord + Clone> WindowSeats<W, S> {
         }
     }
 
+    /// **News about a process-wide `subject`, for every open window, whatever it
+    /// wants** — a fact of the machine every window re-derives (the plan's
+    /// Environment broadcast). Each seat is told once however often this is
+    /// said before it takes.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T-PROGRAMS-REFRESH until 2026-10-31: the Environment broadcast tells every seat"
+        )
+    )]
+    pub fn tell_all(&mut self, subject: &S) {
+        for seat in self.seats.values_mut() {
+            seat.owed.insert(subject.clone());
+        }
+    }
+
     /// What this window has been told and not yet acted on, handed over once.
     pub fn take(&mut self, window: W) -> BTreeSet<S> {
         self.seats
             .get_mut(&window)
             .map(|seat| std::mem::take(&mut seat.owed))
             .unwrap_or_default()
+    }
+}
+
+/// **A holder of per-window seats, leveled by the window directory's walk.**
+///
+/// Every holder the application keeps is handed to [`seat_every_holder`] from
+/// the one walk (`FolioApp::publish_window_directory`), so a second subject's
+/// seats (B2's broadcast, B3's facts) are seated and released on the same walk
+/// as the git watch's rather than on a walk of their own.
+pub trait SeatedByDirectory<W> {
+    /// Seat every window in `open` and release every other.
+    fn seat_windows(&mut self, open: &[W]);
+}
+
+impl<W: Ord + Copy, S: Ord + Clone> SeatedByDirectory<W> for WindowSeats<W, S> {
+    fn seat_windows(&mut self, open: &[W]) {
+        self.level_with(open.iter().copied());
+    }
+}
+
+/// **The directory's walk, for every holder at once.**
+pub fn seat_every_holder<W>(holders: &mut [&mut dyn SeatedByDirectory<W>], open: &[W]) {
+    for holder in holders.iter_mut() {
+        holder.seat_windows(open);
     }
 }
 
@@ -193,5 +236,57 @@ mod tests {
             "the same wish is no change"
         );
         assert_eq!(seats.take(7), set(&["仓库 b"]));
+    }
+
+    /// RED (round 2) — **a process-wide fact is told to every open window once,
+    /// whatever each wants.**
+    ///
+    /// MUTATION: `tell_all` telling one seat only (`break` after the first
+    /// insert) — windows 2 and 3 never hear it.
+    #[test]
+    fn a_process_wide_fact_is_told_to_every_window_once() {
+        let mut seats: WindowSeats<u32, String> = WindowSeats::default();
+        seats.level_with([1, 2, 3]);
+        seats.want(2, set(&["repo a"]));
+        let environment = "环境 environment".to_owned();
+        seats.tell_all(&environment);
+        seats.tell_all(&environment);
+        assert!(
+            seats.want(2, set(&["仓库 b"])),
+            "a changed wish does not drop a fact the window never wanted"
+        );
+        for window in [1, 2, 3] {
+            assert_eq!(
+                seats.take(window),
+                set(&["环境 environment"]),
+                "window {window}"
+            );
+            assert_eq!(seats.take(window), set(&[]), "once, window {window}");
+        }
+    }
+
+    /// RED (round 2) — **the directory's walk levels every holder, so a second
+    /// subject's seats are released with the first's.**
+    ///
+    /// MUTATION: `seat_every_holder` leveling the first holder only — the second
+    /// subject's seat for the closed window survives and is still told.
+    #[test]
+    fn the_walk_levels_a_second_subjects_seats_too() {
+        let mut first: WindowSeats<u32, String> = WindowSeats::default();
+        let mut second: WindowSeats<u32, String> = WindowSeats::default();
+        seat_every_holder(&mut [&mut first, &mut second], &[1, 2]);
+        first.want(2, set(&["repo a"]));
+        second.want(2, set(&["事实 fact"]));
+        assert_eq!(second.wanted(), set(&["事实 fact"]), "window 2 was seated");
+
+        seat_every_holder(&mut [&mut first, &mut second], &[1]);
+        assert_eq!(first.wanted(), set(&[]));
+        assert_eq!(
+            second.wanted(),
+            set(&[]),
+            "the second subject's seat went too"
+        );
+        second.tell(&"事实 fact".to_owned());
+        assert_eq!(second.take(2), set(&[]));
     }
 }

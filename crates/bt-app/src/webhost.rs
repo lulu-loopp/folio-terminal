@@ -634,7 +634,7 @@ pub(crate) fn web_color_scheme(setting: WebColorSchemeV1, theme_is_dark: bool) -
 /// again, so a palette change that did not move light to dark — a new dark scheme, a contrast
 /// floor — costs no engine anything; one that did costs one call per seat. The first failure is
 /// reported and the rest are still told.
-pub(crate) fn tell_every_seat_its_color_scheme<'a>(
+pub(crate) fn tell_all_seat_its_color_scheme<'a>(
     seats: impl IntoIterator<Item = &'a mut WebSeat>,
     scheme: WebColorScheme,
 ) -> (usize, Option<String>) {
@@ -6618,7 +6618,7 @@ mod color_scheme_tests {
 
         let dark = web_color_scheme(WebColorSchemeV1::FollowTheme, true);
         assert_eq!(
-            tell_every_seat_its_color_scheme(seats.iter_mut(), dark),
+            tell_all_seat_its_color_scheme(seats.iter_mut(), dark),
             (3, None),
             "every seat is told, background tabs included"
         );
@@ -6630,14 +6630,14 @@ mod color_scheme_tests {
 
         // A new dark scheme, or a contrast floor: the palette moved and the answer did not.
         assert_eq!(
-            tell_every_seat_its_color_scheme(seats.iter_mut(), dark),
+            tell_all_seat_its_color_scheme(seats.iter_mut(), dark),
             (0, None),
             "an answer a seat already holds costs it nothing"
         );
 
         let light = web_color_scheme(WebColorSchemeV1::FollowTheme, false);
         assert_eq!(
-            tell_every_seat_its_color_scheme(seats.iter_mut(), light),
+            tell_all_seat_its_color_scheme(seats.iter_mut(), light),
             (3, None)
         );
         assert!(

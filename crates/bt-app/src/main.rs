@@ -61548,12 +61548,13 @@ impl FolioApp {
             })
             .collect();
         if let Some(app) = self.app.as_mut() {
-            // **Every window the directory names has a seat in the git watch, and
-            // no other** (T-WINDOWS-ALL): the walk that names a window seats it,
-            // and the walk that stops naming it — closed, or leaving — releases
-            // its seat and every subscription only it wanted.
-            app.git_watch
-                .seat_windows(open.iter().map(|window| window.id), &app.event_proxy);
+            // **Every window the directory names has a seat in every holder of
+            // per-window news, and no other** (T-WINDOWS-ALL): the walk that names
+            // a window seats it, and the walk that stops naming it — closed, or
+            // leaving — releases its seat, and in the git watch every subscription
+            // only it wanted. A new holder is one more entry in this list.
+            let ids: Vec<WindowId> = open.iter().map(|window| window.id).collect();
+            window_news::seat_every_holder(&mut [&mut app.git_watch], &ids);
             app.windows_open = open;
         }
     }
@@ -64016,6 +64017,10 @@ impl FolioApp {
             });
             return;
         }
+        // **The kernel's news about repositories, filed under every window that
+        // shows them, before any window takes its turn** (T-WINDOWS-ALL), so each
+        // window's own turn takes what it was told on this same pass.
+        self.ripen_git_news(now);
         // **Every window's own turn, and the earliest wake-up any of them asked
         // for.** A loop that woke for the first window's clocks and not the
         // second's would be a second window whose caret blinks only when the
@@ -64025,10 +64030,6 @@ impl FolioApp {
         // clock was turned by the reap above; the thirty here would drain shut
         // shells and publish frames for a window nobody can see, which is the
         // sentence the quit's own branch says about its retirement.
-        // **The kernel's news about repositories, filed under every window that
-        // shows them, before any window takes its turn** (T-WINDOWS-ALL), so each
-        // window's own turn takes what it was told on this same pass.
-        self.ripen_git_news(now);
         let mut application_clocks = true;
         for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {

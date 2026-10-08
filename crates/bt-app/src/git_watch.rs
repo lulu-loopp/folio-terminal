@@ -22,7 +22,7 @@
 //!    switch is on and some surface on screen — in **any** open window — is
 //!    showing that repository's Git page. Leaving the page, switching tabs away,
 //!    turning the switch off or closing the window drops the handle once no
-//!    window wants it — see [`GitWatch::want`] and [`GitWatch::seat_windows`],
+//!    window wants it — see [`GitWatch::want`] and `GitWatch::seat_windows_with`,
 //!    which keep each window's seat, and `GitWatch::sync`, which owns the
 //!    difference for the union.
 //! 2. **Coalesced** by [`WatchClock`]: one re-read after the tree goes quiet, and
@@ -53,7 +53,11 @@ use std::{
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppEvent, watch_clock::WatchClock, window_news::WindowSeats};
+use crate::{
+    AppEvent,
+    watch_clock::WatchClock,
+    window_news::{SeatedByDirectory, WindowSeats},
+};
 
 /// One repository's subscription, and the clock its notifications feed.
 struct Watched {
@@ -114,33 +118,13 @@ impl<W: Ord + Copy> GitWatch<W> {
     /// stopped naming the window, rather than whenever another window next
     /// changes what it shows.
     ///
-    /// **The proxy is borrowed here and cloned only where a watch is actually
-    /// opened**, which on one of the two platforms is the difference between an
-    /// idle window and a burning processor. A clone of an `EventLoopProxy` is an
-    /// `Arc` bump on Windows and *not* one on macOS: winit builds a fresh run
-    /// loop source, adds it to the main run loop and **wakes the loop**, and
-    /// dropping it invalidates the source again. [`Self::want`] is called on
-    /// every turn, so a clone taken at the top of it would schedule the very
-    /// turn that takes the next one — a window nobody is looking at, holding a
-    /// core at full tilt for as long as it stays open. So the clone is taken once
-    /// per subscription, in [`subscribe`], and never per turn.
-    pub fn seat_windows(
-        &mut self,
-        open_windows: impl IntoIterator<Item = W>,
-        proxy: &EventLoopProxy<AppEvent>,
-    ) {
-        let news = Arc::clone(&self.news);
-        self.seat_windows_with(open_windows, |root| subscribe(&news, proxy, root));
-    }
-
-    /// [`Self::seat_windows`] with the opening of a watch handed in. Answers
-    /// whether the subscriptions changed.
-    fn seat_windows_with(
-        &mut self,
-        open_windows: impl IntoIterator<Item = W>,
-        open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>,
-    ) -> bool {
-        self.seats.level_with(open_windows) && self.sync(open)
+    /// **This walk only ever drops subscriptions.** A seat it makes wants
+    /// nothing until its window's own turn says otherwise, so the union can
+    /// shrink here and never grow, and no watch is opened.
+    ///
+    /// Answers whether the subscriptions changed.
+    fn seat_windows_with(&mut self, open_windows: impl IntoIterator<Item = W>) -> bool {
+        self.seats.level_with(open_windows) && self.sync(|_| Vec::new())
     }
 
     /// **What this window's drawn Git pages are showing now** (rule 1), asked
@@ -151,16 +135,22 @@ impl<W: Ord + Copy> GitWatch<W> {
     /// dropped unless this window's set changed, so the turn of a window whose
     /// pages stayed put touches no subscription and no lock.
     ///
-    /// Answers whether the subscriptions changed, which is only of interest to a
-    /// diagnostics line.
-    pub fn want(
-        &mut self,
-        window: W,
-        wanted: BTreeSet<PathBuf>,
-        proxy: &EventLoopProxy<AppEvent>,
-    ) -> bool {
+    /// A change of the subscriptions is written to `BT_GIT_TRACE` by
+    /// `Self::sync`; nothing else is said about it.
+    ///
+    /// **The proxy is borrowed here and cloned only where a watch is actually
+    /// opened**, which on one of the two platforms is the difference between an
+    /// idle window and a burning processor. A clone of an `EventLoopProxy` is an
+    /// `Arc` bump on Windows and *not* one on macOS: winit builds a fresh run
+    /// loop source, adds it to the main run loop and **wakes the loop**, and
+    /// dropping it invalidates the source again. This is called on every turn,
+    /// so a clone taken at the top of it would schedule the very turn that takes
+    /// the next one — a window nobody is looking at, holding a core at full tilt
+    /// for as long as it stays open. So the clone is taken once per
+    /// subscription, in [`subscribe`], and never per turn.
+    pub fn want(&mut self, window: W, wanted: BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) {
         let news = Arc::clone(&self.news);
-        self.want_with(window, wanted, |root| subscribe(&news, proxy, root))
+        self.want_with(window, wanted, |root| subscribe(&news, proxy, root));
     }
 
     /// [`Self::want`] with the opening of a watch handed in.
@@ -169,8 +159,10 @@ impl<W: Ord + Copy> GitWatch<W> {
         window: W,
         wanted: BTreeSet<PathBuf>,
         open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>,
-    ) -> bool {
-        self.seats.want(window, wanted) && self.sync(open)
+    ) {
+        if self.seats.want(window, wanted) {
+            self.sync(open);
+        }
     }
 
     /// **Fold in what the kernel has said, and tell every window that wants a
@@ -299,6 +291,14 @@ impl<W: Ord + Copy> GitWatch<W> {
     }
 }
 
+/// The window directory's walk (`FolioApp::publish_window_directory`, through
+/// [`crate::window_news::seat_every_holder`]): [`GitWatch::seat_windows_with`].
+impl<W: Ord + Copy> SeatedByDirectory<W> for GitWatch<W> {
+    fn seat_windows(&mut self, open: &[W]) {
+        self.seat_windows_with(open.iter().copied());
+    }
+}
+
 /// Open the one or two watches a repository needs.
 ///
 /// A free function and not a method because it is called from inside a closure
@@ -306,7 +306,7 @@ impl<W: Ord + Copy> GitWatch<W> {
 /// needs is the mailbox and the proxy, not the registry.
 ///
 /// **And it is the only place in this file the proxy is cloned** — once per
-/// watch opened, for the reason [`GitWatch::seat_windows`] states.
+/// watch opened, for the reason [`GitWatch::want`] states.
 fn subscribe(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     proxy: &EventLoopProxy<AppEvent>,
@@ -718,7 +718,7 @@ mod tests {
             (GitOrigin::Column(SeatId(1)), repo.clone(), true),
             (GitOrigin::Graph(repo.clone()), repo.clone(), true),
         ];
-        assert!(!watch.seat_windows_with([1, 2], |_| Vec::new()));
+        assert!(!watch.seat_windows_with([1, 2]));
         assert!(turn(&mut watch, 1, &first).is_empty());
         assert!(turn(&mut watch, 2, &second).is_empty());
         assert_eq!(watch.counts().0, 1, "one subscription for the union");
@@ -756,7 +756,7 @@ mod tests {
         let theirs = PathBuf::from(r"D:\工作\two");
         let first: Surfaces = vec![(GitOrigin::Column(SeatId(1)), mine.clone(), true)];
         let second: Surfaces = vec![(GitOrigin::Column(SeatId(3)), theirs.clone(), true)];
-        watch.seat_windows_with([1, 2], |_| Vec::new());
+        watch.seat_windows_with([1, 2]);
         turn(&mut watch, 2, &second);
         turn(&mut watch, 1, &first);
         assert_eq!(watch.counts().0, 2, "both windows' repositories");
@@ -785,16 +785,13 @@ mod tests {
             (GitOrigin::Column(SeatId(1)), shared.clone(), true),
             (GitOrigin::Column(SeatId(2)), alone.clone(), true),
         ];
-        watch.seat_windows_with([1, 2], |_| Vec::new());
+        watch.seat_windows_with([1, 2]);
         turn(&mut watch, 1, &first);
         turn(&mut watch, 2, &second);
         assert_eq!(watch.counts().0, 2);
 
         // Window 2 closes: the next walk of the directory no longer names it.
-        assert!(
-            watch.seat_windows_with([1], |_| Vec::new()),
-            "the subscriptions changed"
-        );
+        assert!(watch.seat_windows_with([1]), "the subscriptions changed");
         assert_eq!(
             watch.counts().0,
             1,
@@ -831,7 +828,7 @@ mod tests {
         let repo = PathBuf::from(r"D:\仓库");
         let drawn: Surfaces = vec![(GitOrigin::Column(SeatId(1)), repo.clone(), true)];
         let undrawn: Surfaces = vec![(GitOrigin::Column(SeatId(1)), repo.clone(), false)];
-        watch.seat_windows_with([1, 2], |_| Vec::new());
+        watch.seat_windows_with([1, 2]);
         turn(&mut watch, 1, &drawn);
         turn(&mut watch, 2, &undrawn);
         assert_eq!(
@@ -852,6 +849,98 @@ mod tests {
         assert_eq!(
             turn(&mut watch, 1, &drawn),
             vec![GitOrigin::Column(SeatId(1))]
+        );
+    }
+
+    /// RED (round 2) — **the first window re-reads at exactly the moments it did
+    /// before the seats**: the same re-reads for the same news, against a
+    /// recorded sequence.
+    ///
+    /// The sequence is what the first-window-only watch did on each turn (sync
+    /// to the window's drawn roots, fold the news, re-read the drawn surfaces on
+    /// each ripe root): nothing before the tree is quiet, one re-read per
+    /// ripened root and never a second for the same news, every drawn surface on
+    /// the root together, nothing for a root no page shows, and nothing banked
+    /// for a page that was left — whether it was left before the news ripened or
+    /// on the very pass it did. A second window showing another repository is
+    /// seated beside it and changes none of it.
+    ///
+    /// MUTATIONS: news filed twice (`WindowSeats::take` handing over a copy and
+    /// keeping the news) — the first window re-reads again on the next pass; the
+    /// first seat skipped (`WindowSeats::tell` over `.skip(1)`) — the first
+    /// window never re-reads.
+    #[test]
+    fn the_first_window_re_reads_at_the_moments_it_always_did() {
+        let mut watch = GitWatch::<u32>::default();
+        let a = PathBuf::from(r"D:\仓库\a");
+        let b = PathBuf::from(r"D:\other\b");
+        let c = PathBuf::from(r"D:\第二窗\c");
+        let column = GitOrigin::Column(SeatId(1));
+        let graph = GitOrigin::Graph(a.clone());
+        let page: Surfaces = vec![
+            (column.clone(), a.clone(), true),
+            (GitOrigin::Column(SeatId(2)), b.clone(), false),
+        ];
+        let page_and_graph: Surfaces = vec![
+            (column.clone(), a.clone(), true),
+            (graph.clone(), a.clone(), true),
+        ];
+        let left: Surfaces = vec![(column.clone(), a.clone(), false)];
+        let second: Surfaces = vec![(GitOrigin::Column(SeatId(1)), c, true)];
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let quiet = crate::watch_clock::WATCH_QUIET;
+        watch.seat_windows_with([1, 2]);
+
+        // One pass of the loop: ripen, then the windows' turns in opening order.
+        let pass = |watch: &mut GitWatch<u32>, now: Instant, first: &Surfaces| {
+            watch.ripen(now);
+            let read = turn(watch, 1, first);
+            assert!(
+                turn(watch, 2, &second).is_empty(),
+                "nothing moved under window 2"
+            );
+            read
+        };
+        let heard = |watch: &mut GitWatch<u32>, root: &Path, when: Instant| {
+            lock(&watch.news).insert(root.to_path_buf(), when);
+        };
+
+        let mut recorded: Vec<Vec<GitOrigin>> = Vec::new();
+        recorded.push(pass(&mut watch, at(0), &page));
+        heard(&mut watch, &a, at(100));
+        recorded.push(pass(&mut watch, at(200), &page));
+        recorded.push(pass(&mut watch, at(100) + quiet, &page));
+        recorded.push(pass(&mut watch, at(500), &page));
+        heard(&mut watch, &b, at(3000));
+        recorded.push(pass(&mut watch, at(4000), &page));
+        recorded.push(pass(&mut watch, at(5000), &page_and_graph));
+        heard(&mut watch, &a, at(5100));
+        recorded.push(pass(&mut watch, at(5100) + quiet, &page_and_graph));
+        heard(&mut watch, &a, at(8000));
+        recorded.push(pass(&mut watch, at(8100), &left));
+        recorded.push(pass(&mut watch, at(9000), &left));
+        recorded.push(pass(&mut watch, at(10_000), &page));
+        heard(&mut watch, &a, at(13_000));
+        recorded.push(pass(&mut watch, at(13_000) + quiet, &left));
+        recorded.push(pass(&mut watch, at(14_000), &left));
+
+        assert_eq!(
+            recorded,
+            vec![
+                vec![],                      // the page opens: its own first read, not news
+                vec![],                      // news, the tree not yet quiet
+                vec![column.clone()],        // quiet: one re-read
+                vec![],                      // and never a second for it
+                vec![],                      // news for a root no page draws
+                vec![],                      // a graph joins the page
+                vec![column.clone(), graph], // both surfaces on the root, together
+                vec![],                      // the page is left before the news ripens
+                vec![],                      // and the news is not kept
+                vec![],                      // back on the page: nothing banked
+                vec![],                      // left on the very pass the news ripened
+                vec![],                      // and still nothing
+            ]
         );
     }
 }

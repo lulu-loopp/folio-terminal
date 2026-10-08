@@ -79,7 +79,7 @@ impl DirNews {
     ///
     /// **The already-armed answer comes before the proxy is cloned, and that
     /// order is load-bearing** — the reason is written out at
-    /// [`crate::git_watch::GitWatch::seat_windows`]: a clone is an `Arc` bump on Windows
+    /// [`crate::git_watch::GitWatch::want`]: a clone is an `Arc` bump on Windows
     /// and, on macOS, a new run loop source and a wake-up of the loop. Arming is
     /// idempotent and every caller leans on that, so a clone above the early
     /// return would be one taken per asking however many watches were opened.

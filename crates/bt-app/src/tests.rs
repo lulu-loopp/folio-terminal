@@ -33590,7 +33590,7 @@ fn a_theme_flip_tells_every_web_page_its_colour_scheme() {
     );
     let tell = method_body("Runtime", "tell_web_pages_their_color_scheme");
     assert!(
-        tell.contains("tell_every_seat_its_color_scheme(self.window.web.values_mut(), scheme)"),
+        tell.contains("tell_all_seat_its_color_scheme(self.window.web.values_mut(), scheme)"),
         "every seat of the window, every tab: {tell}"
     );
 }
