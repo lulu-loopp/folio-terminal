@@ -3427,6 +3427,11 @@ impl Runtime<'_> {
             let mut any_live = false;
             let mut any_pty = false;
             for (_, leaf) in tab.leaves_mut() {
+                // A shell still being born is a shell this tab is about to have: the tab has not
+                // ended while one of its panes is in birth.
+                if leaf.birth.is_some() {
+                    any_live = true;
+                }
                 let Some(pty) = leaf.pty.as_mut() else {
                     continue;
                 };

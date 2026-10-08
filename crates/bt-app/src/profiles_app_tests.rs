@@ -2082,17 +2082,22 @@ fn a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace() {
         (Some(PathBuf::from("~")), true),
         "no swap, nothing changes"
     );
-    let spawn = free_fn_body("create_leaf_session");
-    let swapped = spawn
+    let birth = free_fn_body("finish_leaf_birth");
+    let swapped = birth
         .find("let profile = if let Some(fallback) = &shell_fallback {")
         .expect("the swap");
-    let said = spawn
-        .find("birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place.at_shell_home)")
+    let placed = birth
+        .find("place_leaf(leaf, decision, seed, &profile, in_birth);")
+        .expect("the leaf is placed for the started profile");
+    assert!(swapped < placed, "{birth}");
+    let place = free_fn_body("place_leaf");
+    let said = place
+        .find("birth_place_of_the_started_shell(")
         .expect("the birth place is said for the started profile");
-    let told = spawn
-        .find("session.set_spawn_at_shell_home(at_shell_home);")
+    let told = place
+        .find("leaf.session.set_spawn_at_shell_home(at_shell_home);")
         .expect("and the session is told the mark that goes with it");
-    assert!(swapped < said && said < told, "{spawn}");
+    assert!(said < told, "{place}");
 }
 
 /// PIN — **a crash that nobody can see is a crash that nobody reports.**

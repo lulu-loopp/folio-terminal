@@ -19,6 +19,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts.
+- Folio's window now appears before its shells have started, instead of waiting for each one: on a slow start a tab shows its profile's name (or "Terminal") and whatever you type is kept until the shell is ready. If a shell cannot start, Folio says why and keeps running. <!-- zh: pending T-BIRTH-OFF-WINDOW -->
 
 ## 0.4.7-preview — 2026-10-06
 

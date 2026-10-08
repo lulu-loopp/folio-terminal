@@ -2372,6 +2372,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         pending_typing: None,
         // Nor a shell being born: it was never going to have one.
         birth: None,
+        successor: None,
     }
 }
 
