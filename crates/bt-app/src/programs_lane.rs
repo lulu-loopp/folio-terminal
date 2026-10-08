@@ -1,10 +1,11 @@
 //! **What this machine can start, asked off the window thread** (T-PROGRAMS-REFRESH, 0.4.8 B2;
 //! `docs/ARCHITECTURE.md` §4.4 and §5.1's observation lane).
 //!
-//! One question, three answers: which program each profile row starts on this machine (the
+//! One question, four answers: which program each profile row starts on this machine (the
 //! `PATH` walk of `profiles::ProfilePrograms::resolve_row`), what WSL's installation says
-//! (`wsl::read_this_machine`, once the walk has found `wsl.exe`), and where git is
-//! (`profiles::find_git`). Until this lane the first was asked on the window thread at launch and
+//! (`wsl::read_this_machine`, once the walk has found `wsl.exe`), where git is
+//! (`profiles::find_git`), and where the agents keep their configuration
+//! (`attention_hooks::AgentHomes`, T-FRESH-FACTS — the same environment, four variables). Until this lane the first was asked on the window thread at launch and
 //! at every table edit, and all three were asked once and kept for the life of the process, so a
 //! program installed while Folio ran stayed missing from the new-tab menu, `Split with`, the
 //! default profile, the Agents page and the Git page until a restart.
@@ -59,6 +60,7 @@ use std::time::{Duration, Instant};
 use bt_platform::admission::WorkerCtx;
 use bt_pty::ShellEnvironment;
 
+use crate::attention_hooks::AgentHomes;
 use crate::profiles::{self, Profile, ProfilePrograms, RowVerdict};
 use crate::wsl::WslFacts;
 
@@ -123,6 +125,9 @@ pub struct MachineFacts {
     pub generation: u64,
     pub wsl: WslFacts,
     pub git: Option<PathBuf>,
+    /// Where the agents keep their configuration, out of the same environment
+    /// (`attention_hooks::AGENT_HOMES`, T-FRESH-FACTS).
+    pub agent_homes: AgentHomes,
 }
 
 /// **What the window thread finds** when it drains the mailbox.
@@ -270,10 +275,12 @@ fn walk(
         WslFacts::default()
     };
     let git = profiles::find_git(&counting);
+    let agent_homes = AgentHomes::read(&|name| counting.var_os(name));
     publish(Published::Facts(MachineFacts {
         generation,
         wsl,
         git,
+        agent_homes,
     }));
     let path_entries = counting
         .var_os("PATH")
@@ -672,6 +679,8 @@ pub(crate) mod tests {
         path: Vec<PathBuf>,
         files: Vec<PathBuf>,
         wsl: WslFacts,
+        /// Variables other than `PATH`, as the account has them now.
+        variables: Vec<(String, OsString)>,
         /// Every file question asked, in order, across every walk.
         asked: Arc<Mutex<Vec<PathBuf>>>,
     }
@@ -693,6 +702,13 @@ pub(crate) mod tests {
 
         pub(crate) fn set_wsl(&self, wsl: WslFacts) {
             self.lock().wsl = wsl;
+        }
+
+        /// The account sets `name` to `value` (`setx`, System Properties).
+        pub(crate) fn set_variable(&self, name: &str, value: &str) {
+            let mut state = self.lock();
+            state.variables.retain(|(held, _)| held != name);
+            state.variables.push((name.to_owned(), value.into()));
         }
 
         /// From now on every walk stops at its first file question until [`Self::release`].
@@ -717,6 +733,7 @@ pub(crate) mod tests {
 
     struct FakeEnvironment {
         path: OsString,
+        variables: Vec<(String, OsString)>,
         files: Vec<PathBuf>,
         gate: Arc<(Mutex<bool>, Condvar)>,
         asked: Arc<Mutex<Vec<PathBuf>>>,
@@ -724,7 +741,13 @@ pub(crate) mod tests {
 
     impl ShellEnvironment for FakeEnvironment {
         fn var_os(&self, key: &str) -> Option<OsString> {
-            (key == "PATH").then(|| self.path.clone())
+            if key == "PATH" {
+                return Some(self.path.clone());
+            }
+            self.variables
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
         }
 
         fn is_file(&self, path: &Path) -> bool {
@@ -743,6 +766,7 @@ pub(crate) mod tests {
             let state = self.lock();
             Box::new(FakeEnvironment {
                 path: std::env::join_paths(&state.path).unwrap(),
+                variables: state.variables.clone(),
                 files: state.files.clone(),
                 gate: Arc::clone(&self.gate),
                 asked: Arc::clone(&state.asked),
@@ -914,6 +938,36 @@ pub(crate) mod tests {
         assert_eq!(facts.generation, second);
         assert_eq!(facts.wsl, distributions);
         assert_eq!(facts.git, Some(bin(git)));
+    }
+
+    /// RED (T-FRESH-FACTS) — **an agent folder the account sets after launch is read by the next
+    /// walk**, beside the rows, out of the same environment.
+    ///
+    /// MUTATION (observed red): `walk` publishing `AgentHomes::default()` — the second walk
+    /// reports no `CODEX_HOME`.
+    #[test]
+    fn every_walk_reads_the_agent_folders_again() {
+        let machine = FakeMachine::with_path(&[bin_dir()]);
+        let (lane, wakes, _) = lane(machine.clone());
+        let rows = [row("rg", "rg.exe")];
+        let first = lane.request(request(&rows, Trigger::Launch));
+        let facts = answers_through(lane, &wakes, first)
+            .facts
+            .expect("a walk publishes the machine facts");
+        assert_eq!(facts.agent_homes, AgentHomes::default());
+
+        machine.set_variable("CODEX_HOME", r"D:\代理\codex home");
+        let second = lane.request(request(&rows, Trigger::Environment));
+        let facts = answers_through(lane, &wakes, second)
+            .facts
+            .expect("the second walk publishes its facts");
+        assert_eq!(
+            facts.agent_homes,
+            AgentHomes::read(
+                &|name| (name == "CODEX_HOME").then(|| OsString::from(r"D:\代理\codex home"))
+            ),
+            "the variable set after the first walk is in the second walk's facts"
+        );
     }
 
     /// RED — **requests made while a walk is out are answered by one later walk, and that is

@@ -559,6 +559,13 @@ pub struct Block {
     pub note: Option<Text>,
 }
 
+/// Whether two rows are about the same thing: one section, one verb, one label. The label is
+/// part of it because two rows can share a verb (every action row runs some action) and the
+/// label is what the reader aimed at.
+fn same_item(one: &Candidate, other: &Candidate) -> bool {
+    one.section == other.section && one.verb == other.verb && one.label == other.label
+}
+
 /// Everything a query returned, in section order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Listing {
@@ -1593,17 +1600,32 @@ impl PaletteState {
     ///
     /// `requeried` says whether the *query* changed, and it decides where the
     /// selection lands: a new query starts at the top (the mock-up's `palSel =
-    /// 0` on input), while a list that merely got longer because a background
+    /// 0` on input), while a list that merely changed because a background
     /// answer arrived keeps the row the reader was on — moving somebody's
     /// selection because a directory finished being walked would be this box
     /// taking the keyboard away mid-aim.
+    ///
+    /// **Kept by identity, not by position** (owner ruling 2026-10-04, "rows
+    /// follow item identity"; T-FRESH-FACTS): an index walked again can put new
+    /// rows above the one the reader was on, and Enter must still run that row.
+    /// Only when the row is gone does the selection fall back to a position,
+    /// clamped into the list that is there.
     pub fn refill(&mut self, listing: Listing, requeried: bool) {
+        let held = (!requeried)
+            .then(|| self.chosen().map(|row| row.what.clone()))
+            .flatten();
         self.listing = listing;
         if requeried {
             self.selected = 0;
             self.scroll = 0.0;
         } else if self.listing.is_empty() {
             self.selected = 0;
+        } else if let Some(at) = held.and_then(|held| {
+            self.listing
+                .rows()
+                .position(|row| same_item(&row.what, &held))
+        }) {
+            self.selected = at;
         } else {
             self.selected = self.selected.min(self.listing.len() - 1);
         }
@@ -2154,6 +2176,36 @@ mod list_tests {
         assert!(state.selected() < 2, "clamped into the list that is there");
         state.refill(Listing::default(), false);
         assert_eq!(state.selected(), 0, "and an empty list selects nothing");
+    }
+
+    /// RED (T-FRESH-FACTS) — **a background answer that puts rows above the
+    /// reader's keeps the selection on the reader's row.**
+    ///
+    /// MUTATION (observed red): `refill` keeping the position (the old clamp)
+    /// — the selection lands on the row that moved into the reader's place.
+    #[test]
+    fn a_refill_follows_the_readers_row_when_rows_arrive_above_it() {
+        use super::PaletteState;
+        let mut state = PaletteState::opening(crate::shortcuts::Focus::default());
+        let before = vec![
+            candidate(Section::Places, "甲.md"),
+            candidate(Section::Places, "乙.md"),
+            candidate(Section::Places, "丙.md"),
+        ];
+        state.refill(arrange(&before, "", None), true);
+        state.step(true);
+        assert_eq!(
+            state.chosen().map(|row| row.what.label.as_str()),
+            Some("乙.md")
+        );
+        let mut after = vec![candidate(Section::Places, "新建 notes.md")];
+        after.extend(before);
+        state.refill(arrange(&after, "", None), false);
+        assert_eq!(
+            state.chosen().map(|row| row.what.label.as_str()),
+            Some("乙.md"),
+            "Enter still runs the row the reader was on"
+        );
     }
 
     /// PIN — **a pre-edit is drawn and is not the query.**

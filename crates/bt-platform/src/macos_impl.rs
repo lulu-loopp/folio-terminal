@@ -100,12 +100,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSButton, NSColor, NSEvent, NSEventType,
-    NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen, NSView, NSWindow, NSWindowButton,
-    NSWindowDelegate, NSWindowDidBecomeKeyNotification, NSWindowDidEnterFullScreenNotification,
-    NSWindowDidExitFullScreenNotification, NSWindowDidResignKeyNotification,
-    NSWindowDidResizeNotification, NSWindowDidUpdateNotification, NSWindowOcclusionState,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSApplication, NSApplicationDidChangeScreenParametersNotification, NSAutoresizingMaskOptions,
+    NSButton, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen,
+    NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowDidBecomeKeyNotification,
+    NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
+    NSWindowDidResignKeyNotification, NSWindowDidResizeNotification, NSWindowDidUpdateNotification,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_core_foundation::{CFRetained, CFUUID};
@@ -1900,6 +1900,11 @@ pub fn os_ui_language() -> String {
 ///   this fires for exactly the change the reader made.
 /// * **`NSWorkspace`'s accessibility-display notification** — the one the system
 ///   posts when Reduce Motion and its neighbours move.
+/// * **`NSApplicationDidChangeScreenParametersNotification`** (T-FRESH-FACTS) —
+///   a display was added, removed or changed mode, which is when the rate a
+///   window paces its frames to can move without the window moving. Told to the
+///   wake as [`crate::SystemNews::Display`]; the other two are
+///   [`crate::SystemNews::Preferences`].
 ///
 /// **What the callback may do is nudge, and nothing else.** It runs inside
 /// AppKit's own delivery, on a turn this program did not choose; the reading
@@ -1928,7 +1933,10 @@ impl SystemSettingsWatch {
     /// `HWND` it subclasses: there the broadcast arrives *at* a window, here it
     /// arrives at the application, and the door's shape is the caller's — one
     /// watch per window, dropped with it.
-    pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
+    pub fn install(
+        window: NativeWindow,
+        wake: Box<dyn Fn(crate::SystemNews)>,
+    ) -> Result<Self, String> {
         let _ = window;
         let mtm = window_thread("watching the system's preferences")?;
         let observer = SystemSettingsObserver::new(wake);
@@ -1957,6 +1965,17 @@ impl SystemSettingsWatch {
                     None,
                 );
         }
+        // SAFETY: the observer outlives the registration (`Drop` removes it from
+        // this centre), it answers the selector named here, and the name is
+        // AppKit's own constant, never written by anybody.
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &observer,
+                sel!(folioDisplayChanged:),
+                Some(NSApplicationDidChangeScreenParametersNotification),
+                None,
+            );
+        }
         Ok(Self {
             observer,
             application,
@@ -1974,12 +1993,13 @@ impl Drop for SystemSettingsWatch {
             NSWorkspace::sharedWorkspace()
                 .notificationCenter()
                 .removeObserver(&self.observer);
+            NSNotificationCenter::defaultCenter().removeObserver(&self.observer);
         }
     }
 }
 
-/// What the two subscriptions call, and all it may do.
-struct SystemSettingsWake(Box<dyn Fn()>);
+/// What the three subscriptions call, and all it may do.
+struct SystemSettingsWake(Box<dyn Fn(crate::SystemNews)>);
 
 define_class!(
     // SAFETY:
@@ -2003,14 +2023,20 @@ define_class!(
             _context: *mut c_void,
         ) {
             if key_path == Some(ns_string!("effectiveAppearance")) {
-                (self.ivars().0)();
+                (self.ivars().0)(crate::SystemNews::Preferences);
             }
         }
 
         /// An accessibility display option moved.
         #[unsafe(method(folioSystemPreferencesChanged:))]
         fn preferences_changed(&self, _notification: Option<&NSNotification>) {
-            (self.ivars().0)();
+            (self.ivars().0)(crate::SystemNews::Preferences);
+        }
+
+        /// A display was added, removed or changed mode.
+        #[unsafe(method(folioDisplayChanged:))]
+        fn display_changed(&self, _notification: Option<&NSNotification>) {
+            (self.ivars().0)(crate::SystemNews::Display);
         }
     }
 
@@ -2018,7 +2044,7 @@ define_class!(
 );
 
 impl SystemSettingsObserver {
-    fn new(wake: Box<dyn Fn()>) -> Retained<Self> {
+    fn new(wake: Box<dyn Fn(crate::SystemNews)>) -> Retained<Self> {
         let this = Self::alloc().set_ivars(SystemSettingsWake(wake));
         // SAFETY: `NSObject`'s designated initializer, called on a fresh
         // allocation whose ivars are set.
@@ -2387,7 +2413,7 @@ mod tests {
             "the reduce-motion preference"
         );
         assert!(
-            SystemSettingsWatch::install(window, Box::new(|| {})).is_err(),
+            SystemSettingsWatch::install(window, Box::new(|_| {})).is_err(),
             "the settings watch"
         );
         assert_eq!(dpi_at(0, 0), 96, "a dpi with no display to read is scale 1");

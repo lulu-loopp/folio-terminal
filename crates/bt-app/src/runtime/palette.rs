@@ -101,6 +101,7 @@ impl Runtime<'_> {
         self.close_popups_except(Popup::Palette);
         let focus = self.shortcut_focus();
         self.window.palette = Some(palette::PaletteState::opening(focus));
+        self.ask_for_file_indexes_on_open();
         self.requery_palette()
     }
 

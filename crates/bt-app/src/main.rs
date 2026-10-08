@@ -464,6 +464,15 @@ enum AppEvent {
     /// which is why it carries nothing itself. Windows told this window that
     /// *something* changed; the answer to *what* is the read on the next turn.
     SystemPreferencesChanged,
+    /// **A display changed mode, or one came or went** (T-FRESH-FACTS;
+    /// `bt_platform::SystemNews::Display`). The rate each window paces its frames to
+    /// is read again in every window, which a rate changed on the same panel moves
+    /// without moving the window.
+    DisplayChanged,
+    /// **The keyboard layout moved** (T-FRESH-FACTS; `bt_platform::SystemNews::InputLanguage`).
+    /// The summon's virtual key is the layout's answer for its character, so it is
+    /// asked again and the chord re-claimed when it moved.
+    InputLanguageChanged,
     /// **What the platform draws in a window's title bar has moved**
     /// (`bt_platform::CustomWindowFrame::install`'s wake, `docs/DESIGN.md`
     /// §13.48).
@@ -829,6 +838,17 @@ impl AppEvent {
     /// a name on an arm that is three lines long and hand the reader a station
     /// that can never be the answer. They keep the label that says "a wake
     /// nobody named", which is exactly what they are.
+    /// **The event a window's system-settings ear sends for what it heard**
+    /// (T-FRESH-FACTS): each news its own wake, so the turn re-reads only the fact it
+    /// is about.
+    const fn of_system_news(news: bt_platform::SystemNews) -> Self {
+        match news {
+            bt_platform::SystemNews::Preferences => Self::SystemPreferencesChanged,
+            bt_platform::SystemNews::Display => Self::DisplayChanged,
+            bt_platform::SystemNews::InputLanguage => Self::InputLanguageChanged,
+        }
+    }
+
     fn station(&self) -> hang_watch::Station {
         use hang_watch::Station;
         match self {
@@ -854,6 +874,8 @@ impl AppEvent {
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
+            | Self::DisplayChanged
+            | Self::InputLanguageChanged
             | Self::WindowChromeChanged
             | Self::NotificationClicked
             | Self::HandoffAnswered => Station::Chrome,
@@ -23928,6 +23950,21 @@ enum PeekCacheEntry {
     },
 }
 
+/// **Whether a peek reads its file now** (T-FRESH-FACTS): when nothing is cached for it, and —
+/// on a new peek only — when the last read failed. A file that was missing or half-written when a
+/// hover first settled on it used to stay silent for the window's life, while its link was
+/// verified again at the next command's end; a hover that settles on it again reads it again. The
+/// re-entries of one peek (its decode or its resample landing) never re-read, and one read is out
+/// at a time (`Pending`). A subject with no file behind it (`readable` false) is never read.
+fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: bool) -> bool {
+    readable
+        && match entry {
+            None => true,
+            Some(PeekCacheEntry::Failed(_)) => settled,
+            Some(PeekCacheEntry::Pending | PeekCacheEntry::Ready { .. }) => false,
+        }
+}
+
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
@@ -38454,11 +38491,17 @@ pub(crate) struct ProgramNews {
     pub(crate) names: bool,
     /// Git is somewhere else now, so the Git pages answered about the old place ask again.
     pub(crate) git: bool,
+    /// A variable that says where an agent keeps its configuration reads differently now, so
+    /// the agent rows read their files again (T-FRESH-FACTS).
+    pub(crate) agent_homes: bool,
+    /// The `copilot` row's program moved, so the copilot version is asked again
+    /// (T-FRESH-FACTS). Part of [`Self::rows`] for every reader but that probe.
+    pub(crate) copilot: bool,
 }
 
 impl ProgramNews {
     pub(crate) const fn any(self) -> bool {
-        self.rows || self.names || self.git
+        self.rows || self.names || self.git || self.agent_homes
     }
 }
 
@@ -38469,18 +38512,37 @@ fn adopt_program_answers(
     programs: &mut profiles::ProfilePrograms,
     answers: programs_lane::Answers,
 ) -> ProgramNews {
+    let copilot_before = programs
+        .program(attention_copilot::PROFILE_ID)
+        .map(std::ffi::OsStr::to_owned);
     let mut news = ProgramNews {
         rows: programs.adopt(answers.verdicts),
         ..ProgramNews::default()
     };
+    news.copilot = programs
+        .program(attention_copilot::PROFILE_ID)
+        .map(std::ffi::OsStr::to_owned)
+        != copilot_before;
     if let Some(facts) = answers.facts {
         if wsl::adopt(facts.wsl) {
             profiles::names_changed();
             news.names = true;
         }
         news.git = git::GIT_LOCATION.adopt(facts.git);
+        news.agent_homes = attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes);
     }
     news
+}
+
+/// **The three agent rows, read off their files again** — `Runtime::refresh_agent_rows`'s body,
+/// and the program walk's adopter's when the folders the files live in moved (T-FRESH-FACTS). The
+/// copilot readiness is read again with them: whether its hooks are switched off is a file in the
+/// same folder.
+fn read_the_agent_rows_again(app: &mut App) {
+    (app.claude_hooks_installed, app.agent_config_refusals[0]) = attention_hooks::row_state();
+    (app.codex_notify_installed, app.agent_config_refusals[1]) = attention_codex::row_state();
+    (app.copilot_hooks_installed, app.agent_config_refusals[2]) = attention_copilot::row_state();
+    app.copilot_readiness = attention_copilot::readiness();
 }
 
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
@@ -41680,8 +41742,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         let proxy = event_proxy.clone();
         bt_platform::SystemSettingsWatch::install(
             native,
-            Box::new(move || {
-                let _ = proxy.send_event(AppEvent::SystemPreferencesChanged);
+            Box::new(move |news| {
+                let _ = proxy.send_event(AppEvent::of_system_news(news));
             }),
         )
         .ok()
@@ -43892,6 +43954,9 @@ impl Runtime<'_> {
             self.refresh_agent_rows();
             // Which agents are on this machine is the program walk's answer: asked again here.
             self.ask_the_program_walk(programs_lane::Trigger::AgentsPage);
+            // And which copilot it is: the page that prints the version asks for it at every
+            // visit, a failure included (T-FRESH-FACTS).
+            attention_copilot::reask_probe(attention_copilot::ProbeTrigger::AgentsPage);
         }
         let profiles_opened = self.window.settings.take_profiles_open_edge(
             self.window.settings.category() == settings::SettingsCategory::Profiles
@@ -61325,6 +61390,14 @@ impl FolioApp {
             // The parser questions about the PowerShell rows, as after a table change.
             shell_integration::begin_powershell_preparation_for(&app.profile_programs);
         }
+        if news.agent_homes {
+            // Where an agent keeps its configuration moved: its row reads the file there now,
+            // once for the process (the rows are the application's).
+            read_the_agent_rows_again(app);
+        }
+        if news.copilot {
+            attention_copilot::reask_probe(attention_copilot::ProbeTrigger::ProgramMoved);
+        }
         app.program_news.tell_all(&MachineNews::Programs);
         self.for_each_window(|runtime| {
             let shown = shown.remove(&runtime.window_id()).unwrap_or_default();
@@ -65735,6 +65808,21 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 adopted
             }
             AppEvent::ProgramsAnswered => self.adopt_program_walk(),
+            // **Every window asks its display again** (T-FRESH-FACTS): a rate changed on the
+            // panel a window stands on moves neither the window nor its scale, the two events
+            // that asked until now. One monitor query per window, the one a move makes.
+            AppEvent::DisplayChanged => self.for_each_window(|runtime| {
+                runtime.follow_the_display();
+                Ok(())
+            }),
+            // **The summon's key asked of the layout again** (T-FRESH-FACTS); re-claimed only
+            // when the layout puts the chord's character on another key.
+            AppEvent::InputLanguageChanged => {
+                if let Some(app) = self.app.as_mut() {
+                    app.quake.layout_changed();
+                }
+                Ok(())
+            }
             AppEvent::WindowChromeChanged => self.adopt_platform_chrome(),
             // Every window, on this family's standing reason: a window whose
             // finger did nothing has nothing parked, and the walk costs a

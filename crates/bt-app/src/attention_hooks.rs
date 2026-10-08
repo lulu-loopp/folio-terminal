@@ -39,6 +39,7 @@ pub(crate) use crate::attention_ownership::Outcome;
 use crate::attention_ownership::{self as ownership, Decision};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use bt_platform::HostPlatform;
 use serde_json::{Map, Value};
@@ -76,12 +77,124 @@ pub(crate) enum State {
     Refused(&'static str),
 }
 
-/// The directory Claude Code keeps user configuration in, as **this environment** says it.
+/// **Where the three agents keep their configuration, as the account says it now**
+/// (T-FRESH-FACTS): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, and the home each falls
+/// back to — the four variables every agent module composes its file's path from.
+///
+/// They were read out of this process's launch environment at every call, while a pane is born
+/// with the account's current environment (T-ENV-REFRESH; the owner's ruling of 2026-10-05): a
+/// variable set after Folio started reached every agent started in a pane and never the folder
+/// Folio read and wrote the agent's hooks in. The program walk reads the same logon block a pane
+/// is born with, so it reads these four too ([`crate::programs_lane`]'s `MachineFacts`), and
+/// [`AGENT_HOMES`] holds the newest walk's reading.
+pub(crate) const AGENT_HOME_VARIABLES: [&str; 4] = [
+    CONFIG_DIR_VARIABLE,
+    "CODEX_HOME",
+    "COPILOT_HOME",
+    bt_platform::home_variable(),
+];
+
+/// **The four variables as one walk read them** — the set ones, by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AgentHomes(Vec<(&'static str, OsString)>);
+
+impl AgentHomes {
+    /// Read [`AGENT_HOME_VARIABLES`] out of an environment.
+    #[must_use]
+    pub(crate) fn read(variable: &dyn Fn(&str) -> Option<OsString>) -> Self {
+        Self(
+            AGENT_HOME_VARIABLES
+                .iter()
+                .filter_map(|name| variable(name).map(|value| (*name, value)))
+                .collect(),
+        )
+    }
+
+    fn get(&self, name: &str) -> Option<OsString> {
+        self.0
+            .iter()
+            .find(|(held, _)| *held == name)
+            .map(|(_, value)| value.clone())
+    }
+}
+
+/// **The newest walk's reading of the agent folders, with its walk's number** — one writer, the
+/// program walk's adopter on the window thread (`adopt_program_answers`); read from any thread.
+///
+/// Until the first walk has answered (milliseconds after launch, the launch's own walk) a reader
+/// is answered from this process's launch environment, which is the reading the launch had.
+pub(crate) struct AgentHomesCell(Mutex<Option<(u64, AgentHomes)>>);
+
+impl AgentHomesCell {
+    pub(crate) const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// **Adopt walk `generation`'s reading**; an older walk's is refused. Answers whether any of
+    /// the four variables now reads differently.
+    pub(crate) fn adopt(&self, generation: u64, homes: AgentHomes) -> bool {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if held
+            .as_ref()
+            .is_some_and(|(newest, _)| *newest >= generation)
+        {
+            return false;
+        }
+        let before: Vec<Option<OsString>> = AGENT_HOME_VARIABLES
+            .iter()
+            .map(|name| Self::reading(held.as_ref(), name))
+            .collect();
+        *held = Some((generation, homes));
+        AGENT_HOME_VARIABLES
+            .iter()
+            .zip(before)
+            .any(|(name, before)| Self::reading(held.as_ref(), name) != before)
+    }
+
+    /// Whether a walk has answered — the first-run card's wait: it offers rows that write into
+    /// these folders.
+    pub(crate) fn answered(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// One of [`AGENT_HOME_VARIABLES`] as the newest walk read it.
+    pub(crate) fn variable(&self, name: &str) -> Option<OsString> {
+        Self::reading(
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref(),
+            name,
+        )
+    }
+
+    fn reading(held: Option<&(u64, AgentHomes)>, name: &str) -> Option<OsString> {
+        match held {
+            Some((_, homes)) => homes.get(name),
+            None => std::env::var_os(name),
+        }
+    }
+}
+
+/// The product's cell ([`AgentHomesCell`]).
+pub(crate) static AGENT_HOMES: AgentHomesCell = AgentHomesCell::new();
+
+/// [`AgentHomesCell::variable`] on the product's cell.
+#[must_use]
+pub(crate) fn agent_variable(name: &str) -> Option<OsString> {
+    AGENT_HOMES.variable(name)
+}
+
+/// The directory Claude Code keeps user configuration in, as **the account's environment** says
+/// it ([`AGENT_HOMES`]).
 #[must_use]
 pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
-        std::env::var_os(CONFIG_DIR_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(CONFIG_DIR_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
@@ -124,8 +237,8 @@ pub(crate) fn settings_path() -> Option<PathBuf> {
 #[must_use]
 pub(crate) fn settings_path_shown() -> String {
     settings_path_shown_from(
-        std::env::var_os(CONFIG_DIR_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(CONFIG_DIR_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
@@ -946,6 +1059,36 @@ pub(crate) fn today() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (T-FRESH-FACTS) — **an older walk's reading of the agent folders never replaces a
+    /// newer walk's**, and a walk that read the same thing moves nothing.
+    ///
+    /// MUTATION (observed red): `AgentHomesCell::adopt` without its generation refusal — walk 3,
+    /// answering after walk 5, puts the old folder back.
+    #[test]
+    fn an_older_walks_agent_folders_never_overwrite_a_newer_walks() {
+        let cell = AgentHomesCell::new();
+        let reading = |folder: &'static str| {
+            AgentHomes::read(&move |name| (name == CONFIG_DIR_VARIABLE).then(|| folder.into()))
+        };
+        cell.adopt(5, reading(r"D:\新的\claude"));
+        assert!(
+            !cell.adopt(3, reading(r"D:\旧的\claude")),
+            "walk 3 answered after walk 5 and is refused"
+        );
+        assert_eq!(
+            cell.variable(CONFIG_DIR_VARIABLE),
+            Some(OsString::from(r"D:\新的\claude"))
+        );
+        assert!(
+            !cell.adopt(6, reading(r"D:\新的\claude")),
+            "a walk that read the same folder moves no reader"
+        );
+        assert!(
+            cell.adopt(7, reading(r"E:\claude 配置")),
+            "and one that read another folder does"
+        );
+    }
     use crate::attention::{MappedAction, Tier, WaitKind};
 
     #[test]

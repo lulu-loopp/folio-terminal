@@ -6962,10 +6962,11 @@ mod windows_impl {
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
-                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
-                WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE,
+                WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO,
+                WM_INPUTLANGCHANGE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN,
+                WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
+                WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
@@ -9340,6 +9341,13 @@ mod windows_impl {
     /// It exists because the preference used to be read exactly once, at
     /// start-up, and the code said so in a comment ending *"until this window
     /// listens for `WM_SETTINGCHANGE`"*. This is that.
+    ///
+    /// **The same ear hears two more machine facts** (T-FRESH-FACTS): a display
+    /// mode change (`WM_DISPLAYCHANGE`, sent to every top-level window when a
+    /// panel's rate or resolution moves or a panel comes or goes) and this
+    /// thread's input language moving (`WM_INPUTLANGCHANGE`). winit surfaces
+    /// neither. The wake is told which of the three it was ([`crate::SystemNews`]),
+    /// and the reading is still the loop's.
     pub struct SystemSettingsWatch {
         hwnd: HWND,
         /// Held for as long as the subclass is installed, because the subclass
@@ -9355,10 +9363,13 @@ mod windows_impl {
     /// arrive while this window is halfway through a frame; doing the work on the
     /// event loop's own turn is what keeps "when we read it" a property of the
     /// loop rather than of when Windows felt like talking.
-    struct SystemSettingsWake(Box<dyn Fn()>);
+    struct SystemSettingsWake(Box<dyn Fn(crate::SystemNews)>);
 
     impl SystemSettingsWatch {
-        pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
+        pub fn install(
+            window: NativeWindow,
+            wake: Box<dyn Fn(crate::SystemNews)>,
+        ) -> Result<Self, String> {
             let hwnd = window.as_hwnd();
             let wake = Box::new(SystemSettingsWake(wake));
             let reference_data = (&*wake as *const SystemSettingsWake) as usize;
@@ -9397,17 +9408,22 @@ mod windows_impl {
         }
     }
 
-    /// Whether a message is one that can have moved a system preference.
+    /// What a message says about the machine, if it is one this ear listens for.
     ///
     /// Pure, and its own function, for the reason every other pure half in this
     /// crate is: it is the part that can be wrong without a window, and therefore
-    /// the part a test can hold. `WM_THEMECHANGED` is in it beside
+    /// the part a test can hold. `WM_THEMECHANGED` is a preference beside
     /// `WM_SETTINGCHANGE` because the visual-effects page is where both the
     /// animation switch and the theme live, and a person turning one off often
     /// turns the other with it — a second re-read costs one `SystemParametersInfoW`.
     #[must_use]
-    pub(super) fn is_system_preference_message(message: u32) -> bool {
-        message == WM_SETTINGCHANGE || message == WM_THEMECHANGED
+    pub(super) fn system_news_of(message: u32) -> Option<crate::SystemNews> {
+        match message {
+            WM_SETTINGCHANGE | WM_THEMECHANGED => Some(crate::SystemNews::Preferences),
+            WM_DISPLAYCHANGE => Some(crate::SystemNews::Display),
+            WM_INPUTLANGCHANGE => Some(crate::SystemNews::InputLanguage),
+            _ => None,
+        }
     }
 
     unsafe extern "system" fn system_settings_subclass(
@@ -9418,13 +9434,13 @@ mod windows_impl {
         _subclass_id: usize,
         reference_data: usize,
     ) -> LRESULT {
-        if is_system_preference_message(message) {
+        if let Some(news) = system_news_of(message) {
             let wake = reference_data as *const SystemSettingsWake;
             if !wake.is_null() {
                 // SAFETY: the owning `SystemSettingsWatch` holds this box for the
                 // whole installed interval and removes the subclass before
                 // freeing it, on this same thread.
-                (unsafe { &*wake }.0)();
+                (unsafe { &*wake }.0)(news);
             }
         }
         // Forwarded either way: a broadcast this program answers is still a
@@ -15795,6 +15811,22 @@ pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
     Some(format!("{percent}%"))
 }
 
+/// **What a window's system-settings ear heard** ([`SystemSettingsWatch`]), so the loop
+/// re-reads the one fact it is about (T-FRESH-FACTS).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemNews {
+    /// A system-wide preference may have moved: `WM_SETTINGCHANGE` (the `Environment`
+    /// broadcast among them) and `WM_THEMECHANGED` on Windows; the appearance and the
+    /// accessibility display options on macOS.
+    Preferences,
+    /// A display's mode or the set of displays changed: `WM_DISPLAYCHANGE` on Windows,
+    /// `NSApplicationDidChangeScreenParametersNotification` on macOS.
+    Display,
+    /// This thread's input language or keyboard layout changed: `WM_INPUTLANGCHANGE`.
+    /// Windows only: the macOS summon key is a key position, which no layout moves.
+    InputLanguage,
+}
+
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
@@ -20420,9 +20452,11 @@ mod apartment_order_tests {
 /// forward; this is the part with an opinion in it.
 #[cfg(all(test, windows))]
 mod system_preference_message_tests {
-    use super::windows_impl::is_system_preference_message;
+    use super::windows_impl::system_news_of;
+    use crate::SystemNews;
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED,
+        WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE,
+        WM_THEMECHANGED,
     };
 
     /// PIN — the two broadcasts that mean "ask again", and nothing else.
@@ -20433,10 +20467,32 @@ mod system_preference_message_tests {
     /// something else happens to wake the loop.
     #[test]
     fn only_a_settings_or_theme_broadcast_asks_the_system_again() {
-        assert!(is_system_preference_message(WM_SETTINGCHANGE));
-        assert!(is_system_preference_message(WM_THEMECHANGED));
-        assert!(!is_system_preference_message(WM_MOUSEMOVE));
-        assert!(!is_system_preference_message(WM_NCHITTEST));
+        assert_eq!(
+            system_news_of(WM_SETTINGCHANGE),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(
+            system_news_of(WM_THEMECHANGED),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(system_news_of(WM_MOUSEMOVE), None);
+        assert_eq!(system_news_of(WM_NCHITTEST), None);
+    }
+
+    /// RED (T-FRESH-FACTS) — **a display mode change and a keyboard layout change
+    /// are heard, each as itself.** The rate a window paces its frames to and the
+    /// virtual key the summon is claimed on were read once and not again while the
+    /// window stayed where it was.
+    ///
+    /// MUTATION: drop either arm from `system_news_of` and its message answers
+    /// `None` — the window never hears that the panel's rate or the layout moved.
+    #[test]
+    fn a_display_change_and_a_layout_change_are_heard_as_themselves() {
+        assert_eq!(system_news_of(WM_DISPLAYCHANGE), Some(SystemNews::Display));
+        assert_eq!(
+            system_news_of(WM_INPUTLANGCHANGE),
+            Some(SystemNews::InputLanguage)
+        );
     }
 }
 

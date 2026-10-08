@@ -11,21 +11,22 @@
 //! opened — and `set_terminal_font` loads it from the paths this enumeration
 //! hands over.
 //!
-//! **On macOS that second half is already done.** `bt-render`'s
+//! **On macOS that second half is done once, at launch.** `bt-render`'s
 //! `terminal_font_system` on this platform calls `Database::load_system_fonts`,
 //! which walks `/System/Library/Fonts`, `/Library/Fonts`, the `AssetsV2` font
 //! assets and `~/Library/Fonts` and memory-maps every face it finds — that arm
 //! exists because PingFang and Hiragino live under content-hashed directory
-//! names that a fixed file list cannot keep up with. So every family this
-//! module can name is a family the renderer already holds, and the honest value
-//! for `files` here is **the empty vector**: `MonospaceFamily::files` documents
-//! it as "this family needs no loading", `set_terminal_font` loops over an empty
-//! slice and loads nothing, and a path invented to fill the field would be a
-//! second answer to a question that is already settled.
+//! names that a fixed file list cannot keep up with. A family installed while
+//! Folio runs is in CoreText's answer here (the list is asked at every open of
+//! Settings) and not in that database, so **each row carries the files
+//! CoreText names for its faces** (`kCTFontURLAttribute`, T-FRESH-FACTS):
+//! `set_terminal_font` loads them when the family is chosen, exactly as it loads
+//! a Windows family's, and a family that was there at launch is loaded again
+//! from the files the database already holds.
 //!
 //! That is also why this module is small. The whole of the work is: ask CoreText
 //! for the descriptors, keep the ones whose traits carry the monospace bit, take
-//! their family names, and hand the list to [`crate::order_monospace_families`]
+//! their family names and files, and hand the list to [`crate::order_monospace_families`]
 //! — which is the same sort, the same de-duplication and the same guarantee
 //! about the default face that the Windows list goes through, because a picker
 //! that ordered its rows differently on two machines would be a picker nobody
@@ -56,10 +57,12 @@
 //! used by several threads simultaneously — and the two share no object: each
 //! call makes its own collection or descriptor and drops it before returning.
 
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString, CFType};
+use std::path::PathBuf;
+
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString, CFType, CFURL};
 use objc2_core_text::{
     CTFont, CTFontCollection, CTFontDescriptor, CTFontSymbolicTraits, kCTFontFamilyNameAttribute,
-    kCTFontSymbolicTrait, kCTFontTraitsAttribute,
+    kCTFontSymbolicTrait, kCTFontTraitsAttribute, kCTFontURLAttribute,
 };
 
 use crate::MonospaceFamily;
@@ -129,13 +132,17 @@ fn collect_cjk_families() -> Vec<crate::CjkFamily> {
         return Vec::new();
     };
     let descriptors: &CFArray<CTFontDescriptor> = unsafe { descriptors.cast_unchecked() };
-    let mut families = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut families: Vec<crate::CjkFamily> = Vec::new();
     for descriptor in descriptors.iter() {
         let Some(name) = family_name(&descriptor) else {
             continue;
         };
-        if name.starts_with('.') || name.trim().is_empty() || !seen.insert(name.clone()) {
+        if name.starts_with('.') || name.trim().is_empty() {
+            continue;
+        }
+        // A later face of a family already kept adds its file to that family's row.
+        if let Some(family) = families.iter_mut().find(|family| family.name == name) {
+            add_file(&mut family.files, face_file(&descriptor));
             continue;
         }
         let font = unsafe { CTFont::with_font_descriptor(&descriptor, 0.0, std::ptr::null()) };
@@ -178,7 +185,7 @@ fn collect_cjk_families() -> Vec<crate::CjkFamily> {
         }
         families.push(crate::CjkFamily {
             name,
-            files: Vec::new(),
+            files: face_file(&descriptor).into_iter().collect(),
             localized_names,
             coverage,
         });
@@ -227,10 +234,49 @@ fn collect_monospace_families() -> Vec<MonospaceFamily> {
     // as an array of them is reading it as what it holds.
     let descriptors: &CFArray<CTFontDescriptor> = unsafe { descriptors.cast_unchecked() };
 
-    descriptors
-        .iter()
-        .filter_map(|descriptor| monospace_family_entry(&descriptor))
-        .collect()
+    one_row_per_family(
+        descriptors
+            .iter()
+            .filter_map(|descriptor| monospace_family_entry(&descriptor)),
+    )
+}
+
+/// **One row per family, carrying every file its faces live in** — the Windows arm's shape
+/// (`MonospaceFamily::files`: "every file the family's faces live in, de-duplicated, in the order
+/// the faces were reported"). CoreText answers one descriptor per face.
+fn one_row_per_family(faces: impl Iterator<Item = MonospaceFamily>) -> Vec<MonospaceFamily> {
+    let mut families: Vec<MonospaceFamily> = Vec::new();
+    for face in faces {
+        match families
+            .iter_mut()
+            .find(|family| family.name.eq_ignore_ascii_case(&face.name))
+        {
+            Some(family) => {
+                for file in face.files {
+                    add_file(&mut family.files, Some(file));
+                }
+            }
+            None => families.push(face),
+        }
+    }
+    families
+}
+
+fn add_file(files: &mut Vec<PathBuf>, file: Option<PathBuf>) {
+    if let Some(file) = file
+        && !files.contains(&file)
+    {
+        files.push(file);
+    }
+}
+
+/// **The file a face lives in**, as CoreText names it (`kCTFontURLAttribute`), or `None` for a
+/// face with no file behind it.
+fn face_file(descriptor: &CTFontDescriptor) -> Option<PathBuf> {
+    // SAFETY: `kCTFontURLAttribute` is a CoreText constant string and the descriptor is live; the
+    // value comes back owned or not at all.
+    let url = unsafe { descriptor.attribute(kCTFontURLAttribute) }?;
+    url.downcast::<CFURL>().ok()?.to_file_path()
 }
 
 /// **One face as a picker row**, or `None` when it is not one: the one
@@ -245,9 +291,9 @@ fn monospace_family_entry(descriptor: &CTFontDescriptor) -> Option<MonospaceFami
     }
     Some(MonospaceFamily {
         name,
-        // Nothing to load: `bt-render`'s macOS font system already holds
-        // every installed face. See this module's own header.
-        files: Vec::new(),
+        // The face's own file, for a family installed after the renderer's
+        // database was built. See this module's own header.
+        files: face_file(descriptor).into_iter().collect(),
     })
 }
 
@@ -308,6 +354,63 @@ mod tests {
     /// MUTATIONS: ① drop the trait filter and the list is every family on the
     /// machine, which is a monospace picker offering Helvetica; ② drop the sort
     /// and the rows move between launches.
+    /// RED (T-FRESH-FACTS) — **a family's faces are one row carrying every file, so a family
+    /// installed after launch can be loaded when it is chosen.**
+    ///
+    /// MUTATION (observed red on the Mac): `one_row_per_family` keeping the first face's row as
+    /// it was — the bold face's file is not loaded with the family.
+    #[test]
+    fn a_familys_faces_are_one_row_carrying_every_file() {
+        let face = |name: &str, file: &str| MonospaceFamily {
+            name: name.to_owned(),
+            files: vec![PathBuf::from(file)],
+        };
+        let rows = one_row_per_family(
+            [
+                face("等宽 Mono", "/Library/Fonts/DengKuan-Regular.otf"),
+                face("Menlo", "/System/Library/Fonts/Menlo.ttc"),
+                face("等宽 Mono", "/Library/Fonts/DengKuan-Bold.otf"),
+                face("Menlo", "/System/Library/Fonts/Menlo.ttc"),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(
+            rows,
+            vec![
+                MonospaceFamily {
+                    name: "等宽 Mono".to_owned(),
+                    files: vec![
+                        PathBuf::from("/Library/Fonts/DengKuan-Regular.otf"),
+                        PathBuf::from("/Library/Fonts/DengKuan-Bold.otf"),
+                    ],
+                },
+                face("Menlo", "/System/Library/Fonts/Menlo.ttc"),
+            ]
+        );
+    }
+
+    /// RED (T-FRESH-FACTS) — **the machine's rows name files that exist**, which is what makes a
+    /// family installed after the renderer's database was built loadable.
+    ///
+    /// MUTATION (observed red on the Mac): `face_file` answering `None` — every row is empty.
+    #[test]
+    fn the_machines_rows_name_their_files() {
+        let families = monospace_font_families();
+        let named: Vec<_> = families
+            .iter()
+            .filter(|family| !family.files.is_empty())
+            .collect();
+        assert!(
+            !named.is_empty(),
+            "every fixed-width family on a Mac lives in a file: {families:?}"
+        );
+        for family in named {
+            for file in &family.files {
+                assert!(file.is_file(), "{} names {}", family.name, file.display());
+            }
+        }
+    }
+
     #[test]
     fn monospace_families_are_real_and_sorted() {
         let families = monospace_font_families();
