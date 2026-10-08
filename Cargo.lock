@@ -491,7 +491,6 @@ dependencies = [
  "bt-doc",
  "bt-effects",
  "bt-math",
- "bt-platform",
  "bt-testpath",
  "bt-transcript",
  "bt-unicode",

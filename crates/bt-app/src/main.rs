@@ -79972,16 +79972,12 @@ mod printed_path_provenance_tests {
             .find("self.reveal_verified(&path, facts);")
             .expect("and so is the reveal, which takes the resolved name off the target");
         assert!(open < reveal, "the file arm stands before the folder arm");
-        // And the resolved name is the doors' own transform, not a second reading of it.
-        let door = ["resolved_for_a_", "door("].concat();
+        // And the resolved name is the doors' own transform, not a second reading of it: the
+        // path-verification lane hands `bt_term::verify_path` the door's own function as its
+        // resolver (CC-4; `bt-term` names no platform function itself).
+        let door = ["bt_platform::resolved_for_a_", "door"].concat();
         assert!(
-            !found_in_package(
-                "bt-term",
-                needle!(door.as_str()),
-                View::Raw,
-                Scope::Module("crate::session".to_owned()),
-            )
-            .is_empty(),
+            free_fn_body("run_path_verify_worker").contains(&door),
             "the worker produces the door's input with the door's own function"
         );
     }
