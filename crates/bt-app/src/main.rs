@@ -215,6 +215,7 @@ mod web_warmup;
 mod webhost;
 mod webnav;
 mod websheet;
+mod window_news;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -40567,6 +40568,38 @@ fn git_surfaces_wanting_reread(
         .collect()
 }
 
+/// **R31's fourth moment, the window's half: the repositories this window
+/// wants the kernel's news about** — the roots of its surfaces that are drawn.
+///
+/// The seat a window holds in [`git_watch::GitWatch`] is exactly this set, so a
+/// surface that is not on the glass (a column on its Files page, a page in a tab
+/// that is not on screen, which `Runtime::git_surfaces_on_screen` never lists)
+/// subscribes to nothing and is told nothing.
+#[must_use]
+fn git_roots_on_glass(surfaces: &[(GitOrigin, PathBuf, bool)]) -> BTreeSet<PathBuf> {
+    surfaces
+        .iter()
+        .filter(|(_, _, showing)| *showing)
+        .map(|(_, root, _)| root.clone())
+        .collect()
+}
+
+/// **And which of those surfaces the news it took is about**: every drawn
+/// surface standing on a repository the kernel said moved. Two columns and a
+/// graph can be looking at one repository, and all three are out of date
+/// together.
+#[must_use]
+fn git_surfaces_the_kernel_moved(
+    surfaces: &[(GitOrigin, PathBuf, bool)],
+    moved: &BTreeSet<PathBuf>,
+) -> Vec<GitOrigin> {
+    surfaces
+        .iter()
+        .filter(|(_, root, showing)| *showing && moved.contains(root))
+        .map(|(origin, _, _)| origin.clone())
+        .collect()
+}
+
 /// **What Explorer can be pointed at, for a buffer** (G-3).
 ///
 /// A file, always. A git document, only when the working-tree file it is a
@@ -61515,7 +61548,27 @@ impl FolioApp {
             })
             .collect();
         if let Some(app) = self.app.as_mut() {
+            // **Every window the directory names has a seat in the git watch, and
+            // no other** (T-WINDOWS-ALL): the walk that names a window seats it,
+            // and the walk that stops naming it — closed, or leaving — releases
+            // its seat and every subscription only it wanted.
+            app.git_watch
+                .seat_windows(open.iter().map(|window| window.id), &app.event_proxy);
             app.windows_open = open;
+        }
+    }
+
+    /// **Ripen the git watch's news for every window** (R31's D; T-WINDOWS-ALL).
+    ///
+    /// The application's clocks over the union of every window's Git pages,
+    /// read once a pass and before any window's turn: a repository whose tree
+    /// has gone quiet is filed under every seat that wants it, and each window
+    /// takes its own in [`Runtime::advance_git_watch`] on this same pass.
+    fn ripen_git_news(&mut self, now: Instant) {
+        if let Some(app) = self.app.as_mut() {
+            hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
+                app.git_watch.ripen(now);
+            });
         }
     }
 
@@ -63972,6 +64025,10 @@ impl FolioApp {
         // clock was turned by the reap above; the thirty here would drain shut
         // shells and publish frames for a window nobody can see, which is the
         // sentence the quit's own branch says about its retirement.
+        // **The kernel's news about repositories, filed under every window that
+        // shows them, before any window takes its turn** (T-WINDOWS-ALL), so each
+        // window's own turn takes what it was told on this same pass.
+        self.ripen_git_news(now);
         let mut application_clocks = true;
         for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {

@@ -105,7 +105,7 @@ impl FilesWatch {
     /// column exists.
     ///
     /// **The proxy is borrowed here and cloned only where a watch is actually
-    /// opened**, on [`crate::git_watch::GitWatch::sync`]'s reason and with its
+    /// opened**, on [`crate::git_watch::GitWatch::seat_windows`]'s reason and with its
     /// weight: a clone of an `EventLoopProxy` is an `Arc` bump on Windows and,
     /// on macOS, a new run loop source added to the main run loop and a
     /// **wake-up** of it. This is asked on every turn, so a clone taken at the

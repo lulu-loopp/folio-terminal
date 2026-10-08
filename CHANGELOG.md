@@ -6,7 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- A second window's Git page now follows changes on disk as the first window's does.
 
 ## 0.4.7-preview — 2026-10-06
 

@@ -19,10 +19,12 @@
 //! # The three rules
 //!
 //! 1. **Gated by R31's own two conditions.** A watch exists while the master
-//!    switch is on and some surface on screen is showing that repository's Git
-//!    page. Leaving the page, switching tabs away, or turning the switch off
-//!    drops the handle — see [`GitWatch::sync`], which is handed the wanted set
-//!    and owns the difference.
+//!    switch is on and some surface on screen — in **any** open window — is
+//!    showing that repository's Git page. Leaving the page, switching tabs away,
+//!    turning the switch off or closing the window drops the handle once no
+//!    window wants it — see [`GitWatch::want`] and [`GitWatch::seat_windows`],
+//!    which keep each window's seat, and `GitWatch::sync`, which owns the
+//!    difference for the union.
 //! 2. **Coalesced** by [`WatchClock`]: one re-read after the tree goes quiet, and
 //!    at most one per [`crate::watch_clock::WATCH_FLOOR`] while it does not.
 //! 3. **An overflow is a change.** The kernel's "I stopped keeping track" is
@@ -51,7 +53,7 @@ use std::{
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppEvent, watch_clock::WatchClock};
+use crate::{AppEvent, watch_clock::WatchClock, window_news::WindowSeats};
 
 /// One repository's subscription, and the clock its notifications feed.
 struct Watched {
@@ -68,9 +70,15 @@ struct Watched {
     clock: WatchClock,
 }
 
-/// **Every repository this window is currently subscribed to.**
-#[derive(Default)]
-pub struct GitWatch {
+/// **Every repository some open window is showing, and which window shows it.**
+///
+/// The application's (`App::git_watch`): one kernel subscription and one clock
+/// per repository, over the union of what every window's seat wants
+/// ([`crate::window_news::WindowSeats`]), and the news fanned out to every window
+/// whose drawn Git pages stand on that repository. A window says what it wants
+/// and takes what it was told on its own turn ([`Self::want`], [`Self::take`]);
+/// the clocks are read once a pass for all of them ([`Self::ripen`]).
+pub struct GitWatch<W = winit::window::WindowId> {
     /// Where the watcher threads leave their news: the root, and when its most
     /// recent notification arrived.
     ///
@@ -83,33 +91,112 @@ pub struct GitWatch {
     /// looking, so that a busy main thread cannot make a storm look like a lull.
     news: Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     watched: BTreeMap<PathBuf, Watched>,
+    /// Each open window's roots and the ripened news it has not taken yet.
+    seats: WindowSeats<W, PathBuf>,
 }
 
-impl GitWatch {
-    /// **Bring the subscriptions level with what is on screen** (rule 1).
+impl<W> Default for GitWatch<W> {
+    fn default() -> Self {
+        Self {
+            news: Arc::default(),
+            watched: BTreeMap::new(),
+            seats: WindowSeats::default(),
+        }
+    }
+}
+
+impl<W: Ord + Copy> GitWatch<W> {
+    /// **Seat every window the directory names and release every one it does
+    /// not** — the window directory's walk (`FolioApp::publish_window_directory`).
     ///
-    /// `wanted` is the set of repository roots that some surface in the tab on
-    /// screen is showing a Git page for, and it is the whole of the gate: a root
-    /// that leaves it has its handles dropped here, which cancels the read and
-    /// joins the thread. Nothing else in this file ever decides to watch or stop
-    /// watching anything.
-    ///
-    /// Answers whether the set changed, which is only of interest to a
-    /// diagnostics line.
+    /// A released seat takes its roots out of the union, so a repository only a
+    /// closed window was showing loses its subscription here, on the walk that
+    /// stopped naming the window, rather than whenever another window next
+    /// changes what it shows.
     ///
     /// **The proxy is borrowed here and cloned only where a watch is actually
     /// opened**, which on one of the two platforms is the difference between an
     /// idle window and a burning processor. A clone of an `EventLoopProxy` is an
     /// `Arc` bump on Windows and *not* one on macOS: winit builds a fresh run
     /// loop source, adds it to the main run loop and **wakes the loop**, and
-    /// dropping it invalidates the source again. This is called on every turn,
-    /// so a clone taken at the top of it would schedule the very turn that takes
-    /// the next one — a window nobody is looking at, holding a core at full tilt
-    /// for as long as it stays open. So the clone is taken once per
-    /// subscription, in [`subscribe`], and never per turn.
-    pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> bool {
+    /// dropping it invalidates the source again. [`Self::want`] is called on
+    /// every turn, so a clone taken at the top of it would schedule the very
+    /// turn that takes the next one — a window nobody is looking at, holding a
+    /// core at full tilt for as long as it stays open. So the clone is taken once
+    /// per subscription, in [`subscribe`], and never per turn.
+    pub fn seat_windows(
+        &mut self,
+        open_windows: impl IntoIterator<Item = W>,
+        proxy: &EventLoopProxy<AppEvent>,
+    ) {
         let news = Arc::clone(&self.news);
-        let changed = self.sync_with(wanted, |root| subscribe(&news, proxy, root));
+        self.seat_windows_with(open_windows, |root| subscribe(&news, proxy, root));
+    }
+
+    /// [`Self::seat_windows`] with the opening of a watch handed in. Answers
+    /// whether the subscriptions changed.
+    fn seat_windows_with(
+        &mut self,
+        open_windows: impl IntoIterator<Item = W>,
+        open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>,
+    ) -> bool {
+        self.seats.level_with(open_windows) && self.sync(open)
+    }
+
+    /// **What this window's drawn Git pages are showing now** (rule 1), asked
+    /// on the window's own turn.
+    ///
+    /// `wanted` is the set of repository roots that some surface in this
+    /// window's tab on screen is showing a Git page for. Nothing is opened or
+    /// dropped unless this window's set changed, so the turn of a window whose
+    /// pages stayed put touches no subscription and no lock.
+    ///
+    /// Answers whether the subscriptions changed, which is only of interest to a
+    /// diagnostics line.
+    pub fn want(
+        &mut self,
+        window: W,
+        wanted: BTreeSet<PathBuf>,
+        proxy: &EventLoopProxy<AppEvent>,
+    ) -> bool {
+        let news = Arc::clone(&self.news);
+        self.want_with(window, wanted, |root| subscribe(&news, proxy, root))
+    }
+
+    /// [`Self::want`] with the opening of a watch handed in.
+    fn want_with(
+        &mut self,
+        window: W,
+        wanted: BTreeSet<PathBuf>,
+        open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>,
+    ) -> bool {
+        self.seats.want(window, wanted) && self.sync(open)
+    }
+
+    /// **Fold in what the kernel has said, and tell every window that wants a
+    /// repository whose news has ripened** — once a pass, before any window
+    /// takes its turn, so every window takes the same news on the same pass.
+    pub fn ripen(&mut self, now: Instant) {
+        for root in self.due(now) {
+            self.seats.tell(&root);
+        }
+    }
+
+    /// The repositories this window has been told moved and has not yet read
+    /// again, handed over once.
+    pub fn take(&mut self, window: W) -> BTreeSet<PathBuf> {
+        self.seats.take(window)
+    }
+
+    /// **Bring the subscriptions level with what the seats want** (rule 1).
+    ///
+    /// The union of every seat is the whole of the gate: a root that leaves it
+    /// has its handles dropped here, which cancels the read and joins the
+    /// thread. Nothing else in this file ever decides to watch or stop watching
+    /// anything.
+    fn sync(&mut self, open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>) -> bool {
+        let wanted = self.seats.wanted();
+        let changed = self.sync_with(&wanted, open);
         if changed {
             let (held, watching) = self.counts();
             trace(&format!(
@@ -119,7 +206,7 @@ impl GitWatch {
         changed
     }
 
-    /// [`Self::sync`]'s bookkeeping, with the opening of a watch handed in.
+    /// [`Self::sync`]'s bookkeeping over a given set.
     ///
     /// One derivation for the real thing and for the tests: what the gate *is* —
     /// the map follows the set, departures drop their handles, arrivals are
@@ -131,9 +218,8 @@ impl GitWatch {
         wanted: &BTreeSet<PathBuf>,
         mut open: impl FnMut(&Path) -> Vec<bt_platform::DirWatch>,
     ) -> bool {
-        // **A window with no Git page open touches nothing at all**, not even the
-        // mailbox's lock. This is asked on every turn of the event loop — every
-        // mouse move included — and the mailbox can only hold news for a
+        // **With no Git page open in any window nothing is touched at all**, not
+        // even the mailbox's lock. The mailbox can only hold news for a
         // repository something is watching, so with nothing watched and nothing
         // wanted there is provably nothing to reconcile.
         if wanted.is_empty() && self.watched.is_empty() {
@@ -171,7 +257,7 @@ impl GitWatch {
     /// question: a notification that arrived a moment ago may or may not have
     /// made its repository due, and the only way to find out is to give it to
     /// the clock first.
-    pub fn due(&mut self, now: Instant) -> Vec<PathBuf> {
+    fn due(&mut self, now: Instant) -> Vec<PathBuf> {
         if self.watched.is_empty() {
             return Vec::new();
         }
@@ -220,7 +306,7 @@ impl GitWatch {
 /// needs is the mailbox and the proxy, not the registry.
 ///
 /// **And it is the only place in this file the proxy is cloned** — once per
-/// watch opened, for the reason [`GitWatch::sync`] states.
+/// watch opened, for the reason [`GitWatch::seat_windows`] states.
 fn subscribe(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     proxy: &EventLoopProxy<AppEvent>,
@@ -424,7 +510,7 @@ mod tests {
     /// PIN (D, rule 1) — **a watch is held only while a page is showing it, and
     /// dropped the moment it is not.**
     ///
-    /// The gate is the set handed to [`GitWatch::sync`] and nothing else. This
+    /// The gate is the set handed to [`GitWatch::sync_with`] and nothing else. This
     /// checks the bookkeeping half of it — that the map follows the set exactly,
     /// including the case that matters most for R31: an empty set holds nothing
     /// at all, so a window with no Git page open has no subscription open either.
@@ -434,7 +520,7 @@ mod tests {
     /// about.
     #[test]
     fn the_subscriptions_follow_the_pages_that_are_showing() {
-        let mut watch = GitWatch::default();
+        let mut watch = GitWatch::<u32>::default();
         let a = PathBuf::from(r"D:\repo");
         let b = PathBuf::from(r"D:\other");
 
@@ -475,7 +561,7 @@ mod tests {
     /// page already performs has answered it.
     #[test]
     fn news_for_a_page_that_closed_is_not_kept_for_the_next_one() {
-        let mut watch = GitWatch::default();
+        let mut watch = GitWatch::<u32>::default();
         let root = PathBuf::from(r"D:\repo");
         let now = Instant::now();
 
@@ -556,7 +642,7 @@ mod tests {
     /// PIN (D) — **the clock only fires for a repository the kernel spoke about.**
     #[test]
     fn only_the_repository_that_moved_is_read_again() {
-        let mut watch = GitWatch::default();
+        let mut watch = GitWatch::<u32>::default();
         let moved = PathBuf::from(r"D:\repo");
         let still = PathBuf::from(r"D:\other");
         let now = Instant::now();
@@ -574,7 +660,7 @@ mod tests {
         );
     }
 
-    /// [`GitWatch::sync`] with no kernel behind it — the gate's bookkeeping on
+    /// [`GitWatch::sync_with`] with no kernel behind it — the gate's bookkeeping on
     /// its own.
     ///
     /// The subscription itself is proved in `bt_platform`'s own
@@ -582,7 +668,190 @@ mod tests {
     /// can be proved. What these tests are about is the half that decides *when*
     /// one is held, and that half is [`GitWatch::sync_with`] itself rather than a
     /// second copy of it here.
-    fn sync_for_test(watch: &mut GitWatch, wanted: &BTreeSet<PathBuf>) -> bool {
+    fn sync_for_test(watch: &mut GitWatch<u32>, wanted: &BTreeSet<PathBuf>) -> bool {
         watch.sync_with(wanted, |_| Vec::new())
+    }
+
+    // ── T-WINDOWS-ALL: one seat per window ─────────────────────────────────
+    //
+    // What a window's turn does, with no window: its surfaces as
+    // `Runtime::git_surfaces_on_screen` lists them (the active tab's, each with
+    // whether the frame drew it), the roots it wants (`git_roots_on_glass`), the
+    // news it takes, and the surfaces that news re-reads
+    // (`git_surfaces_the_kernel_moved`). The kernel's word is put in the mailbox
+    // by hand, as the tests above do; the subscription itself is
+    // `bt_platform`'s to prove.
+
+    use crate::{GitOrigin, SeatId, git_roots_on_glass, git_surfaces_the_kernel_moved};
+
+    type Surfaces = Vec<(GitOrigin, PathBuf, bool)>;
+
+    /// One window's turn: say what it draws, take what it was told, and answer
+    /// which of its surfaces are read again.
+    fn turn(watch: &mut GitWatch<u32>, window: u32, surfaces: &Surfaces) -> Vec<GitOrigin> {
+        watch.want_with(window, git_roots_on_glass(surfaces), |_| Vec::new());
+        git_surfaces_the_kernel_moved(surfaces, &watch.take(window))
+    }
+
+    /// The kernel spoke about `root`, and the tree has gone quiet since.
+    fn the_disk_moved(watch: &mut GitWatch<u32>, root: &Path, at: Instant) {
+        lock(&watch.news).insert(root.to_path_buf(), at);
+        watch.ripen(at + crate::watch_clock::WATCH_QUIET);
+    }
+
+    /// RED (T-WINDOWS-ALL) — **two windows showing one repository both read it
+    /// again when it changes on disk.**
+    ///
+    /// The census's defect: the subscription, the clock and the reading of the
+    /// surfaces lived on the window that turns the application's clocks, so a
+    /// second window's Git page never heard the disk.
+    ///
+    /// MUTATION: fan out to the first window only (`window_news::WindowSeats::tell`
+    /// stopping after the first seat that wants the root) — window 2 takes no
+    /// news and its column and graph are not read again.
+    #[test]
+    fn two_windows_showing_one_repository_both_read_it_again() {
+        let mut watch = GitWatch::<u32>::default();
+        let repo = PathBuf::from(r"D:\仓库\folio");
+        let first: Surfaces = vec![(GitOrigin::Column(SeatId(1)), repo.clone(), true)];
+        let second: Surfaces = vec![
+            (GitOrigin::Column(SeatId(1)), repo.clone(), true),
+            (GitOrigin::Graph(repo.clone()), repo.clone(), true),
+        ];
+        assert!(!watch.seat_windows_with([1, 2], |_| Vec::new()));
+        assert!(turn(&mut watch, 1, &first).is_empty());
+        assert!(turn(&mut watch, 2, &second).is_empty());
+        assert_eq!(watch.counts().0, 1, "one subscription for the union");
+
+        the_disk_moved(&mut watch, &repo, Instant::now());
+        assert_eq!(
+            turn(&mut watch, 1, &first),
+            vec![GitOrigin::Column(SeatId(1))]
+        );
+        assert_eq!(
+            turn(&mut watch, 2, &second),
+            vec![GitOrigin::Column(SeatId(1)), GitOrigin::Graph(repo.clone())],
+            "the second window's column and graph are read again too"
+        );
+        assert!(
+            turn(&mut watch, 2, &second).is_empty(),
+            "once: the next turn has nothing new"
+        );
+    }
+
+    /// RED (T-WINDOWS-ALL) — **a repository only the second window shows is
+    /// subscribed to and read again.**
+    ///
+    /// The other half of the defect: the first window's turn handed the watch
+    /// its own set alone, which dropped every root another window wanted.
+    ///
+    /// MUTATION: the subscriptions following one window's set rather than the
+    /// union (`GitWatch::sync` handed the asking window's roots) — the second
+    /// window's repository is unsubscribed on the first window's turn and its
+    /// news is dropped with it.
+    #[test]
+    fn a_repository_only_the_second_window_shows_is_watched() {
+        let mut watch = GitWatch::<u32>::default();
+        let mine = PathBuf::from(r"D:\work\one");
+        let theirs = PathBuf::from(r"D:\工作\two");
+        let first: Surfaces = vec![(GitOrigin::Column(SeatId(1)), mine.clone(), true)];
+        let second: Surfaces = vec![(GitOrigin::Column(SeatId(3)), theirs.clone(), true)];
+        watch.seat_windows_with([1, 2], |_| Vec::new());
+        turn(&mut watch, 2, &second);
+        turn(&mut watch, 1, &first);
+        assert_eq!(watch.counts().0, 2, "both windows' repositories");
+
+        the_disk_moved(&mut watch, &theirs, Instant::now());
+        assert!(turn(&mut watch, 1, &first).is_empty());
+        assert_eq!(
+            turn(&mut watch, 2, &second),
+            vec![GitOrigin::Column(SeatId(3))]
+        );
+    }
+
+    /// RED (T-WINDOWS-ALL) — **a closed window's seat is released by the
+    /// directory walk, with every subscription only it wanted.**
+    ///
+    /// MUTATION: leak it (`window_news::WindowSeats::level_with` without its `retain`)
+    /// — the news still reaches the dropped window's seat, and the repository
+    /// only it showed is still subscribed to.
+    #[test]
+    fn a_closed_windows_seat_and_subscriptions_are_released() {
+        let mut watch = GitWatch::<u32>::default();
+        let shared = PathBuf::from(r"D:\repo");
+        let alone = PathBuf::from(r"D:\只在二号窗");
+        let first: Surfaces = vec![(GitOrigin::Column(SeatId(1)), shared.clone(), true)];
+        let second: Surfaces = vec![
+            (GitOrigin::Column(SeatId(1)), shared.clone(), true),
+            (GitOrigin::Column(SeatId(2)), alone.clone(), true),
+        ];
+        watch.seat_windows_with([1, 2], |_| Vec::new());
+        turn(&mut watch, 1, &first);
+        turn(&mut watch, 2, &second);
+        assert_eq!(watch.counts().0, 2);
+
+        // Window 2 closes: the next walk of the directory no longer names it.
+        assert!(
+            watch.seat_windows_with([1], |_| Vec::new()),
+            "the subscriptions changed"
+        );
+        assert_eq!(
+            watch.counts().0,
+            1,
+            "the repository only the closed window showed is not watched"
+        );
+        let now = Instant::now();
+        lock(&watch.news).insert(shared.clone(), now);
+        watch.ripen(now + crate::watch_clock::WATCH_QUIET);
+        assert!(
+            watch.take(2).is_empty(),
+            "a window the directory dropped is told nothing"
+        );
+        assert_eq!(
+            turn(&mut watch, 1, &first),
+            vec![GitOrigin::Column(SeatId(1))]
+        );
+    }
+
+    /// RED (T-WINDOWS-ALL) — **the drawn rule holds per window: a surface that
+    /// is not on the glass wants nothing and is read again for nothing.**
+    ///
+    /// Window 2's column is on its Files page (or its tab is not on screen, which
+    /// `git_surfaces_on_screen` never lists at all): it is not a surface looking
+    /// at the repository, so window 2's seat stays empty and the news that
+    /// re-reads window 1's page costs window 2 no process.
+    ///
+    /// MUTATIONS: `git_roots_on_glass` without its `showing` filter — window 2
+    /// wants, and would be told about, a repository it does not draw; and
+    /// `git_surfaces_the_kernel_moved` without its own — news about the root
+    /// re-reads the undrawn column.
+    #[test]
+    fn a_surface_that_is_not_drawn_is_told_nothing() {
+        let mut watch = GitWatch::<u32>::default();
+        let repo = PathBuf::from(r"D:\仓库");
+        let drawn: Surfaces = vec![(GitOrigin::Column(SeatId(1)), repo.clone(), true)];
+        let undrawn: Surfaces = vec![(GitOrigin::Column(SeatId(1)), repo.clone(), false)];
+        watch.seat_windows_with([1, 2], |_| Vec::new());
+        turn(&mut watch, 1, &drawn);
+        turn(&mut watch, 2, &undrawn);
+        assert_eq!(
+            git_roots_on_glass(&undrawn),
+            BTreeSet::new(),
+            "an undrawn page wants no news"
+        );
+
+        the_disk_moved(&mut watch, &repo, Instant::now());
+        assert!(
+            watch.take(2).is_empty(),
+            "window 2 does not draw the page, so it is not told"
+        );
+        assert!(
+            git_surfaces_the_kernel_moved(&undrawn, &BTreeSet::from([repo.clone()])).is_empty(),
+            "and news about the root does not re-read a surface that is not drawn"
+        );
+        assert_eq!(
+            turn(&mut watch, 1, &drawn),
+            vec![GitOrigin::Column(SeatId(1))]
+        );
     }
 }
