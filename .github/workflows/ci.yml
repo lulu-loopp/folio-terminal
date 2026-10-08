@@ -98,8 +98,11 @@ jobs:
       # The compiler and the shared cache both come from
       # `.github/actions/toolchain`, which is the one place in this repository
       # that decides what Rust a job is built with. `release.yml` calls the same
-      # action, so the two files cannot drift apart again.
+      # action, so the two files cannot drift apart again. The wasm32 target is
+      # for the wasm-floor canary below.
       - uses: ./.github/actions/toolchain
+        with:
+          targets: wasm32-unknown-unknown
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
       # terminal facts; importing document, detection, or viewport policy here recreates the
@@ -263,6 +266,34 @@ jobs:
             throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
           }
           Write-Host "clippy refused the planted todo!() with exit $clippy, which is this gate passing."
+          exit 0
+
+      # G1's canary: a call of an item that exists only under `cfg(unix)`, the
+      # shape of the hole the wasm floor closed in `bt-platform`, planted in a
+      # checked crate. The wasm32 check must refuse it and name that crate.
+      - name: the wasm-floor gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-doc/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`n#[cfg(unix)]`nfn _wasm_floor_probe_unix_only() {}`npub fn _wasm_floor_probe() { _wasm_floor_probe_unix_only() }`n")
+            $failed = $false
+            $message = ""
+            try {
+              & ./scripts/ci/check-wasm-lib.ps1 *> $null
+            } catch {
+              $failed = $true
+              $message = $_.Exception.Message
+            }
+            if (-not $failed) { throw "the wasm32 library check accepted a planted cfg(unix)-only call" }
+            if ($message -notmatch '(?m)^\s+bt-doc - ' -or $message -notmatch '_wasm_floor_probe_unix_only') {
+              throw "the wasm32 library check failed for the wrong reason: $message"
+            }
+            Write-Host $message
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
           exit 0
 
       # **The split plan's budgets, watched where a red is information.**
@@ -662,6 +693,25 @@ jobs:
             $ran++
           }
           Write-Host "$ran of $($gates.Count) licensing gates ran."
+
+  # ── the library crates a browser build will reference (gate G1) ───────────
+  #
+  # `scripts/ci/check-wasm-lib.ps1` holds the list and says why each crate is on
+  # it. A job of its own because it builds every dependency of those crates a
+  # second time, for `wasm32-unknown-unknown`, and nothing else here can share
+  # that build.
+  wasm-lib-check:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/toolchain
+        with:
+          targets: wasm32-unknown-unknown
+      - name: the library crates check for wasm32
+        shell: pwsh
+        run: ./scripts/ci/check-wasm-lib.ps1
 
   # ── real ConPTY, real child processes ─────────────────────────────────────
   conpty:

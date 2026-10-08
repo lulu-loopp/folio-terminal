@@ -129,6 +129,14 @@ fixture with an intentional marker likewise needs an exact live reason row.
 `gates-can-fail` plants each forbidden state and checks the refusal names both
 the planted file and reason.
 
+The wasm floor (gate G1, job `wasm-lib-check`): `scripts/ci/check-wasm-lib.ps1`
+runs `cargo check --locked --lib --target wasm32-unknown-unknown` over the
+library crates a browser build will reference — the list is in the script and
+nowhere else — and names every crate that reports a compile error; it refuses a
+run that checked fewer libraries than the list holds. A crate joins the list in
+the ticket that makes it pass. Its `gates-can-fail` canary plants a call of a
+`cfg(unix)`-only function in `bt-doc` and requires the refusal to name `bt-doc`.
+
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 
 （2026-08-20，分支 `test-env-immunity`；技术细节见 `docs/DESIGN.md` §7.1.6c-3b 尾部。）

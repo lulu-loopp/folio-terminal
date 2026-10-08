@@ -56,10 +56,10 @@ counted.
 <https://github.com/alacritty/alacritty> — Apache License, Version 2.0.
 
 `vendor/alacritty_terminal/` is the crates.io 0.26.0 archive with changes by the
-Folio contributors. Twenty-three of its 211 files differ; each of those carries a
+Folio contributors. Twenty-four of its 211 files differ; each of those carries a
 notice at the top of the file, as section 4(b) requires, and
-`vendor/alacritty_terminal/CHANGES-FOLIO.md` indexes them. Nineteen of the
-twenty-three differ only because this workspace's `rustfmt` settings are not
+`vendor/alacritty_terminal/CHANGES-FOLIO.md` indexes them. Eighteen of the
+twenty-four differ only because this workspace's `rustfmt` settings are not
 upstream's — provably so: `rustfmt --edition 2024` over the upstream file
 reproduces the vendored file byte for byte.
 

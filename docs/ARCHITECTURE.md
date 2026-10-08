@@ -307,6 +307,12 @@ everywhere else). `bt-corpus` is a tool; `bt-source` is read by tests only
 what platform it is on, and only in the files named by
 `FILES_THAT_MAY_NAME_A_PLATFORM` in `main.rs`.
 
+The library crates below `bt-app` that a browser build will reference —
+`bt-unicode`, `bt-transcript`, `bt-doc`, `bt-layout`, `bt-viewport`,
+`bt-detect`, `bt-platform`, `bt-math`, `bt-render` and `bt-term` — check for
+`wasm32-unknown-unknown` in CI (`wasm-lib-check`, `scripts/ci/check-wasm-lib.ps1`,
+which holds the list).
+
 ### 3.2 The three questioned edges, and their disposition
 
 **`bt-pty → bt-term` — hygiene, not an inverted layer.** Production `bt-pty`
