@@ -376,12 +376,18 @@ those manifests actually practise, restated here from what they say:
   `cell_capture.rs` may not name `bt_doc`, `bt_detect` or `bt_viewport`. The
   vendor seam answers "what did the terminal do", never "what shall we do
   about it".
-- **Adding an edge edits this file.** A direction guard over
-  `cargo metadata --no-deps --locked --offline`, reading normal and build
-  dependencies including target-specific tables, with an exception set compared
-  against the merge base so it can only shrink, is planned by
-  `docs/plans/bt-app-split-prep.md` §8.4. Until it lands, the graph in §3.1 is
-  the list.
+- **Adding an edge edits this file.** The direction is enforced by
+  **`scripts/ci/check-crate-edges.ps1`** over
+  `cargo metadata --no-deps --locked --offline`: every normal and build
+  dependency between first-party crates, target-specific tables included, goes
+  from a higher layer of `scripts/ci/crate-layers.tsv` to a lower one, and a
+  crate missing from that table fails. The exemptions live in
+  `scripts/ci/crate-edge-exemptions.tsv`, one row per edge with its
+  `docs/plans/structural-debt.md` row; the list only shrinks against the merge
+  base, and a row whose edge is gone or now goes down fails. Its one row is
+  `bt-term → bt-math` (D-15). `bt-term → bt-platform` goes down (§3.2: the right
+  direction), and dev-dependencies are not layer edges (`bt-pty` naming
+  `bt-term` only as one is §3.2's repair).
 - **`bt-workbench`'s entry, for that guard** (D-27 lands it; census-3 wrote it
   here because the guard does not exist yet —
   `docs/plans/design/ownership-census-2026-09-25.md` §5.4):

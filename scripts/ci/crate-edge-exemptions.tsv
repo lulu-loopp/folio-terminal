@@ -1,0 +1,7 @@
+# Normal or build dependencies between first-party crates that scripts/ci/crate-layers.tsv refuses
+# (same layer or upward) and that exist anyway, each with its row in docs/plans/structural-debt.md.
+# This list only shrinks. scripts/ci/check-crate-edges.ps1 fails on a row whose edge no longer exists
+# or now goes down a layer (the change that removes the edge deletes the row), and on a row that is
+# not at the merge base with origin/main.
+from	to	kind	ledger	reason
+bt-term	bt-math	normal	D-15	session.rs, inline_image::decode_svg_bytes, the MathEngine re-export and the bt-repaint-oracle binary use the math crate; recorded debt until the composition layer is designed
