@@ -740,8 +740,8 @@ mod tests {
         System::{
             Pipes::{ImpersonateNamedPipeClient, PIPE_UNLIMITED_INSTANCES},
             Threading::{
-                GetCurrentThread, OpenProcess, OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
-                PROCESS_SYNCHRONIZE,
+                GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken,
+                OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
             },
         },
     };
@@ -1420,11 +1420,27 @@ mod tests {
         assert_eq!(said[0], format!("kernel_client_pid={}", std::process::id()));
         assert_eq!(said[1], "process=unavailable (0x5)");
         assert_eq!(said[2], "accept=Ok");
-        assert!(
-            said[3].starts_with(&format!("host_pid={} host_user=S-1-5-", std::process::id())),
-            "{said:?}"
+        // The host is this process, so its user and integrity are this process's token's.
+        let mut token = HANDLE::default();
+        // SAFETY: the current process's pseudo-handle; `token` is a live local.
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) }
+            .expect("this process's token opens");
+        let token = OwnedHandle(token);
+        let user = token_information(token.0, TokenUser);
+        // SAFETY: the buffer holds a `TOKEN_USER` whose SID points inside it.
+        let user = sid_text(unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid });
+        let label = token_information(token.0, TokenIntegrityLevel);
+        // SAFETY: the buffer holds a `TOKEN_MANDATORY_LABEL` whose SID points inside it.
+        let integrity =
+            sid_text(unsafe { (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid });
+        assert!(integrity.starts_with("S-1-16-"), "{integrity}");
+        assert_eq!(
+            said[3],
+            format!(
+                "host_pid={} host_user={user} host_integrity={integrity} lent_level=1",
+                std::process::id()
+            )
         );
-        assert!(said[3].ends_with(" lent_level=1"), "{said:?}");
         assert_eq!(said.len(), 4, "{said:?}");
     }
 

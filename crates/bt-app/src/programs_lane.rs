@@ -334,7 +334,13 @@ impl std::fmt::Debug for PaneWaits {
 
 impl Drop for PaneWaits {
     fn drop(&mut self) {
-        self.lane.lock().panes_waiting -= 1;
+        let mut asks = self.lane.lock();
+        debug_assert!(
+            asks.panes_waiting > 0,
+            "a pane stopped waiting that the lane never counted: every PaneWaits is made by \
+             pane_waits, which counts it in"
+        );
+        asks.panes_waiting -= 1;
     }
 }
 
