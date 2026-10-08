@@ -253,8 +253,10 @@ guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
 
 ### A test never prints an environment (T-TEST-ENV-LEAK)
 
-A test never prints an environment or any value from it: a failure names the differing keys only, and a
-secret-shaped key (one holding `KEY`, `TOKEN`, `SECRET` or `PASS`) as `<redacted>`.
+A test never prints an environment map, and never prints the value of a secret-shaped variable (one
+whose name holds `KEY`, `TOKEN`, `SECRET` or `PASS`); a give-up message may quote one named, non-secret
+variable it depends on (`PATH`, `ComSpec`, `PSModulePath`, `WSLENV`, `HOME`), and a test that compares
+environments names the differing keys only, a secret-shaped key as `<redacted>`.
 
 ### Where a test lives (K1)
 
