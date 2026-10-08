@@ -413,6 +413,7 @@ text_entries! {
     CleanupMarkRuntimeClaims,
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
+    CleanupMarkRemoverHome,
     CleanupKindPerCopy,
     CleanupKindPerAccount,
     CleanupKindData,
@@ -2991,8 +2992,14 @@ text_entries! {
     VersionNeverChecked,
     VersionJustNow,
     VersionMinutesAgo,
+    /// [`Self::VersionMinutesAgo`] for a count of one.
+    VersionOneMinuteAgo,
     VersionHoursAgo,
+    /// [`Self::VersionHoursAgo`] for a count of one.
+    VersionOneHourAgo,
     VersionDaysAgo,
+    /// [`Self::VersionDaysAgo`] for a count of one.
+    VersionOneDayAgo,
     VersionSettingsAvailable,
     /// The reason a press fails while no driver exists (`update_job::Failure::Unsupported`).
     UpdateFailedUnsupported,
@@ -4995,6 +5002,7 @@ impl Text {
             Self::CleanupMarkRuntimeClaims => pick(lang, "Unix runtime claims", "Unix 运行时锁"),
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
+            Self::CleanupMarkRemoverHome => pick(lang, "Uninstaller staging", "卸载程序暂存"),
             Self::CleanupKindPerCopy => pick(lang, "per-copy", "按副本"),
             Self::CleanupKindPerAccount => pick(lang, "per-account", "按账户"),
             Self::CleanupKindData => pick(lang, "data", "数据"),
@@ -5794,6 +5802,20 @@ impl Text {
             Self::VersionMinutesAgo => pick(lang, "{count} minutes ago", "{count} 分钟前"),
             Self::VersionHoursAgo => pick(lang, "{count} hours ago", "{count} 小时前"),
             Self::VersionDaysAgo => pick(lang, "{count} days ago", "{count} 天前"),
+            // The singular of each unit. Chinese does not inflect a counted
+            // noun, so its column is the plural entry's own.
+            Self::VersionOneMinuteAgo => match lang {
+                Lang::English => "{count} minute ago",
+                Lang::Chinese => Self::VersionMinutesAgo.on(lang, platform),
+            },
+            Self::VersionOneHourAgo => match lang {
+                Lang::English => "{count} hour ago",
+                Lang::Chinese => Self::VersionHoursAgo.on(lang, platform),
+            },
+            Self::VersionOneDayAgo => match lang {
+                Lang::English => "{count} day ago",
+                Lang::Chinese => Self::VersionDaysAgo.on(lang, platform),
+            },
             Self::VersionSettingsAvailable => pick(
                 lang,
                 "Settings · {version} available",
@@ -6313,17 +6335,29 @@ impl LastChecked {
         };
         Some(unit - elapsed % unit)
     }
+
+    /// **The table entry that words this form, and the count it is filled
+    /// with.** A count of one takes its unit's singular entry, so the line
+    /// reads `1 minute ago` and never `1 minutes ago`; whether the two entries
+    /// differ is each language column's own business.
+    #[must_use]
+    const fn words(self) -> (Text, Option<u64>) {
+        match self {
+            Self::Never => (Text::VersionNeverChecked, None),
+            Self::JustNow => (Text::VersionJustNow, None),
+            Self::MinutesAgo(1) => (Text::VersionOneMinuteAgo, Some(1)),
+            Self::MinutesAgo(count) => (Text::VersionMinutesAgo, Some(count)),
+            Self::HoursAgo(1) => (Text::VersionOneHourAgo, Some(1)),
+            Self::HoursAgo(count) => (Text::VersionHoursAgo, Some(count)),
+            Self::DaysAgo(1) => (Text::VersionOneDayAgo, Some(1)),
+            Self::DaysAgo(count) => (Text::VersionDaysAgo, Some(count)),
+        }
+    }
 }
 
 #[must_use]
 pub fn version_last_checked_in(lang: Lang, checked_at_ms: u64, now_ms: u64) -> String {
-    let (template, count) = match LastChecked::at(checked_at_ms, now_ms) {
-        LastChecked::Never => (Text::VersionNeverChecked, None),
-        LastChecked::JustNow => (Text::VersionJustNow, None),
-        LastChecked::MinutesAgo(count) => (Text::VersionMinutesAgo, Some(count)),
-        LastChecked::HoursAgo(count) => (Text::VersionHoursAgo, Some(count)),
-        LastChecked::DaysAgo(count) => (Text::VersionDaysAgo, Some(count)),
-    };
+    let (template, count) = LastChecked::at(checked_at_ms, now_ms).words();
     let when = match count {
         Some(count) => template
             .in_lang(lang)
@@ -8532,6 +8566,61 @@ fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (T-ABOUT-NITS) — **"Last checked" counts in the singular at one,
+    /// in every unit**, and Chinese reads the same count either way.
+    ///
+    /// MUTATION: delete `words`'s `MinutesAgo(1)` arm; one minute falls to the
+    /// plural entry, reads `1 minutes ago`, and this goes red (likewise the
+    /// hour and day arms).
+    #[test]
+    fn last_checked_is_singular_at_one_in_every_unit() {
+        let minute = 60_000;
+        let hour = 60 * minute;
+        let day = 24 * hour;
+        let now = 1_000 * day;
+        let table = [
+            (0, "Last checked: Never", "上次检查：从未"),
+            (now, "Last checked: just now", "上次检查：刚刚"),
+            (
+                now - minute,
+                "Last checked: 1 minute ago",
+                "上次检查：1 分钟前",
+            ),
+            (
+                now - 2 * minute,
+                "Last checked: 2 minutes ago",
+                "上次检查：2 分钟前",
+            ),
+            (
+                now - 59 * minute,
+                "Last checked: 59 minutes ago",
+                "上次检查：59 分钟前",
+            ),
+            (now - hour, "Last checked: 1 hour ago", "上次检查：1 小时前"),
+            (
+                now - 2 * hour - 1,
+                "Last checked: 2 hours ago",
+                "上次检查：2 小时前",
+            ),
+            (now - day, "Last checked: 1 day ago", "上次检查：1 天前"),
+            (
+                now - 2 * day,
+                "Last checked: 2 days ago",
+                "上次检查：2 天前",
+            ),
+        ];
+        for (checked, english, chinese) in table {
+            assert_eq!(
+                version_last_checked_in(Lang::English, checked, now),
+                english
+            );
+            assert_eq!(
+                version_last_checked_in(Lang::Chinese, checked, now),
+                chinese
+            );
+        }
+    }
 
     /// RED (T-UPDATE-DAILY) — **an open About page books exactly the next
     /// displayed “Last checked” bucket, with no clock for Never.**

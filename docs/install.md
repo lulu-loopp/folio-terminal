@@ -25,7 +25,8 @@ usually does, and if it does not, the Evergreen Runtime is
 [here](https://developer.microsoft.com/microsoft-edge/webview2/). Without it
 everything except the web preview works, and the preview says what is missing.
 
-<!-- winget: add when live -->
+winget has it too: `winget install --id WeiyiShi.Folio --exact` unpacks the same
+zip under winget's packages folder and puts `folio` on your PATH.
 
 ## macOS
 

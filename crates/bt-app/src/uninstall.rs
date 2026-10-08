@@ -69,6 +69,22 @@ enum Remover {
     /// macOS: this bundle's installation home beside it (`update_txn::Home`).
     UpdateHome,
     Data(HostPlatform, Base, &'static str),
+    /// The native remover's per-user folder, `Scope::remover_home`.
+    Staging,
+}
+impl Remover {
+    /// **A data mark's root on `platform`**: its base and the part Folio names,
+    /// or `None` where the mark is no data root — another platform's root (a
+    /// temporary-folder root is every platform's) or not a data mark at all.
+    /// The door resolves, purges and prints a data row only where this answers.
+    fn data_root_on(self, platform: HostPlatform) -> Option<(Base, &'static str)> {
+        match self {
+            Self::Data(host, base, relative) if host == platform || base == Base::Temp => {
+                Some((base, relative))
+            }
+            _ => None,
+        }
+    }
 }
 struct Mark {
     /// The mark's key, in the words `--uninstall-cleanup` has always printed.
@@ -317,6 +333,17 @@ const INVENTORY: &[Mark] = &[
         remover: Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio-panic.log"),
         writer: "main.rs:install_panic_log_hook",
     },
+    // The native remover's per-user folder (`REMOVER_HOME`), purged like a data
+    // root except by the run that has just started a remover there: that
+    // remover removes it when it leaves it empty. A remover that was ended
+    // before it could leaves its copy here for the next purge.
+    Mark {
+        name: "Uninstaller staging",
+        says: Text::CleanupMarkRemoverHome,
+        kind: Kind::Data,
+        remover: Remover::Staging,
+        writer: "../bt-platform/src/deferred_removal.rs:schedule",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,7 +561,9 @@ struct Scope {
     /// macOS: this bundle's installation home, `<parent>/.<Bundle>.folio-update`.
     update_home: Option<PathBuf>,
     /// A private random child directory is made below this per-user root for
-    /// the native remover. In a sandbox it stays below `BT_UNINSTALL_ROOT`.
+    /// the native remover ([`REMOVER_HOME`]). It is inside no purge root: the
+    /// remover is running from it when the purge runs. In a sandbox the
+    /// variables it is named from are below `BT_UNINSTALL_ROOT`.
     remover_home: PathBuf,
     sandbox: Option<PathBuf>,
     /// The language the door speaks: English for `--uninstall-cleanup`, the
@@ -597,10 +626,7 @@ impl Scope {
         let mut data = Vec::new();
         for mark in INVENTORY {
             debug_assert!(!mark.writer.is_empty());
-            if let Remover::Data(host, base, relative) = mark.remover {
-                if host != platform && base != Base::Temp {
-                    continue;
-                }
+            if let Some((base, relative)) = mark.remover.data_root_on(platform) {
                 let head = match base {
                     Base::Roaming => named("APPDATA")?,
                     Base::Local => named("LOCALAPPDATA")?,
@@ -685,14 +711,10 @@ impl Scope {
         } else {
             (None, None)
         };
-        let remover_home = if sandbox {
-            temp.join("Folio")
-        } else {
-            match platform {
-                HostPlatform::Windows => named("LOCALAPPDATA")?.join("Folio"),
-                HostPlatform::MacOs => home.join("Library/Application Support/Folio"),
-                HostPlatform::OtherUnix => temp.join("folio"),
-            }
+        let remover_home = match platform {
+            HostPlatform::Windows => named("LOCALAPPDATA")?.join(REMOVER_HOME),
+            HostPlatform::MacOs => home.join("Library/Application Support").join(REMOVER_HOME),
+            HostPlatform::OtherUnix => temp.join(REMOVER_HOME),
         };
         let mut agents: [Vec<PathBuf>; 3] = Default::default();
         for (index, (variable, default)) in [
@@ -723,6 +745,15 @@ impl Scope {
         })
     }
 }
+/// **The native remover's per-user folder's name**, beside Folio's data folders
+/// and never one of them. `--uninstall --remove-data` purges the data folders
+/// after the program's step has started the remover from its private folder
+/// here, and a purge root holding that folder would be refused the running
+/// remover's image on Windows (the clean-VM row N9: "Local data (including
+/// WebView2) … refused (Access is denied)") and would delete it from under the
+/// remover elsewhere. The remover removes this folder when it leaves it empty.
+const REMOVER_HOME: &str = "Folio-uninstall";
+
 /// **A purge root: the head the operating system names, resolved, and Folio's name below it as
 /// written.**
 ///
@@ -842,9 +873,20 @@ fn execute_with_claim<T>(
         };
         claims.push(claim);
     }
+    // The remover's folder is purged with the data roots and is none of them
+    // (`REMOVER_HOME`).
+    let roots: Vec<(&Mark, PathBuf)> = scope
+        .purge_roots
+        .iter()
+        .map(|(mark, root)| (*mark, root.clone()))
+        .chain(std::iter::once((
+            mark_of(Remover::Staging),
+            scope.remover_home.clone(),
+        )))
+        .collect();
     let mut prepared = Vec::new();
     if purge {
-        for (_, root) in &scope.purge_roots {
+        for (_, root) in &roots {
             let result = prepare_tree(root, &scope.exe);
             if let Err(error) = &result
                 && let Some(held) = held_file(error)
@@ -1002,7 +1044,10 @@ fn execute_with_claim<T>(
             {
                 entries.push(Entry::new(label, Fate::Kept(Text::CleanupRuntime)));
             }
-            Remover::Data(..) | Remover::RecoverySnapshots | Remover::RuntimeClaims => {}
+            Remover::Data(..)
+            | Remover::RecoverySnapshots
+            | Remover::RuntimeClaims
+            | Remover::Staging => {}
             #[cfg(target_os = "linux")]
             Remover::LinuxConfig | Remover::LinuxCache => {}
         }
@@ -1015,7 +1060,12 @@ fn execute_with_claim<T>(
     }
     if purge {
         let complete = !refused(&entries);
-        for ((mark, root), prepared) in scope.purge_roots.iter().zip(prepared) {
+        // A remover this run started is running from its folder now.
+        let started_a_remover = entries.iter().any(|e| e.fate == Fate::Scheduled);
+        for ((mark, root), prepared) in roots.iter().zip(prepared) {
+            if mark.remover == Remover::Staging && started_a_remover {
+                continue;
+            }
             if !complete {
                 entries.push(Entry::new(
                     format!("{}: {}", label(mark, lang), root.display()),
@@ -2029,6 +2079,14 @@ fn door_words(remove_data: bool, pid: u32) -> Vec<OsString> {
     words
 }
 
+/// **The door's process as the way out starts it**: through
+/// `quiet_breakaway_command`, so it outlives the asker's job and holds none of
+/// the asker's standard streams — a resident Folio's are its `diagnostics.log`,
+/// inside the data folder `--remove-data` removes.
+fn door_command(exe: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    bt_platform::quiet_breakaway_command(exe)
+}
+
 /// **The process's last act after *Uninstall* on the Settings card**: start its
 /// own executable as the door with `--after-pid` naming itself, and return —
 /// the door waits for this process to end before it touches anything. Nothing
@@ -2040,7 +2098,7 @@ pub(crate) fn leave_armed() {
         return;
     };
     let started = std::env::current_exe().and_then(|exe| {
-        bt_platform::quiet_breakaway_command(exe)
+        door_command(exe)
             .args(door_words(remove_data, std::process::id()))
             .spawn()
     });

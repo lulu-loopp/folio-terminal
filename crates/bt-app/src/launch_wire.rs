@@ -346,6 +346,33 @@ impl LaunchRequest {
         Some(job.told_by_a_launch(report.failure(), landed))
     }
 
+    /// **What `diagnostics.log` says a report came to**, read off the card the turn has placed:
+    /// `raised` is [`Self::told`]'s answer, `landed` the window the launch landed in and `shown`
+    /// the window the update card's presenter shows it in after the turn's card settle
+    /// (`update_card::Shown::card`, which is what a window draws from). The line names where the
+    /// card is, not what the job was asked to do.
+    #[must_use]
+    pub(crate) fn told_line<W: Copy + Eq>(
+        raised: bool,
+        landed: Option<W>,
+        shown: Option<W>,
+    ) -> &'static str {
+        match (raised, shown) {
+            (false, _) => {
+                "Folio: update job — a launch handed over reports an earlier update's failure; the running update keeps the card"
+            }
+            (true, Some(window)) if Some(window) == landed => {
+                "Folio: update job — a launch handed over reports an earlier update's failure; its card is up in the window the launch landed in"
+            }
+            (true, Some(_)) => {
+                "Folio: update job — a launch handed over reports an earlier update's failure; its card is up in another window"
+            }
+            (true, None) => {
+                "Folio: update job — a launch handed over reports an earlier update's failure; no window shows its card"
+            }
+        }
+    }
+
     /// The line this request crosses as.
     #[must_use]
     fn encode(&self) -> String {
@@ -1459,6 +1486,141 @@ mod tests {
         assert_eq!(plain.told(&mut job, Some(1)), None);
         assert_eq!(job.card_window(), None);
         let _ = std::fs::remove_dir(&here);
+    }
+
+    /// **RED (047-U36-CARD) — a report that lands in a window of its own is up in that window
+    /// after the turn's card settle, whether the start was this installation's or another's.**
+    ///
+    /// The clean-VM row N15: a failure start of one installation handed itself to a running Folio
+    /// of another, the launch opened a window (the default landing), the job was told the new
+    /// window — and the card was drawn nowhere a reader could see, though the log said it was
+    /// raised. The settle that follows the telling (`FolioApp::settle_update_card`) asks
+    /// [`crate::update_job::Job::hand_over`] whether the card's window is still open, against the
+    /// window directory; that directory had been walked at the turn's head, before the window
+    /// door opened the launch's window, so the card was taken for one whose window had closed and
+    /// seated in the older window, behind the new one. The window door now names the window in
+    /// the directory as it opens it (pinned at `launch_landing_tests`); this holds what the
+    /// settle does with the directory that door leaves and with the one the turn's head walked,
+    /// for both installations, and what the log line says of each.
+    ///
+    /// The receiver's installation never enters the job: the report's folder is a name on the
+    /// card, and a folder in another copy's home is shown as one in its own.
+    ///
+    /// MUTATIONS: in [`LaunchRequest::told_line`], drop the `Some(window) == landed` guard (the
+    /// line says "the window the launch landed in" of the card seated in the older window — the
+    /// rehearsal's false line); in `Job::hand_over`, keep a card whose window is not in the
+    /// directory where it is (the turn-head case leaves it in the landed window, so the
+    /// assertion that such a directory moves it goes red — the reason the door must name it).
+    #[test]
+    fn a_report_landing_in_a_window_of_its_own_is_up_there_after_the_settle() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = take();
+        let root = std::env::temp_dir().join(format!("bt-app-047-u36-card-{}", std::process::id()));
+        let receiver = root.join("Folio 终端");
+        let other = root.join("其他 copy");
+        for home in [&receiver, &other] {
+            std::fs::create_dir_all(home.join(".folio-update")).expect("an installation's home");
+        }
+        // The receiver's own windows: one the reader was in, and the summoned terminal.
+        const OLDER: u32 = 1;
+        const QUAKE: u32 = 2;
+        const LANDED: u32 = 9;
+        for (starter, label) in [
+            (&receiver, "same installation"),
+            (&other, "another installation"),
+        ] {
+            for failure in reports(starter.join(".folio-update")) {
+                let start = argv(&["--update-failed", "journal.json"]);
+                let request = LaunchRequest::of_start(&start, Some(&failure), all_folders, None)
+                    .expect("a start a rollback sent crosses");
+                let decision = decide(&request.encode(), || true).expect("the line is a request");
+                park(decision.admitted.expect("the running Folio admitted it"));
+                let arrived = take();
+                assert_eq!(arrived.len(), 1, "{label}: {failure:?}");
+                // The default landing for a plain start is a window of its own.
+                assert_eq!(
+                    landing(&arrived[0], bt_persist::LaunchOpensV1::default()),
+                    Landing::Window
+                );
+
+                // The turn, as the window thread runs it: the landing records the new window as
+                // the one the reader is in, the job is told it, and the card settles against the
+                // window directory — once as the window door now leaves it, naming the new
+                // window, and once as the turn's head walked it, before the door opened it
+                // (the rehearsal's turn).
+                let visited = [QUAKE, OLDER, LANDED];
+                for (open, seated, says) in [
+                    (
+                        &[OLDER, QUAKE, LANDED][..],
+                        LANDED,
+                        "its card is up in the window the launch landed in",
+                    ),
+                    (
+                        &[OLDER, QUAKE][..],
+                        OLDER,
+                        "its card is up in another window",
+                    ),
+                ] {
+                    let mut job = crate::update_job::Job::<u32>::with_offers(true);
+                    assert_eq!(
+                        arrived[0].told(&mut job, Some(LANDED)),
+                        Some(true),
+                        "{label}: {failure:?}"
+                    );
+                    job.hand_over(&crate::update_job::Presenters {
+                        visited: &visited,
+                        open,
+                        quake: Some(QUAKE),
+                    });
+                    let shown = crate::update_card::shown(
+                        &job,
+                        false,
+                        crate::update::CheckView::default(),
+                        None,
+                        0,
+                    );
+                    let (window, paint) = shown.card.as_ref().expect("the card is up");
+                    assert_eq!(*window, seated, "{label}: {failure:?} {open:?}");
+                    // What a window draws from (`Runtime::update_card_is_up`).
+                    assert_eq!(job.card_window(), Some(seated), "{label}: {failure:?}");
+                    if let Failure::Incomplete { folder } = &failure {
+                        assert_eq!(
+                            &paint.folder, folder,
+                            "{label}: the folder is named as sent"
+                        );
+                    }
+                    assert!(
+                        LaunchRequest::told_line(true, Some(LANDED), Some(*window)).ends_with(says),
+                        "{label}: {failure:?} {open:?}"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **RED (047-U36-CARD) — the log line says where the card is**, from the window the settle
+    /// left it in, never from what the job was asked: a card seated elsewhere, or nowhere, is
+    /// not "up in the window the launch landed in".
+    ///
+    /// MUTATION: drop the `Some(window) == landed` guard of [`LaunchRequest::told_line`]; the
+    /// card seated in another window is reported as up where the launch landed.
+    #[test]
+    fn the_log_line_names_where_the_card_is() {
+        let line = |raised, landed, shown| LaunchRequest::told_line::<u32>(raised, landed, shown);
+        assert!(
+            line(true, Some(9), Some(9))
+                .ends_with("its card is up in the window the launch landed in")
+        );
+        assert!(line(true, Some(9), Some(1)).ends_with("its card is up in another window"));
+        assert!(line(true, None, Some(1)).ends_with("its card is up in another window"));
+        assert!(line(true, Some(9), None).ends_with("no window shows its card"));
+        for shown in [None, Some(1), Some(9)] {
+            assert!(
+                line(false, Some(9), shown).ends_with("the running update keeps the card"),
+                "{shown:?}"
+            );
+        }
     }
 
     /// **RED (U-36) — the start's hand-over builds its request with its pass's report.**

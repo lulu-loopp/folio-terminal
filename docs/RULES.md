@@ -1115,12 +1115,22 @@ quit door with `Reason::UpdateRestart`), never the job alone. About → Version 
 the one update surface: its line is `Folio <version> (<commit>) · <state>`, and
 its single control is read from the job's actionable state and route, never
 from the check's offer alone — `Pending` names its state and has no verb; an
-eligible offer has **Update and restart** (the card's Update); a download shows
+eligible offer has **Update and restart** (the card's Update, and the restart
+too: the button's name is the consent — when the download it started is verified,
+Folio restarts as the Ready card's Restart does, through `App::restart_for_update`
+and every refusal it has, without the Ready card asking again; a refused restart
+leaves the Ready card up and the row at `<tag> ready` with **Restart…**; the ask
+is spent at `Verified` and let go when its transaction fails, is cancelled or is
+not the one running, `Job::ask_restart_when_ready`, N10 2026-10-06 — the Ready
+card still asks on every other road: the card's Update, a download put away and
+finished on its own); a download shows
 `Downloading <tag>` and its progress; past the download the line says what the job
 is doing — `Verifying <tag>` (`Staged`), `<tag> ready` with **Restart…**, which
 raises the Ready card again (`Verified`), `Restarting…` (`Quitting`,
 `Committing`) — with the bar full and no verb while nothing can be pressed (all
-2026-10-05); the control is a keyboard stop only while it is enabled. A focus on any
+2026-10-05); the state is one state, so `Last checked: <when>` — the state of a check
+that got no answer — is not shown beside an offer or a transaction (scheme 甲,
+2026-10-01); the control is a keyboard stop only while it is enabled. A focus on any
 Settings control that stops being a stop goes to the nearest stop before it on the page,
 else the nearest after it, and to the dialog's `×` only when the page has no stop
 (2026-10-05); a managed copy names its
@@ -1410,12 +1420,34 @@ nothing before it refused; a run that refused keeps the data and says so on each
 data row, for both verbs. A managed copy's row names the manager's command with the
 cleanup joined before it by `cmd /c "… && …"` where the manager runs none, and
 says to close Folio first. `--uninstall-cleanup` is otherwise unchanged, for the
-managers' hooks.
+managers' hooks. **A process has gone when it has let go of what it held** (0.4.7
+uninstall fix): the door waiting for the Folio that asked, and the remover waiting
+for the processes it outlives, wait on Windows until the process object is
+signalled — its handles closed, its data-directory claim with them, and its image
+unmapped — and not merely until its exit code can be read, which comes first. And
+`uninstall.cmd` is a batch file `cmd.exe` reads: CRLF lines, no byte-order mark,
+nothing past ASCII before its `chcp 65001`, and no command before its question
+that reads the script's input. **The process that removes the data folder holds
+nothing inside it** (0.4.7 T-UNINSTALL-SELFHOLD): the door Folio's way out starts
+has no standard stream of the asker's — all three are the null device, and its
+words reach the person only in the box it raises when the run did not complete —
+and no Folio process passes a handle it was started with to a child that does not
+name it, so no `diagnostics.log` handle reaches the door down a chain of Folio
+processes. The purge's probe therefore never meets the door's own handles. The
+native remover runs from a private folder below a per-user folder of its own,
+`Folio-uninstall` beside the data folders (`%LOCALAPPDATA%` on Windows,
+`~/Library/Application Support` on macOS), which no purge root contains. The remover,
+and a schedule that was refused, remove it once nothing of it remains; a purge takes
+what an ended remover left there (its own row, "Uninstaller staging"), except on the
+run that has just started a remover from it, and the cask's `zap` trashes it.
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
 states that it rules, together with its closure addendum; the owner's ruling of
 2026-09-27 at the end of `docs/plans/design/self-update-2026-09-16.md`; trailing
-entry 2026-09-29 *One press uninstalls Folio* (T-UNINSTALL-UX).
+entry 2026-09-29 *One press uninstalls Folio* (T-UNINSTALL-UX); trailing entry
+2026-10-06 *The uninstall waits for its asker to let go, and its script is CRLF*;
+trailing entry 2026-10-07 *The uninstaller and its remover hold nothing in the data
+folders they remove*.
 **Overrides.** §6 supersedes §§2–5 wherever they disagree: §3's ownership rule is
 replaced by §6's two-kinds-of-mark rule, and §6 corrects revision 1's harm
 ranking and its claim about which removal code was new.
