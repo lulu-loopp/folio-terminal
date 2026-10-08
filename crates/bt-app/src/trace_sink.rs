@@ -931,7 +931,7 @@ mod tests {
     #[test]
     fn the_trace_is_flushed_through_its_door_only_on_the_way_out() {
         std::thread::spawn(|| {
-            crate::tests::on_the_window_thread();
+            crate::test_support::on_the_window_thread();
             drop(Shutdown);
             assert!(
                 crate::hang_watch::admissions_on_this_thread().is_empty(),

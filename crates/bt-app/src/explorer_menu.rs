@@ -2626,7 +2626,7 @@ mod tests {
                 exit_code: 0,
             }
         }
-        if !crate::tests::alone_in_a_process(
+        if !crate::test_support::alone_in_a_process(
             "explorer_menu::tests::the_menu_removal_process_waits_on_its_main_thread_as_a_worker",
             b"",
         ) {
@@ -2669,7 +2669,7 @@ mod tests {
                 CleanupRegistration::Refused(format!("{:?}", role())),
             )]
         }
-        if !crate::tests::alone_in_a_process(
+        if !crate::test_support::alone_in_a_process(
             "explorer_menu::tests::the_uninstall_cleanup_waits_on_its_main_thread_as_a_worker",
             b"",
         ) {

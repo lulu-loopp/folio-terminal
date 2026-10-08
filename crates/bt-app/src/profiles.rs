@@ -21009,7 +21009,7 @@ mod tests {
     /// [`PaneMenuLayout::holds`], the safety triangle — in both states. Leaving
     /// both surfaces closes a peek after the grace and leaves a pinned menu up.
     /// The submenu's opening and closing is `drive_pane_menu_hover`'s, which
-    /// reads no pin (`tests.rs` holds that by name).
+    /// reads no pin (`app_mouse_tests.rs` holds that by name).
     ///
     /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` and the
     /// pinned half goes red.

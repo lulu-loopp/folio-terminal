@@ -17606,7 +17606,7 @@ mod tests {
     /// empty and the files are gone.
     #[test]
     fn launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread() {
-        crate::tests::on_the_window_thread();
+        crate::test_support::on_the_window_thread();
         let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
         let expected = looked_up_by_name(name)
             .map(|found| found.files)
@@ -17651,7 +17651,7 @@ mod tests {
     /// machine's.
     #[test]
     fn the_launch_face_is_looked_up_by_name_and_the_picker_list_comes_from_the_lane() {
-        crate::tests::on_the_window_thread();
+        crate::test_support::on_the_window_thread();
         let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
         let looked_up = looked_up_by_name(name);
         let files = monospace_family_files(name);
