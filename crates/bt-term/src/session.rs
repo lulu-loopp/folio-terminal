@@ -80,6 +80,16 @@ const MAX_OFFSCREEN_RECORDS: usize = 128;
 /// about the same kind of producer. Split reads of one repaint arrive one or two milliseconds apart,
 /// two orders of magnitude inside it.
 const REPAINT_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// **The statuses a shell reports for a job that was stopped, not ended**: 128 + the stop signal,
+/// as bash (`jobs.c`, `128 + WSTOPSIG`) and zsh (`jobs.c`, `0200 | WSTOPSIG`) write `$?` and
+/// `folio.bash`/`folio.zsh` carry it in `OSC 133;D`. The signal numbers differ by system and the
+/// shell may be on another one (ssh), so both sets are here: Linux `SIGSTOP` 19, `SIGTSTP` 20,
+/// `SIGTTIN` 21, `SIGTTOU` 22 (147–150); macOS and the BSDs `SIGSTOP` 17, `SIGTSTP` 18, `SIGTTIN`
+/// 21, `SIGTTOU` 22 (145, 146, 149, 150). None of these is 128 + a signal that ends a process on
+/// the other system (Linux 17/18 are `SIGCHLD`/`SIGCONT`, macOS 19/20 are `SIGCONT`/`SIGCHLD`, all
+/// of which a process survives by default). The stranded-screen rule does not fire on these.
+const JOB_STOPPED_EXIT_CODES: [i32; 6] = [145, 146, 147, 148, 149, 150];
 /// **What the disk said about one path the terminal named** — the ledger's value, and the one
 /// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
 ///
@@ -5702,19 +5712,33 @@ impl DualPlaneSession {
                 //
                 // The evidence is the marker order, not the screen: this `D` answers no `C` written
                 // on the alternate screen (see [`Self::alternate_command_starts`]) while a command
-                // started on the primary screen is still running. A full-screen program running its own cycle on its own
-                // canvas pairs its `D` with its own `C` and is not this; one that writes `133;A`
-                // alone is not this either. What the order cannot tell apart, and what is accepted:
-                // a full-screen host that passes OSC 133 through unchanged and starts a child shell
-                // that inherited Folio's integration — that child's first prompt writes a bare `D`
-                // here too, and the host's screen is then left, which the person can re-enter (tmux
+                // started on the primary screen is still running. A full-screen program running its
+                // own cycle on its own canvas pairs its `D` with its own `C` and is not this; one
+                // that writes `133;A` alone is not this either. What the order cannot tell apart,
+                // and what is accepted: a full-screen host that passes OSC 133 through unchanged and
+                // starts a child shell that inherited Folio's integration and writes a `D` with no
+                // `C` — a cmd-shaped child, whose `PROMPT` writes `D` at every prompt (a bash or zsh
+                // child writes `D` only for a command it ran, after that command's own `C` on the
+                // same canvas). The host's screen is then left, which the person can re-enter (tmux
                 // does not pass 133 through).
+                //
+                // **A stopped program is not a dead one** (T-RESET-MODES round 2, coordinator ruling
+                // 2026-10-08, after Kimi's review). Ctrl+Z on a full-screen program with no suspend
+                // handler leaves it alive and stopped with its alternate screen up, and the shell's
+                // `D` for that command arrives here exactly as a dead program's would; leaving the
+                // screen and resetting its modes would have `fg` resume it on the primary screen
+                // with its mouse and key encodings gone. bash and zsh report a stopped job's status as
+                // 128 + the stop signal, so a `D` carrying one of [`JOB_STOPPED_EXIT_CODES`] keeps
+                // the program's screen, as before this rule. fish and nushell cannot be told apart
+                // this way: fish leaves `$status` at the previous command's value when a job stops,
+                // and nushell reports a frozen job as 0.
                 //
                 // So the command end is held, the segment that carried it settles on the screen it
                 // was written to, and [`Self::return_from_stranded_alternate_screen`] does the rest
                 // before a byte after it is parsed.
                 if screen == ScreenId::Alternate {
                     if self.alternate_command_starts == 0
+                        && !exit_code.is_some_and(|code| JOB_STOPPED_EXIT_CODES.contains(&code))
                         && self
                             .shell_commands_running
                             .get(&ScreenId::Primary)
@@ -39199,6 +39223,61 @@ mod tests {
             modes.keyboard.modify_other_keys,
             crate::adapter::ModifyOtherKeys::Two
         );
+    }
+
+    /// RED (T-RESET-MODES round 2, coordinator ruling 2026-10-08) — **a stopped full-screen program
+    /// keeps its screen**: Ctrl+Z on a program with no suspend handler leaves it alive with its
+    /// alternate screen up, and the shell's `D` for it carries 128 + the stop signal. No return, no
+    /// reset — `fg` resumes the program on its own screen with its own modes — for every stop
+    /// signal on Linux (147–150) and on macOS (145, 146, 149, 150). A killed program's codes
+    /// (137, 143, 130, 1) are the stranded tests' and still return.
+    ///
+    /// MUTATION: drop the `JOB_STOPPED_EXIT_CODES` check from the stranded arm — the pane leaves
+    /// the alternate screen and the program's modes are reset.
+    #[test]
+    fn a_stopped_full_screen_program_keeps_its_screen() {
+        for code in JOB_STOPPED_EXIT_CODES {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}全屏 tui").as_bytes())
+                .unwrap();
+            session
+                .feed(
+                    format!("\r\nzsh: suspended  tui\r\n\x1b]133;D;{code}\x07{PROMPT_A}主屏 $ {PROMPT_B}")
+                        .as_bytes(),
+                )
+                .unwrap();
+            let modes = session.terminal_modes();
+            assert_eq!(session.live_screen, ScreenId::Alternate, "{code}");
+            assert!(modes.alternate_screen, "{code}");
+            assert_eq!(
+                modes.mouse_tracking,
+                crate::adapter::MouseTracking::Motion,
+                "{code}"
+            );
+            assert_eq!(modes.keyboard.kitty, 1, "{code}");
+            assert_eq!(
+                modes.keyboard.modify_other_keys,
+                crate::adapter::ModifyOtherKeys::Two,
+                "{code}"
+            );
+        }
+        for code in [130, 137, 143, 1] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}").as_bytes())
+                .unwrap();
+            session
+                .feed(format!("\x1b]133;D;{code}\x07{PROMPT_A}$ {PROMPT_B}").as_bytes())
+                .unwrap();
+            assert_eq!(
+                session.live_screen,
+                ScreenId::Primary,
+                "{code}: a killed program"
+            );
+        }
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **the first time a session is asked for a keyboard flag it does

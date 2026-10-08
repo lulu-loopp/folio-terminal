@@ -20,6 +20,10 @@
 //! stays on the alternate screen and the wait for a prompt on the primary one gives up, saying
 //! what the screen holds.
 //!
+//! **A stopped program is the other half** (round 2): the same program stopped from outside under
+//! zsh is alive, and the shell's `D` for it carries 128 + the stop signal. Its screen and modes
+//! stay, so `fg` resumes it where it was.
+//!
 //! **Nothing here touches the user's own shell**: `bt_pty::test_shell` starts it without the
 //! user's startup files, with a line editor that saves no history and a temporary home.
 
@@ -162,9 +166,9 @@ impl Probe {
         });
     }
 
-    /// Run `program_command` at the prompt, end the program it starts with `end` once it has
-    /// set its modes, and check the pane the shell comes back to.
-    fn kill_a_full_screen_program(mut self, program_command: &str, end: impl Fn(&str)) {
+    /// Run `program_command` at the prompt and wait until the program it starts has set its
+    /// modes; its process id.
+    fn start_a_full_screen_program(&mut self, program_command: &str) -> String {
         self.wait_until("the first prompt", |probe| {
             probe.rows_holding(PROMPT_ON_SCREEN) == 1
         });
@@ -174,13 +178,15 @@ impl Probe {
             probe.value_after(PID_MARKER).is_some()
         });
         self.settle();
-        let modes = self.session.terminal_modes();
-        assert!(modes.alternate_screen, "the program's modes reach the pane");
-        assert_eq!(modes.mouse_tracking, MouseTracking::Motion);
-        assert_eq!(modes.keyboard.kitty, 1);
-        assert_eq!(modes.keyboard.modify_other_keys, ModifyOtherKeys::Two);
+        assert_program_modes_on(&self.session);
+        self.value_after(PID_MARKER).unwrap()
+    }
 
-        end(&self.value_after(PID_MARKER).unwrap());
+    /// Run `program_command` at the prompt, end the program it starts with `end` once it has
+    /// set its modes, and check the pane the shell comes back to.
+    fn kill_a_full_screen_program(mut self, program_command: &str, end: impl Fn(&str)) {
+        let pid = self.start_a_full_screen_program(program_command);
+        end(&pid);
         // The prompt the command was typed at, and the one the shell draws after it — both on the
         // primary screen.
         self.wait_until("the shell's next prompt on the primary screen", |probe| {
@@ -199,6 +205,15 @@ impl Probe {
         let _ = self.pty.write(b"exit\r");
         let _ = self.pty.shutdown();
     }
+}
+
+fn assert_program_modes_on(session: &DualPlaneSession) {
+    let modes = session.terminal_modes();
+    assert!(modes.alternate_screen, "the program's screen is up");
+    assert_eq!(modes.mouse_tracking, MouseTracking::Motion);
+    assert!(modes.sgr_mouse);
+    assert_eq!(modes.keyboard.kitty, 1);
+    assert_eq!(modes.keyboard.modify_other_keys, ModifyOtherKeys::Two);
 }
 
 /// A program file under the temporary directory, removed when dropped.
@@ -271,23 +286,23 @@ fn a_killed_full_screen_program_under_powershell_leaves_the_prompt_on_the_primar
     }
 }
 
-/// RED (T-RESET-MODES, ruling 2026-10-08 (2) and (3)) — **the same under zsh with `folio.zsh`
-/// over a Unix pty, the program killed with `SIGKILL`.**
-///
-/// MUTATION: drop the stranded-screen arm from the session's `D` handler — the wait for the prompt
-/// on the primary screen gives up with the pane still on the alternate screen.
+/// The program for the zsh arms: its modes, its process id, then a long sleep in its place.
 #[cfg(unix)]
-#[test]
-fn a_killed_full_screen_program_under_zsh_leaves_the_prompt_on_the_primary_screen() {
-    let program = ProgramFile::new(
+fn a_unix_full_screen_program() -> ProgramFile {
+    ProgramFile::new(
         "sh",
         &format!(
             "printf '{}'\necho \"BTPI\"\"D=$$\"\nexec sleep 600\n",
             PROGRAM_MODES.replace('\x1b', "\\033")
         ),
-    );
+    )
+}
+
+/// zsh, started the way a test starts a shell, with `folio.zsh` wrapped around the probe's prompt.
+#[cfg(unix)]
+fn zsh_with_the_integration() -> Probe {
     let mut probe = Probe::spawn(PtyCommand::interactive_shell("/bin/zsh").arg("-i"));
-    // zsh's own first prompt, then the probe's, with the integration wrapped around it.
+    // zsh's own first prompt, then the probe's.
     probe.settle();
     probe
         .pty
@@ -299,12 +314,60 @@ fn a_killed_full_screen_program_under_zsh_leaves_the_prompt_on_the_primary_scree
             .as_bytes(),
         )
         .unwrap();
-    probe.kill_a_full_screen_program(&format!("sh '{}'\r", program.0.display()), |pid| {
-        let status = Command::new("kill")
-            .args(["-KILL", pid])
-            .output()
-            .unwrap()
-            .status;
-        assert!(status.success(), "the program {pid} is ended");
-    });
+    probe
+}
+
+#[cfg(unix)]
+fn send_signal(signal: &str, pid: &str) {
+    let status = Command::new("kill")
+        .args([signal, pid])
+        .output()
+        .unwrap()
+        .status;
+    assert!(status.success(), "kill {signal} {pid}");
+}
+
+/// RED (T-RESET-MODES, ruling 2026-10-08 (2) and (3)) — **the same under zsh with `folio.zsh`
+/// over a Unix pty, the program killed with `SIGKILL`.**
+///
+/// MUTATION: drop the stranded-screen arm from the session's `D` handler — the wait for the prompt
+/// on the primary screen gives up with the pane still on the alternate screen.
+#[cfg(unix)]
+#[test]
+fn a_killed_full_screen_program_under_zsh_leaves_the_prompt_on_the_primary_screen() {
+    let program = a_unix_full_screen_program();
+    zsh_with_the_integration().kill_a_full_screen_program(
+        &format!("sh '{}'\r", program.0.display()),
+        |pid| {
+            send_signal("-KILL", pid);
+        },
+    );
+}
+
+/// RED (T-RESET-MODES round 2) — **a full-screen program stopped from outside under zsh keeps its
+/// screen and its modes**: zsh reports the stopped job (`$?` = 128 + `SIGSTOP`) and draws its
+/// prompt on the program's screen, as before the stranded-screen rule, so `fg` can resume the
+/// program where it was. The program is then ended with `SIGKILL`.
+///
+/// MUTATION: drop the `JOB_STOPPED_EXIT_CODES` check from the stranded arm — the pane returns to
+/// the primary screen and the wait for the prompt on the program's screen gives up.
+#[cfg(unix)]
+#[test]
+fn a_stopped_full_screen_program_under_zsh_keeps_its_screen() {
+    let program = a_unix_full_screen_program();
+    let mut probe = zsh_with_the_integration();
+    let pid = probe.start_a_full_screen_program(&format!("sh '{}'\r", program.0.display()));
+    send_signal("-STOP", &pid);
+    probe.wait_until(
+        "the shell's prompt on the stopped program's screen",
+        |probe| {
+            probe.session.terminal_modes().alternate_screen
+                && probe.rows_holding(PROMPT_ON_SCREEN) >= 1
+        },
+    );
+    probe.settle();
+    assert_program_modes_on(&probe.session);
+    send_signal("-KILL", &pid);
+    let _ = probe.pty.write(b"exit\r");
+    let _ = probe.pty.shutdown();
 }
