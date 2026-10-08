@@ -4875,3 +4875,39 @@ fn the_macos_exit_never_opens_the_installed_build_plainly_over_a_journal_it_cann
         "no journal at all"
     );
 }
+
+/// RED (E1 round 3; role #8 on macOS, the applier's window election) — **a
+/// macOS applier that finds a journal this build cannot read whole ends
+/// `Ended::StoodAside`, as the Windows applier does**: no mark, nothing
+/// recorded, the window duty left to the build that armed it (nothing is
+/// started here), the journal byte for byte as it was, and the exit code of
+/// every end that is neither a commit nor a refusal of its line (1).
+///
+/// MUTATION: remove the `Window::StoodAside` arm of `apply` (it falls into
+/// the catch-all and ends `Ended::Refused`, exit code 2).
+#[test]
+fn the_macos_applier_stands_aside_from_what_it_cannot_read_whole() {
+    let install = shape_install("beyond-applier");
+    let known = std::fs::read(install.home.journal()).unwrap();
+    for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        let (ended, world) = applied(install.road(limits(500, 5_000)), Fake::default());
+        assert!(matches!(ended, Ended::StoodAside(_)), "{what}: {ended:?}");
+        assert_eq!(ended.code(), 1, "{what}");
+        assert!(
+            world.relaunched.is_empty(),
+            "{what}: {:?}",
+            world.relaunched
+        );
+        assert!(
+            world.said.iter().any(|line| line.contains("stands aside")),
+            "{what}: {:?}",
+            world.said
+        );
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+}
