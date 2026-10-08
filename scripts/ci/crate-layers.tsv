@@ -1,0 +1,39 @@
+# The layers of docs/ARCHITECTURE.md section 3, one row per first-party crate (a workspace member
+# whose directory is under crates/; the vendored crates under vendor/ are not first-party).
+# scripts/ci/check-crate-edges.ps1 requires every normal and build dependency between two first-party
+# crates, target-specific tables included, to go from a higher layer to a lower one; a same-layer or
+# upward edge passes only as a row of scripts/ci/crate-edge-exemptions.tsv. A first-party crate with
+# no row here fails the gate, and so does a row naming no first-party crate: a new crate is placed on
+# purpose. Dev-dependencies are not layer edges: they are not in the shipped graph, and Cargo allows
+# them in both directions (bt-term and bt-pty each name the other as one, and so do bt-platform and
+# bt-pty; bt-pty naming bt-term only as a dev-dependency is ARCHITECTURE section 3.2's repair of D-13).
+#
+# 0  no first-party dependency: the Unicode tables, the layout solver, SHA-256 and the release format
+# 1  bt-transcript (the text model); bt-workbench, which depends on bt-layout and on nothing that
+#    reads a window, a clock, a file or the platform
+# 2  bt-doc
+# 3  detection and the viewport over documents
+# 4  bt-term and bt-platform, one layer: bt-term builds without the platform layer, and its
+#    dependency on bt-platform is recorded debt (section 3.2, structural-debt D-14)
+# 5  bt-render, bt-math, persistence and the PTY transport, over the platform; bt-term's dependency
+#    on bt-math goes upward and is recorded debt (section 3.2, structural-debt D-15)
+# 6  bt-app; bt-corpus and bt-lint-probe, tools nothing depends on; bt-source, which only tests read
+crate	layer
+bt-unicode	0
+bt-layout	0
+bt-winres	0
+bt-transcript	1
+bt-workbench	1
+bt-doc	2
+bt-detect	3
+bt-viewport	3
+bt-term	4
+bt-platform	4
+bt-render	5
+bt-math	5
+bt-persist	5
+bt-pty	5
+bt-app	6
+bt-corpus	6
+bt-lint-probe	6
+bt-source	6
