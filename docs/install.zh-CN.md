@@ -11,7 +11,7 @@
 
 网页预览需要 **WebView2 Runtime**。Windows 11 已内置；Windows 10 通常也有，若缺少可安装 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少时预览窗格提示。
 
-<!-- winget: add when live -->
+也可以用 winget：`winget install --id WeiyiShi.Folio --exact` 将同一压缩包解压到 winget 自己的软件包文件夹，并把 `folio` 加入 PATH。
 
 ## macOS
 
