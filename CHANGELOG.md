@@ -6,7 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- Every pasted picture's `[Image #N]` on an agent's input line can be opened, not only the last one.
 
 ## 0.4.7-preview — 2026-10-06
 
