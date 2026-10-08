@@ -4547,11 +4547,11 @@ mod probe_deadline_tests {
             crate::ThreadPriority::BelowNormal,
             move |worker| {
                 let command =
-                    crate::quiet_command_named(std::path::Path::new("cmd.exe")).expect("cmd.exe");
+                    crate::quiet_command_named(std::path::Path::new("ping.exe")).expect("ping.exe");
                 let ending = crate::probe_output_with_raw_tail(
                     worker,
                     &command,
-                    std::ffi::OsStr::new("/c \"ping -n 30 127.0.0.1 >nul\""),
+                    std::ffi::OsStr::new("-n 30 127.0.0.1"),
                     std::time::Duration::ZERO,
                 );
                 let _ =
