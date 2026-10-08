@@ -140,7 +140,7 @@ impl Runtime<'_> {
                     prompt_the_shell_opened,
                 ) {
                     write_pty_input(
-                        leaf.pty.as_ref(),
+                        leaf.input_target(),
                         reanchor_input,
                         "request PSReadLine anchor repair after resize quiescence",
                     )?;

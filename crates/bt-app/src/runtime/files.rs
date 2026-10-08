@@ -912,6 +912,11 @@ impl Runtime<'_> {
             return Ok(());
         }
         state.view = view;
+        // A Git page opening asks where git is again, so one installed while Folio runs is found
+        // (T-PROGRAMS-REFRESH); the page's questions wait on the git worker for that answer.
+        if view == seats::FilesView::Git {
+            self.ask_the_program_walk(crate::programs_lane::Trigger::GitPage);
+        }
         // The page is durable (R1), so turning it is a change to the session —
         // and the save is debounced exactly as every other layout change is.
         self.mark_session_dirty(Instant::now());

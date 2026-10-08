@@ -938,6 +938,19 @@ account's home only for a pane that has neither. A launcher's home mark (`~`) is
 on this side and is skipped. One reader: `DualPlaneSession::standing_folder`. An unreadable
 report forgets the reported folder (`docs/shell-integration.md`, OSC 7), which returns the pane to the folder it
 was opened in, never to the home folder.
+**The program list follows the machine** (T-PROGRAMS-REFRESH, 2026-10-08): which program each
+profile row starts here is asked again — on its own worker, never on the window thread — when a menu
+that lists programs opens (the new-tab menu, a pane's and a terminal's menu), when the Profiles, Agents
+or a Git page opens, when Windows says a setting moved (`WM_SETTINGCHANGE`), on a table edit and when a
+pane's birth needs an unanswered row; never on a timer. A row is known or unknown, and **nothing is
+decided from unknown**: no fallback, banner, saved-pane rewrite, default, hidden agent or "git not
+found"; a pane whose program depends on an unanswered row waits for the answer, keeping what is typed
+into it, and the window opens without waiting. One owner, `bt-app::programs_lane`. **A menu that
+lists programs always updates when a new answer arrives** (owner ruling 2026-10-04) — pointer inside
+or outside, keyboard highlight or not: a highlight the keyboard put on a row follows its item by
+identity and is cleared when the item is gone; a highlight the pointer lit is the row under the
+pointer (coordinator's decision with the ruling); an activation acts on the item the pressed row
+showed. One helper, `profiles::relit`.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration

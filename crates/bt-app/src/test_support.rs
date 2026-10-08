@@ -2370,6 +2370,8 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         pending_paste: None,
         // A fixture is not a restore, so nothing is owed to its prompt.
         pending_typing: None,
+        // Nor a shell being born: it was never going to have one.
+        birth: None,
     }
 }
 

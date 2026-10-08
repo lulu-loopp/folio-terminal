@@ -594,6 +594,9 @@ fn the_rung_has_one_owner() {
         "apply_tabs_leaf_metrics",
         // the restart reads the rung it hands the constructor
         "Runtime::restart_shell",
+        // and so does a pane in birth's landing, which is born at the rung it already has
+        // (T-PROGRAMS-REFRESH)
+        "Runtime::land_pane_birth",
         // the pane head's mark and its tip read the requested rung
         "Runtime::pane_text_sizes",
         "Runtime::rebuild_tooltip_anchors",

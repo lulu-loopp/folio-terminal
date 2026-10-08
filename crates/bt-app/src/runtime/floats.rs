@@ -1395,7 +1395,7 @@ impl Runtime<'_> {
             subject,
             powers,
             crumbs,
-            terminal: profiles::mark(self.default_profile()).in_line(),
+            terminal: profiles::identity_mark(&self.default_profile_id()).in_line(),
         }
     }
 
@@ -1590,12 +1590,15 @@ impl Runtime<'_> {
         // same predicate the head itself is drawn from, so "the head is here" and
         // "the menu repeats the head" can never be two answers.
         let lone = !self.seats.seat_wears_head(bt_layout::SeatKind::Terminal);
+        // Its `Split with` lists programs: the machine is asked again as it opens.
+        self.ask_the_program_walk(crate::programs_lane::Trigger::ProgramMenu);
         self.window.term_menu = Some(TermMenuState {
             point: [position.x as f32, position.y as f32],
             seat,
             pane: profiles::TermMenuPane::Shell,
             subject: self.term_menu_subject(seat),
             hover: None,
+            lit_by: profiles::LitBy::Pointer,
             lone,
             submenu_open: false,
             pointer_was: None,
@@ -1633,6 +1636,7 @@ impl Runtime<'_> {
                 ..profiles::TermMenuSubject::default()
             },
             hover: None,
+            lit_by: profiles::LitBy::Pointer,
             lone: false,
             submenu_open: false,
             pointer_was: None,
@@ -1842,6 +1846,8 @@ impl Runtime<'_> {
         // The highlight follows the surface it is on: opening lands on the first
         // profile, closing takes it back to the heading it came from, so `←`
         // leaves the keyboard somewhere rather than nowhere.
+        // Placed, not pointed at: it follows its item until a hand moves it.
+        menu.lit_by = profiles::LitBy::Keyboard;
         menu.hover = Some(if open {
             profiles::TermMenuHover::Submenu(0)
         } else {

@@ -21,7 +21,10 @@ use crate::{
     scrollback_quota, seats, size_authority_for_rectangle, solve_seats, solve_tree, trace_sink,
     trace_unchanged_present, video_seat, webhost,
 };
-use crate::{LeafView, TextScale};
+use crate::{
+    LeafView, TextScale, conpty_source_of, decided_birth, deliver_held_input, diagnostics,
+    resolved_birth_seed, toast,
+};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{Axis, SeatId, SeatMetrics, SizePolicy};
@@ -39,6 +42,124 @@ use winit::event::MouseScrollDelta;
 use winit::window::{Window, WindowId};
 
 impl Runtime<'_> {
+    /// **Bear every pane of this window whose rows the program walk has now answered**
+    /// (T-PROGRAMS-REFRESH; T-LAUNCH-PROBE's invariant).
+    ///
+    /// A pane in birth is decided here exactly as [`create_leaf_session`] decides one, from the
+    /// answers the application holds; one whose rows are still unknown goes on waiting, and is
+    /// asked about again by the next answer. A decided pane is born through
+    /// [`create_leaf_session`] — the same function and the same `PtyBirth` door as every other
+    /// shell — at its text size and its seat's current rectangle, from its seed with the default
+    /// resolved and its folder crossed ([`resolved_birth_seed`]); what was typed into it meanwhile
+    /// is written to the new shell first, in order. A birth that fails is met exactly as a pane
+    /// that fails at creation: the error leaves this call.
+    pub(crate) fn land_pane_births(&mut self) -> Result<()> {
+        let stored = self.app.settings_store.loaded().default_profile.clone();
+        let mut landed = false;
+        for tab_index in 0..self.window.tabs.len() {
+            let due: Vec<SeatId> = self.window.tabs[tab_index]
+                .sessions
+                .iter()
+                .filter(|(_, leaf)| {
+                    leaf.birth.as_ref().is_some_and(|birth| {
+                        decided_birth(&birth.seed, &stored, &self.app.profile_programs).is_ok()
+                    })
+                })
+                .map(|(seat, _)| *seat)
+                .collect();
+            for seat in due {
+                self.land_pane_birth(tab_index, seat, &stored)?;
+                landed = true;
+            }
+        }
+        if landed {
+            self.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn land_pane_birth(&mut self, tab_index: usize, seat: SeatId, stored: &str) -> Result<()> {
+        let tab_id = self.window.tabs[tab_index].id;
+        let Some(leaf) = self.window.tabs[tab_index].sessions.get(&seat) else {
+            return Ok(());
+        };
+        let Some(birth) = leaf.birth.as_ref() else {
+            return Ok(());
+        };
+        let held_seed = birth.seed.clone();
+        let probe_input = birth.probe_input.clone();
+        let text_scale = leaf.text_scale;
+        let Ok((identity, _)) = decided_birth(&held_seed, stored, &self.app.profile_programs)
+        else {
+            return Ok(());
+        };
+        let (seed, refusal) = resolved_birth_seed(&held_seed, &identity);
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let (layout, _, _, _) = solve_seats(
+            &self.window.tabs[tab_index].seats,
+            &self.window.renderer,
+            render_physical,
+            self.window.size_policy,
+            self.rail_posture(),
+            self.platform_chrome(),
+        );
+        let body = seats::birth_body_viewport(
+            &self.window.tabs[tab_index].seats,
+            &layout,
+            seat,
+            &seats::seat_metrics(self.window.renderer.dpi_milli().get()),
+            self.window.renderer.scale_factor() as f32,
+        );
+        let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
+        let born = create_leaf_session(
+            view,
+            body,
+            LeafId { tab: tab_id, seat },
+            &self.window.pty_wake,
+            probe_input.as_deref(),
+            &seed,
+            &self.app.profile_programs,
+            stored,
+            FormulaSwitches::from_settings(self.app.settings_store.loaded()),
+            scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
+            self.app.settings_store.loaded().line_wrapping,
+        )?;
+        // What was typed meanwhile goes to the shell that has just been born, ahead of anything
+        // typed after; the pane in birth, and with it its queue, goes only once that write was
+        // taken, so a write that fails leaves the bytes held where they were.
+        if let Some(birth) = self.window.tabs[tab_index]
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| leaf.birth.as_ref())
+        {
+            deliver_held_input(birth, born.input_target(), diagnostics::note)?;
+        }
+        let source = conpty_source_of(Some(&born));
+        self.window.tabs[tab_index].sessions.insert(seat, born);
+        if let (Some(shells), Some(source)) = (self.app.startup_shells.as_mut(), source) {
+            shells.born(tab_id, seat, source);
+            if let Some(lines) = shells.lines_if_born() {
+                for line in lines {
+                    trace_sink::stderr_line(line);
+                }
+                self.app.startup_shells = None;
+            }
+        }
+        if let Some(refusal) = refusal {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                refusal.notice(),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Re-solve the tree against the current surface and place the terminal
     /// seat.
     ///
@@ -1405,6 +1526,7 @@ impl Runtime<'_> {
             None,
             &inherited,
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
@@ -2077,11 +2199,14 @@ impl Runtime<'_> {
         // is up, so the new one starts unpinned and a press that raised it pins
         // it on its own way out.
         self.window.chevrons.menu_gone(Popup::Pane);
+        // Its `Split with` lists programs: the machine is asked again as it opens.
+        self.ask_the_program_walk(crate::programs_lane::Trigger::ProgramMenu);
         self.window.pane_menu = Some(PaneMenuState {
             point,
             seat,
             zoomed: self.seats.seat_is_zoomed(seat),
             hover: None,
+            lit_by: profiles::LitBy::Pointer,
             submenu: None,
             pointer_was: None,
             submenu_hold_until: None,
@@ -2227,6 +2352,8 @@ impl Runtime<'_> {
         // row, which is what `→` and a click both mean; closing takes the
         // highlight back to the heading it came from, so `←` leaves the keyboard
         // somewhere rather than nowhere.
+        // Placed, not pointed at: it follows its item until a hand moves it.
+        menu.lit_by = profiles::LitBy::Keyboard;
         menu.hover = match (open, was) {
             (Some(_), _) => Some(profiles::PaneMenuHover::Submenu(0)),
             (None, Some(heading)) => Some(profiles::PaneMenuHover::Row(heading)),
@@ -2336,6 +2463,7 @@ impl Runtime<'_> {
         let mut changed = menu.submenu != was_open;
         if !held && menu.hover != hovered {
             menu.hover = hovered;
+            menu.lit_by = profiles::LitBy::Pointer;
             changed = true;
         }
         // **The ring is the hover, seen from the other window** (B9). Read off

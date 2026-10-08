@@ -113,16 +113,10 @@ impl<W: Ord + Copy, S: Ord + Clone> WindowSeats<W, S> {
     }
 
     /// **News about a process-wide `subject`, for every open window, whatever it
-    /// wants** — a fact of the machine every window re-derives (the plan's
-    /// Environment broadcast). Each seat is told once however often this is
-    /// said before it takes.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T-PROGRAMS-REFRESH until 2026-10-31: the Environment broadcast tells every seat"
-        )
-    )]
+    /// wants** — a fact of the machine every window re-derives: the program
+    /// walk's answer (T-PROGRAMS-REFRESH; `FolioApp::adopt_program_walk`), which
+    /// the Environment broadcast, a menu or a page opening asked for. Each seat is
+    /// told once however often this is said before it takes.
     pub fn tell_all(&mut self, subject: &S) {
         for seat in self.seats.values_mut() {
             seat.owed.insert(subject.clone());
@@ -142,8 +136,8 @@ impl<W: Ord + Copy, S: Ord + Clone> WindowSeats<W, S> {
 ///
 /// Every holder the application keeps is handed to [`seat_every_holder`] from
 /// the one walk (`FolioApp::publish_window_directory`), so a second subject's
-/// seats (B2's broadcast, B3's facts) are seated and released on the same walk
-/// as the git watch's rather than on a walk of their own.
+/// seats (the program walk's news, B3's facts) are seated and released on the
+/// same walk as the git watch's rather than on a walk of their own.
 pub trait SeatedByDirectory<W> {
     /// Seat every window in `open` and release every other.
     fn seat_windows(&mut self, open: &[W]);

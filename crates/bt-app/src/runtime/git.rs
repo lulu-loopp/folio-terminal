@@ -23,6 +23,25 @@ use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
 impl Runtime<'_> {
+    /// **Git is somewhere else now** (T-PROGRAMS-REFRESH): a program walk found git where there
+    /// was none, or found another one. Every Git page this window holds was answered about the git
+    /// that was there — "not found" included — so its columns' and its floating pages' readings
+    /// are forgotten and asked again on their next draw, and its graphs re-read what they show.
+    pub(crate) fn reask_git_pages(&mut self) {
+        for tab in &mut self.window.tabs {
+            tab.git_trees.clear();
+            for state in tab.git_graphs.values_mut() {
+                state.cache.refresh();
+                state.invalidate();
+            }
+        }
+        for win in self.window.float.live_windows_mut() {
+            if let Some(files) = win.files_mut() {
+                files.git = git::GitCache::default();
+            }
+        }
+    }
+
     /// One card per thing a second launch asked for and did not get — the same
     /// door and the same cap [`Self::honour_command_line`] uses, because they are
     /// the same event arriving through two front doors.

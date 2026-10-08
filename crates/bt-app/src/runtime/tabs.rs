@@ -105,6 +105,7 @@ impl Runtime<'_> {
             TabSeed::default(),
             &self.app.profile_programs,
             &self.default_profile_id(),
+            &self.app.settings_store.loaded().default_profile,
             self.window.size_policy,
             // The posture and not the stored preference, for
             // [`Self::resolve_seat_layout`]'s reason: a tab born while the card
@@ -604,7 +605,7 @@ impl Runtime<'_> {
                     kind,
                     self.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
+                        .map(|leaf| profiles::identity_mark(&leaf.profile)),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -1490,7 +1491,7 @@ impl Runtime<'_> {
                 // for it, and `None` there is the honest answer rather than a
                 // path the chooser would reject.
                 profiles::spawn_place(
-                    self.default_profile(),
+                    profiles::index_of_id(&self.default_profile_id()),
                     None,
                     &bt_pty::SystemShellEnvironment,
                 )
@@ -2796,6 +2797,7 @@ impl Runtime<'_> {
             },
             &self.app.profile_programs,
             &self.default_profile_id(),
+            &self.app.settings_store.loaded().default_profile,
             self.window.size_policy,
             self.rail_posture(),
             self.platform_chrome(),

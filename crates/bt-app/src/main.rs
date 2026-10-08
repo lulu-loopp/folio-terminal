@@ -135,6 +135,7 @@ mod preview_viewport;
 mod preview_watch;
 mod preview_wrap;
 mod profiles;
+mod programs_lane;
 mod psreadline;
 mod pty_door;
 mod quake;
@@ -590,6 +591,10 @@ enum AppEvent {
     /// taskbar flash already running on a desktop whose bar turned out to hide itself
     /// ([`Runtime::replace_contradicted_flash`]), and that window may be sitting idle.
     TaskbarAnswered,
+    /// **The program walk published** (T-PROGRAMS-REFRESH): rows of what this machine can start,
+    /// the WSL and git facts beside them, or a walk's end. All of it waits in `programs_lane`'s
+    /// mailbox; this only breaks the parked loop, and the handler is the one place that adopts it.
+    ProgramsAnswered,
     /// **How this copy was installed has been read** (U-3): the fact is in
     /// `install_channel::channel()`.
     ///
@@ -845,6 +850,7 @@ impl AppEvent {
             | Self::ExplorerPackageChanged
             | Self::FontsScanned
             | Self::TaskbarAnswered
+            | Self::ProgramsAnswered
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
@@ -9537,7 +9543,9 @@ fn git_full_path(root: &Path, path: &str) -> PathBuf {
 /// [`cli::resolve`]'s plan. A function so the launch's place can be pinned without a window.
 fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
     LeafSeed {
-        profile: profiles::id(plan.profile),
+        profile: plan
+            .profile
+            .map_or_else(|| profiles::DEFAULT_IDENTITY.to_owned(), profiles::id),
         // **Named** (GitHub issue #16): `Open in Folio`, `folio <folder>`, `--cwd` and
         // `folio-here.cmd` all said where, so the profile's own starting place does not overrule it.
         cwd: plan.cwd.clone().map(profiles::SeedPlace::Named),
@@ -9636,6 +9644,9 @@ struct TermMenuState {
     /// What the pane could answer for when the menu was raised.
     subject: profiles::TermMenuSubject,
     hover: Option<profiles::TermMenuHover>,
+    /// Which hand lit `hover` last — what a relayout under it does with it
+    /// ([`profiles::relit`]).
+    lit_by: profiles::LitBy,
     /// **Whether the pane was the only one in its tab when the menu came up**
     /// (§7.1.6i's floor) — the one fact the pane-verb segment turns on.
     ///
@@ -9804,6 +9815,9 @@ struct PaneMenuState {
     /// anyway — the verb that would shuts the menu on its way through.
     zoomed: bool,
     hover: Option<profiles::PaneMenuHover>,
+    /// Which hand lit `hover` last — what a relayout under it does with it
+    /// ([`profiles::relit`]).
+    lit_by: profiles::LitBy,
     /// **Which of this menu's rows has its list open** (B9), or `None` when
     /// none has.
     ///
@@ -11485,6 +11499,13 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// **A shell still being born** (T-PROGRAMS-REFRESH, T-LAUNCH-PROBE's invariant): `Some`
+    /// while the rule that decides which program this pane starts needs a row the program walk
+    /// has not answered, `None` for every pane whose shell was decided at creation. Such a pane
+    /// owns no process yet; it holds the seed it will be born from — its identity, the
+    /// unresolved default or a named profile and never a fallback — and what is typed into it
+    /// meanwhile, which reaches the shell first and in order. See [`PaneBirth`].
+    birth: Option<PaneBirth>,
     foreground_program_cadence: foreground_program::Cadence,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
@@ -11826,6 +11847,77 @@ struct LeafSession {
     /// with the shell it was about. Written by `stage_paste`; read by the card's layout, draw and
     /// hit; taken by the card's answer.
     pending_paste: Option<PendingPaste>,
+}
+
+/// **What a pane in birth holds until the walk answers the rows it needs** (T-PROGRAMS-REFRESH).
+///
+/// The pane is found again where it stands by its window, tab and seat, so an answer that
+/// arrives after it closed finds nothing. `typed` is the queue that stands in for the
+/// pseudoconsole's input ring: every byte offered to this pane before its shell exists is kept, in
+/// order, and written to the shell at its birth.
+#[derive(Debug)]
+struct PaneBirth {
+    seed: LeafSeed,
+    probe_input: Option<Vec<u8>>,
+    typed: std::cell::RefCell<Vec<u8>>,
+}
+
+impl PaneBirth {
+    /// **Keep bytes for the shell being born — on the input ring's terms** (`bt_pty::InputRing`):
+    /// a write is taken whole when nothing is held whatever its size, or when it fits under
+    /// [`bt_pty::PTY_INPUT_RING_BYTES`] beside what is; otherwise none of it is taken and the
+    /// answer is the ring's own refusal. The walk a birth waits on has no deadline, so this is
+    /// what keeps a pane stuck behind a dead `PATH` entry from holding a paste without end.
+    fn hold(&self, bytes: &[u8]) -> Result<(), bt_pty::PtyError> {
+        let mut typed = self.typed.borrow_mut();
+        let capacity = bt_pty::PTY_INPUT_RING_BYTES.get();
+        if !typed.is_empty() && typed.len() + bytes.len() > capacity {
+            return Err(bt_pty::PtyError::InputRefused {
+                offered: bytes.len(),
+                queued: typed.len(),
+                capacity,
+            });
+        }
+        typed.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// **Hand what was held to the shell that has just been born**, in the order it was offered,
+    /// through `write`; the queue is emptied only once `write` took it, so a write that fails
+    /// leaves every byte held. Nothing held is nothing written.
+    fn deliver(&self, write: impl FnOnce(&[u8]) -> Result<()>) -> Result<()> {
+        let held = self.typed.borrow().clone();
+        if held.is_empty() {
+            return Ok(());
+        }
+        write(&held)?;
+        self.typed.borrow_mut().clear();
+        Ok(())
+    }
+}
+
+/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane whose
+/// program this machine does not have (`Started::Nothing`), nowhere: then the bytes are dropped
+/// and `note` is told once how many, beside the pane's own no-program banner.
+fn deliver_held_input(
+    birth: &PaneBirth,
+    target: PtyTarget<'_>,
+    mut note: impl FnMut(&str),
+) -> Result<()> {
+    birth.deliver(|held| match target {
+        PtyTarget::Nowhere => {
+            note(&format!(
+                "a pane born with no program dropped the {} byte(s) typed into it while it waited",
+                held.len()
+            ));
+            Ok(())
+        }
+        target => write_pty_input(
+            target,
+            held,
+            "deliver what was typed while the shell was being born",
+        ),
+    })
 }
 
 struct TabState {
@@ -12500,21 +12592,28 @@ struct App {
     /// unnamed row means the default, and the default is bundled.
     scheme_source: [Option<(String, String)>; 2],
     /// Which of [`profiles::PROFILES`] this machine can actually start, and with
-    /// which executable — probed once, when the window opens.
+    /// which executable — the program walk's answers, adopted between frames
+    /// (T-PROGRAMS-REFRESH).
     ///
-    /// Once, and held here, for the reason [`profiles::ProfilePrograms`] gives:
-    /// availability is a filesystem question and the picker asks it of every row
-    /// on every frame it is open. Held on the `Runtime` rather than passed down
-    /// from the event loop because it is the same kind of fact as `settings` —
-    /// something about the world this window was opened into, which every verb
-    /// that starts a shell has to consult and none of them may re-derive.
-    ///
-    /// It is deliberately **not** re-probed when a menu opens. Installing Git
-    /// while a menu is on screen is not a case worth a filesystem call per
-    /// frame, and the failure it would introduce — a row changing under a
-    /// pointer already travelling toward it — is worse than the staleness it
-    /// would fix.
+    /// Held here for the reason [`profiles::ProfilePrograms`] gives: availability
+    /// is a filesystem question and the picker asks it of every row on every frame
+    /// it is open, so a frame and the click aimed at it read one value. One for
+    /// the application, because it is a fact about the machine and not about a
+    /// window. **It follows the machine**: a menu that lists programs opening, a
+    /// settings page, the environment broadcast and a pane waiting for a row ask
+    /// the walk again (`programs_lane`), and [`FolioApp::adopt_program_walk`] is
+    /// its one writer after the launch. Every window then re-reads it on its turn
+    /// ([`Self::program_news`]).
     profile_programs: profiles::ProfilePrograms,
+    /// **Each window's seat in the program walk's news** (T-PROGRAMS-REFRESH) — told, through
+    /// `tell_all`, every time an answer moved what [`Self::profile_programs`] or a profile's name
+    /// says, and taken by each window on its own turn to re-lay out and relight the menus that
+    /// list programs and to bear the panes that were waiting for a row. Seated and released by the
+    /// window directory's walk, beside the git watch.
+    program_news: window_news::WindowSeats<WindowId, MachineNews>,
+    /// The startup trace's shell lines while a launch tab's shell is still being born — see
+    /// [`StartupShells`]. `None` once said, and for every launch that had nothing to wait for.
+    startup_shells: Option<StartupShells>,
     // `editor` is **retired** (user ruling 2026-08-25: 「既然有 default app 了,
     // 就把 VS Code 去掉」). It held `profiles::find_vscode`'s answer for one row
     // of one menu, and the row is gone — the door above it hands the path to
@@ -17788,7 +17887,7 @@ impl TabState {
     /// has never reported a folder is not called PowerShell. It is the same
     /// mistake the mark made, one column to the right.
     fn focused_profile_title(&self) -> &'static str {
-        profiles::title(profiles::index_of_id(&self.leaf_profile(self.focused_leaf)))
+        profiles::identity_title(&self.leaf_profile(self.focused_leaf))
     }
 
     /// What this tab's tooltip says (M140).
@@ -17965,7 +18064,7 @@ impl TabState {
     fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
         self.sessions
             .iter()
-            .map(|(seat, leaf)| (*seat, profiles::mark(profiles::index_of_id(&leaf.profile))))
+            .map(|(seat, leaf)| (*seat, profiles::identity_mark(&leaf.profile)))
             .collect()
     }
 
@@ -18022,9 +18121,9 @@ impl TabState {
         // used to do unconditionally, was harmless only while the preview arm
         // ignored the argument.
         let content = match kind {
-            bt_layout::SeatKind::Terminal => Some(profiles::mark(profiles::index_of_id(
-                &self.leaf_profile(seat),
-            ))),
+            bt_layout::SeatKind::Terminal => {
+                Some(profiles::identity_mark(&self.leaf_profile(seat)))
+            }
             // **And the site's own icon where it has one** (§7.7 ②) — which is
             // why the argument is a map and not the set it was: "this leaf holds
             // a page" and "this is the icon that page wears" are one fact about
@@ -20660,8 +20759,36 @@ fn take_psreadline_resize_reanchor_input(
 ///
 /// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
 /// refusal and not an error: there is nowhere for the bytes to go and never was.
-fn write_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<()> {
+///
+/// A leaf whose shell is being born keeps them for that shell ([`PaneBirth`]).
+fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<()> {
     offer_pty_input(pty, bytes, what).map(drop)
+}
+
+/// **Where a pane's input goes**: its shell's ring, the queue of a shell being born, or nowhere.
+#[derive(Clone, Copy)]
+enum PtyTarget<'a> {
+    Shell(&'a PtySession),
+    Birth(&'a PaneBirth),
+    Nowhere,
+}
+
+impl<'a> PtyTarget<'a> {
+    /// The target a leaf's two input facts name — its shell, else the shell being born.
+    fn of(pty: Option<&'a PtySession>, birth: Option<&'a PaneBirth>) -> Self {
+        match (pty, birth) {
+            (Some(pty), _) => Self::Shell(pty),
+            (None, Some(birth)) => Self::Birth(birth),
+            (None, None) => Self::Nowhere,
+        }
+    }
+}
+
+impl LeafSession {
+    /// Where bytes offered to this pane go — see [`PtyTarget`].
+    fn input_target(&self) -> PtyTarget<'_> {
+        PtyTarget::of(self.pty.as_ref(), self.birth.as_ref())
+    }
 }
 
 /// **What became of the bytes** — the same door, for the callers that have to
@@ -20681,9 +20808,20 @@ fn write_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -
 /// whether the program on the other end reads them, and what it makes of them,
 /// is its own business and nothing this process can report. A drop's focus move
 /// is answering "did this window send it", which is the question this answers.
-fn offer_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
-    let Some(pty) = pty else {
-        return Ok(PtyInput::NoChild);
+fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
+    let pty = match pty {
+        PtyTarget::Shell(pty) => pty,
+        PtyTarget::Birth(birth) => {
+            return match birth.hold(bytes) {
+                Ok(()) => Ok(PtyInput::HeldForBirth),
+                // Said as the shell's own refusal is said, and for its reason.
+                Err(refused) => {
+                    eprintln!("{what}: {refused}");
+                    Ok(PtyInput::Refused)
+                }
+            };
+        }
+        PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
     };
     match hang_watch::during(hang_watch::Station::PtyInput, || {
         let result = pty.write_with_reason(bytes, what);
@@ -20718,12 +20856,15 @@ enum PtyInput {
     /// whose shell is gone. Not a refusal and not an error — there is nowhere
     /// for the bytes to go and never was.
     NoChild,
+    /// Kept for a shell being born, which receives them first, in order — the part the
+    /// pseudoconsole's input ring plays for a shell that exists.
+    HeldForBirth,
 }
 
 impl PtyInput {
     /// Whether this window actually sent the bytes.
     const fn queued(self) -> bool {
-        matches!(self, Self::Queued)
+        matches!(self, Self::Queued | Self::HeldForBirth)
     }
 }
 
@@ -27861,7 +28002,7 @@ fn attention_delivery(
         title: notify::toast_title(
             carried,
             tab.terminal_name(seat).as_deref(),
-            profiles::title(profiles::index_of_id(&tab.leaf_profile(seat))),
+            profiles::identity_title(&tab.leaf_profile(seat)),
         ),
         body: raised.body,
     }
@@ -35489,22 +35630,17 @@ fn revive_plan(
         .into_iter()
         .zip(saved)
         .map(|(seat, leaf)| {
+            // **The saved id, kept as an id** — and swapped for the fallback's here
+            // and only here, which is where the reader is owed the sentence about it
+            // ([`revived_profile`]). Below this line the seed names a profile that
+            // exists, or the unresolved default its birth decides; above it,
+            // `unknown_profile_id` carries the name the banner quotes.
+            let (profile, unknown_profile_id) = revived_profile(&leaf.profile_id);
             (
                 seat,
                 LeafSeed {
-                    // **The saved id, kept as an id** — and swapped for the
-                    // fallback's here and only here, which is where the reader is
-                    // owed the sentence about it. Below this line the seed names a
-                    // profile that exists, so nothing downstream has to carry the
-                    // distinction; above it, `unknown_profile_id` carries the name
-                    // the banner quotes.
-                    profile: if profiles::has_id(&leaf.profile_id) {
-                        leaf.profile_id.clone()
-                    } else {
-                        profiles::fallback_profile_id().to_owned()
-                    },
-                    unknown_profile_id: (!profiles::has_id(&leaf.profile_id))
-                        .then(|| leaf.profile_id.clone()),
+                    profile,
+                    unknown_profile_id,
                     cwd: Some(leaf.cwd.as_str())
                         .filter(|cwd| !cwd.is_empty())
                         .map(Path::new)
@@ -36389,6 +36525,24 @@ struct LeafSeed {
     /// one place the rung is read, so an empty `last_command` on the leaf and "this rung does not
     /// restore commands" are the same fact and cannot disagree.
     prefill: Option<String>,
+}
+
+/// **The profile a saved pane comes back as, and the id its banner names** — one reading of a
+/// saved `profile_id` for every door that revives one.
+///
+/// The saved id when this build has the row; the fallback's, with the saved id kept for the
+/// banner, when it has not (§5.4 逐叶降级); and [`profiles::DEFAULT_IDENTITY`] kept as itself
+/// (T-PROGRAMS-REFRESH): a pane saved while its default was still unresolved is a pane whose shell
+/// nobody had decided — it comes back as the default, decided at its birth, and says nothing.
+fn revived_profile(saved: &str) -> (String, Option<String>) {
+    if saved == profiles::DEFAULT_IDENTITY || profiles::has_id(saved) {
+        (saved.to_owned(), None)
+    } else {
+        (
+            profiles::fallback_profile_id().to_owned(),
+            Some(saved.to_owned()),
+        )
+    }
 }
 
 /// **Every popup this window can raise** — E61's "one at a time" written as a
@@ -38172,24 +38326,570 @@ enum Started {
     Nothing,
 }
 
-fn startable_profile(requested: &str, programs: &profiles::ProfilePrograms) -> Started {
-    // **Both authorities, in one place, about one id.** `has_id` is the live
-    // table — the only thing that can say whether a row still exists — and the
-    // snapshot is this window's answer about the machine. Neither alone is the
-    // question the spawn is about.
-    let startable = |id: &str| profiles::has_id(id) && programs.is_available(id);
-    if startable(requested) {
-        return Started::AsAsked;
+/// **The rule, decided from completed answers only** (T-PROGRAMS-REFRESH): `Err` names the rows
+/// whose answer it needed and does not have. A row the machine has not answered is never read as
+/// "not here" — that would turn a slow disk into a fallback, a banner and a rewritten saved pane.
+fn startable_profile(
+    requested: &str,
+    programs: &profiles::ProfilePrograms,
+) -> Result<Started, Vec<String>> {
+    profiles::decided_from_answers(programs, |available| {
+        // **Both authorities, in one place, about one id.** `has_id` is the live
+        // table — the only thing that can say whether a row still exists — and the
+        // snapshot is the application's answer about the machine. Neither alone is
+        // the question the spawn is about.
+        let startable = |id: &str| profiles::has_id(id) && available(id);
+        if startable(requested) {
+            return Started::AsAsked;
+        }
+        let fallback = profiles::fallback_profile_id();
+        // The fallback answering for itself is not a fallback: a default profile
+        // this machine cannot start has nowhere further to fall, and saying
+        // `FellBack(fallback)` there would put a banner on a pane about a swap that
+        // did not happen.
+        if fallback != requested && startable(fallback) {
+            return Started::FellBack(fallback.to_owned());
+        }
+        Started::Nothing
+    })
+}
+
+/// **What a seed is born as, if the answers in hand decide it**: the profile it starts as (the
+/// default resolved, for [`profiles::DEFAULT_IDENTITY`]) and the rule's verdict about it. `Err`
+/// names the rows the decision waits for; the pane is then born in birth ([`PaneBirth`]).
+fn decided_birth(
+    seed: &LeafSeed,
+    stored_default: &str,
+    programs: &profiles::ProfilePrograms,
+) -> Result<(String, Started), Vec<String>> {
+    let identity = if seed.profile == profiles::DEFAULT_IDENTITY {
+        profiles::id(profiles::default_profile_decided(stored_default, programs)?)
+    } else {
+        seed.profile.clone()
+    };
+    let started = startable_profile(&identity, programs)?;
+    Ok((identity, started))
+}
+
+/// **What [`create_leaf_session`] may decide on the spot**: the seed it is born from and the
+/// rule's verdict, when the answers in hand decide it **and nothing about it has to be said**. A
+/// seed of the unresolved default whose named folder cannot cross into the profile it resolved to
+/// owes the reader a card, and the constructor has no window to say it in; such a pane is left in
+/// birth (`Err` naming its profile, which the walk then answers first), and its landing
+/// (`Runtime::land_pane_births`) — which decides it from the same answers — says the refusal. So no
+/// refusal can be decided and dropped here.
+fn birth_here(
+    seed: &LeafSeed,
+    stored_default: &str,
+    programs: &profiles::ProfilePrograms,
+) -> Result<(LeafSeed, Started), Vec<String>> {
+    let (identity, started) = decided_birth(seed, stored_default, programs)?;
+    match resolved_birth_seed(seed, &identity) {
+        (resolved, None) => Ok((resolved, started)),
+        (_, Some(_)) => Err(vec![identity]),
     }
-    let fallback = profiles::fallback_profile_id();
-    // The fallback answering for itself is not a fallback: a default profile
-    // this machine cannot start has nowhere further to fall, and saying
-    // `FellBack(fallback)` there would put a banner on a pane about a swap that
-    // did not happen.
-    if fallback != requested && startable(fallback) {
-        return Started::FellBack(fallback.to_owned());
+}
+
+/// **A seed of the unresolved default, made the seed of the profile it resolved to** — its folder,
+/// which such a seed holds in the host's own namespace, crossed into that profile's (`D:\proj` is
+/// `/mnt/d/proj` to WSL). A folder a launch *named* that has no spelling there is the command
+/// line's own "can't reach this folder" refusal, answered beside the seed for the caller to say;
+/// a carried one simply leaves the pane at the profile's own starting place. Any other seed is
+/// returned as it is.
+fn resolved_birth_seed(seed: &LeafSeed, identity: &str) -> (LeafSeed, Option<cli::CliRefusal>) {
+    let mut resolved = LeafSeed {
+        profile: identity.to_owned(),
+        ..seed.clone()
+    };
+    if seed.profile != profiles::DEFAULT_IDENTITY {
+        return (seed.clone(), None);
     }
-    Started::Nothing
+    let target = profiles::index_of_id(identity);
+    let mut refusal = None;
+    resolved.cwd = seed.cwd.as_ref().and_then(|place| {
+        let crossed = profiles::cwd_for_spawn(
+            profiles::index_of_id(profiles::DEFAULT_IDENTITY),
+            target,
+            Some(place.path()),
+        );
+        if crossed.is_none() && matches!(place, profiles::SeedPlace::Named(_)) {
+            refusal = Some(cli::CliRefusal::UnreachableFolder {
+                folder: place.path().to_path_buf(),
+                profile: target,
+            });
+        }
+        crossed.map(|crossed| place.with_path(crossed))
+    });
+    (resolved, refusal)
+}
+
+/// **What a window is told about the machine** (T-PROGRAMS-REFRESH): one subject, the program
+/// walk's answer, told to every window through `WindowSeats::tell_all` and taken on each window's
+/// own turn ([`Runtime::take_program_news`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MachineNews {
+    /// What [`App::profile_programs`] or a profile's drawn name says has moved.
+    Programs,
+}
+
+/// **The program rows a window's open menus show**, by what each row is about — noted before an
+/// answer re-lays them out, so a keyboard's highlight follows its item ([`profiles::relit`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ShownProgramRows {
+    /// The pane menu's open child, by profile.
+    pane: Vec<usize>,
+    /// The terminal menu's open `Split with` child, by profile.
+    term: Vec<usize>,
+}
+
+/// **What adopting a walk's answers moved** — each field one thing a reader can see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProgramNews {
+    /// A row became known, or its program moved.
+    pub(crate) rows: bool,
+    /// WSL's installation says something else, so a profile's title may read differently.
+    pub(crate) names: bool,
+    /// Git is somewhere else now, so the Git pages answered about the old place ask again.
+    pub(crate) git: bool,
+}
+
+impl ProgramNews {
+    pub(crate) const fn any(self) -> bool {
+        self.rows || self.names || self.git
+    }
+}
+
+/// **The one adoption of the program walk's answers**, at the launch and between frames: the rows
+/// into `programs` (refusing an answer older than the one held for its row), WSL's installation
+/// into `wsl`'s slot, git's location into the git worker's slot.
+fn adopt_program_answers(
+    programs: &mut profiles::ProfilePrograms,
+    answers: programs_lane::Answers,
+) -> ProgramNews {
+    let mut news = ProgramNews {
+        rows: programs.adopt(answers.verdicts),
+        ..ProgramNews::default()
+    };
+    if let Some(facts) = answers.facts {
+        if wsl::adopt(facts.wsl) {
+            profiles::names_changed();
+            news.names = true;
+        }
+        news.git = git::GIT_LOCATION.adopt(facts.git);
+    }
+    news
+}
+
+/// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
+///
+/// `BT_CONPTY_SOURCE` and `BT_STARTUP` name the pseudoconsole each launch tab's first shell came
+/// up on and how long the launch's shells took. A tab whose shell is in birth has neither yet, so
+/// both lines wait until every launch tab's identity shell is born, and then carry the born
+/// shells' own sources, with `pty_spawn` running to the last birth. A launch whose shells were all
+/// decided at once says them where it always did and holds nothing here.
+#[derive(Debug)]
+struct StartupShells {
+    /// One per launch tab, in order: its identity shell's tab and seat, and the ConPTY source it
+    /// came up on — `None` while it is being born.
+    tabs: Vec<(TabId, SeatId, Option<String>)>,
+    /// Whether `BT_CONPTY_SOURCE` is owed.
+    conpty_line: bool,
+    /// Whether `BT_STARTUP` is owed (`BT_STARTUP_TRACE`).
+    startup_owed: bool,
+    /// The `BT_STARTUP` line, measured where the launch measured it, said once `pty_spawn` and
+    /// the sources are known; `None` until the launch has reached it.
+    startup: Option<StartupLine>,
+    /// When the launch began making its shells.
+    phase_started: Instant,
+}
+
+/// The `BT_STARTUP` line's launch-time fields, every one but `pty_spawn` and the sources.
+#[derive(Clone, Debug)]
+struct StartupLine {
+    window: Duration,
+    adapter: Duration,
+    device: Duration,
+    surface: Duration,
+    fonts: Duration,
+    metrics: Duration,
+    render_resources: Duration,
+    renderer_total: Duration,
+    probe_input: usize,
+    runtime_ready: Duration,
+}
+
+impl StartupLine {
+    fn said(&self, pty_spawn: Duration, sources: &[String]) -> String {
+        format!(
+            "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={sources:?} runtime_ready={}ms",
+            self.window.as_millis(),
+            self.adapter.as_millis(),
+            self.device.as_millis(),
+            self.surface.as_millis(),
+            self.fonts.as_millis(),
+            self.metrics.as_millis(),
+            self.render_resources.as_millis(),
+            self.renderer_total.as_millis(),
+            pty_spawn.as_millis(),
+            self.probe_input,
+            self.runtime_ready.as_millis(),
+        )
+    }
+}
+
+impl StartupShells {
+    /// The identity shell of `tab` was born at `seat` on `source`.
+    fn born(&mut self, tab: TabId, seat: SeatId, source: String) {
+        for (held_tab, held_seat, held) in &mut self.tabs {
+            if *held_tab == tab && *held_seat == seat {
+                *held = Some(source.clone());
+            }
+        }
+    }
+
+    /// The lines, once every launch tab's shell is born and the launch has measured its own
+    /// fields; `None` while something is still owed (and `self` keeps waiting).
+    fn lines_if_born(&self) -> Option<Vec<String>> {
+        let sources: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|(_, _, source)| source.clone())
+            .collect::<Option<_>>()?;
+        if self.startup_owed && self.startup.is_none() {
+            // The launch is still on its way to measuring the line it owes.
+            return None;
+        }
+        let mut lines = Vec::new();
+        if self.conpty_line {
+            lines.push(format!("BT_CONPTY_SOURCE sources={sources:?}"));
+        }
+        if let Some(startup) = &self.startup {
+            lines.push(startup.said(self.phase_started.elapsed(), &sources));
+        }
+        Some(lines)
+    }
+}
+
+/// The ConPTY source a leaf's shell came up on — `None` for a pane in birth, which has none yet;
+/// `"direct-input"` for a leaf with no shell at all (`BT_PROBE_INPUT`).
+fn conpty_source_of(leaf: Option<&LeafSession>) -> Option<String> {
+    match leaf {
+        Some(leaf) if leaf.birth.is_some() => None,
+        Some(leaf) => Some(
+            leaf.pty
+                .as_ref()
+                .map(|pty| pty.conpty_source().to_string())
+                .unwrap_or_else(|| "direct-input".to_string()),
+        ),
+        None => Some("none".to_string()),
+    }
+}
+
+/// **A pane's birth from the program walk's answers** (T-PROGRAMS-REFRESH): decided only from
+/// answers in hand, held while it waits, its typed bytes kept for its shell, the startup trace held
+/// with it.
+#[cfg(test)]
+mod program_birth_tests {
+    use super::*;
+
+    fn seed_of(profile: &str) -> LeafSeed {
+        LeafSeed {
+            profile: profile.to_owned(),
+            ..LeafSeed::default()
+        }
+    }
+
+    fn every_row() -> profiles::ProfilePrograms {
+        profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>())
+    }
+
+    /// RED — **a pane whose row is unknown is not decided: it waits, and names the row it waits
+    /// for** — never a fallback, a banner or a rewritten saved pane from unknown.
+    ///
+    /// MUTATION (observed red): `profiles::decided_from_answers` answering `Ok` with the unknown
+    /// row read as absent — the named pane is decided `FellBack` to the fallback and the default
+    /// pane is decided as the next shipped row.
+    #[test]
+    fn a_pane_whose_row_is_unknown_waits_for_it_and_is_never_decided_from_unknown() {
+        let named = profiles::shipped_order()
+            .iter()
+            .copied()
+            .find(|id| profiles::has_id(id) && *id != profiles::fallback_profile_id())
+            .expect("a shipped row other than the fallback");
+        let waiting = every_row().without(named);
+        assert_eq!(
+            decided_birth(&seed_of(named), "", &waiting),
+            Err(vec![named.to_owned()]),
+            "the named pane waits for its own row"
+        );
+        assert_eq!(
+            startable_profile(named, &waiting),
+            Err(vec![named.to_owned()]),
+            "and the rule says so rather than falling back"
+        );
+        assert_eq!(
+            decided_birth(&seed_of(named), "", &every_row()),
+            Ok((named.to_owned(), Started::AsAsked)),
+            "once answered it is born as itself"
+        );
+
+        let first = profiles::shipped_order()
+            .iter()
+            .copied()
+            .find(|id| profiles::has_id(id))
+            .expect("the shipped order names a row");
+        let default_waits = every_row().without(first);
+        assert_eq!(
+            decided_birth(
+                &seed_of(profiles::DEFAULT_IDENTITY),
+                bt_persist::DEFAULT_PROFILE_UNSET,
+                &default_waits
+            ),
+            Err(vec![first.to_owned()]),
+            "the unresolved default waits for the first row its rule reads"
+        );
+        assert_eq!(
+            decided_birth(
+                &seed_of(profiles::DEFAULT_IDENTITY),
+                bt_persist::DEFAULT_PROFILE_UNSET,
+                &every_row()
+            )
+            .map(|(identity, _)| identity),
+            Ok(first.to_owned()),
+            "and is born as the default the answers decide"
+        );
+        // A saved pane of the unresolved default comes back as itself, with no banner.
+        assert_eq!(
+            revived_profile(profiles::DEFAULT_IDENTITY),
+            (profiles::DEFAULT_IDENTITY.to_owned(), None)
+        );
+    }
+
+    /// RED — **what is typed into a pane in birth reaches its shell first, in order**: held, not
+    /// dropped, and taken once.
+    ///
+    /// MUTATION (observed red): the `PtyTarget::Birth` arm of `offer_pty_input` answering
+    /// `NoChild` without holding — the bytes are lost.
+    #[test]
+    fn input_offered_to_a_pane_in_birth_is_held_for_its_shell_in_order() {
+        let birth = PaneBirth {
+            seed: seed_of(profiles::DEFAULT_IDENTITY),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+        };
+        let first = offer_pty_input(PtyTarget::Birth(&birth), "git 状态".as_bytes(), "typed")
+            .expect("held");
+        let second = offer_pty_input(PtyTarget::Birth(&birth), b"\r", "typed").expect("held");
+        assert_eq!(
+            (first, second),
+            (PtyInput::HeldForBirth, PtyInput::HeldForBirth)
+        );
+        assert!(first.queued(), "a drop's focus move counts it as sent");
+        let mut delivered = Vec::new();
+        birth
+            .deliver(|held| {
+                delivered.extend_from_slice(held);
+                Ok(())
+            })
+            .expect("delivered");
+        assert_eq!(delivered, "git 状态\r".as_bytes());
+        birth
+            .deliver(|_| panic!("nothing is left to deliver"))
+            .expect("taken once");
+        assert_eq!(
+            offer_pty_input(PtyTarget::Nowhere, b"x", "typed").expect("nowhere"),
+            PtyInput::NoChild
+        );
+    }
+
+    fn a_birth() -> PaneBirth {
+        PaneBirth {
+            seed: seed_of(profiles::DEFAULT_IDENTITY),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+        }
+    }
+
+    /// RED (round 2) — **a pane in birth holds input on the input ring's terms**: a write is
+    /// taken whole when nothing is held, however large, and one that would pass the ring's size
+    /// beside what is held is refused whole, as the shell's ring refuses it.
+    ///
+    /// MUTATION (observed red): `PaneBirth::hold` without its capacity check — the second write is
+    /// held and the queue grows past the ring's size.
+    #[test]
+    fn a_pane_in_birth_holds_no_more_than_the_input_ring_would() {
+        let birth = a_birth();
+        let capacity = bt_pty::PTY_INPUT_RING_BYTES.get();
+        let paste = "粘".repeat(capacity / 3 + 1);
+        assert_eq!(
+            offer_pty_input(PtyTarget::Birth(&birth), paste.as_bytes(), "paste").expect("held"),
+            PtyInput::HeldForBirth,
+            "a first write is taken whole, as the ring takes one into an empty queue"
+        );
+        assert_eq!(
+            offer_pty_input(PtyTarget::Birth(&birth), b"x", "typed").expect("answered"),
+            PtyInput::Refused,
+            "past the ring's size, refused"
+        );
+        assert!(!PtyInput::Refused.queued());
+        assert_eq!(
+            birth.typed.borrow().len(),
+            paste.len(),
+            "nothing of it taken"
+        );
+    }
+
+    /// RED (round 2) — **a write that fails leaves the held bytes held**, so a birth that could
+    /// not hand them over loses nothing.
+    ///
+    /// MUTATION (observed red): `PaneBirth::deliver` emptying the queue before it writes — the
+    /// failed write takes the bytes with it.
+    #[test]
+    fn a_failed_delivery_keeps_what_was_typed() {
+        let birth = a_birth();
+        birth.hold("ls 目录\r".as_bytes()).expect("held");
+        let failed = birth.deliver(|_| Err(anyhow!("the shell's input was closed")));
+        assert!(failed.is_err());
+        assert_eq!(birth.typed.borrow().as_slice(), "ls 目录\r".as_bytes());
+    }
+
+    /// RED (round 2) — **a pane born with no program says that its typed bytes went nowhere**,
+    /// once, beside its own no-program banner.
+    ///
+    /// MUTATION (observed red): the `PtyTarget::Nowhere` arm of `deliver_held_input` without its
+    /// note — the bytes are dropped in silence.
+    #[test]
+    fn typed_bytes_a_pane_with_no_program_drops_are_said() {
+        let birth = a_birth();
+        birth.hold("echo 你好".as_bytes()).expect("held");
+        let mut lines = Vec::new();
+        deliver_held_input(&birth, PtyTarget::Nowhere, |line| {
+            lines.push(line.to_owned())
+        })
+        .expect("nowhere is not an error");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("{} byte(s)", "echo 你好".len())),
+            "{lines:?}"
+        );
+        let mut again = Vec::new();
+        deliver_held_input(&birth, PtyTarget::Nowhere, |line| {
+            again.push(line.to_owned())
+        })
+        .expect("nothing held");
+        assert!(again.is_empty(), "said once");
+    }
+
+    /// RED — **the startup trace's shell lines wait for the launch's shells** and then name the
+    /// born shells' own sources.
+    ///
+    /// MUTATION (observed red): `lines_if_born` mapping a missing source to `"in-birth"` instead
+    /// of waiting — the lines are said before the second tab's shell exists.
+    #[test]
+    fn the_startup_trace_waits_for_every_launch_shell_and_names_its_conpty() {
+        let mut shells = StartupShells {
+            tabs: vec![
+                (TabId(1), SeatId(0), Some("packaged".to_owned())),
+                (TabId(2), SeatId(0), None),
+            ],
+            conpty_line: true,
+            startup_owed: false,
+            startup: None,
+            phase_started: Instant::now(),
+        };
+        assert_eq!(shells.lines_if_born(), None, "tab 2's shell is being born");
+        shells.born(TabId(2), SeatId(0), "inbox".to_owned());
+        assert_eq!(
+            shells.lines_if_born(),
+            Some(vec![
+                r#"BT_CONPTY_SOURCE sources=["packaged", "inbox"]"#.to_owned()
+            ])
+        );
+        shells.startup_owed = true;
+        assert_eq!(
+            shells.lines_if_born(),
+            None,
+            "the launch has not measured the line it owes yet"
+        );
+    }
+
+    /// RED (Windows) — **a seed of the unresolved default is crossed into the profile it
+    /// resolved to**: a named folder into WSL's namespace, a named folder WSL cannot spell said
+    /// as the command line's refusal, a carried one left to the profile's own place.
+    ///
+    /// MUTATION (observed red): `resolved_birth_seed` keeping the seed's folder as it was — the
+    /// WSL pane is handed `D:\…`.
+    #[cfg(windows)]
+    #[test]
+    fn a_default_pane_is_crossed_into_the_profile_it_resolved_to() {
+        let named = LeafSeed {
+            cwd: Some(profiles::SeedPlace::Named(PathBuf::from(r"D:\项目"))),
+            ..seed_of(profiles::DEFAULT_IDENTITY)
+        };
+        let (wsl, refusal) = resolved_birth_seed(&named, profiles::WSL_ID);
+        assert_eq!(wsl.profile, profiles::WSL_ID);
+        assert_eq!(
+            wsl.cwd,
+            Some(profiles::SeedPlace::Named(PathBuf::from("/mnt/d/项目")))
+        );
+        assert_eq!(refusal, None);
+        let (windows, _) = resolved_birth_seed(&named, profiles::WINDOWS_POWERSHELL_ID);
+        assert_eq!(
+            windows.cwd, named.cwd,
+            "a Windows shell keeps the Windows folder"
+        );
+
+        let unc = PathBuf::from(r"\\服务器\共享");
+        let (_, refusal) = resolved_birth_seed(
+            &LeafSeed {
+                cwd: Some(profiles::SeedPlace::Named(unc.clone())),
+                ..seed_of(profiles::DEFAULT_IDENTITY)
+            },
+            profiles::WSL_ID,
+        );
+        assert!(
+            matches!(refusal, Some(cli::CliRefusal::UnreachableFolder { ref folder, .. }) if *folder == unc),
+            "{refusal:?}"
+        );
+        let (carried, refusal) = resolved_birth_seed(
+            &LeafSeed {
+                cwd: Some(profiles::SeedPlace::Carried(unc.clone())),
+                ..seed_of(profiles::DEFAULT_IDENTITY)
+            },
+            profiles::WSL_ID,
+        );
+        assert_eq!((carried.cwd, refusal), (None, None));
+    }
+
+    /// RED (round 2, Windows) — **the constructor decides nothing it would have to say**: a
+    /// default pane whose named folder WSL cannot spell is left in birth, waiting on the WSL row,
+    /// for its landing to say the refusal; the same pane with a folder that crosses is decided on
+    /// the spot.
+    ///
+    /// MUTATION (observed red): `birth_here` answering `Ok` with the resolved seed whatever the
+    /// refusal — the card would be dropped.
+    #[cfg(windows)]
+    #[test]
+    fn a_pane_that_owes_a_refusal_is_left_for_its_landing_to_say_it() {
+        let named = |folder: &str| LeafSeed {
+            cwd: Some(profiles::SeedPlace::Named(PathBuf::from(folder))),
+            ..seed_of(profiles::DEFAULT_IDENTITY)
+        };
+        let unc = named(r"\\服务器\共享");
+        assert!(
+            decided_birth(&unc, profiles::WSL_ID, &every_row()).is_ok(),
+            "the answers decide it"
+        );
+        assert_eq!(
+            birth_here(&unc, profiles::WSL_ID, &every_row()).map(|(seed, _)| seed),
+            Err(vec![profiles::WSL_ID.to_owned()])
+        );
+        assert_eq!(
+            birth_here(&named(r"D:\项目"), profiles::WSL_ID, &every_row())
+                .map(|(seed, started)| (seed.profile, started)),
+            Ok((profiles::WSL_ID.to_owned(), Started::AsAsked))
+        );
+    }
 }
 
 /// **Where a leaf's shell was born, said for the profile that actually started** (T-RESTART-CWD
@@ -38252,6 +38952,9 @@ fn create_leaf_session(
     probe_input: Option<&[u8]>,
     seed: &LeafSeed,
     programs: &profiles::ProfilePrograms,
+    // `settings.json`'s default choice, which a seed of the unresolved default is resolved
+    // against at its birth.
+    stored_default: &str,
     formulas: FormulaSwitches,
     // **How much of its own past this pane will keep.** A parameter beside
     // `formulas` rather than a field inside it: that struct is the Rendered
@@ -38281,7 +38984,22 @@ fn create_leaf_session(
     // the file named. A WSL leaf falling back to PowerShell must not be handed
     // `/home/me`, and a Git Bash falling back to Windows PowerShell is a pane
     // that does want the PSReadLine probe.
-    let started = startable_profile(&seed.profile, programs);
+    //
+    // **And only from answers in hand** (T-PROGRAMS-REFRESH). When the rule needs a row the
+    // program walk has not answered, nothing is decided: the pane is made **in birth** — every
+    // part of a pane but its process, holding its seed and what is typed into it — the walk is
+    // asked for the rows it waits on, and `Runtime::land_pane_births` comes back here with the
+    // answers once they land.
+    let decided = birth_here(seed, stored_default, programs);
+    let in_birth = decided.is_err();
+    let (seed, started): (LeafSeed, Started) = match decided {
+        Ok(decided) => decided,
+        Err(waiting) => {
+            programs_lane::request(programs_lane::Trigger::Birth, stored_default, &waiting);
+            (seed.clone(), Started::Nothing)
+        }
+    };
+    let seed = &seed;
     let spawn_profile = match &started {
         Started::AsAsked | Started::Nothing => seed.profile.as_str(),
         Started::FellBack(to) => to.as_str(),
@@ -38290,7 +39008,7 @@ fn create_leaf_session(
     // this process, because the module that is broken is the one `Windows
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
     // Idempotent — see `psreadline::begin_probe`.
-    if spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
+    if !in_birth && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
         psreadline::begin_probe();
     }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
@@ -38354,6 +39072,7 @@ fn create_leaf_session(
     let spawn_row = profiles::row_of(spawn_profile);
     let mut pty = if let (Some(row), Some(program)) = (&spawn_row, programs.program(spawn_profile))
         && probe_input.is_none()
+        && !in_birth
     {
         // **The line the picker was missing.** Choosing a profile used to change
         // a tab's title and its mark and nothing else — `spawn_default_in` was
@@ -38519,7 +39238,7 @@ fn create_leaf_session(
     // `bt-pty` has nothing to report — the pane simply came up a PowerShell,
     // having been something else when it was saved, with nothing said. §3 and
     // §5#3 give both ways in one rule, so they get one line in one register.
-    if let Some(unknown) = &seed.unknown_profile_id {
+    if let Some(unknown) = seed.unknown_profile_id.as_ref().filter(|_| !in_birth) {
         session
             .feed(unknown_profile_banner(unknown).as_bytes())
             .context("write the unknown-profile banner into the leaf's first line")?;
@@ -38531,6 +39250,8 @@ fn create_leaf_session(
     // because from the reader's side it is the same event: the pane is back, and
     // it is not the shell they left in it.
     match &started {
+        // Nothing has been decided about a pane in birth, so there is nothing to say yet.
+        _ if in_birth => {}
         Started::AsAsked => {}
         Started::FellBack(to) => {
             session
@@ -38554,7 +39275,7 @@ fn create_leaf_session(
             .feed(fallback_banner(fallback, &seed.profile).as_bytes())
             .context("write the shell fallback banner into the leaf's first line")?;
     }
-    if let Some(bytes) = probe_input {
+    if let Some(bytes) = probe_input.filter(|_| !in_birth) {
         session
             .feed(bytes)
             .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
@@ -38596,8 +39317,9 @@ fn create_leaf_session(
         program: resolved_program,
         // Named only while the started shell stands in the named folder: a fallback profile that
         // could not spell it was put down elsewhere (`birth_place_of_the_started_shell`).
-        born_named: place.named && spawn_place.is_some(),
-        spawn_place,
+        born_named: !in_birth && place.named && spawn_place.is_some(),
+        // A pane in birth was never put down anywhere yet; its seed still says where it will be.
+        spawn_place: spawn_place.filter(|_| !in_birth),
         // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
         // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
         pending_typing: seed.prefill.clone().map(|command| (command, false)),
@@ -38631,6 +39353,11 @@ fn create_leaf_session(
         // Nobody has asked the machine where this shell's `$PROFILE` is yet.
         // Nothing has been pasted into a shell that has just started.
         pending_paste: None,
+        birth: in_birth.then(|| PaneBirth {
+            seed: seed.clone(),
+            probe_input: probe_input.map(<[u8]>::to_vec),
+            typed: std::cell::RefCell::default(),
+        }),
     })
 }
 
@@ -38824,8 +39551,10 @@ fn create_tab_state(
     programs: &profiles::ProfilePrograms,
     // What a Terminal seat with no entry in `leaves` is started as — the
     // resolved `settings.json` default, by id like every other profile a seed
-    // names (T-PROFILE-TABLE-MOVE).
+    // names (T-PROFILE-TABLE-MOVE); [`profiles::DEFAULT_IDENTITY`] while that is undecided.
     default_profile: &str,
+    // `settings.json`'s default choice — see [`create_leaf_session`]'s parameter of this name.
+    stored_default: &str,
     policy: SizePolicy,
     rail: seats::RailState,
     // The other half of the stage this tab is born into — see [`solve_seats`].
@@ -38890,6 +39619,7 @@ fn create_tab_state(
                 prefill: None,
             }),
             programs,
+            stored_default,
             formulas,
             scrollback,
             line_wrapping,
@@ -38901,15 +39631,10 @@ fn create_tab_state(
     // `"none"` is that said out loud rather than borrowed from the
     // shell-less-probe spelling beside it: `"direct-input"` means "a shell, fed
     // by the probe instead of by a pipe", which is a different fact (§7.1.6h).
-    let conpty_source = sessions.get(&terminal_seat_id).map_or_else(
-        || "none".to_string(),
-        |leaf| {
-            leaf.pty
-                .as_ref()
-                .map(|pty| pty.conpty_source().to_string())
-                .unwrap_or_else(|| "direct-input".to_string())
-        },
-    );
+    // A tab whose identity shell is in birth has no source yet; its launch holds the line
+    // ([`StartupShells`]), and every other caller ignores it.
+    let conpty_source =
+        conpty_source_of(sessions.get(&terminal_seat_id)).unwrap_or_else(|| "in-birth".to_owned());
     // Built off the *tree* and not off the caller's map, so the table is total
     // over this tab's Files leaves by construction — the same invariant the loop
     // above gives `sessions`, reached the same way. A seat the caller said
@@ -40351,7 +41076,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
                 leaf.session.take_pty_writes()
             }) {
                 write_pty_input(
-                    leaf.pty.as_ref(),
+                    leaf.input_target(),
                     &reply,
                     "return terminal protocol reply to PTY",
                 )?;
@@ -40394,7 +41119,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             leaf.session.take_pty_writes()
         }) {
             write_pty_input(
-                leaf.pty.as_ref(),
+                leaf.input_target(),
                 &reply,
                 "return terminal protocol reply to PTY",
             )?;
@@ -40435,7 +41160,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             let bytes = quake::typed_into_a_prompt(&command, submit);
             if !bytes.is_empty() {
                 write_pty_input(
-                    leaf.pty.as_ref(),
+                    leaf.input_target(),
                     &bytes,
                     "type a restored command at the prompt",
                 )?;
@@ -41819,6 +42544,14 @@ impl Runtime<'_> {
             });
         }
         taskbar_lane::request();
+        // **And the program walk's** (T-PROGRAMS-REFRESH): what this machine can start is asked
+        // on its own lane, first a few lines below, once the profile table is installed.
+        {
+            let proxy = proxy.clone();
+            programs_lane::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::ProgramsAnswered);
+            });
+        }
         // **The probe can repair and renew the package registration**, which
         // is O's until an update's trial is committed (`update_trial`, F-7,
         // F-18): the probe asks the trial's gate itself
@@ -41909,6 +42642,17 @@ impl Runtime<'_> {
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
             profiles_fault.get_or_insert(sentence);
         }
+        // **What this machine can start is asked here, and not answered on this thread**
+        // (T-PROGRAMS-REFRESH; T-LAUNCH-PROBE's invariant). The walk runs on its own lane the
+        // moment the table it walks is installed, and the panes below read whatever it has
+        // answered by the time they are made — the whole table on an ordinary machine, where the
+        // walk takes a few milliseconds and the window and the GPU take far longer. A row still
+        // out then is unknown, and a pane whose program depends on it is born when it lands.
+        programs_lane::request(
+            programs_lane::Trigger::Launch,
+            &settings_store.loaded().default_profile,
+            &[],
+        );
         // The pin table, on the same terms and for a narrower reason: the root
         // menu's width is measured from the folder names in it, and a PINNED
         // section that arrived after the first measurement would be a menu drawn
@@ -41985,12 +42729,8 @@ impl Runtime<'_> {
         // product — a reader who lives in the card column lives in it in every
         // window, including the first one of a fresh profile.
         let focus_mode = settings_store.loaded().focus_mode;
-        // Probed here rather than beside the first shell, which is where it used
-        // to sit: the opening window is *titled* after the default profile, and
-        // resolving which profile that is needs to know what this machine can
-        // start. It is an environment read and four `is_file` calls, so moving it
-        // ahead of the window costs the launch nothing measurable.
-        let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        // Every row unknown until the walk asked for above has answered it.
+        let mut profile_programs = profiles::ProfilePrograms::unknown();
         // **Folio's own older PSReadLine is replaced here, without asking**
         // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
         // first window, because a pane of this Folio starting a PowerShell is
@@ -42013,25 +42753,8 @@ impl Runtime<'_> {
         shell_integration::begin_startup_migration();
         // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
         // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
-        shell_integration::begin_powershell_preparation_for(&profile_programs);
-        // Three registry reads, on this thread, finishing before the next line
-        // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
-        // `getent` inside the distribution — and the `profiles::title` call
-        // twenty lines below, which composes the opening window's own title,
-        // then **joined** that worker. So the launch waited for a WSL virtual
-        // machine to boot before it could ask for a window, and the console
-        // Windows handed that `wsl.exe` was a Windows Terminal window opening in
-        // front of Folio. What is left costs microseconds and starts nothing.
-        wsl::start(profile_programs.program("wsl"));
-        let default_profile =
-            profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
-        // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::id(default_profile);
-        // The command line, put to this machine: the folder asked about, the
-        // profile looked up in this build's table, and the crossing into that
-        // profile's namespace. Everything it could not honour comes back in the
-        // plan's own list and is said on a card once the window is up.
-        let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        // The parser questions about the PowerShell rows follow when the walk has answered them.
+        shell_integration::begin_powershell_script_preparation();
         // **The canvas, settled before there is a window to paint one in**
         // (§7.46 ②). Everything below this point — the first frame, the first
         // pane, and the `OSC 11` that pane answers — happens on the canvas
@@ -42055,8 +42778,14 @@ impl Runtime<'_> {
             );
         }
         let restored = restore_window_placement(event_loop, &opening);
+        // Titled from whatever the walk has answered so far; the active tab's own title replaces
+        // it before the first paint either way.
+        adopt_program_answers(&mut profile_programs, programs_lane::take());
         let attributes = opening_window_attributes(
-            profiles::title(default_profile),
+            profiles::identity_title(&profiles::default_profile_identity(
+                &settings_store.loaded().default_profile,
+                &profile_programs,
+            )),
             restored
                 .map(|placement| placement.size)
                 .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
@@ -42279,6 +43008,23 @@ impl Runtime<'_> {
         let pty_wake = PtyWakeSignal::new(proxy.clone());
         let wake = &pty_wake;
         let phase_started = Instant::now();
+        // **The walk's answers, read as late as the launch can read them** — right before the
+        // panes are made, without waiting. Everything below decides from these exactly as it
+        // always did from the probe that stood here; a row still unanswered is decided by nobody.
+        adopt_program_answers(&mut profile_programs, programs_lane::take());
+        shell_integration::begin_powershell_preparation_for(&profile_programs);
+        let default_profile =
+            profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
+        // The same answer as a seed spells it — see `Runtime::default_profile_id`.
+        let default_profile_id = profiles::default_profile_identity(
+            &settings_store.loaded().default_profile,
+            &profile_programs,
+        );
+        // The command line, put to this machine: the folder asked about, the
+        // profile looked up in this build's table, and the crossing into that
+        // profile's namespace. Everything it could not honour comes back in the
+        // plan's own list and is said on a card once the window is up.
+        let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
         // Pinned tabs are an answer already given, so they simply open; the rest
         // become a question the prompt will ask over a window that already works.
         let plan = if probe_input.is_some() {
@@ -42366,6 +43112,7 @@ impl Runtime<'_> {
                 seed,
                 &profile_programs,
                 &default_profile_id,
+                &settings_store.loaded().default_profile,
                 // Startup: the opening rectangle is the program's own.
                 SizePolicy::Lawful,
                 // **The panel this window is opening with, both halves of it.**
@@ -42424,7 +43171,25 @@ impl Runtime<'_> {
             platform_chrome,
         );
         renderer.set_seat_viewport(terminal_seat);
-        if trace_startup || trace_resize {
+        // **A launch tab whose shell is in birth holds the two shell lines** until it is born
+        // ([`StartupShells`]); a launch whose shells were all decided says them here, as always.
+        let launch_shells: Vec<(TabId, SeatId, Option<String>)> = tabs
+            .iter()
+            .map(|tab: &TabState| {
+                let seat = tab.seats.identity();
+                (tab.id, seat, conpty_source_of(tab.sessions.get(&seat)))
+            })
+            .collect();
+        let startup_shells = ((trace_startup || trace_resize)
+            && launch_shells.iter().any(|(_, _, source)| source.is_none()))
+        .then_some(StartupShells {
+            tabs: launch_shells,
+            conpty_line: true,
+            startup_owed: trace_startup,
+            startup: None,
+            phase_started,
+        });
+        if (trace_startup || trace_resize) && startup_shells.is_none() {
             trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
@@ -42499,6 +43264,8 @@ impl Runtime<'_> {
             scheme_fault: None,
             scheme_source: [None, None],
             profile_programs,
+            program_news: window_news::WindowSeats::default(),
+            startup_shells,
             psreadline_documents,
             psreadline_installed: None,
             first_run_attempted: false,
@@ -42668,20 +43435,23 @@ impl Runtime<'_> {
         runtime.dress_new_window(native)?;
         if trace_startup {
             let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
-            trace_sink::stderr_line(format!(
-                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={conpty_sources:?} runtime_ready={}ms",
-                window_time.as_millis(),
-                renderer_phases.adapter.as_millis(),
-                renderer_phases.device.as_millis(),
-                renderer_phases.surface_configure.as_millis(),
-                renderer_phases.font_system.as_millis(),
-                renderer_phases.font_metrics.as_millis(),
-                renderer_phases.render_resources.as_millis(),
-                renderer_time.as_millis(),
-                pty_time.as_millis(),
-                probe_input.as_ref().map_or(0, Vec::len),
-                startup_started.elapsed().as_millis(),
-            ));
+            let line = StartupLine {
+                window: window_time,
+                adapter: renderer_phases.adapter,
+                device: renderer_phases.device,
+                surface: renderer_phases.surface_configure,
+                fonts: renderer_phases.font_system,
+                metrics: renderer_phases.font_metrics,
+                render_resources: renderer_phases.render_resources,
+                renderer_total: renderer_time,
+                probe_input: probe_input.as_ref().map_or(0, Vec::len),
+                runtime_ready: startup_started.elapsed(),
+            };
+            match runtime.app.startup_shells.as_mut() {
+                // Said when the last launch shell is born, with `pty_spawn` running to it.
+                Some(shells) => shells.startup = Some(line),
+                None => trace_sink::stderr_line(line.said(pty_time, &conpty_sources)),
+            }
         }
         runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
         // **Every page the file said this window's panes were on**, and here for
@@ -43100,6 +43870,8 @@ impl Runtime<'_> {
             .take_agents_open_edge(content.shows_agents(self.window.settings.category()));
         if agents_opened {
             self.refresh_agent_rows();
+            // Which agents are on this machine is the program walk's answer: asked again here.
+            self.ask_the_program_walk(programs_lane::Trigger::AgentsPage);
         }
         let profiles_opened = self.window.settings.take_profiles_open_edge(
             self.window.settings.category() == settings::SettingsCategory::Profiles
@@ -43107,6 +43879,8 @@ impl Runtime<'_> {
         );
         if profiles_opened {
             shell_integration::begin_profile_observation_for(&self.app.profile_programs);
+            // Every row's program, and WSL's distributions, asked again as the page opens.
+            self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
         // Use the refreshed fact on this very layout, including its geometry.
         let refreshed_values = (psreadline_opened || agents_opened).then(|| {
@@ -44824,7 +45598,9 @@ impl Runtime<'_> {
             // is a row that cannot start, and the first thing anybody does with a
             // new one is call it something.
             settings::SettingsTarget::ProfileNew => {
-                let Some(made) = profiles::create(self.default_profile()) else {
+                // A copy of the default, and so not before the default is decided: the press
+                // does nothing during the few milliseconds the machine has not answered.
+                let Some(made) = self.default_profile().and_then(profiles::create) else {
                     return Ok(());
                 };
                 self.store_profiles()?;
@@ -45049,7 +45825,11 @@ impl Runtime<'_> {
             }
             settings::RowVerb::Hide => {
                 let hidden = profiles::hidden(index);
-                if !profiles::set_hidden(index, !hidden, self.default_profile()) {
+                let defaults = profiles::possible_defaults(
+                    &self.app.settings_store.loaded().default_profile,
+                    &self.app.profile_programs,
+                );
+                if !profiles::set_hidden(index, !hidden, &defaults) {
                     return Ok(());
                 }
             }
@@ -49506,7 +50286,8 @@ impl Runtime<'_> {
         // `expect` because "nothing was typed into" is a real outcome and a
         // panic is not.
         write_pty_input(
-            self.focused().and_then(|leaf| leaf.pty.as_ref()),
+            self.focused()
+                .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
             bytes,
             context,
         )?;
@@ -50321,9 +51102,7 @@ impl Runtime<'_> {
                     section: palette::Section::Places,
                     label,
                     hint,
-                    mark: Some(profiles::mark(profiles::index_of_id(
-                        &tab.leaf_profile(*seat),
-                    ))),
+                    mark: Some(profiles::identity_mark(&tab.leaf_profile(*seat))),
                     awaiting: leaf.attention.ticket().is_some(),
                     verb: palette::Verb::Go {
                         tab: tab.id,
@@ -60489,6 +61268,50 @@ impl FolioApp {
     /// photographed it would put a window the reader closed back into
     /// `session.json` and open it again next launch. The one caller that does
     /// have business with it is [`Self::for_every_window_engines_included`].
+    /// **Adopt what the program walk published, and tell every window** (T-PROGRAMS-REFRESH).
+    ///
+    /// The one writer of [`App::profile_programs`] after the launch. Before the answer moves
+    /// anything, each window notes the program rows its open menus show (a keyboard's highlight
+    /// follows its item across the relayout); the answer is adopted once, for the application;
+    /// and, when it moved something a reader can see, every window's seat is told
+    /// (`WindowSeats::tell_all`) and each window takes the news on its own turn — relighting its
+    /// menus, re-asking its Git pages when git moved, and bearing the panes that were waiting.
+    fn adopt_program_walk(&mut self) -> Result<()> {
+        // Before the application exists the answers wait in the mailbox, where the launch reads
+        // them.
+        if self.app.is_none() {
+            return Ok(());
+        }
+        let answers = programs_lane::take();
+        if answers.is_empty() {
+            return Ok(());
+        }
+        let mut shown = BTreeMap::new();
+        self.for_each_window(|runtime| {
+            shown.insert(runtime.window_id(), runtime.shown_program_rows());
+            Ok(())
+        })?;
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        // A walk's end is news to a pane in birth even when no answer moved: a pane left in birth
+        // to say something at its landing (`birth_here`) waits on rows that were already known.
+        let ended = answers.finished.is_some();
+        let news = adopt_program_answers(&mut app.profile_programs, answers);
+        if !news.any() && !ended {
+            return Ok(());
+        }
+        if news.rows {
+            // The parser questions about the PowerShell rows, as after a table change.
+            shell_integration::begin_powershell_preparation_for(&app.profile_programs);
+        }
+        app.program_news.tell_all(&MachineNews::Programs);
+        self.for_each_window(|runtime| {
+            let shown = shown.remove(&runtime.window_id()).unwrap_or_default();
+            runtime.take_program_news(&shown, news)
+        })
+    }
+
     fn for_each_window(
         &mut self,
         mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
@@ -61573,7 +62396,7 @@ impl FolioApp {
             // leaving — releases its seat, and in the git watch every subscription
             // only it wanted. A new holder is one more entry in this list.
             let ids: Vec<WindowId> = open.iter().map(|window| window.id).collect();
-            window_news::seat_every_holder(&mut [&mut app.git_watch], &ids);
+            window_news::seat_every_holder(&mut [&mut app.git_watch, &mut app.program_news], &ids);
             app.windows_open = open;
         }
     }
@@ -64877,8 +65700,21 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // And the taskbar is asked again (ticket 62): turning auto-hide on or off moves
                 // the desktop's work area, which Windows announces with this same broadcast.
                 taskbar_lane::request();
+                // **And what this machine can start** (T-PROGRAMS-REFRESH). An installer that
+                // puts a program on `PATH` announces it with this broadcast (`Environment`), and
+                // this is the one listener Folio has for it. Not filtered by section: a burst of
+                // broadcasts is at most one walk out and one waiting (measured: a walk is 2–7 ms
+                // on its own worker).
+                if let Some(app) = self.app.as_ref() {
+                    programs_lane::request(
+                        programs_lane::Trigger::Environment,
+                        &app.settings_store.loaded().default_profile,
+                        &[],
+                    );
+                }
                 adopted
             }
+            AppEvent::ProgramsAnswered => self.adopt_program_walk(),
             AppEvent::WindowChromeChanged => self.adopt_platform_chrome(),
             // Every window, on this family's standing reason: a window whose
             // finger did nothing has nothing parked, and the walk costs a
@@ -67155,8 +67991,8 @@ fn banner_line(text: &str) -> String {
 /// The parentheses are the mock-up's and not a stylistic choice: the tip names
 /// the *verb* first and qualifies it, so that a user who reads only the first two
 /// words has still read the truth.
-fn new_tab_tip(profile: usize) -> String {
-    i18n::new_tab_tip(profiles::title(profile))
+fn new_tab_tip(profile: &str) -> String {
+    i18n::new_tab_tip(profiles::identity_title(profile))
 }
 
 fn resolve_title(
@@ -77972,8 +78808,9 @@ mod clipboard_path_tests {
         // (`send_paste`, 0.4.4 ticket 02), which `deliver_paste` answers with.
         let send = method_body("Runtime", "send_paste");
         assert!(
-            send.contains("offer_pty_input(pty.as_ref(), bytes, context)")
-                && send.contains("Ok(landed.queued())"),
+            send.contains(
+                "offer_pty_input(PtyTarget::of(pty.as_ref(), birth.as_ref()), bytes, context)"
+            ) && send.contains("Ok(landed.queued())"),
             "the paste reports the wrapper's success rather than what the ring \
              did with the bytes:\n{send}"
         );
