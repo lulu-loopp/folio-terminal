@@ -425,7 +425,7 @@ order for a login shell: `/etc/profile`, then the first of `~/.bash_profile`, `~
 `~/.bashrc` and nothing else. Which is which is a fact about the profile's own arguments, and only
 the Windows side can read them. This is not cosmetic on Git for Windows:
 `/etc/profile` is what puts `/mingw64/bin` on the path, so a shell that skipped it is a Git Bash
-that cannot find git. The chain is a pinned test (`crates/bt-term/tests/shell_integration_bash.rs`),
+that cannot find git. The chain is a pinned test (`crates/bt-pty/tests/shell_integration_bash.rs`),
 and `PATH`, `MSYSTEM` and `command -v git` were verified byte-identical to a plain `--login` shell.
 
 Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced — as a
@@ -561,7 +561,7 @@ markers that build the region (`B`, `C`) and by no others, so a screen carrying 
 keeps the heuristic it always had. The old measurement named this as its own exit — "if that test
 ever goes red the reason has expired" — and the new one is
 `a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic`, beside a round trip through a
-real `cmd.exe` in `crates/bt-term/tests/shell_integration_cmd.rs`.
+real `cmd.exe` in `crates/bt-pty/tests/shell_integration_cmd.rs`.
 
 What it buys is the capability this profile's reader has no other way to get. Every other profile
 can be handed a script; `cmd` cannot, and until now its command rail was empty however many commands

@@ -499,8 +499,8 @@ fn violations(index: &Index) -> Vec<String> {
 ///
 /// MUTATION: put back `PtySession::spawn_default(PtySize::cells(columns, rows),
 /// Arc::new(|| {}))` in `bt-app`'s `real_powershell_input_reaches_a_viewport_owned_frame`,
-/// or `Command::new("powershell.exe")` in `bt-term`'s
-/// `shell_integration_script.rs`, and this names the line. Rename either start
+/// or `Command::new("powershell.exe")` in `bt-pty`'s
+/// `tests/shell_integration_script.rs`, and this names the line. Rename either start
 /// through `use … as …` and the same call remains a finding.
 #[test]
 fn every_real_shell_a_test_starts_goes_through_the_test_shell_door() {

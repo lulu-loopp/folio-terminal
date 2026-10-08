@@ -260,7 +260,7 @@ fn a_document_link_answers_the_same_row_as_a_terminal_reference() {
     let notes = directory.join("notes.md");
     std::fs::write(&document, b"# x").expect("a document");
     std::fs::write(&notes, b"x").expect("a file it links to");
-    let verdict = bt_term::verify_path(&notes);
+    let verdict = bt_term::verify_path(&notes, &bt_platform::resolved_for_a_door);
     assert!(verdict.exists && !verdict.directory);
     let ledger = |path: &Path| (path == notes.as_path()).then(|| verdict.clone());
 

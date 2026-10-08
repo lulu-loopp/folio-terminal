@@ -634,14 +634,14 @@ impl HeadlessOracle {
                         self.path_questions = self.path_questions.saturating_add(1);
                         *self.path_question_names.entry(path.clone()).or_insert(0) += 1;
                         let verdict = if self.path_reask_reads_disk {
-                            bt_term::verify_path(&path)
+                            bt_term::verify_path(&path, &bt_corpus::resolved_for_a_door)
                         } else {
                             bt_term::PathVerdict::absent()
                         };
                         changed |= self.session.complete_path_verification(path, verdict);
                         continue;
                     }
-                    let verdict = bt_term::verify_path(&path);
+                    let verdict = bt_term::verify_path(&path, &bt_corpus::resolved_for_a_door);
                     changed |= self.session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => {
@@ -1097,6 +1097,7 @@ impl HeadlessOracle {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    bt_corpus::install_host_answers();
     // Set-but-empty names nothing, here as everywhere else in this program: a
     // cleared `BT_PROBE_INPUT=` is a probe that was not asked for, and it says
     // so rather than failing to open a file called the empty string.

@@ -302,6 +302,9 @@ name = "bt-corpus"
 version = "0.4.7"
 dependencies = [
  "anyhow",
+ "bt-detect",
+ "bt-math",
+ "bt-platform",
  "bt-pty",
  "bt-render",
  "bt-term",
@@ -312,6 +315,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "vte",
+ "web-time",
 ]
 
 [[package]]
@@ -430,9 +434,11 @@ version = "0.4.7"
 dependencies = [
  "bt-platform",
  "bt-pty",
+ "bt-source",
  "bt-term",
  "bt-testpath",
  "bt-transcript",
+ "bt-viewport",
  "bt-winres",
  "miniz_oxide",
  "nix",
@@ -486,7 +492,6 @@ dependencies = [
  "bt-effects",
  "bt-math",
  "bt-platform",
- "bt-pty",
  "bt-testpath",
  "bt-transcript",
  "bt-unicode",

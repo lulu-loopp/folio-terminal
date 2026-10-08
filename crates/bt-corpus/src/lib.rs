@@ -7,6 +7,27 @@ use std::{
 
 use thiserror::Error;
 
+/// **The answers `bt-term` asks its host for, given as Folio's desktop build gives them**
+/// (`bt-app`'s `host_answers`; `docs/ARCHITECTURE.md` §3.2): this machine's names, and the band
+/// below normal for every resample-pool thread. Each tool here that replays a pane's bytes calls
+/// it first, so a `file://<host>/` report in a recording made on this machine is read the way the
+/// pane read it.
+pub fn install_host_answers() {
+    bt_term::install_host_names(bt_platform::host_names());
+    bt_term::install_pool_thread_start(enter_the_band_below_normal);
+}
+
+fn enter_the_band_below_normal() {
+    bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::BelowNormal);
+}
+
+/// The name a hand-off door would open, as the desktop build resolves it — the resolver the
+/// replaying tools hand `bt_term::verify_path`.
+#[must_use]
+pub fn resolved_for_a_door(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    bt_platform::resolved_for_a_door(path)
+}
+
 const MAGIC_V1: &[u8; 8] = b"BTCRP001";
 const MAGIC_V2: &[u8; 8] = b"BTCRP002";
 

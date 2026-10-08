@@ -774,7 +774,7 @@ pub enum Integration {
     /// required (Q5's surviving half); detecting it and upgrading the row is
     /// booked, not done. Pinned at
     /// `bt_term::…::a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic`
-    /// and at `bt_term`'s `shell_integration_cmd` round trip, which runs a real
+    /// and at the `shell_integration_cmd` round trip in `bt-pty`'s tests, which runs a real
     /// `cmd.exe`.
     CmdPrompt,
     /// No door at all — nothing is dot-sourced, no argument is added and no

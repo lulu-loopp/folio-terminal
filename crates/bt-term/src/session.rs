@@ -51,12 +51,12 @@ use crate::{
     },
     cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
     command_marks::{CommandMark, CommandMarkId, CommandMarkLedger},
+    host::local_host_names,
     inline_image::{
         DecodedInlineImage, ImageReferenceShape, InlineImageDecodeError, InlineImageScaleTask,
         InlineImageSource, InlineImageTask, ScaledInlineImage, ShellIntegrationMarker,
         decode_inline_image, detect_peek_image_candidates, file_uri_to_local_image_path,
-        file_uri_to_local_path, local_host_names, normalized_local_image_path_key,
-        scale_inline_image,
+        file_uri_to_local_path, normalized_local_image_path_key, scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     palette::TerminalPalette,
@@ -106,10 +106,11 @@ pub struct PathVerdict {
     /// Its size, off that same call — what the glance card prints, so the card costs the window
     /// thread nothing either (§7.29 ⑬).
     pub bytes: Option<u64>,
-    /// **The finished name a hand-off door gives the operating system** —
-    /// [`bt_platform::resolved_for_a_door`], which is the doors' own transform and not a second
-    /// reading of it: `..` folded, the spelling settled, and the verbatim prefix `canonicalize`
-    /// writes on Windows taken back off.
+    /// **The finished name a hand-off door gives the operating system** — the answer of the
+    /// resolver [`verify_path`]'s caller hands it, which on the desktop is the doors' own
+    /// transform (`bt_platform::resolved_for_a_door`) and not a second reading of it: `..`
+    /// folded, the spelling settled, and the verbatim prefix `canonicalize` writes on Windows
+    /// taken back off.
     ///
     /// `None` when the platform would not resolve it. A door handed `None` uses the printed
     /// spelling, which is what it had before this existed.
@@ -169,8 +170,13 @@ impl PathVerdict {
 /// settle the longer one, which is precisely what let a sentence's full stop into the reference the
 /// demo rehearsal photographed. The honest answer is the one below: no Win32 filesystem holds a
 /// name whose last component ends in a dot or a space, so no such name is there.
+///
+/// **`resolve` is the host's door-ready transform** (`docs/ARCHITECTURE.md` §3.2): the platform
+/// layer's answer to "which name would a hand-off door open", asked only of a name that is there.
+/// Every desktop caller hands it `bt_platform::resolved_for_a_door`; this crate does not name the
+/// platform layer.
 #[must_use]
-pub fn verify_path(path: &Path) -> PathVerdict {
+pub fn verify_path(path: &Path, resolve: &dyn Fn(&Path) -> Option<PathBuf>) -> PathVerdict {
     // **Literally `main`'s question**, and it is the same function rather than the same lines
     // written twice: [`path_exists`] is what stood on the window thread, unchanged.
     if !path_exists(path) {
@@ -179,7 +185,7 @@ pub fn verify_path(path: &Path) -> PathVerdict {
     let Ok(metadata) = std::fs::metadata(path) else {
         return PathVerdict::absent();
     };
-    let door_ready = bt_platform::resolved_for_a_door(path);
+    let door_ready = resolve(path);
     // Asked of the name the door opens, not the one that was printed: a link called `editor`
     // that lands on `Thing.app` is a bundle, and `main`'s door judged the resolved name.
     let executable = opening_it_would_run_it(door_ready.as_deref().unwrap_or(path), &metadata);
@@ -187,13 +193,20 @@ pub fn verify_path(path: &Path) -> PathVerdict {
         exists: true,
         directory: metadata.is_dir(),
         bytes: (!metadata.is_dir()).then_some(metadata.len()),
-        // **The finished name a hand-off door hands over**, produced by the doors' own function
-        // rather than by a second reading of what they do — `canonicalize` *and* the verbatim
+        // **The finished name a hand-off door hands over**, produced by the host's door transform
+        // rather than by a second reading of what the doors do — `canonicalize` *and* the verbatim
         // prefix taken off, which is the pair `reveal_arguments` has always spent together. A raw
         // canonical is a name Explorer, the shape gate and the argument builder all refuse.
         door_ready,
         executable,
     }
+}
+
+/// The resolver this crate's tests hand [`verify_path`]: no door is in play, so the name resolves
+/// to nothing and the verdict carries the printed spelling (`door_ready: None`).
+#[cfg(test)]
+pub(crate) fn no_door(_: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// **Whether opening it would run it** — `macos_handoff::opening_it_would_run_it`'s rule, asked
@@ -8991,7 +9004,9 @@ impl DualPlaneSession {
         EnqueueOutcome::Queued
     }
 
-    pub fn run_workers(&mut self) {
+    /// Every outstanding decoration task, answered on this thread — math by the session's own
+    /// stand-ins, pictures by the real decoder, printed paths by [`verify_path`] with `resolve`.
+    pub fn run_workers(&mut self, resolve: &dyn Fn(&Path) -> Option<PathBuf>) {
         loop {
             while let Some(task) = self.take_decoration_worker_task() {
                 match task {
@@ -9017,7 +9032,7 @@ impl DualPlaneSession {
                         self.complete_inline_image_scale(scaled);
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let verdict = verify_path(&path);
+                        let verdict = verify_path(&path, resolve);
                         self.complete_path_verification(path, verdict);
                     }
                 }
@@ -18361,7 +18376,7 @@ mod tests {
         session.feed(&bytes).unwrap();
         assert_eq!(session.pending_tasks(), crate::WORKER_QUEUE_CAP);
         assert!(session.retry_on_idle() > 0);
-        session.run_workers();
+        session.run_workers(&no_door);
         assert_eq!(session.pending_tasks(), 0);
         assert_eq!(session.retry_on_idle(), 0);
         assert!(session.document().entries().iter().all(|(id, _)| {
@@ -24108,7 +24123,7 @@ mod tests {
         // Whatever the scheduler still holds for these lines runs now, so a raster that only
         // survived because nothing else had a chance to land is not mistaken for a handoff.
         let frozen_detections = session.frozen_detection_count;
-        session.run_workers();
+        session.run_workers(&no_door);
         let frozen_artifact = session.decorations.values().find_map(|record| {
             record
                 .artifact
@@ -26122,7 +26137,7 @@ mod tests {
                     assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -27137,6 +27152,127 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    /// **`verify_path` as it stood before CC-4**, byte for byte, with the platform's door-ready
+    /// transform called inside it. Temporary migration evidence (design T-COMPOSE-CRATE §6.1):
+    /// deleted with the `bt-platform` edge once the fixture comparison below has run.
+    fn verify_path_before_cc4(path: &Path) -> PathVerdict {
+        // **Literally `main`'s question**, and it is the same function rather than the same lines
+        // written twice: [`path_exists`] is what stood on the window thread, unchanged.
+        if !path_exists(path) {
+            return PathVerdict::absent();
+        }
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return PathVerdict::absent();
+        };
+        let door_ready = bt_platform::resolved_for_a_door(path);
+        // Asked of the name the door opens, not the one that was printed: a link called `editor`
+        // that lands on `Thing.app` is a bundle, and `main`'s door judged the resolved name.
+        let executable = opening_it_would_run_it(door_ready.as_deref().unwrap_or(path), &metadata);
+        PathVerdict {
+            exists: true,
+            directory: metadata.is_dir(),
+            bytes: (!metadata.is_dir()).then_some(metadata.len()),
+            door_ready,
+            executable,
+        }
+    }
+
+    /// TEMPORARY (CC-4) — **the resolver handed in answers what the platform call inside answered**:
+    /// on every fixture the verdict of `verify_path(path, &bt_platform::resolved_for_a_door)` is
+    /// byte-identical to the verdict of the function as it stood before the resolver became a
+    /// parameter.
+    ///
+    /// MUTATION: hand `verify_path` a resolver that answers `canonicalize` without taking the
+    /// verbatim prefix off, and every present row goes red on Windows; hand it `|_| None` and every
+    /// present row goes red everywhere.
+    #[test]
+    fn the_resolver_handed_in_gives_the_verdicts_the_platform_call_gave() {
+        let root = bt_testpath::temp_path("folio-cc4-verdicts");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("notes-\u{6587}\u{4ef6} \u{e9}t\u{e9}.md");
+        std::fs::write(&file, b"# notes\n").unwrap();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let folder = root.join("sub folder");
+        std::fs::create_dir(&folder).unwrap();
+        let tool = root.join("tool.exe");
+        std::fs::write(&tool, b"MZ").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let bundle = root.join("Thing.app");
+        std::fs::create_dir(&bundle).unwrap();
+        let link = root.join("editor");
+        let linked = make_directory_link(&link, &bundle);
+
+        let mut fixtures = vec![
+            ("an existing file", file.clone()),
+            ("an existing folder", folder.clone()),
+            ("a missing name", root.join("missing.md")),
+            ("a file where a folder is expected", file.join("child.md")),
+            ("a spelling the door folds", folder.join("..").join(&name)),
+            ("a program", tool.clone()),
+            ("a bundle", bundle.clone()),
+            ("a relative path", PathBuf::from("Cargo.toml")),
+            (
+                "a relative path the door folds",
+                PathBuf::from("src/../Cargo.toml"),
+            ),
+            ("a trailing dot", root.join(format!("{name}."))),
+            ("a trailing space", root.join(format!("{name} "))),
+            ("a trailing dot on a folder", root.join("sub folder.")),
+        ];
+        if linked {
+            fixtures.push(("a link to a bundle", link.clone()));
+        }
+        #[cfg(windows)]
+        {
+            fixtures.push(("a verbatim spelling", std::fs::canonicalize(&file).unwrap()));
+            fixtures.push((
+                "a verbatim UNC spelling of a share nobody serves",
+                PathBuf::from(r"\\?\UNC\folio-no-such-host.invalid\share\notes.md"),
+            ));
+            fixtures.push((
+                "a UNC share nobody serves",
+                PathBuf::from(r"\\folio-no-such-host.invalid\share\notes.md"),
+            ));
+            fixtures.push((
+                "forward slashes",
+                PathBuf::from(file.to_string_lossy().replace('\\', "/")),
+            ));
+        }
+
+        let mut present = 0;
+        for (shape, path) in &fixtures {
+            let before = verify_path_before_cc4(path);
+            let after = verify_path(path, &bt_platform::resolved_for_a_door);
+            assert_eq!(after, before, "{shape}: {}", path.display());
+            assert_eq!(
+                format!("{after:?}"),
+                format!("{before:?}"),
+                "{shape}: byte for byte"
+            );
+            present += usize::from(after.exists);
+            println!("{shape}: {after:?}");
+        }
+        assert!(
+            present >= 6,
+            "the fixture set reaches the disk's present arm"
+        );
+
+        if linked {
+            std::fs::remove_dir(&link)
+                .or_else(|_| std::fs::remove_file(&link))
+                .unwrap();
+        }
+        std::fs::remove_dir(&bundle).unwrap();
+        std::fs::remove_file(&tool).unwrap();
+        std::fs::remove_dir(&folder).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+    }
+
     /// A directory symbolic link, or `false` on an account that may not make one.
     ///
     /// Windows gives this privilege to administrators and to machines with Developer Mode on, and
@@ -27387,7 +27523,7 @@ mod tests {
         let mut asked = Vec::new();
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let verdict = verify_path(&path);
+                let verdict = verify_path(&path, &no_door);
                 asked.push(path.clone());
                 session.complete_path_verification(path, verdict);
             }
@@ -27447,7 +27583,7 @@ mod tests {
         let mut asked = Vec::new();
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let verdict = verify_path(&path);
+                let verdict = verify_path(&path, &no_door);
                 asked.push(path.clone());
                 session.complete_path_verification(path, verdict);
             }
@@ -27558,214 +27694,6 @@ mod tests {
             "so its `[Image #3]` is text"
         );
         std::fs::remove_file(&present).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
-    }
-
-    /// One transcript row as Claude Code prints it for a picture of a sent message: Ink's OSC 8,
-    /// BEL-terminated (`ESC ]8;;<url> BEL <label> ESC ]8;; BEL`), over exactly the label, indented
-    /// under the echoed message (T-IMAGE-N-GAPS, the producer's own `As` row).
-    fn claude_code_image_row(number: u32, target: &Path) -> String {
-        format!(
-            "  \u{23bf}  \u{1b}]8;;{}\u{7}[Image #{number}]\u{1b}]8;;\u{7}",
-            bt_transcript::paths::local_path_to_file_uri(target)
-        )
-    }
-
-    /// What a stand-in program that prints exactly `bytes` puts on its output, started through the
-    /// test-shell door (T-IMAGE-N-GAPS). The fixture is Claude Code's own byte shapes; Claude Code
-    /// itself is never started.
-    fn printed_by_a_stand_in(bytes: &[u8]) -> Vec<u8> {
-        let hygiene = bt_pty::test_shell::Hygiene::new();
-        let fixture = hygiene.root().join("claude-code-screen.bin");
-        std::fs::write(&fixture, bytes).unwrap();
-        #[cfg(windows)]
-        let mut command = {
-            let mut command = hygiene.command("cmd", bt_platform::quiet_command);
-            command.arg("/C").arg("type").arg(&fixture);
-            command
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut command = hygiene.command("cat", bt_platform::quiet_command);
-            command.arg(&fixture);
-            command
-        };
-        let output = command
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .expect("the stand-in program runs");
-        assert!(output.status.success(), "the stand-in printed its fixture");
-        assert_eq!(
-            output.stdout, bytes,
-            "byte for byte, as Claude Code wrote it"
-        );
-        output.stdout
-    }
-
-    /// The `file:` target the frame carries over `(row, column)`, if any.
-    fn link_target(frame: &ViewportFrame, row: u32, column: u32) -> Option<String> {
-        frame.hyperlink_at(row, column).map(|hit| hit.uri)
-    }
-
-    /// RED (T-IMAGE-N-GAPS, owner report 2026-10-08) — **every pasted picture on the input line is
-    /// a link, whichever extension Claude Code stored it under.**
-    ///
-    /// The owner's line held `[Image #104]`, `[Image #105]` and `[Image #106]` in one sentence, with
-    /// only `#106` lit. Claude Code names each stored picture `<k>.<ext>` by its content, and
-    /// resizes a large one into JPEG first, so one folder holds `103.png`, `104.jpg`, `105.jpg` and
-    /// `106.png`. The newest learned picture is `103.png`; inferring only `<k>.png` lit `#106`
-    /// alone.
-    ///
-    /// MUTATION: infer only the newest learned picture's own extension (the 2026-09-29 rule), and
-    /// `#104` and `#105` are text while `#106` lights — the screenshot.
-    #[test]
-    fn every_pasted_picture_on_the_input_line_lights_whichever_extension_it_was_stored_under() {
-        let directory = temporary_pictures(&["103.png", "104.jpg", "105.jpg", "106.png"]);
-        let mut session = DualPlaneSession::new(nz(80), nz(8));
-        enable_path_detection(&mut session);
-        let screen = format!(
-            "{}\r\n> 你好世界[Image #104] 你好 [Image #105] [Image #106] 你好世",
-            claude_code_image_row(103, &directory.join("103.png"))
-        );
-        session
-            .feed(&printed_by_a_stand_in(screen.as_bytes()))
-            .unwrap();
-        let mut projection = session.new_projection(session.layout_key());
-        // The first pass learns 103 from the transcript row; the second asks about the rest.
-        frame_after_path_verification(&mut session, &mut projection);
-        let frame = frame_after_path_verification(&mut session, &mut projection);
-        for (column, name) in [(10, "104.jpg"), (28, "105.jpg"), (41, "106.png")] {
-            assert_eq!(
-                link_target(&frame, 1, column),
-                Some(bt_transcript::paths::local_path_to_file_uri(
-                    &directory.join(name)
-                )),
-                "the placeholder at column {column} is a link to {name}"
-            );
-        }
-        let (dotted, _) = underlined_columns(&frame, 1);
-        assert_eq!(
-            dotted,
-            (10..22).chain(28..40).chain(41..53).collect::<Vec<_>>(),
-            "each wears the resting mark over exactly its own cells"
-        );
-        for name in ["103.png", "104.jpg", "105.jpg", "106.png"] {
-            std::fs::remove_file(directory.join(name)).unwrap();
-        }
-        std::fs::remove_dir(&directory).unwrap();
-    }
-
-    /// RED (T-IMAGE-N-GAPS) — **a picture the disk did not hold yet when the input line was first
-    /// drawn lights when Claude Code draws the line again.**
-    ///
-    /// Claude Code puts `[Image #k]` into the input line at once and writes the file afterwards,
-    /// asynchronously; the first frame can ask before the file lands and hear "no". A still screen
-    /// asks nothing more — the rule every printed name follows — but the program drawing the row
-    /// again (the reader typing on) is the program naming the picture again, and the "no" is asked
-    /// once more.
-    ///
-    /// MUTATION: leave the placeholders out of the re-ask pass
-    /// (`paths_named_on_freshly_printed_rows`), and `#104` stays text after the row is redrawn
-    /// over a file that is now there.
-    #[test]
-    fn a_picture_written_after_the_input_line_was_drawn_lights_when_the_line_is_drawn_again() {
-        let directory = temporary_pictures(&["103.png"]);
-        let mut session = DualPlaneSession::new(nz(80), nz(8));
-        enable_path_detection(&mut session);
-        let screen = format!(
-            "{}\r\n> 你好世界[Image #104]",
-            claude_code_image_row(103, &directory.join("103.png"))
-        );
-        session
-            .feed(&printed_by_a_stand_in(screen.as_bytes()))
-            .unwrap();
-        let mut projection = session.new_projection(session.layout_key());
-        // The first pass learns 103 from the transcript row; the second asks about 104 beside it.
-        frame_after_path_verification(&mut session, &mut projection);
-        let frame = frame_after_path_verification(&mut session, &mut projection);
-        assert_eq!(
-            link_target(&frame, 1, 10),
-            None,
-            "asked before the file landed: text"
-        );
-        assert!(
-            session
-                .path_verdict(&directory.join("104.png"))
-                .is_some_and(|verdict| !verdict.exists),
-            "and the disk's answer for it was no"
-        );
-
-        std::fs::write(directory.join("104.png"), b"written after the paste").unwrap();
-        let frame = frame_after_path_verification(&mut session, &mut projection);
-        assert_eq!(
-            link_target(&frame, 1, 10),
-            None,
-            "a still screen asks nothing again"
-        );
-
-        session
-            .feed(&printed_by_a_stand_in(
-                "\r> 你好世界[Image #104] 你好".as_bytes(),
-            ))
-            .unwrap();
-        let frame = frame_after_path_verification(&mut session, &mut projection);
-        assert_eq!(
-            link_target(&frame, 1, 10),
-            Some(bt_transcript::paths::local_path_to_file_uri(
-                &directory.join("104.png")
-            )),
-            "the program drew the placeholder again, the question was asked again, and the file \
-             is there"
-        );
-        for name in ["103.png", "104.png"] {
-            std::fs::remove_file(directory.join(name)).unwrap();
-        }
-        std::fs::remove_dir(&directory).unwrap();
-    }
-
-    /// RED (T-IMAGE-N-GAPS) — **a placeholder Claude Code's word wrap split across two rows of its
-    /// input box is one link over both halves.**
-    ///
-    /// Claude Code wraps its input itself (word wrap, `hard`, no trim) and draws each wrapped row as
-    /// a line of its own, so the space inside `[Image #104]` is where a row can end: `…[Image ` on
-    /// one row, `#104] …` on the next, indented under the prompt. No terminal wrap flag joins them.
-    ///
-    /// MUTATION: drop the seam pass for placeholders from `implicit_hyperlinks`, and neither half is
-    /// a link.
-    #[test]
-    fn a_placeholder_split_by_the_input_boxs_word_wrap_is_one_link_over_both_halves() {
-        let directory = temporary_pictures(&["103.png", "104.png"]);
-        let mut session = DualPlaneSession::new(nz(30), nz(8));
-        enable_path_detection(&mut session);
-        let screen = format!(
-            "{}\r\n> 你好世界你好世界你[Image \r\n  #104] 你好",
-            claude_code_image_row(103, &directory.join("103.png"))
-        );
-        session
-            .feed(&printed_by_a_stand_in(screen.as_bytes()))
-            .unwrap();
-        let mut projection = session.new_projection(session.layout_key());
-        frame_after_path_verification(&mut session, &mut projection);
-        let frame = frame_after_path_verification(&mut session, &mut projection);
-        let picture = Some(bt_transcript::paths::local_path_to_file_uri(
-            &directory.join("104.png"),
-        ));
-        assert_eq!(link_target(&frame, 1, 20), picture, "the upper half");
-        assert_eq!(link_target(&frame, 2, 2), picture, "and the lower half");
-        assert_eq!(
-            underlined_columns(&frame, 1).0,
-            (20..26).collect::<Vec<_>>(),
-            "the mark covers `[Image` and not the blank after it"
-        );
-        assert_eq!(
-            underlined_columns(&frame, 2).0,
-            (2..7).collect::<Vec<_>>(),
-            "and `#104]`, not the indent before it"
-        );
-        for name in ["103.png", "104.png"] {
-            std::fs::remove_file(directory.join(name)).unwrap();
-        }
         std::fs::remove_dir(&directory).unwrap();
     }
 
@@ -28656,7 +28584,7 @@ mod tests {
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
                     this_frame += 1;
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
             }
@@ -28730,7 +28658,7 @@ mod tests {
             session.absorb_printed_path_probes(&mut projection);
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
             }
@@ -28829,12 +28757,14 @@ mod tests {
     ///
     /// The host they print is `gethostname`'s answer. The reader used to know this machine's name
     /// only from `COMPUTERNAME`, which a Mac does not have, so every one of these was read as a
-    /// remote share and the pane forgot its directory. It now asks
-    /// [`bt_platform::host_names`] — the real producer, not a name handed in by the test — and the
-    /// comparison is case-insensitive, because host names are.
+    /// remote share and the pane forgot its directory. It now reads the names the host installed
+    /// ([`local_host_names`]; this crate's tests install [`crate::TEST_HOST_NAMES`] there), and
+    /// the comparison is case-insensitive, because host names are. That the desktop installs the
+    /// operating system's own answer is `bt-app`'s pin
+    /// (`host_answers::tests::the_names_installed_are_the_machines_and_a_report_naming_it_is_accepted`).
     ///
-    /// MUTATION: make `local_host_names` answer the `COMPUTERNAME` variable again — every host
-    /// row goes red on macOS and Linux, where it is unset.
+    /// MUTATION: hand `file_uri_to_local_path` an empty list in
+    /// `set_reported_working_directory` — every host row goes red.
     #[test]
     fn a_cwd_message_naming_this_host_is_accepted_and_a_foreign_one_ignored() {
         let directory = std::env::temp_dir();
@@ -28843,10 +28773,10 @@ mod tests {
             .strip_prefix("file://")
             .expect("a local file URI opens with the scheme and an empty authority");
         let expected = file_uri_to_local_path(&bare, &[]).expect("the bare form is this machine's");
-        let host = bt_platform::host_names()
-            .into_iter()
-            .next()
-            .expect("this machine has a name to ask for");
+        let host = local_host_names()
+            .first()
+            .cloned()
+            .expect("the installed names hold one to ask for");
 
         let reported = |payload: String| {
             let mut session = DualPlaneSession::new(nz(80), nz(24));
@@ -28936,7 +28866,7 @@ mod tests {
             owed = false;
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     owed |= session.complete_path_verification(path, verdict);
                 }
             }
@@ -28974,7 +28904,7 @@ mod tests {
         session.absorb_printed_path_probes(projection);
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let verdict = verify_path(&path);
+                let verdict = verify_path(&path, &no_door);
                 session.complete_path_verification(path, verdict);
             }
         }
@@ -29485,7 +29415,7 @@ mod tests {
                     session.complete_inline_image_scale(scale_inline_image(&task));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -31494,7 +31424,7 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let verdict = verify_path(&path);
+                        let verdict = verify_path(&path, &no_door);
                         session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -31602,7 +31532,7 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let verdict = verify_path(&path);
+                        let verdict = verify_path(&path, &no_door);
                         session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -31778,8 +31708,8 @@ mod tests {
 
     /// The exact bytes `scripts/shell-integration/folio.ps1` puts on the wire for one
     /// directory: an empty authority and a minimally percent-encoded path. The script's own
-    /// emission is pinned end to end in `tests/shell_integration_script.rs`; this is the same
-    /// shape, written where a unit test can reach it.
+    /// emission is pinned end to end in `bt-pty`'s `tests/shell_integration_script.rs`; this is
+    /// the same shape, written where a unit test can reach it.
     fn osc7_report(directory: &Path) -> Vec<u8> {
         const SAFE: &str = "-._~!$&'()*+,;=:@/";
         let mut uri = String::from("file:///");

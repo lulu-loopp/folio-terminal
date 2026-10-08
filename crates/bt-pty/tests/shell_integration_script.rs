@@ -4,6 +4,7 @@
 //! the two supported generations, and the one whose language limits the script is written to — and
 //! feed exactly what it puts on the wire back into a session.
 
+#![cfg(windows)]
 #![allow(clippy::disallowed_methods)]
 
 use std::{
@@ -15,6 +16,13 @@ use bt_term::DualPlaneSession;
 
 fn nz(value: u32) -> std::num::NonZeroU32 {
     std::num::NonZeroU32::new(value).unwrap()
+}
+
+/// **A session of this file**, made after the test host names are installed: the shell's OSC 7
+/// report reads them (`bt_term::local_host_names`, which panics before an installation).
+fn new_session(columns: u32, rows: u32) -> DualPlaneSession {
+    bt_term::install_test_host_names();
+    DualPlaneSession::new(nz(columns), nz(rows))
 }
 
 fn script_path() -> PathBuf {
@@ -135,7 +143,7 @@ fn the_integration_script_reports_its_working_directory_over_osc_7() {
     );
 
     // The whole prompt burst, byte for byte, through the terminal that must understand it.
-    let mut session = DualPlaneSession::new(nz(120), nz(8));
+    let mut session = new_session(120, 8);
     session.feed(&bytes).unwrap();
     assert_eq!(
         session.working_directory(),
@@ -151,7 +159,7 @@ fn the_integration_script_reports_its_working_directory_over_osc_7() {
 #[test]
 fn a_non_filesystem_location_retracts_the_reported_working_directory() {
     let directory = temporary_directory();
-    let mut session = DualPlaneSession::new(nz(120), nz(8));
+    let mut session = new_session(120, 8);
     session.feed(&prompt_bytes(&directory)).unwrap();
     assert_eq!(session.working_directory(), Some(directory.as_path()));
 

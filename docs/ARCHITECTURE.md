@@ -299,7 +299,7 @@ bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty,
 bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
 bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
-bt-platform     ← bt-persist, bt-term, bt-app, bt-lint-probe
+bt-platform     ← bt-persist, bt-app, bt-lint-probe
 bt-viewport     ← bt-render, bt-term
 bt-detect       ← bt-term
 bt-math         ← bt-term
@@ -328,14 +328,14 @@ scheduling band and then calls `bt_effects::admission::lend_worker`, the one
 role-entering function, public for the door alone; and the re-exports
 `bt_platform::admission` (the vocabulary and the door) and `bt_platform::file_reads`,
 so every path through `bt-platform` still resolves. `bt-render` and `bt-math` have
-no `bt-platform` edge since CC-3; `bt-term`'s is D-14's remainder (§3.2). The
+no `bt-platform` edge since CC-3, and `bt-term` none since CC-4 (§3.2). The
 window-waits source guard holds `bt-effects` to starting no thread, waiting on
 nothing, naming the file system and the environment only inside `file_reads`, no
 standard-library clock and no `bt_platform` (§5.1).
 
 The library crates below `bt-app` that a browser build will reference —
 `bt-unicode`, `bt-transcript`, `bt-doc`, `bt-layout`, `bt-viewport`,
-`bt-detect`, `bt-effects`, `bt-platform`, `bt-math`, `bt-render` and `bt-term` — check for
+`bt-detect`, `bt-effects`, `bt-math`, `bt-render` and `bt-term` — check for
 `wasm32-unknown-unknown` in CI (`wasm-lib-check`, `scripts/ci/check-wasm-lib.ps1`,
 which holds the list).
 
@@ -353,29 +353,43 @@ own, outside the preparation and outside the relocation commit. **Done
 2026-09-21** (`21cf1ef8`): the probe lives in `bt-corpus`, and `bt-pty`'s
 manifest names `bt-term` only under `[dev-dependencies]`.
 
-**`bt-term → bt-platform` — wrong layer, recorded, enforced by the gate.**
-`bt-term` must build without the platform layer (the owner's ruling of
-2026-09-21), so the edge is a layer violation: `bt-term` and `bt-platform` share
-a layer of `scripts/ci/crate-layers.tsv`, and the edge passes only as its D-14
-row in `scripts/ci/crate-edge-exemptions.tsv` (§3.3), which J2's boundary crate
-deletes. It is also broader than its manifest says.
-The manifest comment called it one call; there were four product import surfaces:
-`inline_image::resample_pool` sets a thread priority, `session::verify_path`
-calls `handoff::resolved_for_a_door`,
-`inline_image::read_and_decode_local_image` goes through the read ledger, and
-`inline_image::local_host_names` reads `host_names`. The ruled repair is a
-**small headless observation/effect boundary** rather than a reorganised
-`bt-platform`. **Its first half landed 2026-10-08 (CC-3):** the read ledger is
-`bt-effects`' (§3.1), and the manifest comment now names the three surfaces that
-remain — the priority band, `resolved_for_a_door` and `host_names` — which CC-4
-turns into facts the host installs; the edge, and its exemption row, go then.
+**`bt-term → bt-platform` — gone (D-14, repaid by CC-4).** `bt-term` builds
+without the platform layer (the owner's ruling of 2026-09-21), and since CC-4 its
+manifest names `bt-platform` nowhere, not as a dev-dependency either:
+`cargo tree -p bt-term -i bt-platform` prints nothing. Its four former product
+surfaces are answered from outside. The read ledger is `bt-effects`' (CC-3,
+§3.1). The other three are the host's:
+
+- **The machine's names** (`bt_term::install_host_names`, read by
+  `bt_term::local_host_names` when a working-directory report names a host) — a
+  process-wide fact, one answer per process: the same names again are a no-op,
+  different ones a panic, and a read before any installation panics in every
+  build profile, release included ("host names read before the host installed
+  them").
+- **What a resample-pool thread runs first** (`bt_term::install_pool_thread_start`)
+  — a process-wide hook, installed once; a host that installs none (a browser)
+  gets a pool whose threads run no hook.
+- **The name a hand-off door would open** — not installed: `bt_term::verify_path`
+  takes the resolver as a parameter, and its one product caller,
+  `run_path_verify_worker`, hands it `bt_platform::resolved_for_a_door`.
+
+`bt-app` installs the first two in one place, `host_answers::install`, called by
+`main` right after the window thread is entered and before the event loop that
+makes every session exists (pinned by
+`host_answers::tests::the_host_answers_are_installed_before_the_first_session_can_exist`).
+The development tools in `bt-corpus` that replay a pane's bytes install the same
+answers first (`bt_corpus::install_host_answers`). A test process installs
+`bt_term::TEST_HOST_NAMES` (`bt_term::install_test_host_names`): `bt-term`'s own
+unit tests in the reader itself, every other test binary in the one function that
+makes its sessions. The tests that start a real shell through `bt_pty::test_shell`
+— whose door reaches the platform layer — live in `bt-pty/tests`, beside the
+transport they run on.
 
 **`bt-term → bt-math` — real coupling, recorded debt.** `session.rs` imports six
 math types and calls into the math crate in product code,
 `inline_image::decode_svg_bytes` rasterises through it,
-`crates/bt-term/src/lib.rs` re-exports the engine, and
-`crates/bt-term/src/bin/bt-repaint-oracle.rs` uses it in a binary target — the
-same target trap. Hiding it behind re-exports changes nothing. **Recorded as
+and `crates/bt-term/src/lib.rs` re-exports the engine. Hiding it behind
+re-exports changes nothing. **Recorded as
 debt** until the composition layer is designed.
 
 ### 3.3 The dependency policy — this file is now its address
@@ -424,11 +438,11 @@ those manifests actually practise, restated here from what they say:
   crate missing from that table fails. The exemptions live in
   `scripts/ci/crate-edge-exemptions.tsv`, one row per edge with its
   `docs/plans/structural-debt.md` row; the list only shrinks against the merge
-  base, and a row whose edge is gone or now goes down fails. Its two rows are
-  `bt-term → bt-platform` (D-14) and `bt-term → bt-math` (D-15).
+  base, and a row whose edge is gone or now goes down fails. Its one row is
+  `bt-term → bt-math` (D-15).
   Dev-dependencies are not layer edges: Cargo allows them in both directions,
-  and `bt-term`/`bt-pty` and `bt-platform`/`bt-pty` each name the other as one
-  (`bt-pty` naming `bt-term` only as one is §3.2's repair of D-13).
+  and `bt-platform`/`bt-pty` each name the other as one (`bt-pty` naming
+  `bt-term` only as one is §3.2's repair of D-13).
 - **`bt-workbench`'s entry, for that guard** (D-27 lands it; census-3 wrote it
   here because the guard does not exist yet —
   `docs/plans/design/ownership-census-2026-09-25.md` §5.4):

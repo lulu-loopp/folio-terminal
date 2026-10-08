@@ -80,6 +80,7 @@ mod handoff_lane;
 mod hang_watch;
 mod hex_peek;
 mod highlight;
+mod host_answers;
 mod i18n;
 mod icons;
 mod ime_outbound;
@@ -2298,7 +2299,7 @@ fn run_path_verify_worker(
     mut wake: impl FnMut(),
 ) {
     while let Ok(PathWorkerRequest { leaf, path }) = task_rx.recv() {
-        let verdict = bt_term::verify_path(&path);
+        let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
         if result_tx
             .send(MathWorkerResult {
                 leaf,
@@ -73080,6 +73081,10 @@ fn main() -> Result<()> {
     // first turn. Below the six argv doors, whose processes never have a window, and above the
     // hand-over, which is this phase's one wait (§5.3 row 18).
     bt_platform::admission::enter_window_thread();
+    // **The machine's answers for `bt-term`, before anything here can make a session**
+    // (`host_answers`): its names and the resample pool's priority band. Every session is made by
+    // the event loop below, and a session's first working-directory report reads the names.
+    host_answers::install();
     // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
     // taken shared here, before the data directory is resolved (which may move
     // it), before settings, sidecars and the hand-over below; then one look at
@@ -79843,7 +79848,7 @@ mod printed_path_provenance_tests {
         let file = directory.join("notes.md");
         std::fs::write(&file, b"x").expect("a file this test owns");
 
-        let verdict = bt_term::verify_path(&file);
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists && !verdict.directory);
         let target = verified_target_of(Some(&verdict));
         let resolved = target
@@ -79891,7 +79896,7 @@ mod printed_path_provenance_tests {
             "the door refuses a parent step, which is why it has to be folded before it"
         );
 
-        let verdict = bt_term::verify_path(&printed);
+        let verdict = bt_term::verify_path(&printed, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists && verdict.directory);
         let target = verified_target_of(Some(&verdict));
         let resolved = target.resolved.clone().expect("a folder that is there");
@@ -79925,7 +79930,7 @@ mod printed_path_provenance_tests {
         let file = directory.join(name);
         std::fs::write(&file, b"x").expect("a file this test owns");
 
-        let verdict = bt_term::verify_path(&file);
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists);
         let target = verified_target_of(Some(&verdict));
         let resolved = target.resolved.clone().expect("a name that is there");

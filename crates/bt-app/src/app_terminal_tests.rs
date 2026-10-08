@@ -1372,7 +1372,7 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
     session.absorb_printed_path_probes(&mut projection);
     while let Some(task) = session.take_decoration_worker_task() {
         if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
-            let verdict = bt_term::verify_path(&path);
+            let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
             session.complete_path_verification(path, verdict);
         }
     }
@@ -1383,7 +1383,12 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
     let readable_column = 0u32;
     let page_column = readable.to_string_lossy().chars().count() as u32 + 1;
     let directory_column = page_column + page.to_string_lossy().chars().count() as u32 + 1;
-    let is_directory = |path: &Path| Some(bt_term::verify_path(path));
+    let is_directory = |path: &Path| {
+        Some(bt_term::verify_path(
+            path,
+            &bt_platform::resolved_for_a_door,
+        ))
+    };
     for (column, named, plain, control) in [
         (
             readable_column,
@@ -1489,7 +1494,7 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
     session.absorb_printed_path_probes(&mut projection);
     while let Some(task) = session.take_decoration_worker_task() {
         if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
-            let verdict = bt_term::verify_path(&path);
+            let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
             session.complete_path_verification(path, verdict);
         }
     }
@@ -1515,7 +1520,12 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
         "the target is the file, and the line rides in its fragment"
     );
 
-    let is_directory = |path: &Path| Some(bt_term::verify_path(path));
+    let is_directory = |path: &Path| {
+        Some(bt_term::verify_path(
+            path,
+            &bt_platform::resolved_for_a_door,
+        ))
+    };
     assert_eq!(
         hyperlink_activation(
             false,

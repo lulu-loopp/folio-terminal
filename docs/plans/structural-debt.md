@@ -305,7 +305,7 @@ ledger's.
 | D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | census-1 | 0.4.6, with D-32 | repaid (census-1) — the census is `bt_source::FieldCensus` over `bt-app`; inventory and site rows are query reports under `target/`, while the owner annotations (census-1's proposals, until the owner rules) and the shrink-only unknown row multiset are committed and held by `bt-source`'s `census` test and `scripts/ci/check-census-unknowns.ps1`, so a fact with an unknown is `incomplete`, never single-writer. D-32 (census-7) is what the census was taken for, and stays open |
 | D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.5 — `bt-platform` is not split in 0.4.8 (plan K, *Not in 0.4.8*); J2's small boundary crate for D-14 is the first extraction | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | — | repaid on `21cf1ef8` (2026-09-21) — the ConPTY width probe lives in `bt-corpus` and `bt-pty`'s manifest names `bt-term` only under `[dev-dependencies]` (ARCHITECTURE §3.2, *Done 2026-09-21*); carried open by mistake from 2026-09-23 to 2026-10-08 (J4). Not this row: `bt-pty`'s optional edge to `bt-platform` behind its test-only `test-shell` feature and `bt-term`'s dev-dependency on `bt-pty` (T-TEST-SHELL-HYGIENE, T-INTEGRATION-INJECT-4 round 6), for J1 to classify |
-| D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | CC-3 (`bt-effects`), CC-4 | 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite | open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', and three surfaces remain for CC-4 (thread priority, `resolved_for_a_door`, `host_names`) |
+| D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | CC-3 (`bt-effects`), CC-4 | 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite | open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', and three surfaces remain for CC-4 (thread priority, `resolved_for_a_door`, `host_names`); **repaid on `CC4SHA` (CC-4)**: `bt-term`'s manifest names `bt-platform` nowhere (not as a dev-dependency either); the host names and the resample pool's thread-start hook are installed by the host (`bt_term::install_host_names`, `install_pool_thread_start`; `bt-app`'s `host_answers::install`), and `verify_path` takes the door-ready resolver as a parameter |
 | D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then | open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.5 — **0.5 precondition**: the side-effect contract's admission half; its note is 0.4.8 J5 (T-05-CONTRACTS); the enumeration lane and the observation threads' band are built in 0.5 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain; **2026-10-08 (J4):** untouched: every thread 0.4.7 added comes through the door (T-PROBE-CHILD's reader, T-KEYBOARD-CTRLALT's `folio-layout-tables`, T-UNINSTALL-UX's remover pipe); `folio-web-thumb` still stands at `Normal`; RULES 53's 0.4.7 ticket was never cut; was 0.4.7 |
 | D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.5 — with D-1's document owner, after J5's note | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
@@ -921,6 +921,20 @@ owes**, counted in `bt-term`'s source on the CC-3 commit: product
 dev-dependency once the product edge goes. The exemption row
 (`scripts/ci/crate-edge-exemptions.tsv`) stays until CC-4 removes the edge.
 
+**Repaid 2026-10-08 (CC-4, `CC4SHA`).** `bt-term`'s manifest names `bt-platform`
+nowhere, not as a dev-dependency either; `cargo tree -p bt-term -i bt-platform`
+prints nothing, and the exemption row is deleted. The three remaining surfaces
+are the host's (`docs/ARCHITECTURE.md` §3.2): the machine's names and the
+resample pool's thread-start hook are process-wide facts the host installs
+(`bt_term::install_host_names`, `bt_term::install_pool_thread_start`; `bt-app`
+installs both in `host_answers::install`, before its event loop), and
+`verify_path` takes the door-ready resolver as a parameter, which its one product
+caller fills with `bt_platform::resolved_for_a_door` — the function did not move
+and the verdicts were compared byte for byte on a fixture set before the old call
+was deleted. The tests that needed the platform left with it: the real-shell
+tests went to `bt-pty/tests`, and the host-name pin's real-producer half to
+`bt-app`.
+
 **If left.** A stale comment that a reader trusts, and a portable crate whose
 real coupling to the platform crate is invisible in its own manifest.
 
@@ -934,9 +948,9 @@ stays the single answer, consumed by both `bt-term::verify_path` and
 (`CONVENTIONS` §十 rule 9). Fix the manifest comment in the same commit.
 
 **Version.** 0.5 — both halves change product code, which a preparation ticket
-forbids. **Status.** open.
+forbids. **Status.** repaid on `CC4SHA`.
 
-**Ledger.** source: C-4 · K-11 · ticket: CC-3 (`bt-effects`), CC-4 · version: 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite · status: open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', three surfaces remain for CC-4.
+**Ledger.** source: C-4 · K-11 · ticket: CC-3 (`bt-effects`), CC-4 · version: 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite · status: open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', three surfaces remain for CC-4; **repaid on `CC4SHA` (CC-4)**.
 
 ---
 
@@ -946,10 +960,9 @@ forbids. **Status.** open.
 
 **Evidence.** `session.rs` imports six math types and calls into the math crate
 in product code; `inline_image::decode_svg_bytes` rasterises through it;
-`crates/bt-term/src/lib.rs` re-exports the engine; and
-`crates/bt-term/src/bin/bt-repaint-oracle.rs` uses it in a binary target — the
-same target trap as D-13. Hiding the dependency behind re-exports changes
-nothing.
+and `crates/bt-term/src/lib.rs` re-exports the engine. (The binary target that
+used it too, `bt-repaint-oracle`, moved to `bt-corpus` with CC-4.) Hiding the
+dependency behind re-exports changes nothing.
 
 **If left.** The terminal crate carries decoration policy. Accepted for now.
 
