@@ -1851,7 +1851,7 @@ mod refusal_tests {
         // is where it is held).
         #[cfg(not(any(windows, target_os = "macos")))]
         assert!(
-            SystemSettingsWatch::install(window(), Box::new(|| {})).is_ok(),
+            SystemSettingsWatch::install(window(), Box::new(|_| {})).is_ok(),
             "the system settings watch"
         );
         // `ImeSystemCaret::new` returns `Self` and has no failure to test; that
