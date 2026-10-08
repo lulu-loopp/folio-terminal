@@ -702,7 +702,7 @@ impl Runtime<'_> {
         )?;
         // **A replacement still being born waits beside the shell it replaces** (T-BIRTH-OFF-WINDOW):
         // the old shell goes on being the one typed into until the new one lands
-        // (`Runtime::land_shell_births`), and a birth that fails leaves it as it was. A replacement
+        // (`Runtime::land_births`), and a birth that fails leaves it as it was. A replacement
         // with no shell to wait for replaces it now.
         if spawned.birth.is_some() {
             if let Some(leaf) = self.sessions.get_mut(&seat) {
@@ -866,7 +866,7 @@ impl Runtime<'_> {
         // **The panes whose shells have answered land first** (T-BIRTH-OFF-WINDOW), so a shell's
         // first bytes are drained on the turn it is born: its worker woke this window through the
         // pane's own wake, after publishing the answer.
-        hang_watch::during(hang_watch::Station::PtyBirth, || self.land_shell_births())?;
+        hang_watch::during(hang_watch::Station::PtyBirth, || self.land_births())?;
         let mut active_changed = false;
         let mut active_uncapped = false;
         let mut active_sync_closed = false;

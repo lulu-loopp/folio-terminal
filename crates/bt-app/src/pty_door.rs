@@ -160,6 +160,15 @@ pub(crate) fn holds(generation: u64) -> bool {
     births.answers.contains_key(&generation) || births.abandoned.contains(&generation)
 }
 
+/// What a panic said, when it said it in text.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
 /// A session nobody will take, taken apart on a thread of its own (`bt_pty::retire_session`).
 fn retire(answer: Result<PtySession, PtyError>) {
     if let Ok(session) = answer {
@@ -185,7 +194,15 @@ pub(crate) fn request(
         "bt-pty-birth",
         bt_platform::ThreadPriority::BelowNormal,
         move |ctx| {
-            let answer = birth(ctx);
+            // **A birth that panics is a birth that failed** (round 2): an unwinding worker would
+            // publish nothing and wake nobody, and its pane would wait in birth for ever.
+            let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| birth(ctx)))
+                .unwrap_or_else(|panic| {
+                    Err(PtyError::Backend(format!(
+                        "the PTY birth worker panicked: {}",
+                        panic_message(panic.as_ref())
+                    )))
+                });
             let stale = {
                 let mut births = births();
                 if births.abandoned.remove(&generation) {

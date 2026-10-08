@@ -1570,7 +1570,7 @@ impl Runtime<'_> {
             restart_in_flight: self
                 .sessions
                 .get(&seat)
-                .is_some_and(|leaf| leaf.successor.is_some()),
+                .is_some_and(crate::LeafSession::restart_in_flight),
             // The same question `Find…` will ask when it runs, asked of the same
             // function: one door, so a greyed row and a declined verb can never
             // disagree about which panes a search can be addressed to.

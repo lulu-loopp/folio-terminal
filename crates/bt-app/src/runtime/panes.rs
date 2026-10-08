@@ -2,8 +2,9 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    BirthWait, LeafView, TextScale, conpty_source_of, decided_birth, deliver_held_input,
-    diagnostics, i18n, land_shell_birth, resolved_birth_seed, toast,
+    BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due,
+    conpty_source_of, decided_birth, deliver_held_input, diagnostics, i18n, land_shell_birth,
+    land_successor, landed_source, resolved_birth_seed, toast,
 };
 use crate::{
     ColumnNotch, CommandFlash, DividerGrip, Drag, DragCarry, DragHandover, DragSource, DropLanding,
@@ -42,82 +43,43 @@ use winit::event::MouseScrollDelta;
 use winit::window::{Window, WindowId};
 
 impl Runtime<'_> {
-    /// **Bear every pane of this window whose rows the program walk has now answered**
-    /// (T-PROGRAMS-REFRESH; T-LAUNCH-PROBE's invariant).
+    /// **Land every birth of this window that is due** — one pass over both places a birth can
+    /// sit (a pane's own, and a *Restart shell* successor's beside it) in both of its waits
+    /// ([`births_due`]): T-PROGRAMS-REFRESH's rows and T-BIRTH-OFF-WINDOW's shell. Called when the
+    /// program walk's answer reaches this window and at the head of every drain (the birth worker
+    /// wakes the pane's window through the pane's own wake).
     ///
-    /// A pane in birth is decided here exactly as [`create_leaf_session`] decides one, from the
-    /// answers the application holds; one whose rows are still unknown goes on waiting, and is
-    /// asked about again by the next answer. A decided pane is made again through
-    /// [`create_leaf_session`] — the same function as every other pane, which asks for its shell —
-    /// at its text size and its seat's current rectangle, from its seed with the default
-    /// resolved and its folder crossed ([`resolved_birth_seed`]); what was typed into it meanwhile
-    /// moves to the new pane, which is itself in birth for its shell and lands when that answers
-    /// ([`Self::land_shell_births`]) — one road, two triggers.
-    /// **Land every pane of this window whose shell has answered** (T-BIRTH-OFF-WINDOW): its
-    /// birth finished from the answer, a resize it missed told to it, what was typed meanwhile
-    /// written to it first ([`land_shell_birth`]); a *Restart shell* successor that landed takes
-    /// its pane. A birth that failed is said as an error toast over a pane with no shell, or — for
-    /// a successor — over the pane it would have replaced, which is left as it was. Called at the
-    /// head of every drain: the worker wakes the pane's window through the pane's own wake.
-    pub(crate) fn land_shell_births(&mut self) -> Result<()> {
+    /// A birth whose rows are now answered is decided exactly as [`create_leaf_session`] decides
+    /// one, and made again through it at its text size and its seat's current rectangle, from its
+    /// seed with the default resolved and its folder crossed ([`resolved_birth_seed`]); the new
+    /// pane is itself in birth for its shell, and what was typed meanwhile moves to it. A birth
+    /// whose shell has answered lands ([`land_shell_birth`]): finished from the answer, a resize it
+    /// missed told to it, what was typed written first. A successor that lands takes its pane's
+    /// place; one that fails is said as an error toast over the pane it would have replaced, which
+    /// is left as it was. A pane's own failed birth is said over a pane with no shell.
+    pub(crate) fn land_births(&mut self) -> Result<()> {
+        let stored = self.app.settings_store.loaded().default_profile.clone();
         let mut landed = false;
         for tab_index in 0..self.window.tabs.len() {
-            let tab_id = self.window.tabs[tab_index].id;
-            let due: Vec<SeatId> = self.window.tabs[tab_index]
-                .sessions
-                .iter()
-                .filter(|(_, leaf)| leaf.shell_answered())
-                .map(|(seat, _)| *seat)
-                .collect();
-            for seat in due {
-                let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) else {
-                    continue;
-                };
-                let refusal = land_shell_birth(leaf, diagnostics::note)?;
-                let source = conpty_source_of(Some(leaf));
-                if let (Some(shells), Some(source)) = (self.app.startup_shells.as_mut(), source) {
-                    shells.born(tab_id, seat, source);
-                    if let Some(lines) = shells.lines_if_born() {
-                        for line in lines {
-                            trace_sink::stderr_line(line);
-                        }
-                        self.app.startup_shells = None;
-                    }
-                }
-                if let Some(refusal) = refusal {
-                    self.say_shell_refusal(&refusal)?;
-                }
-                landed = true;
-            }
-            let successors: Vec<SeatId> = self.window.tabs[tab_index]
-                .sessions
-                .iter()
-                .filter(|(_, leaf)| {
-                    leaf.successor
-                        .as_ref()
-                        .is_some_and(|successor| successor.shell_answered())
-                })
-                .map(|(seat, _)| *seat)
-                .collect();
-            for seat in successors {
-                let Some(mut successor) = self.window.tabs[tab_index]
+            let due: Vec<(SeatId, BirthAt, BirthDue)> = {
+                let programs = &self.app.profile_programs;
+                let rows_decide = |seed: &LeafSeed| decided_birth(seed, &stored, programs).is_ok();
+                self.window.tabs[tab_index]
                     .sessions
-                    .get_mut(&seat)
-                    .and_then(|leaf| leaf.successor.take())
-                else {
-                    continue;
-                };
+                    .iter()
+                    .flat_map(|(seat, leaf)| {
+                        births_due(leaf, &rows_decide)
+                            .into_iter()
+                            .map(|(at, due)| (*seat, at, due))
+                    })
+                    .collect()
+            };
+            for (seat, at, due) in due {
                 landed = true;
-                if let Some(refusal) = land_shell_birth(&mut successor, diagnostics::note)? {
-                    self.say_shell_refusal(&refusal)?;
-                    continue;
-                }
-                if tab_index == self.window.active_tab {
-                    self.replace_restarted_shell(seat, *successor)?;
-                } else {
-                    self.window.tabs[tab_index]
-                        .sessions
-                        .insert(seat, *successor);
+                match (at, due) {
+                    (at, BirthDue::Rows) => self.land_pane_birth(tab_index, seat, &stored, at)?,
+                    (BirthAt::Pane, BirthDue::Shell) => self.land_own_shell(tab_index, seat)?,
+                    (BirthAt::Successor, BirthDue::Shell) => self.land_restart(tab_index, seat)?,
                 }
             }
         }
@@ -131,6 +93,51 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// A pane's own shell has answered: land it, record its source for the startup trace, and
+    /// say a failed birth.
+    fn land_own_shell(&mut self, tab_index: usize, seat: SeatId) -> Result<()> {
+        let tab_id = self.window.tabs[tab_index].id;
+        let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        let refusal = land_shell_birth(leaf, diagnostics::note)?;
+        let source = landed_source(leaf, refusal.is_some());
+        if let (Some(shells), Some(source)) = (self.app.startup_shells.as_mut(), source) {
+            shells.born(tab_id, seat, source);
+            if let Some(lines) = shells.lines_if_born() {
+                for line in lines {
+                    trace_sink::stderr_line(line);
+                }
+                self.app.startup_shells = None;
+            }
+        }
+        if let Some(refusal) = refusal {
+            self.say_shell_refusal(&refusal)?;
+        }
+        Ok(())
+    }
+
+    /// A *Restart shell* successor's shell has answered: it takes the pane's place, or its failure
+    /// is said and the pane keeps the shell it has.
+    fn land_restart(&mut self, tab_index: usize, seat: SeatId) -> Result<()> {
+        let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        match land_successor(leaf, diagnostics::note)? {
+            SuccessorLanding::Waiting => Ok(()),
+            SuccessorLanding::Refused(refusal) => self.say_shell_refusal(&refusal),
+            SuccessorLanding::Landed(successor) if tab_index == self.window.active_tab => {
+                self.replace_restarted_shell(seat, *successor)
+            }
+            SuccessorLanding::Landed(successor) => {
+                self.window.tabs[tab_index]
+                    .sessions
+                    .insert(seat, *successor);
+                Ok(())
+            }
+        }
+    }
+
     /// A shell that could not be born, said where B2's refusals are said: an error toast on this
     /// window, its title naming what failed and its body the reason.
     fn say_shell_refusal(&mut self, refusal: &anyhow::Error) -> Result<()> {
@@ -142,47 +149,31 @@ impl Runtime<'_> {
         )
     }
 
-    pub(crate) fn land_pane_births(&mut self) -> Result<()> {
-        let stored = self.app.settings_store.loaded().default_profile.clone();
-        let mut landed = false;
-        for tab_index in 0..self.window.tabs.len() {
-            let due: Vec<SeatId> = self.window.tabs[tab_index]
-                .sessions
-                .iter()
-                .filter(|(_, leaf)| {
-                    leaf.birth.as_ref().is_some_and(|birth| {
-                        matches!(birth.waiting, BirthWait::Programs { .. })
-                            && decided_birth(&birth.seed, &stored, &self.app.profile_programs)
-                                .is_ok()
-                    })
-                })
-                .map(|(seat, _)| *seat)
-                .collect();
-            for seat in due {
-                self.land_pane_birth(tab_index, seat, &stored)?;
-                landed = true;
-            }
-        }
-        if landed {
-            self.publish_frame(FrameTrigger {
-                occurred_at: Instant::now(),
-                source: FrameSource::Expose,
-            })?;
-        }
-        Ok(())
-    }
-
-    fn land_pane_birth(&mut self, tab_index: usize, seat: SeatId, stored: &str) -> Result<()> {
+    fn land_pane_birth(
+        &mut self,
+        tab_index: usize,
+        seat: SeatId,
+        stored: &str,
+        at: BirthAt,
+    ) -> Result<()> {
         let tab_id = self.window.tabs[tab_index].id;
         let Some(leaf) = self.window.tabs[tab_index].sessions.get(&seat) else {
             return Ok(());
         };
-        let Some(birth) = leaf.birth.as_ref() else {
+        let Some(birth) = leaf.birth_at(at) else {
             return Ok(());
         };
         let held_seed = birth.seed.clone();
         let probe_input = birth.probe_input.clone();
-        let text_scale = leaf.text_scale;
+        let text_scale = match at {
+            BirthAt::Pane => leaf.text_scale,
+            BirthAt::Successor => leaf
+                .successor
+                .as_deref()
+                .map_or(leaf.text_scale, |successor: &LeafSession| {
+                    successor.text_scale
+                }),
+        };
         let Ok((identity, _)) = decided_birth(&held_seed, stored, &self.app.profile_programs)
         else {
             return Ok(());
@@ -219,25 +210,44 @@ impl Runtime<'_> {
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
         )?;
-        // What was typed meanwhile goes to the shell that has just been born, ahead of anything
-        // typed after; the pane in birth, and with it its queue, goes only once that write was
-        // taken, so a write that fails leaves the bytes held where they were.
+        // What was typed meanwhile moves to the new pane — into its own birth's queue while its
+        // shell is being made, or to its shell or nowhere when it has none to wait for — ahead of
+        // anything typed after; the old queue goes only once that was taken.
         if let Some(birth) = self.window.tabs[tab_index]
             .sessions
             .get(&seat)
-            .and_then(|leaf| leaf.birth.as_ref())
+            .and_then(|leaf| leaf.birth_at(at))
         {
             deliver_held_input(birth, born.input_target(), diagnostics::note)?;
         }
-        let source = conpty_source_of(Some(&born));
-        self.window.tabs[tab_index].sessions.insert(seat, born);
-        if let (Some(shells), Some(source)) = (self.app.startup_shells.as_mut(), source) {
-            shells.born(tab_id, seat, source);
-            if let Some(lines) = shells.lines_if_born() {
-                for line in lines {
-                    trace_sink::stderr_line(line);
+        match at {
+            BirthAt::Pane => {
+                let source = conpty_source_of(Some(&born));
+                self.window.tabs[tab_index].sessions.insert(seat, born);
+                if let (Some(shells), Some(source)) = (self.app.startup_shells.as_mut(), source) {
+                    shells.born(tab_id, seat, source);
+                    if let Some(lines) = shells.lines_if_born() {
+                        for line in lines {
+                            trace_sink::stderr_line(line);
+                        }
+                        self.app.startup_shells = None;
+                    }
                 }
-                self.app.startup_shells = None;
+            }
+            // A successor made again stays beside the shell it replaces until its own shell
+            // lands; one with no shell to wait for takes the pane's place now, as
+            // `restart_shell` does with one.
+            BirthAt::Successor if born.birth.is_some() => {
+                if let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) {
+                    leaf.successor = Some(Box::new(born));
+                }
+            }
+            BirthAt::Successor => {
+                if tab_index == self.window.active_tab {
+                    self.replace_restarted_shell(seat, born)?;
+                } else {
+                    self.window.tabs[tab_index].sessions.insert(seat, born);
+                }
             }
         }
         if let Some(refusal) = refusal {

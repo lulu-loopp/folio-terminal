@@ -1015,7 +1015,7 @@ pub enum Station {
     /// parked controller to the page's window, in place of `request_environment`,
     /// `request_controller` and a pump dispatch on the gesture's turn.
     WebAdopt = 209,
-    /// **The panes whose shells have answered, landing** — `Runtime::land_shell_births`, at the
+    /// **The panes whose shells have answered, landing** — `Runtime::land_births`, at the
     /// head of every drain: each pane's birth finished from its `bt-pty-birth` worker's answer, a
     /// resize it missed told to it, its held input written (T-BIRTH-OFF-WINDOW). Nothing here
     /// waits for a shell to be made; until that ticket this slot was the window thread's join of
