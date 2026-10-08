@@ -51,6 +51,22 @@ function Run-Gate([int]$Want, [string]$Case) {
     return $output
 }
 
+# The way a `shell: pwsh` step runs a script on GitHub Actions: `pwsh -command ". '<step file>'"`,
+# where the step file is the step's text between `$ErrorActionPreference = 'stop'` and a last line
+# that exits with `$LASTEXITCODE`. A native command the gate ran last sets that variable, so this
+# road sees an exit status that `-File` does not.
+function Run-GateAsAStep([int]$Want, [string]$Case) {
+    $step = Join-Path $root "step.ps1"
+    [IO.File]::WriteAllText($step, (
+        "`$ErrorActionPreference = 'stop'`n" +
+        "& '$gate' -Repo '$root' -Metadata '$metadata'`n" +
+        "if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit `$LASTEXITCODE }`n"))
+    $output = & pwsh -NoProfile -command ". '$step'" 2>&1 | Out-String
+    $got = $LASTEXITCODE
+    if ($got -ne $Want) { throw "$Case as a CI step returned $got, wanted $Want`n$output" }
+    return $output
+}
+
 try {
     [IO.Directory]::CreateDirectory($root) | Out-Null
     Push-Location $root
@@ -60,7 +76,7 @@ try {
         & git config user.name crate-edges
         & git config core.autocrlf false
         Write-File "scripts/ci/crate-layers.tsv" "crate`tlayer`nbt-a`t1`nbt-b`t1`nbt-c`t1`n"
-        Write-File ".gitignore" "metadata.json`n"
+        Write-File ".gitignore" "metadata.json`nstep.ps1`n"
         & git add .
         & git commit -q -m layers
         & git update-ref refs/remotes/origin/main (& git rev-parse HEAD).Trim()
@@ -69,6 +85,8 @@ try {
         Write-File "scripts/ci/crate-edge-exemptions.tsv" ($exemptionHeader + $aToB)
         $output = Run-Gate 0 "no base list"
         if ($output -notmatch "introduces it") { throw "the no-base-list pass was not loud: $output" }
+        $output = Run-GateAsAStep 0 "no base list"
+        if ($output -notmatch "introduces it") { throw "the no-base-list pass as a CI step was not loud: $output" }
 
         & git add .
         & git commit -q -m exemptions
@@ -98,5 +116,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-crate-edges: no-base-list, unchanged, growth, shrink and no-merge-base cases pass"
+Write-Host "check-crate-edges: no-base-list (also as a CI step), unchanged, growth, shrink and no-merge-base cases pass"
 exit 0

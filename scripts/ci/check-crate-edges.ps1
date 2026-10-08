@@ -249,3 +249,7 @@ if ($noBase) {
     exit 2
 }
 Write-Host "every one of the $($edges.Count) normal and build edges between $($crates.Count) first-party crates goes down a layer or is one of $($exempt.Count) exemption(s)"
+# The verdict is this script's own status. The last native command (`git show` of a list the base
+# does not have, or `git merge-base`) leaves its status in $LASTEXITCODE, and a caller that exits
+# with that variable — a GitHub Actions `shell: pwsh` step does — would otherwise read it as ours.
+exit 0
