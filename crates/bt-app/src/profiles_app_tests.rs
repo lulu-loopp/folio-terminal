@@ -935,7 +935,10 @@ fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
     assert_ne!(git, fallback, "the fixture needs two different rows");
 
     let equipped = profiles::ProfilePrograms::with_only(&[git, fallback]);
-    assert_eq!(startable_profile("gitbash", &equipped), Ok(Started::AsAsked));
+    assert_eq!(
+        startable_profile("gitbash", &equipped),
+        Ok(Started::AsAsked)
+    );
 
     // Git uninstalled between two launches, which is the row's own case.
     let gitless = profiles::ProfilePrograms::with_only(&[fallback]);
