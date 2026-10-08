@@ -18,6 +18,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- What you install or change while Folio runs is seen without a restart: a Copilot CLI (or the Node.js it needs) on the Agents page, a display's refresh rate, a keyboard layout that moves the summon key, and a new `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `COPILOT_HOME`; files added inside folded folders appear the next time you open the command palette, a picture that was not ready the first time you hovered it shows on the next hover, and on macOS a font installed while Folio runs can be chosen and used. <!-- zh: pending T-FRESH-FACTS -->
 - Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts.
 
 ## 0.4.7-preview — 2026-10-06

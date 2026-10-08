@@ -4483,23 +4483,90 @@ pub fn probe_output(mut command: std::process::Command) -> std::io::Result<std::
     spawn_probe(&mut command, ProbeStdio::ANSWER)?.wait_with_output()
 }
 
+/// What a probe held to a deadline came back with ([`probe_output_with_raw_tail`]).
+#[derive(Debug)]
+pub enum ProbeEnding {
+    /// It ended by itself, with this output.
+    Finished(std::process::Output),
+    /// It was still running at the deadline: it was stopped (its contained tree ends with it),
+    /// and what it had said is dropped.
+    Overran,
+}
+
 /// [`probe_output`] for a command whose arguments end with `tail` exactly as
 /// written: a string the program parses for itself (`cmd /c "…"`), which the
 /// standard library's quoting would change. The command's own arguments, if
 /// any, come first and are quoted as [`std::process::Command::arg`] quotes them.
+///
+/// **Held to `deadline_after`**, the probes' child-wait shape (`shell_integration`'s
+/// `run_powershell_probe`): `try_wait` polled on the worker every 20 ms through
+/// [`wait::sleep_within`], and a child still running at the deadline killed and reported
+/// [`ProbeEnding::Overran`] (T-FRESH-FACTS round 2: a hung `copilot --version` wedged its
+/// probe for the life of the process).
 #[cfg(windows)]
 pub fn probe_output_with_raw_tail(
+    worker: &admission::WorkerCtx,
     command: &std::process::Command,
     tail: &std::ffi::OsStr,
-) -> std::io::Result<std::process::Output> {
-    spawn_probe_born(
+    deadline_after: std::time::Duration,
+) -> std::io::Result<ProbeEnding> {
+    let mut child = spawn_probe_born(
         command,
         ProbeStdio::ANSWER,
         Some(tail),
         probe_job(),
         ProbeBirthSeam::default(),
-    )?
-    .wait_with_output()
+    )?;
+    let deadline = std::time::Instant::now() + deadline_after;
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(ProbeEnding::Finished);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Ok(ProbeEnding::Overran);
+        }
+        wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    }
+}
+
+/// RED (T-FRESH-FACTS round 2) — **a raw-tail probe still running at its deadline is stopped and
+/// reported, not waited for.** The child would run for half a minute; the deadline has already
+/// passed when the probe starts, so the first look past its birth finds it running.
+///
+/// MUTATION (observed red): `probe_output_with_raw_tail` waiting for the output with no deadline
+/// — the probe answers `Finished` half a minute later.
+#[cfg(all(test, windows))]
+mod probe_deadline_tests {
+    #[test]
+    fn a_probe_past_its_deadline_is_stopped_and_reported() {
+        let (sent, answered) = std::sync::mpsc::channel();
+        crate::spawn_at_priority(
+            "probe-deadline-test",
+            crate::ThreadPriority::BelowNormal,
+            move |worker| {
+                let command =
+                    crate::quiet_command_named(std::path::Path::new("ping.exe")).expect("ping.exe");
+                let ending = crate::probe_output_with_raw_tail(
+                    worker,
+                    &command,
+                    std::ffi::OsStr::new("-n 30 127.0.0.1"),
+                    std::time::Duration::ZERO,
+                );
+                let _ =
+                    sent.send(ending.map(|ending| matches!(ending, crate::ProbeEnding::Overran)));
+            },
+        )
+        .expect("a worker");
+        assert!(
+            answered
+                .recv()
+                .expect("an answer")
+                .expect("the probe started"),
+            "the probe past its deadline is reported overrun"
+        );
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -7187,10 +7254,11 @@ mod windows_impl {
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
-                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
-                WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE,
+                WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO,
+                WM_INPUTLANGCHANGE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN,
+                WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
+                WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
@@ -9550,9 +9618,9 @@ mod windows_impl {
         }
     }
 
-    /// **Windows saying a system-wide preference has moved.**
+    /// **Windows saying a system-wide preference, a display or the keyboard layout has moved.**
     ///
-    /// One subclass for one broadcast. `WM_SETTINGCHANGE` goes to every top-level
+    /// One subclass for three messages. `WM_SETTINGCHANGE` goes to every top-level
     /// window when somebody changes something in Settings — and the only thing
     /// this window does with it is *ask again*: the message's `wparam`/`lparam`
     /// name an area and a section, but the areas are not enumerated for
@@ -9565,6 +9633,13 @@ mod windows_impl {
     /// It exists because the preference used to be read exactly once, at
     /// start-up, and the code said so in a comment ending *"until this window
     /// listens for `WM_SETTINGCHANGE`"*. This is that.
+    ///
+    /// **The same ear hears two more machine facts** (T-FRESH-FACTS): a display
+    /// mode change (`WM_DISPLAYCHANGE`, sent to every top-level window when a
+    /// panel's rate or resolution moves or a panel comes or goes) and this
+    /// thread's input language moving (`WM_INPUTLANGCHANGE`). winit surfaces
+    /// neither. The wake is told which of the three it was ([`crate::SystemNews`]),
+    /// and the reading is still the loop's.
     pub struct SystemSettingsWatch {
         hwnd: HWND,
         /// Held for as long as the subclass is installed, because the subclass
@@ -9580,10 +9655,13 @@ mod windows_impl {
     /// arrive while this window is halfway through a frame; doing the work on the
     /// event loop's own turn is what keeps "when we read it" a property of the
     /// loop rather than of when Windows felt like talking.
-    struct SystemSettingsWake(Box<dyn Fn()>);
+    struct SystemSettingsWake(Box<dyn Fn(crate::SystemNews)>);
 
     impl SystemSettingsWatch {
-        pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
+        pub fn install(
+            window: NativeWindow,
+            wake: Box<dyn Fn(crate::SystemNews)>,
+        ) -> Result<Self, String> {
             let hwnd = window.as_hwnd();
             let wake = Box::new(SystemSettingsWake(wake));
             let reference_data = (&*wake as *const SystemSettingsWake) as usize;
@@ -9622,17 +9700,22 @@ mod windows_impl {
         }
     }
 
-    /// Whether a message is one that can have moved a system preference.
+    /// What a message says about the machine, if it is one this ear listens for.
     ///
     /// Pure, and its own function, for the reason every other pure half in this
     /// crate is: it is the part that can be wrong without a window, and therefore
-    /// the part a test can hold. `WM_THEMECHANGED` is in it beside
+    /// the part a test can hold. `WM_THEMECHANGED` is a preference beside
     /// `WM_SETTINGCHANGE` because the visual-effects page is where both the
     /// animation switch and the theme live, and a person turning one off often
     /// turns the other with it — a second re-read costs one `SystemParametersInfoW`.
     #[must_use]
-    pub(super) fn is_system_preference_message(message: u32) -> bool {
-        message == WM_SETTINGCHANGE || message == WM_THEMECHANGED
+    pub(super) fn system_news_of(message: u32) -> Option<crate::SystemNews> {
+        match message {
+            WM_SETTINGCHANGE | WM_THEMECHANGED => Some(crate::SystemNews::Preferences),
+            WM_DISPLAYCHANGE => Some(crate::SystemNews::Display),
+            WM_INPUTLANGCHANGE => Some(crate::SystemNews::InputLanguage),
+            _ => None,
+        }
     }
 
     unsafe extern "system" fn system_settings_subclass(
@@ -9643,13 +9726,13 @@ mod windows_impl {
         _subclass_id: usize,
         reference_data: usize,
     ) -> LRESULT {
-        if is_system_preference_message(message) {
+        if let Some(news) = system_news_of(message) {
             let wake = reference_data as *const SystemSettingsWake;
             if !wake.is_null() {
                 // SAFETY: the owning `SystemSettingsWatch` holds this box for the
                 // whole installed interval and removes the subclass before
                 // freeing it, on this same thread.
-                (unsafe { &*wake }.0)();
+                (unsafe { &*wake }.0)(news);
             }
         }
         // Forwarded either way: a broadcast this program answers is still a
@@ -16020,6 +16103,22 @@ pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
     Some(format!("{percent}%"))
 }
 
+/// **What a window's system-settings ear heard** ([`SystemSettingsWatch`]), so the loop
+/// re-reads the one fact it is about (T-FRESH-FACTS).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemNews {
+    /// A system-wide preference may have moved: `WM_SETTINGCHANGE` (the `Environment`
+    /// broadcast among them) and `WM_THEMECHANGED` on Windows; the appearance and the
+    /// accessibility display options on macOS.
+    Preferences,
+    /// A display's mode or the set of displays changed: `WM_DISPLAYCHANGE` on Windows,
+    /// `NSApplicationDidChangeScreenParametersNotification` on macOS.
+    Display,
+    /// This thread's input language or keyboard layout changed: `WM_INPUTLANGCHANGE`.
+    /// Windows only: the macOS summon key is a key position, which no layout moves.
+    InputLanguage,
+}
+
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
@@ -18754,7 +18853,7 @@ mod macos_window_backend_tests {
     /// winit.**
     ///
     /// The rule X-4 wrote down for every AppKit callback in this port: never do
-    /// the work inside the handler, hand it to the loop. The watch's two
+    /// the work inside the handler, hand it to the loop. The watch's three
     /// callbacks therefore call the wake and nothing else, and the wake
     /// `bt-app` hands in is one `EventLoopProxy::send_event` — winit's user
     /// event channel, delivered on the thread that owns the window. The other
@@ -18773,7 +18872,7 @@ mod macos_window_backend_tests {
             .expect("a method body is closed at eight spaces");
         let body = &rest[..end];
         assert!(
-            body.contains("(self.ivars().0)();"),
+            body.contains("(self.ivars().0)(crate::SystemNews::Preferences);"),
             "the observer does something other than nudge the loop:\n{body}"
         );
         for forbidden in ["effectiveAppearance()", "appearance_is_light", "NSScreen"] {
@@ -20645,9 +20744,11 @@ mod apartment_order_tests {
 /// forward; this is the part with an opinion in it.
 #[cfg(all(test, windows))]
 mod system_preference_message_tests {
-    use super::windows_impl::is_system_preference_message;
+    use super::windows_impl::system_news_of;
+    use crate::SystemNews;
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED,
+        WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE,
+        WM_THEMECHANGED,
     };
 
     /// PIN — the two broadcasts that mean "ask again", and nothing else.
@@ -20658,10 +20759,32 @@ mod system_preference_message_tests {
     /// something else happens to wake the loop.
     #[test]
     fn only_a_settings_or_theme_broadcast_asks_the_system_again() {
-        assert!(is_system_preference_message(WM_SETTINGCHANGE));
-        assert!(is_system_preference_message(WM_THEMECHANGED));
-        assert!(!is_system_preference_message(WM_MOUSEMOVE));
-        assert!(!is_system_preference_message(WM_NCHITTEST));
+        assert_eq!(
+            system_news_of(WM_SETTINGCHANGE),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(
+            system_news_of(WM_THEMECHANGED),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(system_news_of(WM_MOUSEMOVE), None);
+        assert_eq!(system_news_of(WM_NCHITTEST), None);
+    }
+
+    /// RED (T-FRESH-FACTS) — **a display mode change and a keyboard layout change
+    /// are heard, each as itself.** The rate a window paces its frames to and the
+    /// virtual key the summon is claimed on were read once and not again while the
+    /// window stayed where it was.
+    ///
+    /// MUTATION (observed red): drop either arm from `system_news_of` and its message answers
+    /// `None` — the window never hears that the panel's rate or the layout moved.
+    #[test]
+    fn a_display_change_and_a_layout_change_are_heard_as_themselves() {
+        assert_eq!(system_news_of(WM_DISPLAYCHANGE), Some(SystemNews::Display));
+        assert_eq!(
+            system_news_of(WM_INPUTLANGCHANGE),
+            Some(SystemNews::InputLanguage)
+        );
     }
 }
 

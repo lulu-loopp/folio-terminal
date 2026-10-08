@@ -581,6 +581,16 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
+        // Nor, for one turn, where they keep their configuration (T-FRESH-FACTS): the rows it
+        // offers write hooks into the folders the walk read out of the account's environment,
+        // which arrive with the walk's end, after the rows. After that turn the card reads the
+        // folders it has — the launch environment's, when no walk has answered.
+        if !first_run::agent_folders_settled(
+            &mut self.app.first_run_waited_for_agent_folders,
+            attention_hooks::AGENT_HOMES.answered(),
+        ) {
+            return Ok(());
+        }
         // The one row whose offer depends on a version, and the version comes
         // off another process. Starting the probe here rather than waiting for
         // the Agents page is what makes the wait finite; the card holds until it

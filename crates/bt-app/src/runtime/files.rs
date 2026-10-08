@@ -2761,6 +2761,24 @@ impl Runtime<'_> {
             .collect()
     }
 
+    /// **The palette opened: every root it lists is walked again** (T-FRESH-FACTS;
+    /// [`palette_index::FileIndexes::reopened`]). An open that a walk already out answers is said
+    /// once in `diagnostics.log`.
+    pub(in crate::runtime) fn ask_for_file_indexes_on_open(&mut self) {
+        for root in self.palette_files_roots() {
+            match self.app.file_indexes.reopened(&root) {
+                palette_index::Reopened::Asked(request) => {
+                    let _ = self.app.file_index_worker.request(request);
+                }
+                palette_index::Reopened::Merged(epoch) => crate::diagnostics::note(&format!(
+                    "palette file index: the palette opened while walk {epoch} of {} was out; \
+                     that walk answers this opening",
+                    root.display()
+                )),
+            }
+        }
+    }
+
     /// Ask for any index the `Files` section needs and does not have.
     pub(in crate::runtime) fn ask_for_file_indexes(&mut self) {
         // **It asks and it does not forget.** Forgetting is `App`'s

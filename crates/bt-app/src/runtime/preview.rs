@@ -13387,7 +13387,7 @@ impl Runtime<'_> {
                 if let Some(active) = self.window.peek_hover.active.clone()
                     && active.subject.key == cache_key
                 {
-                    self.show_or_request_peek(&active)?;
+                    self.show_or_request_peek(&active, false)?;
                 }
             }
             Err(error) => {
