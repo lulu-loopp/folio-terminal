@@ -44,6 +44,19 @@ D-54, D-55, D-56 and D-65, and the first slices the owner wants before 0.5 of
 rows once deferred — D-1, D-9, D-12, D-15, D-17. Only D-43, D-44 and D-59 stay
 deferred.
 
+**After 0.4.7 (2026-10-08, plan J4).** The ledger did not read zero at the end
+of 0.4.7: 70 rows are open. Each is re-homed against the 0.4.8 plan
+(`00-PLAN-048`, groups A–K): *0.4.8* cites the plan ticket that takes it;
+*0.5* holds the ownership and contract rows the 2026-09-21 review put before
+0.5's new subsystems, and three of them are **0.5 preconditions** — D-1 (who
+owns session, document and view) and the side-effect contract, whose admission
+half is D-16 and whose execution and completion half is D-33; the two notes
+are 0.4.8's J5, written before 0.5 builds on them. *Unassigned* rows fit no
+0.4.8 plan ticket and wait for the coordinator, who cuts a ticket, rules the
+row into 0.5, or rules it not debt. The *Version* column now takes 0.4.8,
+0.5 and `unassigned — <why>` beside the earlier values; a re-homed row keeps
+its former version in its status (*was 0.4.6*).
+
 **Not on this ledger.** Defects (the adversarial-review ledgers, and the
 incidental list below); UI constants
 (`docs/design/UI-DEVIATIONS.md`, which tickets 16–31 take to zero on their own
@@ -55,12 +68,15 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 9 | 1 | 8 |
-| 0.4.6 | 49 | 45 | 4 |
-| 0.4.7 | 21 | 21 | 0 |
+| 0.4.5 | 8 | 0 | 8 |
+| 0.4.6 | 4 | 0 | 4 |
+| 0.4.7 | 0 | 0 | 0 |
+| 0.4.8 (plan ticket on the row) | 19 | 19 | 0 |
+| 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
-| already repaid | 1 | 0 | 1 |
-| **total** | **84** | **71** | **13** |
+| unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 34 | 34 | 0 |
+| already repaid | 2 | 0 | 2 |
+| **total** | **84** | **70** | **14** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -80,6 +96,19 @@ proposed by the ticket for the coordinator to confirm.)
 
 (2026-09-27, A4: D-84 added to 0.4.7. Recounted from the table below: the 0.4.7
 line before this one read 15 rows, which did not count A1e's D-78…D-82.)
+
+(2026-10-08, J4 — the reconciliation after 0.4.7: the table above is recounted
+from the rows. The table before it read 0.4.5 9/1/8, 0.4.6 49/45/4, 0.4.7
+21/21/0, deferred 4/4/0, already repaid 1/0/1, total 84/71/13. 0.4.7 shipped
+with every row it held still open; no row was repaid in 0.4.6 after
+2026-09-27 or in 0.4.7. One row is repaid by bookkeeping — D-13, repaid on
+`21cf1ef8` two days before this ledger had columns and carried open since —
+eleven were narrowed, four widened, and every open row now names 0.4.8 (a
+ticket of the 0.4.8 plan), 0.5 (with its reason), deferred, or *unassigned*,
+which means no 0.4.8 plan ticket takes it and the coordinator decides. D-64,
+0.4.5's one open row, moved with the others. Of the 70 open rows: 11 narrowed,
+59 untouched, of which 4 widened. The evidence, row by row, is the section
+*The 2026-10-08 reconciliation* below.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -197,6 +226,62 @@ engine's warm-up ask, the spare controller's making and its drain) ask it before
 each unit and yield when it is spent (the budget note's §R-B, Codex's Q2). It
 added D-84, the part of aggregate scheduling the allowance does not reach (§R-G).
 
+### The 2026-10-08 reconciliation (0.4.8 plan J4)
+
+Every row was read against what 0.4.6 and 0.4.7 landed after this ledger's
+last pass (2026-09-27, `34e16355`, to `v0.4.7-preview` = `e87f556c` and main
+`6a3f0eb6`): the commits, the dated `docs/DESIGN.md` entries, `docs/RULES.md`,
+`docs/ARCHITECTURE.md`, the committed inventories (`window_waits.tsv`,
+`window-thread-bare-sites.tsv`, `MIGRATION-DEBT.tsv`, `lane::EXPECTED_FAILURES`)
+and the manifests. No commit of that range names a ledger row by its ID — the
+`D-n` in the U-42 and U-SMALL-047 messages number rehearsal findings, not these
+rows — so each finding below is a fact of the tree, with the commit that made
+it. *Repaid* needs a commit and a stated rule; where the code is repaired and
+the rule is stated nowhere, the row is *narrowed* with that doubt on it.
+
+**Repaid.**
+- D-13 — `21cf1ef8` (2026-09-21): the width probe moved to `bt-corpus`, and
+  `bt-pty` names `bt-term` only as a dev-dependency; the rule is ARCHITECTURE
+  §3.2's *Done 2026-09-21* and the DESIGN entry of that day, *a PTY transport
+  … must owe terminal policy nothing*.
+
+**Narrowed** (the row's own words for what remains are in its status cell).
+- D-2 — T-ENV-REFRESH round 4 (row 11's birth on `bt-pty-birth`);
+  T-INTEGRATION-INJECT-1's second follow-up `c7a604ab` (an unlisted join of the
+  script worker removed, the scanner taught its shape); bare sites 248 → 232.
+  A2 has not landed.
+- D-3 — T-PROBE-CHILD and T-PROBE-BORN-IN-JOB (`spawn_probe`, ARCHITECTURE
+  §2.2: *a machine probe is not in that set: no descendant may outlive its
+  probe owner*); T-ENV-REFRESH round 4 (the PSReadLine probe's five-second
+  deadline, asked again after failure).
+- D-5 — `5bdc1a5a`: RULES row 36, the update check, folded.
+- D-20 — T-GATES-047 `7c2a4a36` (as recorded on 2026-09-30).
+- D-23, D-24 — rows retired with the readers they named (`c7a604ab`,
+  `addfbaed`, `e5d56789`); none migrated.
+- D-34 — T-INTEGRATION-INJECT-1 and -4: the `$PROFILE` install runs on
+  `powershell-profile-install`.
+- D-43 — T-ENV-REFRESH round 4: ARCHITECTURE §5, *A shell birth has one
+  short-lived worker*.
+- D-52 — T-INTEGRATION-INJECT-1: fact 19's enable writer retired.
+- D-60 — `64bcebdb` (2026-09-13): the tests answer from a loopback listener;
+  no sentence states the rule.
+- D-83 — T-GUARDS-BLIND `5f7ba1fe` and `1d914d1a`: core-macos runs `bt-app`'s
+  updater and uninstall modules.
+
+**Widened** (open, and larger than the row says).
+- D-14 — `ae514613`: `bt-term` imports `bt_platform::host_names`.
+- D-32 — 203 methods in `main.rs`'s two `impl Runtime<'_>` blocks, 117 of them
+  unassigned.
+- D-33 — three answer roads of 0.4.7 outside the lane contract.
+- D-82 — the WinHTTP request now has a product caller, on the update job's
+  worker.
+
+**Touched, not narrowed.** D-39 (contained, still no deadline); D-54
+(B-EXPLORER-CLAIM rules a new fact of the class, none of its four).
+
+**Untouched.** Every other open row. Its status cell says so and gives the
+version it had (*was …*).
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -207,90 +292,90 @@ ledger's.
 
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
-| D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid); every raw effect outside a door is a row of `docs/plans/window-thread-bare-sites.tsv`, which only shrinks — 248 sites, seeded at 263 on `2cc59a83` — and the configuration the lint will need is fenced and its probe proven per target (A2a, 2026-09-26: advanced, not repaid); every turn is accounted and every admitted call measured per call, with a budget line for each of the four triggers and an exit summary from the run's atomics (A3, 2026-09-27: advanced, not repaid — A1 and A3 have landed, and by the owner's ruling of 2026-09-25 D-2 closes when A2 lands too); deferrable work yields to the earliest window's deadline — the search walk's slice and the idle calls ask one `TurnAllowance` a turn (A4, 2026-09-27: advanced, not repaid — A1, A3 and A4 have landed; what the allowance leaves of aggregate scheduling is D-84) |
-| D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open — the update job's worker `bt-update-job` added to the list (U-20, 2026-09-27; its two drivers U-27 and U-20) |
-| D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
-| D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
-| D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.7 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
-| D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | 0.4.6 — with D-28: the guards' prose is written when the migration list reaches zero | open |
-| D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | census-5a (note) and census-5b, after the ruling | 0.4.6 — the owner rules the table first | open — 28 surfaces inventoried and seven kinds proposed for the ruling in `docs/plans/design/ownership-census-2026-09-25.md` §3–§4 (2026-09-25) |
-| D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | 0.4.7 — the fourth entrance's design, the tool face; the entrance itself arrives with 0.5's outward interface | open — §9 table written; export ruled not an entrance on `5f433943` |
-| D-10 | diagnostics have plumbing but no event model | K-5 · C-4 | none yet | 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber | open |
+| D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.5 — **0.5 precondition** (the 2026-09-21 structure review): the session/document/view ownership note is 0.4.8 J5 (T-05-CONTRACTS, design only); the first slice and the session registry are 0.5; the backend stays 0.6 | open; **2026-10-08 (J4):** untouched; 0.4.7 added session facts on the session's own thread (T-PANE-IDENTITY's `current_frame`, `screen_fence_state`; T-PANE-COLUMNS' `foreground_program`), no owner beside the window; was 0.4.7 |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — A2 (the bare-site lint), the step its closure waits for, has no ticket; G4 takes the waits #29 and #31 | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid); every raw effect outside a door is a row of `docs/plans/window-thread-bare-sites.tsv`, which only shrinks — 248 sites, seeded at 263 on `2cc59a83` — and the configuration the lint will need is fenced and its probe proven per target (A2a, 2026-09-26: advanced, not repaid); every turn is accounted and every admitted call measured per call, with a budget line for each of the four triggers and an exit summary from the run's atomics (A3, 2026-09-27: advanced, not repaid — A1 and A3 have landed, and by the owner's ruling of 2026-09-25 D-2 closes when A2 lands too); deferrable work yields to the earliest window's deadline — the search walk's slice and the idle calls ask one `TurnAllowance` a turn (A4, 2026-09-27: advanced, not repaid — A1, A3 and A4 have landed; what the allowance leaves of aggregate scheduling is D-84); **2026-10-08 (J4):** **narrowed**: row 11's process birth runs on the `bt-pty-birth` worker and the window thread joins it (T-ENV-REFRESH round 4); an unlisted window-thread join of the PowerShell script worker was found and removed, and the scanner taught its shape (`c7a604ab`); row 29 added, ruled to stay (the update's exit guard, 2026-09-28); bare sites 248 → 232; A2 has not landed; was 0.4.6 |
+| D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.8 — B4 (T-PROBE-NO-CACHED-FAILURE) and B3 (T-FRESH-FACTS: the probes as facts re-asked); G1 for the two named containment gaps | open — the update job's worker `bt-update-job` added to the list (U-20, 2026-09-27; its two drivers U-27 and U-20); **2026-10-08 (J4):** **narrowed**: every machine probe starts through one door, `bt_platform::spawn_probe` / `probe_output`, which contains its whole process tree and ends it on deadline, wait, drop and unwind (T-PROBE-CHILD, T-PROBE-BORN-IN-JOB; ARCHITECTURE §2.2); the three PowerShell probes share one five-second deadline and a failed answer is asked again at the next reader edge (T-ENV-REFRESH round 4, T-INTEGRATION-INJECT-3 round 2). Still open: `copilot --version` and the macOS locale probe have no deadline, and each probe keeps its own slot, wake and latch (`profile_runtime::REMOVAL` has no in-flight latch); was 0.4.6 |
+| D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.8 — G7 (census #28: an internal stop loses unsaved preview edits, this row's controlled-failure road); the emergency half is D-56 (0.5) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.8 — rolling: each 0.4.8 ticket folds the `docs/RULES.md` row it depends on in its own commit; what is unfolded at 0.4.8's end goes to 0.5 with its subsystem | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not); **2026-10-08 (J4):** **narrowed**: row 36 (the update check) folded on `5bdc1a5a` (0.4.6); RULES has 55 rows, 24 folded in whole or part, 31 `not yet folded`; was 0.4.6 |
+| D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff`; **2026-10-08 (J4):** untouched: §7.2's chains are still first-pass lines (T-IMAGE-N added a hop to §7.1's recognition and verdict rows); was 0.4.7 |
+| D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — it closes with D-28 | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | census-5a (note) and census-5b, after the ruling | 0.5 — the owner rules the table before 0.5's notification model | open — 28 surfaces inventoried and seven kinds proposed for the ruling in `docs/plans/design/ownership-census-2026-09-25.md` §3–§4 (2026-09-25); **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | 0.5 — the fourth entrance is 0.5's outward interface | open — §9 table written; export ruled not an entrance on `5f433943`; **2026-10-08 (J4):** untouched; 0.4.8 F8 (T-LAUNCH-ENV) adds an explicit launch input and must say whether it is a row of §9's table; was 0.4.7 |
+| D-10 | diagnostics have plumbing but no event model | K-5 · C-4 | none yet | 0.5 — the operation vocabulary, with the 0.5 self-report | open; **2026-10-08 (J4):** untouched: 0.4.6 and 0.4.7 added `diagnostics.log` lines (U-39, U-42a…e) each in its own format; was 0.4.6 |
 | D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | census-1 | 0.4.6, with D-32 | repaid (census-1) — the census is `bt_source::FieldCensus` over `bt-app`; inventory and site rows are query reports under `target/`, while the owner annotations (census-1's proposals, until the owner rules) and the shrink-only unknown row multiset are committed and held by `bt-source`'s `census` test and `scripts/ci/check-census-unknowns.ps1`, so a fact with an unknown is `incomplete`, never single-writer. D-32 (census-7) is what the census was taken for, and stays open |
-| D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.4.7 — the first extraction, after the `bt-app` move ends with D-32 in 0.4.6 | open |
-| D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.6 | open |
-| D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.6 | open |
-| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.7 — the first slice, ahead of the 0.5 composition layer | open (recorded debt) |
-| D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.4.7 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain |
-| D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.4.7 — the first slice, with D-1's first slice | open |
+| D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.5 — `bt-platform` is not split in 0.4.8 (plan K, *Not in 0.4.8*); J2's small boundary crate for D-14 is the first extraction | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | — | repaid on `21cf1ef8` (2026-09-21) — the ConPTY width probe lives in `bt-corpus` and `bt-pty`'s manifest names `bt-term` only under `[dev-dependencies]` (ARCHITECTURE §3.2, *Done 2026-09-21*); carried open by mistake from 2026-09-23 to 2026-10-08 (J4). Not this row: `bt-pty`'s optional edge to `bt-platform` behind its test-only `test-shell` feature and `bt-term`'s dev-dependency on `bt-pty` (T-TEST-SHELL-HYGIENE, T-INTEGRATION-INJECT-4 round 6), for J1 to classify |
+| D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite | open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6 |
+| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then | open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.5 — **0.5 precondition**: the side-effect contract's admission half; its note is 0.4.8 J5 (T-05-CONTRACTS); the enumeration lane and the observation threads' band are built in 0.5 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain; **2026-10-08 (J4):** untouched: every thread 0.4.7 added comes through the door (T-PROBE-CHILD's reader, T-KEYBOARD-CTRLALT's `folio-layout-tables`, T-UNINSTALL-UX's remover pipe); `folio-web-thumb` still stands at `Normal`; RULES 53's 0.4.7 ticket was never cut; was 0.4.7 |
+| D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.5 — with D-1's document owner, after J5's note | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | repaid (census-2, 0.4.6) — each subject is item-bound or file-bound by how the test reads it (`ITEM_QUERIES` and the helpers derived from it); only a file-bound subject read out of `main.rs` is a reader 2a must retarget; `--self-check` holds the fixture |
-| D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.6 | open |
-| D-20 | MIGRATION-DEBT class P10 — the platform-file walk (1 row) | same | P10 | 0.4.6 | open — narrowed by T-GATES-047: the script twin and agreement pin are gone; the one Rust directory walk remains on MIGRATION-DEBT |
-| D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | 0.4.6 | open |
-| D-22 | MIGRATION-DEBT class P13 — the remaining source-text walks (3 rows) | same | P13 | 0.4.6 | open |
-| D-23 | MIGRATION-DEBT class P14 — named-body pins (192 rows) | same | P14 | 0.4.6 | open |
-| D-24 | MIGRATION-DEBT class P16 — ledger keys naming a file (63 rows), and the ten text `#[cfg(test)]` splits | same | P16 | 0.4.6 | open |
-| D-25 | MIGRATION-DEBT class P17 — cross-crate and script readers (13 rows) | same | P17 | 0.4.6 | open |
-| D-26 | the ~110 `[..].concat()` needle halves written whole | split prep §6 | P18 | 0.4.6 | open |
-| D-27 | the CI dependency-direction guard, and `bt-term → bt-math` recorded | split prep §8.4–§8.5 | P19 | 0.4.6 | open — `bt-workbench`'s entry is already written for it in `docs/ARCHITECTURE.md` §3.3 (census-3, 2026-09-25) |
-| D-28 | MIGRATION-DEBT to zero and deleted; the allowlist final | split prep §7.2 | P20 | 0.4.6 | open |
-| D-29 | the unmoved topic `launch` (4 methods) | split prep Appendix C | none yet | 0.4.6 | open |
-| D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.6 | open |
-| D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.6 | open |
-| D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | census-7 (a frozen list, after census-1 and census-2) | 0.4.6 | open |
-| D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | A5 (contract and harness); the exception rows D-70…D-76 | 0.4.6 — moved from 0.4.5 by the note's R8 (2026-09-25): the presentation lane (D-41), its second client, is deferred; closes when D-70…D-76 close | open — first instance, `handoff_lane`, on `2657e5e3`; the font lane (`settings::MonospaceFamilySlot`) numbers its requests since ticket 50; **contract and harness landed, exceptions listed** (A5, 2026-09-25): `bt-app::lane` declares the hand-off, font, taskbar and computation lanes' policies, `lane_contract_tests` runs eight claims on each through its real admission, publication and acceptance, and each failure is a row of `lane::EXPECTED_FAILURES` naming D-70…D-76. Not yet adapted: path verification (on `MathWorker`'s shared answer sender), the ten probes (D-3), and the files, preview, index and git workers |
-| D-34 | §5.3 row 2 — the marks lock's install half on the window thread | §5.3 | none yet | 0.4.6 | open — the wait behind our own writer repaid on `fbfab1ff`; ticket 56 put the PSReadLine upgrade on the same thread at launch (`psreadline::upgrade_recorded` from `Runtime::create`, before the first window and before the profile migration's worker): it takes the lock only on a launch that replaces Folio's own older module, and the same move to a worker repays it |
-| D-35 | §5.3 row 3 — `psreadline::apply_recorded`, nine files under the lock | §5.3 | none yet | 0.4.6 | open |
-| D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.6 | open |
+| D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-20 | MIGRATION-DEBT class P10 — the platform-file walk (1 row) | same | P10 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — narrowed by T-GATES-047: the script twin and agreement pin are gone; the one Rust directory walk remains on MIGRATION-DEBT; **2026-10-08 (J4):** no further change; was 0.4.6 |
+| D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-22 | MIGRATION-DEBT class P13 — the remaining source-text walks (3 rows) | same | P13 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-23 | MIGRATION-DEBT class P14 — named-body pins (192 rows) | same | P14 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** **narrowed**: 192 → 190 rows, two readers retired with the code they read (T-INTEGRATION-INJECT-1, `c7a604ab`), none migrated; was 0.4.6 |
+| D-24 | MIGRATION-DEBT class P16 — ledger keys naming a file (63 rows), and the ten text `#[cfg(test)]` splits | same | P16 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** **narrowed**: 63 → 57 rows, six keys retired with their readers (B-EXPLORER-CLAIM `e5d56789`; T-INTEGRATION-INJECT-1 `addfbaed`), none migrated; was 0.4.6 |
+| D-25 | MIGRATION-DEBT class P17 — cross-crate and script readers (13 rows) | same | P17 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-26 | the ~110 `[..].concat()` needle halves written whole | split prep §6 | P18 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-27 | the CI dependency-direction guard, and `bt-term → bt-math` recorded | split prep §8.4–§8.5 | P19 | 0.4.8 — J1 (T-DEP-DIRECTION-GUARD) | open — `bt-workbench`'s entry is already written for it in `docs/ARCHITECTURE.md` §3.3 (census-3, 2026-09-25); **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-28 | MIGRATION-DEBT to zero and deleted; the allowlist final | split prep §7.2 | P20 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-29 | the unmoved topic `launch` (4 methods) | split prep Appendix C | none yet | 0.4.8 — K2 (T-SPLIT-2B), after its reader fix; K2's plan line names free functions and types, so the coordinator confirms it takes the unmoved topics | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.8 — K2 (T-SPLIT-2B), after its reader fix; as D-29 | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.8 — K2 (T-SPLIT-2B), after its reader fix; as D-29 | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | census-7 (a frozen list, after census-1 and census-2) | 0.4.8 — J3 (T-RUNTIME-DEP-MAP) drafts the destinations, K2 moves them | open; **2026-10-08 (J4):** **widened**: `main.rs`'s two `impl Runtime<'_>` blocks hold 203 methods (201 at the 2026-09-23 count): 117 unassigned plus D-29…D-31's 86; was 0.4.6 |
+| D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | A5 (contract and harness); the exception rows D-70…D-76 | 0.5 — **0.5 precondition**: the side-effect contract's execution and completion half; its note is 0.4.8 J5 (T-05-CONTRACTS); the row closes when D-70…D-76 close | open — first instance, `handoff_lane`, on `2657e5e3`; the font lane (`settings::MonospaceFamilySlot`) numbers its requests since ticket 50; **contract and harness landed, exceptions listed** (A5, 2026-09-25): `bt-app::lane` declares the hand-off, font, taskbar and computation lanes' policies, `lane_contract_tests` runs eight claims on each through its real admission, publication and acceptance, and each failure is a row of `lane::EXPECTED_FAILURES` naming D-70…D-76. Not yet adapted: path verification (on `MathWorker`'s shared answer sender), the ten probes (D-3), and the files, preview, index and git workers; **2026-10-08 (J4):** **widened**: three answer roads 0.4.7 added stand outside `bt-app::lane` — `folio-layout-tables` (T-KEYBOARD-CTRLALT, which states its own two terminal answers and a bound of eight), the foreground-program worker (T-PANE-COLUMNS E8) and the PowerShell parse questions on `powershell-script-prepare` (T-INTEGRATION-INJECT-3); `lane::EXPECTED_FAILURES` unchanged; was 0.4.6 |
+| D-34 | §5.3 row 2 — the marks lock's install half on the window thread | §5.3 | none yet | 0.4.8 — G6 (T-INTEGRATION-INJECT-2: Folio's own PSReadLine per pane retires the module install that takes this lock); the agent-hook installs (`attention_ownership::record`) have no plan ticket and are listed for the coordinator | open — the wait behind our own writer repaid on `fbfab1ff`; ticket 56 put the PSReadLine upgrade on the same thread at launch (`psreadline::upgrade_recorded` from `Runtime::create`, before the first window and before the profile migration's worker): it takes the lock only on a launch that replaces Folio's own older module, and the same move to a worker repays it; **2026-10-08 (J4):** **narrowed**: the `$PROFILE` install half runs on a worker, `powershell-profile-install` (T-INTEGRATION-INJECT-1 and -4; DESIGN 2026-10-04, 2026-10-05); the PSReadLine install and upgrade (`psreadline::install_recorded` from `apply_psreadline`, the launch's `upgrade_recorded`, `App::release_trial_writes`) and the agent-hook installs still take the marks lock on the window thread; `window_waits.tsv` row 2 still names the retired `spend_powershell_intent`; was 0.4.6 |
+| D-35 | §5.3 row 3 — `psreadline::apply_recorded`, nine files under the lock | §5.3 | none yet | 0.4.8 — G6 (T-INTEGRATION-INJECT-2) retires the installed module this row writes | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.8 — G6 (T-INTEGRATION-INJECT-2) retires the installed module this row walks | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
 | D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | 50 | 0.4.5 — the traced frozen gear | repaid (ticket 50) |
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
-| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | 0.4.6 | open |
-| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them |
-| D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | deferred → unassigned — construction awaits the owner's measurement-based decision after the self-inflicted waits are fixed and measured (owner, 2026-09-24; `docs/plans/design/window-thread-budget-2026-09-25.md` §R-E, replacing §4); a release is assigned only after that ruling, and this deferral does not repay D-41 | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both |
-| D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | 0.4.6 — independent of D-41 (budget note R8, 2026-09-26): no frame is admitted while recovering, so B9 does not wait for the presentation lane | open |
-| D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open — admitted where it stands through `pty_door::spawn_shell`, minted in `create_leaf_session` (A1d, 2026-09-26: its door, not its move) |
-| D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open — admitted where it stands through `pty_door::resize`, minted in `commit_leaf_resize`, one admission per leaf (A1d, 2026-09-26: its door, not its move) |
+| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** touched, not narrowed: both commands now lead a contained process group (`probe_output`, T-PROBE-CHILD) but still have no deadline and stay on the pane-birth road; was 0.4.6 |
+| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B7 was never cut | open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them; **2026-10-08 (J4):** untouched; 0.4.8 B1 (T-WINDOWS-ALL) gives every window the git watch and the document re-reads, which multiplies this row's start and drop sites unless B1 repays them; was 0.4.6 |
+| D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | deferred → unassigned — construction awaits the owner's measurement-based decision after the self-inflicted waits are fixed and measured (owner, 2026-09-24; `docs/plans/design/window-thread-budget-2026-09-25.md` §R-E, replacing §4); a release is assigned only after that ruling, and this deferral does not repay D-41 | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both; **2026-10-08 (J4):** untouched |
+| D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — B9 was never cut | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open — admitted where it stands through `pty_door::spawn_shell`, minted in `create_leaf_session` (A1d, 2026-09-26: its door, not its move); **2026-10-08 (J4):** **narrowed**: process birth (`CreatePseudoConsole`, `CreateProcessW`, the folder `stat`, the fresh account environment) runs on the `bt-pty-birth` worker and the window thread joins it through `PtyBirth` (T-ENV-REFRESH round 4; ARCHITECTURE §5, *A shell birth has one short-lived worker*); the join stays until the session owner (D-1) |
+| D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open — admitted where it stands through `pty_door::resize`, minted in `commit_leaf_resize`, one admission per leaf (A1d, 2026-09-26: its door, not its move); **2026-10-08 (J4):** untouched |
 | D-45 | §5.3 row 13 — `sample_window_place` resampled at three sites for one instant | §5.3 | 48 | 0.4.5 — one site is `drain_pty` | repaid (ticket 48) |
 | D-46 | §5.3 row 14 — `Window::set_title` at five sites with no throttle | §5.3 | 49 | 0.4.5 — one site is `drain_pty` | repaid (ticket 49) |
-| D-47 | §5.3 row 20 — renames, the preserving save and store writes on the window thread | §5.3 | none yet | 0.4.6 | open |
-| D-48 | §7.2 chain stub — attention ingress | §7.2 | census-4 | 0.4.6, with D-57 | open |
-| D-49 | §7.2 chain stub — resize | §7.2 | none yet | 0.4.7 | open |
-| D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.6 — tickets 02 and 03 have just walked it | open |
-| D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
-| D-52 | §4.2 class — asynchronous publication and competing operations (facts 4, 10, 13, 19, 22) | §4.2; survey Part 4 | none yet | 0.4.6, with D-3 | open — fact 10 touched by U-25, not widened (the start's renewal rides the existing probe and latch) |
-| D-53 | §4.2 class — durability and external transactions (facts 8, 9, 11) | §4.2; survey Part 4 | U-6 | 0.4.6, with D-34 and D-47 | open — **narrowed by U-6 (0.4.6)**: fact 11's part repaid — the update check's memory, file and claim have one owner, `update::OfferState`, whose one lock is held across every read-modify-write; facts 8 and 9 remain |
-| D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
-| D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
-| D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.7 | open |
-| D-57 | §12.1 — `bt-workbench` is born | §12.1 | census-3 and census-4 | 0.4.6 | open — day-one contents, order, public surface and guard entry in `docs/plans/design/ownership-census-2026-09-25.md` §5 (2026-09-25); **narrowed by census-3** (2026-09-25, branch `feat/bt-workbench-born`): the crate exists holding the ledger, `attention::expiry` (`WAIT_TTL`, `WaitClock`), `is_consumed` and `Places` (private counter, compile-fail doctest), `bt-app` its only dependent, `bt-layout` its only dependency; what remains is census-4 — the reach rule and its `notify` tests move, and D-48 |
+| D-47 | §5.3 row 20 — renames, the preserving save and store writes on the window thread | §5.3 | none yet | 0.4.8 — B6 (T-SETTINGS-REREAD): its storage transaction (revision preconditions, field-level merge, durable owed edits) is this row's storage lane for settings, keybindings, profiles and pins; renames and the preview save have no plan ticket and are listed for the coordinator | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-48 | §7.2 chain stub — attention ingress | §7.2 | census-4 | 0.5 — written with D-57's census-4, when the attention core moves | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-49 | §7.2 chain stub — resize | §7.2 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.8 — A1 (the Linux series, #19…#27): PR #17's survey makes Linux's lane-owned paste a second paste architecture, this row's decision | open; **2026-10-08 (J4):** untouched on main; was 0.4.6 |
+| D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.8 — B (freshness): B2 and B3 re-ask facts 5, 6 and 12 on the environment broadcast, B6 re-reads fact 7; fact 1 (the verdict ledger) has no plan ticket | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-52 | §4.2 class — asynchronous publication and competing operations (facts 4, 10, 13, 19, 22) | §4.2; survey Part 4 | none yet | 0.4.8 — G7 (#30, the Enable/Undo race in two windows, a competing operation of this class); facts 4, 10, 13 and 22 have no plan ticket and are listed for the coordinator | open — fact 10 touched by U-25, not widened (the start's renewal rides the existing probe and latch); **2026-10-08 (J4):** **narrowed**: fact 19's enable writer retired with the `$PROFILE` enable road (T-INTEGRATION-INJECT-1), so `REMOVAL` has one writer kind; two presses still start two threads with no in-flight latch; was 0.4.6 |
+| D-53 | §4.2 class — durability and external transactions (facts 8, 9, 11) | §4.2; survey Part 4 | U-6 | 0.4.8 — B6 (T-SETTINGS-REREAD)'s storage transaction for the store files; facts 8 (the session snapshot) and 9 (the marks record) go with it or to J5's contract, the coordinator decides | open — **narrowed by U-6 (0.4.6)**: fact 11's part repaid — the update check's memory, file and claim have one owner, `update::OfferState`, whose one lock is held across every read-modify-write; facts 8 and 9 remain; **2026-10-08 (J4):** untouched: the update journal and the transaction adapter (U-13…U-42, U-41a1) are new facts of this class with one owner each from birth (§4.2); facts 8 and 9 unchanged; was 0.4.6 |
+| D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.5 — with D-1's session registry, which issues the epochs this class needs | open; **2026-10-08 (J4):** touched, not narrowed: B-EXPLORER-CLAIM (`e5d56789`, 0.4.6) ruled who may take the data directory's claim, a new fact of this class (§4.2); facts 2, 3, 14 and 20 unchanged; was 0.4.7 |
+| D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.5 — each publication declares its kind, under J5's side-effect contract | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.5 — the journal, with D-4's policy and J5's contract | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-57 | §12.1 — `bt-workbench` is born | §12.1 | census-3 and census-4 | 0.5 — census-4 opens the 0.5 workbench | open — day-one contents, order, public surface and guard entry in `docs/plans/design/ownership-census-2026-09-25.md` §5 (2026-09-25); **narrowed by census-3** (2026-09-25, branch `feat/bt-workbench-born`): the crate exists holding the ledger, `attention::expiry` (`WAIT_TTL`, `WaitClock`), `is_consumed` and `Places` (private counter, compile-fail doctest), `bt-app` its only dependent, `bt-layout` its only dependency; what remains is census-4 — the reach rule and its `notify` tests move, and D-48; **2026-10-08 (J4):** untouched: `bt-workbench` changed only by U-44's dead-code sweep; was 0.4.6 |
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
-| D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended |
-| D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |
+| D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended; **2026-10-08 (J4):** untouched |
+| D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — the code is repaired; the row waits for its rule sentence | open; **2026-10-08 (J4):** **narrowed**: both tests answer from a loopback listener (`answering`, `ask_this_machine`) since `64bcebdb` (2026-09-13, before this row was written); the rule that a transport test never reaches the network is stated in no DESIGN, RULES or ARCHITECTURE sentence, so the row is not marked repaid; was 0.4.6 |
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | 72 | 0.4.6 | repaid (ticket 72) — the job lints the workspace and tests `bt-render` and `bt-corpus`; the `bt-app` and `bt-term` suites are not portable yet and are D-78 |
-| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43, 54 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54; narrowed by ticket 54: the environment call is taken at an idle turn, but the environment starts no runtime process (measured), so the first page's `request_controller` and pump dispatch remain; ruling owed; ruled 2026-09-25 (option A) and **narrowed by ticket 60**: a profile that has opened a page gets a spare controller made at idle for its first eligible page (2318 → 146 ms median, spike 59); **open for 0.4.6** — the residual is a profile's first-ever page, a page that arrives before the spare has landed, and every page after the spare is used |
-| D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
-| D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
+| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43, 54 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54; narrowed by ticket 54: the environment call is taken at an idle turn, but the environment starts no runtime process (measured), so the first page's `request_controller` and pump dispatch remain; ruling owed; ruled 2026-09-25 (option A) and **narrowed by ticket 60**: a profile that has opened a page gets a spare controller made at idle for its first eligible page (2318 → 146 ms median, spike 59); **open for 0.4.6** — the residual is a profile's first-ever page, a page that arrives before the spare has landed, and every page after the spare is used; **2026-10-08 (J4):** untouched; was 0.4.5 |
+| D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — the L variant precedes the 0.5 restyle | open; **2026-10-08 (J4):** untouched; the 0.5 design tokens are written (`docs/plans/design/ui-05-tokens-2026-09-27.md`); was 0.4.7 |
+| D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — with D-65 | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | 72 | 0.4.6 — beside D-63, since widening the Mac CI job hits it | repaid (ticket 72) |
 | D-68 | the taskbar's auto-hide state asked of Explorer on the window thread: `SHAppBarMessage(ABM_GETSTATE)` inside `sample_window_place`, at every turn's head and again for a delivery between turns | the owner's next93 stall report, 2026-09-25; ticket 62 | 62 | 0.4.5 — a wait on another process inside the typing turn | repaid (ticket 62) |
 | D-69 | §5.3 row 22 — `Window::set_ime_cursor_area` called at every offer of a caret: twice in one turn (15 + 85 ms) and once for 3,138 ms under load on the owner's next93 | the owner's next93 stall reports, 2026-09-25; ticket 63 | 63 | 0.4.5 — typing stability | repaid (ticket 63) |
-| D-70 | the hand-off lane: a worker that dies leaves the requests it had accepted with no terminal outcome — `answers()` reads a disconnected channel as empty, `LANE_GONE` answers only a later submission, and the ids stay owed in each window's `Pending` | A5 (`lane::EXPECTED_FAILURES`: Handoff × a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
-| D-71 | the hand-off lane: the answers held for an undrained consumer are unbounded — the answer channel is an unbounded `mpsc::channel` and `turned_away` a `Vec` | A5 (Handoff × answers held are bounded) | none yet | 0.4.6 — with D-33 | open |
-| D-72 | the font lane: a coalesced or superseded request gets no outcome of its own, and a walk that dies leaves `ScanState::running` set for ever — no fault, no later walk; the wake has no failure road | A5 (Font × every request ends exactly once; a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
-| D-73 | the taskbar lane: the requests between two served ones get no outcome, and a worker that dies leaves `Asks::worker` set — requests are counted and never served, and nothing says so | A5 (Taskbar × every request ends exactly once; a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
-| D-74 | the computation lane (`MathWorker`): admission and answers are unbounded `mpsc::channel`s, each way | A5 (Computation × a full lane answers without waiting; answers held are bounded) | none yet | 0.4.6 — with D-33 | open |
-| D-75 | the computation lane: no request identity — an answer carries only its question, so one question asked twice gives two answers nobody can tell apart | A5 (Computation × every request has its own identity) | none yet | 0.4.6 — with D-33 | open |
-| D-76 | the computation lane: the decoration thread's death is invisible while the scaling and path-verification threads hold clones of the one answer sender; the drain sees a disconnection only when all three have gone | A5 (Computation × a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
-| D-77 | §5.3 row 23 — the first window's GPU is opened with `pollster::block_on(GpuContext::open(…))` in `Runtime::create`, on the window thread, a wait no row listed | thread-door note revision (e)2; A1a | B9 (device recovery rests on deadlines and rebuilds on a worker) | 0.4.6 — moves with B9's rebuild on a worker (D-42) | open — registered as row 23 `pending`, door `admission::doors::GpuOpen`; it stays on the window thread until then (coordinator, 2026-09-26); admitted where it stands through `gpu_door::open_first_window` (A1d, 2026-09-26) |
-| D-78 | `trace_sink::Shutdown`'s `Drop` flushes the trace — a bounded wait, through its admitted door — when `fn main` returns early from a loop that could not be built | thread-door note (c)4, (e)3, (g)1; A1e | none yet — *The trace writer is retired through its admitted flush door, never by a drop* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27) |
-| D-79 | `AttentionPipe` and `LaunchPipe`, on both platforms, join their listener thread in `Drop` | thread-door note (c)4, (e)3; A1e | none yet — *An endpoint is retired through an explicit door, not by its drop* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product reach: the endpoints live in statics |
-| D-80 | the video engines (`video::engine::Engine`, `macos_player::Engine`) and `VideoSeat` and `VideoSeats` shut the engine down — a bounded poll and a join — in `Drop` | thread-door note (c)4, (e)3, (f)2; A1e; scope extended by the note's revision (m) (2026-09-27): the direct closes of `window_waits.tsv` row 25 and the media session's reader quiescence and `MFShutdown` of row 27 | none yet — *A video engine is shut down through an explicit door, not by its drop* | 0.4.7 | open — rows of the closed `Drop` inventory (A1e, 2026-09-27) |
-| D-81 | `PtySession`'s `Drop` finishes the input dump (a write, two `sync_data`) and runs `shutdown` (a bounded reap, a bounded join) | thread-door note (c)4, (e)3; A1e | none yet — *A shell is taken apart only through `retire_within`, never by a drop on the window thread* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); on `pty-retirement`, and on the caller only when that thread cannot start |
-| D-82 | WinHTTP's `http::Request` waits up to `CLOSE_WAIT` (5 s) on a `Condvar` in `Drop` for its handle's closing callback | thread-door note (g)2; A1e | none yet — *A download's request is closed through its own bounded door, not by its drop* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product caller of `https_download` yet |
-| D-83 | the `bt-app` and `bt-term` suites are not portable: on macOS 294 of `bt-app`'s 4,600 tests (282 after ticket 72) and 43 of `bt-term`'s fail, each asserting a Windows fact on every host | ticket 72's report (Mac mini, 2026-09-26) | none yet | 0.4.7 — proposed by ticket 72 | open |
-| D-84 | aggregate turn scheduling beyond deferrable work: a turn's deadline is one number shared by every window, and only deferrable work is scheduled against it | budget note §R-B, §R-G (Codex's Q2; the owner's ruling of 2026-09-25, 1); A4 | none yet — owed a 0.4.7 ticket, *The window thread's turn is scheduled across windows and sources*, after B4–B9 | 0.4.7 | open — opened by A4 (2026-09-27) |
+| D-70 | the hand-off lane: a worker that dies leaves the requests it had accepted with no terminal outcome — `answers()` reads a disconnected channel as empty, `LANE_GONE` answers only a later submission, and the ids stay owed in each window's `Pending` | A5 (`lane::EXPECTED_FAILURES`: Handoff × a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-71 | the hand-off lane: the answers held for an undrained consumer are unbounded — the answer channel is an unbounded `mpsc::channel` and `turned_away` a `Vec` | A5 (Handoff × answers held are bounded) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-72 | the font lane: a coalesced or superseded request gets no outcome of its own, and a walk that dies leaves `ScanState::running` set for ever — no fault, no later walk; the wake has no failure road | A5 (Font × every request ends exactly once; a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-73 | the taskbar lane: the requests between two served ones get no outcome, and a worker that dies leaves `Asks::worker` set — requests are counted and never served, and nothing says so | A5 (Taskbar × every request ends exactly once; a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-74 | the computation lane (`MathWorker`): admission and answers are unbounded `mpsc::channel`s, each way | A5 (Computation × a full lane answers without waiting; answers held are bounded) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-75 | the computation lane: no request identity — an answer carries only its question, so one question asked twice gives two answers nobody can tell apart | A5 (Computation × every request has its own identity) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-76 | the computation lane: the decoration thread's death is invisible while the scaling and path-verification threads hold clones of the one answer sender; the drain sees a disconnection only when all three have gone | A5 (Computation × a dead worker is observable) | none yet | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-77 | §5.3 row 23 — the first window's GPU is opened with `pollster::block_on(GpuContext::open(…))` in `Runtime::create`, on the window thread, a wait no row listed | thread-door note revision (e)2; A1a | B9 (device recovery rests on deadlines and rebuilds on a worker) | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — it moves with D-42 | open — registered as row 23 `pending`, door `admission::doors::GpuOpen`; it stays on the window thread until then (coordinator, 2026-09-26); admitted where it stands through `gpu_door::open_first_window` (A1d, 2026-09-26); **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-78 | `trace_sink::Shutdown`'s `Drop` flushes the trace — a bounded wait, through its admitted door — when `fn main` returns early from a loop that could not be built | thread-door note (c)4, (e)3, (g)1; A1e | none yet — *The trace writer is retired through its admitted flush door, never by a drop* | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-79 | `AttentionPipe` and `LaunchPipe`, on both platforms, join their listener thread in `Drop` | thread-door note (c)4, (e)3; A1e | none yet — *An endpoint is retired through an explicit door, not by its drop* | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product reach: the endpoints live in statics; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-80 | the video engines (`video::engine::Engine`, `macos_player::Engine`) and `VideoSeat` and `VideoSeats` shut the engine down — a bounded poll and a join — in `Drop` | thread-door note (c)4, (e)3, (f)2; A1e; scope extended by the note's revision (m) (2026-09-27): the direct closes of `window_waits.tsv` row 25 and the media session's reader quiescence and `MFShutdown` of row 27 | none yet — *A video engine is shut down through an explicit door, not by its drop* | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — rows of the closed `Drop` inventory (A1e, 2026-09-27); **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-81 | `PtySession`'s `Drop` finishes the input dump (a write, two `sync_data`) and runs `shutdown` (a bounded reap, a bounded join) | thread-door note (c)4, (e)3; A1e | none yet — *A shell is taken apart only through `retire_within`, never by a drop on the window thread* | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); on `pty-retirement`, and on the caller only when that thread cannot start; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-82 | WinHTTP's `http::Request` waits up to `CLOSE_WAIT` (5 s) on a `Condvar` in `Drop` for its handle's closing callback | thread-door note (g)2; A1e | none yet — *A download's request is closed through its own bounded door, not by its drop* | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product caller of `https_download` yet; **2026-10-08 (J4):** **widened**: `https_download` has a product caller now, the update job (`update_job`, U-18…U-20), so the drop's wait runs on the `bt-update-job` worker, never the window thread; was 0.4.7 |
+| D-83 | the `bt-app` and `bt-term` suites are not portable: on macOS 294 of `bt-app`'s 4,600 tests (282 after ticket 72) and 43 of `bt-term`'s fail, each asserting a Windows fact on every host | ticket 72's report (Mac mini, 2026-09-26) | none yet | 0.4.8 — H1 (T-D83), then H7 | open; **2026-10-08 (J4):** **narrowed**: core-macos runs `bt-app`'s updater modules (T-GUARDS-BLIND, `5f7ba1fe`) and its uninstall tests (`1d914d1a`); the rest of `bt-app` and all of `bt-term` are checked, not tested; was 0.4.7 |
+| D-84 | aggregate turn scheduling beyond deferrable work: a turn's deadline is one number shared by every window, and only deferrable work is scheduled against it | budget note §R-B, §R-G (Codex's Q2; the owner's ruling of 2026-09-25, 1); A4 | none yet — owed a 0.4.7 ticket, *The window thread's turn is scheduled across windows and sources*, after B4–B9 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — opened by A4 (2026-09-27); **2026-10-08 (J4):** untouched: its ticket was to follow B4–B9, none of which was cut; was 0.4.7 |
 
 ---
 
@@ -362,7 +447,7 @@ state moved into the authoritative backend.
 
 **Status.** open. Direction stated in `docs/ARCHITECTURE.md` §4.1.
 
-**Ledger.** source: structure review C-1 · K-1 · ticket: none yet · version: 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 · status: open.
+**Ledger.** source: structure review C-1 · K-1 · ticket: none yet · version: 0.5 — **0.5 precondition** (the 2026-09-21 structure review): the session/document/view ownership note is 0.4.8 J5 (T-05-CONTRACTS, design only); the first slice and the session registry are 0.5; the backend stays 0.6 · status: open; **2026-10-08 (J4):** untouched; 0.4.7 added session facts on the session's own thread (T-PANE-IDENTITY's `current_frame`, `screen_fence_state`; T-PANE-COLUMNS' `foreground_program`), no owner beside the window; was 0.4.7.
 
 ---
 
@@ -414,7 +499,7 @@ first cut must not be advertised as eliminating every window-thread stall**.
 **Status.** open. Lanes, the exception list and the migration order are in
 `docs/ARCHITECTURE.md` §5.
 
-**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69).
+**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — A2 (the bare-site lint), the step its closure waits for, has no ticket; G4 takes the waits #29 and #31 · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid); every raw effect outside a door is a row of `docs/plans/window-thread-bare-sites.tsv`, which only shrinks — 248 sites, seeded at 263 on `2cc59a83` — and the configuration the lint will need is fenced and its probe proven per target (A2a, 2026-09-26: advanced, not repaid); every turn is accounted and every admitted call measured per call, with a budget line for each of the four triggers and an exit summary from the run's atomics (A3, 2026-09-27: advanced, not repaid — A1 and A3 have landed, and by the owner's ruling of 2026-09-25 D-2 closes when A2 lands too); deferrable work yields to the earliest window's deadline — the search walk's slice and the idle calls ask one `TurnAllowance` a turn (A4, 2026-09-27: advanced, not repaid — A1, A3 and A4 have landed; what the allowance leaves of aggregate scheduling is D-84); **2026-10-08 (J4):** **narrowed**: row 11's process birth runs on the `bt-pty-birth` worker and the window thread joins it (T-ENV-REFRESH round 4); an unlisted window-thread join of the PowerShell script worker was found and removed, and the scanner taught its shape (`c7a604ab`); row 29 added, ruled to stay (the update's exit guard, 2026-09-28); bare sites 248 → 232; A2 has not landed; was 0.4.6.
 
 ---
 
@@ -458,7 +543,7 @@ worker keeps this shape until it does; it is a mutation of the install folder's
 
 **Version.** 0.4.4. **Status.** open.
 
-**Ledger.** source: K-9 · C-2 · ticket: none yet · version: 0.4.6 · status: open.
+**Ledger.** source: K-9 · C-2 · ticket: none yet · version: 0.4.8 — B4 (T-PROBE-NO-CACHED-FAILURE) and B3 (T-FRESH-FACTS: the probes as facts re-asked); G1 for the two named containment gaps · status: open — the update job's worker `bt-update-job` added to the list (U-20, 2026-09-27; its two drivers U-27 and U-20); **2026-10-08 (J4):** **narrowed**: every machine probe starts through one door, `bt_platform::spawn_probe` / `probe_output`, which contains its whole process tree and ends it on deadline, wait, drop and unwind (T-PROBE-CHILD, T-PROBE-BORN-IN-JOB; ARCHITECTURE §2.2); the three PowerShell probes share one five-second deadline and a failed answer is asked again at the next reader edge (T-ENV-REFRESH round 4, T-INTEGRATION-INJECT-3 round 2). Still open: `copilot --version` and the macOS locale probe have no deadline, and each probe keeps its own slot, wake and latch (`profile_runtime::REMOVAL` has no in-flight latch); was 0.4.6.
 
 ---
 
@@ -508,7 +593,7 @@ above. Both are acceptable exits; the coordinator picks one.
 
 **Status.** open.
 
-**Ledger.** source: C-3 · K-8 · ticket: none yet · version: 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement · status: open.
+**Ledger.** source: C-3 · K-8 · ticket: none yet · version: 0.4.8 — G7 (census #28: an internal stop loses unsaved preview edits, this row's controlled-failure road); the emergency half is D-56 (0.5) · status: open; **2026-10-08 (J4):** untouched; was 0.4.6.
 
 ---
 
@@ -539,7 +624,7 @@ eighteen of fifty-three rows are folded; thirty-five are marked `not yet folded`
 with their addresses listed. The remaining work is folding, one subsystem at a
 time, by the ticket that needs it.
 
-**Ledger.** source: K-2 · C-4 · ticket: the ticket that depends on each row · version: 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket · status: open — 19 folded; row 28's wheel half folded by ticket 37 on 2026-09-24, the press half not.
+**Ledger.** source: K-2 · C-4 · ticket: the ticket that depends on each row · version: 0.4.8 — rolling: each 0.4.8 ticket folds the `docs/RULES.md` row it depends on in its own commit; what is unfolded at 0.4.8's end goes to 0.5 with its subsystem · status: open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not); **2026-10-08 (J4):** **narrowed**: row 36 (the update check) folded on `5bdc1a5a` (0.4.6); RULES has 55 rows, 24 folded in whole or part, 31 `not yet folded`; was 0.4.6.
 
 ---
 
@@ -578,7 +663,7 @@ four crates of policy.
 **Status.** **partly discharged.** The printed-path chain is written hop by hop;
 attention ingress, resize and paste convergence are named as stubs to fill.
 
-**Ledger.** source: K-10 · C-4 · ticket: through D-48…D-50 · version: 0.4.7 · status: open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff`.
+**Ledger.** source: K-10 · C-4 · ticket: through D-48…D-50 · version: unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) · status: open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff`; **2026-10-08 (J4):** untouched: §7.2's chains are still first-pass lines (T-IMAGE-N added a hop to §7.1's recognition and verdict rows); was 0.4.7.
 
 ---
 
@@ -606,7 +691,7 @@ enforce are stated in prose** — in `docs/RULES.md` or
 **Version.** With the move. **Status.** decided (it is the preparation plan); the
 prose half is open.
 
-**Ledger.** source: K-14 · C-4 · ticket: with D-28 · version: 0.4.6 — with D-28: the guards' prose is written when the migration list reaches zero · status: open.
+**Ledger.** source: K-14 · C-4 · ticket: with D-28 · version: unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — it closes with D-28 · status: open; **2026-10-08 (J4):** untouched; was 0.4.6.
 
 ---
 
@@ -648,7 +733,7 @@ table; these rows only record what exists).**
 |---|---|---|---|---|---|
 | 2026-09-24, ticket 37 | persistent pane state — a terminal pane's text size while it is not 100 % | non-urgent | non-modal | the existing top-right controls: left of the pane's `⌄` (`seats::text_size_mark_beside`); a click resets it | ruled 2026-09-24 (owner): the same rule in a headless pane's corner, left of its `⌄`; no room, no mark |
 
-**Ledger.** source: K-3 · C-4 · ticket: none yet · version: 0.4.6 — the owner rules the table first · status: open.
+**Ledger.** source: K-3 · C-4 · ticket: census-5a (note) and census-5b, after the ruling · version: 0.5 — the owner rules the table before 0.5's notification model · status: open — 28 surfaces inventoried and seven kinds proposed for the ruling in `docs/plans/design/ownership-census-2026-09-25.md` §3–§4 (2026-09-25); **2026-10-08 (J4):** untouched; was 0.4.6.
 
 ---
 
@@ -677,7 +762,7 @@ depth review is explicit that a ladder would be inappropriate.
 `docs/ARCHITECTURE.md` §9; the fourth row is written when the outward interface
 is designed.
 
-**Ledger.** source: K-4 · C-4 · ticket: none yet · version: 0.4.7 — the fourth entrance's design, the tool face; the entrance itself arrives with 0.5's outward interface · status: open — §9 table written; export ruled not an entrance on `5f433943`.
+**Ledger.** source: K-4 · C-4 · ticket: none yet · version: 0.5 — the fourth entrance is 0.5's outward interface · status: open — §9 table written; export ruled not an entrance on `5f433943`; **2026-10-08 (J4):** untouched; 0.4.8 F8 (T-LAUNCH-ENV) adds an explicit launch input and must say whether it is a row of §9's table; was 0.4.7.
 
 ---
 
@@ -706,7 +791,7 @@ coordinator's call.
 **Version.** 0.5. **Status.** open; the ruled shape is in
 `docs/ARCHITECTURE.md` §10.
 
-**Ledger.** source: K-5 · C-4 · ticket: none yet · version: 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber · status: open.
+**Ledger.** source: K-5 · C-4 · ticket: none yet · version: 0.5 — the operation vocabulary, with the 0.5 self-report · status: open; **2026-10-08 (J4):** untouched: 0.4.6 and 0.4.7 added `diagnostics.log` lines (U-39, U-42a…e) each in its own format; was 0.4.6.
 
 ---
 
@@ -738,7 +823,7 @@ in the tree.
 **Version.** With the move. **Status.** decided (the move and its preparation);
 the census is open.
 
-**Ledger.** source: K-7 · C-4 · ticket: census-1 · version: 0.4.6, with D-32 · status: repaid (census-1).
+**Ledger.** source: K-7 · C-4 · ticket: census-1 · version: 0.4.6, with D-32 · status: repaid (census-1) — the census is `bt_source::FieldCensus` over `bt-app`; inventory and site rows are query reports under `target/`, while the owner annotations (census-1's proposals, until the owner rules) and the shrink-only unknown row multiset are committed and held by `bt-source`'s `census` test and `scripts/ci/check-census-unknowns.ps1`, so a fact with an unknown is `incomplete`, never single-writer. D-32 (census-7) is what the census was taken for, and stays open.
 
 **Repaid (2026-09-26, census-1).** The census the smallest change asked for is a query, `bt_source::FieldCensus`, over `bt-app`'s product items. Every `self.` access resolves to `Runtime`, `WindowRuntime`, or through `Deref` to `TabState` by stated rules (the census note's revision (b)2 §3); every field of `App`, `WindowRuntime`, `TabState` and `LeafSession` has a committed inventory row, with proven writers, mutable access, hub membership and inner mutability in separate columns, and every site the rules cannot resolve is listed with its item and reason. `bt-source`'s `census` test is the diff gate. What it is for — drafting the unassigned methods' destinations against owners rather than name clusters — is D-32, census-7.
 
@@ -771,7 +856,7 @@ them would be a second copy of a fact.
 
 **Status.** open.
 
-**Ledger.** source: K-11 · ticket: none yet · version: 0.4.7 — the first extraction, after the `bt-app` move ends with D-32 in 0.4.6 · status: open.
+**Ledger.** source: K-11 · ticket: none yet · version: 0.5 — `bt-platform` is not split in 0.4.8 (plan K, *Not in 0.4.8*); J2's small boundary crate for D-14 is the first extraction · status: open; **2026-10-08 (J4):** untouched; was 0.4.7.
 
 ---
 
@@ -803,7 +888,15 @@ alternatives; choice deferred.
 
 **Version.** 0.4.4. **Status.** open, with the choice already scoped.
 
-**Ledger.** source: K-12 · C-4 · split prep P21 · ticket: P21 · version: 0.4.6 · status: open.
+**Repaid (2026-09-21, `21cf1ef8`; recorded 2026-10-08 by J4).** The first of the
+three alternatives was taken the same day as the review: the probe moved to
+`crates/bt-corpus`, byte for byte, and `bt-pty`'s manifest names `bt-term` under
+`[dev-dependencies]` only, with a comment that no code the crate ships names
+`bt_term` (DESIGN, 2026-09-21; ARCHITECTURE §3.2, *Done 2026-09-21*). The ledger
+gained its columns two days later from the review's list and carried the row
+open until this reconciliation.
+
+**Ledger.** source: K-12 · C-4 · split prep P21 · ticket: P21 · version: — · status: repaid on `21cf1ef8` (2026-09-21) — the ConPTY width probe lives in `bt-corpus` and `bt-pty`'s manifest names `bt-term` only under `[dev-dependencies]` (ARCHITECTURE §3.2, *Done 2026-09-21*); carried open by mistake from 2026-09-23 to 2026-10-08 (J4). Not this row: `bt-pty`'s optional edge to `bt-platform` behind its test-only `test-shell` feature and `bt-term`'s dev-dependency on `bt-pty` (T-TEST-SHELL-HYGIENE, T-INTEGRATION-INJECT-4 round 6), for J1 to classify.
 
 ---
 
@@ -831,7 +924,7 @@ stays the single answer, consumed by both `bt-term::verify_path` and
 **Version.** 0.5 — both halves change product code, which a preparation ticket
 forbids. **Status.** open.
 
-**Ledger.** source: C-4 · K-11 · ticket: none yet · version: 0.4.6 · status: open.
+**Ledger.** source: C-4 · K-11 · ticket: none yet · version: 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite · status: open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6.
 
 ---
 
@@ -853,7 +946,7 @@ nothing.
 
 **Version.** 0.5 at the earliest. **Status.** decided — recorded as debt.
 
-**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27 · version: 0.4.7 — the first slice, ahead of the 0.5 composition layer · status: open (recorded debt).
+**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27 · version: 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then · status: open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7.
 
 ---
 
@@ -886,7 +979,7 @@ through the door, held by a source guard); the enumeration lane and the thumbnai
 thread's band are open, the band with the other observation threads' in RULES 53's
 0.4.7 ticket.
 
-**Ledger.** source: K-13 · ticket: A1c (the thread door's bypass) · version: 0.4.7 · status: open — rule stated; the thread door's bypass repaid in 0.4.6.
+**Ledger.** source: K-13 · ticket: A1c (the thread door's bypass) · version: 0.5 — **0.5 precondition**: the side-effect contract's admission half; its note is 0.4.8 J5 (T-05-CONTRACTS); the enumeration lane and the observation threads' band are built in 0.5 · status: open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain; **2026-10-08 (J4):** untouched: every thread 0.4.7 added comes through the door (T-PROBE-CHILD's reader, T-KEYBOARD-CTRLALT's `folio-layout-tables`, T-UNINSTALL-UX's remover pipe); `folio-web-thumb` still stands at `Normal`; RULES 53's 0.4.7 ticket was never cut; was 0.4.7.
 
 ---
 
@@ -911,7 +1004,7 @@ both faces consume it. Do **not** unify the three selection representations.
 
 **Version.** 0.5, with the document owner of D-1. **Status.** open.
 
-**Ledger.** source: C-4 · ticket: none yet · version: 0.4.7 — the first slice, with D-1's first slice · status: open.
+**Ledger.** source: C-4 · ticket: none yet · version: 0.5 — with D-1's document owner, after J5's note · status: open; **2026-10-08 (J4):** untouched; was 0.4.7.
 
 ---
 
@@ -958,7 +1051,10 @@ finding is not lost.
 - `profile_runtime::REMOVAL` is one slot with two writers and no in-flight
   latch; the last report written wins (also the subject of D-3).
 - `psreadline-probe` and `copilot-version-probe` block on their child with no
-  timeout; a hung probe thread is never reclaimed.
+  timeout; a hung probe thread is never reclaimed. *(Half fixed: the PSReadLine
+  probe has the five-second PowerShell deadline since T-ENV-REFRESH round 4;
+  the Copilot probe's tree is contained since T-PROBE-CHILD but still has no
+  deadline — D-3.)*
 - `folio-web-thumb` stands at `Normal`, breaking the band rule (it goes
   through the thread door since A1c, at the band it had), and **panics on
   spawn failure**.
@@ -966,7 +1062,8 @@ finding is not lost.
   `bt-dir-watch` has an unbounded receive in its start and an unbounded join in
   its drop.
 - `crates/bt-pty/Cargo.toml`'s comment claims the library depends on the
-  terminal crate; production code never names it.
+  terminal crate; production code never names it. *(Fixed by `21cf1ef8`, with
+  D-13.)*
 - `crates/bt-term/Cargo.toml`'s "one call" comment is stale — there are three
   import surfaces (D-14).
 - `bt-term::session::opening_it_would_run_it` has a doc comment saying a platform
@@ -975,7 +1072,8 @@ finding is not lost.
 - `the_shell_page_is_gone` walks the crate's source non-recursively, so a future
   `runtime/` directory silently escapes a whole-program prohibition guard (D-7).
 - `crates/bt-platform/src/lib.rs` contains an embedded NUL byte; the file is not
-  clean UTF-8.
+  clean UTF-8. *(Fixed by T-GUARDS-BLIND, `5f7ba1fe`: the bytes are written as
+  escapes, and a gate refuses a NUL byte in any tracked text file.)*
 - macOS uninstall cleanup cannot honour its own safety check: the
   process-holding probe is a no-op off Windows, so "no process holds the data"
   is unverifiable there.
@@ -1014,7 +1112,7 @@ content before their plate*, §4), beside D-65. **All six are fixed by ticket
 
 **Repaid by census-2 (0.4.6).** The census tells two kinds of subject apart by how the test reads. A literal in the item-naming position of a `bt-source` query — the constructors listed in the script's `ITEM_QUERIES` (`ItemQuery::{function, method, type_item, field, variant}`, `Scope::Impls`), or a test helper or closure the script derives from them (`method_body(owner, name)`, `method_body(name)`, `let body = |name| method_body("Runtime", name)`, a `for` over a literal array fed to one) — is **item-bound**: its witnesses are resolved by the query's own kind and owner type, and when 2a moves it the row says *subject moves: follows the item*, not *retarget*. Every other literal stays **file-bound** with today's reading; a literal spelled both ways is both. A test whose only source reading is an item query is now a census row (it was invisible before, so a migrated pin dropped out of the inventory the moment it stopped naming a file). Ten of the eleven hand-written overrides were removed: each audited a `main.rs` text reading that no tree the script runs on still makes. Evidence: the script's `--self-check` fixture, and the relocation `7edfd12a` (census-2's report).
 
-**Ledger.** source: split prep, 2026-09-22 · ticket: census-2 · version: 0.4.6 — D-29…D-32 need a true census · status: repaid (census-2).
+**Ledger.** source: split prep, 2026-09-22 · ticket: census-2 (the census note's revision (b)) · version: 0.4.6 — D-29…D-32 need a true census · status: repaid (census-2, 0.4.6) — each subject is item-bound or file-bound by how the test reads it (`ITEM_QUERIES` and the helpers derived from it); only a file-bound subject read out of `main.rs` is a reader 2a must retarget; `--self-check` holds the fixture.
 
 ---
 
@@ -1195,6 +1293,11 @@ lanes they name; D-51, D-54 and D-55 are 0.4.7.
   `a_body_longer_than_the_cap_is_an_error` reach the network and failed with
   "The request timed out" in an unrelated run. Owed: a local server, or a
   reason recorded on the ignored list. 0.4.6.
+  **Narrowed (2026-10-08, J4):** both tests ask a loopback listener
+  (`answering`, `ask_this_machine`) since `64bcebdb` (2026-09-13) — the local
+  server was there before this row was written. What keeps it open is the
+  rule: no sentence in DESIGN, RULES or ARCHITECTURE says a transport test
+  never reaches the network.
 
 The other entries of `scripts/ci/ignored-tests.txt` are probes, one writer and
 two privilege-bound fixtures, each with its reason there; they are not debt.
