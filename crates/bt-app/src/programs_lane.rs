@@ -908,10 +908,12 @@ pub(crate) mod tests {
     /// (walk 1 below normal); the worker spawned below normal and `serve` not setting the band
     /// (walk 1 below normal); `serve` not setting the band per walk (walk 2 stays at the launch's
     /// normal); `request` dropping the replaced request's urgency (walk 4 below normal).
-    #[cfg(windows)]
+    ///
+    /// Each band is expected as the platform reads it back from a thread started in it: on
+    /// Windows the band itself; where a band is requested and not enforced (RULES 53) nothing,
+    /// and the sequence is then all `None`.
     #[test]
     fn the_launch_walk_runs_at_normal_priority_and_every_other_walk_below_normal() {
-        use bt_platform::ThreadPriority::{BelowNormal, Normal};
         /// The fake machine, and the band each walk was in when it asked for its environment.
         struct Banded(
             FakeMachine,
@@ -933,6 +935,16 @@ pub(crate) mod tests {
                 self.0.wsl()
             }
         }
+        let read_back = |band| {
+            bt_platform::spawn_at_priority("band-read-back", band, |_| {
+                bt_platform::current_thread_priority()
+            })
+            .expect("a thread starts")
+            .join()
+            .expect("it answers")
+        };
+        let normal = read_back(bt_platform::ThreadPriority::Normal);
+        let below = read_back(bt_platform::ThreadPriority::BelowNormal);
         let machine = FakeMachine::with_path(&[bin_dir()]);
         let bands = Arc::new(Mutex::new(Vec::new()));
         let (lane, wakes, _) = lane(Banded(machine.clone(), Arc::clone(&bands)));
@@ -941,13 +953,13 @@ pub(crate) mod tests {
 
         let launch = lane.request(request(&rows, Trigger::Launch));
         answers_through(lane, &wakes, launch);
-        assert_eq!(banded(), [Some(Normal)], "the launch's walk");
+        assert_eq!(banded(), [normal], "the launch's walk");
 
         let menu = lane.request(request(&rows, Trigger::ProgramMenu));
         answers_through(lane, &wakes, menu);
         assert_eq!(
             banded(),
-            [Some(Normal), Some(BelowNormal)],
+            [normal, below],
             "a menu's walk on the same worker"
         );
 
@@ -965,13 +977,7 @@ pub(crate) mod tests {
         answers_through(lane, &wakes, environment);
         assert_eq!(
             banded(),
-            [
-                Some(Normal),
-                Some(BelowNormal),
-                Some(BelowNormal),
-                Some(Normal),
-                Some(BelowNormal),
-            ],
+            [normal, below, below, normal, below],
             "the replaced launch's urgency is kept by the request that replaced it, and only by it"
         );
     }
