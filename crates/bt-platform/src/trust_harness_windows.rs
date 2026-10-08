@@ -722,7 +722,9 @@ fn version_block(version: FileVersion) -> Vec<u8> {
 /// resources, `SignerSignEx3` signs and `WinVerifyTrust`,
 /// `GetFileVersionInfoW` and `LoadLibraryExW` read like any other. It opens no
 /// window. [`Behaviour::Returns`]: `xor eax, eax; ret`, importing nothing — the
-/// process exits at once. [`Behaviour::StaysUp`]: `Sleep(INFINITE)` in a loop,
+/// process exits at once. [`Behaviour::SaysItsCommandLineLength`]: the same,
+/// with its command line's length in bytes as the exit code, read from its
+/// PEB. [`Behaviour::StaysUp`]: `Sleep(INFINITE)` in a loop,
 /// importing that one function from `KERNEL32.dll` — the process waits in the
 /// kernel, using no processor, until it is ended. (A loop that spins instead
 /// keeps a scanner's emulator busy until its own time limit whenever the file
@@ -740,6 +742,13 @@ fn small_program(behaviour: Behaviour) -> Vec<u8> {
     const LIBRARY: u32 = 0x90;
     let section: Vec<u8> = match behaviour {
         Behaviour::Returns => vec![0x31, 0xC0, 0xC3],
+        // mov rax, gs:[0x60] (the PEB); mov rax, [rax + 0x20] (its process
+        // parameters); movzx eax, word [rax + 0x70] (their command line's
+        // `Length`); ret.
+        Behaviour::SaysItsCommandLineLength => vec![
+            0x65, 0x48, 0x8B, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x40, 0x20, 0x0F,
+            0xB7, 0x40, 0x70, 0xC3,
+        ],
         Behaviour::StaysUp => {
             let mut section = vec![0u8; 0xA0];
             // sub rsp, 0x28; mov ecx, INFINITE; call [rip + (ADDRESSES - 0x0F)];
@@ -830,7 +839,7 @@ fn small_program(behaviour: Behaviour) -> Vec<u8> {
     }
     put(&mut image, &mut at, &[0; 4]);
     let characteristics: u32 = match behaviour {
-        Behaviour::Returns => 0x6000_0020,
+        Behaviour::Returns | Behaviour::SaysItsCommandLineLength => 0x6000_0020,
         Behaviour::StaysUp => 0xE000_0060,
     };
     put(&mut image, &mut at, &characteristics.to_le_bytes());

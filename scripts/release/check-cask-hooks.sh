@@ -20,8 +20,9 @@
 #   4. `brew uninstall --cask --zap` while that Folio runs: the app is taken
 #      away anyway (Homebrew moves it back into the Caskroom before any zap
 #      step), the door refuses with exit 2, and the zap goes on.
-#   5. `brew uninstall --cask --zap` with Folio closed: the door ran and the
-#      planted entrance is gone.
+#   5. `brew uninstall --cask --zap` with Folio closed: the door ran, the
+#      planted entrance is gone, and the data folder and a planted remover's
+#      folder (`Folio-uninstall`) are trashed.
 #
 # **Nothing of this account is touched.** Every brew command and the Folio it
 # starts run with HOME pointed at a scratch folder, so the cleanup door's
@@ -178,6 +179,8 @@ stop_folio
 
 # ── 5. zap ────────────────────────────────────────────────────────────────────
 b install --cask --appdir="$apps" "$tap/folio"
+# What a remover ended before it could retire leaves behind (REMOVER_HOME).
+mkdir -p "$home/Library/Application Support/Folio-uninstall/uninstall-0123"
 said=$(b uninstall --cask --zap "$tap/folio" 2>&1)
 echo "$said"
 case "$said" in
@@ -186,6 +189,7 @@ case "$said" in
 esac
 check "$(ok [ ! -f "$planted" ])" "zap: the planted entrance is gone"
 check "$(ok [ ! -e "$home/Library/Application Support/Folio" ])" "zap: the data folder is trashed"
+check "$(ok [ ! -e "$home/Library/Application Support/Folio-uninstall" ])" "zap: the remover's folder is trashed"
 
 echo
 if [ "$failures" -gt 0 ]; then

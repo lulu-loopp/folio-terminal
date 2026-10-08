@@ -1717,7 +1717,8 @@ impl Runtime<'_> {
     /// ordinals count in.
     ///
     /// Read off [`App::windows_open`], which is the directory `FolioApp`
-    /// publishes each turn: a `Runtime` is one window by construction and can
+    /// publishes at each turn's head and as each window opens: a `Runtime` is
+    /// one window by construction and can
     /// see no other, so the list has to be handed down rather than walked here.
     ///
     /// **This window is not in it.** A pane already in this window has nothing

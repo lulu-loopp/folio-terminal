@@ -453,9 +453,16 @@ function Assert-ArchiveMatchesManifest {
                     $problems.Add("outside   : $($entry.FullName) is not under $prefix, the manifest's root")
                     continue
                 }
+                $name = $entry.FullName.Substring($prefix.Length)
                 $stream = $entry.Open()
-                try { $hash = Get-StreamSha256 -Stream $stream } finally { $stream.Dispose() }
-                [pscustomobject]@{ Name = $entry.FullName.Substring($prefix.Length); Size = $entry.Length; Sha256 = $hash }
+                $bytes = New-Object IO.MemoryStream
+                try { $stream.CopyTo($bytes) } finally { $stream.Dispose() }
+                $bytes.Position = 0
+                $hash = Get-StreamSha256 -Stream $bytes
+                foreach ($problem in (Test-BatchMember -Name $name -Bytes $bytes.ToArray())) {
+                    $problems.Add($problem)
+                }
+                [pscustomobject]@{ Name = $name; Size = $entry.Length; Sha256 = $hash }
             }
         )
         foreach ($problem in (Compare-ReleaseMembers -Manifest $release -Found $found -Exempt $exempt)) {
