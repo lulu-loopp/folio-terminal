@@ -4,8 +4,9 @@ use std::{
     hash::{BuildHasher, Hasher},
     num::NonZeroU32,
     sync::{Arc, Mutex, MutexGuard},
-    time::Instant,
 };
+
+use web_time::Instant;
 
 use alacritty_terminal::{
     Term,

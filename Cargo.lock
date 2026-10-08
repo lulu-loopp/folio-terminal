@@ -369,6 +369,7 @@ dependencies = [
  "typst-library",
  "typst-svg",
  "typst-syntax",
+ "web-time",
 ]
 
 [[package]]
@@ -405,6 +406,7 @@ dependencies = [
  "objc2-user-notifications 0.3.2",
  "objc2-web-kit",
  "ttf-parser",
+ "web-time",
  "webview2-com",
  "windows",
  "windows-core",
@@ -447,6 +449,7 @@ dependencies = [
  "ttf-parser",
  "unicode-properties",
  "unicode-script",
+ "web-time",
  "wgpu",
 ]
 
@@ -476,6 +479,7 @@ dependencies = [
  "proptest",
  "rayon",
  "unicode-width",
+ "web-time",
 ]
 
 [[package]]
@@ -5041,6 +5045,7 @@ dependencies = [
  "log",
  "memchr",
  "serde",
+ "web-time",
 ]
 
 [[package]]

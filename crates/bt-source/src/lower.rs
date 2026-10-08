@@ -150,6 +150,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
             module_paths: module_paths.clone(),
             span: file_span,
             body: ModuleShape::WholeFile,
+            compilation: Compilation::AlwaysInProduct,
         });
 
         match TokenStream::from_str(&text) {
@@ -822,13 +823,15 @@ impl Parsed<'_> {
                     // between them — the scope a reader names by its Rust path.
                     let span = self.span(braces(brace));
                     let module_paths = self.paths_for(module);
+                    let gate = gate.and(compilation);
                     self.modules.push(ModuleRecord {
                         file: self.file,
                         module_paths,
                         span,
                         body: ModuleShape::Inline,
+                        compilation: gate,
                     });
-                    self.walk(inner, module, predicates, gate.and(compilation));
+                    self.walk(inner, module, predicates, gate);
                     module.pop();
                     predicates.truncate(depth);
                 }

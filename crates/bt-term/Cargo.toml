@@ -23,6 +23,7 @@ bt-platform = { path = "../bt-platform" }
 bt-viewport = { path = "../bt-viewport" }
 image.workspace = true
 rayon.workspace = true
+web-time.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

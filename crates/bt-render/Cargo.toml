@@ -26,6 +26,7 @@ unicode-properties.workspace = true
 # cosmic-text does not re-export the crate. Pinned to the version cosmic-text
 # itself depends on, so the trait and the argument are the same type.
 unicode-script.workspace = true
+web-time.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]

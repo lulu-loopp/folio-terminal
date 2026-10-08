@@ -380,7 +380,7 @@ impl GlyphFixture {
                 focused: true,
             }],
             FrameTrigger {
-                occurred_at: std::time::Instant::now(),
+                occurred_at: web_time::Instant::now(),
                 source: FrameSource::Expose,
             },
         );

@@ -31,8 +31,10 @@ use std::{
     sync::Arc,
     sync::OnceLock,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use bt_doc::{ContentAnchor, MathMode, ScreenId};
 use bt_platform::admission::{WaitToken, doors};

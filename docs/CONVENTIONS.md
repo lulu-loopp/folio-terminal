@@ -147,6 +147,26 @@ the change that adds it. `gates-can-fail` plants an upward edge, a stale
 exemption and a crate with no layer and checks that each refusal names the
 crate and the reason. `scripts/ci/check-crate-edges-tests.ps1` plants an added
 exemption in a scratch repository.
+The wasm floor (gate G1, job `wasm-lib-check`): `scripts/ci/check-wasm-lib.ps1`
+runs `cargo check --locked --lib --target wasm32-unknown-unknown` over the
+library crates a browser build will reference — the list is in the script and
+nowhere else — and names every crate that reports a compile error; it refuses a
+run that checked fewer libraries than the list holds. A crate joins the list in
+the ticket that makes it pass. Its `gates-can-fail` canary plants a call of a
+`cfg(unix)`-only function in `bt-doc` and requires the refusal to name `bt-doc`.
+
+The clock guard (gate G3, `clock-guard` in `logic`): `scripts/ci/check-clock-guard.ps1`
+runs `crates/bt-source/tests/clock_guard.rs`, which refuses `std::time::Instant`
+and `std::time::SystemTime` in every spelling (qualified, flat or nested `use`,
+glob, alias) in the product code of an explicit source set — the library crates
+G1 checks except `bt-platform`, of which only `crate::admission` is read,
+`vendor/vte`, and `vendor/alacritty_terminal` without `event_loop` and `tty`.
+Those crates read time through `web_time`, which is `std::time` on every native
+target. The script's header names the set and what is out of it; it refuses a
+run that read no file. Four canaries: a qualified clock in `bt-doc`, a nested
+import in `bt-layout` and a crate-root nested import (`use ::std::{time::Instant}`)
+in `bt-viewport` are refused by file, and a clock planted in
+`bt-platform`'s `http` module (out of scope by name) is not.
 
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 

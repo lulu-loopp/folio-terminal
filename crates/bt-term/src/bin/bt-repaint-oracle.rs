@@ -6,8 +6,10 @@ use std::{
     fs, io,
     num::NonZeroU32,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use bt_math::MathEngine;
 use bt_term::{

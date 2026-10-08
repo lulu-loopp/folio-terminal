@@ -3,7 +3,7 @@ use std::{
     io::{Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
-    time::SystemTime,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -577,9 +577,16 @@ struct DecodedImagePayload {
 /// `None` is a real answer — the file is not there — and it compares equal to
 /// itself, which is what lets a refusal about a missing file be remembered
 /// rather than re-asked on every occurrence of it in a screenful.
+///
+/// The modified time is the file system's, kept as its offset from the Unix
+/// epoch — `Ok` at or after it, `Err` before it — which is the same value one to
+/// one, without naming the standard library's clock type: on
+/// `wasm32-unknown-unknown` that type is not the one the rest of this crate
+/// reads time through (`crates/bt-source/tests/clock_guard.rs`), and nothing here
+/// reads a clock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocalImageStamp {
-    modified: Option<SystemTime>,
+    modified: Option<Result<Duration, Duration>>,
     len: u64,
 }
 
@@ -587,7 +594,10 @@ impl LocalImageStamp {
     fn of(path: &Path) -> Option<Self> {
         let metadata = std::fs::metadata(path).ok()?;
         Some(Self {
-            modified: metadata.modified().ok(),
+            modified: metadata.modified().ok().map(|at| {
+                at.duration_since(UNIX_EPOCH)
+                    .map_err(|before| before.duration())
+            }),
             len: metadata.len(),
         })
     }

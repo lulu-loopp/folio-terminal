@@ -486,7 +486,7 @@ impl MathEngine {
         source: &str,
         key: MathRenderKey,
     ) -> Result<MathRaster, MathRenderError> {
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         let document = self.typeset(source, key)?;
         let page = document.pages().first().ok_or(MathRenderError::NoPage)?;
         if let Some(character) = frame_undrawn_character(&page.frame) {

@@ -20,6 +20,7 @@ typst-library.workspace = true
 typst-svg.workspace = true
 # Already pinned transitively by Typst; parse emitted math without rewriting text literals.
 typst-syntax = "=0.15.1"
+web-time.workspace = true
 
 [dev-dependencies]
 serde.workspace = true
