@@ -426,18 +426,28 @@ fn is_trial() -> bool {
     update_startup::trial().is_some()
 }
 
+/// **Whether the gate holds this process's writes**: it is a trial, or a start
+/// that continues with its writes held because its transaction's rescue build
+/// could not be started (`update_startup::is_held`, 0.4.8 E1). A held process
+/// has no transaction of its own to wait for: no watch reads one, so nothing
+/// it held back is ever released, and its pending writes are dropped when it
+/// ends.
+fn is_held_back() -> bool {
+    is_trial() || update_startup::is_held()
+}
+
 /// **Whether this process's durable writes are held back now**: it is a trial
-/// whose transaction has not been read as committed. Always `false` outside a
-/// trial.
+/// whose transaction has not been read as committed, or a held start. Always
+/// `false` in any other start.
 pub(crate) fn writes_are_deferred() -> bool {
-    GATE.defers(is_trial())
+    GATE.defers(is_held_back())
 }
 
 /// **Ask before a durable write**: `true` means do not write — the writer is
-/// recorded as pending and runs again when the trial is committed. Always
-/// `false` outside a trial, which is every start but an update's trial.
+/// recorded as pending and runs again when the trial is committed (a held
+/// start never is). Always `false` in any other start.
 pub(crate) fn defer(writer: Writer) -> bool {
-    GATE.defer(is_trial(), writer)
+    GATE.defer(is_held_back(), writer)
 }
 
 /// How a document is read in this process: a refused file's copy is owed while
@@ -455,7 +465,7 @@ pub(crate) fn keeping() -> bt_persist::Keeping {
 /// commit reads the document again and keeps it before anything replaces it.
 pub(crate) fn owe_copy(report: &bt_persist::ReadReport, path: &Path, keep: fn(&Path)) {
     if report.owes_a_copy() {
-        GATE.owe_copy(is_trial(), path, keep);
+        GATE.owe_copy(is_held_back(), path, keep);
     }
 }
 
@@ -662,6 +672,12 @@ pub(crate) fn watch(
                 }
                 Ok(LastTrialCommit::Pending) => {}
                 Ok(LastTrialCommit::NotItsOwn) => commit_itself = None,
+                Ok(LastTrialCommit::StoodAside) => {
+                    eprintln!(
+                        "BT_UPDATE_TRIAL transaction {txn}: the journal is one this build cannot read whole; it is not committed by itself, and the build that wrote it decides"
+                    );
+                    commit_itself = None;
+                }
                 Ok(LastTrialCommit::Unprovable) => {
                     eprintln!(
                         "BT_UPDATE_TRIAL transaction {txn}: this process cannot read its own start instant, so its receipt names nobody; it is not committed by itself, and a recovery decides"
@@ -976,11 +992,14 @@ pub(crate) fn hand_back(
     since: (u16, u16, u16),
     starter: &mut dyn Starter,
 ) -> Option<Running> {
+    // A header this build cannot read is handed back to the rescue build its
+    // envelope names (`update_txn::Sight::acting_header`, E1).
     let Some(header) = file_reads::read(Lane::UpdateJournal, home.journal())
         .ok()
-        .and_then(|bytes| crate::update_txn::Header::parse(&bytes).ok())
+        .and_then(|bytes| crate::update_txn::sight(&bytes).acting_header())
     else {
-        // No journal to read: the watch reads the end on its next turn.
+        // No journal to read, or nothing of it: the watch reads the end on
+        // its next turn, and nobody could take a journal nothing of reads.
         return None;
     };
     let program = home.rescue_program(&header.rescue);
@@ -1864,6 +1883,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (E1; role #4, the trial's receipt writer: site R1,
+    /// `update_apply::read_receipt`, as `write_receipt` reads what stands at
+    /// its own name) — **a receipt at the trial's name that this build cannot
+    /// read is never written over**: a later receipt version, a v1 receipt
+    /// with a word this build does not read, and bytes that are no receipt
+    /// are each kept byte for byte, and the write is refused.
+    ///
+    /// MUTATION: drop the version check from the receipt's read (`versioned`
+    /// in `Receipt::parse`): a later receipt of the same trial that names no
+    /// running process reads as an earlier attempt and is replaced.
+    #[test]
+    fn a_receipt_this_build_cannot_read_is_never_written_over() {
+        let root = scratch("beyond-receipt");
+        let path = root.join("health");
+        let me = std::process::id();
+        let mine = Receipt {
+            txn: TXN,
+            nonce: nonce(),
+            pid: me,
+            version: crate::version::VERSION.to_owned(),
+            started: bt_platform::install_flip::started_of(me),
+        };
+        let job = ReceiptJob {
+            path: path.clone(),
+            bytes: mine.encode(),
+        };
+        let earlier = Receipt {
+            pid: 2,
+            version: crate::update_txn::LATER_BUILD.to_owned(),
+            started: None,
+            ..mine
+        };
+        for (what, there) in crate::update_txn::receipt_beyond_inputs(&earlier) {
+            std::fs::write(&path, &there).unwrap();
+            let written = write_receipt(&job);
+            assert!(written.is_err(), "{what}: {written:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), there, "{what}: kept");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED (U-35 round 3, the review's F1) — **what is already at a trial's
     /// receipt name decides whether its receipt is written there**: the same
     /// receipt is already written; an earlier attempt of the same trial — this
@@ -2324,6 +2384,59 @@ mod tests {
         assert!(
             changed.is_empty(),
             "the trial wrote before it was committed:\n{}",
+            changed.join("\n")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (E1; the owner's ruling E5 of 2026-10-08) — **a start that
+    /// continues with its writes held writes nothing durable, and nothing it
+    /// held back is ever released**: every writer of the trial's gate is
+    /// held — the same writers over the same folder as a trial's, through
+    /// each one's product entry — and the process is no trial: no receipt
+    /// falls due, no watch runs, and the gate stays shut.
+    ///
+    /// Run in a process of its own over a private `APPDATA`, local folder and
+    /// home, as the trial's test is.
+    ///
+    /// MUTATION: in `is_held_back`, ask only `is_trial()` (the held start
+    /// writes the new build's data over, as before E1).
+    #[test]
+    fn a_held_start_writes_nothing_durable() {
+        const SELECTOR: &str = "update_trial::tests::a_held_start_writes_nothing_durable";
+        if let Some(root) = child_root(SELECTOR) {
+            assert!(update_startup::become_held(TXN));
+            assert!(
+                !run_the_start_writers(&root),
+                "the marks' migration started (ProfileMigration)"
+            );
+            let pending = GATE.pending();
+            for writer in [
+                Writer::Session,
+                Writer::Settings,
+                Writer::RefusedCopies,
+                Writer::UpdateCheck,
+                Writer::ProfileMigration,
+            ] {
+                assert!(pending.contains(&writer), "{writer:?} in {pending:?}");
+            }
+            assert!(writes_are_deferred());
+            assert_eq!(update_startup::trial(), None, "no trial");
+            assert_eq!(receipt_due(), None, "no receipt");
+            assert!(take_released().is_empty(), "nothing is released");
+            return;
+        }
+        let root = scratch("held-start");
+        seed_what_the_old_build_left(&root);
+        let before = every_file(&root);
+        run_in_a_process_of_its_own(SELECTOR, &root);
+        let changed: Vec<String> = changes(&before, &every_file(&root))
+            .into_iter()
+            .filter(|line| !line.contains(crate::diagnostics::LOG_FILENAME))
+            .collect();
+        assert!(
+            changed.is_empty(),
+            "the held start wrote:\n{}",
             changed.join("\n")
         );
         let _ = std::fs::remove_dir_all(&root);

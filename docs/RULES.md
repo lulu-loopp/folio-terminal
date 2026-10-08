@@ -1167,9 +1167,42 @@ build runs as a trial and is `Committed` only on its receipt; a failed trial is
 rolled back by digest, and a rollback that fails is `Stuck` with everything kept,
 retried at the next logon or start three times at most; whatever phase a dead
 applier leaves, a start opens exactly one Folio, and the new build before
-`Committed` only as a trial (on Windows, a start whose rescue build the
-operating system will not start continues plainly over a destructive phase
-other than `TrialStarting` — an open hole, U-35 round 2). **Every road process — the outgoing build once
+`Committed` only as a trial. **On Windows, a start whose rescue build cannot
+be started — its folder gone, its file held, the operating system refusing it —
+continues with its writes held** (E1, the owner's ruling E5 of 2026-10-08),
+over every destructive phase but `TrialStarting`, which keeps U-35's road
+below: the trial's write gate is shut for the life of that process, with no
+trial, no receipt, no watch and no release, so nothing it changes is written
+and nothing is recorded in the journal; its card says the update is not
+finished and that the changes made in this session are not kept. The rollback a
+later logon or start makes may put back what the new build wrote; nothing of
+the held session is lost to it unannounced. **A journal a build cannot read
+whole** (E1) is preserved byte for byte, and only the rescue build its envelope
+names settles it: every build reads the header's `txn`, `rescue` and
+`written_by` whatever its `v`, `class` or `outcome` say, and a header it cannot
+read is a `destructive` transaction with nothing decided. A start hands it to
+that rescue build, continues past it with the card when sent with
+`--update-failed` (or when its rescue cannot be started, held as above on
+Windows), and continues with the card when not even the envelope reads; the
+frozen class actions stay the exceptions — a `terminal` header is retired, a
+`preparing` or `deferred` one continued past or discarded when the install was
+replaced by hand. A lock holder stands aside: it records, removes and ends
+nothing and lets the lock go. An exit answers what an unknown live set opens —
+the rescue copy on Windows, a held-writes trial on macOS (the installed build
+with `--update-failed` when no transaction can be named) — and never the
+installed build plainly. A receipt it cannot read is never accepted or written
+over. The job owner leaves it, the offer still shows, and the press answers
+that a newer Folio's update is not finished. The card names the later build
+the header's `written_by` names — attribution only, which words the card and
+never changes what is done — and otherwise says the update's record cannot be
+read. **What a build may write** (E1): the header's `class` and `outcome`
+vocabularies are closed — no build adds a class, an outcome, a header version
+or a change to the envelope; a trial writes only words its rescue build reads,
+unless it reads that build's version first and writes the old form below it; a
+body or receipt word an older rescue build would misread raises the release
+manifest's `min_updater` to the word's first version; an optional field is
+additive only when losing it costs a card's wording and nothing else.
+**Every road process — the outgoing build once
 its hand-over is over, the applier, the recovery build — leaves through one
 exit guard**, armed when Restart to update is pressed: one mark
 (`H\<txn>\owner`) says which one process has the duty to open a window —

@@ -178,7 +178,8 @@ enum Pre {
 pub(crate) use crate::update_apply::{Opener, Opens, failed_words, trial_words};
 use crate::update_txn::{
     Action, Actor, Asker, BundleIdentity, Class, Disk, Effect, Event, HeaderOutcome, Home, Journal,
-    Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, TrialProcess, TxnId, decide,
+    Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, Role, Sight, TrialProcess, TxnId,
+    decide, sight,
 };
 
 /// `open`, by its absolute path: LaunchServices starts the trial as it starts
@@ -470,6 +471,10 @@ pub(crate) enum Ended {
     /// this holder's: the next ordinary start retires a retired transaction,
     /// and a prepared one is the running build's.
     Left(String),
+    /// **The journal is one this build cannot read whole** (0.4.8 E1): this
+    /// holder recorded, removed and ended nothing and let the lock go; the
+    /// rescue build the journal names settles it.
+    StoodAside(String),
 }
 
 impl Ended {
@@ -838,6 +843,7 @@ pub(crate) fn recover(
                 | Ended::Abandoned
                 | Ended::Deferred(_)
                 | Ended::Left(_)
+                | Ended::StoodAside(_)
         );
     Recovered {
         ended,
@@ -853,6 +859,14 @@ pub(crate) fn recover(
 /// and with `--update-failed` while the header is `destructive` or a retired
 /// rollback. Without a worker the live bundle is not asked, and a
 /// `destructive` header is answered with a trial, safe for either build.
+///
+/// **A journal this build cannot read whole** (0.4.8 E1,
+/// [`Role::MacExit`]) is answered by its header's frozen class when the
+/// header reads, and otherwise as a `destructive` transaction whose live set
+/// is not known: a trial of the envelope's transaction, its writes held —
+/// and when not even the envelope reads, so that no transaction can be named
+/// for a trial, the installed build with `--update-failed`, which continues
+/// past it with the card that says so. Never the installed build plainly.
 pub(crate) fn opens_now(worker: Option<&WorkerCtx>, home: &Home) -> Opens {
     opens_now_with(worker, home, &own_layouts())
 }
@@ -864,18 +878,19 @@ fn opens_now_with(
     home: &Home,
     layouts: &Layouts<dyn ApplyPoints>,
 ) -> Opens {
-    let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok();
-    let Some(header) = bytes
-        .as_deref()
-        .and_then(|bytes| crate::update_txn::Header::parse(bytes).ok())
-    else {
+    let Ok(bytes) = file_reads::read(Lane::UpdateJournal, home.journal()) else {
         return Opens::Installed { failed: false };
+    };
+    let seen = sight(&bytes);
+    let Some(header) = seen.acting_header() else {
+        return Opens::Installed { failed: true };
     };
     let destructive = header.class == Class::Destructive;
     let failed = destructive || header.outcome == HeaderOutcome::RolledBack;
-    let journal = bytes
-        .as_deref()
-        .and_then(|bytes| Journal::parse(bytes).ok());
+    let journal = match seen {
+        Sight::Known(journal) => Some(journal),
+        Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_) => None,
+    };
     let new_live = match (journal.as_ref(), worker) {
         (Some(journal), Some(worker)) => exit_places(home, journal)
             .and_then(|bundles| {
@@ -1025,11 +1040,13 @@ impl<'a> Txn<'a> {
             }
         };
         let locked = |ended: Ended| (ended, TransactionLock::Held);
+        // A journal this build cannot read whole is stood aside from: nothing
+        // recorded, the lock let go as this returns (E1, `Role::MacHolder`).
         let journal = match file_reads::read(Lane::UpdateJournal, road.home.journal()) {
-            Ok(bytes) => match Journal::parse(&bytes) {
-                Ok(journal) => journal,
-                Err(refusal) => {
-                    return Err(locked(Ended::Refused(format!("the journal: {refusal}"))));
+            Ok(bytes) => match sight(&bytes) {
+                Sight::Known(journal) => journal,
+                beyond => {
+                    return Err(locked(Ended::StoodAside(beyond.said(Role::MacHolder))));
                 }
             },
             Err(error) => return Err(locked(Ended::Refused(format!("the journal: {error}")))),
@@ -1971,7 +1988,7 @@ fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result
 /// The receipt at `path`: `None` while there is none, else what it says.
 fn read_receipt(path: &Path) -> Option<Result<Receipt, String>> {
     match file_reads::read(Lane::UpdateJournal, path) {
-        Ok(bytes) => Some(Receipt::parse(&bytes).map_err(|refusal| refusal.to_string())),
+        Ok(bytes) => Some(crate::update_txn::receipt_sight(&bytes).known(Role::MacReceiptWatch)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => Some(Err(error.to_string())),
     }

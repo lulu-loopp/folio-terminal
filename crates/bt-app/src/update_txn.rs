@@ -26,12 +26,26 @@
 //!
 //! # What crosses versions
 //!
-//! Only the [`Header`] (`{v, txn, rescue, class, outcome}`) and the [`Receipt`]
-//! (`{v, txn, nonce, pid, version}`) are read by a build other than the one that
-//! wrote them: an ordinary start of any later version reads the header, and the
-//! rescue build (a copy of O) reads the receipt the new build wrote. They are
-//! frozen at v1, carry their version, and refuse one they do not know by name.
-//! The [`Body`] is written and read by the rescue build alone.
+//! Only the [`Header`] (`{v, txn, rescue, class, outcome}`, and since 0.4.8 the
+//! writer's version `written_by`) and the [`Receipt`] (`{v, txn, nonce, pid,
+//! version}`) are read by a build other than the one that wrote them: an
+//! ordinary start of any later version reads the header, and the rescue build
+//! (a copy of O) reads the receipt the new build wrote. They are frozen at v1,
+//! carry their version, and refuse one they do not know by name. The [`Body`]
+//! is written and read by the rescue build alone.
+//!
+//! # A journal this build cannot read (0.4.8 E1)
+//!
+//! Every production read of a journal goes through [`sight`], and of a
+//! receipt through [`receipt_sight`]; each reader's answer to what it cannot
+//! read whole is its row of one table ([`Role::beyond`]). **The envelope rule,
+//! frozen for ever:** whatever a later header's `v`, `class` or `outcome` say,
+//! its `txn`, `rescue` and `written_by` keep their names, types and meaning,
+//! so a build that reads nothing else of a journal still finds the rescue
+//! build that can. The `class` and `outcome` vocabularies are closed: a later
+//! build adds no class and no outcome. A later body or receipt word that an
+//! older rescue build would misread raises the release manifest's
+//! `min_updater` to its first version.
 //!
 //! **Nothing in this file is called from the product yet, and that is the
 //! ticket boundary**: U-11 gives it its door, U-12 its startup caller and
@@ -409,6 +423,13 @@ struct HeaderWire {
     rescue: String,
     class: String,
     outcome: String,
+    /// **The version of the build that wrote these bytes** (0.4.8 E1): every
+    /// writer stamps its own [`crate::version::VERSION`]; absent from what
+    /// 0.4.6 and 0.4.7 wrote. Attribution only: it is read only when the
+    /// journal does not parse whole ([`sight`]), to word the card and the log
+    /// line, and it never changes what a reader does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    written_by: Option<String>,
 }
 
 impl Header {
@@ -438,6 +459,7 @@ impl Header {
             rescue: self.rescue.clone(),
             class: self.class.word().to_owned(),
             outcome: self.outcome.word().to_owned(),
+            written_by: Some(crate::version::VERSION.to_owned()),
         }
     }
 }
@@ -1056,6 +1078,398 @@ impl Journal {
             ..self.clone()
         })
     }
+}
+
+// ───────────────────────────── what a reader sees ─────────────────────────────
+
+/// **What a reader sees in `H\journal.json`** (0.4.8 E1, the journal's escape
+/// hatch): every production read of a journal another build may have written
+/// goes through [`sight`], and every reader's answer to anything but
+/// [`Sight::Known`] is its row of the one table, [`Role::beyond`].
+///
+/// **The rule.** A transaction this build cannot read whole is preserved
+/// byte for byte, and only the rescue build its envelope names settles it.
+/// The frozen header's class actions are the exceptions, taken on the
+/// header's promise and not on the unknown body: a `terminal` class is
+/// retired, a `preparing` or `deferred` one continued past or discarded when
+/// the install was replaced by hand. A header this build cannot read is a
+/// `destructive` transaction with nothing decided ([`Sight::acting_header`]).
+///
+/// **The envelope** — `txn`, `rescue` and `written_by` — keeps its names, its
+/// types and its meaning in every header any later build writes, whatever
+/// its `v`, `class` or `outcome` say. It is frozen for ever: it is how a
+/// build that reads nothing else of a journal still finds the build that can.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Sight {
+    /// Every word is one this build knows.
+    Known(Journal),
+    /// The frozen header reads and the body does not: a later build's phase,
+    /// layout or adapter, or a body cut short.
+    Header { header: Header, beyond: Beyond },
+    /// The header does not read and its envelope does: a later header
+    /// version, class or outcome, or a header damaged outside the envelope.
+    Envelope { envelope: Envelope, beyond: Beyond },
+    /// Not even the envelope reads: no transaction and no rescue build can be
+    /// named.
+    Unreadable(ParseRefusal),
+}
+
+/// **The header's envelope** — the three fields every header of every
+/// version carries with the same names, types and meaning ([`Sight`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Envelope {
+    pub(crate) txn: TxnId,
+    pub(crate) rescue: String,
+    pub(crate) written_by: Option<String>,
+}
+
+/// The envelope as it is read: whatever `v`, `class` and `outcome` say.
+#[derive(Deserialize)]
+struct EnvelopeWire {
+    txn: TxnId,
+    rescue: String,
+    #[serde(default)]
+    written_by: Option<String>,
+}
+
+/// **What lies beyond this build's grammar** — attribution only: it words
+/// the card and the line, and no reader's action depends on it
+/// ([`beyond_rule`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Beyond {
+    /// The envelope's `written_by`, when it names a build later than this
+    /// one. A later `written_by` says only that a later build last wrote the
+    /// bytes, not that the rest of them is sound.
+    pub(crate) newer: Option<String>,
+    /// Why the journal did not read whole.
+    pub(crate) refusal: ParseRefusal,
+}
+
+/// **The one reading of a journal's bytes** ([`Sight`]). Pure: the caller
+/// read the bytes.
+pub(crate) fn sight(bytes: &[u8]) -> Sight {
+    sight_as(bytes, crate::version::VERSION)
+}
+
+/// [`sight`] as the build of version `this_build` reads it.
+fn sight_as(bytes: &[u8], this_build: &str) -> Sight {
+    let refusal = match Journal::parse(bytes) {
+        Ok(journal) => return Sight::Known(journal),
+        Err(refusal) => refusal,
+    };
+    let envelope: Option<EnvelopeWire> = json(bytes).ok();
+    let newer = envelope
+        .as_ref()
+        .and_then(|envelope| envelope.written_by.as_deref())
+        .filter(|written_by| later_than(written_by, this_build))
+        .map(str::to_owned);
+    match Header::parse(bytes) {
+        Ok(header) => Sight::Header {
+            header,
+            beyond: Beyond { newer, refusal },
+        },
+        Err(refusal) => match envelope {
+            Some(EnvelopeWire {
+                txn,
+                rescue,
+                written_by,
+            }) => Sight::Envelope {
+                envelope: Envelope {
+                    txn,
+                    rescue,
+                    written_by,
+                },
+                beyond: Beyond { newer, refusal },
+            },
+            None => Sight::Unreadable(refusal),
+        },
+    }
+}
+
+/// Whether the version `written_by` is later than `this_build`; a version
+/// either side cannot order is not.
+fn later_than(written_by: &str, this_build: &str) -> bool {
+    match (
+        crate::update::Version::parse(written_by),
+        crate::update::Version::parse(this_build),
+    ) {
+        (Some(written_by), Some(this_build)) => written_by > this_build,
+        _ => false,
+    }
+}
+
+impl Sight {
+    /// **The header a reader acts on**: the journal's own, the header read
+    /// alone, or for an envelope a `destructive` transaction with nothing
+    /// decided — which hands every start to the envelope's rescue build and
+    /// opens what an unknown live set opens. `None` when nothing reads.
+    pub(crate) fn acting_header(&self) -> Option<Header> {
+        match self {
+            Sight::Known(journal) => Some(journal.header()),
+            Sight::Header { header, .. } => Some(header.clone()),
+            Sight::Envelope { envelope, .. } => Some(Header {
+                txn: envelope.txn,
+                rescue: envelope.rescue.clone(),
+                class: Class::Destructive,
+                outcome: HeaderOutcome::None,
+            }),
+            Sight::Unreadable(_) => None,
+        }
+    }
+
+    /// The later build that wrote what this one cannot read, if one is named.
+    pub(crate) fn newer(&self) -> Option<&str> {
+        match self {
+            Sight::Header { beyond, .. } | Sight::Envelope { beyond, .. } => {
+                beyond.newer.as_deref()
+            }
+            Sight::Known(_) | Sight::Unreadable(_) => None,
+        }
+    }
+
+    /// **The line a reader says** of what it saw and of what `role` does
+    /// about it, from the table ([`beyond_rule`]).
+    pub(crate) fn said(&self, role: Role) -> String {
+        let seen = match self {
+            Sight::Known(journal) => format!("transaction {} is read whole", journal.txn),
+            Sight::Header { header, beyond } => format!(
+                "transaction {} is {:?} and its body {}",
+                header.txn,
+                header.class,
+                beyond.account()
+            ),
+            Sight::Envelope { envelope, beyond } => {
+                format!("transaction {}'s header {}", envelope.txn, beyond.account())
+            }
+            Sight::Unreadable(refusal) => format!("the journal cannot be read ({refusal})"),
+        };
+        format!("{seen}; {}", beyond_rule(role, self.newer()).phrase())
+    }
+}
+
+impl Beyond {
+    fn account(&self) -> String {
+        match &self.newer {
+            Some(newer) => format!("was written by Folio {newer} ({})", self.refusal),
+            None => format!("cannot be read ({})", self.refusal),
+        }
+    }
+}
+
+/// **What the trial's receipt reads as** — the receipt readers' one reading
+/// ([`Role::ReceiptWrite`], [`Role::WindowsReceiptWatch`],
+/// [`Role::MacReceiptWatch`]): a receipt this build cannot read is never
+/// accepted and never written over ([`BeyondAction::NeverAccept`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReceiptSight {
+    Known(Receipt),
+    Unknown(ParseRefusal),
+}
+
+/// **The one reading of a receipt's bytes.**
+pub(crate) fn receipt_sight(bytes: &[u8]) -> ReceiptSight {
+    match Receipt::parse(bytes) {
+        Ok(receipt) => ReceiptSight::Known(receipt),
+        Err(refusal) => ReceiptSight::Unknown(refusal),
+    }
+}
+
+impl ReceiptSight {
+    /// The receipt, or why it is not one: `role`'s row is never to accept
+    /// it.
+    pub(crate) fn known(self, role: Role) -> Result<Receipt, String> {
+        match self {
+            ReceiptSight::Known(receipt) => Ok(receipt),
+            ReceiptSight::Unknown(refusal) => match beyond_rule(role, None) {
+                BeyondAction::NeverAccept => Err(refusal.to_string()),
+                other => Err(format!("{refusal}; {}", other.phrase())),
+            },
+        }
+    }
+}
+
+/// **Who reads a journal or a receipt another build may have written**: the
+/// sixteen reader and decision roles of the escape hatch (`docs/DESIGN.md`,
+/// 2026-10-08), each with its row of [`Role::beyond`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Role {
+    /// The ordinary start (`update_startup::run`) and its decisions.
+    Start,
+    /// The trial's watch ([`trial_sight`]).
+    TrialWatch,
+    /// The trial's watchdog (`update_trial::hand_back`).
+    TrialHandBack,
+    /// The trial's receipt writer (`update_trial::write_receipt`).
+    ReceiptWrite,
+    /// The Windows lock holder's receipt watch (`update_apply::read_receipt`).
+    WindowsReceiptWatch,
+    /// U-35's reservation (`update_apply::reserve_last_trial`).
+    LastTrialReserve,
+    /// U-35's self-commit (`update_apply::commit_last_trial_as`).
+    LastTrialCommit,
+    /// The applier's window election (`update_apply::read_window_phase`).
+    WindowElection,
+    /// The Windows exit guard (`update_apply_windows::opens_now`).
+    WindowsExit,
+    /// The Windows lock holder: the applier and the recovery
+    /// (`update_apply_windows`).
+    WindowsHolder,
+    /// The macOS exit guard (`update_apply_macos::opens_now`).
+    MacExit,
+    /// The macOS lock holder (`update_apply_macos`, its `Txn::hold`).
+    MacHolder,
+    /// The macOS lock holder's receipt watch.
+    MacReceiptWatch,
+    /// The recovery door (`update_recover::run` and its leave).
+    RecoveryDoor,
+    /// The outgoing build's exit (`update_handoff`, its `OldLeave`).
+    OutgoingExit,
+    /// The job owner at a launch (`update_prepare::at_launch`) and the press
+    /// (Prepare).
+    JobOwner,
+}
+
+impl Role {
+    /// Every role.
+    #[cfg(test)]
+    pub(crate) const ALL: [Role; 16] = [
+        Role::Start,
+        Role::TrialWatch,
+        Role::TrialHandBack,
+        Role::ReceiptWrite,
+        Role::WindowsReceiptWatch,
+        Role::LastTrialReserve,
+        Role::LastTrialCommit,
+        Role::WindowElection,
+        Role::WindowsExit,
+        Role::WindowsHolder,
+        Role::MacExit,
+        Role::MacHolder,
+        Role::MacReceiptWatch,
+        Role::RecoveryDoor,
+        Role::OutgoingExit,
+        Role::JobOwner,
+    ];
+
+    /// **The table: what each role does with anything but what it reads
+    /// whole.**
+    pub(crate) const fn beyond(self) -> BeyondAction {
+        match self {
+            Role::Start | Role::TrialWatch | Role::TrialHandBack | Role::OutgoingExit => {
+                BeyondAction::ActOnHeader
+            }
+            Role::ReceiptWrite | Role::WindowsReceiptWatch | Role::MacReceiptWatch => {
+                BeyondAction::NeverAccept
+            }
+            Role::LastTrialReserve
+            | Role::LastTrialCommit
+            | Role::WindowElection
+            | Role::WindowsHolder
+            | Role::MacHolder => BeyondAction::StandAside,
+            Role::WindowsExit | Role::MacExit | Role::RecoveryDoor => BeyondAction::UnknownLiveSet,
+            Role::JobOwner => BeyondAction::LeaveToItsRescue,
+        }
+    }
+}
+
+/// **What a reader does with a journal or a receipt it cannot read whole.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BeyondAction {
+    /// Act on [`Sight::acting_header`] by the role's own rules: a header
+    /// that does not read is a `destructive` transaction with nothing
+    /// decided; a journal of which nothing reads is left exactly as it is,
+    /// and a start says so on its card.
+    ActOnHeader,
+    /// Never accept it and never write over it.
+    NeverAccept,
+    /// Record nothing, remove nothing, end nothing, and let the lock go.
+    StandAside,
+    /// Answer what a `destructive` transaction whose live set is unknown
+    /// opens: the rescue copy on Windows, a held-writes trial on macOS —
+    /// never the installed build plainly.
+    UnknownLiveSet,
+    /// Leave it to the build that wrote it: the offer still shows, and the
+    /// press answers that another build's update is not finished.
+    LeaveToItsRescue,
+}
+
+impl BeyondAction {
+    fn phrase(self) -> &'static str {
+        match self {
+            BeyondAction::ActOnHeader => "this build acts on its header alone",
+            BeyondAction::NeverAccept => "it is never accepted or written over",
+            BeyondAction::StandAside => {
+                "this holder stands aside: nothing is recorded, removed or ended"
+            }
+            BeyondAction::UnknownLiveSet => "which set is live is not known",
+            BeyondAction::LeaveToItsRescue => "it is left to the build that wrote it",
+        }
+    }
+}
+
+/// **The action `role` takes on what it cannot read whole** — its row of
+/// [`Role::beyond`], whatever later build `newer` names: the attribution
+/// words the card and the line and never changes an action.
+pub(crate) fn beyond_rule(role: Role, newer: Option<&str>) -> BeyondAction {
+    let _attribution_only = newer;
+    role.beyond()
+}
+
+/// **The later build every role test names** as the writer of what it cannot
+/// read ([`beyond_inputs`]).
+#[cfg(test)]
+pub(crate) const LATER_BUILD: &str = "99.0.0";
+
+/// **The three journals a reader role is fed** (E1), from the bytes of a
+/// journal it reads whole, `known`: (i) an unknown header word — the class
+/// `paused` — written by [`LATER_BUILD`], so only the envelope reads; (ii) a
+/// known header over an unknown body word — the phase `FuturePhase`; (iii)
+/// bytes of which nothing reads.
+#[cfg(test)]
+pub(crate) fn beyond_inputs(known: &[u8]) -> [(&'static str, Vec<u8>); 3] {
+    let mut header_word: serde_json::Value =
+        serde_json::from_slice(known).expect("a journal is JSON");
+    header_word["class"] = serde_json::Value::from("paused");
+    header_word["written_by"] = serde_json::Value::from(LATER_BUILD);
+    let mut body_word: serde_json::Value =
+        serde_json::from_slice(known).expect("a journal is JSON");
+    body_word["body"]["phase"] = serde_json::Value::from("FuturePhase");
+    [
+        (
+            "an unknown header word, by a later build",
+            serde_json::to_vec(&header_word).expect("bytes"),
+        ),
+        (
+            "an unknown body word",
+            serde_json::to_vec(&body_word).expect("bytes"),
+        ),
+        ("bytes that are no journal", br#"{"x":1}"#.to_vec()),
+    ]
+}
+
+/// **The three receipts a receipt reader is fed** (E1), from `known`, a
+/// receipt it reads: (i) the same receipt as a later version, `v: 2`; (ii) a
+/// v1 receipt whose `pid` is a word this build does not read; (iii) bytes
+/// that are no receipt.
+#[cfg(test)]
+pub(crate) fn receipt_beyond_inputs(known: &Receipt) -> [(&'static str, Vec<u8>); 3] {
+    let mut later: serde_json::Value =
+        serde_json::from_slice(&known.encode()).expect("a receipt is JSON");
+    later["v"] = serde_json::Value::from(2);
+    let mut word: serde_json::Value =
+        serde_json::from_slice(&known.encode()).expect("a receipt is JSON");
+    word["pid"] = serde_json::Value::from("the trial");
+    [
+        (
+            "a later receipt version",
+            serde_json::to_vec(&later).expect("bytes"),
+        ),
+        (
+            "an unknown receipt word",
+            serde_json::to_vec(&word).expect("bytes"),
+        ),
+        ("bytes that are no receipt", br#"{"x":1}"#.to_vec()),
+    ]
 }
 
 // ─────────────────────────────────── transitions ───────────────────────────────────
@@ -2699,12 +3113,14 @@ pub(crate) enum TrialSight {
 /// live commits forward on the receipt of the trial started over it, so that
 /// trial must be able to write one), or a header this build cannot read — is
 /// not decided yet. A journal naming another transaction, or none, means this
-/// trial's is gone.
+/// trial's is gone. A header this build cannot read is a `destructive`
+/// transaction with nothing decided ([`Sight::acting_header`],
+/// [`Role::TrialWatch`]).
 pub(crate) fn trial_sight(journal: Option<&[u8]>, txn: &TxnId) -> TrialSight {
     let Some(bytes) = journal else {
         return TrialSight::Ended;
     };
-    let Ok(header) = Header::parse(bytes) else {
+    let Some(header) = sight(bytes).acting_header() else {
         return TrialSight::Undecided;
     };
     if header.txn != *txn {
@@ -2839,18 +3255,22 @@ pub(crate) enum AfterRollback {
 }
 
 /// **Whether a retired rollback's new version never ran** (U-42a): the
-/// body's `Retired { untried }`, read from the whole journal `bytes`. `false`
-/// for any other journal, and for one that does not parse whole.
-pub(crate) fn rolled_back_untried(bytes: &[u8]) -> bool {
-    Journal::parse(bytes).is_ok_and(|journal| {
-        matches!(
-            journal.body.phase,
-            Phase::Retired {
-                outcome: Outcome::RolledBack,
-                untried: true,
-            }
-        )
-    })
+/// body's `Retired { untried }`, read from the whole journal. `false` for any
+/// other journal, and for one this build cannot read whole.
+pub(crate) fn rolled_back_untried(sight: &Sight) -> bool {
+    matches!(
+        sight,
+        Sight::Known(Journal {
+            body: Body {
+                phase: Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried: true,
+                },
+                ..
+            },
+            ..
+        })
+    )
 }
 
 /// **The card a start sent with `--update-failed` raises**, or `None` for a
@@ -3112,7 +3532,7 @@ mod tests {
     #[derive(Serialize)]
     struct JournalWire046<'a> {
         #[serde(flatten)]
-        header: HeaderWire,
+        header: HeaderWire046,
         body: &'a Body046,
     }
 
@@ -3123,22 +3543,26 @@ mod tests {
     }
 
     /// PIN (U-41a1, managed-update §1.3, U-37's H.1 rule for a v1
-    /// document) — **a journal 0.4.6 wrote, which names no adapter, reads as
-    /// `Ours`, and an ordinary copy's journal is written byte for byte as
-    /// 0.4.6 wrote it.**
+    /// document; E1) — **a journal 0.4.6 wrote, which names no adapter, reads
+    /// as `Ours`, and 0.4.6 and 0.4.7 read an ordinary copy's journal as they
+    /// always did**: its body is 0.4.6's bytes, and its header is 0.4.6's
+    /// with the writer's version beside it (`written_by`, E1), a key neither
+    /// of them knows.
     ///
     /// A 0.4.6 copy that is updated to 0.4.7 leaves a journal no adapter was
     /// recorded in, and every lock holder after it reads the adapter from the
     /// journal (R2): an absent field must be the road every existing
-    /// transaction is on. And the header and body an ordinary copy writes
-    /// stay 0.4.6's bytes, so nothing an ordinary update leaves on the disk
-    /// changes with this field — the receipt's rule (`started`, U-37).
+    /// transaction is on. And the body an ordinary copy writes stays 0.4.6's
+    /// bytes, so nothing an ordinary update leaves on the disk changes with
+    /// this field — the receipt's rule (`started`, U-37). Until E1 this pin
+    /// said the whole journal was 0.4.6's bytes; the header now names its
+    /// writer, and what holds is that 0.4.6 and 0.4.7 read it unchanged.
     ///
     /// MUTATION: drop `#[serde(default)]` from `Body::adapter` (the 0.4.6
     /// journal is refused as malformed), or drop its `skip_serializing_if`
     /// (an ordinary journal gains `"adapter":"Ours"`).
     #[test]
-    fn a_journal_that_names_no_adapter_reads_as_ours_and_ours_is_written_as_0_4_6_wrote_it() {
+    fn a_journal_that_names_no_adapter_reads_as_ours_and_0_4_6_and_0_4_7_read_ours_as_ever() {
         for (phase, layout) in [
             (Phase::Allocated, members_layout()),
             (
@@ -3161,18 +3585,42 @@ mod tests {
         ] {
             let ours = journal(phase.clone(), layout.clone());
             let old = Body046 { phase, layout };
+            let header = ours.header();
+            let header_046 = HeaderWire046 {
+                v: 1,
+                txn: header.txn,
+                rescue: header.rescue,
+                class: header.class.word().to_owned(),
+                outcome: header.outcome.word().to_owned(),
+            };
             let written_by_046 = serde_json::to_vec(&JournalWire046 {
-                header: ours.header().wire(),
+                header: header_046,
                 body: &old,
             })
             .unwrap();
             let read = Journal::parse(&written_by_046).expect("a 0.4.6 journal is read");
             assert_eq!(read.body.adapter, Adapter::Ours, "no adapter is ours");
             assert_eq!(read, ours);
+            let ours_bytes = ours.encode();
+            let BodyOnly046 { body } =
+                serde_json::from_slice(&ours_bytes).expect("0.4.6 and 0.4.7 read the body");
+            assert_eq!(body, old);
             assert_eq!(
-                ours.encode(),
-                written_by_046,
-                "an ordinary journal is 0.4.6's bytes"
+                header_as_0_4_6_and_0_4_7_read_it(&ours_bytes),
+                header_as_0_4_6_and_0_4_7_read_it(&written_by_046),
+                "0.4.6 and 0.4.7 read the header as they always did"
+            );
+            let mut written: serde_json::Value = serde_json::from_slice(&ours_bytes).unwrap();
+            let named = written
+                .as_object_mut()
+                .unwrap()
+                .remove("written_by")
+                .expect("the writer is named");
+            assert_eq!(named, crate::version::VERSION);
+            assert_eq!(
+                written,
+                serde_json::from_slice::<serde_json::Value>(&written_by_046).unwrap(),
+                "beside the writer's name, an ordinary journal is 0.4.6's"
             );
         }
     }
@@ -3520,13 +3968,13 @@ mod tests {
         );
         let untried = retire(Phase::Moving).encode();
         let reread = Journal::parse(&untried).expect("the flag reads back");
-        assert!(rolled_back_untried(&untried));
+        assert!(rolled_back_untried(&sight(&untried)));
         assert_eq!(reread.body.phase, retire(Phase::Moving).body.phase);
         let older = String::from_utf8(untried)
             .unwrap()
             .replace(",\"untried\":true", "");
         assert!(
-            !rolled_back_untried(older.as_bytes()),
+            !rolled_back_untried(&sight(older.as_bytes())),
             "an earlier build's journal reads as a rollback after a trial: {older}"
         );
     }
@@ -5839,5 +6287,816 @@ mod tests {
             from: Place::Install,
             to: Place::Backup,
         }));
+    }
+
+    // ───────────────────────── the escape hatch (0.4.8 E1) ─────────────────────────
+
+    /// A journal of this module's transaction, as this build writes it.
+    fn written(phase: Phase) -> Vec<u8> {
+        journal(phase, members_layout()).encode()
+    }
+
+    /// The JSON of `bytes`, with `key` set to `value` at the top level.
+    fn with_top(bytes: &[u8], key: &str, value: serde_json::Value) -> Vec<u8> {
+        let mut document: serde_json::Value = serde_json::from_slice(bytes).expect("JSON");
+        document[key] = value;
+        serde_json::to_vec(&document).expect("bytes")
+    }
+
+    /// RED (E1) — **`sight` names what reads — the whole journal, the header
+    /// alone, the envelope alone, or nothing — and the build the envelope
+    /// names as its writer words the card but changes no reader's action.**
+    ///
+    /// Every sight that is not `Known`, with and without a later `written_by`,
+    /// is put to every role of the table: the action is the role's row and
+    /// nothing else. `written_by` counts as later only when it orders after
+    /// this build; an equal, earlier, absent or unreadable one names nobody.
+    /// The envelope reads whatever `v`, `class` and `outcome` say, and it is
+    /// what a header that does not read acts as: `destructive`, nothing
+    /// decided, its own transaction and rescue build.
+    ///
+    /// MUTATION: in `beyond_rule`, answer `BeyondAction::StandAside` when
+    /// `newer` names a build (a later writer would change what a reader does).
+    #[test]
+    fn a_sight_names_what_reads_and_its_writer_changes_no_action() {
+        let known = journal(Phase::Moving, members_layout());
+        let bytes = known.encode();
+        assert_eq!(sight(&bytes), Sight::Known(known.clone()));
+        let [(_, header_word), (_, body_word), (_, nothing)] = beyond_inputs(&bytes);
+
+        let envelope_newer = sight(&header_word);
+        let Sight::Envelope { envelope, beyond } = &envelope_newer else {
+            panic!("an unknown class reads as its envelope: {envelope_newer:?}");
+        };
+        assert_eq!(
+            envelope,
+            &Envelope {
+                txn: txn(),
+                rescue: known.rescue.clone(),
+                written_by: Some(LATER_BUILD.to_owned()),
+            }
+        );
+        assert_eq!(beyond.newer.as_deref(), Some(LATER_BUILD));
+        assert_eq!(
+            beyond.refusal,
+            ParseRefusal::UnknownClass("paused".to_owned())
+        );
+        assert_eq!(
+            envelope_newer.acting_header(),
+            Some(Header {
+                txn: txn(),
+                rescue: known.rescue.clone(),
+                class: Class::Destructive,
+                outcome: HeaderOutcome::None,
+            }),
+            "an envelope acts as destructive with nothing decided"
+        );
+
+        // A later header version and outcome read as the envelope too.
+        for (key, value) in [
+            ("v", serde_json::Value::from(2)),
+            ("outcome", serde_json::Value::from("paused")),
+        ] {
+            let later = with_top(&bytes, key, value);
+            assert!(
+                matches!(sight(&later), Sight::Envelope { .. }),
+                "{key}: {:?}",
+                sight(&later)
+            );
+        }
+
+        // Only a build that orders after this one is named.
+        for (written_by, named) in [
+            (serde_json::Value::from(crate::version::VERSION), false),
+            (serde_json::Value::from("0.4.6"), false),
+            (serde_json::Value::from("no version"), false),
+            (serde_json::Value::Null, false),
+            (serde_json::Value::from("v99.1.0-rc.1"), true),
+        ] {
+            let mut document: serde_json::Value = serde_json::from_slice(&header_word).unwrap();
+            document["written_by"] = written_by.clone();
+            let seen = sight(&serde_json::to_vec(&document).unwrap());
+            assert!(
+                matches!(seen, Sight::Envelope { .. }),
+                "{written_by}: {seen:?}"
+            );
+            assert_eq!(seen.newer().is_some(), named, "{written_by}");
+        }
+        let envelope_unnamed = sight(&with_top(
+            &header_word,
+            "written_by",
+            serde_json::Value::from(crate::version::VERSION),
+        ));
+
+        let header_unnamed = sight(&body_word);
+        let Sight::Header { header, beyond } = &header_unnamed else {
+            panic!("an unknown phase reads as its header: {header_unnamed:?}");
+        };
+        assert_eq!(header, &known.header());
+        assert_eq!(beyond.newer, None, "this build wrote it");
+        assert!(matches!(beyond.refusal, ParseRefusal::Malformed(_)));
+        let header_newer = sight(&with_top(
+            &body_word,
+            "written_by",
+            serde_json::Value::from(LATER_BUILD),
+        ));
+        assert_eq!(header_newer.newer(), Some(LATER_BUILD));
+        assert_eq!(header_newer.acting_header(), Some(known.header()));
+
+        let unreadable = sight(&nothing);
+        assert!(matches!(unreadable, Sight::Unreadable(_)), "{unreadable:?}");
+        assert_eq!(unreadable.acting_header(), None);
+        // A transaction id that does not read leaves no envelope either.
+        let torn = with_top(&header_word, "txn", serde_json::Value::from("7a"));
+        assert!(matches!(sight(&torn), Sight::Unreadable(_)));
+        assert!(matches!(
+            sight(&bytes[..bytes.len() / 2]),
+            Sight::Unreadable(ParseRefusal::Truncated)
+        ));
+
+        // The table, row by row (design §3(a)).
+        let table = [
+            (Role::Start, BeyondAction::ActOnHeader),
+            (Role::TrialWatch, BeyondAction::ActOnHeader),
+            (Role::TrialHandBack, BeyondAction::ActOnHeader),
+            (Role::ReceiptWrite, BeyondAction::NeverAccept),
+            (Role::WindowsReceiptWatch, BeyondAction::NeverAccept),
+            (Role::LastTrialReserve, BeyondAction::StandAside),
+            (Role::LastTrialCommit, BeyondAction::StandAside),
+            (Role::WindowElection, BeyondAction::StandAside),
+            (Role::WindowsExit, BeyondAction::UnknownLiveSet),
+            (Role::WindowsHolder, BeyondAction::StandAside),
+            (Role::MacExit, BeyondAction::UnknownLiveSet),
+            (Role::MacHolder, BeyondAction::StandAside),
+            (Role::MacReceiptWatch, BeyondAction::NeverAccept),
+            (Role::RecoveryDoor, BeyondAction::UnknownLiveSet),
+            (Role::OutgoingExit, BeyondAction::ActOnHeader),
+            (Role::JobOwner, BeyondAction::LeaveToItsRescue),
+        ];
+        assert_eq!(table.map(|(role, _)| role), Role::ALL);
+        let beyond = [
+            &envelope_newer,
+            &envelope_unnamed,
+            &header_newer,
+            &header_unnamed,
+            &unreadable,
+        ];
+        for (role, action) in table {
+            assert_eq!(role.beyond(), action, "{role:?}");
+            for seen in beyond {
+                assert_eq!(
+                    beyond_rule(role, seen.newer()),
+                    action,
+                    "{role:?} over {seen:?}"
+                );
+            }
+        }
+    }
+
+    /// RED (E1; role #2, the trial's watch, site H2 `trial_sight`) — **the
+    /// trial reads a journal it cannot read whole by the header it acts on**:
+    /// an unknown header word is its envelope's transaction, `destructive`
+    /// and undecided — its writes stay held, and a journal naming another
+    /// transaction is this trial's end; an unknown body word is decided by the
+    /// frozen header as ever (a retired commit releases the writes); nothing
+    /// that reads stays undecided. Pure: nothing is written.
+    ///
+    /// MUTATION: in `trial_sight`, read the header alone again
+    /// (`Header::parse(bytes).ok()`): another transaction's envelope keeps the
+    /// trial waiting for ever, its writes neither released nor dropped.
+    #[test]
+    fn the_trial_watch_reads_what_it_cannot_read_whole_by_its_header() {
+        let other = TxnId::new([0x11; 16]);
+        let trial = written(Phase::Trial {
+            nonce: nonce(TRIAL_NONCE),
+            process: TRIAL,
+            began_ms: BEGAN,
+        });
+        let [
+            (header_word, header_bytes),
+            (body_word, body_bytes),
+            (nothing, no_bytes),
+        ] = beyond_inputs(&trial);
+        for (what, bytes, own, another) in [
+            (
+                header_word,
+                &header_bytes,
+                TrialSight::Undecided,
+                TrialSight::Ended,
+            ),
+            (
+                body_word,
+                &body_bytes,
+                TrialSight::Undecided,
+                TrialSight::Ended,
+            ),
+            (
+                nothing,
+                &no_bytes,
+                TrialSight::Undecided,
+                TrialSight::Undecided,
+            ),
+        ] {
+            assert_eq!(trial_sight(Some(bytes), &txn()), own, "{what}");
+            assert_eq!(trial_sight(Some(bytes), &other), another, "{what}");
+        }
+        let retired = written(Phase::Retired {
+            outcome: Outcome::Committed,
+            untried: false,
+        });
+        let [_, (body_word, body_bytes), _] = beyond_inputs(&retired);
+        assert_eq!(
+            trial_sight(Some(&body_bytes), &txn()),
+            TrialSight::Committed,
+            "{body_word}: the frozen header's outcome"
+        );
+    }
+
+    /// `v0.4.6-preview` and `v0.4.7-preview`: `HeaderWire`, verbatim — the
+    /// two are the same.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct HeaderWire046 {
+        v: u64,
+        txn: TxnId,
+        rescue: String,
+        class: String,
+        outcome: String,
+    }
+
+    /// The header as 0.4.6 and 0.4.7 read it: the version first
+    /// (`versioned`), then the five fields.
+    fn header_as_0_4_6_and_0_4_7_read_it(bytes: &[u8]) -> Option<HeaderWire046> {
+        #[derive(Deserialize)]
+        struct Versioned046 {
+            v: u64,
+        }
+        let Versioned046 { v } = serde_json::from_slice(bytes).ok()?;
+        (v == 1).then_some(())?;
+        serde_json::from_slice(bytes).ok()
+    }
+
+    /// PIN (E1, the rollout contract; the shape of
+    /// `a_0_4_6_reader_takes_a_0_4_7_receipt_as_it_always_did`) — **0.4.6 and
+    /// 0.4.7 read a header that names its writer exactly as they always read
+    /// one, and this build reads 0.4.7's bytes, which name no writer, whole.**
+    ///
+    /// `written_by` is a key 0.4.6 and 0.4.7 do not know, in a v1 document:
+    /// they ignore it, as they ignored `adapter` and the receipt's `started`
+    /// (no `deny_unknown_fields`). Every start of 0.4.6 and 0.4.7 that meets a
+    /// journal a later build wrote reads its header this way, and a downgrade
+    /// passes no manifest, so this is the one check there is.
+    ///
+    /// MUTATION: make `HeaderWire::written_by` a required `String` (0.4.7's
+    /// bytes no longer read whole), or write the header as `v: 2` (0.4.6 and
+    /// 0.4.7 refuse every later journal).
+    #[test]
+    fn a_0_4_6_or_0_4_7_reader_reads_a_header_that_names_its_writer_as_it_always_did() {
+        for phase in [
+            Phase::Allocated,
+            Phase::Moving,
+            Phase::RollbackIntent {
+                trial: Some(TRIAL),
+                trial_started: false,
+            },
+            Phase::Retired {
+                outcome: Outcome::Committed,
+                untried: false,
+            },
+        ] {
+            let ours = journal(phase.clone(), members_layout());
+            let bytes = ours.encode();
+            let named: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(named["written_by"], crate::version::VERSION);
+            let old = header_as_0_4_6_and_0_4_7_read_it(&bytes)
+                .unwrap_or_else(|| panic!("{phase:?}: 0.4.6 and 0.4.7 read it"));
+            let header = ours.header();
+            assert_eq!(
+                old,
+                HeaderWire046 {
+                    v: 1,
+                    txn: header.txn,
+                    rescue: header.rescue.clone(),
+                    class: header.class.word().to_owned(),
+                    outcome: header.outcome.word().to_owned(),
+                }
+            );
+            assert_eq!(Class::from_word(&old.class), Ok(header.class));
+            assert_eq!(HeaderOutcome::from_word(&old.outcome), Ok(header.outcome));
+
+            // 0.4.7's bytes: the same journal, no writer named.
+            let unnamed = serde_json::to_vec(&JournalWire046 {
+                header: HeaderWire046 {
+                    v: 1,
+                    txn: header.txn,
+                    rescue: header.rescue.clone(),
+                    class: header.class.word().to_owned(),
+                    outcome: header.outcome.word().to_owned(),
+                },
+                body: &Body046 {
+                    phase: phase.clone(),
+                    layout: members_layout(),
+                },
+            })
+            .unwrap();
+            assert_eq!(sight(&unnamed), Sight::Known(ours), "{phase:?}");
+        }
+        assert_eq!(HEADER_VERSION, 1);
+    }
+
+    /// PIN (E5's grammar half; design §3(c) A2) — **the reserved trial's own
+    /// commit re-encodes the body it read losslessly**: N is the one writer
+    /// whose image is not O's, so the `Committed` it records over
+    /// `TrialStarting` carries the layout and the adapter it read, byte for
+    /// byte, and adds no field an O-image reader does not know.
+    ///
+    /// MUTATION: give `Phase::Committed` a field written by default (or record
+    /// `LastTrialReady` with a fresh layout): the body N writes carries what
+    /// it did not read.
+    #[test]
+    fn the_reserved_trials_commit_re_encodes_the_body_it_read_losslessly() {
+        let receipt = Receipt {
+            pid: TRIAL.pid,
+            started: Some(TRIAL.started),
+            ..valid_receipt()
+        };
+        for layout in [members_layout(), bundle_layout()] {
+            let read = journal(
+                Phase::TrialStarting {
+                    nonce: nonce(TRIAL_NONCE),
+                    began_ms: BEGAN,
+                },
+                layout,
+            );
+            let committed = read
+                .advance(&Event::LastTrialReady {
+                    receipt: receipt.clone(),
+                    process: TRIAL,
+                })
+                .expect("its own exact receipt commits it");
+            let before: serde_json::Value = serde_json::from_slice(&read.encode()).unwrap();
+            let after: serde_json::Value = serde_json::from_slice(&committed.encode()).unwrap();
+            let keys = |value: &serde_json::Value| {
+                value
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(keys(&before["body"]), keys(&after["body"]));
+            assert_eq!(before["body"]["layout"], after["body"]["layout"]);
+            assert_eq!(
+                after["body"]["phase"],
+                serde_json::json!({ "phase": "Committed" })
+            );
+            assert_eq!(keys(&before), keys(&after), "no header key is added");
+        }
+    }
+
+    /// Which closed vocabulary of the journal and the receipt a word is in.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Vocabulary {
+        HeaderVersion,
+        ReceiptVersion,
+        Envelope,
+        Class,
+        HeaderOutcome,
+        Phase,
+        RetiredOutcome,
+        Layout,
+        Adapter,
+    }
+
+    /// Design §3(c): additive, or breaking for some reader that exists.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Kind {
+        Additive,
+        Breaking,
+    }
+
+    /// One word of the grammar.
+    struct Word {
+        vocabulary: Vocabulary,
+        word: &'static str,
+        since: &'static str,
+        kind: Kind,
+        writers: &'static str,
+    }
+
+    const fn word(
+        vocabulary: Vocabulary,
+        word: &'static str,
+        since: &'static str,
+        kind: Kind,
+        writers: &'static str,
+    ) -> Word {
+        Word {
+            vocabulary,
+            word,
+            since,
+            kind,
+            writers,
+        }
+    }
+
+    /// **The journal's and the receipt's grammar** — every word, the release
+    /// it arrived in, whether it is additive (design §3(c), A1–A4) and who
+    /// writes it. A word a later build adds gets its row here, classified by
+    /// §3(c) of the escape hatch's design note (`docs/DESIGN.md`, 2026-10-08)
+    /// before it is written: a new class, outcome, header version or
+    /// envelope change is forbidden; a breaking body or receipt word raises
+    /// the release manifest's `min_updater`.
+    const GRAMMAR: &[Word] = &[
+        word(
+            Vocabulary::HeaderVersion,
+            "1",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R, N",
+        ),
+        word(
+            Vocabulary::ReceiptVersion,
+            "1",
+            "0.4.6",
+            Kind::Additive,
+            "N",
+        ),
+        word(
+            Vocabulary::Envelope,
+            "written_by",
+            "0.4.8",
+            Kind::Additive,
+            "O, P, R, N",
+        ),
+        word(Vocabulary::Class, "preparing", "0.4.6", Kind::Additive, "O"),
+        word(
+            Vocabulary::Class,
+            "deferred",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R",
+        ),
+        word(
+            Vocabulary::Class,
+            "destructive",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R, N",
+        ),
+        word(
+            Vocabulary::Class,
+            "terminal",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R",
+        ),
+        word(
+            Vocabulary::HeaderOutcome,
+            "none",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R",
+        ),
+        word(
+            Vocabulary::HeaderOutcome,
+            "committed",
+            "0.4.6",
+            Kind::Additive,
+            "P, R, N",
+        ),
+        word(
+            Vocabulary::HeaderOutcome,
+            "rolled_back",
+            "0.4.6",
+            Kind::Additive,
+            "P, R",
+        ),
+        word(Vocabulary::Phase, "Allocated", "0.4.6", Kind::Additive, "O"),
+        word(
+            Vocabulary::Phase,
+            "Prepared",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R",
+        ),
+        word(Vocabulary::Phase, "Handoff", "0.4.6", Kind::Additive, "O"),
+        word(Vocabulary::Phase, "Armed", "0.4.6", Kind::Additive, "P"),
+        word(Vocabulary::Phase, "Moving", "0.4.6", Kind::Additive, "P"),
+        word(
+            Vocabulary::Phase,
+            "TrialStarting",
+            "0.4.7",
+            Kind::Additive,
+            "P, R",
+        ),
+        word(Vocabulary::Phase, "Trial", "0.4.6", Kind::Additive, "P, R"),
+        word(
+            Vocabulary::Phase,
+            "Committed",
+            "0.4.6",
+            Kind::Additive,
+            "P, R, N",
+        ),
+        word(
+            Vocabulary::Phase,
+            "RollbackIntent",
+            "0.4.6",
+            Kind::Additive,
+            "P, R",
+        ),
+        word(Vocabulary::Phase, "Stuck", "0.4.6", Kind::Additive, "P, R"),
+        word(
+            Vocabulary::Phase,
+            "RolledBack",
+            "0.4.6",
+            Kind::Additive,
+            "P, R",
+        ),
+        word(
+            Vocabulary::Phase,
+            "Abandoned",
+            "0.4.6",
+            Kind::Additive,
+            "O, P",
+        ),
+        word(
+            Vocabulary::Phase,
+            "Retired",
+            "0.4.6",
+            Kind::Additive,
+            "P, R",
+        ),
+        word(
+            Vocabulary::RetiredOutcome,
+            "Committed",
+            "0.4.6",
+            Kind::Additive,
+            "P, R",
+        ),
+        word(
+            Vocabulary::RetiredOutcome,
+            "RolledBack",
+            "0.4.6",
+            Kind::Additive,
+            "P, R",
+        ),
+        word(
+            Vocabulary::Layout,
+            "Members",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R, N",
+        ),
+        word(
+            Vocabulary::Layout,
+            "Bundle",
+            "0.4.6",
+            Kind::Additive,
+            "O, P, R, N",
+        ),
+        word(
+            Vocabulary::Layout,
+            "BundleIntent",
+            "0.4.6",
+            Kind::Additive,
+            "O",
+        ),
+        // Absent on the wire: what a 0.4.6 body, which names none, reads as.
+        word(
+            Vocabulary::Adapter,
+            "Ours",
+            "0.4.7",
+            Kind::Additive,
+            "O, P, R, N",
+        ),
+        // A 0.4.6 reader takes these for `Ours` (design §3(d)): breaking for
+        // it alone, met only by a downgrade to 0.4.6 with the macOS rescue
+        // clone missing. Their roads are off, so nobody writes them yet.
+        word(
+            Vocabulary::Adapter,
+            "Homebrew",
+            "0.4.7",
+            Kind::Breaking,
+            "O (road off)",
+        ),
+        word(
+            Vocabulary::Adapter,
+            "Scoop",
+            "0.4.7",
+            Kind::Breaking,
+            "O (road off)",
+        ),
+        word(
+            Vocabulary::Adapter,
+            "Winget",
+            "0.4.7",
+            Kind::Breaking,
+            "O (road off)",
+        ),
+    ];
+
+    /// The header classes, by an exhaustive match: a new class has no word
+    /// here until it has one in [`GRAMMAR`].
+    fn class_word(class: Class) -> &'static str {
+        match class {
+            Class::Preparing => "preparing",
+            Class::Deferred => "deferred",
+            Class::Destructive => "destructive",
+            Class::Terminal => "terminal",
+        }
+    }
+
+    fn outcome_word(outcome: HeaderOutcome) -> &'static str {
+        match outcome {
+            HeaderOutcome::None => "none",
+            HeaderOutcome::Committed => "committed",
+            HeaderOutcome::RolledBack => "rolled_back",
+        }
+    }
+
+    fn phase_word(phase: PhaseKind) -> &'static str {
+        match phase {
+            PhaseKind::Allocated => "Allocated",
+            PhaseKind::Prepared => "Prepared",
+            PhaseKind::Handoff => "Handoff",
+            PhaseKind::Armed => "Armed",
+            PhaseKind::Moving => "Moving",
+            PhaseKind::TrialStarting => "TrialStarting",
+            PhaseKind::Trial => "Trial",
+            PhaseKind::Committed => "Committed",
+            PhaseKind::RollbackIntent => "RollbackIntent",
+            PhaseKind::Stuck => "Stuck",
+            PhaseKind::RolledBack => "RolledBack",
+            PhaseKind::Abandoned => "Abandoned",
+            PhaseKind::Retired => "Retired",
+        }
+    }
+
+    fn retired_word(outcome: Outcome) -> &'static str {
+        match outcome {
+            Outcome::Committed => "Committed",
+            Outcome::RolledBack => "RolledBack",
+        }
+    }
+
+    fn layout_word(layout: &Layout) -> &'static str {
+        match layout {
+            Layout::Members(_) => "Members",
+            Layout::Bundle { .. } => "Bundle",
+            Layout::BundleIntent { .. } => "BundleIntent",
+        }
+    }
+
+    fn adapter_word(adapter: Adapter) -> &'static str {
+        match adapter {
+            Adapter::Ours => "Ours",
+            Adapter::Homebrew => "Homebrew",
+            Adapter::Scoop => "Scoop",
+            Adapter::Winget => "Winget",
+        }
+    }
+
+    /// RED (E1) — **every word of the journal's and the receipt's grammar has
+    /// its row** (vocabulary, word, the release it arrived in, additive or
+    /// breaking, its writers), and **the class and outcome vocabularies are
+    /// closed at four words and three**.
+    ///
+    /// Each vocabulary's words come from its type by an exhaustive match, so a
+    /// new variant does not compile until it is matched, and fails here until
+    /// it has its row. Each row's word is the word the wire carries (written
+    /// by this build's own serialiser). The class and outcome rows are pinned
+    /// by count: a fifth class or a fourth outcome is read by every 0.4.6 and
+    /// 0.4.7 start as a journal it cannot read, for ever — design §3(c)
+    /// forbids it.
+    ///
+    /// MUTATION: add a variant `Class::Paused` (a scratch commit): the build
+    /// fails at these matches, and with its arm added, the row is missing.
+    #[test]
+    fn every_grammar_word_has_its_row_and_the_header_vocabularies_are_closed() {
+        let rows = |vocabulary: Vocabulary| -> Vec<&'static str> {
+            GRAMMAR
+                .iter()
+                .filter(|row| row.vocabulary == vocabulary)
+                .map(|row| row.word)
+                .collect()
+        };
+        let pinned = "add its row to GRAMMAR, classified by design §3(c) \
+                      (docs/DESIGN.md, the journal's escape hatch)";
+        let check = |vocabulary: Vocabulary, words: Vec<&'static str>| {
+            let mut have = rows(vocabulary);
+            let mut want = words;
+            have.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(have, want, "{vocabulary:?}: {pinned}");
+        };
+
+        const CLASSES: [Class; 4] = [
+            Class::Preparing,
+            Class::Deferred,
+            Class::Destructive,
+            Class::Terminal,
+        ];
+        const OUTCOMES: [HeaderOutcome; 3] = [
+            HeaderOutcome::None,
+            HeaderOutcome::Committed,
+            HeaderOutcome::RolledBack,
+        ];
+        for class in CLASSES {
+            assert_eq!(class.word(), class_word(class));
+            assert_eq!(Class::from_word(class_word(class)), Ok(class));
+        }
+        for outcome in OUTCOMES {
+            assert_eq!(outcome.word(), outcome_word(outcome));
+        }
+        check(Vocabulary::Class, CLASSES.map(class_word).to_vec());
+        check(
+            Vocabulary::HeaderOutcome,
+            OUTCOMES.map(outcome_word).to_vec(),
+        );
+        assert_eq!(rows(Vocabulary::Class).len(), 4, "the classes are closed");
+        assert_eq!(
+            rows(Vocabulary::HeaderOutcome).len(),
+            3,
+            "the outcomes are closed"
+        );
+
+        check(Vocabulary::Phase, PhaseKind::ALL.map(phase_word).to_vec());
+        for phase in phase_samples() {
+            let wire = serde_json::to_value(&phase).unwrap();
+            assert_eq!(wire["phase"], phase_word(phase.kind()), "{phase:?}");
+        }
+
+        let retired = [Outcome::Committed, Outcome::RolledBack];
+        check(
+            Vocabulary::RetiredOutcome,
+            retired.map(retired_word).to_vec(),
+        );
+        for outcome in retired {
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                retired_word(outcome)
+            );
+        }
+
+        let layouts = [
+            members_layout(),
+            bundle_layout(),
+            Layout::BundleIntent {
+                old: old_bundle(),
+                to_version: "0.4.7".to_owned(),
+            },
+        ];
+        check(
+            Vocabulary::Layout,
+            layouts.iter().map(layout_word).collect(),
+        );
+        for layout in &layouts {
+            assert_eq!(
+                serde_json::to_value(layout).unwrap()["layout"],
+                layout_word(layout)
+            );
+        }
+
+        let adapters = [
+            Adapter::Ours,
+            Adapter::Homebrew,
+            Adapter::Scoop,
+            Adapter::Winget,
+        ];
+        check(Vocabulary::Adapter, adapters.map(adapter_word).to_vec());
+        for adapter in adapters {
+            assert_eq!(
+                serde_json::to_value(adapter).unwrap(),
+                adapter_word(adapter)
+            );
+        }
+
+        check(Vocabulary::HeaderVersion, vec!["1"]);
+        assert_eq!(HEADER_VERSION.to_string(), "1");
+        check(Vocabulary::ReceiptVersion, vec!["1"]);
+        assert_eq!(RECEIPT_VERSION.to_string(), "1");
+        check(Vocabulary::Envelope, vec!["written_by"]);
+        let header: serde_json::Value =
+            serde_json::from_slice(&journal(Phase::Moving, members_layout()).header().encode())
+                .unwrap();
+        assert!(header.get("written_by").is_some());
+
+        assert_eq!(GRAMMAR.len(), 4 + 3 + 13 + 2 + 3 + 4 + 2 + 1);
+        for row in GRAMMAR {
+            assert!(
+                crate::update::Version::parse(row.since).is_some() && !row.writers.is_empty(),
+                "{:?} {}",
+                row.vocabulary,
+                row.word
+            );
+            if row.kind == Kind::Breaking {
+                assert_eq!(
+                    row.vocabulary,
+                    Vocabulary::Adapter,
+                    "{}: a breaking word outside the adapters needs its own ruling",
+                    row.word
+                );
+            }
+        }
     }
 }

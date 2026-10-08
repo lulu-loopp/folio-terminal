@@ -78,7 +78,8 @@ use bt_platform::install_txn::{self, Hold};
 
 use crate::cli;
 use crate::update_txn::{
-    Actor, Effect, Event, Home, Journal, Nonce, Phase, PhaseKind, Receipt, TrialProcess, TxnId,
+    Actor, Effect, Event, Home, Journal, Nonce, Phase, PhaseKind, Receipt, Role, Sight,
+    TrialProcess, TxnId, receipt_sight, sight,
 };
 
 /// **How long the Windows applier and recovery wait, and how often they
@@ -171,6 +172,10 @@ pub(crate) enum Ended {
     /// new build that the journal does not record runs, the data directory is
     /// held, or what runs or who holds it cannot be known.
     Deferred(Deferral),
+    /// **The journal is one this build cannot read whole** (0.4.8 E1): this
+    /// holder recorded, removed and ended nothing and let the lock go; the
+    /// rescue build the journal names settles it.
+    StoodAside(String),
 }
 
 impl Ended {
@@ -426,7 +431,7 @@ pub(crate) fn until_let_go(
 /// The receipt at `path`: `None` while there is none, else what it says.
 pub(crate) fn read_receipt(path: &Path) -> Option<Result<Receipt, String>> {
     match file_reads::read(Lane::UpdateJournal, path) {
-        Ok(bytes) => Some(Receipt::parse(&bytes).map_err(|refusal| refusal.to_string())),
+        Ok(bytes) => Some(receipt_sight(&bytes).known(Role::WindowsReceiptWatch)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => Some(Err(error.to_string())),
     }
@@ -442,18 +447,35 @@ pub(crate) fn now_ms() -> u64 {
         })
 }
 
+/// **What U-35's reservation found** ([`reserve_last_trial`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Reserved {
+    /// `TrialStarting` is durable: the frozen trial words' transaction and
+    /// nonce.
+    Trial(TxnId, Nonce),
+    /// The journal is in another phase than `Moving`: not eligible.
+    NotEligible,
+    /// **The journal is one this build cannot read whole** (0.4.8 E1):
+    /// nothing was recorded, and the lock is let go.
+    StoodAside(String),
+}
+
 /// **Reserve U-35's one last trial before it is launched.** The caller has
 /// already proved that the new image is live and that both the first start of
 /// it and the rescue copy were refused by the operating system. This takes the
 /// transaction lock once, records `TrialStarting` durably only over `Moving`
 /// (so a failed trial can never come round here again; any other phase is
-/// `Ok(None)`, not eligible), and returns the frozen trial words' transaction
-/// and nonce.
+/// not eligible), and returns the frozen trial words' transaction and nonce.
+/// A journal this build cannot read whole is stood aside from
+/// ([`Role::LastTrialReserve`]).
+///
+/// # Errors
+/// The lock or the journal could not be had, or the write failed.
 pub(crate) fn reserve_last_trial(
     worker: &WorkerCtx,
     home: &Home,
     actor: Actor,
-) -> Result<Option<(TxnId, Nonce)>, String> {
+) -> Result<Reserved, String> {
     let _lock = match install_txn::try_hold(&home.lock(), Hold::Exclusive) {
         Ok(Some(lock)) => lock,
         Ok(None) => return Err("the transaction lock is held".to_owned()),
@@ -461,9 +483,12 @@ pub(crate) fn reserve_last_trial(
     };
     let bytes = file_reads::read(Lane::UpdateJournal, home.journal())
         .map_err(|error| format!("the journal could not be read: {error}"))?;
-    let journal = Journal::parse(&bytes).map_err(|refusal| refusal.to_string())?;
+    let journal = match sight(&bytes) {
+        Sight::Known(journal) => journal,
+        beyond => return Ok(Reserved::StoodAside(beyond.said(Role::LastTrialReserve))),
+    };
     if journal.body.phase != Phase::Moving {
-        return Ok(None);
+        return Ok(Reserved::NotEligible);
     }
     let nonce = crate::update_job::mint_nonce();
     let mut journaled = Journaled::of(home, worker, journal);
@@ -474,7 +499,7 @@ pub(crate) fn reserve_last_trial(
             began_ms: now_ms(),
         },
     )?;
-    Ok(Some((journaled.journal.txn, nonce)))
+    Ok(Reserved::Trial(journaled.journal.txn, nonce))
 }
 
 /// **What U-35's reserved trial found when it asked to commit itself**
@@ -497,6 +522,11 @@ pub(crate) enum LastTrialCommit {
     /// asked again; the trial stays uncommitted, its writes held, and a
     /// recovery decides the transaction.
     Unprovable,
+    /// **The journal is one this build cannot read whole** (0.4.8 E1):
+    /// nothing was recorded and the lock is let go; never asked again — the
+    /// trial stays uncommitted, its writes held, and the rescue build the
+    /// journal names decides.
+    StoodAside,
 }
 
 /// **U-35's reserved trial commits its own transaction** (U-35 round 2, the
@@ -561,7 +591,12 @@ pub(crate) fn commit_last_trial_as(
         }
         Err(error) => return Err(format!("the journal could not be read: {error}")),
     };
-    let journal = Journal::parse(&bytes).map_err(|refusal| refusal.to_string())?;
+    let journal = match sight(&bytes) {
+        Sight::Known(journal) => journal,
+        Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_) => {
+            return Ok(LastTrialCommit::StoodAside);
+        }
+    };
     if journal.txn != txn {
         return Ok(LastTrialCommit::NotItsOwn);
     }
@@ -1209,18 +1244,32 @@ fn read_window_owner(home: &Home, txn: TxnId) -> io::Result<Option<Running>> {
     }
 }
 
+/// Why the election's read of the phase gave no phase.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PhaseRead {
+    /// The read failed, or the journal is another transaction's: asked again
+    /// within the election's wait.
+    Unread(String),
+    /// **The journal is one this build cannot read whole** (0.4.8 E1): the
+    /// applier stands aside ([`Role::WindowElection`]) and writes no mark.
+    StoodAside(String),
+}
+
 /// The durable transaction phase that says whether an unmarked election is
 /// still open. The transaction identity is checked with the phase: a journal
 /// for another transaction cannot authorize this contender.
-pub(crate) fn read_window_phase(home: &Home, txn: TxnId) -> Result<PhaseKind, String> {
-    let bytes =
-        file_reads::read(Lane::UpdateJournal, home.journal()).map_err(|error| error.to_string())?;
-    let journal = Journal::parse(&bytes).map_err(|refusal| refusal.to_string())?;
+pub(crate) fn read_window_phase(home: &Home, txn: TxnId) -> Result<PhaseKind, PhaseRead> {
+    let bytes = file_reads::read(Lane::UpdateJournal, home.journal())
+        .map_err(|error| PhaseRead::Unread(error.to_string()))?;
+    let journal = match sight(&bytes) {
+        Sight::Known(journal) => journal,
+        beyond => return Err(PhaseRead::StoodAside(beyond.said(Role::WindowElection))),
+    };
     if journal.txn != txn {
-        return Err(format!(
+        return Err(PhaseRead::Unread(format!(
             "the journal is transaction {}, not {txn}",
             journal.txn
-        ));
+        )));
     }
     Ok(journal.body.phase.kind())
 }
@@ -1347,6 +1396,9 @@ pub(crate) enum Window {
     /// This process proved no duty. Contention or an unreadable mark leaves
     /// it elsewhere; a lock-open failure is left to O, which armed the duty.
     Refused(WindowRefusal),
+    /// **An applier found a journal this build cannot read whole** (0.4.8
+    /// E1): it wrote no mark and stands aside ([`Ended::StoodAside`]).
+    StoodAside(String),
 }
 
 impl Window {
@@ -1363,6 +1415,7 @@ impl PartialEq for Window {
             (Self::Mine(_), Self::Mine(_)) => true,
             (Self::Theirs(left), Self::Theirs(right)) => left == right,
             (Self::RoadTaken(left), Self::RoadTaken(right)) => left == right,
+            (Self::StoodAside(left), Self::StoodAside(right)) => left == right,
             (Self::Refused(left), Self::Refused(right)) => {
                 left.why == right.why
                     && left.contended == right.contended
@@ -1539,7 +1592,7 @@ fn take_the_window_within_using<AfterLock, ReadOwner, ReadPhase, Write, Wait>(
 where
     AfterLock: FnOnce(),
     ReadOwner: FnMut() -> io::Result<Option<Running>>,
-    ReadPhase: FnMut() -> Result<PhaseKind, String>,
+    ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
     Write: FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
     Wait: FnMut(Duration) -> bool,
 {
@@ -1594,13 +1647,22 @@ where
         // ([`Contender::Outgoing`]).
         Ok(_) => {
             if contender == Contender::Applier {
-                match retry_within(read_until, &mut read_phase, |_| true, &mut wait) {
+                match retry_within(
+                    read_until,
+                    &mut read_phase,
+                    |read| matches!(read, PhaseRead::Unread(_)),
+                    &mut wait,
+                ) {
                     Ok(phase) if window_duty_is_open(phase) => {}
                     Ok(phase) => {
                         drop(held);
                         return Window::RoadTaken(phase);
                     }
-                    Err(why) => {
+                    Err(PhaseRead::StoodAside(why)) => {
+                        drop(held);
+                        return Window::StoodAside(why);
+                    }
+                    Err(PhaseRead::Unread(why)) => {
                         drop(held);
                         return Window::Refused(WindowRefusal {
                             why: format!(
@@ -2320,9 +2382,185 @@ pub(crate) fn owed_at_logon(ended: &Ended) -> bool {
             | Ended::OldHeldTheLock
             | Ended::Abandoned
             | Ended::Deferred(_)
+            | Ended::StoodAside(_)
     )
 }
 
+/// **The lock holders and the receipt watch over a journal or a receipt this
+/// build cannot read whole** (0.4.8 E1): each role is fed the three inputs of
+/// `update_txn::beyond_inputs` over a home in a temporary folder, with the
+/// real lock, read and write, on a worker the thread door lends.
+#[cfg(test)]
+mod beyond_tests {
+    use super::*;
+    use crate::update_txn::{Adapter, Body, Inventories, Layout, beyond_inputs};
+
+    const TXN: TxnId = TxnId::new([0x6e; 16]);
+
+    fn nonce() -> Nonce {
+        Nonce::new([0x2d; 32])
+    }
+
+    /// A home in a temporary folder, its transaction's folder made, and the
+    /// bytes of its journal at `phase`, as this build writes them.
+    fn home_at(tag: &str, phase: Phase) -> (PathBuf, Home, Vec<u8>) {
+        let root = bt_testpath::temp_path(&format!("bt-update-beyond-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::at(root.join("home"));
+        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        let bytes = Journal {
+            txn: TXN,
+            rescue: "rescue".to_owned(),
+            body: Body {
+                phase,
+                layout: Layout::Members(Inventories {
+                    old_shipped: vec!["folio.exe".to_owned()],
+                    old_present: Vec::new(),
+                    new: Vec::new(),
+                }),
+                adapter: Adapter::Ours,
+            },
+        }
+        .encode();
+        (root, home, bytes)
+    }
+
+    fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+        bt_platform::spawn_at_priority(
+            "bt-update-beyond-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            body,
+        )
+        .expect("the thread door starts a thread")
+        .join()
+        .expect("the worker does not panic")
+    }
+
+    /// The transaction lock is free: nobody kept it.
+    fn lock_is_free(home: &Home) -> bool {
+        install_txn::try_hold(&home.lock(), Hold::Exclusive)
+            .unwrap()
+            .is_some()
+    }
+
+    /// RED (E1; role #6, U-35's reservation, site J3 `reserve_last_trial`) —
+    /// **the exit guard's reservation stands aside from a journal this build
+    /// cannot read whole**: it records nothing, the journal is byte for byte
+    /// as it was, and the lock is let go; the guard then shows its window
+    /// (`WindowsLeave::last_trial` answers the line as its refusal).
+    ///
+    /// MUTATION: restore the pre-E1 read in `reserve_last_trial`
+    /// (`Journal::parse(&bytes).map_err(..)?`: an `Err`, not a stand-aside).
+    #[test]
+    fn the_reservation_stands_aside_from_what_it_cannot_read_whole() {
+        let (root, home, known) = home_at("reserve", Phase::Moving);
+        for (what, bytes) in beyond_inputs(&known) {
+            install_txn::durable_write(&home.journal(), &bytes).unwrap();
+            let at = home.clone();
+            let reserved =
+                on_a_worker(move |worker| reserve_last_trial(worker, &at, Actor::Applier));
+            assert!(
+                matches!(reserved, Ok(Reserved::StoodAside(_))),
+                "{what}: {reserved:?}"
+            );
+            assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
+            assert!(lock_is_free(&home), "{what}: the lock is let go");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (E1; role #7, U-35's self-commit, site J4 `commit_last_trial_as`)
+    /// — **the reserved trial stands aside from a journal this build cannot
+    /// read whole**: it records nothing and never asks again
+    /// (`LastTrialCommit::StoodAside`); the journal is byte for byte as it
+    /// was and the lock is let go — its writes stay held, and the build that
+    /// wrote the journal decides.
+    ///
+    /// MUTATION: restore the pre-E1 read in `commit_last_trial_as`
+    /// (`Journal::parse(&bytes).map_err(..)?`: an `Err`, asked again every
+    /// turn).
+    #[test]
+    fn the_reserved_trial_stands_aside_from_what_it_cannot_read_whole() {
+        let (root, home, known) = home_at(
+            "commit",
+            Phase::TrialStarting {
+                nonce: nonce(),
+                began_ms: 42,
+            },
+        );
+        for (what, bytes) in beyond_inputs(&known) {
+            install_txn::durable_write(&home.journal(), &bytes).unwrap();
+            let at = home.clone();
+            let committed = on_a_worker(move |worker| {
+                commit_last_trial_as(worker, &at, TXN, nonce(), 4242, Some(7))
+            });
+            assert_eq!(committed, Ok(LastTrialCommit::StoodAside), "{what}");
+            assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
+            assert!(lock_is_free(&home), "{what}: the lock is let go");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (E1; role #8, the applier's window election, site J5
+    /// `read_window_phase`) — **an applier stands aside from a journal this
+    /// build cannot read whole**: it writes no mark, the journal is byte for
+    /// byte as it was, and its answer is `Window::StoodAside`, which ends the
+    /// applier as `Ended::StoodAside` with the window duty left to the build
+    /// that armed it.
+    ///
+    /// MUTATION: map `PhaseRead::StoodAside` back to the pre-E1 retryable
+    /// `Window::Refused` in the election.
+    #[test]
+    fn the_window_election_stands_aside_from_what_it_cannot_read_whole() {
+        let (root, home, known) = home_at("election", Phase::Handoff { applier: nonce() });
+        for (what, bytes) in beyond_inputs(&known) {
+            install_txn::durable_write(&home.journal(), &bytes).unwrap();
+            let window = take_the_window_within_reads_at(
+                &home,
+                TXN,
+                this_process(),
+                Duration::from_millis(500),
+                || Ok(None),
+            );
+            assert!(
+                matches!(window, Window::StoodAside(_)),
+                "{what}: {window:?}"
+            );
+            assert!(!owner_path(&home, TXN).exists(), "{what}: no mark");
+            assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (E1; role #5, the Windows lock holder's receipt watch, site R1
+    /// `read_receipt`) — **a receipt this build cannot read is never
+    /// accepted**: a later receipt version, a v1 receipt with a word this
+    /// build does not read, and bytes that are no receipt each read as a
+    /// refusal, said and never turned into `Committed`; the bytes are left as
+    /// they are.
+    ///
+    /// MUTATION: drop the version check from the receipt's read (`versioned`
+    /// in `Receipt::parse`): a later receipt version is accepted.
+    #[test]
+    fn the_receipt_watch_never_accepts_what_it_cannot_read() {
+        let (root, home, _) = home_at("receipt", Phase::Moving);
+        let receipt = Receipt {
+            txn: TXN,
+            nonce: nonce(),
+            pid: 4242,
+            version: crate::update_txn::LATER_BUILD.to_owned(),
+            started: Some(7),
+        };
+        let path = home.receipt_path(TXN, &nonce());
+        for (what, bytes) in crate::update_txn::receipt_beyond_inputs(&receipt) {
+            std::fs::write(&path, &bytes).unwrap();
+            let read = read_receipt(&path);
+            assert!(matches!(read, Some(Err(_))), "{what}: {read:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
 #[cfg(test)]
 mod exit_guard_tests {
     use super::*;

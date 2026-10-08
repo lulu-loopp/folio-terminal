@@ -120,9 +120,16 @@ impl Report {
         match failure {
             Failure::RolledBack => Some(Self::RolledBack),
             Failure::Interrupted => Some(Self::Interrupted),
-            Failure::Incomplete { folder } => Some(Self::Incomplete {
-                folder: folder.clone(),
-            }),
+            // A later Folio's unfinished update crosses as *Update
+            // incomplete.* (0.4.8 E1): the key and its words are the ones every
+            // build since 0.4.7 reads, and a new value of a known key would
+            // drop the whole frame there ([`WIRE_VERSION`]'s rule). Whether this
+            // session's writes are held is the sender's own and does not cross.
+            Failure::Incomplete { folder, .. } | Failure::Newer { folder, .. } => {
+                Some(Self::Incomplete {
+                    folder: folder.clone(),
+                })
+            }
             Failure::TrialIncomplete { .. } | Failure::Unsupported | Failure::Stopped(_) => None,
         }
     }
@@ -135,6 +142,7 @@ impl Report {
             Self::Interrupted => Failure::Interrupted,
             Self::Incomplete { folder } => Failure::Incomplete {
                 folder: folder.clone(),
+                held: false,
             },
         }
     }
@@ -1396,6 +1404,7 @@ mod tests {
             Failure::Interrupted,
             Failure::Incomplete {
                 folder: Some(folder),
+                held: false,
             },
         ]
     }
@@ -1583,7 +1592,7 @@ mod tests {
                     assert_eq!(*window, seated, "{label}: {failure:?} {open:?}");
                     // What a window draws from (`Runtime::update_card_is_up`).
                     assert_eq!(job.card_window(), Some(seated), "{label}: {failure:?}");
-                    if let Failure::Incomplete { folder } = &failure {
+                    if let Failure::Incomplete { folder, .. } = &failure {
                         assert_eq!(
                             &paint.folder, folder,
                             "{label}: the folder is named as sent"
@@ -1716,6 +1725,70 @@ mod tests {
                 }),
                 "Show folder only with a folder to show: {sent:?}"
             );
+        }
+    }
+
+    /// **RED (E1) — a newer Folio's unfinished update crosses the hand-over as *Update
+    /// incomplete.*, in the words every build since 0.4.7 reads.**
+    ///
+    /// A start that continued past a journal it cannot read whole, and finds a Folio already
+    /// running, hands its report over like any other. The running Folio may be 0.4.7, whose
+    /// decoder drops the whole frame at a value of `failed` it does not know
+    /// ([`WIRE_VERSION`]'s rule): so the report crosses as `incomplete` with its folder — the
+    /// frame byte for byte the one an unfinished rollback sends — whatever later build the
+    /// journal names, and whether or not the sender's writes are held.
+    ///
+    /// MUTATION: give `Failure::Newer` a report of its own in [`Report::of`] (a new token,
+    /// `newer`): a 0.4.7 Folio drops the frame.
+    #[test]
+    fn a_newer_folios_unfinished_update_crosses_as_update_incomplete() {
+        let folder = journal_folder();
+        let incomplete = LaunchRequest::of_start(
+            &sent_by_a_rollback(),
+            Some(&Failure::Incomplete {
+                folder: Some(folder.clone()),
+                held: false,
+            }),
+            all_folders,
+            Some(Path::new(HERE)),
+        )
+        .expect("the launch crosses")
+        .encode();
+        for version in [None, Some("99.0.0".to_owned())] {
+            for held in [false, true] {
+                let failure = Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: version.clone(),
+                    held,
+                };
+                assert_eq!(
+                    Report::of(&failure),
+                    Some(Report::Incomplete {
+                        folder: Some(folder.clone())
+                    })
+                );
+                let frame = LaunchRequest::of_start(
+                    &sent_by_a_rollback(),
+                    Some(&failure),
+                    all_folders,
+                    Some(Path::new(HERE)),
+                )
+                .expect("the launch crosses")
+                .encode();
+                assert_eq!(frame, incomplete, "{failure:?}: the same frame as 0.4.7's");
+                let words: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                assert_eq!(words[REPORT_KEY], "incomplete");
+                assert_eq!(
+                    words[REPORT_FOLDER_KEY].as_str().map(PathBuf::from),
+                    Some(folder.clone())
+                );
+                assert_eq!(
+                    LaunchRequest::decode(&frame).and_then(|request| request.report),
+                    Some(Report::Incomplete {
+                        folder: Some(folder.clone())
+                    })
+                );
+            }
         }
     }
 

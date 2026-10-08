@@ -83,8 +83,8 @@
 //! **Any other home**, reading the header:
 //!
 //! * handed a command line, and the transaction is no longer one an ordinary
-//!   start hands over — `terminal`, `preparing` or `deferred`, no journal, or
-//!   one this build cannot read — the installed Folio is started with the
+//!   start hands over — `terminal`, `preparing` or `deferred`, or no journal
+//!   — the installed Folio is started with the
 //!   original arguments, detached, and the door exits 0 (on a macOS bundle
 //!   whose retired outcome is `rolled_back`, with `--update-failed <journal>`
 //!   first, for its card). The start that handed itself over is thereby made
@@ -93,7 +93,12 @@
 //! * a `destructive` class on a home no road of this build recovers: the
 //!   installed Folio with `--update-failed <journal>` before the handed
 //!   arguments, which continues past the header with *Update incomplete.*
-//!   (U-34: the exit guard's start; U-24 started nothing here).
+//!   (U-34: the exit guard's start; U-24 started nothing here);
+//! * a journal this build cannot read whole (0.4.8 E1): left exactly as it
+//!   is, read by its header's frozen class when the header reads and
+//!   otherwise as `destructive` — a macOS bundle's holder stands aside, and
+//!   every exit is what an unknown live set opens, never the installed Folio
+//!   plainly (`update_txn::Role::RecoveryDoor`).
 //!
 //! Headless, like the other argv doors: it runs before the parse and the
 //! admission in `fn main`, on a standalone main that is a worker
@@ -113,7 +118,7 @@ use bt_platform::file_reads::{self, Lane};
 use crate::cli;
 use crate::update_apply::{ExitGuard, Leave, Left, Opens};
 use crate::update_apply_macos::{self, Hands, Limits, Road};
-use crate::update_txn::{Actor, Class, Header, Home};
+use crate::update_txn::{Actor, Class, Header, Home, Role, Sight, sight};
 
 /// **The recovery door's effects**: a lock holder's (its lines, the exchange,
 /// the check of a restored bundle), and the start of the installed Folio.
@@ -292,7 +297,10 @@ impl<W: World> Leave for Unnamed<W> {
 /// of this build recovers, the installed program with `--update-failed` while
 /// the header is `destructive` (it continues past it, with *Update
 /// incomplete.*), and plainly otherwise — with the handed command line after
-/// its words.
+/// its words. **A journal this build cannot read whole** is answered by its
+/// header's frozen class when the header reads, and otherwise as
+/// `destructive` (0.4.8 E1, [`Role::RecoveryDoor`]): never the installed
+/// build plainly.
 struct DoorLeave<'a, W: World> {
     worker: Option<&'a WorkerCtx>,
     door: &'a Door<'a>,
@@ -309,9 +317,10 @@ impl<W: World> Leave for DoorLeave<'_, W> {
         let opens = if home.installed_bundle().is_some() {
             update_apply_macos::opens_now(self.worker, home)
         } else {
-            let destructive = header_of(home)
-                .header
-                .is_some_and(|header| header.class == Class::Destructive);
+            let destructive = header_of(home).sight.is_some_and(|seen| {
+                seen.acting_header()
+                    .is_none_or(|header| header.class == Class::Destructive)
+            });
             Opens::Installed {
                 failed: destructive,
             }
@@ -349,37 +358,50 @@ fn code_of(left: &Left, ended: i32) -> i32 {
     }
 }
 
-/// What the header says, for the line and for the decisions after it.
+/// What the journal says, for the line and for the decisions after it:
+/// `sight` is `None` when there is no journal or it could not be read.
 struct Read {
     state: String,
-    header: Option<Header>,
+    sight: Option<Sight>,
+}
+
+impl Read {
+    /// The header the door acts on ([`Sight::acting_header`]).
+    fn header(&self) -> Option<Header> {
+        self.sight.as_ref().and_then(Sight::acting_header)
+    }
 }
 
 fn header_of(home: &Home) -> Read {
     let journal = home.journal();
     match file_reads::read(Lane::Install, &journal) {
-        Ok(bytes) => match Header::parse(&bytes) {
-            Ok(header) => Read {
-                state: format!(
+        Ok(bytes) => {
+            let seen = sight(&bytes);
+            let state = match &seen {
+                Sight::Known(known) => format!(
                     "transaction {} is {:?} in {}",
-                    header.txn,
-                    header.class,
+                    known.txn,
+                    known.body.phase.class(),
                     home.root().display()
                 ),
-                header: Some(header),
-            },
-            Err(refusal) => Read {
-                state: format!("{} is left as it is: {refusal}", journal.display()),
-                header: None,
-            },
-        },
+                beyond => format!(
+                    "{} is left as it is: {}",
+                    journal.display(),
+                    beyond.said(Role::RecoveryDoor)
+                ),
+            };
+            Read {
+                state,
+                sight: Some(seen),
+            }
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Read {
             state: format!("no transaction in {}", home.root().display()),
-            header: None,
+            sight: None,
         },
         Err(error) => Read {
             state: format!("{} could not be read: {error}", journal.display()),
-            header: None,
+            sight: None,
         },
     }
 }
@@ -402,8 +424,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
     // Windows member set is `run_windows`'s.
     let recovers_here = home.installed_bundle().is_some();
     let destructive = first
-        .header
-        .as_ref()
+        .header()
         .filter(|header| recovers_here && header.class == Class::Destructive);
     let (did, ended) = match destructive {
         Some(header) => {
@@ -916,6 +937,42 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(world.spawned, vec![(installed, handed())]);
         assert!(world.said[0].contains("no transaction in"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (E1; role #14, the recovery door, site H6 `header_of` and both
+    /// branches of `DoorLeave::opening`) — **over a home no road of its own
+    /// recovers, the door leaves a journal it cannot read whole as it is and
+    /// opens the installed Folio with `--update-failed`, never plainly**: an
+    /// unknown header word (its envelope is `destructive`), an unknown body
+    /// word under a `destructive` header, and bytes of which nothing reads.
+    /// The start it opens continues past the journal with the card that says
+    /// so. The bundle branch answers through `update_apply_macos::opens_now`
+    /// (`the_macos_lock_holder_stands_aside_from_what_it_cannot_read_whole`).
+    ///
+    /// MUTATION: in `DoorLeave::opening`'s non-bundle branch, restore the
+    /// pre-E1 `failed: <the header read alone is destructive>` (a journal of
+    /// which nothing reads opens the installed build plainly).
+    #[test]
+    fn the_door_never_opens_the_installed_build_plainly_over_what_it_cannot_read() {
+        let (root, rescue) = installation("beyond", Some(Phase::Moving));
+        let (home, installed) = Home::of_rescue(HostPlatform::Windows, &rescue).unwrap();
+        let known = std::fs::read(home.journal()).unwrap();
+        let data = data_root(&root);
+        for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+            std::fs::write(home.journal(), &bytes).unwrap();
+            let (code, world) = run_over(&home, &installed, Some(handed()), &data);
+            assert_eq!(code, 0, "{what}");
+            let mut words = crate::update_apply::failed_words(&home).to_vec();
+            words.extend(handed());
+            assert_eq!(world.spawned, vec![(installed.clone(), words)], "{what}");
+            assert!(
+                world.said[0].contains("is left as it is"),
+                "{what}: {:?}",
+                world.said
+            );
+            assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
