@@ -1199,11 +1199,11 @@ impl Runtime<'_> {
     /// Asked by [`Self::adopt_new_palette`], which every window runs for every palette change and
     /// for the `Web pages` row, so no door that moves the answer can leave a page behind. A seat
     /// already holding the answer is not told again — see
-    /// [`webhost::tell_every_seat_its_color_scheme`].
+    /// [`webhost::tell_all_seat_its_color_scheme`].
     pub(crate) fn tell_web_pages_their_color_scheme(&mut self) {
         let scheme = self.web_color_scheme_in_force();
         let (_, failure) =
-            webhost::tell_every_seat_its_color_scheme(self.window.web.values_mut(), scheme);
+            webhost::tell_all_seat_its_color_scheme(self.window.web.values_mut(), scheme);
         if let Some(error) = failure {
             eprintln!("BT_WEB {error}");
         }
