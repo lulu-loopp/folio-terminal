@@ -879,15 +879,25 @@ impl CopilotProbe {
         let mut state = self.lock();
         state.requested += 1;
         let generation = state.requested;
-        state.waiting = Some((generation, trigger));
+        let replaced = state.waiting.replace((generation, trigger));
         if let Some((_, _, joined)) = state.out.as_mut() {
             *joined += 1;
         }
-        if state.worker {
-            return generation;
-        }
+        let start_a_worker = !state.worker;
         state.worker = true;
         drop(state);
+        // Said after the lock is let go: the line is a file write.
+        if let Some((older, older_trigger)) = replaced {
+            (self.note)(&format!(
+                "copilot probe request {older} ({}) was replaced before it started by request \
+                 {generation} ({}), which answers both",
+                older_trigger.name(),
+                trigger.name()
+            ));
+        }
+        if !start_a_worker {
+            return generation;
+        }
         // In the workers' band, `psreadline::begin_probe`'s rule: this starts a program written
         // in JavaScript to ask it one question, and it must never be the reason a frame was late.
         let started = bt_platform::spawn_at_priority(
@@ -1119,18 +1129,35 @@ fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
     // A raw tail and not `args`, because what is being built is a string `cmd`
     // parses for itself: the outer quotes are the pair it strips, and the inner
     // ones are what keep a program path holding a space one token.
-    let output = {
-        bt_platform::probe_output_with_raw_tail(
-            &command,
-            std::ffi::OsStr::new(&probe_command_tail(&copilot)),
-        )
-        .inspect(|output| {
-            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, output)
-        })
-        .ok()?
+    let ending = bt_platform::probe_output_with_raw_tail(
+        ctx,
+        &command,
+        std::ffi::OsStr::new(&probe_command_tail(&copilot)),
+        PROBE_DEADLINE,
+    )
+    .ok()?;
+    let output = match ending {
+        bt_platform::ProbeEnding::Finished(output) => output,
+        // Stopped at the deadline: the version is unknown (not "no copilot"), and the next
+        // trigger asks again.
+        bt_platform::ProbeEnding::Overran => {
+            crate::diagnostics::note(&format!(
+                "copilot probe: `{} --version` did not answer within {} s and was stopped; the \
+                 version is unknown until the next probe",
+                copilot.display(),
+                PROBE_DEADLINE.as_secs()
+            ));
+            return None;
+        }
     };
+    bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, &output);
     Version::parse(&String::from_utf8_lossy(&output.stdout))
 }
+
+/// **How long `copilot --version` may take** before the probe stops it and answers "unknown" —
+/// a node start, measured at ~150 ms idle and seconds under full load (T-FRESH-FACTS §2).
+#[cfg(windows)]
+const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The whole of what `cmd.exe` is handed, as one string it parses itself.
 ///
@@ -1286,12 +1313,29 @@ mod tests {
             probe.lock().answer.map(|answer| answer.generation),
             Some(newest)
         );
-        let line = notes.try_recv().expect("the merge is said");
-        assert!(
-            line.contains(&format!("copilot probe {first}")) && line.contains("3 request(s)"),
-            "{line}"
+        let lines: Vec<String> = notes.try_iter().collect();
+        let replaced: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("was replaced before it started"))
+            .collect();
+        assert_eq!(
+            replaced.len(),
+            2,
+            "each request replaced while it waited is said (round 2): {lines:?}"
         );
-        assert!(notes.try_recv().is_err(), "and said once");
+        assert!(
+            replaced[1].contains(&format!("by request {newest}")),
+            "{lines:?}"
+        );
+        let merged: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("3 request(s)"))
+            .collect();
+        assert_eq!(merged.len(), 1, "and the merge is said once: {lines:?}");
+        assert!(
+            merged[0].contains(&format!("copilot probe {first}")),
+            "{lines:?}"
+        );
     }
 
     /// RED (T-FRESH-FACTS) — **an older probe's answer never overwrites a newer one.**

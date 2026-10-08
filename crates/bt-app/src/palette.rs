@@ -1631,6 +1631,14 @@ impl PaletteState {
         }
     }
 
+    /// **Bring the selected row into the box this layout draws** — after a refill that kept the
+    /// reader's row by identity (T-FRESH-FACTS round 2): the row may have moved, and the list it is
+    /// in may be shorter than the scroll held, so the scroll is asked of the new layout
+    /// ([`PaletteLayout::scroll_to_show`], clamped to its `max_scroll`).
+    pub fn show_selected(&mut self, layout: &PaletteLayout) {
+        self.scroll = layout.scroll_to_show(self.selected, self.scroll);
+    }
+
     /// Walk the selection one row.
     pub fn step(&mut self, forwards: bool) {
         self.selected = step(self.listing.len(), self.selected, forwards);
@@ -2378,6 +2386,46 @@ mod list_tests {
             tall.max_scroll() > 0.0,
             "so the rest is reachable by scroll"
         );
+    }
+
+    /// RED (T-FRESH-FACTS round 2) — **a refill that keeps the reader's row
+    /// leaves a scroll the new list can hold.** A long list scrolled to its
+    /// end is answered by a short one that still holds the row.
+    ///
+    /// MUTATION (observed red): `show_selected` leaving the scroll as it was —
+    /// the scroll stays past the short list's end.
+    #[test]
+    fn a_kept_row_is_shown_in_the_list_that_replaced_the_old_one() {
+        use super::PaletteState;
+        let long = listing_of((0..60).map(|at| row(&format!("行 {at}"), None)).collect());
+        let mut state = PaletteState::opening(crate::shortcuts::Focus::default());
+        state.refill(long.clone(), true);
+        state.point_at(59);
+        let tall = super::layout(WINDOW, SCALE, &long, look("", ""), 0.0, &mut ten_per_char);
+        state.show_selected(&tall);
+        assert!(
+            state.scroll() > 0.0,
+            "the last of sixty rows is scrolled to"
+        );
+
+        let short = listing_of(
+            [57, 58, 59]
+                .iter()
+                .map(|at| row(&format!("行 {at}"), None))
+                .collect(),
+        );
+        state.refill(short.clone(), false);
+        assert_eq!(state.selected(), 2, "the reader's row, by identity");
+        let small = super::layout(
+            WINDOW,
+            SCALE,
+            &short,
+            look("", ""),
+            state.scroll(),
+            &mut ten_per_char,
+        );
+        state.show_selected(&small);
+        assert_eq!(state.scroll(), 0.0, "three rows have nothing to scroll");
     }
 
     /// PIN — **the scroll brings the selected row wholly into the box, and

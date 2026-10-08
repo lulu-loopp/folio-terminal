@@ -154,6 +154,14 @@ impl Runtime<'_> {
         if let Some(state) = self.window.palette.as_mut() {
             state.refill(listing, requeried);
         }
+        // A kept row may have moved, and the list may be shorter than the scroll held: the scroll
+        // follows the row in the layout the new list makes (T-FRESH-FACTS round 2).
+        if !requeried
+            && let Some(layout) = self.palette_layout()
+            && let Some(state) = self.window.palette.as_mut()
+        {
+            state.show_selected(&layout);
+        }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }

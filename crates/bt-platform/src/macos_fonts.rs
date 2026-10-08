@@ -90,8 +90,9 @@ pub fn monospace_font_families() -> Vec<MonospaceFamily> {
 /// to, which is why the answer's own family name is compared with the one asked
 /// for. The row is built by [`monospace_family_entry`], the same derivation the
 /// walk makes for every face it keeps, so a family is monospaced here exactly
-/// when it is a row of [`monospace_font_families`], and its `files` are empty
-/// for the reason this module's header gives.
+/// when it is a row of [`monospace_font_families`], and its `files` name the
+/// file of the face CoreText matched (this module's header says why rows carry
+/// files).
 ///
 /// **A door** (`doors::FontFamilyLookup`), the same signature as the Windows arm's.
 #[must_use]

@@ -820,6 +820,17 @@ enum AppEvent {
 }
 
 impl AppEvent {
+    /// **The event a window's system-settings ear sends for what it heard**
+    /// (T-FRESH-FACTS): each news its own wake, so the turn re-reads only the fact it
+    /// is about.
+    const fn of_system_news(news: bt_platform::SystemNews) -> Self {
+        match news {
+            bt_platform::SystemNews::Preferences => Self::SystemPreferencesChanged,
+            bt_platform::SystemNews::Display => Self::DisplayChanged,
+            bt_platform::SystemNews::InputLanguage => Self::InputLanguageChanged,
+        }
+    }
+
     /// **Which station this event's handler is charged to** (2026-09-11).
     ///
     /// The whole of `user_event` used to run under [`hang_watch::Station::Woken`],
@@ -838,17 +849,6 @@ impl AppEvent {
     /// a name on an arm that is three lines long and hand the reader a station
     /// that can never be the answer. They keep the label that says "a wake
     /// nobody named", which is exactly what they are.
-    /// **The event a window's system-settings ear sends for what it heard**
-    /// (T-FRESH-FACTS): each news its own wake, so the turn re-reads only the fact it
-    /// is about.
-    const fn of_system_news(news: bt_platform::SystemNews) -> Self {
-        match news {
-            bt_platform::SystemNews::Preferences => Self::SystemPreferencesChanged,
-            bt_platform::SystemNews::Display => Self::DisplayChanged,
-            bt_platform::SystemNews::InputLanguage => Self::InputLanguageChanged,
-        }
-    }
-
     fn station(&self) -> hang_watch::Station {
         use hang_watch::Station;
         match self {
@@ -12671,6 +12671,9 @@ struct App {
     /// copy was installed (U-3). Never rearmed: once spent, a still-missing
     /// answer is read as unknown.
     first_run_waited_for_channel: bool,
+    /// Whether the first-run card has already waited its one turn for the program walk's reading
+    /// of the agent folders (`first_run::agent_folders_settled`).
+    first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
     /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
@@ -43352,6 +43355,7 @@ impl Runtime<'_> {
             psreadline_installed: None,
             first_run_attempted: false,
             first_run_waited_for_channel: false,
+            first_run_waited_for_agent_folders: false,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
@@ -61379,6 +61383,25 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
+        // A walk that died never published its facts: one walk is asked for in its place
+        // (T-FRESH-FACTS round 2), so nothing waiting on them waits for an unrelated trigger.
+        if let Some(died) = answers.died {
+            let line = match programs_lane::request_after_death(
+                died,
+                &app.settings_store.loaded().default_profile,
+            ) {
+                Some(again) => {
+                    format!(
+                        "program walk {died} ended early; walk {again} is asked for in its place"
+                    )
+                }
+                None => format!(
+                    "program walk {died} ended early; it was itself asked for after a death, so \
+                     the next trigger walks again"
+                ),
+            };
+            diagnostics::note(&line);
+        }
         // A walk's end is news to a pane in birth even when no answer moved: a pane left in birth
         // to say something at its landing (`birth_here`) waits on rows that were already known.
         let ended = answers.finished.is_some();

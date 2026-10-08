@@ -4483,23 +4483,90 @@ pub fn probe_output(mut command: std::process::Command) -> std::io::Result<std::
     spawn_probe(&mut command, ProbeStdio::ANSWER)?.wait_with_output()
 }
 
+/// What a probe held to a deadline came back with ([`probe_output_with_raw_tail`]).
+#[derive(Debug)]
+pub enum ProbeEnding {
+    /// It ended by itself, with this output.
+    Finished(std::process::Output),
+    /// It was still running at the deadline: it was stopped (its contained tree ends with it),
+    /// and what it had said is dropped.
+    Overran,
+}
+
 /// [`probe_output`] for a command whose arguments end with `tail` exactly as
 /// written: a string the program parses for itself (`cmd /c "…"`), which the
 /// standard library's quoting would change. The command's own arguments, if
 /// any, come first and are quoted as [`std::process::Command::arg`] quotes them.
+///
+/// **Held to `deadline_after`**, the probes' child-wait shape (`shell_integration`'s
+/// `run_powershell_probe`): `try_wait` polled on the worker every 20 ms through
+/// [`wait::sleep_within`], and a child still running at the deadline killed and reported
+/// [`ProbeEnding::Overran`] (T-FRESH-FACTS round 2: a hung `copilot --version` wedged its
+/// probe for the life of the process).
 #[cfg(windows)]
 pub fn probe_output_with_raw_tail(
+    worker: &admission::WorkerCtx,
     command: &std::process::Command,
     tail: &std::ffi::OsStr,
-) -> std::io::Result<std::process::Output> {
-    spawn_probe_born(
+    deadline_after: std::time::Duration,
+) -> std::io::Result<ProbeEnding> {
+    let mut child = spawn_probe_born(
         command,
         ProbeStdio::ANSWER,
         Some(tail),
         probe_job(),
         ProbeBirthSeam::default(),
-    )?
-    .wait_with_output()
+    )?;
+    let deadline = std::time::Instant::now() + deadline_after;
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(ProbeEnding::Finished);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Ok(ProbeEnding::Overran);
+        }
+        wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    }
+}
+
+/// RED (T-FRESH-FACTS round 2) — **a raw-tail probe still running at its deadline is stopped and
+/// reported, not waited for.** The child would run for half a minute; the deadline has already
+/// passed when the probe starts, so the first look past its birth finds it running.
+///
+/// MUTATION (observed red): `probe_output_with_raw_tail` waiting for the output with no deadline
+/// — the probe answers `Finished` half a minute later.
+#[cfg(all(test, windows))]
+mod probe_deadline_tests {
+    #[test]
+    fn a_probe_past_its_deadline_is_stopped_and_reported() {
+        let (sent, answered) = std::sync::mpsc::channel();
+        crate::spawn_at_priority(
+            "probe-deadline-test",
+            crate::ThreadPriority::BelowNormal,
+            move |worker| {
+                let command =
+                    crate::quiet_command_named(std::path::Path::new("cmd.exe")).expect("cmd.exe");
+                let ending = crate::probe_output_with_raw_tail(
+                    worker,
+                    &command,
+                    std::ffi::OsStr::new("/c \"ping -n 30 127.0.0.1 >nul\""),
+                    std::time::Duration::ZERO,
+                );
+                let _ =
+                    sent.send(ending.map(|ending| matches!(ending, crate::ProbeEnding::Overran)));
+            },
+        )
+        .expect("a worker");
+        assert!(
+            answered
+                .recv()
+                .expect("an answer")
+                .expect("the probe started"),
+            "the probe past its deadline is reported overrun"
+        );
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -9326,9 +9393,9 @@ mod windows_impl {
         }
     }
 
-    /// **Windows saying a system-wide preference has moved.**
+    /// **Windows saying a system-wide preference, a display or the keyboard layout has moved.**
     ///
-    /// One subclass for one broadcast. `WM_SETTINGCHANGE` goes to every top-level
+    /// One subclass for three messages. `WM_SETTINGCHANGE` goes to every top-level
     /// window when somebody changes something in Settings — and the only thing
     /// this window does with it is *ask again*: the message's `wparam`/`lparam`
     /// name an area and a section, but the areas are not enumerated for
@@ -20484,7 +20551,7 @@ mod system_preference_message_tests {
     /// virtual key the summon is claimed on were read once and not again while the
     /// window stayed where it was.
     ///
-    /// MUTATION: drop either arm from `system_news_of` and its message answers
+    /// MUTATION (observed red): drop either arm from `system_news_of` and its message answers
     /// `None` — the window never hears that the panel's rate or the layout moved.
     #[test]
     fn a_display_change_and_a_layout_change_are_heard_as_themselves() {

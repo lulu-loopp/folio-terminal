@@ -1986,7 +1986,7 @@ impl SystemSettingsWatch {
 impl Drop for SystemSettingsWatch {
     fn drop(&mut self) {
         // SAFETY: dropped on the thread that installed it (the value is not
-        // `Send`), and both registrations are the ones made above.
+        // `Send`), and all three registrations are the ones made above.
         unsafe {
             self.application
                 .removeObserver_forKeyPath(&self.observer, ns_string!("effectiveAppearance"));
