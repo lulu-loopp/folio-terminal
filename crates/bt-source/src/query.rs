@@ -1170,8 +1170,8 @@ impl Occurrence {
                 .identities()
                 .any(|identity| identity.variant.permits_product())
         });
-        let module_permits = innermost_inline_module(index, self.span)
-            .is_none_or(ModuleRecord::permits_product);
+        let module_permits =
+            innermost_inline_module(index, self.span).is_none_or(ModuleRecord::permits_product);
         file_permits && item_permits && module_permits
     }
 }
