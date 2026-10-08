@@ -56,6 +56,7 @@ mod coalesce;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
+mod elevated_host;
 mod explorer_menu;
 mod favicon;
 mod file_peek;
@@ -72071,15 +72072,25 @@ fn main() -> Result<()> {
         };
         std::process::exit(code);
     }
+    // **The elevated host's door, second**, for the first door's reason: an exact private line,
+    // answered before console adoption, the panic log, any claim, endpoint or settings — the
+    // host is a headless process that authenticates its pipe and is otherwise nothing.
+    if let Some(line) = bt_platform::elevated_protocol::HostLine::parse(std::env::args_os().skip(1))
+    {
+        std::process::exit(match line {
+            Ok(line) => elevated_host::serve(&line),
+            Err(_) => elevated_host::USAGE,
+        });
+    }
     // The private native remover's stdout is its readiness pipe. Answer this
-    // second door before console adoption can replace that inherited handle,
+    // third door before console adoption can replace that inherited handle,
     // and before any code capable of constructing a window.
     if cli::uninstall_remove(std::env::args_os().skip(1)) {
         let code =
             uninstall::remover_standalone(bt_platform::deferred_removal::run_from_environment);
         std::process::exit(code);
     }
-    // After both private doors, adopt the console so that even the panic hook's own words have
+    // After the private doors, adopt the console so that even the panic hook's own words have
     // somewhere to land when a shell launched this window-subsystem process to read its traces.
     // **For the front door only** — see `diagnostics::enter_resident_run`, which
     // is where the borrow ends.

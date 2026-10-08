@@ -179,6 +179,16 @@ that file. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
 `bt-platform`'s ignored `trust::tests::the_released_windows_assets_carry_an_identity_oid`
 downloads to read real signatures from (E-6); unset or empty, it asks GitHub for the
 latest release. It downloads into the temporary folder and writes nothing else.
+`BT_ELEVATED_HOST_TEST_LINE` and `BT_ELEVATED_HOST_TEST_ANSWER` carry the host line
+(the words the launch would hand `ShellExecuteExW`) and an answer file that `bt-platform`'s
+`elevated_pipe::tests::an_honest_host_and_parent_authenticate_by_kernel_pid_and_capability`
+sets on the copy of its own test binary that plays the elevated host: only that test's child
+half reads them, and it writes one line into that file. `BT_ELEVATED_PIPE_VM_ROW`,
+`BT_ELEVATED_PIPE_VM_DIR` and `BT_ELEVATED_PIPE_VM_PROGRAM` name the row (`launch` or
+`observe`), the guest folder its `row.txt` (and for `observe`, `line.txt`) is written to,
+and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
+`elevated_pipe::tests::vm_row`, which only the clean-VM harness runs: it performs a real
+`runas` launch.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |

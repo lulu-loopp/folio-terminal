@@ -144,6 +144,7 @@ bt_pty::PtySession::resize	all	a cross-crate entrance that waits inside
 bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
 bt_platform::keyboard_layout_shift_table	windows	the worker-only keyboard-layout-table door: one registry read and one System32 DLL load, copied and freed before return
 windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
+windows::Win32::UI::Shell::ShellExecuteExW	windows	waits for the shell and its UAC surface
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
 libc::write	macos	counted by call site, does not wait
@@ -185,6 +186,7 @@ bt-platform	-	crate::deferred_removal::finish_with	std::fs::write 2	worker-door-
 bt-platform	-	crate::deferred_removal::removal_from_environment	std::fs::canonicalize 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::UI::Shell::ShellExecuteExW 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	

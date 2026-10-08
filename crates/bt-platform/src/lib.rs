@@ -6573,6 +6573,21 @@ pub mod launch_pipe;
 #[path = "launch_pipe_portable.rs"]
 pub mod launch_pipe;
 
+/// **An elevated pane's pipe and launch primitives** (T-ADMIN-2): one attempt's
+/// protected pipe, the `runas` launch of the host, and the handshake both ends
+/// run. A second door onto [`attention_pipe`]'s boundary, sharing its owned
+/// handle, descriptor, overlapped event and client open; what it adds is the
+/// Administrators ACE, the kernel peer-pid checks and the deadline every wait
+/// takes.
+#[cfg(windows)]
+pub mod elevated_pipe;
+
+/// The same primitives where there is no UAC: every entrance answers
+/// `Unsupported`.
+#[cfg(not(windows))]
+#[path = "elevated_pipe_unsupported.rs"]
+pub mod elevated_pipe;
+
 /// The global summon key, and the foreground it hands back — the quake
 /// terminal's other half (`docs/DESIGN.md` §7.54).
 ///

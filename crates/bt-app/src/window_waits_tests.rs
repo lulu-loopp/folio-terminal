@@ -2984,14 +2984,15 @@ const LANDMARKS: [(&str, &[&str]); 4] = [
 /// in `fn main` after the parse (and so before the hand-over); `loop_running` on
 /// `StartCause::Init`; `exiting` at the head of `App::finish`, in `settle_quit`'s `Write` arm, in
 /// `main`'s build-error arm and after `run_app`; `quit_abandoned` in the `Abandon` arm; and the
-/// eight standalone entries, in list order: the console-membership helper; the attention-payload
-/// door; Explorer-menu removal; the two uninstall entries (the public cleanup/uninstall door and
-/// the copied remover, T-UNINSTALL-UX); the macOS applier (U-28); the Windows applier (U-23); and
+/// nine standalone entries, in list order: the console-membership helper; the elevated host's
+/// door (T-ADMIN-2); the attention-payload door; Explorer-menu removal; the two uninstall
+/// entries (the public cleanup/uninstall door and the copied remover, T-UNINSTALL-UX); the macOS
+/// applier (U-28); the Windows applier (U-23); and
 /// the recovery door, which rolls a macOS bundle back on a worker since U-29 and recovers a
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 17] = [
+const PINS: [Pin; 18] = [
     Pin {
         writer: "enter_standalone_main",
         owner: "bt-app crate::main",
@@ -3040,6 +3041,11 @@ const PINS: [Pin; 17] = [
     Pin {
         writer: "quit_abandoned",
         owner: "bt-app crate::session_end::settle",
+        after: None,
+    },
+    Pin {
+        writer: "enter_standalone_main",
+        owner: "bt-app crate::elevated_host::serve",
         after: None,
     },
     Pin {
