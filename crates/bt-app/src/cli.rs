@@ -687,10 +687,13 @@ pub struct CliPlan {
     /// they did not ask.
     pub wants_pane: bool,
     /// Which profile that pane starts as — the caller's, or this machine's
-    /// default when they named none or named one this build has not got.
-    pub profile: usize,
-    /// Where it opens, **already in that profile's namespace**, or `None` for
-    /// "wherever a fresh shell of it would".
+    /// default when they named none or named one this build has not got; `None`
+    /// while that default is undecided (T-PROGRAMS-REFRESH), when the pane is the
+    /// unresolved default and its birth decides.
+    pub profile: Option<usize>,
+    /// Where it opens, **already in that profile's namespace** — or, for the
+    /// unresolved default, in the host's own, crossed at the pane's birth — or
+    /// `None` for "wherever a fresh shell of it would".
     pub cwd: Option<PathBuf>,
     /// A document to open a preview on, once there is a window.
     pub preview: Option<PathBuf>,
@@ -1280,12 +1283,12 @@ impl CliRefusal {
 /// what `--cwd` already said.
 pub fn resolve(
     request: &CliRequest,
-    default_profile: usize,
+    default_profile: Option<usize>,
     kind: impl Fn(&Path) -> PathKind,
 ) -> CliPlan {
     let mut refusals = Vec::new();
     let profile = match request.profile.as_deref() {
-        Some(id) if profiles::has_id(id) => profiles::index_of_id(id),
+        Some(id) if profiles::has_id(id) => Some(profiles::index_of_id(id)),
         Some(id) => {
             refusals.push(CliRefusal::NoSuchProfile(id.to_owned()));
             default_profile
@@ -1320,7 +1323,14 @@ pub fn resolve(
     // that pane starts as may not speak them — so the crossing is asked here,
     // through the same function a split's folder chooser goes through, and the
     // pairs that cannot cross are reported rather than dropped.
+    //
+    // The unresolved default has no namespace yet: its folder stays as it was
+    // written, and the pane's birth crosses it (and says the same refusal there
+    // when it cannot).
     let cwd = folder.and_then(|folder| {
+        let Some(profile) = profile else {
+            return Some(folder);
+        };
         let crossed = profiles::translate_cwd(
             profiles::PathNamespace::Windows,
             profiles::paths(profile),
@@ -1885,7 +1895,7 @@ mod tests {
         }
     }
 
-    const PWSH: usize = 0;
+    const PWSH: Option<usize> = Some(0);
 
     /// PIN — a folder that is there is where the pane opens, and nothing is
     /// refused.
@@ -1946,15 +1956,15 @@ mod tests {
         for index in 0..profiles::count() {
             let id = profiles::id(index);
             let plan = resolve(&parsed(&["--profile", &id]), PWSH, table(&[]));
-            assert_eq!(plan.profile, index, "{id}");
+            assert_eq!(plan.profile, Some(index), "{id}");
             assert!(plan.refusals.is_empty(), "{id}");
         }
         let plan = resolve(
             &parsed(&["--profile", "fish"]),
-            profiles::fallback_profile(),
+            Some(profiles::fallback_profile()),
             table(&[]),
         );
-        assert_eq!(plan.profile, profiles::fallback_profile());
+        assert_eq!(plan.profile, Some(profiles::fallback_profile()));
         assert!(plan.wants_pane);
         assert_eq!(
             plan.refusals,
@@ -2031,7 +2041,7 @@ mod tests {
             PWSH,
             table(&[(r"D:\Developer", PathKind::Directory)]),
         );
-        assert_eq!(plan.profile, wsl);
+        assert_eq!(plan.profile, Some(wsl));
         assert_eq!(plan.cwd, Some(PathBuf::from("/mnt/d/Developer")));
         assert!(plan.refusals.is_empty());
         let plan = resolve(
@@ -2050,19 +2060,39 @@ mod tests {
         assert!(!plan.refusals[0].notice().trim().is_empty());
     }
 
+    /// RED (T-PROGRAMS-REFRESH) — **while the default is undecided, a command line's folder is
+    /// kept as it was written**: the pane is the unresolved default, and its birth crosses the
+    /// folder into the profile the default resolves to (and refuses it there if it must). Nothing
+    /// is crossed for, or refused on behalf of, a profile nobody has decided.
+    ///
+    /// MUTATION (observed red): `let profile = profile?;` in the crossing — a folder named while
+    /// the default is undecided is dropped instead of kept for the birth to cross.
+    #[test]
+    fn an_undecided_default_keeps_the_folder_as_written_for_its_birth_to_cross() {
+        let plan = resolve(
+            &parsed(&["--cwd", r"\\服务器\共享"]),
+            None,
+            table(&[(r"\\服务器\共享", PathKind::Directory)]),
+        );
+        assert_eq!(plan.profile, None);
+        assert_eq!(plan.cwd, Some(PathBuf::from(r"\\服务器\共享")));
+        assert!(plan.refusals.is_empty());
+        assert!(plan.wants_pane);
+    }
+
     /// PIN — a launch nobody passed anything to asks for nothing and refuses
     /// nothing, whatever the machine looks like.
     #[test]
     fn an_empty_request_resolves_to_a_plan_that_wants_nothing() {
         let plan = resolve(
             &CliRequest::default(),
-            profiles::fallback_profile(),
+            Some(profiles::fallback_profile()),
             table(&[]),
         );
         assert!(!plan.wants_pane);
         assert_eq!(plan.cwd, None);
         assert_eq!(plan.preview, None);
-        assert_eq!(plan.profile, profiles::fallback_profile());
+        assert_eq!(plan.profile, Some(profiles::fallback_profile()));
         assert!(plan.refusals.is_empty());
     }
 

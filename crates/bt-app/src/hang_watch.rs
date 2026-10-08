@@ -503,7 +503,7 @@ pub enum Station {
     FileIndex = 21,
     /// The probe and settings family — `PsReadLineProbed`,
     /// `PowerShellProfileProbed`, `CopilotProbed`, `UpdateChecked`,
-    /// `ExplorerPackageChanged`, `FontsScanned`, `SchemesChanged`,
+    /// `ExplorerPackageChanged`, `FontsScanned`, `ProgramsAnswered`, `SchemesChanged`,
     /// `StorageChanged`, `SystemPreferencesChanged`, `NotificationClicked`.
     ///
     /// **One station for nine arms**, because what they have in common is what a

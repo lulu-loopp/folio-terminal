@@ -1,6 +1,7 @@
 //! `terminal` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::PtyTarget;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
     FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
@@ -703,6 +704,7 @@ impl Runtime<'_> {
             None,
             &seed,
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
@@ -818,13 +820,14 @@ impl Runtime<'_> {
 
         let LeafSession {
             pty,
+            birth,
             session,
             projection,
             ..
         } = self.window.tabs[active].shell_mut();
         paste_text(session, projection, &text, |bytes| {
             write_pty_input(
-                pty.as_ref(),
+                PtyTarget::of(pty.as_ref(), birth.as_ref()),
                 bytes,
                 "write an inserted files row path to PTY",
             )

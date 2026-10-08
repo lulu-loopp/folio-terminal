@@ -5532,7 +5532,7 @@ impl SettingsRow {
             // not index 0 showed stale words until touched. Reading state is the
             // whole of the fix, and it is free here because there is no second
             // place holding the button's caption.
-            Self::DefaultProfile => Some(values.default_profile),
+            Self::DefaultProfile => values.default_profile,
             // Ticked on what the window is actually doing: `None` is ticked
             // while no picture is named, and neither item is ticked once one
             // is — because the answer then is the file itself, and the button is
@@ -6671,7 +6671,10 @@ pub struct SettingsValues {
     /// which is what the row's own description promises. The *stored* id is left
     /// alone by that degradation, so nothing here can quietly consume a choice
     /// the user made before they uninstalled something.
-    pub default_profile: usize,
+    ///
+    /// `None` while the machine has not answered the rows the default is decided from
+    /// (T-PROGRAMS-REFRESH): the combo names no profile until it is decided.
+    pub default_profile: Option<usize>,
     /// Which row of the family picker is ticked — an index, resolved against
     /// this machine's list, never the stored name.
     ///
@@ -6862,7 +6865,7 @@ impl SettingsValues {
             minimum_contrast: MinimumContrastV1::Off,
             web_color_scheme: WebColorSchemeV1::FollowTheme,
             language: LanguageV1::System,
-            default_profile: profiles::fallback_profile(),
+            default_profile: Some(profiles::fallback_profile()),
             terminal_font: 0,
             terminal_cjk_font: 0,
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
@@ -25353,7 +25356,7 @@ mod tests {
         let quake_page = open_shut_showing(SettingsRow::QuakeProfile);
         for chosen in 0..profiles::count() {
             let general = SettingsValues {
-                default_profile: chosen,
+                default_profile: Some(chosen),
                 ..values()
             };
             let drawn = button_marks(&general_page, SettingsRow::DefaultProfile, &general);
@@ -25566,7 +25569,7 @@ mod tests {
     fn the_default_profile_combo_shows_the_profile_that_would_actually_start() {
         for chosen in 0..profiles::count() {
             let values = SettingsValues {
-                default_profile: chosen,
+                default_profile: Some(chosen),
                 ..values()
             };
             assert_eq!(
@@ -29496,7 +29499,7 @@ mod tests {
         lacking.profile_available = (0..profiles::count())
             .map(|index| index == profiles::fallback_profile())
             .collect();
-        lacking.default_profile = profiles::fallback_profile();
+        lacking.default_profile = Some(profiles::fallback_profile());
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
         // `End` and then two steps back: `Explorer context menu` closes this

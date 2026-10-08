@@ -376,6 +376,7 @@ ledger's.
 | D-82 | WinHTTP's `http::Request` waits up to `CLOSE_WAIT` (5 s) on a `Condvar` in `Drop` for its handle's closing callback | thread-door note (g)2; A1e | none yet — *A download's request is closed through its own bounded door, not by its drop* | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product caller of `https_download` yet; **2026-10-08 (J4):** **widened**: `https_download` has a product caller now, the update job (`update_job`, U-18…U-20), so the drop's wait runs on the `bt-update-job` worker, never the window thread; was 0.4.7 |
 | D-83 | the `bt-app` and `bt-term` suites are not portable: on macOS 294 of `bt-app`'s 4,600 tests (282 after ticket 72) and 43 of `bt-term`'s fail, each asserting a Windows fact on every host | ticket 72's report (Mac mini, 2026-09-26) | none yet | 0.4.8 — H1 (T-D83), then H7 | open; **2026-10-08 (J4):** **narrowed**: core-macos runs `bt-app`'s updater modules (T-GUARDS-BLIND, `5f7ba1fe`) and its uninstall tests (`1d914d1a`); the rest of `bt-app` and all of `bt-term` are checked, not tested; was 0.4.7 |
 | D-84 | aggregate turn scheduling beyond deferrable work: a turn's deadline is one number shared by every window, and only deferrable work is scheduled against it | budget note §R-B, §R-G (Codex's Q2; the owner's ruling of 2026-09-25, 1); A4 | none yet — owed a 0.4.7 ticket, *The window thread's turn is scheduled across windows and sources*, after B4–B9 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — opened by A4 (2026-09-27); **2026-10-08 (J4):** untouched: its ticket was to follow B4–B9, none of which was cut; was 0.4.7 |
+| D-85 | the program-walk lane: the requests made while a walk is out are answered by the next walk and get no outcome of their own; the line `diagnostics.log` gets when that walk ends is the only record of them | A5 (Programs × every request ends exactly once); T-PROGRAMS-REFRESH (2026-10-08) | none yet | unassigned — listed for the coordinator (2026-10-08) | open |
 
 ---
 
@@ -1619,3 +1620,14 @@ wait on some road, and none has a ruling that it may.
   *The window thread's turn is scheduled across windows and sources*, drafted
   after B4–B9 have moved their waits. Opened by A4 per §R-G; by the owner's ruling
   of 2026-09-25 it is one of the two rows D-2 leaves behind when it closes.
+
+## D-85 — the row added on 2026-10-08 by T-PROGRAMS-REFRESH
+
+- **D-85 · program walk.** `ProgramsLane::serve` answers the newest request
+  standing; a request replaced before its walk started is answered by the walk
+  that served its successor, which a request made later always is — nothing is
+  lost, but no request has an outcome of its own, which is D-72's and D-73's
+  shape. Unlike them, a walk that unwinds is observable (`WalkOut` marks the
+  worker gone and reports the walk that died, and the next request starts a new
+  worker), so only the outcome half is owed: a "superseded by walk N" outcome the
+  drain can report once per request, if a consumer ever needs one.

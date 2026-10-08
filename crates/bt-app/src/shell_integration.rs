@@ -4254,10 +4254,21 @@ mod tests {
             !worker.contains(".join()"),
             "the window thread waits for no startup worker"
         );
+        // The script is prepared before the window; the parser questions about the PowerShell
+        // rows follow the program walk's answers (T-PROGRAMS-REFRESH), read before the panes.
         let warmed = source
-            .find("shell_integration::begin_powershell_preparation_for(&profile_programs);")
+            .find("shell_integration::begin_powershell_script_preparation();")
             .expect("launch starts the script's preparation");
         assert!(warmed < source.find("opening_window_attributes(").unwrap());
+        let asked = source
+            .find("shell_integration::begin_powershell_preparation_for(&profile_programs);")
+            .expect("launch asks about the PowerShell rows the walk answered");
+        assert!(
+            asked
+                < source
+                    .find("let (tab, conpty_source) = create_tab_state(")
+                    .unwrap()
+        );
         let probe = source_for_profile_probe();
         let command = source_for_probe_command();
         assert!(command.contains("quiet_command_named"));
@@ -6831,6 +6842,7 @@ mod tests {
         assert_eq!(
             owners,
             [
+                "Runtime::land_pane_birth",
                 "Runtime::pop_out_preview",
                 "Runtime::restart_shell",
                 "Runtime::split_seat",

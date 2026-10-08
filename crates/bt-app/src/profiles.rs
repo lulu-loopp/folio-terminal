@@ -1077,6 +1077,10 @@ pub fn paste_recipient(
 /// feature's audience.
 pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 
+/// The shipped WSL row: the program walk reads WSL's installation once it has
+/// found this row's `wsl.exe` (`crate::programs_lane`), and not otherwise.
+pub const WSL_ID: &str = "wsl";
+
 /// **Which table of shipped rows a build hands out** — the one axis
 /// [`shipped_for`] turns.
 ///
@@ -1278,7 +1282,7 @@ fn windows_shipped() -> Vec<Profile> {
             origin: Origin::Builtin,
         },
         Profile {
-            id: "wsl".to_owned(),
+            id: WSL_ID.to_owned(),
             // The mock-up writes `WSL · Ubuntu`; this is the half of it that is a
             // constant, and [`Qualifier::WslDistribution`] is the half that is a
             // claim about this machine.
@@ -2138,7 +2142,9 @@ impl ProfileTable {
             .into_iter()
             .filter(|index| {
                 self.profiles.get(*index).is_none_or(|profile| {
-                    profile.origin != Origin::Builtin || programs.is_available(&profile.id)
+                    profile.origin != Origin::Builtin
+                        || programs.is_available(&profile.id)
+                        || programs.is_unknown(&profile.id)
                 })
             })
             .collect()
@@ -2338,19 +2344,19 @@ impl Registry {
     /// [`set_hidden`]'s body — the two guards over this table's own floor rather
     /// than over the process's, which is what lets a test hide a row without
     /// moving the window's answer to "which profile is the floor".
-    fn set_hidden(&self, index: usize, hidden: bool, default: usize) -> bool {
-        self.set_hidden_on(index, hidden, default, SeedPlatform::of_this_build())
+    fn set_hidden(&self, index: usize, hidden: bool, defaults: &[usize]) -> bool {
+        self.set_hidden_on(index, hidden, defaults, SeedPlatform::of_this_build())
     }
 
     fn set_hidden_on(
         &self,
         index: usize,
         hidden: bool,
-        default: usize,
+        defaults: &[usize],
         platform: SeedPlatform,
     ) -> bool {
         let floor = fallback_profile_in_on(&self.table(), platform);
-        if hidden && (index == default || index == floor) {
+        if hidden && (defaults.contains(&index) || index == floor) {
             return false;
         }
         self.edit(index, |profile| {
@@ -2477,6 +2483,14 @@ pub fn table() -> Arc<ProfileTable> {
 /// Read one thing out of the table without cloning a row.
 fn with_table<R>(read: impl FnOnce(&ProfileTable) -> R) -> R {
     read(&table())
+}
+
+/// **A profile's drawn name moved without the table moving** — a WSL walk that
+/// found a different default distribution, which is a different title
+/// qualifier (`crate::wsl::adopt`). The revision is what every measured width and
+/// the title cache are keyed on, so it advances here as for an edit.
+pub fn names_changed() {
+    registry().revision.fetch_add(1, Ordering::Relaxed);
 }
 
 /// How many times the table has moved. Into `LayoutKey`, beside `lang_rev`.
@@ -3292,9 +3306,11 @@ pub fn set_env(index: usize, env: Vec<(String, String)>) -> bool {
 /// degradation in this product lands on it and a floor that can be taken away is
 /// a chain with a hole in the bottom. `default` is passed in rather than read,
 /// because which row is the default is `settings.json`'s answer resolved against
-/// this machine ([`default_profile`]) and not a fact this table holds.
-pub fn set_hidden(index: usize, hidden: bool, default: usize) -> bool {
-    registry().set_hidden(index, hidden, default)
+/// this machine ([`possible_defaults`]) and not a fact this table holds — every
+/// row that may be the default while the machine has not decided it, and the one
+/// row once it has.
+pub fn set_hidden(index: usize, hidden: bool, defaults: &[usize]) -> bool {
+    registry().set_hidden(index, hidden, defaults)
 }
 
 /// Take one row out of the table and hand it back whole, so an Undo can put it
@@ -3894,7 +3910,11 @@ pub struct ProfileLine {
 /// resolved answer rather than the file so that the page and the `+` cannot
 /// disagree about what the default is.
 #[must_use]
-pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -> Vec<ProfileLine> {
+pub fn page_lines(
+    programs: &ProfilePrograms,
+    default: Option<usize>,
+    automatic: bool,
+) -> Vec<ProfileLine> {
     let fallback = fallback_profile();
     with_table(|table| {
         table
@@ -3903,6 +3923,7 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
             .enumerate()
             .map(|(index, profile)| {
                 let available = programs.is_available(&profile.id);
+                let unknown = programs.is_unknown(&profile.id);
                 let is_agent = agent_command(profile).is_some();
                 let program = programs.program(&profile.id).map(Path::new);
                 let profile_fallback = power_shell_profile_fallback_for_launch(
@@ -3915,6 +3936,9 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                     mark: profile.mark,
                     title: title(index),
                     command: match (available, is_agent) {
+                        // Not answered yet: the row says it is being looked for, and
+                        // nothing about it is decided until it is.
+                        _ if unknown => checking_text().to_owned(),
                         (true, _) => command_line(profile, programs.program(&profile.id)),
                         // An agent this window did not find says **where it
                         // looked**, because the answer to "but I use it every
@@ -3935,8 +3959,8 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                     }),
                     profile_fallback,
                     is_agent,
-                    is_default: index == default,
-                    default_is_automatic: automatic,
+                    is_default: default == Some(index),
+                    default_is_automatic: default.is_some() && automatic,
                     is_fallback: index == fallback,
                     deletable: profile.origin == Origin::User,
                     hidden: profile.hidden,
@@ -4428,7 +4452,7 @@ fn automatic_profile_in(
 /// `$SHELL` this machine can start is first — as its own row, or as the system
 /// row of that name pointing at it — then `/bin/zsh` on macOS, then `/bin/bash`,
 /// then `/bin/sh`, which is the floor under both.
-fn shipped_order() -> &'static [&'static str] {
+pub(crate) fn shipped_order() -> &'static [&'static str] {
     shipped_order_for(SeedPlatform::of_this_build())
 }
 
@@ -4465,15 +4489,108 @@ fn shipped_order_for(platform: SeedPlatform) -> &'static [&'static str] {
 /// exactly as long as its cause. The same sentence is why an unset default is
 /// resolved afresh on every read and never written down: a machine that grows a
 /// PowerShell 7 opens with it the next morning, and one that loses it stops.
+///
+/// **`None` while the answer depends on a row the machine has not answered**
+/// (T-PROGRAMS-REFRESH, T-LAUNCH-PROBE's invariant): the default is never the
+/// fallback "because the real default is not known yet". A surface that names
+/// the default names nothing until it is decided; a seed takes
+/// [`DEFAULT_IDENTITY`] and its birth decides.
 #[must_use]
-pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
+pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> Option<usize> {
+    default_profile_decided(stored, programs).ok()
+}
+
+/// [`default_profile`] with the unknown rows it consulted named.
+pub(crate) fn default_profile_decided(
+    stored: &str,
+    programs: &ProfilePrograms,
+) -> Result<usize, Vec<String>> {
     with_table(|table| {
-        default_profile_in(table, stored, |index| {
-            table
-                .get(index)
-                .is_some_and(|row| programs.is_available(&row.id))
+        decided_from_answers(programs, |available| {
+            default_profile_in(table, stored, |index| {
+                table.get(index).is_some_and(|row| available(&row.id))
+            })
         })
     })
+}
+
+/// **Every row that may be the default** — the decided default alone, or, while
+/// rows it depends on are unknown, each of those rows and the row the rule
+/// reaches past them. What a guard protects "the default" with while the default
+/// is not decided: never the fallback in its place.
+#[must_use]
+pub fn possible_defaults(stored: &str, programs: &ProfilePrograms) -> Vec<usize> {
+    with_table(|table| {
+        let unknown = std::cell::RefCell::new(Vec::new());
+        let reached = default_profile_in(table, stored, |index| {
+            let Some(row) = table.get(index) else {
+                return false;
+            };
+            match programs.answer(&row.id) {
+                Some(found) => found.is_some(),
+                None => {
+                    unknown.borrow_mut().push(index);
+                    false
+                }
+            }
+        });
+        let mut rows = unknown.into_inner();
+        rows.push(reached);
+        rows
+    })
+}
+
+/// **The rows a walk answers first** — the ones the default's rule reads, in the
+/// order it reads them: the stored choice, the shipped order, the fallback. A
+/// pane in birth whose profile is the default waits on exactly these, so a walk
+/// held up by one slow `PATH` entry answers them before it reaches the rest.
+#[must_use]
+pub fn default_chain(stored: &str) -> Vec<String> {
+    let mut chain = vec![stored.to_owned()];
+    chain.extend(shipped_order().iter().map(|id| (*id).to_owned()));
+    chain.push(fallback_profile_id().to_owned());
+    chain.retain(|id| !id.is_empty());
+    let mut seen = std::collections::BTreeSet::new();
+    chain.retain(|id| seen.insert(id.clone()));
+    chain
+}
+
+/// **The identity a seed carries for "the default profile, still to be
+/// resolved"** — the empty id, which no row has. A pane holding it is titled
+/// and marked as a terminal of no particular profile, is saved as it, and its
+/// birth resolves it; it is never spelled as the fallback's id.
+pub const DEFAULT_IDENTITY: &str = "";
+
+/// The default profile in the spelling a pane seed owns: the decided row's
+/// id, or [`DEFAULT_IDENTITY`] while the answer is unknown. Every door that
+/// seeds "the default" asks this one function.
+#[must_use]
+pub fn default_profile_identity(stored: &str, programs: &ProfilePrograms) -> String {
+    default_profile(stored, programs).map_or_else(|| DEFAULT_IDENTITY.to_owned(), id)
+}
+
+/// **The name a pane's profile identity goes by** — the row's title, and for
+/// [`DEFAULT_IDENTITY`] the plain word for a terminal: that pane is a terminal
+/// of no particular profile until its birth decides which, and naming the
+/// fallback there would be naming a shell it may never run.
+#[must_use]
+pub fn identity_title(id: &str) -> &'static str {
+    if id == DEFAULT_IDENTITY {
+        crate::i18n::Text::SeatTerminal.text()
+    } else {
+        title(index_of_id(id))
+    }
+}
+
+/// The mark a pane's profile identity wears — the row's, and for
+/// [`DEFAULT_IDENTITY`] the mark a terminal seat of no particular shell wears.
+#[must_use]
+pub fn identity_mark(id: &str) -> ChromeMark {
+    if id == DEFAULT_IDENTITY {
+        ActionIcon::UnknownSeat.mark()
+    } else {
+        mark(index_of_id(id))
+    }
 }
 
 /// Whether the answer above came from the machine rather than from the reader —
@@ -4484,15 +4601,18 @@ pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
 /// and one naming a shell that has since been uninstalled, are both defaults
 /// nobody is currently choosing, and a badge that called them chosen would be
 /// pointing at a row for a reason that is not the reason it is there.
+///
+/// `false` while the stored row is unknown: no badge is drawn from unknown.
 #[must_use]
 pub fn default_profile_is_automatic(stored: &str, programs: &ProfilePrograms) -> bool {
     with_table(|table| {
-        chosen_profile_in(table, stored, |index| {
-            table
-                .get(index)
-                .is_some_and(|row| programs.is_available(&row.id))
+        decided_from_answers(programs, |available| {
+            chosen_profile_in(table, stored, |index| {
+                table.get(index).is_some_and(|row| available(&row.id))
+            })
+            .is_none()
         })
-        .is_none()
+        .unwrap_or(false)
     })
 }
 
@@ -4613,6 +4733,14 @@ pub fn has_id(id: &str) -> bool {
 #[must_use]
 pub fn unavailable_tip(profile: usize) -> String {
     crate::i18n::unavailable_profile_tip(title(profile))
+}
+
+/// What a row whose program has not been answered yet says — on the Profiles
+/// page in place of its command line, and over its greyed menu row. The words
+/// the About page's version line already says while it asks.
+#[must_use]
+pub fn checking_text() -> &'static str {
+    crate::i18n::Text::VersionChecking.text()
 }
 
 /// What, if anything, this profile's title has to name before it is unambiguous
@@ -5342,66 +5470,107 @@ fn is_a_git_on(platform: HostPlatform, path: &Path, environment: &dyn ShellEnvir
 // and `file_menu_layout` all carried, and with it the only fact outside the
 // subject that could change the length of one of these lists.
 
-/// Which executable each profile resolves to **on this machine**, probed once.
+/// Which executable each profile resolves to **on this machine** — the answers in hand.
 ///
-/// Once, and that is the whole reason this is a value rather than a function.
-/// Availability is a filesystem question, the picker asks it of every row it
-/// draws, and the picker is redrawn on every frame it is open — a probe called
-/// from the paint would put four `is_file` calls on the pointer's path at
-/// whatever rate the screen refreshes. It is also a question whose answer must
-/// not change *while the menu is open*: a row that greys out between the frame
-/// you read it on and the click you aimed at it is a worse answer than a stale
-/// one.
+/// A value rather than a function, and the reason has not changed: availability is a
+/// filesystem question, the picker asks it of every row it draws, and the picker is redrawn on
+/// every frame it is open — a probe called from the paint would put a `PATH` walk on the
+/// pointer's path at whatever rate the screen refreshes. The answers are asked for on the
+/// program-walk lane (`crate::programs_lane`) and **adopted** here between frames, so a frame and
+/// the click aimed at it read one value.
 ///
-/// The environment is injected for the reason `bt_pty::shell`'s already is:
-/// otherwise every test of this module would be a test of what happens to be
-/// installed on the machine running it, and "Git Bash is greyed" would pass on
-/// the build server and fail on the developer's laptop for the same code.
+/// **Since T-PROGRAMS-REFRESH the answers follow the machine.** A walk is asked for when a menu
+/// that lists programs opens, when the Profiles or Agents page or a Git page opens, when Windows
+/// says the environment moved, when the table changes and when a pane's birth finds a row it needs
+/// unknown; each answer carries the number of the walk that gave it, and an answer older than the
+/// one held for its row is not adopted ([`Self::adopt_against`]).
 ///
-/// **Keyed by [`Profile::id`] and never by row position** (T-PROFILE-TABLE-MOVE).
-/// A snapshot is a value that outlives the frame it was taken on, and the table
-/// under it has a settings page with `Move up` and `Move down` on every row: a
-/// vector indexed by position answers "is row 3 startable" with whatever row was
-/// third when the probe ran, so a window holding one of these read a reorder as
-/// every pane changing shell. An id is the one thing about a row that a move
-/// does not touch, so a snapshot keyed on it cannot observe a move at all — a
-/// row that was startable stays startable wherever it now sits, and a row that
-/// is not in the snapshot is a row this window has not probed yet, which is the
-/// same answer as "not on this machine" and degrades the same way.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// **A row is known or unknown, and unknown is never "not here".** A row with no answer is a row
+/// whose question has not been answered — at launch before the first walk lands, or a row a table
+/// edit added or re-pointed — and nothing is decided from it: not a fallback, a banner, a saved
+/// pane's rewrite, a default or a hidden agent ([`decided_from_answers`]). A known row keeps its
+/// answer until a newer one replaces it, so a refresh never makes a row unknown.
+///
+/// The environment is injected for the reason `bt_pty::shell`'s already is: otherwise every test
+/// of this module would be a test of what happens to be installed on the machine running it.
+///
+/// **Keyed by [`Profile::id`] and never by row position** (T-PROFILE-TABLE-MOVE): an id is the one
+/// thing about a row that a move does not touch. Each answer remembers the [`ProgramSource`] it
+/// answered, so an edit that re-points a row leaves that row unknown rather than answered about the
+/// program it used to name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfilePrograms {
-    resolved: BTreeMap<String, Option<OsString>>,
+    answers: BTreeMap<String, RowAnswer>,
+}
+
+/// One row's completed answer: the source it was asked about, the walk that answered, and where
+/// the program is (`None`: not on this machine).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RowAnswer {
+    source: ProgramSource,
+    generation: u64,
+    program: Option<OsString>,
+}
+
+/// **One row's answer as a walk publishes it** — what [`ProfilePrograms::adopt_against`] takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowVerdict {
+    /// The walk that gave it (`crate::programs_lane`'s request number).
+    pub generation: u64,
+    pub id: String,
+    /// The program source the walk read the row as. An answer about a source the live row no
+    /// longer has is not an answer about the row.
+    pub source: ProgramSource,
+    pub program: Option<OsString>,
 }
 
 impl ProfilePrograms {
-    /// Ask the machine, once, what each profile would start.
+    /// No row answered: what the launch holds until its first walk lands.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// Ask the machine about this process's table, synchronously — the tests' door.
+    #[cfg(test)]
     #[must_use]
     pub fn probe(environment: &dyn ShellEnvironment) -> Self {
         with_table(|table| Self::probe_rows(&table.profiles, environment))
     }
 
-    /// The same probe over rows handed in rather than over this process's table.
+    /// The same probe over rows handed in rather than over this process's table, every row
+    /// answered, as one walk (generation `0`) answers it.
     ///
-    /// Split off for [`shipped_for`]'s reason: the question *which of these rows
-    /// can this machine start* is asked about a macOS seed by a Windows runner,
-    /// and a probe that could only read the process's own table could only ever
-    /// be asked about the platform it was running on.
+    /// Split off for [`shipped_for`]'s reason: the question *which of these rows can this machine
+    /// start* is asked about a macOS seed by a Windows runner. Its one product caller is the
+    /// standalone `--remove-shell-integration` door, which has no event loop and so no lane to
+    /// ask (`shell_integration::installed_powershells`, Windows only).
+    #[cfg(any(test, windows))]
     #[must_use]
     pub fn probe_rows(rows: &[Profile], environment: &dyn ShellEnvironment) -> Self {
         Self {
-            resolved: rows
+            answers: rows
                 .iter()
-                .map(|profile| (profile.id.clone(), Self::resolve_row(profile, environment)))
+                .map(|profile| {
+                    (
+                        profile.id.clone(),
+                        RowAnswer {
+                            source: profile.program.clone(),
+                            generation: 0,
+                            program: Self::resolve_row(profile, environment),
+                        },
+                    )
+                })
                 .collect(),
         }
     }
 
-    /// Where one row's program is on this machine, or `None` when it is nowhere.
-    ///
-    /// Lifted out of [`Self::probe_rows`] when the probe became a map keyed by id:
-    /// the pair being built is the interesting line of that function now, and a
-    /// three-armed match nested inside the closure that builds it buried it.
-    fn resolve_row(profile: &Profile, environment: &dyn ShellEnvironment) -> Option<OsString> {
+    /// Where one row's program is on this machine, or `None` when it is nowhere — the walk's
+    /// question about one row (`crate::programs_lane`).
+    pub(crate) fn resolve_row(
+        profile: &Profile,
+        environment: &dyn ShellEnvironment,
+    ) -> Option<OsString> {
         match &profile.program {
             // A real `None` on a machine with no PowerShell 7, which is what
             // greys the row rather than starting 5.1 under 7's name.
@@ -5420,27 +5589,101 @@ impl ProfilePrograms {
         }
     }
 
-    /// The program the profile with this **id** would start, or `None` when this
-    /// machine has nowhere to start it from — and equally when this snapshot was
-    /// taken before the row existed.
-    ///
-    /// The two are one answer on purpose: a caller that cannot start a program
-    /// and a caller that has never looked for one both owe the reader the same
-    /// degradation, and a third state here would be a third arm at every call
-    /// site for a difference nobody can act on.
+    /// **Take a walk's answers**, row by row, against the live table: an answer is adopted when
+    /// the live table still has its row, the row still names the program source the walk read,
+    /// and no answer from a later walk is held for the row. Answers whether anything a reader can
+    /// see changed (a row became known, or its program moved).
+    pub fn adopt(&mut self, verdicts: impl IntoIterator<Item = RowVerdict>) -> bool {
+        with_table(|table| self.adopt_against(table, verdicts))
+    }
+
+    /// [`Self::adopt`] against a table handed in.
+    fn adopt_against(
+        &mut self,
+        table: &ProfileTable,
+        verdicts: impl IntoIterator<Item = RowVerdict>,
+    ) -> bool {
+        let mut changed = false;
+        for verdict in verdicts {
+            let Some(row) = table.profiles.iter().find(|row| row.id == verdict.id) else {
+                continue;
+            };
+            if row.program != verdict.source {
+                continue;
+            }
+            if let Some(held) = self.answers.get(&verdict.id)
+                && held.source == verdict.source
+                && held.generation > verdict.generation
+            {
+                continue;
+            }
+            let answer = RowAnswer {
+                source: verdict.source,
+                generation: verdict.generation,
+                program: verdict.program,
+            };
+            let before = self.answers.insert(verdict.id, answer.clone());
+            changed |= before.is_none_or(|before| {
+                before.program != answer.program || before.source != answer.source
+            });
+        }
+        changed
+    }
+
+    /// **The answers a changed table keeps**: a row that is still there and still names the same
+    /// program source keeps its answer; a row that is new or re-pointed becomes unknown until a
+    /// walk answers it; a row that is gone takes its answer with it.
+    #[must_use]
+    pub fn carried_into_live_table(&self) -> Self {
+        with_table(|table| self.carried_into(table))
+    }
+
+    fn carried_into(&self, table: &ProfileTable) -> Self {
+        Self {
+            answers: self
+                .answers
+                .iter()
+                .filter(|(id, answer)| {
+                    table
+                        .profiles
+                        .iter()
+                        .any(|row| &row.id == *id && row.program == answer.source)
+                })
+                .map(|(id, answer)| (id.clone(), answer.clone()))
+                .collect(),
+        }
+    }
+
+    /// The answer about the profile with this id: `None` while it is unknown, `Some(None)` when
+    /// this machine has nowhere to start it from, `Some(Some(program))` when it has.
+    #[must_use]
+    pub fn answer(&self, id: &str) -> Option<Option<&OsStr>> {
+        self.answers.get(id).map(|answer| answer.program.as_deref())
+    }
+
+    /// Whether the row with this id has no answer yet.
+    #[must_use]
+    pub fn is_unknown(&self, id: &str) -> bool {
+        self.answer(id).is_none()
+    }
+
+    /// [`Self::is_unknown`] asked about a live-table position.
+    #[must_use]
+    pub fn row_is_unknown(&self, index: usize) -> bool {
+        self.is_unknown(&id(index))
+    }
+
+    /// The program the profile with this **id** would start — `None` when this machine has
+    /// nowhere to start it from **or the row is unknown**. Only a caller that has already
+    /// decided from known answers ([`decided_from_answers`]) or that draws a row reads this; a
+    /// decision reads [`Self::answer`].
     #[must_use]
     pub fn program(&self, id: &str) -> Option<&OsStr> {
-        self.resolved.get(id)?.as_deref()
+        self.answer(id).flatten()
     }
 
     /// The same answer about **the row standing at one position of the live
     /// table** — the form the pickers and the Profiles page ask in.
-    ///
-    /// Those callers are drawing the table as it is right now, so a position is
-    /// what they hold and the id is one lookup away; taking the lookup here is
-    /// what keeps the position from being carried any further than the frame it
-    /// was read on. A position the table does not hold resolves to no id and so
-    /// to no program, which is the same degradation as every other miss.
     #[must_use]
     pub fn row_program(&self, index: usize) -> Option<&OsStr> {
         self.program(&id(index))
@@ -5453,20 +5696,13 @@ impl ProfilePrograms {
         self.row_program(index).is_some()
     }
 
-    /// **A machine on which exactly these profiles resolve**, for tests about
-    /// what a *caller* does with the answer rather than about the probe.
-    ///
-    /// Test-only, on `SessionStore::at`'s footing: [`Self::probe`] is the
-    /// product's one door and it walks the shipped table against a real
-    /// environment, which is the right shape for the tests that are about
-    /// resolution and the wrong one for the tests that are about the rule a
-    /// missing program triggers — those would have to spell out the candidate
-    /// list of every shipped row in order to say "Git Bash is not here".
+    /// **A machine on which exactly these profiles resolve**, every other row answered absent,
+    /// for tests about what a *caller* does with the answer rather than about the walk.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn with_only(available: &[usize]) -> Self {
         Self {
-            resolved: with_table(|table| {
+            answers: with_table(|table| {
                 table
                     .profiles
                     .iter()
@@ -5474,14 +5710,47 @@ impl ProfilePrograms {
                     .map(|(index, profile)| {
                         (
                             profile.id.clone(),
-                            available
-                                .contains(&index)
-                                .then(|| OsString::from(format!("C:\\fake\\{index}.exe"))),
+                            RowAnswer {
+                                source: profile.program.clone(),
+                                generation: 0,
+                                program: available
+                                    .contains(&index)
+                                    .then(|| OsString::from(format!("C:\\fake\\{index}.exe"))),
+                            },
                         )
                     })
                     .collect()
             }),
         }
+    }
+
+    /// Every one of `rows` answered absent — a machine with none of their programs.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn none_of(rows: &[Profile]) -> Self {
+        Self {
+            answers: rows
+                .iter()
+                .map(|profile| {
+                    (
+                        profile.id.clone(),
+                        RowAnswer {
+                            source: profile.program.clone(),
+                            generation: 0,
+                            program: None,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// These answers with the row `id` unknown again — for tests of what an unknown row does.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn without(mut self, id: &str) -> Self {
+        self.answers.remove(id);
+        self
     }
 
     /// Where one candidate says to look, or `None` when the machine cannot even
@@ -5520,24 +5789,51 @@ impl ProfilePrograms {
         }
     }
 
-    /// Whether this profile can do what its row says it does.
+    /// Whether this profile can do what its row says it does — `false` for a row that is not on
+    /// this machine **and for one that is unknown**; a surface that must tell the two apart asks
+    /// [`Self::is_unknown`].
     ///
     /// **Settings > Profiles draws a profile it cannot start greyed rather than
     /// hiding it** (user ruling 2026-08-10, placed by the ruling of
     /// 2026-09-06): the row is the product saying "this is a thing Folio
-    /// opens", and the grey is it saying "not on this machine". Dropping the
-    /// row conflates "you have not installed Git" with "we never thought of
-    /// Git", and only one of those is something the user can act on.
+    /// opens", and the grey is it saying "not on this machine".
     ///
     /// **A menu that starts a shell leaves it off instead** (user ruling
-    /// 2026-09-06): every row of one of those is a button, and the page above
-    /// has already said the sentence somewhere it can be read. See
-    /// [`ProfileTable::offered_to_start`], which is where that list is drawn up,
-    /// and note that this answer is still what those menus grey a row of the
-    /// reader's *own* with — the rule drops built-in rows only.
+    /// 2026-09-06): see [`ProfileTable::offered_to_start`].
     #[must_use]
     pub fn is_available(&self, id: &str) -> bool {
         self.program(id).is_some()
+    }
+}
+
+/// **A rule decided from completed answers only** — `Err` names the rows it consulted that have
+/// no answer, and the rule's own answer is then not used.
+///
+/// `rule` is handed `available(id)`; an unknown row reads `false` there only so the rule can run
+/// to its end, and it is recorded. A row the machine has not answered is never read as "not here"
+/// by anybody downstream: a slow disk would otherwise become a fallback, a banner, a rewritten
+/// saved pane or a hidden agent.
+pub(crate) fn decided_from_answers<R>(
+    programs: &ProfilePrograms,
+    rule: impl FnOnce(&dyn Fn(&str) -> bool) -> R,
+) -> Result<R, Vec<String>> {
+    let waiting = std::cell::RefCell::new(Vec::<String>::new());
+    let available = |id: &str| match programs.answer(id) {
+        Some(found) => found.is_some(),
+        None => {
+            let mut waiting = waiting.borrow_mut();
+            if !waiting.iter().any(|held| held == id) {
+                waiting.push(id.to_owned());
+            }
+            false
+        }
+    };
+    let decided = rule(&available);
+    let waiting = waiting.into_inner();
+    if waiting.is_empty() {
+        Ok(decided)
+    } else {
+        Err(waiting)
     }
 }
 
@@ -5739,7 +6035,14 @@ impl ProfileMenuLayout {
             .iter()
             .zip(&self.items)
             .filter(|(index, _)| !programs.row_is_available(**index))
-            .map(|(index, rect)| (MenuRow::Profile(*index), *rect, unavailable_tip(*index)));
+            .map(|(index, rect)| {
+                let tip = if programs.row_is_unknown(*index) {
+                    checking_text().to_owned()
+                } else {
+                    unavailable_tip(*index)
+                };
+                (MenuRow::Profile(*index), *rect, tip)
+            });
         let recents = self
             .recent
             .iter()
@@ -5882,7 +6185,8 @@ pub fn layout(
     // default profile — or unplugging the drive Git lives on — cannot make the
     // menu change width under the pointer.
     let annotation = measure(hint_text(), px(HINT_FONT_LOGICAL_PX))
-        .max(measure(unavailable_hint_text(), px(HINT_FONT_LOGICAL_PX)));
+        .max(measure(unavailable_hint_text(), px(HINT_FONT_LOGICAL_PX)))
+        .max(measure(checking_text(), px(HINT_FONT_LOGICAL_PX)));
     // Measured before the closure below borrows `measure` for the rest of the
     // function, not because the order matters to the layout.
     let files_hint = measure(files_pane_hint_text(), px(HINT_FONT_LOGICAL_PX));
@@ -6129,7 +6433,13 @@ fn recent_is_available(seed: &Seed, programs: &ProfilePrograms) -> bool {
         // id this table no longer holds revives as the fallback profile, so
         // what the grey has to answer for is the profile that would really
         // start.
-        Seed::Term { profile_id, .. } => programs.row_is_available(index_of_id(profile_id)),
+        //
+        // A row the walk has not answered is offered: nothing is greyed from unknown, and the
+        // pane it revives waits for its answer at its birth.
+        Seed::Term { profile_id, .. } => {
+            let index = index_of_id(profile_id);
+            programs.row_is_available(index) || programs.row_is_unknown(index)
+        }
         Seed::Files { .. } | Seed::Preview { .. } => true,
         // **A window is offered while any one of its tabs can still be opened**
         // (multiwindow slice D). Greying it because one shell of six has gone
@@ -6165,7 +6475,7 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 pub fn build(
     layout: &ProfileMenuLayout,
     programs: &ProfilePrograms,
-    default: usize,
+    default: Option<usize>,
     hover: Option<MenuRow>,
     recent: &[RecentEntry],
     now: SystemTime,
@@ -6225,7 +6535,10 @@ pub fn build(
                 // resolved through [`default_profile`], which refuses to answer
                 // with a profile this machine cannot start.
                 hint: if available {
-                    (index == default).then(|| hint(hint_text().to_owned()))
+                    (Some(index) == default).then(|| hint(hint_text().to_owned()))
+                } else if programs.row_is_unknown(index) {
+                    // Not answered yet: being looked for, and not "not installed".
+                    Some(hint(checking_text().to_owned()))
                 } else {
                     Some(hint(unavailable_hint_text().to_owned()))
                 },
@@ -10143,6 +10456,15 @@ impl TermMenuLayout {
             .and_then(|submenu| submenu.rows.get(at).copied())
     }
 
+    /// Every row of the open child, top to bottom, as the profile it is about — what
+    /// [`relit`] compares across a relayout. Empty while no child is up.
+    #[must_use]
+    pub fn submenu_items(&self) -> &[usize] {
+        self.submenu
+            .as_ref()
+            .map_or(&[], |submenu| submenu.rows.as_slice())
+    }
+
     /// **Whether this point is on the child at all** — its rows, its padding,
     /// its border. [`PaneMenuLayout::on_submenu`]'s reason verbatim: the hit
     /// answers `Surface` for both menus' padding, so the safety triangle cannot
@@ -11290,6 +11612,48 @@ pub enum PaneMenuHit {
     Surface,
 }
 
+/// **Which hand lit a menu's row last** — the pointer or the keyboard.
+///
+/// One highlight serves both hands in these menus ([`PaneMenuHover`]'s own
+/// sentence), and they part only when the rows move under it: see [`relit`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LitBy {
+    /// The pointer lit it, or nothing has.
+    #[default]
+    Pointer,
+    /// An arrow key walked to it.
+    Keyboard,
+}
+
+/// **A menu's rows follow their items** (owner ruling 2026-10-04; the coordinator's decision on
+/// the pointer, T-FRESHNESS round 2) — the one helper every menu that lists programs relights
+/// through when a new answer about the machine re-lays it out.
+///
+/// `lit` is the lit row's position among `shown`, the items the menu showed; `now` is the items
+/// it shows after the relayout; `under_pointer` is the position the pointer stands over in the
+/// new layout.
+///
+/// * **A row the keyboard lit follows its item**: the position of the same item in `now`, or
+///   nothing when the item is gone. Enter then acts on the item the reader was looking at.
+/// * **A row the pointer lit is the row under the pointer**: the lit row is always the row a
+///   press there acts on, and a press acts on the row it lands on.
+#[must_use]
+pub fn relit<K: PartialEq>(
+    lit: Option<usize>,
+    by: LitBy,
+    shown: &[K],
+    now: &[K],
+    under_pointer: Option<usize>,
+) -> Option<usize> {
+    match by {
+        LitBy::Pointer => under_pointer,
+        LitBy::Keyboard => {
+            let item = shown.get(lit?)?;
+            now.iter().position(|candidate| candidate == item)
+        }
+    }
+}
+
 /// What is lit — the pointer's hover and the keyboard's cursor, which are one
 /// thing in a menu.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11667,6 +12031,16 @@ impl PaneMenuLayout {
         self.submenu
             .as_ref()
             .and_then(|submenu| submenu.rows.get(at).copied())
+    }
+
+    /// Every row of the open child, top to bottom, as what it is about (a `PROFILES` index
+    /// under `Split with`) — what [`relit`] compares across a relayout. Empty while no child is
+    /// up.
+    #[must_use]
+    pub fn submenu_items(&self) -> &[usize] {
+        self.submenu
+            .as_ref()
+            .map_or(&[], |submenu| submenu.rows.as_slice())
     }
 
     /// Whether this point is on either surface. Two rectangles, because a menu
@@ -14167,7 +14541,7 @@ mod tests {
             let layers = build(
                 &layout,
                 &equipped(),
-                fallback_profile(),
+                Some(fallback_profile()),
                 None,
                 NO_RECENT,
                 now(),
@@ -15079,7 +15453,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            0,
+            Some(0),
             None,
             &vault,
             now(),
@@ -16142,7 +16516,7 @@ mod tests {
             "a bare Windows box can start one row, so one row is what it is offered"
         );
         assert!(
-            page_lines(&bare(), fallback_profile(), true).len() > 1,
+            page_lines(&bare(), Some(fallback_profile()), true).len() > 1,
             "and the eleven it dropped are still on the page that explains them"
         );
         assert_eq!(
@@ -16170,13 +16544,7 @@ mod tests {
         let (built, faults) = merge(shipped(), &file(vec![mine("mine")]));
         assert!(faults.is_empty(), "{faults:?}");
         let table = ProfileTable { profiles: built };
-        let nothing_at_all = ProfilePrograms {
-            resolved: table
-                .profiles()
-                .iter()
-                .map(|profile| (profile.id.clone(), None))
-                .collect(),
-        };
+        let nothing_at_all = ProfilePrograms::none_of(table.profiles());
         assert_eq!(
             table
                 .offered_to_start(&nothing_at_all)
@@ -16199,7 +16567,7 @@ mod tests {
     /// stands under, and answers `None` on a machine that has them all.
     #[test]
     fn the_page_keeps_every_agent_row_and_the_group_says_the_way_out_once() {
-        let missing = page_lines(&bare(), fallback_profile(), true);
+        let missing = page_lines(&bare(), Some(fallback_profile()), true);
         assert_eq!(missing.len(), count(), "every row, agents included");
         let claude = missing
             .iter()
@@ -16220,7 +16588,7 @@ mod tests {
             "which stands under the last agent row"
         );
 
-        let all_of_them = page_lines(&equipped(), fallback_profile(), false);
+        let all_of_them = page_lines(&equipped(), Some(fallback_profile()), false);
         assert_eq!(
             agent_note_after(&all_of_them),
             None,
@@ -16459,7 +16827,7 @@ mod tests {
             let layers = build(
                 &layout,
                 &equipped(),
-                chosen,
+                Some(chosen),
                 None,
                 NO_RECENT,
                 now(),
@@ -16524,7 +16892,7 @@ mod tests {
                 let layer = one_layer(build(
                     &layout,
                     &programs,
-                    chosen,
+                    Some(chosen),
                     None,
                     &vault,
                     now(),
@@ -16698,23 +17066,23 @@ mod tests {
 
         assert_eq!(
             default_profile("cmd", &all),
-            index_of_id("cmd"),
+            Some(index_of_id("cmd")),
             "a stored id this machine can start is the answer, whatever index it is"
         );
         assert_eq!(
             default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &all),
-            index_of_id("pwsh"),
+            Some(index_of_id("pwsh")),
             "nobody has ever opened the setting: the first shipped shell this \
              machine has, which on a machine with PowerShell 7 is PowerShell 7"
         );
         assert_eq!(
             default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &bare()),
-            fallback_profile(),
+            Some(fallback_profile()),
             "and on a machine that has only the one, the walk stops at the floor"
         );
         assert_eq!(
             default_profile(WINDOWS_POWERSHELL_ID, &all),
-            index_of_id(WINDOWS_POWERSHELL_ID),
+            Some(index_of_id(WINDOWS_POWERSHELL_ID)),
             "unset is not the same as choosing 5.1: a reader who picked it keeps it \
              on the very machine the unset answer would have moved off"
         );
@@ -16729,12 +17097,12 @@ mod tests {
         );
         assert_eq!(
             default_profile("a-profile-from-a-newer-build", &all),
-            index_of_id("pwsh"),
+            Some(index_of_id("pwsh")),
             "an id this build does not have decides nothing, so the machine does"
         );
         assert_eq!(
             default_profile("gitbash", &bare()),
-            fallback_profile(),
+            Some(fallback_profile()),
             "chosen, installed once, uninstalled since — the window still opens"
         );
         // And the resolved answer is always startable, which is the property
@@ -16742,7 +17110,8 @@ mod tests {
         for stored in ["cmd", "gitbash", "wsl", "pwsh", "", "nonsense"] {
             for machine in [&all, &bare()] {
                 assert!(
-                    machine.row_is_available(default_profile(stored, machine)),
+                    default_profile(stored, machine)
+                        .is_some_and(|default| machine.row_is_available(default)),
                     "the default resolved for {stored:?} must be startable"
                 );
             }
@@ -17796,8 +18165,9 @@ mod tests {
             None,
             "a flag with nothing behind it names nobody"
         );
-        // No test process has read this machine's registry (`wsl::start` is `main`'s alone), so the
-        // fall-through is the honest empty answer rather than whatever is installed here.
+        // No test process has read this machine's registry (`wsl::adopt` is the application's
+        // alone), so the fall-through is the honest empty answer rather than whatever is installed
+        // here.
         assert_eq!(wsl_distribution(index_of_id("wsl")), None);
     }
 
@@ -18539,7 +18909,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &programs,
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             NO_RECENT,
             now(),
@@ -18663,7 +19033,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &programs,
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -18835,7 +19205,7 @@ mod tests {
         let rest = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             NO_RECENT,
             now(),
@@ -18845,7 +19215,7 @@ mod tests {
         let hover = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             Some(MenuRow::Profile(0)),
             NO_RECENT,
             now(),
@@ -19003,7 +19373,7 @@ mod tests {
         let layers = build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             NO_RECENT,
             now(),
@@ -19095,7 +19465,7 @@ mod tests {
             let layer = one_layer(build(
                 &layout,
                 &equipped(),
-                fallback_profile(),
+                Some(fallback_profile()),
                 None,
                 NO_RECENT,
                 now(),
@@ -19440,7 +19810,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19484,7 +19854,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19576,7 +19946,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19614,7 +19984,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             None,
             &vault,
             now(),
@@ -19695,7 +20065,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            fallback_profile(),
+            Some(fallback_profile()),
             Some(MenuRow::Recent(0)),
             &vault,
             now(),
@@ -22675,7 +23045,7 @@ mod tests {
     #[test]
     fn the_profiles_page_keeps_every_row_and_names_what_is_missing() {
         let machine = bare();
-        let lines = page_lines(&machine, 0, true);
+        let lines = page_lines(&machine, Some(0), true);
         assert_eq!(lines.len(), count(), "no row is dropped from the page");
         let absent: Vec<&ProfileLine> = lines.iter().filter(|line| !line.available).collect();
         assert!(
@@ -25395,14 +25765,14 @@ mod tests {
             .position_of_id(WINDOWS_POWERSHELL_ID)
             .unwrap();
         assert!(
-            !registry.set_hidden_on(0, true, 0, SeedPlatform::Windows),
+            !registry.set_hidden_on(0, true, &[0], SeedPlatform::Windows),
             "0 is the default here"
         );
-        assert!(!registry.set_hidden_on(floor, true, 0, SeedPlatform::Windows));
+        assert!(!registry.set_hidden_on(floor, true, &[0], SeedPlatform::Windows));
         assert!(registry.table().profiles().iter().all(|row| !row.hidden));
 
         let cmd = registry.table().position_of_id("cmd").unwrap();
-        assert!(registry.set_hidden_on(cmd, true, 0, SeedPlatform::Windows));
+        assert!(registry.set_hidden_on(cmd, true, &[0], SeedPlatform::Windows));
         assert!(
             !registry.table().offered().contains(&cmd),
             "hiding is being out of the pickers"
@@ -25413,7 +25783,7 @@ mod tests {
             "and it is still a profile: a seat already on disk restarts through \
              its own id"
         );
-        assert!(registry.set_hidden_on(cmd, false, 0, SeedPlatform::Windows));
+        assert!(registry.set_hidden_on(cmd, false, &[0], SeedPlatform::Windows));
     }
 
     /// RED (B-AUDIT-046 SET-1) — a Mac registry protects `/bin/sh`, not the
@@ -25435,8 +25805,8 @@ mod tests {
         assert_ne!(first, floor, "the test distinguishes a row from the floor");
         drop(table);
 
-        assert!(registry.set_hidden_on(first, true, floor, SeedPlatform::MacOs));
-        assert!(!registry.set_hidden_on(floor, true, first, SeedPlatform::MacOs));
+        assert!(registry.set_hidden_on(first, true, &[floor], SeedPlatform::MacOs));
+        assert!(!registry.set_hidden_on(floor, true, &[first], SeedPlatform::MacOs));
         assert!(registry.table().get(first).unwrap().hidden);
         assert!(!registry.table().get(floor).unwrap().hidden);
     }
@@ -25458,7 +25828,7 @@ mod tests {
             true
         });
         let cmd = registry.table().position_of_id("cmd").unwrap();
-        registry.set_hidden(cmd, true, 1);
+        registry.set_hidden(cmd, true, &[1]);
         registry.rename(cmd, "Console");
         registry.move_profile(0, true);
         let moved = registry.table().position_of_id("pwsh").unwrap();
@@ -26266,7 +26636,7 @@ mod tests {
     /// one line the row has room for is the reason it cannot start.
     #[test]
     fn an_unavailable_row_gives_its_reason_and_drops_its_capability_line() {
-        let lines = page_lines(&bare(), fallback_profile(), true);
+        let lines = page_lines(&bare(), Some(fallback_profile()), true);
         assert_eq!(lines.len(), count());
         let git = lines
             .iter()
@@ -26303,7 +26673,7 @@ mod tests {
     /// say nothing about where the tab opens, which is what `--cd ~` is.
     #[test]
     fn the_line_under_a_name_is_the_executable_and_its_words() {
-        let lines = page_lines(&equipped(), fallback_profile(), false);
+        let lines = page_lines(&equipped(), Some(fallback_profile()), false);
         let of = |id: &str| {
             lines
                 .iter()
@@ -26457,6 +26827,238 @@ mod tests {
         assert_eq!(unkeepable.page_url(), None);
         assert!(page.is_page());
         assert!(!file.is_page());
+    }
+
+    // ── T-PROGRAMS-REFRESH: the program list follows the machine ──────────────────────────────
+
+    /// A table of the test's own: the shipped fallback and one tool row named for the test, so the
+    /// adoption is asked about a table this test controls and not about the process's.
+    fn table_with_tool(tool: &Profile) -> ProfileTable {
+        let mut fallback = row_of(fallback_profile_id()).expect("the shipped fallback");
+        fallback.hidden = false;
+        let mut tool = tool.clone();
+        tool.origin = Origin::Builtin;
+        ProfileTable {
+            profiles: vec![fallback, tool],
+        }
+    }
+
+    /// RED — **a program installed while Folio runs shows in the new-tab menu after the
+    /// environment broadcast, and after a menu opens with no broadcast at all**.
+    ///
+    /// The production lane (`crate::programs_lane`) over a machine the test writes (the fake walk
+    /// door): the first walk finds no `rg`, the menu does not offer the built-in row; `rg` is
+    /// installed; the broadcast's walk answers, the window thread adopts it, and the menu offers
+    /// the row. Then the program goes again and a menu-open walk takes it back off, with no
+    /// broadcast in between.
+    ///
+    /// MUTATION (observed red): `ProgramsLane::serve` returning after its first walk — the lane
+    /// asks only at launch, and the row never appears.
+    #[test]
+    fn a_program_installed_while_folio_runs_appears_in_the_menu_after_the_broadcast_and_after_a_menu_opens()
+     {
+        use crate::programs_lane::{Trigger, WalkRequest, tests as lane_tests};
+        let machine = lane_tests::FakeMachine::with_path(&[lane_tests::bin_dir()]);
+        let installed = lane_tests::bin("rg.exe");
+        let (lane, wakes, _) = lane_tests::lane(machine.clone());
+        let tool = lane_tests::row("rg-工具", "rg.exe");
+        let table = table_with_tool(&tool);
+        let mut programs = ProfilePrograms::unknown();
+        let ask = |trigger| {
+            lane.request(WalkRequest {
+                rows: table.profiles.clone(),
+                first: Vec::new(),
+                trigger,
+            })
+        };
+        let offered = |programs: &ProfilePrograms| table.offered_to_start(programs).contains(&1);
+
+        let launch = ask(Trigger::Launch);
+        programs.adopt_against(
+            &table,
+            lane_tests::answers_through(lane, &wakes, launch).verdicts,
+        );
+        assert!(
+            !offered(&programs),
+            "not on this machine yet: a built-in absent row is left off"
+        );
+
+        machine.install(&installed);
+        let broadcast = ask(Trigger::Environment);
+        assert!(programs.adopt_against(
+            &table,
+            lane_tests::answers_through(lane, &wakes, broadcast).verdicts
+        ));
+        assert!(offered(&programs), "the broadcast's walk found it");
+        assert_eq!(
+            programs.program("rg-工具"),
+            Some(installed.as_os_str()),
+            "and the program is the one installed"
+        );
+
+        machine.uninstall(&installed);
+        let menu = ask(Trigger::ProgramMenu);
+        programs.adopt_against(
+            &table,
+            lane_tests::answers_through(lane, &wakes, menu).verdicts,
+        );
+        assert!(
+            !offered(&programs),
+            "a menu opening asks again on its own, with no broadcast"
+        );
+    }
+
+    /// RED — **an answer from an older walk never overwrites a newer one**, and an answer about a
+    /// program source the row no longer has is not an answer about the row.
+    ///
+    /// MUTATION (observed red): drop `held.generation > verdict.generation` from
+    /// `adopt_against`'s refusal — the walk-3 answer replaces walk 5's.
+    #[test]
+    fn an_older_walks_answer_never_overwrites_a_newer_one() {
+        use crate::programs_lane::tests as lane_tests;
+        let tool = lane_tests::row("工具", "tool.exe");
+        let table = table_with_tool(&tool);
+        let verdict = |generation, program: &str| RowVerdict {
+            generation,
+            id: tool.id.clone(),
+            source: tool.program.clone(),
+            program: Some(OsString::from(program)),
+        };
+        let mut programs = ProfilePrograms::unknown();
+        assert!(programs.adopt_against(&table, [verdict(5, r"C:\新\tool.exe")]));
+        assert!(
+            !programs.adopt_against(&table, [verdict(3, r"C:\旧\tool.exe")]),
+            "walk 3 answered before walk 5 and is refused"
+        );
+        assert_eq!(
+            programs.program(&tool.id),
+            Some(OsStr::new(r"C:\新\tool.exe"))
+        );
+
+        let stale_source = RowVerdict {
+            source: ProgramSource::Path(PathBuf::from(r"C:\别处\tool.exe")),
+            ..verdict(9, r"C:\别处\tool.exe")
+        };
+        assert!(!programs.adopt_against(&table, [stale_source]));
+        assert_eq!(
+            programs.program(&tool.id),
+            Some(OsStr::new(r"C:\新\tool.exe"))
+        );
+    }
+
+    /// RED — **unknown is never "not here"**: the default is not decided while a row it reads is
+    /// unanswered, the menu offers the row with "Checking…" rather than calling it not installed,
+    /// and an edit keeps the answers of the rows it did not change.
+    ///
+    /// MUTATION (observed red): `decided_from_answers` reading an unknown row as absent and
+    /// answering `Ok` — the default is decided as the next row; `offered_to_start` without its
+    /// `is_unknown` clause — the unknown built-in row is left off the menu.
+    #[test]
+    fn an_unknown_row_decides_no_default_and_is_offered_as_being_looked_for() {
+        let first = shipped_order()
+            .iter()
+            .find_map(|id| position_of(id))
+            .expect("the shipped order names a row of this build's table");
+        let first_id = id(first);
+        let all: Vec<usize> = (0..count()).collect();
+        let known = ProfilePrograms::with_only(&all);
+        assert_eq!(
+            default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &known),
+            Some(first)
+        );
+        let waiting = ProfilePrograms::with_only(&all).without(&first_id);
+        assert_eq!(
+            default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &waiting),
+            None,
+            "the automatic default reads the first shipped row first, and it is unanswered"
+        );
+        assert_eq!(
+            default_profile_decided(bt_persist::DEFAULT_PROFILE_UNSET, &waiting),
+            Err(vec![first_id.clone()]),
+            "and it says which row it waits for"
+        );
+        assert_eq!(
+            default_profile_identity(bt_persist::DEFAULT_PROFILE_UNSET, &waiting),
+            DEFAULT_IDENTITY
+        );
+        assert!(
+            possible_defaults(bt_persist::DEFAULT_PROFILE_UNSET, &waiting).contains(&first),
+            "the Hide guard protects the row that may still be the default"
+        );
+        assert!(table().offered_to_start(&waiting).contains(&first));
+        assert!(waiting.row_is_unknown(first) && !waiting.row_is_available(first));
+
+        // An edit that leaves the row as it was keeps its answer.
+        assert_eq!(known.carried_into(&table()), known);
+    }
+
+    /// RED — **a keyboard's highlight follows its profile when the list changes under it, and
+    /// Enter runs the profile the row showed; a pointer's highlight is the row under the
+    /// pointer, which is the row a press there runs** (owner ruling 2026-10-04).
+    ///
+    /// The real `Split with` child, laid out before and after a walk that found a built-in
+    /// program: the new row lands above the lit one.
+    ///
+    /// MUTATION (observed red): index-based activation — `relit`'s keyboard arm answering `lit`
+    /// unchanged — Enter runs the newly inserted profile instead of the one the reader saw lit.
+    #[test]
+    fn a_highlight_follows_its_profile_and_enter_runs_the_profile_it_showed() {
+        let builtins: Vec<usize> = (0..count())
+            .filter(|index| {
+                table()
+                    .get(*index)
+                    .is_some_and(|row| row.origin == Origin::Builtin && !row.hidden)
+            })
+            .take(3)
+            .collect();
+        let [a, b, c] = builtins[..] else {
+            panic!("this build ships at least three visible built-in rows");
+        };
+        let before = ProfilePrograms::with_only(&[a, c]);
+        let after = ProfilePrograms::with_only(&[a, b, c]);
+        let shown_layout = pane_menu_on(true, &before);
+        let shown = shown_layout.submenu_items().to_vec();
+        let lit = shown
+            .iter()
+            .position(|row| *row == c)
+            .expect("the child lists c");
+        let now_layout = pane_menu_on(true, &after);
+        let now = now_layout.submenu_items();
+        assert_ne!(
+            now.iter().position(|row| *row == c),
+            Some(lit),
+            "the walk moved c's row"
+        );
+
+        let keyboard = relit(Some(lit), LitBy::Keyboard, &shown, now, None);
+        assert_eq!(
+            keyboard.and_then(|at| now_layout.submenu_row(at)),
+            Some(c),
+            "Enter runs the profile the reader saw lit"
+        );
+
+        // The pointer has not moved: it stands over ordinal `lit` of the new layout.
+        let pointer = relit(Some(lit), LitBy::Pointer, &shown, now, Some(lit));
+        assert_eq!(
+            pointer,
+            Some(lit),
+            "the lit row is the row under the pointer"
+        );
+        assert_eq!(
+            pointer.and_then(|at| now_layout.submenu_row(at)),
+            now_layout.submenu_row(lit),
+            "and a press there runs the row it lands on, which is the lit one"
+        );
+
+        // A profile the walk took away leaves no keyboard highlight behind.
+        let gone = relit(
+            Some(lit),
+            LitBy::Keyboard,
+            &shown,
+            pane_menu_on(true, &ProfilePrograms::with_only(&[a])).submenu_items(),
+            None,
+        );
+        assert_eq!(gone, None);
     }
 }
 

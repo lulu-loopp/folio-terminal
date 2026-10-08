@@ -41,10 +41,18 @@ pub(crate) enum LaneName {
     Taskbar,
     /// `MathWorker`'s formula and decode thread (`run_decoration_worker`).
     Computation,
+    /// `programs_lane`: what this machine can start (T-PROGRAMS-REFRESH).
+    Programs,
 }
 
 impl LaneName {
-    pub(crate) const ALL: [Self; 4] = [Self::Handoff, Self::Font, Self::Taskbar, Self::Computation];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Handoff,
+        Self::Font,
+        Self::Taskbar,
+        Self::Computation,
+        Self::Programs,
+    ];
 }
 
 /// How a newer request relates to an older one.
@@ -185,6 +193,24 @@ pub(crate) const COMPUTATION: Contract = Contract {
         answers_held: Bound::Unbounded,
     },
     cancellation: Cancellation::Abandon,
+};
+
+/// `programs_lane`: numbered requests (`Asks::requested`); one `program-walk` worker that serves
+/// the newest request standing, the requests made while a walk is out answered by the next walk;
+/// answers published per row into a mailbox that keeps the newest per row, and adopted by
+/// `ProfilePrograms::adopt` only when not older than the answer held for the row; the target is
+/// the application. A walk's end answers every request numbered up to it.
+pub(crate) const PROGRAMS: Contract = Contract {
+    lane: LaneName::Programs,
+    replacement: Replacement::LatestValue,
+    execution: Order::NewestRequested,
+    delivery: Delivery::NewestAdopted,
+    bounds: Bounds {
+        waiting: Bound::At(1),
+        executing: 1,
+        answers_held: Bound::At(1),
+    },
+    cancellation: Cancellation::Never,
 };
 
 /// The obligations of §R-D, one each.
@@ -390,6 +416,13 @@ pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
         failure: FailureKind::DeathUnobservable,
         repair: "D-73",
         why: "a worker that dies leaves Asks::worker set: requests are counted and never served",
+    },
+    ExpectedFailure {
+        lane: LaneName::Programs,
+        claim: Claim::EveryRequestEndsExactlyOnce,
+        failure: FailureKind::NoTerminal,
+        repair: "D-85",
+        why: "the worker serves the newest request standing; the ones made while a walk was out               get no outcome of their own (the next walk answers them, said in diagnostics)",
     },
     ExpectedFailure {
         lane: LaneName::Computation,

@@ -10454,26 +10454,29 @@ fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
     assert_ne!(git, fallback, "the fixture needs two different rows");
 
     let equipped = profiles::ProfilePrograms::with_only(&[git, fallback]);
-    assert_eq!(startable_profile("gitbash", &equipped), Started::AsAsked);
+    assert_eq!(
+        startable_profile("gitbash", &equipped),
+        Ok(Started::AsAsked)
+    );
 
     // Git uninstalled between two launches, which is the row's own case.
     let gitless = profiles::ProfilePrograms::with_only(&[fallback]);
     assert_eq!(
         startable_profile("gitbash", &gitless),
-        Started::FellBack(fallback_id.to_owned()),
+        Ok(Started::FellBack(fallback_id.to_owned())),
         "the pane comes back running what this machine does have"
     );
     assert_eq!(
         startable_profile(fallback_id, &gitless),
-        Started::AsAsked,
+        Ok(Started::AsAsked),
         "and the profile standing in for the others is not standing in for itself"
     );
 
     // Nothing at all: a machine with no Windows PowerShell, or a `BT_SHELL`
     // pointed at a program that is not there.
     let bare = profiles::ProfilePrograms::with_only(&[]);
-    assert_eq!(startable_profile("gitbash", &bare), Started::Nothing);
-    assert_eq!(startable_profile(fallback_id, &bare), Started::Nothing);
+    assert_eq!(startable_profile("gitbash", &bare), Ok(Started::Nothing));
+    assert_eq!(startable_profile(fallback_id, &bare), Ok(Started::Nothing));
 
     // **An id the table does not hold at all** — a row somebody deleted in
     // Settings ▸ Profiles while a pane was running it, which the snapshot
@@ -10482,7 +10485,7 @@ fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
     assert!(!profiles::has_id("a-row-nobody-has"));
     assert_eq!(
         startable_profile("a-row-nobody-has", &equipped),
-        Started::FellBack(fallback_id.to_owned()),
+        Ok(Started::FellBack(fallback_id.to_owned())),
         "a profile that is gone degrades exactly as a missing program does"
     );
 }
@@ -19587,22 +19590,22 @@ fn a_tabs_tip_is_the_name_then_its_provenance_then_its_promise() {
 #[test]
 fn the_new_tab_button_names_the_profile_it_would_start() {
     assert_eq!(
-        new_tab_tip(profiles::fallback_profile()),
+        new_tab_tip(profiles::fallback_profile_id()),
         "New tab (Windows PowerShell 5.1)"
     );
     assert_eq!(
-        new_tab_tip(profiles::index_of_id("pwsh")),
+        new_tab_tip("pwsh"),
         "New tab (PowerShell 7)",
         "the two PowerShells are told apart by the only thing that differs \n             — their version, which is why both titles carry one"
     );
     assert_eq!(
-        new_tab_tip(profiles::index_of_id("cmd")),
+        new_tab_tip("cmd"),
         "New tab (Command Prompt)",
         "point the setting elsewhere and the button says so"
     );
     for index in 0..profiles::count() {
         assert_eq!(
-            new_tab_tip(index),
+            new_tab_tip(&profiles::id(index)),
             format!("New tab ({})", profiles::title(index))
         );
     }
@@ -20131,7 +20134,7 @@ fn every_road_that_names_a_folder_opens_there_whatever_the_profile_says() {
                     origin: cli::LaunchOrigin::Explorer,
                     ..cli::CliRequest::default()
                 },
-                profiles::index_of_id(pwsh),
+                Some(profiles::index_of_id(pwsh)),
                 directory,
             )),
         ),
@@ -20142,7 +20145,7 @@ fn every_road_that_names_a_folder_opens_there_whatever_the_profile_says() {
                     path: Some(clicked.clone()),
                     ..cli::CliRequest::default()
                 },
-                profiles::index_of_id(pwsh),
+                Some(profiles::index_of_id(pwsh)),
                 directory,
             )),
         ),
@@ -45293,6 +45296,8 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         pending_paste: None,
         // A fixture is not a restore, so nothing is owed to its prompt.
         pending_typing: None,
+        // Nor a shell being born: it was never going to have one.
+        birth: None,
     }
 }
 

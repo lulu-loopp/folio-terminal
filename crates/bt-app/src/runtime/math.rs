@@ -86,7 +86,7 @@ impl Runtime<'_> {
                 .get(index)
                 .map(TabState::tooltip_text)
                 .unwrap_or_default(),
-            tooltip::TooltipAnchorId::NewTab => new_tab_tip(self.default_profile()),
+            tooltip::TooltipAnchorId::NewTab => new_tab_tip(&self.default_profile_id()),
             tooltip::TooltipAnchorId::NewTabMenu => i18n::Text::ChooseProfile.text().to_owned(),
             _ => String::new(),
         }

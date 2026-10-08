@@ -2,8 +2,9 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    FilesFocusArrival, LeafSession, Popup, Runtime, cli, i18n, launch_wire, persist,
-    profile_menu_anchor, profiles, seats, settings, shell_integration, text_field, toast,
+    FilesFocusArrival, LeafSession, MachineNews, Popup, Runtime, ShownProgramRows, cli, i18n,
+    launch_wire, persist, profile_menu_anchor, profiles, programs_lane, seats, settings,
+    shell_integration, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -29,7 +30,7 @@ impl Runtime<'_> {
         &self,
         request: &launch_wire::LaunchRequest,
     ) -> (String, Vec<cli::CliRefusal>) {
-        let plan = cli::resolve(
+        let plan: cli::CliPlan = cli::resolve(
             &cli::CliRequest {
                 cwd: request.cwd.clone(),
                 profile: request.profile.clone(),
@@ -45,7 +46,11 @@ impl Runtime<'_> {
             self.default_profile(),
             cli::machine_path_kind,
         );
-        (profiles::id(plan.profile), plan.refusals)
+        (
+            plan.profile
+                .map_or_else(|| profiles::DEFAULT_IDENTITY.to_owned(), profiles::id),
+            plan.refusals,
+        )
     }
 
     /// The picker's verb: a tab on the profile the row names, optionally
@@ -177,7 +182,10 @@ impl Runtime<'_> {
     /// have to be refreshed by whoever wrote it, in every place they wrote it.
     /// [`profiles::default_profile`] is cheap — a walk of four entries and an
     /// array index — and none of these callers is a hot path.
-    pub(crate) fn default_profile(&self) -> usize {
+    ///
+    /// `None` while the rows it reads are unanswered (T-PROGRAMS-REFRESH): a surface names no
+    /// default until the machine has decided it.
+    pub(crate) fn default_profile(&self) -> Option<usize> {
         profiles::default_profile(
             &self.app.settings_store.loaded().default_profile,
             &self.app.profile_programs,
@@ -191,8 +199,14 @@ impl Runtime<'_> {
     /// stable id, because everything downstream of a new-tab door holds its
     /// profile across at least one gesture — a folder chooser, a tear-out, a
     /// save — and a position does not survive one.
+    ///
+    /// [`profiles::DEFAULT_IDENTITY`] while undecided: the pane it seeds is born when the answer
+    /// lands, as the default the machine then has.
     pub(in crate::runtime) fn default_profile_id(&self) -> String {
-        profiles::id(self.default_profile())
+        profiles::default_profile_identity(
+            &self.app.settings_store.loaded().default_profile,
+            &self.app.profile_programs,
+        )
     }
 
     /// Whether that answer came from the machine rather than from the reader —
@@ -225,6 +239,11 @@ impl Runtime<'_> {
         // opened a fresh one pins it on its own way out.
         self.window.chevrons.menu_gone(Popup::Profile);
         self.window.profile_menu.toggle();
+        // A menu that lists programs opening asks the machine again; it draws now from the
+        // answer it holds, and re-lays out when a newer one lands (T-PROGRAMS-REFRESH).
+        if self.window.profile_menu.is_open() {
+            self.ask_the_program_walk(programs_lane::Trigger::ProgramMenu);
+        }
         self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -431,15 +450,136 @@ impl Runtime<'_> {
     /// from — and everything else `store_profiles` does it owes for the same
     /// reasons, which is why they are one call rather than two lists that have
     /// to be kept in step.
+    ///
+    /// **The programs are asked for, not probed here** (T-PROGRAMS-REFRESH): every row that is
+    /// still there and still names the same program keeps its answer, a new or re-pointed row is
+    /// unknown until the program walk answers it, and the walk is asked now.
     fn adopt_profile_table(&mut self) -> Result<()> {
-        self.app.profile_programs =
-            profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        self.app.profile_programs = self.app.profile_programs.carried_into_live_table();
+        self.ask_the_program_walk(programs_lane::Trigger::TableChanged);
         shell_integration::begin_powershell_preparation_for(&self.app.profile_programs);
         self.app.first_run_attempted = false;
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         })
+    }
+
+    /// **Ask the program walk again** (T-PROGRAMS-REFRESH) — over the live table, the rows the
+    /// default's rule reads first. Never waits: the answer comes back through
+    /// `AppEvent::ProgramsAnswered`.
+    pub(crate) fn ask_the_program_walk(&self, trigger: programs_lane::Trigger) {
+        programs_lane::request(
+            trigger,
+            &self.app.settings_store.loaded().default_profile,
+            &[],
+        );
+    }
+
+    /// The program rows this window's open menus show, by what each is about — taken before an
+    /// answer re-lays them out.
+    pub(crate) fn shown_program_rows(&mut self) -> ShownProgramRows {
+        ShownProgramRows {
+            pane: self
+                .pane_menu_layout()
+                .filter(|layout| layout.submenu_kind() == Some(profiles::PaneMenuRow::SplitWith))
+                .map(|layout| layout.submenu_items().to_vec())
+                .unwrap_or_default(),
+            term: self
+                .term_menu_layout()
+                .map(|layout| layout.submenu_items().to_vec())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// **This window's share of a program walk's answer** (T-PROGRAMS-REFRESH), taken on its turn
+    /// from its seat in `App::program_news`: the menus that list programs relit
+    /// ([`Self::relight_program_menus`]), the Git pages asked again when git moved, the panes in
+    /// birth born, and the chrome — every list of programs it draws — rebuilt from the answer.
+    pub(crate) fn take_program_news(
+        &mut self,
+        shown: &ShownProgramRows,
+        git_moved: bool,
+    ) -> Result<()> {
+        let told = self.app.program_news.take(self.window_id());
+        if !told.contains(&MachineNews::Programs) {
+            return Ok(());
+        }
+        if git_moved {
+            self.reask_git_pages();
+        }
+        self.relight_program_menus(shown);
+        self.land_pane_births()?;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Every menu that lists programs, relit after the rows moved under it** (owner ruling
+    /// 2026-10-04): the menus always take the new answer, whether the pointer is in them or not;
+    /// a highlight the pointer lit is the row under the pointer now, and one the keyboard lit
+    /// follows its profile ([`profiles::relit`]). A press acts on the row it lands on in the
+    /// layout just drawn, so the lit row and the acted-on row are one.
+    pub(crate) fn relight_program_menus(&mut self, shown: &ShownProgramRows) {
+        let pointer = self.window.pointer_position;
+        if self.window.profile_menu.is_open() {
+            let over = pointer.and_then(|position| {
+                let layout = self.profile_menu_layout()?;
+                profiles::hit(
+                    &layout,
+                    &self.app.profile_programs,
+                    self.app.recent.entries(),
+                    position.x,
+                    position.y,
+                )
+                .flatten()
+            });
+            self.window.profile_menu.set_hover(over);
+        }
+        if let Some(layout) = self
+            .pane_menu_layout()
+            .filter(|layout| layout.submenu_kind() == Some(profiles::PaneMenuRow::SplitWith))
+        {
+            let under = pointer.and_then(|position| {
+                match profiles::pane_menu_hit(&layout, position.x, position.y) {
+                    Some(profiles::PaneMenuHit::Submenu(at)) => Some(at),
+                    _ => None,
+                }
+            });
+            if let Some(menu) = self.window.pane_menu.as_mut()
+                && let Some(profiles::PaneMenuHover::Submenu(at)) = menu.hover
+            {
+                menu.hover = profiles::relit(
+                    Some(at),
+                    menu.lit_by,
+                    &shown.pane,
+                    layout.submenu_items(),
+                    under,
+                )
+                .map(profiles::PaneMenuHover::Submenu);
+            }
+        }
+        if let Some(layout) = self.term_menu_layout() {
+            let under = pointer.and_then(|position| {
+                match profiles::term_menu_hit(&layout, position.x, position.y) {
+                    Some(profiles::TermMenuHit::Submenu(at)) => Some(at),
+                    _ => None,
+                }
+            });
+            if let Some(menu) = self.window.term_menu.as_mut()
+                && let Some(profiles::TermMenuHover::Submenu(at)) = menu.hover
+            {
+                menu.hover = profiles::relit(
+                    Some(at),
+                    menu.lit_by,
+                    &shown.term,
+                    layout.submenu_items(),
+                    under,
+                )
+                .map(profiles::TermMenuHover::Submenu);
+            }
+        }
     }
 
     /// Say once, on the window, that `profiles.json` could not be used whole.

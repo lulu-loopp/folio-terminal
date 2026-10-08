@@ -1,6 +1,7 @@
 //! `first_run` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::profiles;
 use crate::shell_integration;
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
@@ -568,6 +569,15 @@ impl Runtime<'_> {
         // through it worth anything.
         if !first_run::due(store.was_missing(), store.loaded().first_run_card)
             && !diagnostics::switched_on(std::env::var_os("BT_FIRST_RUN_CARD"))
+        {
+            return Ok(());
+        }
+        // **Nothing about the agents is decided from unknown** (T-PROGRAMS-REFRESH): the card
+        // offers its rows on whether claude, codex and copilot are on this machine, and waits —
+        // polled here every turn — until the program walk has answered those rows.
+        if ["claude", "codex", "copilot"]
+            .iter()
+            .any(|id| profiles::has_id(id) && self.app.profile_programs.is_unknown(id))
         {
             return Ok(());
         }
