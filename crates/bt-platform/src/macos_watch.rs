@@ -360,6 +360,17 @@ impl Stopper {
 }
 
 impl DirWatch {
+    /// A returned watcher has already armed its event stream.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        true
+    }
+
+    /// macOS reports watch failures before returning the watcher.
+    pub fn take_failure(&mut self) -> Option<std::io::Error> {
+        None
+    }
+
     /// Start watching `path` and everything under it.
     ///
     /// `wake` is called on the watcher thread, once per batch, and is expected to

@@ -113,7 +113,7 @@ impl HandoffLane {
         bt_platform::spawn_at_priority(
             "bt-os-handoff",
             bt_platform::ThreadPriority::BelowNormal,
-            move |ctx| run_handoff_lane(request_rx, answer_tx, make_executor(ctx), lane_wake),
+            move |ctx| run_handoff_lane(ctx, request_rx, answer_tx, make_executor(ctx), lane_wake),
         )
         .context("spawn the OS hand-off lane")?;
         Ok(Self {
@@ -179,11 +179,13 @@ impl HandoffLane {
 /// **The lane's body**: one request, one door, one answer, then the wake — `run_path_verify_worker`'s
 /// shape, and nothing else runs here.
 fn run_handoff_lane(
+    worker: &WorkerCtx,
     requests: mpsc::Receiver<Request>,
     answers: mpsc::Sender<Completion>,
     mut execute: impl FnMut(NativeWindow, &Handoff) -> Result<(), String>,
     wake: impl Fn(),
 ) {
+    let _ = worker;
     while let Ok(Request {
         id,
         window,

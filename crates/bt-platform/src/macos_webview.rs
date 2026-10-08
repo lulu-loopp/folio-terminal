@@ -228,7 +228,7 @@ struct Shared {
     /// for nothing.
     found: RefCell<String>,
     found_case: Cell<bool>,
-    wake: Box<dyn Fn()>,
+    wake: Box<dyn Fn() + Send + Sync>,
 }
 
 impl Shared {
@@ -1297,7 +1297,7 @@ impl WebHost {
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
         request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-        wake: Box<dyn Fn()>,
+        wake: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         let shared = Rc::new(Shared {
             events: RefCell::new(VecDeque::new()),
