@@ -15,7 +15,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
-- On a machine where looking for installed programs is slow (for example a network folder on `PATH`), Folio's window opens at once instead of waiting; a tab whose shell depends on what is still being looked for reads "Terminal" until it is found, then starts, and whatever you typed meanwhile reaches it in order. On an ordinary machine the shell is almost always running before the first frame, as before.
+- Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts.
 
 ## 0.4.7-preview — 2026-10-06
 

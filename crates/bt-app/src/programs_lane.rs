@@ -15,9 +15,10 @@
 //! in the second.
 //!
 //! **The contract** (`crate::lane`'s shape; measured cost in DESIGN 2026-10-08): numbered
-//! requests; one `program-walk` worker at below-normal priority, started by the first request and
-//! waiting for the next; it serves the newest request standing, and the requests made while a
-//! walk is out are answered by the next walk (said once in `diagnostics.log` when that walk ends);
+//! requests; one `program-walk` worker, started by the first request and waiting for the next; it
+//! serves the newest request standing, and the requests made while a walk is out are answered by
+//! the next walk (said once in `diagnostics.log` when that walk ends); each walk runs in the band
+//! its request carries (below);
 //! answers are published row by row into a mailbox that keeps the newest answer per row, then the
 //! machine facts, then the walk's end; the event loop is woken after the walk's end and after each
 //! row the request asked for first, and never before the publication it is woken for. The
@@ -28,6 +29,16 @@
 //! **Rows the default's rule reads are answered first** (the request's `first`, from
 //! `profiles::default_chain` and any pane waiting for its row), so a walk held up behind one slow
 //! entry has already answered what a launch's panes need.
+//!
+//! **The launch's walk runs at normal priority, every other walk below normal** (RULES 53's
+//! exception for this lane). The launch's walk is the one the first panes' births wait on, and on
+//! a cold machine it is not short — measured on a clean guest after boot, 1.2–2 s of `PATH`
+//! metadata while the antivirus scans the freshly unpacked program at normal priority (DESIGN
+//! 2026-10-08) — so it does not stand behind that work. Every later walk only refreshes what a
+//! menu or page shows and stays out of the frame's way. The band belongs to the request
+//! ([`Trigger::urgent`]); a request that replaces one not yet started keeps the more urgent band of
+//! the two, as it keeps its rows asked first. The one worker sets its own band at the start of
+//! each walk (`bt_platform::set_current_thread_priority`); no second thread and no wait.
 //!
 //! **Who asks** (the triggers, and there is no timer): the launch; a table edit; a menu that lists
 //! programs opening (the new-tab menu, a pane's menu, a terminal's menu); the Profiles, Agents
@@ -72,6 +83,22 @@ impl Trigger {
             Self::Environment => "system setting changed",
             Self::Birth => "a pane waits for its program",
         }
+    }
+
+    /// **Whether a walk for this trigger runs at normal priority**: only the launch's, the walk
+    /// the first panes' births wait on. Every other walk runs below normal.
+    #[must_use]
+    pub const fn urgent(self) -> bool {
+        matches!(self, Self::Launch)
+    }
+}
+
+/// The band a walk runs in, from its request's urgency.
+const fn band(urgent: bool) -> bt_platform::ThreadPriority {
+    if urgent {
+        bt_platform::ThreadPriority::Normal
+    } else {
+        bt_platform::ThreadPriority::BelowNormal
     }
 }
 
@@ -268,12 +295,20 @@ fn ordered<'a>(rows: &'a [Profile], first: &[String]) -> Vec<&'a Profile> {
 struct Asks {
     /// The number of the newest request; counted from `1`.
     requested: u64,
-    /// The newest request not yet started, with its number.
-    waiting: Option<(u64, WalkRequest)>,
+    /// The newest request not yet started.
+    waiting: Option<Waiting>,
     /// The walk out now: its number, why, and how many requests were made while it was out.
     out: Option<(u64, Trigger, u64)>,
     /// A worker thread is running (started by the first request, waiting for the next).
     worker: bool,
+}
+
+/// **A request not yet started**: its number, the request, and whether its walk runs at normal
+/// priority — its own trigger's urgency or that of a request it replaced.
+struct Waiting {
+    generation: u64,
+    request: WalkRequest,
+    urgent: bool,
 }
 
 /// What the worker has published and the window thread has not drained.
@@ -327,16 +362,23 @@ impl ProgramsLane {
         asks.requested += 1;
         let generation = asks.requested;
         // A request replaced before its walk started keeps the rows it wanted first, behind the
-        // newer request's own.
+        // newer request's own, and its urgency: a launch replaced by a menu's request before its
+        // walk started is still the walk the first panes wait on.
         let mut first = request.first;
-        if let Some((_, replaced)) = asks.waiting.take() {
-            for id in replaced.first {
+        let mut urgent = request.trigger.urgent();
+        if let Some(replaced) = asks.waiting.take() {
+            urgent |= replaced.urgent;
+            for id in replaced.request.first {
                 if !first.contains(&id) {
                     first.push(id);
                 }
             }
         }
-        asks.waiting = Some((generation, WalkRequest { first, ..request }));
+        asks.waiting = Some(Waiting {
+            generation,
+            request: WalkRequest { first, ..request },
+            urgent,
+        });
         if let Some((_, _, joined)) = asks.out.as_mut() {
             *joined += 1;
         }
@@ -346,11 +388,10 @@ impl ProgramsLane {
         }
         asks.worker = true;
         drop(asks);
-        let started = bt_platform::spawn_at_priority(
-            "program-walk",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |ctx| self.serve(ctx),
-        );
+        // Started in the band of the request that starts it; every walk then sets its own.
+        let started = bt_platform::spawn_at_priority("program-walk", band(urgent), move |ctx| {
+            self.serve(ctx);
+        });
         if let Err(error) = started {
             // The request stays standing and the next one tries the thread again; nothing on the
             // window thread waits for an answer meanwhile.
@@ -378,9 +419,13 @@ impl ProgramsLane {
     /// **The worker's whole body**: take the newest request, walk, publish, and wait for the next.
     fn serve(&self, ctx: &WorkerCtx) {
         loop {
-            let (generation, request) = {
+            let Waiting {
+                generation,
+                request,
+                urgent,
+            } = {
                 let mut asks = self.lock();
-                let (generation, request) = loop {
+                let waiting = loop {
                     if let Some(waiting) = asks.waiting.take() {
                         break waiting;
                     }
@@ -389,9 +434,12 @@ impl ProgramsLane {
                         .wait(asks)
                         .unwrap_or_else(PoisonError::into_inner);
                 };
-                asks.out = Some((generation, request.trigger, 0));
-                (generation, request)
+                asks.out = Some((waiting.generation, waiting.request.trigger, 0));
+                waiting
             };
+            // The walk's band is its request's. Off Windows a band is requested, not enforced
+            // (RULES 53), and the answer is not consulted.
+            let _ = bt_platform::set_current_thread_priority(band(urgent));
             // A walk that unwinds leaves the lane able to answer: the worker is marked gone, so
             // the next request starts another, and the window thread is told which walk died.
             let guard = WalkOut {
@@ -414,10 +462,11 @@ impl ProgramsLane {
                 crate::trace_sink::stderr_line(format!(
                     "BT_PERF_TRACE program_walk_us={} generation={generation} trigger={:?} \
                      rows={} path_entries={path_entries} file_questions={file_questions} \
-                     joined={joined}",
+                     joined={joined} band={:?}",
                     elapsed.as_micros(),
                     request.trigger.name(),
                     request.rows.len(),
+                    band(urgent),
                 ));
             }
             if joined > 0 {
@@ -648,7 +697,7 @@ pub(crate) mod tests {
     /// A lane of the test's own over `machine`, leaked for the `'static` its worker needs; its
     /// wakes and its diagnostics lines come back on channels.
     pub(crate) fn lane(
-        machine: FakeMachine,
+        machine: impl Machine + 'static,
     ) -> (
         &'static ProgramsLane,
         mpsc::Receiver<()>,
@@ -849,6 +898,82 @@ pub(crate) mod tests {
             "{line}"
         );
         assert!(notes.try_recv().is_err(), "said once, not per request");
+    }
+
+    /// RED — **the launch's walk runs at normal priority and every other walk below normal**, the
+    /// band read from inside each walk on the one worker; a launch replaced by a menu's request
+    /// before its walk started keeps the launch's band, and the walk after it is below normal again.
+    ///
+    /// MUTATIONS (observed red, each alone): `Trigger::urgent` answering `false` for the launch
+    /// (walk 1 below normal); the worker spawned below normal and `serve` not setting the band
+    /// (walk 1 below normal); `serve` not setting the band per walk (walk 2 stays at the launch's
+    /// normal); `request` dropping the replaced request's urgency (walk 4 below normal).
+    #[cfg(windows)]
+    #[test]
+    fn the_launch_walk_runs_at_normal_priority_and_every_other_walk_below_normal() {
+        use bt_platform::ThreadPriority::{BelowNormal, Normal};
+        /// The fake machine, and the band each walk was in when it asked for its environment.
+        struct Banded(
+            FakeMachine,
+            Arc<Mutex<Vec<Option<bt_platform::ThreadPriority>>>>,
+        );
+        impl Machine for Banded {
+            fn environment(
+                &self,
+                ctx: &WorkerCtx,
+                note: &dyn Fn(&str),
+            ) -> Box<dyn ShellEnvironment> {
+                self.1
+                    .lock()
+                    .unwrap()
+                    .push(bt_platform::current_thread_priority());
+                self.0.environment(ctx, note)
+            }
+            fn wsl(&self) -> WslFacts {
+                self.0.wsl()
+            }
+        }
+        let machine = FakeMachine::with_path(&[bin_dir()]);
+        let bands = Arc::new(Mutex::new(Vec::new()));
+        let (lane, wakes, _) = lane(Banded(machine.clone(), Arc::clone(&bands)));
+        let rows = [row("rg", "rg.exe")];
+        let banded = || bands.lock().unwrap().clone();
+
+        let launch = lane.request(request(&rows, Trigger::Launch));
+        answers_through(lane, &wakes, launch);
+        assert_eq!(banded(), [Some(Normal)], "the launch's walk");
+
+        let menu = lane.request(request(&rows, Trigger::ProgramMenu));
+        answers_through(lane, &wakes, menu);
+        assert_eq!(
+            banded(),
+            [Some(Normal), Some(BelowNormal)],
+            "a menu's walk on the same worker"
+        );
+
+        // Walk 3 is held out; a launch request waits behind it and a menu's request replaces it.
+        machine.hold();
+        lane.request(request(&rows, Trigger::ProfilesPage));
+        while lane.lock().out.is_none() {
+            std::thread::yield_now();
+        }
+        lane.request(request(&rows, Trigger::Launch));
+        let replacing = lane.request(request(&rows, Trigger::ProgramMenu));
+        machine.release();
+        answers_through(lane, &wakes, replacing);
+        let environment = lane.request(request(&rows, Trigger::Environment));
+        answers_through(lane, &wakes, environment);
+        assert_eq!(
+            banded(),
+            [
+                Some(Normal),
+                Some(BelowNormal),
+                Some(BelowNormal),
+                Some(Normal),
+                Some(BelowNormal),
+            ],
+            "the replaced launch's urgency is kept by the request that replaced it, and only by it"
+        );
     }
 
     /// RED — **the rows the default's rule reads are answered before the rest**, and a row asked

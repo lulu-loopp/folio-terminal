@@ -706,9 +706,12 @@ when that walk ends. A walk reads the **current logon environment**
 entry an installer wrote after Folio started is seen; it answers the rows the default's rule
 reads first and publishes row by row; it wakes the loop (`AppEvent::ProgramsAnswered`) after
 each row the request asked for first and at the walk's end, never for the other rows or the WSL and
-git facts, which the end's wake brings. The worker runs at below-normal priority. Nothing waits for it and it has no deadline: measured on the
-development machine, a walk of the twelve shipped Windows rows over a 23-entry `PATH` is 2–3 ms
-(291 `is_file` calls), ≤ 7 ms with every hardware thread busy (DESIGN, 2026-10-08). A walk that
+git facts, which the end's wake brings. The launch's walk runs at normal priority and every other
+walk below normal: the request carries its band, and the one worker sets it at the start of each
+walk (RULES 53's exception). Nothing waits for a walk and it has no deadline: on a warm machine
+the launch's walk has answered before the first panes are made and the shell is running before the
+first frame; on a cold start the window opens first, the tab says "Terminal" and typed text is held
+until the shell starts (measured in DESIGN, 2026-10-08). A walk that
 unwinds marks the worker gone and tells the window thread which walk died; the next request
 starts another. The git worker reads the place the walk answered at every question
 (`git::GIT_LOCATION`), waiting on its own thread until the first walk has answered.
