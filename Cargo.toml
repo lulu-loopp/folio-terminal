@@ -138,7 +138,7 @@ gif = { version = "=0.14.2", default-features = false, features = ["std", "color
 # overflow — which no `catch_unwind` contains — back behind `cat evil.md`.
 mitex = "=0.2.4"
 mitex-parser = "=0.2.4"
-mitex-spec-gen = "=0.2.4"
+mitex-spec-gen = { version = "=0.2.4", features = ["prebuilt"] }
 pollster = "0.4"
 # Exact because a newer crates.io 0.9.x would otherwise out-resolve the local
 # loader patch and silently drop BetterTerminal's strict ConPTY sidecar policy.

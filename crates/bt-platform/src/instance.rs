@@ -583,16 +583,22 @@ fn per_user_temporary_directory() -> Option<PathBuf> {
 ///   module exists to stop.
 #[cfg(unix)]
 pub(crate) fn prepare_runtime_directory() -> std::io::Result<PathBuf> {
+    // SAFETY: `geteuid` reads this process's own credentials and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    prepare_private_directory(&runtime_directory(), uid)
+}
+
+#[cfg(unix)]
+fn prepare_private_directory(directory: &Path, uid: u32) -> std::io::Result<PathBuf> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
-    let directory = runtime_directory();
-    match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+    match std::fs::DirBuilder::new().mode(0o700).create(directory) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
-    let metadata = std::fs::symlink_metadata(&directory)?;
+    let metadata = std::fs::symlink_metadata(directory)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
@@ -600,17 +606,16 @@ pub(crate) fn prepare_runtime_directory() -> std::io::Result<PathBuf> {
              out where it goes",
         ));
     }
-    // SAFETY: `geteuid` reads this process's own credentials and cannot fail.
-    if metadata.uid() != unsafe { libc::geteuid() } {
+    if metadata.uid() != uid {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
             "the Folio runtime directory belongs to another user",
         ));
     }
     if metadata.permissions().mode() & 0o777 != 0o700 {
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
     }
-    Ok(directory)
+    Ok(directory.to_path_buf())
 }
 
 /// The name one directory's claim is taken under — a kernel object's name on
@@ -1206,7 +1211,7 @@ mod tests {
     /// precedent: a claim about a platform arm is a claim about the source when
     /// no runner can hold it.
     ///
-    /// MUTATION: take the `symlink_metadata` out of `prepare_runtime_directory`,
+    /// MUTATION: take the `symlink_metadata` out of `prepare_private_directory`,
     /// or make `DataDirectoryClaim`'s Unix body a unit struct again, and this
     /// goes red on Windows.
     #[test]
@@ -1256,6 +1261,15 @@ mod tests {
             .split("fn prepare_runtime_directory()")
             .nth(1)
             .expect("the Unix arm prepares its own runtime directory");
+        let prepare = prepare.split("\n}\n").next().unwrap_or_default();
+        assert!(
+            prepare.contains("prepare_private_directory(&runtime_directory(), uid)"),
+            "the runtime directory uses the shared private-directory preparation"
+        );
+        let prepare = source
+            .split("fn prepare_private_directory(")
+            .nth(1)
+            .expect("the private-directory helper is present");
         let prepare = prepare.split("\n}\n").next().unwrap_or_default();
         assert!(
             prepare.contains(".mode(0o700)"),

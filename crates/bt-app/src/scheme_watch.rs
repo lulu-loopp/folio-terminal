@@ -82,6 +82,15 @@ impl SchemeWatch {
     /// the thing this mechanism exists to avoid.
     pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>) {
         let directory = crate::persist::storage_dir().join(crate::schemes::USER_SCHEME_DIR);
+        if let Some(error) = self.news.take_failure()
+            && worth_a_line(&error)
+        {
+            eprintln!(
+                "recoverable scheme watch failure on {}: {error}",
+                directory.display()
+            );
+        }
+        self.news.cancel_unarmed();
         if let Err(error) = self.news.arm(&directory, proxy, AppEvent::SchemesChanged)
             && worth_a_line(&error)
         {
@@ -95,7 +104,17 @@ impl SchemeWatch {
     /// Fold in whatever the watcher thread has said and answer whether a rescan
     /// is due.
     pub fn due(&mut self, now: Instant) -> bool {
-        self.news.due(now)
+        let due = self.news.due(now);
+        if let Some(error) = self.news.take_failure()
+            && worth_a_line(&error)
+        {
+            let directory = crate::persist::storage_dir().join(crate::schemes::USER_SCHEME_DIR);
+            eprintln!(
+                "recoverable scheme watch failure on {}: {error}",
+                directory.display()
+            );
+        }
+        due
     }
 
     /// When the loop must wake to answer news it already has, if it has any.
@@ -141,9 +160,8 @@ mod tests {
     /// whose absence is the ordinary case.
     ///
     /// So the error here is **not constructed** — `io::Error::from(NotFound)`
-    /// would have passed on every one of those seven weeks. It is the one
-    /// `DirWatch::start` hands back for a folder that is not there, which is the
-    /// only thing this arm will ever be shown.
+    /// would have passed on every one of those seven weeks. The error comes
+    /// from the real `DirWatch::start` call.
     ///
     /// MUTATION: put the raw `HRESULT` back in `win32_io_error` and this goes
     /// red, which is the stderr line coming back with it.
