@@ -72232,7 +72232,7 @@ mod linux_desktop_retirement_tests {
 
     #[test]
     fn an_unfinished_retirement_worker_is_left_running_at_the_exit_budget() {
-        crate::tests::on_the_window_thread_exiting();
+        crate::test_support::on_the_window_thread_exiting();
 
         let release = Arc::new(Barrier::new(2));
         let worker_release = Arc::clone(&release);
