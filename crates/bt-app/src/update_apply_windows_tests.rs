@@ -6138,3 +6138,27 @@ fn a_trial_hands_back_what_it_cannot_read_whole_to_the_rescue_its_header_names()
         );
     }
 }
+
+/// RED (E1 round 2; role #9, the Windows exit guard, `opens_now`) — **a
+/// journal file the exit cannot read at all is no absent journal**: it opens
+/// the rescue copy with `--update-failed`, as for any journal of which
+/// nothing reads, and never the installed build plainly; only a journal that
+/// is not there does that.
+///
+/// MUTATION: in `opens_now`, map a read that failed other than "no such
+/// file" back to no journal (`Opens::Installed { failed: false }`).
+#[test]
+fn the_windows_exit_opens_the_rescue_over_a_journal_it_cannot_read() {
+    let Some(install) = Install::new("unread-exit") else {
+        return;
+    };
+    let road = install.road(limits(600, 20_000));
+    let kind = crate::update_txn::a_journal_that_cannot_be_read(&install.home.journal());
+    assert_eq!(opens_now(&road), Opens::Rescue, "{kind:?}");
+    std::fs::remove_dir(install.home.journal()).unwrap();
+    assert_eq!(
+        opens_now(&road),
+        Opens::Installed { failed: false },
+        "no journal at all"
+    );
+}

@@ -80,8 +80,8 @@ use bt_platform::install_txn::{self, Hold};
 
 use crate::cli;
 use crate::update_txn::{
-    Actor, Effect, Event, Home, Journal, Nonce, Phase, PhaseKind, Receipt, Role, Sight,
-    TrialProcess, TxnId, receipt_sight,
+    Actor, Effect, Event, Home, Journal, Nonce, ParseRefusal, Phase, PhaseKind, Receipt, Role,
+    Sight, TrialProcess, TxnId, receipt_sight,
 };
 
 /// **How long the Windows applier and recovery wait, and how often they
@@ -483,11 +483,12 @@ pub(crate) fn reserve_last_trial(
         Ok(None) => return Err("the transaction lock is held".to_owned()),
         Err(failure) => return Err(failure.to_string()),
     };
-    let bytes = file_reads::read(Lane::UpdateJournal, home.journal())
-        .map_err(|error| format!("the journal could not be read: {error}"))?;
-    let journal = match Role::LastTrialReserve.sight(&bytes) {
-        Sight::Known(journal) => journal,
-        beyond => return Ok(Reserved::StoodAside(beyond.said(Role::LastTrialReserve))),
+    let journal = match Role::LastTrialReserve
+        .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
+    {
+        Some(Sight::Known(journal)) => journal,
+        Some(beyond) => return Ok(Reserved::StoodAside(beyond.said(Role::LastTrialReserve))),
+        None => return Err("the journal could not be read: there is none".to_owned()),
     };
     if journal.body.phase != Phase::Moving {
         return Ok(Reserved::NotEligible);
@@ -586,16 +587,12 @@ pub(crate) fn commit_last_trial_as(
         Ok(None) => return Ok(LastTrialCommit::Pending),
         Err(failure) => return Err(failure.to_string()),
     };
-    let bytes = match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(LastTrialCommit::NotItsOwn);
-        }
-        Err(error) => return Err(format!("the journal could not be read: {error}")),
-    };
-    let journal = match Role::LastTrialCommit.sight(&bytes) {
-        Sight::Known(journal) => journal,
-        Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_) => {
+    let journal = match Role::LastTrialCommit
+        .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
+    {
+        Some(Sight::Known(journal)) => journal,
+        None => return Ok(LastTrialCommit::NotItsOwn),
+        Some(Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_)) => {
             return Ok(LastTrialCommit::StoodAside);
         }
     };
@@ -1255,17 +1252,25 @@ pub(crate) enum PhaseRead {
     /// **The journal is one this build cannot read whole** (0.4.8 E1): the
     /// applier stands aside ([`Role::WindowElection`]) and writes no mark.
     StoodAside(String),
+    /// **The journal's file could not be read** (E1 round 2): asked again
+    /// within the election's wait — a scanner lets go within moments — and
+    /// stood aside from as [`PhaseRead::StoodAside`] when it never reads.
+    NotRead(String),
 }
 
 /// The durable transaction phase that says whether an unmarked election is
 /// still open. The transaction identity is checked with the phase: a journal
 /// for another transaction cannot authorize this contender.
 pub(crate) fn read_window_phase(home: &Home, txn: TxnId) -> Result<PhaseKind, PhaseRead> {
-    let bytes = file_reads::read(Lane::UpdateJournal, home.journal())
-        .map_err(|error| PhaseRead::Unread(error.to_string()))?;
-    let journal = match Role::WindowElection.sight(&bytes) {
-        Sight::Known(journal) => journal,
-        beyond => return Err(PhaseRead::StoodAside(beyond.said(Role::WindowElection))),
+    let journal = match Role::WindowElection
+        .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
+    {
+        Some(Sight::Known(journal)) => journal,
+        Some(unread @ Sight::Unreadable(ParseRefusal::Unread(_))) => {
+            return Err(PhaseRead::NotRead(unread.said(Role::WindowElection)));
+        }
+        Some(beyond) => return Err(PhaseRead::StoodAside(beyond.said(Role::WindowElection))),
+        None => return Err(PhaseRead::Unread("there is no journal".to_owned())),
     };
     if journal.txn != txn {
         return Err(PhaseRead::Unread(format!(
@@ -1646,12 +1651,14 @@ impl Contender for Applier {
         match retry_within(
             read_until,
             read_phase,
-            |read| matches!(read, PhaseRead::Unread(_)),
+            |read| matches!(read, PhaseRead::Unread(_) | PhaseRead::NotRead(_)),
             wait,
         ) {
             Ok(phase) if window_duty_is_open(phase) => Ok(()),
             Ok(phase) => Err(Window::RoadTaken(phase)),
-            Err(PhaseRead::StoodAside(why)) => Err(Window::StoodAside(why)),
+            Err(PhaseRead::StoodAside(why) | PhaseRead::NotRead(why)) => {
+                Err(Window::StoodAside(why))
+            }
             Err(PhaseRead::Unread(why)) => Err(Window::Refused(WindowRefusal {
                 why: format!("the update journal could not be read for the window election: {why}"),
                 contended: false,

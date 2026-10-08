@@ -129,6 +129,12 @@ pub(crate) enum ParseRefusal {
     },
     /// Anything else: not JSON, a field missing or of the wrong type.
     Malformed(String),
+    /// **The bytes could not be read at all** (E1 round 2): the read failed
+    /// with this operating-system error, which is not "no such file" — a
+    /// sharing violation, a refused access, a folder where the file should
+    /// be. Nothing is known of the document, and nothing is concluded from
+    /// its absence ([`sight_of_read`]).
+    Unread(String),
 }
 
 impl fmt::Display for ParseRefusal {
@@ -156,6 +162,7 @@ impl fmt::Display for ParseRefusal {
                 )
             }
             Self::Malformed(why) => write!(f, "malformed: {why}"),
+            Self::Unread(error) => write!(f, "it could not be read: {error}"),
         }
     }
 }
@@ -1151,6 +1158,20 @@ pub(crate) fn sight(bytes: &[u8]) -> Sight {
     sight_as(bytes, crate::version::VERSION)
 }
 
+/// **What a reader sees from one read of `H\journal.json`** (E1 round 2):
+/// `None` only when there is no such file; a read that failed any other way
+/// is [`Sight::Unreadable`] with the operating system's error as its refusal
+/// ([`ParseRefusal::Unread`]) — a journal that could not be read is never
+/// taken for no journal, and each reader takes its role's answer to it.
+/// Pure: the caller made the read.
+pub(crate) fn sight_of_read(read: std::io::Result<Vec<u8>>) -> Option<Sight> {
+    match read {
+        Ok(bytes) => Some(sight(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(Sight::Unreadable(ParseRefusal::Unread(error.to_string()))),
+    }
+}
+
 /// [`sight`] as the build of version `this_build` reads it.
 fn sight_as(bytes: &[u8], this_build: &str) -> Sight {
     let refusal = match Journal::parse(bytes) {
@@ -1360,6 +1381,13 @@ impl Role {
         sight(bytes)
     }
 
+    /// **The one reading of one read of `H\journal.json`, made by this
+    /// role** — [`sight_of_read`], written where the product reads as
+    /// [`Role::sight`] is.
+    pub(crate) fn sight_of_read(self, read: std::io::Result<Vec<u8>>) -> Option<Sight> {
+        sight_of_read(read)
+    }
+
     /// **The table: what each role does with anything but what it reads
     /// whole.**
     pub(crate) const fn beyond(self) -> BeyondAction {
@@ -1454,6 +1482,21 @@ pub(crate) fn beyond_inputs(known: &[u8]) -> [(&'static str, Vec<u8>); 3] {
         ),
         ("bytes that are no journal", br#"{"x":1}"#.to_vec()),
     ]
+}
+
+/// **A journal whose file cannot be read at all** (E1 round 2): `journal`
+/// replaced by a folder of that name, which every platform refuses to read
+/// as a file with an error other than "no such file". Answers that error's
+/// kind, for the test to show it is no absence.
+#[cfg(test)]
+pub(crate) fn a_journal_that_cannot_be_read(journal: &Path) -> std::io::ErrorKind {
+    let _ = std::fs::remove_file(journal);
+    std::fs::create_dir_all(journal).expect("a folder at the journal's name");
+    let kind = std::fs::read(journal)
+        .expect_err("a folder is no file")
+        .kind();
+    assert_ne!(kind, std::io::ErrorKind::NotFound);
+    kind
 }
 
 /// **The three receipts a receipt reader is fed** (E1), from `known`, a
@@ -7238,7 +7281,8 @@ mod tests {
 ///
 /// [`SITES`] is the one table of every product call, outside `#[cfg(test)]`,
 /// of `Header::parse`, `Journal::parse`, `Receipt::parse`, [`sight`] and
-/// [`Role::sight`] (one call shape, `sight(`), [`receipt_sight`] and this
+/// [`Role::sight`] (one call shape, `sight(`), [`sight_of_read`] and
+/// [`Role::sight_of_read`] (another), [`receipt_sight`] and this
 /// module's own `json` — and of any `serde_json::from_*` in an updater module
 /// (one whose path has a segment beginning `update`). Each row names the item
 /// the calls stand in, how many there are, what the item is — a reader by its
@@ -7284,6 +7328,9 @@ mod parse_sites {
         ReceiptParse,
         /// `sight(` — the free function and [`Role::sight`].
         Sight,
+        /// `sight_of_read(` — the free function and [`Role::sight_of_read`]
+        /// (E1 round 2: one read of the file, its error included).
+        SightOfRead,
         ReceiptSight,
         /// This module's own `json`, which every parser goes through.
         Json,
@@ -7343,7 +7390,7 @@ mod parse_sites {
         site(
             "H1+J1+J2",
             "crate::update_startup::run",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::Start),
             "crate::update_startup::tests::on_disk::the_start_acts_on_the_header_of_what_it_cannot_read_whole",
@@ -7359,7 +7406,7 @@ mod parse_sites {
         site(
             "H3",
             "crate::update_trial::hand_back",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::TrialHandBack),
             "crate::update_apply_windows::tests::a_trial_hands_back_what_it_cannot_read_whole_to_the_rescue_its_header_names",
@@ -7367,7 +7414,7 @@ mod parse_sites {
         site(
             "H4+J6",
             "crate::update_apply_windows::opens_now",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::WindowsExit),
             "crate::update_apply_windows::tests::the_windows_exit_opens_the_rescue_over_what_it_cannot_read_whole",
@@ -7375,7 +7422,7 @@ mod parse_sites {
         site(
             "H5+J8",
             "crate::update_apply_macos::opens_now_with",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::MacExit),
             "crate::update_apply_macos::tests::the_macos_exit_never_opens_the_installed_build_plainly_over_what_it_cannot_read",
@@ -7383,7 +7430,7 @@ mod parse_sites {
         site(
             "H6",
             "crate::update_recover::header_of",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::RecoveryDoor),
             "crate::update_recover::tests::the_door_never_opens_the_installed_build_plainly_over_what_it_cannot_read",
@@ -7391,7 +7438,7 @@ mod parse_sites {
         site(
             "H7",
             "crate::update_handoff::OldLeave::opening",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::OutgoingExit),
             "crate::update_handoff::tests::the_old_build_leaves_what_it_cannot_read_whole_by_its_header",
@@ -7399,7 +7446,7 @@ mod parse_sites {
         site(
             "J10",
             "crate::update_handoff::OldLeave::fallback",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::OutgoingExit),
             "crate::update_handoff::tests::the_old_build_leaves_what_it_cannot_read_whole_by_its_header",
@@ -7407,7 +7454,7 @@ mod parse_sites {
         site(
             "J3",
             "crate::update_apply::reserve_last_trial",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::LastTrialReserve),
             "crate::update_apply::beyond_tests::the_reservation_stands_aside_from_what_it_cannot_read_whole",
@@ -7415,7 +7462,7 @@ mod parse_sites {
         site(
             "J4",
             "crate::update_apply::commit_last_trial_as",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::LastTrialCommit),
             "crate::update_apply::beyond_tests::the_reserved_trial_stands_aside_from_what_it_cannot_read_whole",
@@ -7423,7 +7470,7 @@ mod parse_sites {
         site(
             "J5",
             "crate::update_apply::read_window_phase",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::WindowElection),
             "crate::update_apply::beyond_tests::the_window_election_stands_aside_from_what_it_cannot_read_whole",
@@ -7431,7 +7478,7 @@ mod parse_sites {
         site(
             "J7",
             "crate::update_apply_windows::read_journal",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::WindowsHolder),
             "crate::update_apply_windows::tests::the_windows_lock_holder_stands_aside_from_what_it_cannot_read_whole",
@@ -7439,7 +7486,7 @@ mod parse_sites {
         site(
             "J9",
             "crate::update_apply_macos::Txn::hold",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::MacHolder),
             "crate::update_apply_macos::tests::the_macos_lock_holder_stands_aside_from_what_it_cannot_read_whole",
@@ -7447,7 +7494,7 @@ mod parse_sites {
         site(
             "J11",
             "crate::update_prepare::at_launch",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::JobOwner),
             "crate::update_prepare::tests::the_job_owner_leaves_what_it_cannot_read_whole_and_the_press_says_why",
@@ -7455,7 +7502,7 @@ mod parse_sites {
         site(
             "P1",
             "crate::update_prepare::journal_there",
-            Reads::Sight,
+            Reads::SightOfRead,
             1,
             Is::Reader(Role::JobOwner),
             "crate::update_prepare::tests::the_job_owner_leaves_what_it_cannot_read_whole_and_the_press_says_why",
@@ -7588,6 +7635,22 @@ mod parse_sites {
             Is::NotJournal("a local feed's release list"),
             "crate::update::tests::an_unreadable_or_malformed_feed_is_a_failed_check_not_a_panic",
         ),
+        site(
+            "sight_of_read",
+            "crate::update_txn::Role::sight_of_read",
+            Reads::SightOfRead,
+            1,
+            Is::Owner,
+            "crate::update_txn::tests::a_sight_names_what_reads_and_its_writer_changes_no_action",
+        ),
+        site(
+            "sight_of_read",
+            "crate::update_txn::sight_of_read",
+            Reads::Sight,
+            1,
+            Is::Owner,
+            "crate::update_txn::tests::a_sight_names_what_reads_and_its_writer_changes_no_action",
+        ),
     ];
 
     /// What the guard says every refusal is about.
@@ -7662,6 +7725,14 @@ mod parse_sites {
                 vec![
                     in_owner("sight"),
                     ItemQuery::method("Role", "sight").in_module(OWNER),
+                ],
+            ),
+            (
+                Reads::SightOfRead,
+                Pattern::call("sight_of_read"),
+                vec![
+                    in_owner("sight_of_read"),
+                    ItemQuery::method("Role", "sight_of_read").in_module(OWNER),
                 ],
             ),
             (
@@ -7848,6 +7919,12 @@ mod update_txn {
         pub fn sight(self, bytes: &[u8]) -> Sight { sight(bytes) }
     }
     pub fn receipt_sight(_bytes: &[u8]) -> Sight { Sight }
+    pub fn sight_of_read(read: Result<Vec<u8>, ()>) -> Option<Sight> {
+        read.ok().map(|bytes| sight(&bytes))
+    }
+    impl Role {
+        pub fn sight_of_read(self, read: Result<Vec<u8>, ()>) -> Option<Sight> { sight_of_read(read) }
+    }
 }
 
 mod update_reader {
@@ -7933,6 +8010,22 @@ mod update_reader {
                 "own",
                 "crate::update_txn::Role::sight",
                 Reads::Sight,
+                1,
+                Is::Owner,
+                pin,
+            ),
+            site(
+                "own",
+                "crate::update_txn::sight_of_read",
+                Reads::Sight,
+                1,
+                Is::Owner,
+                pin,
+            ),
+            site(
+                "own",
+                "crate::update_txn::Role::sight_of_read",
+                Reads::SightOfRead,
                 1,
                 Is::Owner,
                 pin,

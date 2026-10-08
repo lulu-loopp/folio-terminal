@@ -372,11 +372,12 @@ impl Read {
     }
 }
 
+/// What the door reads at the journal: a file that could not be read is a
+/// journal of which nothing reads (E1 round 2), never no journal.
 fn header_of(home: &Home) -> Read {
     let journal = home.journal();
-    match file_reads::read(Lane::Install, &journal) {
-        Ok(bytes) => {
-            let seen = Role::RecoveryDoor.sight(&bytes);
+    match Role::RecoveryDoor.sight_of_read(file_reads::read(Lane::Install, &journal)) {
+        Some(seen) => {
             let state = match &seen {
                 Sight::Known(known) => format!(
                     "transaction {} is {:?} in {}",
@@ -395,12 +396,8 @@ fn header_of(home: &Home) -> Read {
                 sight: Some(seen),
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Read {
+        None => Read {
             state: format!("no transaction in {}", home.root().display()),
-            sight: None,
-        },
-        Err(error) => Read {
-            state: format!("{} could not be read: {error}", journal.display()),
             sight: None,
         },
     }
@@ -937,6 +934,34 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(world.spawned, vec![(installed, handed())]);
         assert!(world.said[0].contains("no transaction in"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (E1 round 2; role #14, the recovery door, H6 and `DoorLeave`) —
+    /// **a journal file the door cannot read at all is no absent journal**:
+    /// handed a start, the door opens the installed Folio with
+    /// `--update-failed` (its card says the record cannot be read), never
+    /// plainly, and the file is left as it is.
+    ///
+    /// MUTATION: in `header_of`, map a read that failed other than "no such
+    /// file" back to no journal (`sight: None`).
+    #[test]
+    fn the_door_never_opens_the_installed_build_plainly_over_a_journal_it_cannot_read() {
+        let (root, rescue) = installation("unread", Some(Phase::Moving));
+        let (home, installed) = Home::of_rescue(HostPlatform::Windows, &rescue).unwrap();
+        let kind = crate::update_txn::a_journal_that_cannot_be_read(&home.journal());
+        let data = data_root(&root);
+        let (code, world) = run_over(&home, &installed, Some(handed()), &data);
+        assert_eq!(code, 0, "{kind:?}");
+        let mut words = crate::update_apply::failed_words(&home).to_vec();
+        words.extend(handed());
+        assert_eq!(world.spawned, vec![(installed, words)], "{kind:?}");
+        assert!(
+            world.said[0].contains("could not be read"),
+            "{:?}",
+            world.said
+        );
+        assert!(home.journal().is_dir(), "left as it is");
         let _ = std::fs::remove_dir_all(&root);
     }
 

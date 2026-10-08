@@ -629,25 +629,24 @@ impl Leave for OldLeave<'_> {
     /// A journal this build cannot read whole is read by its header's frozen
     /// class when the header reads, and otherwise as `destructive` (0.4.8 E1,
     /// [`crate::update_txn::Role::OutgoingExit`]): the start then continues past it with the
-    /// card, never plainly.
+    /// card, never plainly. A journal file that could not be read is such a
+    /// journal (E1 round 2); only one that is not there opens O plainly.
     fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
-        let words =
-            self.home
-                .filter(|home| {
-                    self.election_failure.is_some()
-                        || file_reads::read(Lane::UpdateJournal, home.journal())
-                            .ok()
-                            .is_some_and(|bytes| {
-                                Role::OutgoingExit.sight(&bytes).acting_header().is_none_or(
-                                    |header| {
-                                        header.class == Class::Destructive
-                                            || header.outcome == HeaderOutcome::RolledBack
-                                    },
-                                )
+        let words = self
+            .home
+            .filter(|home| {
+                self.election_failure.is_some()
+                    || Role::OutgoingExit
+                        .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
+                        .is_some_and(|seen| {
+                            seen.acting_header().is_none_or(|header| {
+                                header.class == Class::Destructive
+                                    || header.outcome == HeaderOutcome::RolledBack
                             })
-                })
-                .map(|home| crate::update_apply::failed_words(home).to_vec())
-                .unwrap_or_default();
+                        })
+            })
+            .map(|home| crate::update_apply::failed_words(home).to_vec())
+            .unwrap_or_default();
         Some((self.program.to_path_buf(), words))
     }
 
@@ -673,8 +672,9 @@ impl Leave for OldLeave<'_> {
     /// this build cannot read the journal whole (0.4.8 E1).
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         let home = self.home?;
-        let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok()?;
-        let header = Role::OutgoingExit.sight(&bytes).acting_header()?;
+        let header = Role::OutgoingExit
+            .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))?
+            .acting_header()?;
         Some((
             home.rescue_program(&header.rescue),
             crate::update_apply::failed_words(home).to_vec(),
@@ -2392,6 +2392,43 @@ mod tests {
                 (staged.home.rescue_program(&staged.journal.rescue), failed),
             ]
         );
+    }
+
+    /// RED (E1 round 2; role #15, O's exit, H7 and J10) — **a journal file O
+    /// cannot read at all is no absent journal**: O starts itself with
+    /// `--update-failed` (it continues past the journal with the card that
+    /// says its record cannot be read), and has no rescue to fall back to —
+    /// never itself plainly.
+    ///
+    /// MUTATION: in `OldLeave::opening`, map a read that failed other than
+    /// "no such file" back to no journal (`.ok()` before the sight).
+    #[test]
+    fn the_old_build_never_opens_itself_plainly_over_a_journal_it_cannot_read() {
+        let folder = Folder::new("o-unread");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let installed = folder.0.join("folio.exe");
+        let kind = crate::update_txn::a_journal_that_cannot_be_read(&staged.home.journal());
+        let mut starts = Starts {
+            die: true,
+            ..Starts::default()
+        };
+        let left = Leaving::over(&staged.home, txn, &folder.0).leave(
+            crate::update_apply::this_process(),
+            &installed,
+            &mut starts,
+            None,
+        );
+        assert!(matches!(left, Left::ShownHere(_)), "{kind:?}: {left:?}");
+        assert_eq!(
+            starts.calls,
+            vec![(
+                installed,
+                crate::update_apply::failed_words(&staged.home).to_vec()
+            )],
+            "{kind:?}"
+        );
+        assert!(staged.home.journal().is_dir(), "left as it is");
     }
 
     /// RED (E1; role #15, O's exit, sites H7 `OldLeave::opening` and J10

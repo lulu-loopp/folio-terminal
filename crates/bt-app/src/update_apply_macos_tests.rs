@@ -4850,3 +4850,28 @@ fn the_macos_receipt_watch_never_accepts_what_it_cannot_read() {
         assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}");
     }
 }
+
+/// RED (E1 round 2; role #11, the macOS exit guard, `opens_now_with`) — **a
+/// journal file the exit cannot read at all is no absent journal**: no
+/// transaction can be named for a trial, so the installed build opens with
+/// `--update-failed` and the card that says the record cannot be read —
+/// never plainly; only a journal that is not there opens it plainly.
+///
+/// MUTATION: in `opens_now_with`, map a read that failed other than "no such
+/// file" back to no journal (`Opens::Installed { failed: false }`).
+#[test]
+fn the_macos_exit_never_opens_the_installed_build_plainly_over_a_journal_it_cannot_read() {
+    let install = shape_install("unread-exit");
+    let kind = crate::update_txn::a_journal_that_cannot_be_read(&install.home.journal());
+    let home = install.home.clone();
+    let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+    assert_eq!(opens, Opens::Installed { failed: true }, "{kind:?}");
+    std::fs::remove_dir(install.home.journal()).unwrap();
+    let home = install.home.clone();
+    let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+    assert_eq!(
+        opens,
+        Opens::Installed { failed: false },
+        "no journal at all"
+    );
+}

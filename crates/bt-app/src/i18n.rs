@@ -5987,7 +5987,8 @@ impl Text {
     /// the *entry* would take the Windows half out of every completeness check
     /// to excuse the Mac half, which is how a translated sentence quietly stops
     /// being checked. The source marker beside each of these is `// zh: pending
-    /// opus46` on the literal itself — grep is how the copywriter finds them,
+    /// <TICKET>` on the literal itself, naming the ticket that left the
+    /// Chinese owed (`// zh: pending E1`) — grep is how the copywriter finds them,
     /// and this list is how the build refuses to forget them.
     /// **The entries no Mac ever draws** — the exemption list of
     /// `no_string_a_mac_reader_meets_names_a_windows_program` (§13.32 ②).

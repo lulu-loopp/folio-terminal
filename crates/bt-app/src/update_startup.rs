@@ -323,24 +323,18 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
 pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     let admission = admit(start.home, world);
     let journal_path = start.home.journal();
-    let seen = match file_reads::read(Lane::Install, &journal_path) {
-        Ok(bytes) => Role::Start.sight(&bytes),
-        Err(error) => {
-            if error.kind() != io::ErrorKind::NotFound {
-                world.say(&format!(
-                    "BT_UPDATE_START {} could not be read: {error}",
-                    journal_path.display()
-                ));
-            }
-            return Verdict::Continue {
-                admission,
-                trial: None,
-                last_trial: false,
-                failed: None,
-                waiting: None,
-                held: None,
-            };
-        }
+    // A journal that could not be read is never taken for none (E1 round
+    // 2): it is unreadable, with the card that says so.
+    let Some(seen) = Role::Start.sight_of_read(file_reads::read(Lane::Install, &journal_path))
+    else {
+        return Verdict::Continue {
+            admission,
+            trial: None,
+            last_trial: false,
+            failed: None,
+            waiting: None,
+            held: None,
+        };
     };
     // Nothing of the journal reads, not even the transaction or its rescue
     // build: it is left exactly as it is, and the card says so (E1).
@@ -2200,6 +2194,37 @@ mod tests {
         /// card (`failed: None`).
         #[test]
         fn an_unreadable_journal_is_left_alone() {
+            a_journal_file_that_cannot_be_read_is_left_alone_with_its_card();
+            an_unreadable_journal_is_left_alone_as_bytes();
+        }
+
+        /// E1 round 2: a journal file that cannot be read at all is no absent
+        /// journal — the start continues with the card that says the update's
+        /// record cannot be read (MUTATION: map that read back to no journal).
+        fn a_journal_file_that_cannot_be_read_is_left_alone_with_its_card() {
+            let Some(scene) = Scene::new("unread-file") else {
+                return;
+            };
+            let kind = crate::update_txn::a_journal_that_cannot_be_read(&scene.home.journal());
+            let mut world = Recorded::default();
+            let Verdict::Continue { failed, held, .. } = scene.run(&[], None, &mut world) else {
+                panic!("the start continues");
+            };
+            assert_eq!(
+                failed,
+                Some(Failure::Newer {
+                    folder: Some(scene.home.root().to_path_buf()),
+                    version: None,
+                    held: false,
+                }),
+                "{kind:?}"
+            );
+            assert_eq!(held, None);
+            assert!(world.spawned.is_empty());
+            assert!(scene.home.journal().is_dir(), "left as it is");
+        }
+
+        fn an_unreadable_journal_is_left_alone_as_bytes() {
             let Some(scene) = Scene::new("unreadable") else {
                 return;
             };
