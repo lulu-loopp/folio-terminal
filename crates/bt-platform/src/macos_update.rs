@@ -55,7 +55,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::Output;
 use std::time::{Duration, Instant};
 
 use crate::HostPlatform;
@@ -259,12 +259,8 @@ fn run_at(
         detail,
     };
     let mut command = crate::quiet_command(at);
-    command
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = crate::spawn_probe(&mut command)
+    command.args(arguments);
+    let mut child = crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER)
         .map_err(|error| refused(format!("did not start: {error}")))?;
     let deadline = Instant::now() + within;
     loop {

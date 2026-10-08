@@ -624,11 +624,18 @@ fn uninstall_purge_refuses_the_application_folder() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Also: `make_standard_streams_uninheritable` comes before every door that can start a child
+/// (T-UNINSTALL-SELFHOLD; MUTATION: remove it from `main`, and this is red —
+/// `the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log` drives the call itself).
 #[test]
 fn uninstall_door_precedes_every_startup_effect() {
     let source = include_str!("main.rs");
     let main = source.split_once("\nfn main() -> Result<()> {").unwrap().1;
     let door = main.find("cli::uninstall_cleanup(").unwrap();
+    let uninheritable = main
+        .find("bt_platform::make_standard_streams_uninheritable();")
+        .expect("main makes its standard streams uninheritable");
+    assert!(uninheritable < main.find("cli::console_members(").unwrap());
     for later in [
         "install_panic_log_hook();",
         "cli::attention(",
@@ -782,6 +789,11 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             include_str!("main.rs"),
             "install_panic_log_hook",
         ),
+        (
+            Remover::Staging,
+            include_str!("../../bt-platform/src/deferred_removal.rs"),
+            "schedule",
+        ),
     ] {
         let mut functions = Functions::default();
         functions.visit_file(&syn::parse_file(source).unwrap());
@@ -839,7 +851,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 27);
+    assert_eq!(INVENTORY.len(), 28);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
     // is the one function that writes a `Run` value, and the row names it.
@@ -1035,6 +1047,91 @@ fn uninstall_archive_has_ten_files_and_a_one_press_wrapper() {
     ] {
         assert!(!wrapper.contains(forbidden), "{forbidden}");
     }
+}
+
+/// RED (0.4.7 uninstall fix) — **the shipped `uninstall.cmd`, run by the real `cmd.exe`, asks
+/// its one question and starts the `folio.exe` beside it with `--uninstall` — and
+/// `--remove-data` only on `n` — whatever code page the console had when it started.**
+///
+/// The script is the archive's own bytes; the `folio.exe` beside it is a stand-in whose exit code
+/// is the length of the command line it was started with
+/// (`trust_harness::Behaviour::SaysItsCommandLineLength`), which the script hands back as its own.
+/// It runs once in the console's own code page and once after `chcp 65001`, as the clean-VM
+/// rehearsal ran it; the answer is read from a file, as a typed line is.
+///
+/// The clean-VM rehearsal of 0.4.7 met the script shipped with LF line endings: `cmd.exe` reads a
+/// batch file a line at a time and finds its place again by offset, and in a file of LF-only
+/// lines holding UTF-8 text it lost its place — fragments of lines ran as commands, and
+/// `folio.exe` was never started.
+///
+/// MUTATION: write the script with its CRs removed (the shipped bytes before this fix); the
+/// stand-in is not started with the expected line.
+#[test]
+#[cfg(windows)]
+fn the_shipped_uninstall_script_answers_its_question_in_the_real_cmd() {
+    let (root, _) = sandbox("uninstall-cmd");
+    let folder = root.join("folio");
+    fs::create_dir_all(&folder).unwrap();
+    let stand_in = folder.join("folio.exe");
+    bt_platform::trust_harness::program(
+        &stand_in,
+        bt_platform::trust::FileVersion([0, 4, 7, 0]),
+        bt_platform::trust_harness::Behaviour::SaysItsCommandLineLength,
+    )
+    .unwrap();
+    let script = folder.join("uninstall.cmd");
+    fs::write(&script, include_bytes!("../../../packaging/uninstall.cmd")).unwrap();
+    let answer = root.join("answer.txt");
+    // The test shell's door: `cmd.exe` with its AutoRun refused (`/d`), under a temporary home.
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    // A script `cmd.exe` mis-reads runs fragments of its lines as commands — on the clean VM,
+    // `Folio` among them. So it finds programs in the system folder alone (where `chcp` is) and
+    // starts in a folder with nothing in it: no fragment reaches a program on this machine's
+    // `PATH`, such as the `folio.exe` a build puts there.
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let empty = root.join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let run = |typed: &str, first: &str| {
+        use std::os::windows::process::CommandExt;
+        fs::write(&answer, format!("{typed}\r\n")).unwrap();
+        let output = hygiene
+            .command("cmd.exe", bt_platform::quiet_command)
+            .arg("/c")
+            // `cmd /c` takes away the first and the last quote of a line that begins with one.
+            .raw_arg(format!("\"{first}\"{}\"\"", script.display()))
+            .env("PATH", &system)
+            .current_dir(&empty)
+            .stdin(fs::File::open(&answer).unwrap())
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+    // `cmd.exe` starts a program with the program as the line wrote it, a space, and the rest of
+    // the line as written — its leading space included, and the space an empty `%remove%` leaves.
+    let started_with = |rest: &str| {
+        let line = format!("\"{}\" {rest}", stand_in.display());
+        i32::try_from(2 * line.encode_utf16().count()).unwrap()
+    };
+    for first in ["", "chcp 65001 >nul <nul & "] {
+        for (typed, tail) in [
+            ("", " --uninstall "),
+            ("Y", " --uninstall "),
+            ("n", " --uninstall --remove-data"),
+        ] {
+            let (code, stdout) = run(typed, first);
+            assert_eq!(
+                code,
+                Some(started_with(tail)),
+                "{first:?} {typed:?}:
+{stdout}"
+            );
+            assert!(stdout.contains("Keep settings and data? [Y/n]"), "{stdout}");
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 /// An uninstaller must not bring anything into existence. An account that never ran
@@ -2347,6 +2444,99 @@ fn the_door_waits_for_the_folio_that_asked_before_it_touches_anything() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// RED (0.4.7 uninstall fix) — **the door waits for the Folio that asked until that process has
+/// let go of what it held, not until it has said its exit code.**
+///
+/// The asker is a real process — a copy of this test binary — that takes the data directory's
+/// claim the way a Folio does (`persist::is_writer_of`) and leaves by Folio's own way out
+/// (`leave_process`). It is held at its end (`trust_harness::stopped_at_exit`): its exit code
+/// said, its claim not yet let go. There the door, with the real wait (`waited_for`) at a bound of
+/// nothing and the real cleanup (`execute`, the kernel claim), answers that a Folio is running
+/// **from its wait**, before any claim is asked — and nothing is touched. Once the asker has gone,
+/// the same door completes and reaches the program's step.
+///
+/// This is the clean-VM rehearsal's failure (two of two in-app uninstalls): the door saw the
+/// asker's exit code, took the asker for gone, and was refused the claim the asker still held —
+/// "A Folio instance is running" with "Program files (per-copy): kept". No earlier test met it:
+/// every door test handed the wait a seam or no asker, and none had a real process holding the
+/// claim while it left.
+///
+/// MUTATION: in `bt_platform::install_flip`'s Windows arm, `creation_of` asks the exit code
+/// instead of whether the process object is signalled; the door then answers from the claim, with
+/// the program row "kept".
+#[test]
+#[cfg(windows)]
+fn the_door_waits_until_the_asker_has_let_go_of_its_claim() {
+    if let Ok(data) = std::env::var("BT_UNINSTALL_ASKER_CHILD") {
+        // The asker: the data directory's claim, as a Folio takes it; its identity; Folio's way
+        // out.
+        assert!(crate::persist::is_writer_of(Path::new(&data)));
+        let me = std::process::id();
+        let started = bt_platform::install_flip::started_of(me).unwrap();
+        fs::write(Path::new(&data).join("asker"), format!("{me} {started}")).unwrap();
+        bt_platform::leave_process(0);
+    }
+    let (root, scope) = sandbox("uninstall-asker");
+    fs::create_dir_all(&scope.data[0]).unwrap();
+    let scope = std::sync::Arc::new(scope);
+    let mut command = bt_platform::quiet_command(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "uninstall::tests::the_door_waits_until_the_asker_has_let_go_of_its_claim",
+            "--nocapture",
+        ])
+        .env("BT_UNINSTALL_ASKER_CHILD", &scope.data[0])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let asker = || {
+        let said = fs::read_to_string(scope.data[0].join("asker")).unwrap();
+        let (pid, started) = said.split_once(' ').unwrap();
+        Running {
+            pid: pid.parse().unwrap(),
+            started: started.parse().unwrap(),
+        }
+    };
+    let door = |within: Duration| {
+        let scope = scope.clone();
+        let asker = asker();
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let report = {
+            let reached = reached.clone();
+            on_a_worker(move |worker| {
+                uninstall(
+                    worker,
+                    &scope,
+                    Some(asker),
+                    within,
+                    |scope, program| super::execute(scope, false, system_absent, Some(program)),
+                    |_| {
+                        reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Vec::new()
+                    },
+                )
+            })
+        };
+        (
+            report.code,
+            report.stdout(),
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    };
+    let (at_its_end, status) =
+        bt_platform::trust_harness::stopped_at_exit(&mut command, |_, _| door(Duration::ZERO))
+            .unwrap();
+    assert_eq!(status.code(), Some(0));
+    let running = Report::blocked(Why::Said(Text::CleanupRunning))
+        .in_lang(scope.lang)
+        .stdout();
+    assert_eq!(at_its_end, (2, running, false));
+    let (code, stdout, reached) = door(AFTER_PID_WITHIN);
+    assert_eq!((code, reached), (0, true), "{stdout}");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 /// RED (T-UNINSTALL-UX) — **the door's lines are in the language `settings.json` names; with no
 /// settings file, in the OS's; and a file that says `System` is the OS's too.**
 ///
@@ -2403,17 +2593,39 @@ fn the_door_speaks_the_settings_language_and_the_os_language_without_one() {
     assert_eq!(lines(None, "en-US").0, Lang::English);
 }
 
-/// PIN (T-UNINSTALL-UX) — **`--uninstall-cleanup` still prints what it always printed: every
-/// mark's English is its name, and every kind's English is the word the door used to write.**
+/// PIN (T-UNINSTALL-UX) — **`--uninstall-cleanup` still prints what it always printed: on each
+/// platform, every mark the door prints there has its name as its English, and every kind's
+/// English is the word the door used to write.**
 ///
 /// The package managers' hooks read this transcript; the language arrived for `--uninstall`
-/// only.
+/// only. Per platform, because a row's English may differ by platform (`pick_platform`): "Local
+/// data (including WebView2)" is a Windows data root's row and is printed nowhere else, and the
+/// same text on macOS says "Local data". A data mark is checked where it is a data root
+/// (`Remover::data_root_on`); every other mark on every platform.
 ///
-/// MUTATION: change a mark's `says` to a row whose English differs from its `name`.
+/// MUTATIONS: change a mark's `says` to a row whose English differs from its `name`; or make
+/// `data_root_on` answer for every platform — the Windows-only Local data row is then checked on
+/// macOS, where its English is "Local data".
 #[test]
 fn the_cleanup_verb_prints_the_same_english_as_before() {
-    for mark in INVENTORY {
-        assert_eq!(english(mark.says), mark.name, "{}", mark.name);
+    for platform in [
+        HostPlatform::Windows,
+        HostPlatform::MacOs,
+        HostPlatform::OtherUnix,
+    ] {
+        for mark in INVENTORY {
+            if matches!(mark.remover, Remover::Data(..))
+                && mark.remover.data_root_on(platform).is_none()
+            {
+                continue;
+            }
+            assert_eq!(
+                mark.says.on(Lang::English, platform),
+                mark.name,
+                "{platform:?}: {}",
+                mark.name
+            );
+        }
     }
     for (text, word) in [
         (Text::CleanupKindPerCopy, "per-copy"),
@@ -2630,4 +2842,363 @@ fn every_running_installed_image_is_in_the_removers_wait_census() {
     child.wait().unwrap();
     reader.join().unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (T-UNINSTALL-SELFHOLD) — **the door Folio's way out starts holds nothing of the Folio
+/// that asked, so a `--remove-data` run removes the folder that held that Folio's log.**
+///
+/// Three real processes, all copies of this test binary. The asker does what a resident Folio
+/// does with its streams: `make_standard_streams_uninheritable` (the first line of `main`), then
+/// `redirect_std_streams_to_file` onto `diagnostics.log` in the sandbox's data folder (a resident
+/// run's log channel). It is started once with no streams (a Folio started by a person) and once
+/// with that same log as its streams (a Folio started by a Folio — an update's trial). It records
+/// its identity, starts the door through `door_command` (the way out's own builder) and leaves
+/// without waiting, as `leave_armed` does. The door says one line on each stream, waits for the
+/// asker's end with the real `waited_for` (`--after-pid`), and runs the real `uninstall` over the
+/// sandbox with the door's cleanup (`execute`: the claims, the purge's preflight with the real
+/// `cleanup::probe_file`, the purge). Asked to keep the data, the log holds none of the door's
+/// words; asked to remove it, the door answers 0 and the data folder, log and all, is gone.
+///
+/// This is the clean-VM finding of 2026-10-07: every in-app uninstall with "Also remove settings
+/// and data" refused with "A process holds Folio data … (diagnostics.log)", and the holder was the
+/// door itself, holding the duplicates of the asker's streams it was started with.
+///
+/// MUTATIONS, each seen red on Windows: in `bt_platform::quiet_breakaway_command`, leave out the
+/// three null streams — the door's line lands in the asker's log (on every platform), and the
+/// remove-data runs answer 2 naming `diagnostics.log`; make
+/// `make_standard_streams_uninheritable` do nothing — the handed asker's remove-data run answers 2
+/// the same way; in `uninstall`, open the data folder's `diagnostics.log` for appending before
+/// the cleanup and hold it — every remove-data run answers 2.
+#[test]
+fn the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log() {
+    const ROLE: &str = "BT_UNINSTALL_SELFHOLD_CHILD";
+    const NAME: &str =
+        "uninstall::tests::the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log";
+    const SAID: &str = "door line 卸载 seen";
+    let libtest = |command: &mut std::process::Command| {
+        command.args(["--exact", NAME, "--nocapture"]);
+    };
+    let identity = |root: &Path, name: &str| {
+        let said = fs::read_to_string(root.join(name)).unwrap();
+        let (pid, started) = said.split_once(' ').unwrap();
+        Running {
+            pid: pid.parse().unwrap(),
+            started: started.parse().unwrap(),
+        }
+    };
+    if let Some(role) = std::env::var_os(ROLE) {
+        let role = role.into_string().unwrap();
+        let (part, rest) = role.split_once('|').unwrap();
+        let (remove, root) = rest.split_once('|').unwrap();
+        let (remove, root) = (remove == "remove", PathBuf::from(root));
+        let scope = Scope::sandbox(&root, root.join("app/folio.exe")).unwrap();
+        if part == "asker" {
+            bt_platform::make_standard_streams_uninheritable();
+            assert!(bt_platform::redirect_std_streams_to_file(
+                &scope.data[0].join(crate::diagnostics::LOG_FILENAME)
+            ));
+            let me = std::process::id();
+            let started = bt_platform::install_flip::started_of(me).unwrap();
+            fs::write(root.join("asker"), format!("{me} {started}")).unwrap();
+            let mut door = door_command(std::env::current_exe().unwrap());
+            libtest(&mut door);
+            // A test harness may hold this process in a job that allows no breakaway, so the
+            // door stays in the harness's job: `CREATE_NO_WINDOW` alone. Only the flags change;
+            // the streams are the builder's.
+            #[cfg(windows)]
+            std::os::windows::process::CommandExt::creation_flags(&mut door, 0x0800_0000);
+            let door = door.env(ROLE, format!("door|{rest}")).spawn().unwrap();
+            let started = bt_platform::install_flip::started_of(door.id()).unwrap();
+            fs::write(root.join("door"), format!("{} {started}", door.id())).unwrap();
+            std::process::exit(0);
+        }
+        println!("{SAID}");
+        eprintln!("{SAID}");
+        let asker = identity(&root, "asker");
+        let scope = std::sync::Arc::new(scope);
+        let (code, stdout) = on_a_worker(move |worker| {
+            let report = uninstall(
+                worker,
+                &scope,
+                Some(asker),
+                AFTER_PID_WITHIN,
+                |scope, program| execute_then(scope, remove, system_absent, Some(program)),
+                |_| Vec::new(),
+            );
+            (report.code, report.stdout())
+        });
+        fs::write(root.join("door-said"), format!("{code}\n{stdout}")).unwrap();
+        std::process::exit(0);
+    }
+    for handed in [false, true] {
+        for remove in [true, false] {
+            let (root, scope) = sandbox("uninstall-selfhold");
+            let data = scope.data[0].clone();
+            settings_speaking(&scope, bt_persist::LanguageV1::English);
+            let log = data.join(crate::diagnostics::LOG_FILENAME);
+            let stream = || -> std::process::Stdio {
+                if handed {
+                    fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log)
+                        .unwrap()
+                        .into()
+                } else {
+                    std::process::Stdio::null()
+                }
+            };
+            // The command owns the log's handles until it is dropped, so it lives only for the
+            // asker's run: past it, the only holders a probe can meet are the asker's and the
+            // door's.
+            let status = {
+                let mut asker = bt_platform::quiet_command(std::env::current_exe().unwrap());
+                libtest(&mut asker);
+                let words = if remove { "remove" } else { "keep" };
+                asker
+                    .env(ROLE, format!("asker|{words}|{}", root.display()))
+                    .stdin(std::process::Stdio::null())
+                    .stdout(stream())
+                    .stderr(stream())
+                    .status()
+                    .unwrap()
+            };
+            let case = format!("handed its streams: {handed}, remove data: {remove}");
+            assert_eq!(status.code(), Some(0), "{case}");
+            let door = identity(&root, "door");
+            assert!(
+                on_a_worker(move |worker| waited_for(worker, door, AFTER_PID_WITHIN)),
+                "{case}"
+            );
+            let said = fs::read_to_string(root.join("door-said")).unwrap();
+            let (code, report) = said.split_once('\n').unwrap();
+            assert_eq!(code, "0", "{case}\n{report}");
+            if remove {
+                assert!(
+                    !data.exists(),
+                    "{case}: the data folder and its log are gone"
+                );
+            } else {
+                let kept = fs::read_to_string(&log).unwrap();
+                assert!(
+                    !kept.contains(SAID),
+                    "{case}: the door wrote into its asker's log:\n{kept}"
+                );
+                assert!(data.join(crate::persist::SETTINGS_FILE_NAME).exists());
+            }
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+}
+
+/// Whether `path` is `root` or below it, compared by component and, as Windows and macOS
+/// compare names, without case.
+fn within(path: &Path, root: &Path) -> bool {
+    let folded = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    folded(path).starts_with(&folded(root))
+}
+
+/// RED (T-UNINSTALL-SELFHOLD, clean-VM row N9) — **the native remover's per-user folder is
+/// inside no purge root, on any platform**: `--remove-data` purges the data folders after the
+/// program's step has started the remover from its private folder there.
+///
+/// Every platform's scope, resolved the way production resolves it (no sandbox; nothing is
+/// purged here).
+///
+/// MUTATION: in `Scope::resolve`, put the Windows arm of `remover_home` back at
+/// `%LOCALAPPDATA%\Folio` — inside "Local data (including WebView2)"; or the macOS arm at
+/// `~/Library/Application Support/Folio` — the data folder itself.
+#[test]
+fn the_removers_folder_is_inside_no_purge_root() {
+    let (root, _) = sandbox("remover-home");
+    for platform in [
+        HostPlatform::Windows,
+        HostPlatform::MacOs,
+        HostPlatform::OtherUnix,
+    ] {
+        let mapped = root.clone();
+        let scope = Scope::resolve(
+            root.join("app/folio.exe"),
+            platform,
+            move |name| {
+                Some(
+                    mapped
+                        .join(match name {
+                            "APPDATA" => "roaming",
+                            "LOCALAPPDATA" => "local",
+                            "HOME" | "USERPROFILE" => "home",
+                            "XDG_DATA_HOME" => "xdg",
+                            _ => return None,
+                        })
+                        .into_os_string(),
+                )
+            },
+            root.join("temp"),
+            false,
+        )
+        .unwrap();
+        for (mark, purged) in &scope.purge_roots {
+            assert!(
+                !within(&scope.remover_home, purged),
+                "{platform:?}: the remover's folder {} is inside the purge root `{}` ({})",
+                scope.remover_home.display(),
+                mark.name,
+                purged.display()
+            );
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (T-UNINSTALL-SELFHOLD, clean-VM row N9) — **a remove-data run purges every data folder
+/// around the remover it has just started, and says it completed.**
+///
+/// `uninstall.cmd` answered `n` printed "Local data (including WebView2) (data): …\Local\Folio:
+/// refused (Access is denied. (os error 5))" and skipped "Removal continues after this window
+/// closes." — the folder it could not remove was the remover's own, started by the program's step
+/// just before the purge, its image in use.
+///
+/// The real door over a seeded sandbox — `uninstall`, `execute` with the purge, the real
+/// `remove_the_program` — with the hand-over doing to the disk what `deferred_removal::schedule`
+/// does: a private folder below the remover's home and a copy of the program in it, held open
+/// as a running image holds its file (no delete sharing; Windows). The run answers 0 with no row
+/// refused, every data folder is gone, and the remover's copy is still there for it to run from.
+///
+/// MUTATION: in `Scope::resolve`, put `remover_home` back inside the data folders
+/// (`%LOCALAPPDATA%\Folio` on Windows, `~/Library/Application Support/Folio` on macOS): on
+/// Windows the Local data row is refused with "Access is denied" and the run answers 1; on macOS
+/// the purge deletes the remover's copy.
+#[test]
+fn a_remove_data_run_purges_around_the_remover_it_started() {
+    let (root, scope) = sandbox("purge-around-remover");
+    seed(&scope, &scope.exe);
+    settings_speaking(&scope, bt_persist::LanguageV1::English);
+    for (_, purged) in &scope.purge_roots {
+        if purged.extension().is_none() {
+            fs::create_dir_all(purged).unwrap();
+            fs::write(purged.join("held by nobody"), b"data").unwrap();
+        }
+    }
+    seed_program(&scope);
+    let scope = std::sync::Arc::new(scope);
+    let staged = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (code, stdout) = {
+        let (scope, staged) = (scope.clone(), staged.clone());
+        on_a_worker(move |worker| {
+            let report = uninstall(
+                worker,
+                &scope,
+                None,
+                AFTER_PID_WITHIN,
+                |scope, program| execute_then(scope, true, system_absent, Some(program)),
+                |scope| {
+                    remove_the_program(
+                        worker,
+                        scope,
+                        crate::install_channel::Channel::Ours,
+                        bt_platform::host_platform(),
+                        members,
+                        &[],
+                        |_, removal, home| {
+                            let private = home.join("uninstall-0123456789abcdef");
+                            fs::create_dir_all(&private)?;
+                            let copy = private.join(removal.program.file_name().unwrap());
+                            fs::copy(&removal.program, &copy)?;
+                            let held =
+                                bt_platform::trust_harness::hold_without_delete_sharing(&copy).ok();
+                            *staged.lock().unwrap() = Some((copy, held));
+                            Ok(())
+                        },
+                    )
+                },
+            );
+            (report.code, report.stdout())
+        })
+    };
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!stdout.contains("refused"), "{stdout}");
+    for (mark, purged) in &scope.purge_roots {
+        assert!(!purged.exists(), "{} stayed:\n{stdout}", mark.name);
+    }
+    let (copy, held) = staged
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the remover was handed over");
+    assert!(
+        copy.exists(),
+        "the purge took the remover's copy:\n{stdout}"
+    );
+    drop(held);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (T-UNINSTALL-SELFHOLD round 3) — **a remover's folder left behind is taken by the next
+/// purge, and the zap list names it.**
+///
+/// A remover ended before it could retire leaves its private folder and copy in the per-user
+/// folder (`REMOVER_HOME`). A later `--uninstall-cleanup --purge` — scoop's, winget's, or a
+/// person's — takes it with the data folders and says so on its own row. Homebrew's
+/// `brew uninstall --zap` does not run the purge, so the cask's own `trash` list names the same
+/// folder, as the code resolves it on macOS.
+///
+/// MUTATIONS: in `execute`, skip the remover's folder on every run (not only the run that started
+/// a remover) — the stale copy stays and its row is missing; remove
+/// `~/Library/Application Support/Folio-uninstall` from `packaging/homebrew/folio.rb`'s `trash`.
+#[test]
+fn a_purge_takes_a_removers_folder_left_behind() {
+    let (root, scope) = sandbox("stale-remover");
+    seed(&scope, &scope.exe);
+    let stale = scope
+        .remover_home
+        .join("uninstall-00000000000000000000000000000000");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("folio.exe"), b"a remover that never retired").unwrap();
+    let report = execute(&scope, true, system_absent);
+    let stdout = report.stdout();
+    assert_eq!(report.code, 0, "{stdout}");
+    assert!(!scope.remover_home.exists(), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "Uninstaller staging (data): {}: removed",
+            scope.remover_home.display()
+        )),
+        "{stdout}"
+    );
+    fs::remove_dir_all(root).unwrap();
+
+    let cask = include_str!("../../../packaging/homebrew/folio.rb");
+    let zap = &cask[cask.find("zap script:").expect("a zap script")..];
+    let trash = &zap[zap.find("trash:").expect("a trash list")..];
+    let trash = &trash[..trash.find(']').unwrap()];
+    // The cask spells the account's home `~`; the scope is resolved under a home of its own and
+    // read back below it.
+    let (home, _) = sandbox("zap-list");
+    let mapped = home.clone();
+    let mac = Scope::resolve(
+        home.join("Folio.app/Contents/MacOS/folio"),
+        HostPlatform::MacOs,
+        move |name| (name == "HOME").then(|| mapped.clone().into_os_string()),
+        home.join("temp"),
+        true,
+    )
+    .unwrap();
+    for folder in [&mac.data[0], &mac.remover_home] {
+        let below: Vec<_> = folder
+            .strip_prefix(&home)
+            .unwrap()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let spelled = format!("~/{}", below.join("/"));
+        assert!(
+            trash.contains(&format!("\"{spelled}\"")),
+            "the zap does not trash {spelled}:\n{trash}"
+        );
+    }
+    fs::remove_dir_all(home).unwrap();
 }

@@ -848,21 +848,19 @@ fn run_probe() -> Option<Version> {
     let copilot = bt_platform::program_on_path(Path::new("copilot"))?;
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
-    let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
-    // `raw_arg` and not `args`, because what is being built is a string `cmd`
+    let command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
+    // A raw tail and not `args`, because what is being built is a string `cmd`
     // parses for itself: the outer quotes are the pair it strips, and the inner
     // ones are what keep a program path holding a space one token.
     let output = {
-        use std::os::windows::process::CommandExt as _;
-        command.raw_arg(probe_command_tail(&copilot));
-        bt_platform::probe_output(command)
-            .inspect(|output| {
-                bt_platform::file_reads::pipe_output(
-                    bt_platform::file_reads::Lane::Attention,
-                    output,
-                )
-            })
-            .ok()?
+        bt_platform::probe_output_with_raw_tail(
+            &command,
+            std::ffi::OsStr::new(&probe_command_tail(&copilot)),
+        )
+        .inspect(|output| {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, output)
+        })
+        .ok()?
     };
     Version::parse(&String::from_utf8_lossy(&output.stdout))
 }
