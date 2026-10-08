@@ -118,7 +118,7 @@ use bt_platform::file_reads::{self, Lane};
 use crate::cli;
 use crate::update_apply::{ExitGuard, Leave, Left, Opens};
 use crate::update_apply_macos::{self, Hands, Limits, Road};
-use crate::update_txn::{Actor, Class, Header, Home, Role, Sight, sight};
+use crate::update_txn::{Actor, Class, Header, Home, Role, Sight};
 
 /// **The recovery door's effects**: a lock holder's (its lines, the exchange,
 /// the check of a restored bundle), and the start of the installed Folio.
@@ -376,7 +376,7 @@ fn header_of(home: &Home) -> Read {
     let journal = home.journal();
     match file_reads::read(Lane::Install, &journal) {
         Ok(bytes) => {
-            let seen = sight(&bytes);
+            let seen = Role::RecoveryDoor.sight(&bytes);
             let state = match &seen {
                 Sight::Known(known) => format!(
                     "transaction {} is {:?} in {}",

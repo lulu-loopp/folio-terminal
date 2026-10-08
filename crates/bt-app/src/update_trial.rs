@@ -996,7 +996,11 @@ pub(crate) fn hand_back(
     // envelope names (`update_txn::Sight::acting_header`, E1).
     let Some(header) = file_reads::read(Lane::UpdateJournal, home.journal())
         .ok()
-        .and_then(|bytes| crate::update_txn::sight(&bytes).acting_header())
+        .and_then(|bytes| {
+            crate::update_txn::Role::TrialHandBack
+                .sight(&bytes)
+                .acting_header()
+        })
     else {
         // No journal to read, or nothing of it: the watch reads the end on
         // its next turn, and nobody could take a journal nothing of reads.

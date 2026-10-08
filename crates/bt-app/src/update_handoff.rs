@@ -71,8 +71,8 @@ use bt_platform::install_txn::{self, Held};
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::update_apply::{Contender, ExitGuard, Leave, Left, Window};
-use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, TxnId, sight};
+use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, Window};
+use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, Role, TxnId};
 
 /// **What Prepare leaves the job holding** (U-20 / U-27 make it; the job keeps
 /// it from its `Verified` report until the process leaves): the installation
@@ -574,7 +574,7 @@ impl Leaving {
                 } else {
                     Duration::ZERO
                 },
-                Contender::Outgoing,
+                Outgoing,
             );
             match window {
                 Window::Mine(duty) => {
@@ -586,9 +586,6 @@ impl Leaving {
                     guard.owns_window(duty);
                 }
                 Window::Theirs(owner) => guard.not_mine(Some(owner.pid)),
-                Window::RoadTaken(_) | Window::StoodAside(_) => {
-                    unreachable!("the outgoing build never reads the journal to elect ({window:?})")
-                }
                 Window::Refused(refusal) => {
                     crate::diagnostics::note(&format!(
                         "Folio: the outgoing build's window election was refused: {}",
@@ -634,21 +631,23 @@ impl Leave for OldLeave<'_> {
     /// [`crate::update_txn::Role::OutgoingExit`]): the start then continues past it with the
     /// card, never plainly.
     fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
-        let words = self
-            .home
-            .filter(|home| {
-                self.election_failure.is_some()
-                    || file_reads::read(Lane::UpdateJournal, home.journal())
-                        .ok()
-                        .is_some_and(|bytes| {
-                            sight(&bytes).acting_header().is_none_or(|header| {
-                                header.class == Class::Destructive
-                                    || header.outcome == HeaderOutcome::RolledBack
+        let words =
+            self.home
+                .filter(|home| {
+                    self.election_failure.is_some()
+                        || file_reads::read(Lane::UpdateJournal, home.journal())
+                            .ok()
+                            .is_some_and(|bytes| {
+                                Role::OutgoingExit.sight(&bytes).acting_header().is_none_or(
+                                    |header| {
+                                        header.class == Class::Destructive
+                                            || header.outcome == HeaderOutcome::RolledBack
+                                    },
+                                )
                             })
-                        })
-            })
-            .map(|home| crate::update_apply::failed_words(home).to_vec())
-            .unwrap_or_default();
+                })
+                .map(|home| crate::update_apply::failed_words(home).to_vec())
+                .unwrap_or_default();
         Some((self.program.to_path_buf(), words))
     }
 
@@ -675,7 +674,7 @@ impl Leave for OldLeave<'_> {
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         let home = self.home?;
         let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok()?;
-        let header = sight(&bytes).acting_header()?;
+        let header = Role::OutgoingExit.sight(&bytes).acting_header()?;
         Some((
             home.rescue_program(&header.rescue),
             crate::update_apply::failed_words(home).to_vec(),
@@ -2058,7 +2057,7 @@ mod tests {
             txn,
             Running { pid: 1, started: 1 },
             Duration::ZERO,
-            crate::update_apply::Contender::Applier,
+            crate::update_apply::Applier,
         );
         assert_eq!(
             crate::update_apply::window_holder(&staged.home, txn, Running { pid: 1, started: 1 },),
@@ -2078,7 +2077,7 @@ mod tests {
                     txn,
                     Running { pid: 1, started: 1 },
                     Duration::ZERO,
-                    crate::update_apply::Contender::Applier,
+                    crate::update_apply::Applier,
                 ),
                 Window::Refused(refusal) if refusal.contended()
             ),
@@ -2092,7 +2091,7 @@ mod tests {
                 txn,
                 Running { pid: 1, started: 1 },
                 Duration::ZERO,
-                crate::update_apply::Contender::Applier,
+                crate::update_apply::Applier,
             )
             .is_mine(),
             "only dropping the process's exit guard releases the retained lock"
@@ -2107,8 +2106,10 @@ mod tests {
     /// taken. An applier asking at the same state does read the journal, and
     /// stands down.
     ///
-    /// MUTATION: in `Leaving::leave`, elect as `Contender::Applier` (O reads
-    /// `Abandoned` as a road taken and starts nothing).
+    /// MUTATION: in `Leaving::leave`, elect as `Applier` (O would read
+    /// `Abandoned` as a road taken and start nothing): since E1-a2 the match
+    /// over its `Window<Applier>` no longer compiles, because that answer can
+    /// say the road was taken.
     #[test]
     fn an_outgoing_build_whose_applier_never_started_still_opens_folio() {
         let folder = Folder::new("applier-never-started");
@@ -2132,7 +2133,7 @@ mod tests {
                 txn,
                 Running { pid: 2, started: 2 },
                 Duration::ZERO,
-                crate::update_apply::Contender::Applier,
+                crate::update_apply::Applier,
             ),
             Window::RoadTaken(PhaseKind::Abandoned),
             "an applier reads the journal"
@@ -2227,7 +2228,7 @@ mod tests {
                     txn,
                     me,
                     Duration::ZERO,
-                    crate::update_apply::Contender::Applier,
+                    crate::update_apply::Applier,
                 )
             },
             |_| drop(holder.take()),
@@ -2269,7 +2270,7 @@ mod tests {
                 txn,
                 Running { pid: 1, started: 1 },
                 Duration::ZERO,
-                crate::update_apply::Contender::Applier,
+                crate::update_apply::Applier,
             ),
             Window::Theirs(me)
         );
@@ -2666,7 +2667,7 @@ mod tests {
             txn,
             Running { pid: 1, started: 1 },
             Duration::ZERO,
-            crate::update_apply::Contender::Applier,
+            crate::update_apply::Applier,
         );
         release.send(()).unwrap();
         let first = first.join().unwrap();

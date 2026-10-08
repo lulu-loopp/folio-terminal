@@ -192,7 +192,7 @@ use crate::update_prepare_windows::{Resume, staged_as_verified};
 use crate::update_txn::{
     Action, Actor, Asker, Class, Digest, Disk, Effect, Event, HeaderOutcome, Home, Inventories,
     Journal, Layout, Located, Move, Nonce, Phase, PhaseKind, Place, Restore, Role, Seen, Sight,
-    TrialProcess, TxnId, decide, sight,
+    TrialProcess, TxnId, decide,
 };
 
 /// **The applier's and the recovery's effects that a test stands in for**:
@@ -961,7 +961,7 @@ pub(crate) fn opens_now(road: &Road) -> Opens {
     let Ok(bytes) = file_reads::read(Lane::UpdateJournal, road.home.journal()) else {
         return Opens::Installed { failed: false };
     };
-    let seen = sight(&bytes);
+    let seen = Role::WindowsExit.sight(&bytes);
     let Some(header) = seen.acting_header() else {
         return Opens::Rescue;
     };
@@ -1042,7 +1042,7 @@ fn live_set(inventories: &Inventories, install: &Path) -> Option<Live> {
 /// [`Ended::StoodAside`]).
 fn read_journal(home: &Home) -> Result<Option<Sight>, String> {
     match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => Ok(Some(sight(&bytes))),
+        Ok(bytes) => Ok(Some(Role::WindowsHolder.sight(&bytes))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("the journal: {error}")),
     }

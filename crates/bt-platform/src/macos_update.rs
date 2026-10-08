@@ -957,6 +957,20 @@ pub fn min_updater(worker: &crate::admission::WorkerCtx, bundle: &Path) -> Resul
     plist_string(worker, bundle, "FolioMinUpdater")
 }
 
+/// **`FolioUpdateProtocol` of the bundle at `bundle`** — the update protocol
+/// it speaks, sealed in its `Info.plist` beside [`min_updater`] (0.4.6 ticket
+/// U-9; read by the macOS Prepare since 0.4.8 ticket E1-a2), as `plutil`
+/// prints the integer.
+///
+/// # Errors
+/// As [`short_version`]'s.
+pub fn update_protocol(
+    worker: &crate::admission::WorkerCtx,
+    bundle: &Path,
+) -> Result<String, Refusal> {
+    plist_string(worker, bundle, "FolioUpdateProtocol")
+}
+
 /// **One string of the bundle's `Info.plist`** — `plutil -extract <key> raw
 /// -o - <bundle>/Contents/Info.plist`, within [`PLIST_WITHIN`].
 fn plist_string(

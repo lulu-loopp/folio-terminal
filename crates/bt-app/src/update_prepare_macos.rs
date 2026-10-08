@@ -79,6 +79,7 @@ use bt_platform::macos_update::{self, Failed};
 
 use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
+use crate::update_archive;
 use crate::update_handoff::Staged;
 use crate::update_job::{
     Driver, MACOS_ARCHITECTURE, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop,
@@ -534,14 +535,17 @@ fn copy_verified(
 /// **A bundle is the offered Folio**: [`Tools::verify`], its
 /// `CFBundleShortVersionString` equal to `version`, and its main executable
 /// carrying the offer's architecture ([`MACOS_ARCHITECTURE`]); and **this
-/// build may update itself to it** — its sealed `FolioMinUpdater` no newer
-/// than this build (0.4.7 U-42c, the Windows archive reader's `min_updater`
-/// rule). Answers its identity — cdhash and version — for the journal.
+/// build may update itself to it** — its sealed `FolioUpdateProtocol` this
+/// build's ([`spoken`], 0.4.8 E1-a2) and its sealed `FolioMinUpdater` no
+/// newer than this build (0.4.7 U-42c): the Windows archive reader's
+/// `protocol` and `min_updater` rules, in that order. Answers its identity —
+/// cdhash and version — for the journal.
 ///
 /// # Errors
 /// [`Stop::TooOld`] when the bundle needs a newer updater (with one line in
-/// `diagnostics.log`); [`Stop::Identity`] for every other check, a missing
-/// or unreadable `FolioMinUpdater` included.
+/// `diagnostics.log`); [`Stop::Identity`] for every other check — another
+/// protocol (with one line), a missing or unreadable `FolioUpdateProtocol`
+/// or `FolioMinUpdater` included.
 pub(crate) fn check(
     worker: &WorkerCtx,
     tools: &dyn Tools,
@@ -559,6 +563,7 @@ pub(crate) fn check(
     if !architectures.iter().any(|name| name == MACOS_ARCHITECTURE) {
         return Err(Stop::Identity);
     }
+    spoken(&macos_update::update_protocol(worker, bundle).map_err(|_| Stop::Identity)?)?;
     let needs = macos_update::min_updater(worker, bundle).map_err(|_| Stop::Identity)?;
     let needed = crate::update::Version::parse(&needs).ok_or(Stop::Identity)?;
     let this = crate::update::Version::parse(crate::version::VERSION).ok_or(Stop::Identity)?;
@@ -573,6 +578,32 @@ pub(crate) fn check(
         cdhash: Cdhash::parse(&code.cdhash).map_err(|_| Stop::Identity)?,
         version: found,
     })
+}
+
+/// **The bundle speaks this build's update protocol**: its sealed
+/// `FolioUpdateProtocol`, `sealed`, is [`release_manifest::PROTOCOL`] — the
+/// rule and the words of the Windows archive reader's `protocol` check
+/// (`update_archive`'s `offered`, [`update_archive::Reason::Protocol`]). A
+/// value that is not a number is refused as a malformed manifest is there.
+///
+/// Defence in depth for a hop, which the frozen surfaces already keep: it
+/// runs in Prepare, so it protects no downgrade, and no journal read.
+///
+/// # Errors
+/// [`Stop::Identity`], with one line in `diagnostics.log` for another
+/// protocol.
+///
+/// [`release_manifest::PROTOCOL`]: bt_winres::release_manifest::PROTOCOL
+fn spoken(sealed: &str) -> Result<(), Stop> {
+    let protocol: u32 = sealed.parse().map_err(|_| Stop::Identity)?;
+    if protocol == bt_winres::release_manifest::PROTOCOL {
+        return Ok(());
+    }
+    crate::diagnostics::note(&format!(
+        "Folio: update job — the new bundle is refused: {}",
+        update_archive::Reason::Protocol(protocol)
+    ));
+    Err(Stop::Identity)
 }
 
 /// A signed bundle's identity as the journal records it: its main

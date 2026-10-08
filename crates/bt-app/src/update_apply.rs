@@ -66,7 +66,9 @@
 //! (`bt_platform::wait::sleep_within`), on the `WorkerCtx` of the standalone
 //! main the applier runs on.
 
+use std::convert::Infallible;
 use std::ffi::OsString;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -79,7 +81,7 @@ use bt_platform::install_txn::{self, Hold};
 use crate::cli;
 use crate::update_txn::{
     Actor, Effect, Event, Home, Journal, Nonce, Phase, PhaseKind, Receipt, Role, Sight,
-    TrialProcess, TxnId, receipt_sight, sight,
+    TrialProcess, TxnId, receipt_sight,
 };
 
 /// **How long the Windows applier and recovery wait, and how often they
@@ -483,7 +485,7 @@ pub(crate) fn reserve_last_trial(
     };
     let bytes = file_reads::read(Lane::UpdateJournal, home.journal())
         .map_err(|error| format!("the journal could not be read: {error}"))?;
-    let journal = match sight(&bytes) {
+    let journal = match Role::LastTrialReserve.sight(&bytes) {
         Sight::Known(journal) => journal,
         beyond => return Ok(Reserved::StoodAside(beyond.said(Role::LastTrialReserve))),
     };
@@ -591,7 +593,7 @@ pub(crate) fn commit_last_trial_as(
         }
         Err(error) => return Err(format!("the journal could not be read: {error}")),
     };
-    let journal = match sight(&bytes) {
+    let journal = match Role::LastTrialCommit.sight(&bytes) {
         Sight::Known(journal) => journal,
         Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_) => {
             return Ok(LastTrialCommit::StoodAside);
@@ -1261,7 +1263,7 @@ pub(crate) enum PhaseRead {
 pub(crate) fn read_window_phase(home: &Home, txn: TxnId) -> Result<PhaseKind, PhaseRead> {
     let bytes = file_reads::read(Lane::UpdateJournal, home.journal())
         .map_err(|error| PhaseRead::Unread(error.to_string()))?;
-    let journal = match sight(&bytes) {
+    let journal = match Role::WindowElection.sight(&bytes) {
         Sight::Known(journal) => journal,
         beyond => return Err(PhaseRead::StoodAside(beyond.said(Role::WindowElection))),
     };
@@ -1382,9 +1384,15 @@ impl std::fmt::Debug for WindowRefusal {
     }
 }
 
-/// **Who has the duty a window follows**, as [`take_the_window`] found it.
+/// **Who has the duty a window follows**, as [`take_the_window`] found it for
+/// the contender `C`.
+///
+/// The two answers that come from the journal are `C`'s to have: an
+/// [`Applier`] reads the journal in an unmarked election and may be told the
+/// road was taken or that it stands aside; the [`Outgoing`] build reads no
+/// journal, and its `Window<Outgoing>` cannot hold either (0.4.8 E1-a2, F10).
 #[derive(Debug)]
-pub(crate) enum Window {
+pub(crate) enum Window<C: Contender = Applier> {
     /// This process: it opens a window when it leaves.
     Mine(WindowDuty),
     /// This live process has it: it opens the window.
@@ -1392,16 +1400,16 @@ pub(crate) enum Window {
     /// The mark and lock are now gone, but the journal records that an
     /// applier already took or finished the road. Its exit guard opened the
     /// window, so this later contender starts nothing.
-    RoadTaken(PhaseKind),
+    RoadTaken(C::Road),
     /// This process proved no duty. Contention or an unreadable mark leaves
     /// it elsewhere; a lock-open failure is left to O, which armed the duty.
     Refused(WindowRefusal),
     /// **An applier found a journal this build cannot read whole** (0.4.8
     /// E1): it wrote no mark and stands aside ([`Ended::StoodAside`]).
-    StoodAside(String),
+    StoodAside(C::Aside),
 }
 
-impl Window {
+impl<C: Contender> Window<C> {
     /// Whether this process won the duty.
     #[cfg(test)]
     pub(crate) const fn is_mine(&self) -> bool {
@@ -1409,7 +1417,7 @@ impl Window {
     }
 }
 
-impl PartialEq for Window {
+impl<C: Contender> PartialEq for Window<C> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Mine(_), Self::Mine(_)) => true,
@@ -1427,7 +1435,7 @@ impl PartialEq for Window {
     }
 }
 
-impl Eq for Window {}
+impl<C: Contender> Eq for Window<C> {}
 
 /// `H\<txn>\owner.lock`: the election's lock (round 5).
 pub(crate) fn owner_lock_path(home: &Home, txn: TxnId) -> PathBuf {
@@ -1480,20 +1488,20 @@ pub(crate) fn take_the_window(
         txn,
         me,
         election_within(until, Instant::now()),
-        Contender::Applier,
+        Applier,
     )
 }
 
 /// [`take_the_window`], as `contender`, waiting up to `within` for the
 /// election's lock — zero in O's panic road, which waits for nothing.
-pub(crate) fn take_the_window_within(
+pub(crate) fn take_the_window_within<C: Contender>(
     worker: Option<&WorkerCtx>,
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
-    contender: Contender,
-) -> Window {
+    contender: C,
+) -> Window<C> {
     take_the_window_within_using(
         home,
         txn,
@@ -1563,33 +1571,107 @@ struct ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait> {
     wait: Wait,
 }
 
-/// **Who asks for the window duty.** Only an applier reads the journal in an
+/// **Who asks for the window duty**, as a type: what the journal may answer
+/// it is the type's ([`Window`]). Only an applier reads the journal in an
 /// unmarked election.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Contender {
-    /// The outgoing build O. It holds the transaction lock `H\lock` until its
-    /// process ends (`update_handoff::Staged::lock`, kept by `update_job` until
-    /// the process leaves), and every applier road takes that lock before it
-    /// writes the journal (`update_apply_windows::apply_under_the_lock_with`,
-    /// `update_apply_macos::Txn::hold`). So while O asks, no applier road can
-    /// have moved the journal past `Handoff`: a later phase there is O's own
-    /// record (`Abandoned` when its applier could not be started), never
-    /// evidence of a road taken, and O does not read it.
-    Outgoing,
-    /// An applier: an absent or dead mark may be claimed only while the
-    /// journal says no applier road has been taken.
-    Applier,
+pub(crate) trait Contender: Copy + fmt::Debug {
+    /// What a [`Window::RoadTaken`] carries for this contender.
+    type Road: fmt::Debug + PartialEq;
+    /// What a [`Window::StoodAside`] carries for this contender.
+    type Aside: fmt::Debug + PartialEq;
+
+    /// **An absent, malformed or dead mark**: whether this contender may
+    /// record itself, or the answer it is given instead — the journal's, read
+    /// with `read_phase` until `read_until`.
+    fn unmarked<ReadPhase, Wait>(
+        self,
+        read_until: Instant,
+        read_phase: &mut ReadPhase,
+        wait: &mut Wait,
+    ) -> Result<(), Window<Self>>
+    where
+        ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
+        Wait: FnMut(Duration) -> bool;
 }
 
-fn take_the_window_within_using<AfterLock, ReadOwner, ReadPhase, Write, Wait>(
+/// **The outgoing build O.** It holds the transaction lock `H\lock` until its
+/// process ends (`update_handoff::Staged::lock`, kept by `update_job` until
+/// the process leaves), and every applier road takes that lock before it
+/// writes the journal (`update_apply_windows::apply_under_the_lock_with`,
+/// `update_apply_macos::Txn::hold`). So while O asks, no applier road can
+/// have moved the journal past `Handoff`: a later phase there is O's own
+/// record (`Abandoned` when its applier could not be started), never
+/// evidence of a road taken, and O does not read it — so neither of the
+/// journal's answers can be its.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Outgoing;
+
+/// **An applier**: an absent or dead mark may be claimed only while the
+/// journal says no applier road has been taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Applier;
+
+impl Contender for Outgoing {
+    type Road = Infallible;
+    type Aside = Infallible;
+
+    fn unmarked<ReadPhase, Wait>(
+        self,
+        _read_until: Instant,
+        _read_phase: &mut ReadPhase,
+        _wait: &mut Wait,
+    ) -> Result<(), Window<Self>>
+    where
+        ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
+        Wait: FnMut(Duration) -> bool,
+    {
+        Ok(())
+    }
+}
+
+impl Contender for Applier {
+    type Road = PhaseKind;
+    type Aside = String;
+
+    fn unmarked<ReadPhase, Wait>(
+        self,
+        read_until: Instant,
+        read_phase: &mut ReadPhase,
+        wait: &mut Wait,
+    ) -> Result<(), Window<Self>>
+    where
+        ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
+        Wait: FnMut(Duration) -> bool,
+    {
+        match retry_within(
+            read_until,
+            read_phase,
+            |read| matches!(read, PhaseRead::Unread(_)),
+            wait,
+        ) {
+            Ok(phase) if window_duty_is_open(phase) => Ok(()),
+            Ok(phase) => Err(Window::RoadTaken(phase)),
+            Err(PhaseRead::StoodAside(why)) => Err(Window::StoodAside(why)),
+            Err(PhaseRead::Unread(why)) => Err(Window::Refused(WindowRefusal {
+                why: format!("the update journal could not be read for the window election: {why}"),
+                contended: false,
+                retryable: true,
+                outgoing_keeps_duty: false,
+            })),
+        }
+    }
+}
+
+fn take_the_window_within_using<C, AfterLock, ReadOwner, ReadPhase, Write, Wait>(
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
-    contender: Contender,
+    contender: C,
     operations: ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait>,
-) -> Window
+) -> Window<C>
 where
+    C: Contender,
     AfterLock: FnOnce(),
     ReadOwner: FnMut() -> io::Result<Option<Running>>,
     ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
@@ -1644,36 +1726,11 @@ where
         // Absent, malformed, or its process gone: for an applier the journal
         // decides whether the duty is still open before this process records
         // itself; the outgoing build has nothing to learn there
-        // ([`Contender::Outgoing`]).
+        // ([`Outgoing`]).
         Ok(_) => {
-            if contender == Contender::Applier {
-                match retry_within(
-                    read_until,
-                    &mut read_phase,
-                    |read| matches!(read, PhaseRead::Unread(_)),
-                    &mut wait,
-                ) {
-                    Ok(phase) if window_duty_is_open(phase) => {}
-                    Ok(phase) => {
-                        drop(held);
-                        return Window::RoadTaken(phase);
-                    }
-                    Err(PhaseRead::StoodAside(why)) => {
-                        drop(held);
-                        return Window::StoodAside(why);
-                    }
-                    Err(PhaseRead::Unread(why)) => {
-                        drop(held);
-                        return Window::Refused(WindowRefusal {
-                            why: format!(
-                                "the update journal could not be read for the window election: {why}"
-                            ),
-                            contended: false,
-                            retryable: true,
-                            outgoing_keeps_duty: false,
-                        });
-                    }
-                }
+            if let Err(window) = contender.unmarked(read_until, &mut read_phase, &mut wait) {
+                drop(held);
+                return window;
             }
             let mark = owner_path(home, txn);
             let bytes = owner_value(me);
@@ -1720,7 +1777,7 @@ pub(crate) fn take_the_window_within_at(
         txn,
         me,
         within,
-        Contender::Applier,
+        Applier,
         ElectionOps {
             after_lock,
             read_owner: || read_window_owner(home, txn),
@@ -1748,7 +1805,7 @@ pub(crate) fn take_the_window_within_writes_at(
         txn,
         me,
         within,
-        Contender::Applier,
+        Applier,
         ElectionOps {
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
@@ -1774,7 +1831,7 @@ pub(crate) fn take_the_window_within_reads_at(
         txn,
         me,
         within,
-        Contender::Applier,
+        Applier,
         ElectionOps {
             after_lock: || {},
             read_owner: read,

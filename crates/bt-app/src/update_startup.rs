@@ -92,8 +92,8 @@ use bt_platform::install_txn::{self, Held, Hold};
 use crate::cli;
 use crate::update_job::Failure;
 use crate::update_txn::{
-    AfterRollback, Class, Digest, Effect, Header, Home, JournalRead, Nonce, Role, Sight,
-    StartAction, StartView, TxnId, after_rollback, at_start, rolled_back_untried, sight,
+    AfterRollback, Class, Clearing, Digest, Header, Home, JournalRead, Nonce, Removal, Role, Sight,
+    StartAction, StartView, TxnId, after_rollback, at_start, rolled_back_untried,
 };
 
 /// **The pass has run.** Only [`pass`] makes one, and `launch_wire::hand_over`
@@ -324,7 +324,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     let admission = admit(start.home, world);
     let journal_path = start.home.journal();
     let seen = match file_reads::read(Lane::Install, &journal_path) {
-        Ok(bytes) => sight(&bytes),
+        Ok(bytes) => Role::Start.sight(&bytes),
         Err(error) => {
             if error.kind() != io::ErrorKind::NotFound {
                 world.say(&format!(
@@ -530,8 +530,8 @@ fn image(program: &Path) -> Option<Digest> {
     Some(Digest::new(bt_winres::digest::sha256(&bytes)))
 }
 
-/// A retirement or a discard: the action's effects, in the protocol's order,
-/// stopping at the first that fails — the journal is removed only once
+/// A retirement or a discard: the action's steps ([`StartAction::steps`]), in
+/// the protocol's order, stopping at the first that fails — the journal is removed only once
 /// `H\<txn>` is gone, so a start that is stopped halfway leaves a journal that
 /// still names what is left (U-10, "journal deleted last").
 ///
@@ -539,7 +539,7 @@ fn image(program: &Path) -> Option<Digest> {
 /// deleted** (U-17's debt 7, the coordinator's ruling in U-27): a read-only
 /// volume inside the folder would stop the deletion halfway and keep the
 /// transaction for ever. The mount table is read here, which waits on nothing;
-/// when it lists a mount, the detach and every effect after it — holding the
+/// when it lists a mount, the detach and every step after it — holding the
 /// transaction lock — go to a worker ([`World::on_a_worker`]), because a
 /// detach waits on `hdiutil` and this is the window thread. The start goes on
 /// without waiting for it.
@@ -550,22 +550,33 @@ fn retire(
     mut lock: Option<Held>,
     world: &mut impl World,
 ) {
-    let effects = action.effects();
+    let steps = action.steps();
+    let kept = |failure: String| {
+        format!(
+            "BT_UPDATE_START transaction {} is kept for the next start: {failure}",
+            header.txn
+        )
+    };
+    if steps.remove_entrance
+        && let Err(failure) = world.retire_entrance(header.txn)
+    {
+        world.say(&kept(failure));
+        return;
+    }
     let folder = home.transaction(header.txn);
-    for (at, effect) in effects.iter().enumerate() {
-        let done = match effect {
-            Effect::RemoveEntrance => world.retire_entrance(header.txn),
-            Effect::DetachMount => match world.mounts_under(&folder) {
+    for (at, step) in steps.clearing.iter().enumerate() {
+        let done = match step {
+            Clearing::DetachMount => match world.mounts_under(&folder) {
                 Ok(points) if points.is_empty() => Ok(()),
                 Ok(_) => {
-                    let rest = effects[at..].to_vec();
+                    let rest = steps.clearing[at..].to_vec();
                     let (txn, home, held) = (header.txn, home.clone(), lock.take());
                     let job: OffThread = Box::new(move |worker| {
-                        // The lock goes with the effects it guards, and is
+                        // The lock goes with the steps it guards, and is
                         // let go when they are done.
                         let _held = held;
-                        for effect in rest {
-                            perform(worker, effect, txn, &home).map_err(|failure| {
+                        for step in rest {
+                            perform(worker, step, txn, &home).map_err(|failure| {
                                 format!(
                                     "BT_UPDATE_START transaction {txn} is kept for the next start: {failure}"
                                 )
@@ -580,50 +591,45 @@ fn retire(
                 }
                 Err(error) => Err(error),
             },
-            Effect::DeleteTxnDir | Effect::DeleteJournal => {
-                delete(*effect, header.txn, home).map_err(|failure| failure.to_string())
+            Clearing::Delete(removal) => {
+                delete(*removal, header.txn, home).map_err(|failure| failure.to_string())
             }
-            other => unreachable!("a start's action has no {other:?}"),
         };
         if let Err(failure) = done {
-            world.say(&format!(
-                "BT_UPDATE_START transaction {} is kept for the next start: {failure}",
-                header.txn
-            ));
+            world.say(&kept(failure));
             return;
         }
     }
 }
 
-/// One of a retirement's effects on a worker: the detach of every image under
+/// One of a retirement's steps on a worker: the detach of every image under
 /// `H/<txn>` (`bt_platform::macos_update::detach_all_under`), or a deletion.
 fn perform(
     worker: &bt_platform::admission::WorkerCtx,
-    effect: Effect,
+    step: Clearing,
     txn: TxnId,
     home: &Home,
 ) -> Result<(), String> {
-    match effect {
-        Effect::DetachMount => {
+    match step {
+        Clearing::DetachMount => {
             bt_platform::macos_update::detach_all_under(worker, &home.transaction(txn))
                 .map_err(|refusal| refusal.to_string())
         }
-        Effect::DeleteTxnDir | Effect::DeleteJournal => {
-            delete(effect, txn, home).map_err(|failure| failure.to_string())
+        Clearing::Delete(removal) => {
+            delete(removal, txn, home).map_err(|failure| failure.to_string())
         }
-        other => unreachable!("a start's action has no {other:?} after its detach"),
     }
 }
 
 /// `H\<txn>` or the journal, removed durably.
-fn delete(effect: Effect, txn: TxnId, home: &Home) -> Result<(), install_txn::Failure> {
-    match effect {
-        Effect::DeleteTxnDir => {
+fn delete(removal: Removal, txn: TxnId, home: &Home) -> Result<(), install_txn::Failure> {
+    match removal {
+        Removal::TxnDir => {
             install_txn::durable_remove(&home.transaction(txn))?;
             crate::shell_integration::remove_trial_script(txn);
             Ok(())
         }
-        _ => install_txn::durable_remove(&home.journal()),
+        Removal::Journal => install_txn::durable_remove(&home.journal()),
     }
 }
 
@@ -1229,8 +1235,8 @@ mod tests {
         /// (U-10 decision 13), with the journal last (decision 14). This is the
         /// one durable thing an ordinary start ever does.
         ///
-        /// MUTATION: in `retire`, answer `Ok(())` for `Effect::DeleteJournal`
-        /// without removing it.
+        /// MUTATION: in `retire`, answer `Ok(())` for
+        /// `Clearing::Delete(Removal::Journal)` without removing it.
         #[test]
         fn a_terminal_journal_is_retired_at_start() {
             let Some(scene) = Scene::new("terminal") else {
@@ -1283,8 +1289,8 @@ mod tests {
         /// at every start for ever. The image is attached here the way a dead
         /// Prepare leaves it — no record, just a mount point under the folder.
         ///
-        /// MUTATION: drop `Effect::DetachMount` from `StartAction::Retire`'s and
-        /// `StartAction::Discard`'s effects in `update_txn`.
+        /// MUTATION: drop `Clearing::DetachMount` from the steps of
+        /// `StartAction::Retire` and `StartAction::Discard` in `update_txn`.
         #[test]
         fn retire_and_discard_detach_before_deleting() {
             use crate::update_prepare_macos::tests::fixture;

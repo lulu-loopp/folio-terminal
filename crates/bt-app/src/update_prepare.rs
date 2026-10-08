@@ -42,8 +42,8 @@ use crate::install_channel::Channel;
 use crate::update_handoff::Staged;
 use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
 use crate::update_txn::{
-    Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, TxnId, decide,
-    may,
+    Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, Role, TxnId,
+    decide, may,
 };
 
 /// The worker a Prepare runs on — one per press, one job per process (R.3).
@@ -275,7 +275,7 @@ pub(crate) enum AtLaunch {
 /// [`Stop::Busy`] as before.
 pub(crate) fn journal_there(home: &Home) -> Stop {
     match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => match crate::update_txn::sight(&bytes) {
+        Ok(bytes) => match Role::JobOwner.sight(&bytes) {
             crate::update_txn::Sight::Known(_) => Stop::Busy,
             crate::update_txn::Sight::Header { .. }
             | crate::update_txn::Sight::Envelope { .. }
@@ -307,7 +307,7 @@ pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, Str
     // A journal this build cannot read whole is left to the build that wrote
     // it (E1, `update_txn::Role::JobOwner`): the offer still shows, and the
     // press says so (`update_job::Stop::Newer`).
-    let journal = match crate::update_txn::sight(&bytes) {
+    let journal = match Role::JobOwner.sight(&bytes) {
         crate::update_txn::Sight::Known(journal) => journal,
         crate::update_txn::Sight::Header { .. }
         | crate::update_txn::Sight::Envelope { .. }

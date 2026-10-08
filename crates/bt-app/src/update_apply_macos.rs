@@ -179,7 +179,7 @@ pub(crate) use crate::update_apply::{Opener, Opens, failed_words, trial_words};
 use crate::update_txn::{
     Action, Actor, Asker, BundleIdentity, Class, Disk, Effect, Event, HeaderOutcome, Home, Journal,
     Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, Role, Sight, TrialProcess, TxnId,
-    decide, sight,
+    decide,
 };
 
 /// `open`, by its absolute path: LaunchServices starts the trial as it starts
@@ -881,7 +881,7 @@ fn opens_now_with(
     let Ok(bytes) = file_reads::read(Lane::UpdateJournal, home.journal()) else {
         return Opens::Installed { failed: false };
     };
-    let seen = sight(&bytes);
+    let seen = Role::MacExit.sight(&bytes);
     let Some(header) = seen.acting_header() else {
         return Opens::Installed { failed: true };
     };
@@ -1043,7 +1043,7 @@ impl<'a> Txn<'a> {
         // A journal this build cannot read whole is stood aside from: nothing
         // recorded, the lock let go as this returns (E1, `Role::MacHolder`).
         let journal = match file_reads::read(Lane::UpdateJournal, road.home.journal()) {
-            Ok(bytes) => match sight(&bytes) {
+            Ok(bytes) => match Role::MacHolder.sight(&bytes) {
                 Sight::Known(journal) => journal,
                 beyond => {
                     return Err(locked(Ended::StoodAside(beyond.said(Role::MacHolder))));

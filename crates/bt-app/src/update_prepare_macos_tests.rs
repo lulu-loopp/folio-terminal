@@ -139,6 +139,23 @@ pub(crate) mod fixture {
         notice: &str,
         needs: &str,
     ) -> PathBuf {
+        let protocol = bt_winres::release_manifest::PROTOCOL.to_string();
+        bundle_sealing(parent, name, version, notice, needs, Some(&protocol))
+    }
+
+    /// [`bundle_needing`], whose sealed `FolioUpdateProtocol` is `protocol`,
+    /// or which seals none (E1-a2).
+    pub(crate) fn bundle_sealing(
+        parent: &Path,
+        name: &str,
+        version: &str,
+        notice: &str,
+        needs: &str,
+        protocol: Option<&str>,
+    ) -> PathBuf {
+        let protocol = protocol.map_or_else(String::new, |protocol| {
+            format!("<key>FolioUpdateProtocol</key><integer>{protocol}</integer>")
+        });
         let bundle = parent.join(name);
         let macos = bundle.join("Contents").join("MacOS");
         std::fs::create_dir_all(&macos).unwrap();
@@ -168,6 +185,7 @@ pub(crate) mod fixture {
                  <key>CFBundlePackageType</key><string>APPL</string>\
                  <key>CFBundleShortVersionString</key><string>{version}</string>\
                  <key>FolioMinUpdater</key><string>{needs}</string>\
+                 {protocol}\
                  </dict></plist>\n"
             ),
         )
@@ -296,8 +314,8 @@ pub(crate) mod fixture {
 }
 
 use fixture::{
-    Scratch, answer, attach, blank_image, bundle, bundle_needing, image_of, listing, mounted,
-    on_macos,
+    Scratch, answer, attach, blank_image, bundle, bundle_needing, bundle_sealing, image_of,
+    listing, mounted, on_macos,
 };
 
 /// The offer every test presses: `v0.4.7`, for macOS.
@@ -837,6 +855,76 @@ fn a_bundle_that_needs_a_newer_updater_says_this_version_is_too_old() {
     assert!(!home.transaction(TxnId::new([0x2c; 16])).exists());
     assert!(!home.journal().exists());
     assert!(mounted(home.root()).is_empty());
+}
+
+/// RED (E1-a2) — **a bundle that seals another update protocol, or none, is
+/// refused as not verified, and leaves nothing.**
+///
+/// The Windows Prepare refuses a release whose manifest speaks another
+/// protocol, and one whose manifest has no `protocol` line (a malformed
+/// manifest), both as *not verified*; the macOS Prepare read only
+/// `FolioMinUpdater` and never the `FolioUpdateProtocol` beside it. Each
+/// bundle here is the scene's, signed after its `Info.plist` says protocol 2
+/// or names no protocol.
+///
+/// MUTATION: in `check`, drop the `spoken(..)` line: both jobs verify.
+#[test]
+fn a_bundle_that_speaks_another_update_protocol_or_none_is_refused() {
+    if !on_macos() {
+        return;
+    }
+    for (case, protocol, seed) in [("protocol 2", Some("2"), 0x2d), ("no protocol", None, 0x2e)] {
+        let scene = Scene::new("protocol", "Folio.app", |new| {
+            let parent = new.parent().expect("the source folder");
+            std::fs::remove_dir_all(new).unwrap();
+            bundle_sealing(
+                parent,
+                IMAGE_BUNDLE,
+                "0.4.7",
+                "the new build",
+                bt_winres::release_manifest::MIN_UPDATER,
+                protocol,
+            );
+        });
+        let tools = Arc::new(TestTools::new(&scene.scratch));
+        let job = press(&driver(&scene, &tools), scene.release(), seed);
+        assert!(
+            matches!(
+                job.state(),
+                State::Failed(_, Failure::Stopped(Stop::Identity))
+            ),
+            "{case}: {:?}",
+            job.state()
+        );
+        let home = scene.home();
+        assert!(!home.transaction(TxnId::new([seed; 16])).exists(), "{case}");
+        assert!(!home.journal().exists(), "{case}");
+        assert!(mounted(home.root()).is_empty(), "{case}");
+    }
+}
+
+/// RED (E1-a2) — **the protocol a bundle seals is held to this build's by the
+/// Windows archive reader's rule and words**: this build's protocol passes;
+/// another one, or a value that is no number, is *not verified*, and the
+/// line another one is refused with is the archive reader's own
+/// (`update_archive::Reason::Protocol`). Pure, so it runs everywhere.
+///
+/// MUTATION: make `spoken` answer `Ok(())` for every number: protocol 2
+/// passes.
+#[test]
+fn the_sealed_protocol_is_held_to_this_builds_as_the_archive_reader_holds_it() {
+    let this = bt_winres::release_manifest::PROTOCOL;
+    assert_eq!(spoken(&this.to_string()), Ok(()));
+    assert_eq!(spoken(&(this + 1).to_string()), Err(Stop::Identity));
+    assert_eq!(spoken("one"), Err(Stop::Identity));
+    assert_eq!(spoken(""), Err(Stop::Identity));
+    assert_eq!(
+        crate::update_archive::Reason::Protocol(this + 1).to_string(),
+        format!(
+            "the release speaks update protocol {}, this build {this}",
+            this + 1
+        )
+    );
 }
 
 /// RED (U-27) — **the copy is verified again where it lies**: a copy altered
