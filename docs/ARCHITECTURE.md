@@ -42,8 +42,7 @@ Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
 `bt-install-channel` (ticket U-1), through the door. A1c (on `f2b31952`) moved the eighteen bare sites of `bt-app`
 and `bt-platform` through the door without adding or removing one. And one more after it: `update_trial::begin_watch`'s
 `folio-trial-watch` (0.4.6 U-13), through the door, started only in an update's trial. T-PROBE-CHILD adds one
-probe-output reader site, called once for each pipe, through the door. `crates/bt-platform/src/lib.rs` holds a NUL byte, so
-ripgrep skips it as binary; search it with `grep -a`. To re-count, grep the patterns in the last column and
+probe-output reader site, called once for each pipe, through the door. To re-count, grep the patterns in the last column and
 drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |

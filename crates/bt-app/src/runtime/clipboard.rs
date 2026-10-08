@@ -2,22 +2,115 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey, PasteOffer, PasteTarget,
-    PreparedClipboardPaste, Runtime, StagedPaste, TextFieldSeat, UserInputKind, copy_selection,
-    hang_watch, input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
-    paste_card_step, paste_offer_is_kept, paste_target_is_live, pending_paste_in,
-    prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name,
-    recoverable_clipboard_write, restore, seats, stage_paste, take_pending_paste, text_field,
-    toast, write_selection_text, write_terminal_clipboard_text,
+    ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
+    PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
+    TextFieldSeat, UserInputKind, copy_selection, hang_watch, input_line_needs_a_space_first,
+    offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
+    paste_target_is_live, pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste,
+    profile_banner_name, recoverable_clipboard_write, restore, seats, stage_paste,
+    take_pending_paste, text_field, toast, write_selection_text, write_terminal_clipboard_text,
 };
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
+use bt_viewport::MathBlockAnchor;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::event::Ime;
 
 impl Runtime<'_> {
+    /// **`Copy` on a row whose execution policy the user can change**: put the command on the
+    /// clipboard and say so only after the platform accepts the write.
+    pub(crate) fn copy_policy_command(&mut self) -> Result<()> {
+        match copy_policy_command_with(crate::write_terminal_clipboard_text) {
+            Some(said) => self.toast(toast::ToastKind::Ok, toast::ToastAnchor::Window, None, said),
+            None => Ok(()),
+        }
+    }
+
+    /// Submit one copy through the platform's clipboard path, and apply its
+    /// effect only after the write succeeds.
+    pub(crate) fn submit_clipboard_write(
+        &mut self,
+        text: String,
+        action: &'static str,
+        effect: ClipboardWriteEffect,
+    ) -> Result<bool> {
+        if recoverable_clipboard_write(write_terminal_clipboard_text(&text), action) {
+            self.apply_clipboard_write_effect(effect)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Put a rendered page's selection on the clipboard, through the door the
+    /// terminal's own copy already uses.
+    pub(in crate::runtime) fn copy_preview_text_selection(
+        &mut self,
+        surface: PreviewSurface,
+    ) -> bool {
+        let Some(text) = self.preview_selected_text(surface) else {
+            return false;
+        };
+        if let Err(error) = write_terminal_clipboard_text(&text) {
+            // Recoverable on `recoverable_clipboard_write`'s terms: the
+            // selection stays standing so the reader can try again.
+            eprintln!("recoverable preview copy failure: {error:#}");
+            return false;
+        }
+        true
+    }
+
+    /// **Asked of the pane the block is in.** This used to ask the *focused* one, and a right
+    /// press does not move the keyboard — the focus move lives inside the left-only route — so
+    /// copying from a formula in an unfocused pane asked a session where the anchor names nothing
+    /// and copied nothing, or, where that session happened to hold a block of the same shape,
+    /// copied the wrong formula. The seat comes from the press, like the other two verbs'.
+    pub(in crate::runtime) fn copy_math_latex(
+        &mut self,
+        target: PasteTarget,
+        anchor: &MathBlockAnchor,
+    ) {
+        // A block anchor names a place in a shell's transcript, so a tab with no
+        // shell has no anchor anybody could have clicked and nothing to copy
+        // (§7.1.6h) — the same `None` a stale anchor already answers with.
+        let Some(index) = self.live_paste_target(target) else {
+            return;
+        };
+        let Some(source) = self.window.tabs[index]
+            .sessions
+            .get(&target.seat)
+            .and_then(|leaf| leaf.session.math_source(anchor))
+        else {
+            return;
+        };
+        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
+            bt_platform::set_clipboard_text(source)
+        })
+        .map_err(|error| anyhow!(error))
+        .context("copy original LaTeX source to clipboard");
+        // **Only a copy that landed says it landed** (owner ruling 2026-09-14 ②).
+        // The bool this helper already returned was being thrown away, and a tick on a
+        // clipboard the window could not reach would be the one acknowledgement in this
+        // product that confirms nothing.
+        if recoverable_clipboard_write(result, "formula copy") {
+            self.window.math_copied = Some((anchor.clone(), Instant::now()));
+        }
+    }
+
+    pub(crate) fn apply_clipboard_write_effect(
+        &mut self,
+        effect: ClipboardWriteEffect,
+    ) -> Result<()> {
+        match effect {
+            ClipboardWriteEffect::None => Ok(()),
+            ClipboardWriteEffect::Toast { anchor, text } => {
+                self.toast(toast::ToastKind::Ok, anchor, None, text)
+            }
+        }
+    }
+
     /// **What a landing is promising to write into, read off the window as it
     /// stands this instant** (review 2026-09-17 P1-a) — or `None` when it is
     /// promising no text write at all.
@@ -98,9 +191,8 @@ impl Runtime<'_> {
     /// pasted somewhere this window does not control.
     pub(in crate::runtime) fn copy_path_to_clipboard(&mut self, path: &Path) -> Result<()> {
         let text = path.to_string_lossy().into_owned();
-        let result = write_terminal_clipboard_text(&text);
-        recoverable_clipboard_write(result, "copy a files row's path");
-        Ok(())
+        self.submit_clipboard_write(text, "copy a files row's path", ClipboardWriteEffect::None)
+            .map(drop)
     }
 
     pub(in crate::runtime) fn copy_selection(&mut self) -> Result<()> {
@@ -123,7 +215,7 @@ impl Runtime<'_> {
     /// The text is that pane's, whatever pane the pointer let go over: it is the
     /// selection just made that the hand means, and there is only one pane it was
     /// ever made in.
-    pub(in crate::runtime) fn copy_selection_on_release(&self, seat: SeatId) {
+    pub(in crate::runtime) fn copy_selection_on_release(&mut self, seat: SeatId) {
         let Some(leaf) = self.sessions.get(&seat) else {
             return;
         };
@@ -230,7 +322,7 @@ impl Runtime<'_> {
     /// selection — and each of those doors already does what its field does
     /// after an insert (re-ask the search, re-filter the palette, write the
     /// setting through). One line of printable text for the five one-line
-    /// fields (`text_field::one_line`, as [`Self::clipboard_line`] cuts it);
+    /// fields (`text_field::one_line`, as [`Self::apply_clipboard_text_to_field`] cuts it);
     /// the settings dialog drops the line breaks instead, its own long-standing
     /// rule for a pasted path.
     pub(crate) fn paste_into_field(&mut self, field: TextFieldSeat) -> Result<()> {
@@ -238,17 +330,24 @@ impl Runtime<'_> {
             bt_platform::clipboard_text()
         })
         .unwrap_or_default();
+        self.apply_clipboard_text_to_field(field, &text)
+    }
+
+    fn apply_clipboard_text_to_field(&mut self, field: TextFieldSeat, text: &str) -> Result<()> {
         if text.is_empty() {
             return Ok(());
         }
-        let line = || Ime::Commit(text_field::one_line(&text));
+        if field == TextFieldSeat::Settings {
+            return self.paste_into_settings_field(text);
+        }
+        let line = Ime::Commit(text_field::one_line(text));
         match field {
-            TextFieldSeat::FindBar => self.search_ime(line()),
-            TextFieldSeat::GraphSearch => self.graph_search_ime(&line()),
-            TextFieldSeat::GitPrompt => self.git_prompt_ime(&line()),
-            TextFieldSeat::Palette => self.palette_ime(&line()),
-            TextFieldSeat::TabName => self.rename_ime(&line()),
-            TextFieldSeat::Settings => self.paste_into_settings_field(&text),
+            TextFieldSeat::FindBar => self.search_ime(line),
+            TextFieldSeat::GraphSearch => self.graph_search_ime(&line),
+            TextFieldSeat::GitPrompt => self.git_prompt_ime(&line),
+            TextFieldSeat::Palette => self.palette_ime(&line),
+            TextFieldSeat::TabName => self.rename_ime(&line),
+            TextFieldSeat::Settings => Ok(()),
         }
     }
 
@@ -293,11 +392,25 @@ impl Runtime<'_> {
             seat,
             incarnation: leaf.incarnation,
         };
-        let recipient = leaf.paste_recipient.clone();
-        let leading_space = input_line_needs_a_space_first(&leaf.session);
         let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
         let payload = bt_platform::clipboard_payload();
         hang_watch::at(leaving);
+        self.apply_clipboard_payload(target, payload)
+    }
+
+    fn apply_clipboard_payload(
+        &mut self,
+        target: PasteTarget,
+        payload: Result<bt_platform::ClipboardPayload, String>,
+    ) -> Result<()> {
+        let Some(active) = self.live_paste_target(target) else {
+            return Ok(());
+        };
+        let Some(leaf) = self.window.tabs[active].sessions.get(&target.seat) else {
+            return Ok(());
+        };
+        let recipient = leaf.paste_recipient.clone();
+        let leading_space = input_line_needs_a_space_first(&leaf.session);
         let mut prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
         // **The picture cannot travel down [`Self::deliver_paste`], because there is
         // no text yet** (§7.61): what a picture pastes is the path of a file nobody
@@ -640,5 +753,49 @@ impl Runtime<'_> {
             },
         );
         Some(restore::paste_card_layout(&content, width, height, scale).with_ring(ring))
+    }
+}
+
+/// Put [`crate::shell_integration::POLICY_COMMAND`] on the clipboard through `write` — the app's
+/// synchronous clipboard door, or a test's — and return what the window says about it; `None`
+/// when the clipboard refused (the refusal is already logged by the shared door).
+fn copy_policy_command_with(write: impl FnOnce(&str) -> Result<()>) -> Option<String> {
+    crate::recoverable_clipboard_write(
+        write(crate::shell_integration::POLICY_COMMAND),
+        "copy the execution policy command",
+    )
+    .then(|| crate::i18n::graph_copied(crate::shell_integration::POLICY_COMMAND))
+}
+
+#[cfg(test)]
+mod policy_command_tests {
+    use super::copy_policy_command_with;
+    use crate::shell_integration::POLICY_COMMAND;
+
+    /// PIN — **`Copy` puts exactly the one command on the clipboard, and says it in full**
+    /// (T-INTEGRATION-INJECT-4 round 4). Through the clipboard seam, never the real clipboard.
+    ///
+    /// RED (mutation: copy `"Set-ExecutionPolicy RemoteSigned"`, the LocalMachine scope that
+    /// needs elevation, instead of the const).
+    #[test]
+    fn copy_puts_exactly_the_policy_command_on_the_clipboard() {
+        let mut written = Vec::new();
+        let said = copy_policy_command_with(|text| {
+            written.push(text.to_owned());
+            Ok(())
+        });
+        assert_eq!(
+            written,
+            ["Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"]
+        );
+        assert_eq!(written, [POLICY_COMMAND]);
+        assert_eq!(
+            said.as_deref(),
+            Some(crate::i18n::graph_copied(POLICY_COMMAND).as_str())
+        );
+        assert!(said.is_some_and(|said| said.contains(POLICY_COMMAND)));
+
+        let refused = copy_policy_command_with(|_| Err(anyhow::anyhow!("clipboard busy")));
+        assert_eq!(refused, None, "a refused copy says nothing was copied");
     }
 }
