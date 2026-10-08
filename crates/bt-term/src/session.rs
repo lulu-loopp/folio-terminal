@@ -27456,7 +27456,7 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(80), nz(8));
         enable_path_detection(&mut session);
         let screen = format!(
-            "{}\r\n> 退出了，[Image #104] 然后 [Image #105] [Image #106] ，还有",
+            "{}\r\n> 你好世界[Image #104] 你好 [Image #105] [Image #106] 你好世",
             claude_code_image_row(103, &directory.join("103.png"))
         );
         session
@@ -27505,7 +27505,7 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(80), nz(8));
         enable_path_detection(&mut session);
         let screen = format!(
-            "{}\r\n> 退出了，[Image #104]",
+            "{}\r\n> 你好世界[Image #104]",
             claude_code_image_row(103, &directory.join("103.png"))
         );
         session
@@ -27537,7 +27537,7 @@ mod tests {
 
         session
             .feed(&printed_by_a_stand_in(
-                "\r> 退出了，[Image #104] 还有".as_bytes(),
+                "\r> 你好世界[Image #104] 你好".as_bytes(),
             ))
             .unwrap();
         let frame = frame_after_path_verification(&mut session, &mut projection);
@@ -27570,7 +27570,7 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(30), nz(8));
         enable_path_detection(&mut session);
         let screen = format!(
-            "{}\r\n> 退出了，然后看这张[Image \r\n  #104] 还有",
+            "{}\r\n> 你好世界你好世界你[Image \r\n  #104] 你好",
             claude_code_image_row(103, &directory.join("103.png"))
         );
         session

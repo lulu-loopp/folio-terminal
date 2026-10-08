@@ -9436,7 +9436,7 @@ mod image_placeholder_tests {
             verdicts.insert(folder.join(name), false);
         }
         let links = PrintedPathLinks::new(None, verdicts).with_image_placeholders(&table);
-        let line = "退出了，[Image #104] 然后 [Image #106] [Image #107] [Image #108]";
+        let line = "你好世界[Image #104] 你好 [Image #106] [Image #107] [Image #108]";
         let mut unknown = BTreeSet::new();
         let found = links.image_placeholder_links_in(line, &mut unknown);
         assert_eq!(
@@ -9486,8 +9486,8 @@ mod image_placeholder_tests {
     /// joins.
     #[test]
     fn a_placeholder_split_at_its_inner_blank_is_read_across_the_seam() {
-        let upper = "> 退出了，然后看这张[Image ";
-        let lower = "  #104] 还有";
+        let upper = "> 你好世界你好世界你[Image ";
+        let lower = "  #104] 你好";
         let (head, tail, number) =
             image_placeholder_across(upper, lower).expect("the split placeholder");
         assert_eq!(&upper[head.byte_start..head.byte_end], "[Image");
