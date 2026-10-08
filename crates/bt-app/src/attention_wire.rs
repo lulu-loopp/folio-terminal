@@ -1242,7 +1242,7 @@ mod tests {
     fn the_attention_verb_waits_for_its_payload_on_its_main_thread_as_a_worker() {
         use bt_platform::admission::{Refused, Role, enter_standalone_main, role};
         const PAYLOAD: &str = r#"{"hook_event_name":"Stop"}"#;
-        if !crate::tests::alone_in_a_process(
+        if !crate::test_support::alone_in_a_process(
             "attention_wire::tests::the_attention_verb_waits_for_its_payload_on_its_main_thread_as_a_worker",
             PAYLOAD.as_bytes(),
         ) {

@@ -72557,6 +72557,8 @@ fn main() -> Result<()> {
     bt_platform::leave_process(code)
 }
 
+#[cfg(test)]
+mod test_support;
 /// **The largest of this file's test modules, in a file of its own**
 /// (`refactor/main-tests-out`, 2026-09-18).
 ///
