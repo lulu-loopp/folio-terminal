@@ -42,8 +42,7 @@ Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
 `bt-install-channel` (ticket U-1), through the door. A1c (on `f2b31952`) moved the eighteen bare sites of `bt-app`
 and `bt-platform` through the door without adding or removing one. And one more after it: `update_trial::begin_watch`'s
 `folio-trial-watch` (0.4.6 U-13), through the door, started only in an update's trial. T-PROBE-CHILD adds one
-probe-output reader site, called once for each pipe, through the door. `crates/bt-platform/src/lib.rs` holds a NUL byte, so
-ripgrep skips it as binary; search it with `grep -a`. To re-count, grep the patterns in the last column and
+probe-output reader site, called once for each pipe, through the door. To re-count, grep the patterns in the last column and
 drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |
@@ -324,7 +323,12 @@ own, outside the preparation and outside the relocation commit. **Done
 2026-09-21** (`21cf1ef8`): the probe lives in `bt-corpus`, and `bt-pty`'s
 manifest names `bt-term` only under `[dev-dependencies]`.
 
-**`bt-term → bt-platform` — right direction, broader than its manifest says.**
+**`bt-term → bt-platform` — wrong layer, recorded, enforced by the gate.**
+`bt-term` must build without the platform layer (the owner's ruling of
+2026-09-21), so the edge is a layer violation: `bt-term` and `bt-platform` share
+a layer of `scripts/ci/crate-layers.tsv`, and the edge passes only as its D-14
+row in `scripts/ci/crate-edge-exemptions.tsv` (§3.3), which J2's boundary crate
+deletes. It is also broader than its manifest says.
 The manifest comment calls it one call; there are three product import surfaces:
 `inline_image::resample_pool` sets a thread priority, `session::verify_path`
 calls `handoff::resolved_for_a_door`, and
@@ -379,12 +383,19 @@ those manifests actually practise, restated here from what they say:
   `cell_capture.rs` may not name `bt_doc`, `bt_detect` or `bt_viewport`. The
   vendor seam answers "what did the terminal do", never "what shall we do
   about it".
-- **Adding an edge edits this file.** A direction guard over
-  `cargo metadata --no-deps --locked --offline`, reading normal and build
-  dependencies including target-specific tables, with an exception set compared
-  against the merge base so it can only shrink, is planned by
-  `docs/plans/bt-app-split-prep.md` §8.4. Until it lands, the graph in §3.1 is
-  the list.
+- **Adding an edge edits this file.** The direction is enforced by
+  **`scripts/ci/check-crate-edges.ps1`** over
+  `cargo metadata --no-deps --locked --offline`: every normal and build
+  dependency between first-party crates, target-specific tables included, goes
+  from a higher layer of `scripts/ci/crate-layers.tsv` to a lower one, and a
+  crate missing from that table fails. The exemptions live in
+  `scripts/ci/crate-edge-exemptions.tsv`, one row per edge with its
+  `docs/plans/structural-debt.md` row; the list only shrinks against the merge
+  base, and a row whose edge is gone or now goes down fails. Its two rows are
+  `bt-term → bt-platform` (D-14) and `bt-term → bt-math` (D-15).
+  Dev-dependencies are not layer edges: Cargo allows them in both directions,
+  and `bt-term`/`bt-pty` and `bt-platform`/`bt-pty` each name the other as one
+  (`bt-pty` naming `bt-term` only as one is §3.2's repair of D-13).
 - **`bt-workbench`'s entry, for that guard** (D-27 lands it; census-3 wrote it
   here because the guard does not exist yet —
   `docs/plans/design/ownership-census-2026-09-25.md` §5.4):
