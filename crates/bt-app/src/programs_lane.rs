@@ -691,7 +691,25 @@ pub(crate) mod tests {
                 gathered.finished = answers.finished;
                 return gathered;
             }
-            wakes.recv().expect("a walk publishes and wakes the loop");
+            wait_for_a_wake(wakes, &format!("walk {generation}'s end"));
+        }
+    }
+
+    /// **One wake, within the lane suite's patience** (`crate::lane::PATIENCE`): a lane that never
+    /// wakes fails the test that awaited `what`, by name, rather than hanging it.
+    pub(crate) fn wait_for_a_wake(wakes: &mpsc::Receiver<()>, what: &str) {
+        if wakes.recv_timeout(crate::lane::PATIENCE).is_err() {
+            panic!("no wake within the lane suite's patience while awaiting {what}");
+        }
+    }
+
+    /// Drain until a walk's death is reported, and answer which walk died.
+    fn death_reported(lane: &ProgramsLane, wakes: &mpsc::Receiver<()>, of: u64) -> Option<u64> {
+        loop {
+            wait_for_a_wake(wakes, &format!("walk {of}'s death"));
+            if let Some(died) = lane.take().died {
+                return Some(died);
+            }
         }
     }
 
@@ -899,16 +917,12 @@ pub(crate) mod tests {
         });
         let rows = [row("rg", "rg.exe")];
         let dead = lane.request(request(&rows, Trigger::Launch));
-        let mut died = None;
-        while died.is_none() {
-            wakes.recv().expect("the death wakes the loop");
-            died = lane.take().died;
-        }
-        assert_eq!(died, Some(dead));
+        assert_eq!(death_reported(lane, &wakes, dead), Some(dead));
+        // Said before the death was published, so it is there now.
         assert!(
             notes
-                .recv()
-                .unwrap()
+                .try_recv()
+                .expect("the death is said")
                 .contains("ended before its last answer")
         );
         let next = lane.request(request(&rows, Trigger::ProgramMenu));

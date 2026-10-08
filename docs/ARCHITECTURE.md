@@ -54,7 +54,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | named sites / distinct names | **50 / 46**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **34** — 28 `mpsc::channel`, 6 `mpsc::sync_channel`; `bt-app` 27 (T-KEYBOARD-CTRLALT adds the layout-table request and answer pair), `bt-platform` 7 (T-UNINSTALL-UX adds the remover readiness pipe) — and **8** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 3 — T-PROGRAMS-REFRESH adds the program walk's requests and git's place); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
-| `AppEvent` variants | **35** (T-PROGRAMS-REFRESH added `ProgramsAnswered`; T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
+| `AppEvent` variants | **37**, recounted at T-PROGRAMS-REFRESH (the row said 34 before it while the enum had 36; T-PROGRAMS-REFRESH added `ProgramsAnswered`; T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
 | child-process construction | **one** `Command::new`, inside the doors `bt_platform::quiet_command` and `quiet_breakaway_command`, with **17** product callers — the existing probe, shell, Git, update, rescue and trial callers; `bt_platform::foreground_program` starts the private console-membership helper; `uninstall::leave_armed` starts `--uninstall [--remove-data] --after-pid <pid>`; and `bt_platform::deferred_removal::schedule` starts the internal native copy as `--uninstall-remove`. Both uninstall starts request `CREATE_BREAKAWAY_FROM_JOB` on Windows; a containing job that disallows breakaway makes creation fail and the caller reports failure instead of claiming a detached child exists. No command interpreter or mutable removal script is involved; besides this door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` remain | `quiet_command(_named)?\(`, `quiet_breakaway_command\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
 | `Runtime` methods | **1,424** — 1,223 in the 27 `runtime/*.rs` topics, 201 still in `main.rs` (§13) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
 
@@ -677,8 +677,9 @@ requests made while a walk is out are answered by the next walk, said once in `d
 when that walk ends. A walk reads the **current logon environment**
 (`bt_platform::environment::fresh_logon_environment`, a pane birth's own door), so a `PATH`
 entry an installer wrote after Folio started is seen; it answers the rows the default's rule
-reads first, publishes row by row and wakes the loop after each publication
-(`AppEvent::ProgramsAnswered`). Nothing waits for it and it has no deadline: measured on the
+reads first and publishes row by row; it wakes the loop (`AppEvent::ProgramsAnswered`) after
+each row the request asked for first and at the walk's end, never for the other rows or the WSL and
+git facts, which the end's wake brings. The worker runs at below-normal priority. Nothing waits for it and it has no deadline: measured on the
 development machine, a walk of the twelve shipped Windows rows over a 23-entry `PATH` is 2–3 ms
 (291 `is_file` calls), ≤ 7 ms with every hardware thread busy (DESIGN, 2026-10-08). A walk that
 unwinds marks the worker gone and tells the window thread which walk died; the next request

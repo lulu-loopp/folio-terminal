@@ -11862,15 +11862,61 @@ struct PaneBirth {
 }
 
 impl PaneBirth {
-    /// Keep bytes for the shell being born.
-    fn hold(&self, bytes: &[u8]) {
-        self.typed.borrow_mut().extend_from_slice(bytes);
+    /// **Keep bytes for the shell being born — on the input ring's terms** (`bt_pty::InputRing`):
+    /// a write is taken whole when nothing is held whatever its size, or when it fits under
+    /// [`bt_pty::PTY_INPUT_RING_BYTES`] beside what is; otherwise none of it is taken and the
+    /// answer is the ring's own refusal. The walk a birth waits on has no deadline, so this is
+    /// what keeps a pane stuck behind a dead `PATH` entry from holding a paste without end.
+    fn hold(&self, bytes: &[u8]) -> Result<(), bt_pty::PtyError> {
+        let mut typed = self.typed.borrow_mut();
+        let capacity = bt_pty::PTY_INPUT_RING_BYTES.get();
+        if !typed.is_empty() && typed.len() + bytes.len() > capacity {
+            return Err(bt_pty::PtyError::InputRefused {
+                offered: bytes.len(),
+                queued: typed.len(),
+                capacity,
+            });
+        }
+        typed.extend_from_slice(bytes);
+        Ok(())
     }
 
-    /// Everything held, in the order it was offered, taken once.
-    fn take_typed(&self) -> Vec<u8> {
-        std::mem::take(&mut *self.typed.borrow_mut())
+    /// **Hand what was held to the shell that has just been born**, in the order it was offered,
+    /// through `write`; the queue is emptied only once `write` took it, so a write that fails
+    /// leaves every byte held. Nothing held is nothing written.
+    fn deliver(&self, write: impl FnOnce(&[u8]) -> Result<()>) -> Result<()> {
+        let held = self.typed.borrow().clone();
+        if held.is_empty() {
+            return Ok(());
+        }
+        write(&held)?;
+        self.typed.borrow_mut().clear();
+        Ok(())
     }
+}
+
+/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane whose
+/// program this machine does not have (`Started::Nothing`), nowhere: then the bytes are dropped
+/// and `note` is told once how many, beside the pane's own no-program banner.
+fn deliver_held_input(
+    birth: &PaneBirth,
+    target: PtyTarget<'_>,
+    mut note: impl FnMut(&str),
+) -> Result<()> {
+    birth.deliver(|held| match target {
+        PtyTarget::Nowhere => {
+            note(&format!(
+                "a pane born with no program dropped the {} byte(s) typed into it while it waited",
+                held.len()
+            ));
+            Ok(())
+        }
+        target => write_pty_input(
+            target,
+            held,
+            "deliver what was typed while the shell was being born",
+        ),
+    })
 }
 
 struct TabState {
@@ -20765,8 +20811,14 @@ fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Resu
     let pty = match pty {
         PtyTarget::Shell(pty) => pty,
         PtyTarget::Birth(birth) => {
-            birth.hold(bytes);
-            return Ok(PtyInput::HeldForBirth);
+            return match birth.hold(bytes) {
+                Ok(()) => Ok(PtyInput::HeldForBirth),
+                // Said as the shell's own refusal is said, and for its reason.
+                Err(refused) => {
+                    eprintln!("{what}: {refused}");
+                    Ok(PtyInput::Refused)
+                }
+            };
         }
         PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
     };
@@ -38318,6 +38370,25 @@ fn decided_birth(
     Ok((identity, started))
 }
 
+/// **What [`create_leaf_session`] may decide on the spot**: the seed it is born from and the
+/// rule's verdict, when the answers in hand decide it **and nothing about it has to be said**. A
+/// seed of the unresolved default whose named folder cannot cross into the profile it resolved to
+/// owes the reader a card, and the constructor has no window to say it in; such a pane is left in
+/// birth (`Err` naming its profile, which the walk then answers first), and its landing
+/// (`Runtime::land_pane_births`) — which decides it from the same answers — says the refusal. So no
+/// refusal can be decided and dropped here.
+fn birth_here(
+    seed: &LeafSeed,
+    stored_default: &str,
+    programs: &profiles::ProfilePrograms,
+) -> Result<(LeafSeed, Started), Vec<String>> {
+    let (identity, started) = decided_birth(seed, stored_default, programs)?;
+    match resolved_birth_seed(seed, &identity) {
+        (resolved, None) => Ok((resolved, started)),
+        (_, Some(_)) => Err(vec![identity]),
+    }
+}
+
 /// **A seed of the unresolved default, made the seed of the profile it resolved to** — its folder,
 /// which such a seed holds in the host's own namespace, crossed into that profile's (`D:\proj` is
 /// `/mnt/d/proj` to WSL). A folder a launch *named* that has no spelling there is the command
@@ -38372,17 +38443,17 @@ struct ShownProgramRows {
 
 /// **What adopting a walk's answers moved** — each field one thing a reader can see.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ProgramNews {
+pub(crate) struct ProgramNews {
     /// A row became known, or its program moved.
-    rows: bool,
+    pub(crate) rows: bool,
     /// WSL's installation says something else, so a profile's title may read differently.
-    names: bool,
+    pub(crate) names: bool,
     /// Git is somewhere else now, so the Git pages answered about the old place ask again.
-    git: bool,
+    pub(crate) git: bool,
 }
 
 impl ProgramNews {
-    const fn any(self) -> bool {
+    pub(crate) const fn any(self) -> bool {
         self.rows || self.names || self.git
     }
 }
@@ -38613,12 +38684,99 @@ mod program_birth_tests {
             (PtyInput::HeldForBirth, PtyInput::HeldForBirth)
         );
         assert!(first.queued(), "a drop's focus move counts it as sent");
-        assert_eq!(birth.take_typed(), "git 状态\r".as_bytes());
-        assert!(birth.take_typed().is_empty(), "taken once");
+        let mut delivered = Vec::new();
+        birth
+            .deliver(|held| {
+                delivered.extend_from_slice(held);
+                Ok(())
+            })
+            .expect("delivered");
+        assert_eq!(delivered, "git 状态\r".as_bytes());
+        birth
+            .deliver(|_| panic!("nothing is left to deliver"))
+            .expect("taken once");
         assert_eq!(
             offer_pty_input(PtyTarget::Nowhere, b"x", "typed").expect("nowhere"),
             PtyInput::NoChild
         );
+    }
+
+    fn a_birth() -> PaneBirth {
+        PaneBirth {
+            seed: seed_of(profiles::DEFAULT_IDENTITY),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+        }
+    }
+
+    /// RED (round 2) — **a pane in birth holds input on the input ring's terms**: a write is
+    /// taken whole when nothing is held, however large, and one that would pass the ring's size
+    /// beside what is held is refused whole, as the shell's ring refuses it.
+    ///
+    /// MUTATION (observed red): `PaneBirth::hold` without its capacity check — the second write is
+    /// held and the queue grows past the ring's size.
+    #[test]
+    fn a_pane_in_birth_holds_no_more_than_the_input_ring_would() {
+        let birth = a_birth();
+        let capacity = bt_pty::PTY_INPUT_RING_BYTES.get();
+        let paste = "粘".repeat(capacity / 3 + 1);
+        assert_eq!(
+            offer_pty_input(PtyTarget::Birth(&birth), paste.as_bytes(), "paste").expect("held"),
+            PtyInput::HeldForBirth,
+            "a first write is taken whole, as the ring takes one into an empty queue"
+        );
+        assert_eq!(
+            offer_pty_input(PtyTarget::Birth(&birth), b"x", "typed").expect("answered"),
+            PtyInput::Refused,
+            "past the ring's size, refused"
+        );
+        assert!(!PtyInput::Refused.queued());
+        assert_eq!(
+            birth.typed.borrow().len(),
+            paste.len(),
+            "nothing of it taken"
+        );
+    }
+
+    /// RED (round 2) — **a write that fails leaves the held bytes held**, so a birth that could
+    /// not hand them over loses nothing.
+    ///
+    /// MUTATION (observed red): `PaneBirth::deliver` emptying the queue before it writes — the
+    /// failed write takes the bytes with it.
+    #[test]
+    fn a_failed_delivery_keeps_what_was_typed() {
+        let birth = a_birth();
+        birth.hold("ls 目录\r".as_bytes()).expect("held");
+        let failed = birth.deliver(|_| Err(anyhow!("the shell's input was closed")));
+        assert!(failed.is_err());
+        assert_eq!(birth.typed.borrow().as_slice(), "ls 目录\r".as_bytes());
+    }
+
+    /// RED (round 2) — **a pane born with no program says that its typed bytes went nowhere**,
+    /// once, beside its own no-program banner.
+    ///
+    /// MUTATION (observed red): the `PtyTarget::Nowhere` arm of `deliver_held_input` without its
+    /// note — the bytes are dropped in silence.
+    #[test]
+    fn typed_bytes_a_pane_with_no_program_drops_are_said() {
+        let birth = a_birth();
+        birth.hold("echo 你好".as_bytes()).expect("held");
+        let mut lines = Vec::new();
+        deliver_held_input(&birth, PtyTarget::Nowhere, |line| {
+            lines.push(line.to_owned())
+        })
+        .expect("nowhere is not an error");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("{} byte(s)", "echo 你好".len())),
+            "{lines:?}"
+        );
+        let mut again = Vec::new();
+        deliver_held_input(&birth, PtyTarget::Nowhere, |line| {
+            again.push(line.to_owned())
+        })
+        .expect("nothing held");
+        assert!(again.is_empty(), "said once");
     }
 
     /// RED — **the startup trace's shell lines wait for the launch's shells** and then name the
@@ -38694,12 +38852,42 @@ mod program_birth_tests {
         );
         let (carried, refusal) = resolved_birth_seed(
             &LeafSeed {
-                cwd: Some(profiles::SeedPlace::Carried(unc)),
+                cwd: Some(profiles::SeedPlace::Carried(unc.clone())),
                 ..seed_of(profiles::DEFAULT_IDENTITY)
             },
             profiles::WSL_ID,
         );
         assert_eq!((carried.cwd, refusal), (None, None));
+    }
+
+    /// RED (round 2, Windows) — **the constructor decides nothing it would have to say**: a
+    /// default pane whose named folder WSL cannot spell is left in birth, waiting on the WSL row,
+    /// for its landing to say the refusal; the same pane with a folder that crosses is decided on
+    /// the spot.
+    ///
+    /// MUTATION (observed red): `birth_here` answering `Ok` with the resolved seed whatever the
+    /// refusal — the card would be dropped.
+    #[cfg(windows)]
+    #[test]
+    fn a_pane_that_owes_a_refusal_is_left_for_its_landing_to_say_it() {
+        let named = |folder: &str| LeafSeed {
+            cwd: Some(profiles::SeedPlace::Named(PathBuf::from(folder))),
+            ..seed_of(profiles::DEFAULT_IDENTITY)
+        };
+        let unc = named(r"\\服务器\共享");
+        assert!(
+            decided_birth(&unc, profiles::WSL_ID, &every_row()).is_ok(),
+            "the answers decide it"
+        );
+        assert_eq!(
+            birth_here(&unc, profiles::WSL_ID, &every_row()).map(|(seed, _)| seed),
+            Err(vec![profiles::WSL_ID.to_owned()])
+        );
+        assert_eq!(
+            birth_here(&named(r"D:\项目"), profiles::WSL_ID, &every_row())
+                .map(|(seed, started)| (seed.profile, started)),
+            Ok((profiles::WSL_ID.to_owned(), Started::AsAsked))
+        );
     }
 }
 
@@ -38801,10 +38989,10 @@ fn create_leaf_session(
     // part of a pane but its process, holding its seed and what is typed into it — the walk is
     // asked for the rows it waits on, and `Runtime::land_pane_births` comes back here with the
     // answers once they land.
-    let decided = decided_birth(seed, stored_default, programs);
+    let decided = birth_here(seed, stored_default, programs);
     let in_birth = decided.is_err();
     let (seed, started): (LeafSeed, Started) = match decided {
-        Ok((identity, started)) => (resolved_birth_seed(seed, &identity).0, started),
+        Ok(decided) => decided,
         Err(waiting) => {
             programs_lane::request(programs_lane::Trigger::Birth, stored_default, &waiting);
             (seed.clone(), Started::Nothing)
@@ -61104,8 +61292,11 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
+        // A walk's end is news to a pane in birth even when no answer moved: a pane left in birth
+        // to say something at its landing (`birth_here`) waits on rows that were already known.
+        let ended = answers.finished.is_some();
         let news = adopt_program_answers(&mut app.profile_programs, answers);
-        if !news.any() {
+        if !news.any() && !ended {
             return Ok(());
         }
         if news.rows {
@@ -61115,7 +61306,7 @@ impl FolioApp {
         app.program_news.tell_all(&MachineNews::Programs);
         self.for_each_window(|runtime| {
             let shown = shown.remove(&runtime.window_id()).unwrap_or_default();
-            runtime.take_program_news(&shown, news.git)
+            runtime.take_program_news(&shown, news)
         })
     }
 

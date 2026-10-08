@@ -2,8 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    FilesFocusArrival, LeafSession, MachineNews, Popup, Runtime, ShownProgramRows, cli, i18n,
-    launch_wire, persist, profile_menu_anchor, profiles, programs_lane, seats, settings,
+    FilesFocusArrival, LeafSession, MachineNews, Popup, ProgramNews, Runtime, ShownProgramRows,
+    cli, i18n, launch_wire, persist, profile_menu_anchor, profiles, programs_lane, seats, settings,
     shell_integration, text_field, toast,
 };
 use anyhow::Result;
@@ -493,23 +493,27 @@ impl Runtime<'_> {
     }
 
     /// **This window's share of a program walk's answer** (T-PROGRAMS-REFRESH), taken on its turn
-    /// from its seat in `App::program_news`: the menus that list programs relit
-    /// ([`Self::relight_program_menus`]), the Git pages asked again when git moved, the panes in
-    /// birth born, and the chrome — every list of programs it draws — rebuilt from the answer.
+    /// from its seat in `App::program_news`: the panes in birth the answers now decide are born;
+    /// and when the answer moved something, the menus that list programs are relit
+    /// ([`Self::relight_program_menus`]), the Git pages asked again when git moved, and the
+    /// chrome — every list of programs it draws — rebuilt from the answer.
     pub(crate) fn take_program_news(
         &mut self,
         shown: &ShownProgramRows,
-        git_moved: bool,
+        news: ProgramNews,
     ) -> Result<()> {
         let told = self.app.program_news.take(self.window_id());
         if !told.contains(&MachineNews::Programs) {
             return Ok(());
         }
-        if git_moved {
+        self.land_pane_births()?;
+        if !news.any() {
+            return Ok(());
+        }
+        if news.git {
             self.reask_git_pages();
         }
         self.relight_program_menus(shown);
-        self.land_pane_births()?;
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }

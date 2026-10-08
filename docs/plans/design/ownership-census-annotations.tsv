@@ -32,8 +32,6 @@ App.favicons_changed	-	PROJ	web	the 2026-09-25 table
 App.file_indexes	-	OBS	files	the 2026-09-25 table
 App.first_run_attempted	-	LIFE	first_run	the 2026-09-25 table
 App.git_watch	-	OBS	the application (git_watch)	T-WINDOWS-ALL (2026-10-08): the kernel subscriptions and clocks are the application's; FolioApp writes it at the window directory's walk (window_news::seat_every_holder) and before the turns (ripen), and each window's turn in runtime::git writes only its own seat (want, take) through window_news::WindowSeats
-App.program_news	-	OBS	the application (FolioApp)	T-PROGRAMS-REFRESH (2026-10-08): FolioApp levels the seats at the window directory's walk (window_news::seat_every_holder) and tells every seat when a program walk's answer moved something (adopt_program_walk, WindowSeats::tell_all); each window's turn in runtime::profiles takes only its own seat (take_program_news)
-App.startup_shells	-	LIFE	the application (Runtime::create)	T-PROGRAMS-REFRESH (2026-10-08): set once at the launch when a launch tab's shell is in birth; the launch fills the BT_STARTUP line it measured (main.rs), and runtime::panes' birth landing records each born shell's source and clears it once both lines are said
 App.handoff_lane	-	RES	handoff	the 2026-09-25 table
 App.keybindings_store	-	DUR	keyboard	proposed by census-1
 App.layout_tables	-	OBS	keyboard	round 5: the application-owned per-HKL observation map is written only when a key requests a miss or a worker answer lands
@@ -43,6 +41,7 @@ App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table
 App.pending_restore_answer	-	ASYNC	windows	the 2026-09-25 table
 App.pins_store	-	DUR	files	proposed by census-1
 App.profiles_store	-	DUR	profiles	the 2026-09-25 table
+App.program_news	-	OBS	the application (FolioApp)	T-PROGRAMS-REFRESH (2026-10-08): FolioApp levels the seats at the window directory's walk (window_news::seat_every_holder) and tells every seat when a program walk's answer moved something (adopt_program_walk, WindowSeats::tell_all); each window's turn in runtime::profiles takes only its own seat (take_program_news)
 App.quake	-	LIFE	quake	the 2026-09-25 table
 App.quit	-	LIFE	windows	the 2026-09-25 table
 App.recent	-	DUR	windows	the 2026-09-25 table
@@ -51,6 +50,7 @@ App.restore_question	-	DUR	windows	the 2026-09-25 table
 App.session_store	-	DUR	windows	the 2026-09-25 table
 App.settings_store	-	DUR	main[settings]	the 2026-09-25 table
 App.shortcuts	-	DUR	keyboard	the 2026-09-25 table
+App.startup_shells	-	LIFE	the application (Runtime::create)	T-PROGRAMS-REFRESH (2026-10-08): set once at the launch when a launch tab's shell is in birth; the launch fills the BT_STARTUP line it measured (main.rs), and runtime::panes' birth landing records each born shell's source and clears it once both lines are said
 App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
 App.web_spare	-	LIFE	web	proposed by census-1
 App.web_warmup	-	LIFE	web	proposed by census-1

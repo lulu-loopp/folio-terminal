@@ -22,8 +22,8 @@ use crate::{
     trace_unchanged_present, video_seat, webhost,
 };
 use crate::{
-    LeafView, TextScale, conpty_source_of, decided_birth, resolved_birth_seed, toast,
-    write_pty_input,
+    LeafView, TextScale, conpty_source_of, decided_birth, deliver_held_input, diagnostics,
+    resolved_birth_seed, toast,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -128,20 +128,15 @@ impl Runtime<'_> {
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
         )?;
-        // The pane in birth goes here, by the insert, and with it its queue: the bytes are taken
-        // first and handed to the shell that has just been born, ahead of anything typed after.
-        let typed = self.window.tabs[tab_index]
+        // What was typed meanwhile goes to the shell that has just been born, ahead of anything
+        // typed after; the pane in birth, and with it its queue, goes only once that write was
+        // taken, so a write that fails leaves the bytes held where they were.
+        if let Some(birth) = self.window.tabs[tab_index]
             .sessions
             .get(&seat)
             .and_then(|leaf| leaf.birth.as_ref())
-            .map(crate::PaneBirth::take_typed)
-            .unwrap_or_default();
-        if !typed.is_empty() {
-            write_pty_input(
-                born.input_target(),
-                &typed,
-                "deliver what was typed while the shell was being born",
-            )?;
+        {
+            deliver_held_input(birth, born.input_target(), diagnostics::note)?;
         }
         let source = conpty_source_of(Some(&born));
         self.window.tabs[tab_index].sessions.insert(seat, born);

@@ -422,7 +422,8 @@ pub(crate) const EXPECTED_FAILURES: &[ExpectedFailure] = &[
         claim: Claim::EveryRequestEndsExactlyOnce,
         failure: FailureKind::NoTerminal,
         repair: "D-85",
-        why: "the worker serves the newest request standing; the ones made while a walk was out               get no outcome of their own (the next walk answers them, said in diagnostics)",
+        why: "the worker serves the newest request standing; the ones made while a walk was out \
+              get no outcome of their own (the next walk answers them, said in diagnostics)",
     },
     ExpectedFailure {
         lane: LaneName::Computation,
@@ -537,7 +538,7 @@ impl Delivered {
 }
 
 /// How long the suite waits for something that must happen.
-const PATIENCE: Duration = Duration::from_secs(10);
+pub(crate) const PATIENCE: Duration = Duration::from_secs(10);
 /// How long it watches before concluding that something does not happen.
 const QUIET: Duration = Duration::from_millis(300);
 /// A submission slower than this made the asker wait.
