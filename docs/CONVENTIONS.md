@@ -129,6 +129,25 @@ fixture with an intentional marker likewise needs an exact live reason row.
 `gates-can-fail` plants each forbidden state and checks the refusal names both
 the planted file and reason.
 
+The crate dependency direction (`docs/ARCHITECTURE.md` §3) is the gate
+`scripts/ci/check-crate-edges.ps1`, run in the `logic` job. It reads
+`cargo metadata --no-deps` as strict UTF-8 and requires every normal and build
+dependency between first-party crates (the workspace members under `crates/`)
+to go from a higher layer of `scripts/ci/crate-layers.tsv` to a lower one.
+A same-layer or upward edge needs a row in
+`scripts/ci/crate-edge-exemptions.tsv` (from, to, kind, ledger row, reason).
+Dev-dependencies are not layer edges and are listed, not judged: they are
+not in the shipped graph, and Cargo allows them in both directions —
+`bt-term` and `bt-pty` each name the other as one, and so do `bt-platform`
+and `bt-pty`.
+It also fails on a first-party crate with no layer row, a layer row naming no
+crate, an exemption whose edge is gone or now goes down, an exemption that is
+not at the merge base, and zero crates read. A new crate gets its layer row in
+the change that adds it. `gates-can-fail` plants an upward edge, a stale
+exemption and a crate with no layer and checks that each refusal names the
+crate and the reason. `scripts/ci/check-crate-edges-tests.ps1` plants an added
+exemption in a scratch repository.
+
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 
 （2026-08-20，分支 `test-env-immunity`；技术细节见 `docs/DESIGN.md` §7.1.6c-3b 尾部。）

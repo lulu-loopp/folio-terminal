@@ -830,11 +830,12 @@ impl DirWatch {
         match self._never {}
     }
 
-    /// Take a subscription failure when one is available.
+    /// Take a subscription failure, if the platform reports failures asynchronously.
     #[cfg(not(target_os = "linux"))]
     pub fn take_failure(&mut self) -> Option<std::io::Error> {
         match self._never {}
     }
+
     /// The tree contract. Refused; M2-1.
     pub fn start(path: &Path, wake: impl Fn() + Send + 'static) -> Result<Self, std::io::Error> {
         #[cfg(target_os = "linux")]

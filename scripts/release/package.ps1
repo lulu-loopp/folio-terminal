@@ -457,6 +457,21 @@ if ($info.ProductVersion.Trim() -ne $Version) {
 # rebuild. Every disagreement is printed with its member's name, and the run
 # stops: a manifest that does not describe its archive is a release whose
 # executable's signature vouches for bytes the archive does not hold.
+#
+# **The batch members first, by their shape** (0.4.7 uninstall fix): the
+# manifest names the bytes the build saw, so a checkout that smudged a batch
+# file's line endings agrees with it and is still a script `cmd.exe` cannot
+# read — `Test-BatchMember` says what `cmd.exe` needs of one.
+$batchProblems = @(
+    foreach ($item in $members) {
+        if ($item.ContainsKey('Packed')) { continue }
+        Test-BatchMember -Name $item.Name -Bytes ([IO.File]::ReadAllBytes($item.Path))
+    }
+)
+if ($batchProblems.Count -gt 0) {
+    $batchProblems | ForEach-Object { Write-Host "  $_" }
+    throw "$($batchProblems.Count) batch member(s) are not in the shape cmd.exe reads"
+}
 $exe = Join-Path $Binaries 'folio.exe'
 $release = Read-ReleaseManifest -Exe $exe
 $expectedHeader = [ordered]@{
