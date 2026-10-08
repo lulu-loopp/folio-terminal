@@ -694,6 +694,19 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
             }
             guard.owns_window(duty);
         }
+        Window::StoodAside(why) => {
+            // The journal is one this build cannot read whole (E1): no mark,
+            // nothing recorded, and the window duty stays with the build
+            // that armed it, as for any applier that proved none — the
+            // Windows applier's own arm.
+            guard.not_mine(None);
+            let left = guard.leave();
+            guard
+                .inner()
+                .world
+                .say(&format!("BT_UPDATE_APPLY {why}; {}", left.said()));
+            return Ended::StoodAside(why);
+        }
         other => {
             let owner = match &other {
                 Window::Theirs(owner) => Some(owner.pid),

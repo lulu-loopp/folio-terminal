@@ -576,6 +576,34 @@ pub(crate) fn commit_last_trial_as(
     pid: u32,
     started: Option<u64>,
 ) -> Result<LastTrialCommit, String> {
+    commit_last_trial_reading(
+        worker,
+        home,
+        (txn, nonce),
+        (pid, started),
+        || file_reads::read(Lane::UpdateJournal, home.journal()),
+        |pause| {
+            bt_platform::wait::sleep_within(worker, pause);
+            true
+        },
+    )
+}
+
+/// [`commit_last_trial_as`] with the journal's bytes (`journal_bytes`, one
+/// read of the file) and the pause between two reads handed in. **A read that fails other than "no such file" is
+/// asked again** within [`JOURNAL_WRITE_WITHIN`] — a scanner or a sync tool
+/// that holds `journal.json` lets go within moments, as the window election
+/// asks again ([`PhaseRead::NotRead`], E1 round 3) — and only a journal that
+/// still cannot be read is stood aside from. `wait` answers whether to ask
+/// again.
+fn commit_last_trial_reading(
+    worker: &WorkerCtx,
+    home: &Home,
+    (txn, nonce): (TxnId, Nonce),
+    (pid, started): (u32, Option<u64>),
+    mut journal_bytes: impl FnMut() -> io::Result<Vec<u8>>,
+    mut wait: impl FnMut(Duration) -> bool,
+) -> Result<LastTrialCommit, String> {
     // Its own start instant is half of what its receipt must name (H.1): a
     // process that cannot read it wrote a receipt that names nobody, which
     // neither it nor any holder can ever accept.
@@ -587,12 +615,19 @@ pub(crate) fn commit_last_trial_as(
         Ok(None) => return Ok(LastTrialCommit::Pending),
         Err(failure) => return Err(failure.to_string()),
     };
-    let journal = match Role::LastTrialCommit
-        .sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
-    {
-        Some(Sight::Known(journal)) => journal,
-        None => return Ok(LastTrialCommit::NotItsOwn),
-        Some(Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_)) => {
+    let read_once = || match Role::LastTrialCommit.sight_of_read(journal_bytes()) {
+        Some(Sight::Unreadable(ParseRefusal::Unread(error))) => Err(error),
+        seen => Ok(seen),
+    };
+    let journal = match retry_within(
+        Instant::now() + JOURNAL_WRITE_WITHIN,
+        read_once,
+        |_| true,
+        &mut wait,
+    ) {
+        Ok(Some(Sight::Known(journal))) => journal,
+        Ok(None) => return Ok(LastTrialCommit::NotItsOwn),
+        Ok(Some(Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_))) | Err(_) => {
             return Ok(LastTrialCommit::StoodAside);
         }
     };
@@ -1246,8 +1281,9 @@ fn read_window_owner(home: &Home, txn: TxnId) -> io::Result<Option<Running>> {
 /// Why the election's read of the phase gave no phase.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PhaseRead {
-    /// The read failed, or the journal is another transaction's: asked again
-    /// within the election's wait.
+    /// There is no journal, or it is another transaction's: asked again
+    /// within the election's wait. (A read that failed is
+    /// [`PhaseRead::NotRead`].)
     Unread(String),
     /// **The journal is one this build cannot read whole** (0.4.8 E1): the
     /// applier stands aside ([`Role::WindowElection`]) and writes no mark.
@@ -2562,6 +2598,81 @@ mod beyond_tests {
             assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
             assert!(lock_is_free(&home), "{what}: the lock is let go");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (E1 round 3; role #7, U-35's self-commit, site J4) — **a journal
+    /// read that fails other than "no such file" is asked again before the
+    /// reserved trial stands aside**: one refused read (a scanner holding
+    /// `journal.json`) is followed by a read that answers, and the commit goes
+    /// on (`Pending`: its receipt is not there yet); a read that keeps
+    /// failing until the wait gives up is stood aside from. The journal is byte
+    /// for byte as it was and the lock is let go. No clock: the pause is the
+    /// test's own, and answers when to stop asking.
+    ///
+    /// MUTATION: in `commit_last_trial_reading`, ask once only
+    /// (`|_| false` as the retry's test) — one transient refusal ends the
+    /// self-commit for good.
+    #[test]
+    fn the_reserved_trial_asks_again_before_it_stands_aside_from_a_journal_it_cannot_read() {
+        let (root, home, known) = home_at(
+            "commit-transient",
+            Phase::TrialStarting {
+                nonce: nonce(),
+                began_ms: 42,
+            },
+        );
+        install_txn::durable_write(&home.journal(), &known).unwrap();
+        let refused = || io::Error::from(io::ErrorKind::PermissionDenied);
+
+        let at = home.clone();
+        let bytes = known.clone();
+        let (answer, reads) = on_a_worker(move |worker| {
+            let mut reads = 0;
+            let answer = commit_last_trial_reading(
+                worker,
+                &at,
+                (TXN, nonce()),
+                (4242, Some(7)),
+                || {
+                    reads += 1;
+                    if reads == 1 {
+                        Err(refused())
+                    } else {
+                        Ok(bytes.clone())
+                    }
+                },
+                |_| true,
+            );
+            (answer, reads)
+        });
+        assert_eq!(
+            answer,
+            Ok(LastTrialCommit::Pending),
+            "asked again, then read"
+        );
+        assert_eq!(reads, 2);
+
+        let at = home.clone();
+        let (answer, pauses) = on_a_worker(move |worker| {
+            let mut pauses = 0;
+            let answer = commit_last_trial_reading(
+                worker,
+                &at,
+                (TXN, nonce()),
+                (4242, Some(7)),
+                || Err(refused()),
+                |_| {
+                    pauses += 1;
+                    pauses < 3
+                },
+            );
+            (answer, pauses)
+        });
+        assert_eq!(answer, Ok(LastTrialCommit::StoodAside), "never read");
+        assert_eq!(pauses, 3);
+        assert_eq!(std::fs::read(home.journal()).unwrap(), known);
+        assert!(lock_is_free(&home), "the lock is let go");
         let _ = std::fs::remove_dir_all(&root);
     }
 

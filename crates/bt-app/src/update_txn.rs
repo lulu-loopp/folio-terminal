@@ -7459,9 +7459,12 @@ mod parse_sites {
             Is::Reader(Role::LastTrialReserve),
             "crate::update_apply::beyond_tests::the_reservation_stands_aside_from_what_it_cannot_read_whole",
         ),
+        // The self-commit's read stands in `commit_last_trial_reading`;
+        // `commit_last_trial_as` hands it the file's bytes (`journal_bytes`),
+        // which reads and parses nothing, and a test hands it its own.
         site(
             "J4",
-            "crate::update_apply::commit_last_trial_as",
+            "crate::update_apply::commit_last_trial_reading",
             Reads::SightOfRead,
             1,
             Is::Reader(Role::LastTrialCommit),
