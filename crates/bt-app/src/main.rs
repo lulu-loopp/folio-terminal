@@ -72558,6 +72558,10 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+mod app_files_tests;
+#[cfg(test)]
+mod app_keyboard_tests;
+#[cfg(test)]
 mod app_mouse_tests;
 #[cfg(test)]
 mod app_panes_tests;
@@ -72565,6 +72569,14 @@ mod app_panes_tests;
 mod app_preview_tests;
 #[cfg(test)]
 mod app_tabs_tests;
+#[cfg(test)]
+mod app_terminal_tests;
+#[cfg(test)]
+mod app_windows_tests;
+#[cfg(test)]
+mod preview_app_tests;
+#[cfg(test)]
+mod profiles_app_tests;
 #[cfg(test)]
 mod seats_app_tests;
 #[cfg(test)]
