@@ -35,7 +35,6 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
 mod animation;
 mod app_delegate_wire;
 mod arrival;
@@ -447,6 +446,8 @@ const PANIC_LOG_FILENAME: &str = "folio-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    #[cfg(target_os = "linux")]
+    NativeDialogReady,
     /// A keyboard layout's copied Shift table landed from the worker road.
     /// The answer is in `App::layout_tables`; this event only breaks a parked
     /// loop, and the next key lookup drains the channel too if the wake is lost.
@@ -825,6 +826,8 @@ impl AppEvent {
     fn station(&self) -> hang_watch::Station {
         use hang_watch::Station;
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeDialogReady => Station::Chrome,
             Self::PreviewReady => Station::Preview,
             Self::MathReady => Station::Math,
             Self::FilesReady => Station::Files,
@@ -29087,6 +29090,16 @@ impl NotificationDesk {
             .as_ref()
             .map(bt_platform::Notifier::take_activations)
             .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn take_failure(&mut self) -> Option<String> {
+        let failure = self.voice.as_ref()?.take_failures().into_iter().next()?;
+        if self.refused {
+            return None;
+        }
+        self.refused = true;
+        Some(failure)
     }
 }
 
@@ -61029,6 +61042,20 @@ impl FolioApp {
     /// The queue is drained before the loop over it, so the borrow of the application ends before
     /// the first window is reached.
     fn route_clicked_notifications(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(error) = self
+            .app
+            .as_mut()
+            .and_then(|app| app.notifications.take_failure())
+        {
+            eprintln!("desktop notification refused: {error}");
+            if let Some(id) = self.frontmost_window().or_else(|| self.windows.key_at(0))
+                && !self.is_leaving(id)
+                && let Some(mut runtime) = self.runtime(id)
+            {
+                runtime.raise_notification_refusal(&error)?;
+            }
+        }
         let Some(app) = self.app.as_ref() else {
             return Ok(());
         };
@@ -62659,6 +62686,8 @@ impl FolioApp {
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
+        #[cfg(target_os = "linux")]
+        runtime.restore_minimized_window()?;
         runtime.show_quake_window()?;
         let native = native_window(&runtime.window.window).ok();
         if let Some(app) = self.app.as_mut() {
@@ -64545,6 +64574,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let (mut batch, gone) = self.drain_files_answers();
                 self.for_each_window(|runtime| runtime.apply_files_results(&mut batch, gone))
             }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeDialogReady => Ok(()),
             AppEvent::PreviewReady => {
                 let (mut batch, gone) = self.drain_preview_answers();
                 self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
@@ -68790,9 +68821,16 @@ mod floated_page_tests {
         let read = up
             .find("foreground_holder()")
             .expect("the summon reads who had the keyboard");
+        let restored = up
+            .find("runtime.restore_minimized_window()?")
+            .expect("the Linux summon restores its minimized window");
         let show = up
             .find("show_quake_window()")
             .expect("the summon shows the window");
+        assert!(
+            read < restored && restored < show,
+            "the summon restores a minimized window after reading and before showing it"
+        );
         assert!(
             read < show,
             "the foreground is read after the window is up, by which time it is \
@@ -72371,6 +72409,14 @@ fn main() -> Result<()> {
         }
     };
     let _ = SUMMON_PROXY.set(event_loop.create_proxy());
+    #[cfg(target_os = "linux")]
+    {
+        let proxy = event_loop.create_proxy();
+        bt_platform::install_dialog_wake(move || {
+            let _ = proxy.send_event(AppEvent::NativeDialogReady);
+        })
+        .map_err(|error| anyhow!(error))?;
+    }
     // **The application delegate, and it has to be here** (M3-1, X-4).
     //
     // After `build` and not before it: what `EventLoop::new` does on the machine
@@ -72556,7 +72602,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 17] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 20] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -72573,6 +72619,8 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
+        // Linux hands process work its WorkerCtx; the other hand-off doors are synchronous.
+        "handoff_lane.rs",
         // The startup path: the native-window door's two arms, and the five
         // platform calls M1-1 made non-fatal.
         "main.rs",
@@ -72583,6 +72631,10 @@ mod platform_gate_tests {
         "profiles.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // The Linux-only minimize restore bridge has only the Linux quake summon caller.
+        "runtime/windows.rs",
+        // Native failure fixture: Linux reports async watch-start failure; other starts refuse inline.
+        "scheme_watch.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;

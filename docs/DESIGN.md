@@ -14268,3 +14268,11 @@ Pinned by `i18n::tests::last_checked_is_singular_at_one_in_every_unit` (red with
 **Corrected beside it.** ARCHITECTURE §0.1 no longer says `crates/bt-platform/src/lib.rs` holds a NUL byte — T-GUARDS-BLIND (`5f7ba1fe`) wrote the bytes as escapes. No rule sentence was added to ARCHITECTURE: the one repaid row's rule was already stated in §3.2.
 
 ---
+
+### 2026-10-06 — Linux summons restore the minimized window before showing it
+
+On Linux, `FolioApp::summon_quake` reads the previous foreground, restores a minimized window through `Runtime::restore_minimized_window`, then shows it and runs the foreground retry. The other platforms keep the existing summon sequence. Pinned by `floated_page_tests::the_foreground_is_read_before_the_summon_and_handed_back_after_it`.
+
+### 2026-10-06 — Linux hand-offs retain the lane worker
+
+Linux dispatches file and address requests through `ShellThread::hand_over_on_worker`, carrying the handoff lane's `WorkerCtx` into the Linux file and process doors.

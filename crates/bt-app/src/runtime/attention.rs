@@ -849,7 +849,7 @@ impl Runtime<'_> {
     /// definition one the reader was not looking at, so there is no pane under their eye for the
     /// card to hang off; and what the card is about is the *channel*, which belongs to the window
     /// rather than to whichever shell happened to speak first.
-    fn raise_notification_refusal(&mut self, error: &str) -> Result<()> {
+    pub(crate) fn raise_notification_refusal(&mut self, error: &str) -> Result<()> {
         self.toast(
             toast::ToastKind::Error,
             toast::ToastAnchor::Window,
