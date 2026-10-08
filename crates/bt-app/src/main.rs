@@ -79955,13 +79955,17 @@ mod printed_path_provenance_tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// PIN (closure review r6, B-2) — **the open door is asked about the name `main` asked it
-    /// about.**
+    /// GUARD (closure review r6, B-2; re-pointed by CC-4) — **the open door is asked about the name
+    /// `main` asked it about, and the resolved name is the doors' own transform.**
     ///
     /// `main`'s Windows `open_local_path` reads `names_a_program` off the *printed* spelling —
     /// there is no `canonicalize` in that door at all. For one round the branch handed it the
     /// resolved name instead, which is a different question about a symlink and a refusal `main`
-    /// does not make.
+    /// does not make. Its subject is how `Runtime::activate_hyperlink` and
+    /// `run_path_verify_worker` are written (CONVENTIONS, "A test pins behaviour by running it").
+    ///
+    /// MUTATION: hand `bt_term::verify_path` a raw `canonicalize` in `run_path_verify_worker`
+    /// instead of `bt_platform::resolved_for_a_door`, and the last assertion goes red.
     #[test]
     fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
         let press = method_body("Runtime", "activate_hyperlink");
