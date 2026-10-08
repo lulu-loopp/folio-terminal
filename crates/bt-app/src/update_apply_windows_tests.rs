@@ -2900,9 +2900,8 @@ fn an_applier_that_never_gets_the_lock_still_opens_folio() {
 
 /// **The window's mark held open by a scanner** (no delete sharing), naming a
 /// process that is gone: an applier reads it as stale and claims, but every
-/// replacement is refused before the rename, so the applier owns the duty
-/// through `owner.lock` alone. `None` where the platform replaces an open
-/// file.
+/// replacement is refused before the rename, so no contender's mark lands.
+/// `None` where the platform replaces an open file.
 fn mark_held_open(install: &Install) -> Option<std::fs::File> {
     let mark = crate::update_apply::owner_path(&install.home, install.txn);
     std::fs::create_dir_all(mark.parent().unwrap()).unwrap();
@@ -2910,104 +2909,215 @@ fn mark_held_open(install: &Install) -> Option<std::fs::File> {
     bt_platform::trust_harness::hold_without_delete_sharing(&mark).ok()
 }
 
-/// RED (T-UPDATE-LOCK-RACE round 4) — **an applier that owns the window only
-/// through the election lock, and whose road stops at `Handoff` after it held
-/// the transaction lock, opens the one window itself.** O keeps that lock
-/// until its process ends, so O is gone by then, and it had stood down
-/// against this applier's `owner.lock`. Driven through the product `apply`:
-/// the mark's replacement is refused before the rename ([`mark_held_open`]),
-/// and the journal names another applier's nonce, so the road stops at
-/// `Handoff` with the transaction lock held.
-///
-/// MUTATION: in `ExitGuard::road_ended`, hand a lock-only duty back whether
-/// or not the transaction lock was held (nothing is opened).
-#[test]
-fn a_lock_only_applier_that_stops_at_handoff_after_the_lock_opens_the_one_window() {
-    let Some(install) = Install::new("lock-only-held") else {
+/// **What the outgoing build O does after its leave**, in ruling 1's cells
+/// (0.4.8 E2): it keeps the transaction lock `H\lock` until its process ends,
+/// which may be at once or long after (a process lingering in its teardown).
+#[derive(Clone, Copy, Debug)]
+enum OutgoingAfterLeave {
+    Gone,
+    Lingering,
+}
+
+/// **Whether the applier P is alive in ruling 1's cells** (0.4.8 E2): alive
+/// and running its product `apply`, or ended from outside before it decided
+/// anything.
+#[derive(Clone, Copy, Debug)]
+enum ApplierIs {
+    Alive,
+    Dead,
+}
+
+/// **One cell of ruling 1's table** (0.4.8 E2; Kimi round 4's R4-1): the
+/// window's mark cannot be written by anybody ([`mark_held_open`]), O holds
+/// `H\lock` (this test stands for it) while P runs, and O's leave — its
+/// short wait for P's mark, its election, its start — follows. Exactly one
+/// window opener: O, starting the installed build with `--update-failed`.
+/// P, alive, stands aside: no road (it never asks for `H\lock`, so O's linger
+/// is nothing to it), nothing opened, and a line that names the cell.
+fn mark_unwritable_cell(tag: &str, outgoing: OutgoingAfterLeave, applier: ApplierIs) {
+    let Some(install) = Install::new(tag) else {
         return;
     };
     let Some(scanner) = mark_held_open(&install) else {
         return;
     };
     let journal = std::fs::read(install.home.journal()).unwrap();
-    let (ended, world) = match start(
-        install.road(limits(20_000, 20_000)),
-        install.txn,
-        Nonce::new([0x55; 32]),
-        install.world(Trial::Answers),
-    )
-    .join()
+    let mut o_lock = Some(
+        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+            .unwrap()
+            .unwrap(),
+    );
+    let p = match applier {
+        ApplierIs::Alive => {
+            let (ended, world) =
+                applied(&install, limits(600, 20_000), install.world(Trial::Answers));
+            assert!(
+                said_at(&world, "stands aside and the outgoing build keeps the duty").is_some(),
+                "{outgoing:?}/{applier:?}: the cell is named: {:?}",
+                world.said
+            );
+            assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+            assert!(
+                world.opened.is_empty(),
+                "{outgoing:?}/{applier:?}: the applier opens nothing: {:?}",
+                world.opened
+            );
+            assert!(world.shown.is_empty(), "{:?}", world.shown);
+            // Still running as far as O's wait can tell: this test process.
+            crate::update_apply::this_process()
+        }
+        ApplierIs::Dead => Running { pid: 1, started: 1 },
+    };
+    let leaving = Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(p, Duration::from_millis(300));
+    let (left, started) = match old_leaves(&install, Running { pid: 2, started: 2 }, leaving).join()
     {
         Ok(answer) => answer,
         Err(panic) => std::panic::resume_unwind(panic),
     };
-    drop(scanner);
-    assert!(
-        said_at(&world, "owner.lock records the duty").is_some(),
-        "the duty is lock-only: {:?}",
-        world.said
+    if matches!(outgoing, OutgoingAfterLeave::Gone) {
+        o_lock = None;
+    }
+    assert_eq!(
+        left,
+        Left::Started(install.installed.clone()),
+        "{outgoing:?}/{applier:?}"
     );
-    assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+    assert_eq!(
+        started,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "{outgoing:?}/{applier:?}: O opens the one window"
+    );
     assert_eq!(
         std::fs::read(install.home.journal()).unwrap(),
         journal,
-        "the road stopped at Handoff"
+        "{outgoing:?}/{applier:?}: nothing was recorded"
     );
-    assert_eq!(
-        world.opened,
-        vec![(install.installed.clone(), failed_then(&install, &[]))],
-        "the applier opens the one window: {:?}",
-        world.said
-    );
-    assert!(world.shown.is_empty(), "{:?}", world.shown);
+    drop(o_lock);
+    drop(scanner);
 }
 
-/// RED (T-UPDATE-LOCK-RACE round 4) — **an applier that owns the window only
-/// through the election lock, and whose road never held the transaction lock,
-/// gives the duty back to O: it opens nothing, and O, finding the election
-/// lock free and no live mark, opens the one window.** The transaction lock
-/// is held by this test, standing for O, until the applier's one deadline has
-/// passed; the applier's product `apply` runs through its own election.
+/// RED (0.4.8 E2, ruling 1) — **mark unwritable, O gone after its leave, P
+/// alive: O opens the one window and P stands aside.** On 0.4.7 the applier
+/// kept a lock-only duty here and opened the window itself once O's lock was
+/// gone.
 ///
-/// MUTATION: in `update_apply_windows::apply`, drop the duty instead of
-/// `guard.owns_window(duty)` (the applier and O each open a window).
+/// MUTATION: in `update_handoff::Leaving::leave`, drop the outgoing fallback —
+/// stand down (`guard.not_mine(None)`) when the applier left no mark (no
+/// start: `Left::NotMine(None)`). Second mutation: in `Applier::unrecorded`,
+/// answer `Mine` through the held lock (the applier opens a window too).
 #[test]
-fn a_lock_only_applier_that_never_held_the_lock_gives_the_window_back_to_o() {
-    let Some(install) = Install::new("lock-only-never") else {
+fn mark_unwritable_outgoing_gone_applier_alive_has_one_opener() {
+    mark_unwritable_cell(
+        "e2-gone-alive 写不进",
+        OutgoingAfterLeave::Gone,
+        ApplierIs::Alive,
+    );
+}
+
+/// RED (0.4.8 E2, ruling 1) — **mark unwritable, O lingering after its leave
+/// with `H\lock` held, P alive: O opens the one window.** This is Kimi round
+/// 4's R4-1 cell: on 0.4.7 P waited for `H\lock` past its deadline, handed a
+/// lock-only duty back to an O that had already stood down, and nothing
+/// opened.
+///
+/// MUTATION: as [`mark_unwritable_outgoing_gone_applier_alive_has_one_opener`].
+#[test]
+fn mark_unwritable_outgoing_lingering_applier_alive_has_one_opener() {
+    mark_unwritable_cell(
+        "e2-linger-alive 写不进",
+        OutgoingAfterLeave::Lingering,
+        ApplierIs::Alive,
+    );
+}
+
+/// RED (0.4.8 E2, ruling 1) — **mark unwritable, O gone after its leave, P
+/// dead before it decided: O opens the one window.**
+///
+/// MUTATION: drop the outgoing fallback, as above.
+#[test]
+fn mark_unwritable_outgoing_gone_applier_dead_has_one_opener() {
+    mark_unwritable_cell(
+        "e2-gone-dead 写不进",
+        OutgoingAfterLeave::Gone,
+        ApplierIs::Dead,
+    );
+}
+
+/// RED (0.4.8 E2, ruling 1) — **mark unwritable, O lingering after its leave,
+/// P dead before it decided: O opens the one window.**
+///
+/// MUTATION: drop the outgoing fallback, as above.
+#[test]
+fn mark_unwritable_outgoing_lingering_applier_dead_has_one_opener() {
+    mark_unwritable_cell(
+        "e2-linger-dead 写不进",
+        OutgoingAfterLeave::Lingering,
+        ApplierIs::Dead,
+    );
+}
+
+/// RED (0.4.8 E2, ruling 2; review m-d) — **a panic on the applier's road
+/// before it holds the duty — here inside its window election, with the
+/// election lock held — starts nothing: the unwinding releases the election,
+/// and O, finding the applier's election free and no mark of it, opens the
+/// one window.** The panic leaves through the applier's exit guard
+/// (`ExitGuard::contender`), whose drop owes no window before the duty is
+/// won.
+///
+/// MUTATION: in `apply_electing`, build the guard with `ExitGuard::new` (no
+/// contender guard): the panicking applier's drop starts the installed build
+/// too, and two windows open.
+#[test]
+fn a_panic_before_the_duty_leaves_the_one_window_to_o() {
+    let Some(install) = Install::new("e2-panic-election") else {
         return;
     };
-    let Some(scanner) = mark_held_open(&install) else {
-        return;
-    };
-    let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+    let o_lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
         .unwrap()
         .unwrap();
-    let (ended, world) = applied(&install, limits(600, 20_000), install.world(Trial::Answers));
-    drop(held);
-    drop(scanner);
-    assert!(
-        said_at(&world, "owner.lock records the duty").is_some(),
-        "the duty is lock-only: {:?}",
-        world.said
-    );
-    assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
+    let road = install.road(limits(20_000, 20_000));
+    let (txn, nonce, home) = (install.txn, install.applier, install.home.clone());
+    let mut world = install.world(Trial::Answers);
+    let (panicked, world) = on_a_worker(move |worker| {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_electing(worker, &road, txn, nonce, &mut world, |_worker, until| {
+                crate::update_apply::take_the_window_within_writes_at(
+                    &home,
+                    txn,
+                    road.me,
+                    until.saturating_duration_since(Instant::now()),
+                    crate::update_apply::Applier,
+                    |_mark, _bytes| panic!("a planted panic inside the election 选举中途"),
+                )
+            })
+        }))
+        .is_err();
+        (panicked, world)
+    });
+    assert!(panicked, "the planted panic unwound through the applier");
     assert!(
         world.opened.is_empty(),
-        "the applier opens nothing: {:?}",
+        "the applier had no duty and opens nothing: {:?}",
         world.opened
     );
     assert!(world.shown.is_empty(), "{:?}", world.shown);
-
-    let mut starts = Starts::default();
-    let left = Leaving::over(&install.home, install.txn, &install.data).leave(
-        Running { pid: 1, started: 1 },
-        &install.installed,
-        &mut starts,
-        None,
+    assert_eq!(
+        crate::update_apply::window_owner(&install.home, install.txn),
+        None
     );
+
+    let leaving = Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(Running { pid: 1, started: 1 }, Duration::from_millis(300));
+    let (left, started) = match old_leaves(&install, Running { pid: 2, started: 2 }, leaving).join()
+    {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    drop(o_lock);
     assert_eq!(left, Left::Started(install.installed.clone()));
     assert_eq!(
-        starts.calls,
+        started,
         vec![(install.installed.clone(), failed_then(&install, &[]))],
         "O opens the one window"
     );
@@ -3384,21 +3494,19 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
 /// contenders are both live processes (this test and a synthetic program it
 /// started), so neither can be taken for a dead owner.
 ///
-/// **The winner's duty is recorded one of two ways**, and each is asserted as
-/// what it is: a replaced mark that names the winner, or — when the
-/// replacement is refused before its rename — the stale mark left byte for
-/// byte with the election lock still held by the winner's answer, so a third
-/// contender finds `WindowHolder::Unmarked`. A scanner that opens the freshly
-/// written mark without delete sharing gives the second way at random under
-/// load; every tenth round holds the mark open the same way
-/// (`trust_harness::hold_without_delete_sharing`), so both ways are asserted
-/// in every run.
+/// **A replacement refused before its rename gives no winner** (0.4.8 E2):
+/// each applier whose mark does not land stands aside and lets the lock go,
+/// leaving the stale mark byte for byte and no held lock, and the duty with
+/// the outgoing build. A scanner that opens the freshly written mark without
+/// delete sharing gives that answer at random under load; every tenth round
+/// holds the mark open the same way
+/// (`trust_harness::hold_without_delete_sharing`), so both answers are
+/// asserted in every run.
 ///
 /// MUTATION: in `update_apply::take_the_window_within_using`, give each
-/// contender a lock of its own (both answer `Mine`); or answer a replacement
-/// refused before its rename with `WindowDuty::recorded` instead of
-/// `WindowDuty::held`, which lets the lock go (both answer `Mine` in the first
-/// scanned round).
+/// contender a lock of its own (both answer `Mine`); or, in
+/// `Applier::unrecorded`, answer `Mine` through a lock it keeps (a scanned
+/// round then has a winner whose duty the outgoing build cannot see).
 #[test]
 fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
     let Some(install) = Install::new("stale-race") else {
@@ -3422,13 +3530,6 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
         let scanned = round % 10 == 9;
         let scanner = scanned
             .then(|| bt_platform::trust_harness::hold_without_delete_sharing(&mark).unwrap());
-        // A lock-only winner keeps the lock until its answer is dropped, so
-        // the loser of a scanned round waits briefly, not a whole election.
-        let within = if scanned {
-            Duration::from_millis(300)
-        } else {
-            crate::update_apply::ELECTION_WITHIN
-        };
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let racers: Vec<_> = contenders
             .iter()
@@ -3449,7 +3550,7 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
                             &home,
                             txn,
                             who,
-                            Instant::now() + within,
+                            Instant::now() + crate::update_apply::ELECTION_WITHIN,
                         )
                     },
                 )
@@ -3462,43 +3563,38 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
             .collect();
         let on_disk =
             std::fs::read(&mark).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-        let mine = answers.iter().filter(|answer| answer.is_mine()).count();
-        assert_eq!(mine, 1, "round {round}: {answers:?}");
-        let at = answers.iter().position(Window::is_mine).unwrap();
-        let winner = contenders[at];
-        assert!(
-            answers.contains(&Window::Theirs(winner))
-                || answers
-                    .iter()
-                    .any(|answer| matches!(answer, Window::Refused(_))),
-            "round {round}: the loser names the winner or truthfully refuses: {answers:?}"
-        );
-        let Window::Mine(duty) = &answers[at] else {
-            unreachable!("the position is a Mine")
-        };
-        if scanned {
-            assert!(
-                duty.is_lock_backed(),
-                "round {round}: a replacement the scanner refuses records no mark: {answers:?}"
-            );
-        }
-        if duty.is_lock_backed() {
-            assert_eq!(
-                on_disk.as_deref().ok(),
-                Some(written.as_str()),
-                "round {round}: the refused replacement left the stale mark whole: {answers:?}"
-            );
-            assert_eq!(
-                crate::update_apply::window_holder(&install.home, install.txn, third),
-                Ok(Some(crate::update_apply::WindowHolder::Unmarked)),
-                "round {round}: the winner's held lock is its record: {answers:?}"
-            );
-        } else {
-            assert_eq!(
-                crate::update_apply::window_owner(&install.home, install.txn),
-                Some(winner),
-                "round {round}: {answers:?}; the mark's bytes: {on_disk:?}"
-            );
+        let stood_aside = |answer: &Window| matches!(answer, Window::Refused(refusal) if refusal.why().contains("stands aside"));
+        match answers.iter().position(Window::is_mine) {
+            Some(at) => {
+                assert!(!scanned, "round {round}: {answers:?}");
+                let winner = contenders[at];
+                let loser = &answers[1 - at];
+                assert!(
+                    *loser == Window::Theirs(winner) || matches!(loser, Window::Refused(_)),
+                    "round {round}: the loser names the winner or truthfully refuses: {answers:?}"
+                );
+                assert_eq!(
+                    crate::update_apply::window_owner(&install.home, install.txn),
+                    Some(winner),
+                    "round {round}: {answers:?}; the mark's bytes: {on_disk:?}"
+                );
+            }
+            None => {
+                assert!(
+                    answers.iter().all(stood_aside),
+                    "round {round}: with no winner, each applier stood aside: {answers:?}"
+                );
+                assert_eq!(
+                    on_disk.as_deref().ok(),
+                    Some(written.as_str()),
+                    "round {round}: the refused replacement left the stale mark whole: {answers:?}"
+                );
+                assert_eq!(
+                    crate::update_apply::window_holder(&install.home, install.txn, third),
+                    Ok(None),
+                    "round {round}: nothing is held and the stale mark owns nothing: {answers:?}"
+                );
+            }
         }
         drop(answers);
         drop(scanner);
@@ -3695,7 +3791,7 @@ fn the_applier_waits_for_o_within_one_budget() {
     let nonce = install.applier;
     let mut world = install.world(Trial::Answers);
     let expired = Instant::now() - Duration::from_millis(1);
-    let ((ended, successor, transaction_lock), asked) = on_a_worker(move |worker| {
+    let ((ended, successor), asked) = on_a_worker(move |worker| {
         let mut asked = None;
         let answer = apply_under_the_lock_with(
             worker,
@@ -3714,10 +3810,6 @@ fn the_applier_waits_for_o_within_one_budget() {
     assert_eq!(asked, Some(Duration::ZERO));
     assert_eq!(ended, Ended::OldHeldTheLock);
     assert_eq!(successor, None);
-    assert_eq!(
-        transaction_lock,
-        crate::update_apply::TransactionLock::NeverHeld
-    );
 }
 
 /// RED (U-34, round 7) — **a late applier after O's wait ran out never

@@ -1230,7 +1230,15 @@ process with no application can raise (`bt_platform::standalone_alert`:
 Core Foundation's on macOS, the ownerless one on Windows). So a window
 follows Restart to update whatever the road met — a refused write, a
 hand-over past its 15 s, a refusal, a panic; the one exception is the
-recovery at logon that attempted nothing. **Since U-35 (Windows only), when
+recovery at logon that attempted nothing. **The applier takes the duty
+only by a mark that lands** (E2, the coordinator's ruling of 2026-10-08):
+one whose mark cannot be written stands aside — it runs no road and starts
+nothing — and the outgoing build, which finds no mark of it at the end of
+its wait (or the election still held by it), opens the window, the
+installed build with `--update-failed`, whether it then leaves at once or
+lingers holding the transaction lock; an applier that ends before it has
+the duty, a panic included, starts nothing either, and the outgoing build
+opens the window. **Since U-35 (Windows only), when
 at `Moving` the new live image's start and the previous build's rescue start
 are both refused by the operating system, the holder durably records
 `TrialStarting` with one nonce, then asks the same installed new image to

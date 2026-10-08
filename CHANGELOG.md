@@ -8,6 +8,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- After Restart to update, Folio always comes back, also when the update cannot write to its own folder and the closing Folio takes a long time to go away — before, nothing reopened until you started Folio again. <!-- zh: pending T-UPDATE-LOCK-RACE -->
+- If the updater stops on an internal error before it starts working, one Folio opens afterwards, not two. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - A second window's Git page now follows changes on disk as the first window's does.
 - Before a pane's shell reports its folder, everything that offers "where this pane is" uses the folder the pane was opened in: the pane's files card and a files column opened from it (which showed your home folder), the files column's folder menu, the place hints in the command palette, and the folder picker of New terminal in folder… in the pane menu and the new-tab menu — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
 - Every pasted picture's `[Image #N]` on an agent's input line can be opened, not only the last one.

@@ -107,9 +107,10 @@
 //! U-24, now applied by it): every way out of the applier and of the
 //! recovery — a normal end, any refusal once the home is known, a panic
 //! unwinding — goes through `update_apply::ExitGuard` ([`WindowsLeave`]). The
-//! applier has the duty only once it has won the window election
-//! (`update_apply::OWNER_FILE` and its lock), before it waits for O's lock;
-//! before that, and when another process owns the election, it starts nothing. A successor
+//! applier has the duty only once it has won the window election with a mark
+//! that landed (`update_apply::OWNER_FILE` and its lock), before it waits for
+//! O's lock; before that — a panic included — when another process owns the
+//! election, and when its mark does not land, it starts nothing. A successor
 //! it leaves behind still running — the trial it started, the mark's holder
 //! found at `Handoff` — opens Folio; otherwise one start of what the disk
 //! names once the lock is let go ([`opens_now`]), counted only when a Folio
@@ -175,8 +176,8 @@ use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
     BeforeDeciding, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave, Limits, Opener,
-    Opens, TransactionLock, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
-    read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
+    Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon, read_receipt, stop_trial,
+    trial_runs, trial_words, until_let_go,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -659,14 +660,13 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
     World::say(&mut world, &format!("BT_UPDATE_APPLY {refused}"));
     // Refused before it took the window's mark: the duty stays with O, which
     // armed it at the press and finds no mark (U-34, round 2).
-    let mut guard = ExitGuard::new(WindowsLeave {
+    let mut guard = ExitGuard::contender(WindowsLeave {
         road: &road,
         world: &mut world,
         handed: &[],
         worker: None,
         actor: None,
     });
-    guard.not_mine(None);
     let left = guard.leave();
     drop(guard);
     World::say(&mut world, &format!("BT_UPDATE_APPLY {}", left.said()));
@@ -675,10 +675,10 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
 
 /// **The applier, over any road** — see the module header. It takes the
 /// window's mark first (`update_apply::take_the_window`) and runs its road only
-/// if it got it; once the lock is let go, it leaves through its exit guard
-/// (`update_apply::ExitGuard`): the trial it started, still running, is the
-/// window; otherwise the start the disk names ([`opens_now`]), acknowledged,
-/// else the rescue copy, else the failure window shown here.
+/// if the mark landed; once the lock is let go, it leaves through its exit
+/// guard (`update_apply::ExitGuard`): the trial it started, still running, is
+/// the window; otherwise the start the disk names ([`opens_now`]),
+/// acknowledged, else the rescue copy, else the failure window shown here.
 pub(crate) fn apply(
     worker: &WorkerCtx,
     road: &Road,
@@ -686,10 +686,34 @@ pub(crate) fn apply(
     nonce: Nonce,
     world: &mut impl World,
 ) -> Ended {
+    apply_electing(worker, road, txn, nonce, world, |worker, until| {
+        crate::update_apply::take_the_window_for_applier(
+            worker,
+            &road.home,
+            txn,
+            road.me,
+            until,
+            road.limits.poll,
+        )
+    })
+}
+
+/// [`apply`], with the window election `elect` asked by the road deadline it
+/// is given: the product's is `update_apply::take_the_window_for_applier`.
+fn apply_electing(
+    worker: &WorkerCtx,
+    road: &Road,
+    txn: TxnId,
+    nonce: Nonce,
+    world: &mut impl World,
+    elect: impl FnOnce(&WorkerCtx, Instant) -> Window,
+) -> Ended {
     // Every way out of the road, a panic included, leaves through the guard
     // (U-34); the lock is let go before a build starts — its own start
-    // retires a finished transaction, which needs it.
-    let mut guard = ExitGuard::new(WindowsLeave {
+    // retires a finished transaction, which needs it. The guard owes a window
+    // only once the election is won (0.4.8 E2): before that the duty is O's,
+    // and an applier that ends or panics there starts nothing.
+    let mut guard = ExitGuard::contender(WindowsLeave {
         road,
         world,
         handed: &[],
@@ -707,14 +731,7 @@ pub(crate) fn apply(
     // admission all spend the same `old_within` — the election's own wait for
     // its lock too (round 8).
     let until = Instant::now() + road.limits.old_within;
-    let window = crate::update_apply::take_the_window_for_applier(
-        worker,
-        &road.home,
-        txn,
-        road.me,
-        until,
-        road.limits.poll,
-    );
+    let window = elect(worker, until);
     match window {
         Window::Mine(duty) => {
             if let Some(warning) = duty.warning() {
@@ -729,7 +746,6 @@ pub(crate) fn apply(
             // The journal is one this build cannot read whole (E1): no mark,
             // nothing recorded, and the window duty stays with the build
             // that armed it, as for any applier that proved none.
-            guard.not_mine(None);
             let left = guard.leave();
             guard
                 .inner()
@@ -738,11 +754,12 @@ pub(crate) fn apply(
             return Ended::StoodAside(why);
         }
         other => {
-            let owner = match &other {
-                Window::Theirs(owner) => Some(owner.pid),
-                _ => None,
-            };
-            guard.not_mine(owner);
+            // Another live owner, an election O still runs, or this
+            // applier's own mark that did not land (0.4.8 E2): the duty is
+            // the owner's or O's, which armed it.
+            if let Window::Theirs(owner) = &other {
+                guard.not_mine(Some(owner.pid));
+            }
             let left = guard.leave();
             guard
                 .inner()
@@ -751,10 +768,9 @@ pub(crate) fn apply(
             return Ended::Refused(format!("the window is not this applier's: {other:?}"));
         }
     }
-    let (ended, successor, transaction_lock) =
+    let (ended, successor) =
         apply_under_the_lock(worker, road, txn, nonce, until, &mut *guard.inner().world);
     guard.succeeded_by(successor);
-    guard.road_ended(transaction_lock);
     if ended.deferred_to_a_holder() {
         guard.window_elsewhere();
     }
@@ -766,9 +782,8 @@ pub(crate) fn apply(
     ended
 }
 
-/// **The applier's road under the transaction lock**: where it ended, the
-/// trial it started, which opens Folio while it runs, and whether the road
-/// ever held that lock ([`ExitGuard::road_ended`]).
+/// **The applier's road under the transaction lock**: where it ended, and the
+/// trial it started, which opens Folio while it runs.
 fn apply_under_the_lock(
     worker: &WorkerCtx,
     road: &Road,
@@ -776,7 +791,7 @@ fn apply_under_the_lock(
     nonce: Nonce,
     window: Instant,
     world: &mut impl World,
-) -> (Ended, Option<Running>, TransactionLock) {
+) -> (Ended, Option<Running>) {
     apply_under_the_lock_with(worker, road, txn, nonce, window, world, |path, within| {
         install_txn::hold_within(path, Hold::Exclusive, within)
     })
@@ -790,23 +805,16 @@ fn apply_under_the_lock_with(
     window: Instant,
     world: &mut impl World,
     hold: impl FnOnce(&Path, Duration) -> Result<Option<install_txn::Held>, install_txn::Failure>,
-) -> (Ended, Option<Running>, TransactionLock) {
+) -> (Ended, Option<Running>) {
     let lock = match hold(
         &road.home.lock(),
         window.saturating_duration_since(Instant::now()),
     ) {
         Ok(Some(held)) => held,
-        Ok(None) => return (Ended::OldHeldTheLock, None, TransactionLock::NeverHeld),
-        Err(failure) => {
-            return (
-                Ended::Failed(failure.to_string()),
-                None,
-                TransactionLock::NeverHeld,
-            );
-        }
+        Ok(None) => return (Ended::OldHeldTheLock, None),
+        Err(failure) => return (Ended::Failed(failure.to_string()), None),
     };
-    let (ended, successor) = under_the_lock(worker, road, txn, nonce, window, world, lock);
-    (ended, successor, TransactionLock::Held)
+    under_the_lock(worker, road, txn, nonce, window, world, lock)
 }
 
 /// [`apply_under_the_lock_with`] once `lock` is held.
@@ -888,7 +896,7 @@ pub(crate) fn recover(
                             }
                             Ok(Some(crate::update_apply::WindowHolder::Unmarked)) => {
                                 world.say(
-                                    "BT_UPDATE_RECOVER an election-lock holder has the update's window; the handed-off update is left to it",
+                                    "BT_UPDATE_RECOVER an applier's window election is still in flight; the handed-off update is left to it",
                                 );
                                 Ended::Deferred(Deferral::WindowDuty)
                             }

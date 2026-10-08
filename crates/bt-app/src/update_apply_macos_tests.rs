@@ -4911,3 +4911,121 @@ fn the_macos_applier_stands_aside_from_what_it_cannot_read_whole() {
         );
     }
 }
+
+// ── the window duty on macOS (0.4.8 E2) ──────────────────────────────────────
+
+/// **O's spawner in these tests**: it records every start and starts nothing;
+/// every start is acknowledged.
+#[derive(Default)]
+struct OldStarts {
+    calls: Vec<(PathBuf, Vec<OsString>)>,
+}
+
+impl crate::update_handoff::Spawner for OldStarts {
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+        self.calls.push((program.to_path_buf(), args.to_vec()));
+        Ok(Running { pid: 0, started: 0 })
+    }
+
+    fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+        true
+    }
+}
+
+/// RED (0.4.8 E2, ruling 3; Kimi round 4's R4-2) — **the macOS applier owns
+/// the window through the mark it landed, and opens it itself when its road
+/// never held the transaction lock**: O, holding `H\lock` (this test stands
+/// for it) past the applier's deadline, had read that mark and stood down.
+/// Drives the product `apply`'s `owns_window` call site. Runs on every host
+/// (a bundle-shaped home of ordinary files; the road stops at the lock).
+///
+/// MUTATION: in `apply_electing`, drop the duty instead of
+/// `guard.owns_window(duty)` (the contender guard then opens nothing).
+#[test]
+fn the_macos_applier_whose_mark_landed_opens_the_one_window() {
+    let install = shape_install("e2-mark-landed 已落");
+    let o_lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let (ended, world) = applied(install.road(limits(300, 0)), Fake::default());
+    drop(o_lock);
+    assert_eq!(ended, Ended::LockHeld, "{:?}", world.said);
+    assert_eq!(
+        crate::update_apply::window_owner(&install.home, install.txn),
+        Some(crate::update_apply::this_process())
+    );
+    assert_eq!(
+        world
+            .relaunched
+            .iter()
+            .map(|(bundle, _)| bundle.clone())
+            .collect::<Vec<_>>(),
+        vec![install.installed.clone()],
+        "the applier opens the one window: {:?}",
+        world.said
+    );
+    assert!(world.shown.is_empty(), "{:?}", world.shown);
+}
+
+/// RED (0.4.8 E2, rulings 1 and 3) — **a macOS applier whose mark does not
+/// land stands aside — no road, nothing opened, the cell named — and O,
+/// finding no mark of it, opens the one window**, whether or not O then
+/// lingers holding `H\lock`. Drives the product `apply`'s stand-aside arm
+/// through the real election with a mark writer that refuses before the
+/// rename. Runs on every host.
+///
+/// MUTATION: in `Applier::unrecorded`, answer `Mine` through the held lock
+/// (the applier opens a window beside O's).
+#[test]
+fn the_macos_applier_whose_mark_does_not_land_leaves_the_one_window_to_o() {
+    let install = shape_install("e2-mark-refused 写不进");
+    let o_lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let road = install.road(limits(300, 0));
+    let (home, txn) = (install.home.clone(), install.txn);
+    let (ended, world) = on_a_worker(move |worker| {
+        let mut world = Fake::default();
+        let ended = apply_electing(worker, &road, &mut world, |_worker, until| {
+            crate::update_apply::take_the_window_within_writes_at(
+                &home,
+                txn,
+                crate::update_apply::this_process(),
+                until.saturating_duration_since(Instant::now()),
+                crate::update_apply::Applier,
+                |_mark, _bytes| {
+                    Err(
+                        crate::update_apply::MarkWriteFailure::before_rename_for_test(
+                            "the volume refused the write 卷拒绝写入",
+                            false,
+                        ),
+                    )
+                },
+            )
+        });
+        (ended, world)
+    });
+    assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+    assert!(
+        said(&world, "stands aside and the outgoing build keeps the duty"),
+        "{:?}",
+        world.said
+    );
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+    assert_eq!(world.exchanges, 0);
+
+    let program = install.home.installed_program().unwrap();
+    let mut starts = OldStarts::default();
+    let left = crate::update_handoff::Leaving::over(&install.home, install.txn, &install.data)
+        .leave(Running { pid: 2, started: 2 }, &program, &mut starts, None);
+    drop(o_lock);
+    assert_eq!(left, crate::update_apply::Left::Started(program.clone()));
+    assert_eq!(
+        starts.calls,
+        vec![(
+            program,
+            crate::update_apply::failed_words(&install.home).to_vec()
+        )],
+        "O opens the one window"
+    );
+}
