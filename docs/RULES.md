@@ -1177,8 +1177,9 @@ and nothing is recorded in the journal; its card says the update is not
 finished and that the changes made in this session are not kept. The rollback a
 later logon or start makes may put back what the new build wrote; nothing of
 the held session is lost to it unannounced. **A journal a build cannot read
-whole** (E1) is preserved byte for byte, and only the rescue build its envelope
-names settles it: every build reads the header's `txn`, `rescue` and
+whole** (E1) — a journal file that cannot be read at all included; only one
+that is not there is no journal — is preserved byte for byte, and only the
+rescue build its envelope names settles it: every build reads the header's `txn`, `rescue` and
 `written_by` whatever its `v`, `class` or `outcome` say, and a header it cannot
 read is a `destructive` transaction with nothing decided. A start hands it to
 that rescue build, continues past it with the card when sent with

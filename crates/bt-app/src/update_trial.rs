@@ -994,9 +994,9 @@ pub(crate) fn hand_back(
 ) -> Option<Running> {
     // A header this build cannot read is handed back to the rescue build its
     // envelope names (`update_txn::Sight::acting_header`, E1).
-    let Some(header) = file_reads::read(Lane::UpdateJournal, home.journal())
-        .ok()
-        .and_then(|bytes| crate::update_txn::sight(&bytes).acting_header())
+    let Some(header) =
+        crate::update_txn::sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal()))
+            .and_then(|seen| seen.acting_header())
     else {
         // No journal to read, or nothing of it: the watch reads the end on
         // its next turn, and nobody could take a journal nothing of reads.

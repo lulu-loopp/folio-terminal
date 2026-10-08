@@ -271,17 +271,17 @@ pub(crate) enum AtLaunch {
 /// installation is another transaction's ([`Stop::Busy`]), or that journal is
 /// one this build cannot read whole — another Folio's update is not finished,
 /// and the build that wrote it finishes it ([`Stop::Newer`], 0.4.8 E1,
-/// `update_txn::Role::JobOwner`). A journal that cannot be read at all is
-/// [`Stop::Busy`] as before.
+/// `update_txn::Role::JobOwner`) — a journal file that could not be read
+/// included (E1 round 2). One gone since the press looked is [`Stop::Busy`]:
+/// another holder had it.
 pub(crate) fn journal_there(home: &Home) -> Stop {
-    match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => match crate::update_txn::sight(&bytes) {
-            crate::update_txn::Sight::Known(_) => Stop::Busy,
+    match crate::update_txn::sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal())) {
+        Some(crate::update_txn::Sight::Known(_)) | None => Stop::Busy,
+        Some(
             crate::update_txn::Sight::Header { .. }
             | crate::update_txn::Sight::Envelope { .. }
-            | crate::update_txn::Sight::Unreadable(_) => Stop::Newer,
-        },
-        Err(_) => Stop::Busy,
+            | crate::update_txn::Sight::Unreadable(_),
+        ) => Stop::Newer,
     }
 }
 
@@ -299,19 +299,21 @@ pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, Str
     else {
         return Ok(AtLaunch::Busy);
     };
-    let bytes = match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(AtLaunch::Nothing),
-        Err(error) => return Err(error.to_string()),
-    };
-    // A journal this build cannot read whole is left to the build that wrote
-    // it (E1, `update_txn::Role::JobOwner`): the offer still shows, and the
-    // press says so (`update_job::Stop::Newer`).
-    let journal = match crate::update_txn::sight(&bytes) {
-        crate::update_txn::Sight::Known(journal) => journal,
-        crate::update_txn::Sight::Header { .. }
-        | crate::update_txn::Sight::Envelope { .. }
-        | crate::update_txn::Sight::Unreadable(_) => return Ok(AtLaunch::Left),
+    // A journal this build cannot read whole — or whose file could not be
+    // read (E1 round 2) — is left to the build that wrote it (E1,
+    // `update_txn::Role::JobOwner`): the offer still shows, and the press
+    // says so (`update_job::Stop::Newer`).
+    let journal = match crate::update_txn::sight_of_read(file_reads::read(
+        Lane::UpdateJournal,
+        home.journal(),
+    )) {
+        None => return Ok(AtLaunch::Nothing),
+        Some(crate::update_txn::Sight::Known(journal)) => journal,
+        Some(
+            crate::update_txn::Sight::Header { .. }
+            | crate::update_txn::Sight::Envelope { .. }
+            | crate::update_txn::Sight::Unreadable(_),
+        ) => return Ok(AtLaunch::Left),
     };
     // A job owner's answer is read from the phase alone (`decide`'s first
     // arm); the rest of the description is what an owner of no destructive

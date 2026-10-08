@@ -129,6 +129,12 @@ pub(crate) enum ParseRefusal {
     },
     /// Anything else: not JSON, a field missing or of the wrong type.
     Malformed(String),
+    /// **The bytes could not be read at all** (E1 round 2): the read failed
+    /// with this operating-system error, which is not "no such file" — a
+    /// sharing violation, a refused access, a folder where the file should
+    /// be. Nothing is known of the document, and nothing is concluded from
+    /// its absence ([`sight_of_read`]).
+    Unread(String),
 }
 
 impl fmt::Display for ParseRefusal {
@@ -156,6 +162,7 @@ impl fmt::Display for ParseRefusal {
                 )
             }
             Self::Malformed(why) => write!(f, "malformed: {why}"),
+            Self::Unread(error) => write!(f, "it could not be read: {error}"),
         }
     }
 }
@@ -1151,6 +1158,20 @@ pub(crate) fn sight(bytes: &[u8]) -> Sight {
     sight_as(bytes, crate::version::VERSION)
 }
 
+/// **What a reader sees from one read of `H\journal.json`** (E1 round 2):
+/// `None` only when there is no such file; a read that failed any other way
+/// is [`Sight::Unreadable`] with the operating system's error as its refusal
+/// ([`ParseRefusal::Unread`]) — a journal that could not be read is never
+/// taken for no journal, and each reader takes its role's answer to it.
+/// Pure: the caller made the read.
+pub(crate) fn sight_of_read(read: std::io::Result<Vec<u8>>) -> Option<Sight> {
+    match read {
+        Ok(bytes) => Some(sight(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(Sight::Unreadable(ParseRefusal::Unread(error.to_string()))),
+    }
+}
+
 /// [`sight`] as the build of version `this_build` reads it.
 fn sight_as(bytes: &[u8], this_build: &str) -> Sight {
     let refusal = match Journal::parse(bytes) {
@@ -1445,6 +1466,21 @@ pub(crate) fn beyond_inputs(known: &[u8]) -> [(&'static str, Vec<u8>); 3] {
         ),
         ("bytes that are no journal", br#"{"x":1}"#.to_vec()),
     ]
+}
+
+/// **A journal whose file cannot be read at all** (E1 round 2): `journal`
+/// replaced by a folder of that name, which every platform refuses to read
+/// as a file with an error other than "no such file". Answers that error's
+/// kind, for the test to show it is no absence.
+#[cfg(test)]
+pub(crate) fn a_journal_that_cannot_be_read(journal: &Path) -> std::io::ErrorKind {
+    let _ = std::fs::remove_file(journal);
+    std::fs::create_dir_all(journal).expect("a folder at the journal's name");
+    let kind = std::fs::read(journal)
+        .expect_err("a folder is no file")
+        .kind();
+    assert_ne!(kind, std::io::ErrorKind::NotFound);
+    kind
 }
 
 /// **The three receipts a receipt reader is fed** (E1), from `known`, a

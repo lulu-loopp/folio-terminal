@@ -179,7 +179,7 @@ pub(crate) use crate::update_apply::{Opener, Opens, failed_words, trial_words};
 use crate::update_txn::{
     Action, Actor, Asker, BundleIdentity, Class, Disk, Effect, Event, HeaderOutcome, Home, Journal,
     Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, Role, Sight, TrialProcess, TxnId,
-    decide, sight,
+    decide, sight_of_read,
 };
 
 /// `open`, by its absolute path: LaunchServices starts the trial as it starts
@@ -878,10 +878,11 @@ fn opens_now_with(
     home: &Home,
     layouts: &Layouts<dyn ApplyPoints>,
 ) -> Opens {
-    let Ok(bytes) = file_reads::read(Lane::UpdateJournal, home.journal()) else {
+    // Only a journal that is not there opens the installed build plainly; a
+    // file that could not be read is unreadable (E1 round 2).
+    let Some(seen) = sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal())) else {
         return Opens::Installed { failed: false };
     };
-    let seen = sight(&bytes);
     let Some(header) = seen.acting_header() else {
         return Opens::Installed { failed: true };
     };
@@ -1042,15 +1043,14 @@ impl<'a> Txn<'a> {
         let locked = |ended: Ended| (ended, TransactionLock::Held);
         // A journal this build cannot read whole is stood aside from: nothing
         // recorded, the lock let go as this returns (E1, `Role::MacHolder`).
-        let journal = match file_reads::read(Lane::UpdateJournal, road.home.journal()) {
-            Ok(bytes) => match sight(&bytes) {
-                Sight::Known(journal) => journal,
-                beyond => {
+        let journal =
+            match sight_of_read(file_reads::read(Lane::UpdateJournal, road.home.journal())) {
+                Some(Sight::Known(journal)) => journal,
+                Some(beyond) => {
                     return Err(locked(Ended::StoodAside(beyond.said(Role::MacHolder))));
                 }
-            },
-            Err(error) => return Err(locked(Ended::Refused(format!("the journal: {error}")))),
-        };
+                None => return Err(locked(Ended::Refused("there is no journal".to_owned()))),
+            };
         if journal.txn != road.txn {
             return Err(locked(Ended::Refused(format!(
                 "the journal is transaction {}, not {}",
