@@ -1202,7 +1202,9 @@ or a change to the envelope; a trial writes only words its rescue build reads,
 unless it reads that build's version first and writes the old form below it; a
 body or receipt word an older rescue build would misread raises the release
 manifest's `min_updater` to the word's first version; an optional field is
-additive only when losing it costs a card's wording and nothing else.
+additive only when losing it costs a card's wording and nothing else. Every
+product read of a journal or a receipt is made by one reader role and is
+listed with it; a read that is not listed fails the build's tests (E1-a2).
 **Every road process — the outgoing build once
 its hand-over is over, the applier, the recovery build — leaves through one
 exit guard**, armed when Restart to update is pressed: one mark
