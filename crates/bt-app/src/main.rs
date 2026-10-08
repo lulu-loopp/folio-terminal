@@ -48215,7 +48215,7 @@ impl Runtime<'_> {
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf| leaf.session.working_directory())
+            .filter_map(|leaf: &LeafSession| leaf.session.standing_folder())
             .map(|cwd| cwd.display().to_string())
             .collect();
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
@@ -48920,17 +48920,11 @@ impl Runtime<'_> {
                 .find(|tab| tab.id == leaf.tab)
                 .map(|tab| (tab, leaf.seat)),
         };
-        seat.and_then(|(tab, seat)| {
-            tab.sessions
-                .get(&seat)
-                .and_then(|leaf| leaf.session.working_directory())
-                .map(|path| path.display().to_string())
-        })
-        .or_else(|| {
-            profiles::home_directory(&bt_pty::SystemShellEnvironment)
-                .map(|home| home.display().to_string())
-        })
-        .unwrap_or_default()
+        files_root_of(
+            seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
+                .map(|leaf| &leaf.session),
+            &bt_pty::SystemShellEnvironment,
+        )
     }
 
     /// Hand one path to the system's default handler, and say so when the window
@@ -50281,7 +50275,7 @@ impl Runtime<'_> {
                     .unwrap_or_else(|| tab.display_title());
                 let hint = leaf
                     .session
-                    .working_directory()
+                    .standing_folder()
                     .map(|cwd| cwd.display().to_string())
                     .or_else(|| {
                         leaf.program
@@ -67219,6 +67213,27 @@ fn session_title(
         .or_else(|| {
             place_layer(working_directory, place).map(|text| (text, tooltip::NameSource::Cwd))
         })
+}
+
+/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28): the
+/// folder the pane is standing in ([`DualPlaneSession::standing_folder`] — its shell's last report,
+/// else the folder it was opened in), and the account's home only for a pane that has neither.
+///
+/// One reader for both doors, the folder button's card ([`Runtime::trigger_root`]) and
+/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). The report alone is not enough: a pane
+/// opened in a profile's fixed folder has none until its shell's first prompt, and none for its
+/// whole life when the shell does not report, while its own tab is already named after the folder
+/// it stands in.
+fn files_root_of(
+    session: Option<&DualPlaneSession>,
+    environment: &dyn bt_pty::ShellEnvironment,
+) -> String {
+    session
+        .and_then(DualPlaneSession::standing_folder)
+        .map(Path::to_path_buf)
+        .or_else(|| profiles::home_directory(environment))
+        .map(|folder| folder.display().to_string())
+        .unwrap_or_default()
 }
 
 /// The folder layer on its own: the working directory as one reader writes it,

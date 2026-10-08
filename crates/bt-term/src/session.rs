@@ -11832,6 +11832,23 @@ impl DualPlaneSession {
             .or(self.spawn_directory.as_deref())
     }
 
+    /// **The folder this pane is standing in, as a folder this side can open** — what a files card
+    /// or a files column taken from this pane is rooted at (issue #28).
+    ///
+    /// [`Self::reference_directory`]'s ladder, with its second rung read one way narrower: a spawn
+    /// directory that is the shell's own home *mark* ([`Self::set_spawn_at_shell_home`], the `~`
+    /// handed to `wsl.exe --cd`) is a word for a launcher and names no folder here, so it is not
+    /// offered. Every other spawn directory is the folder the pane was opened in — the profile's
+    /// fixed folder, a carried or named one, or the account's home — and it answers until the
+    /// shell's first report replaces it.
+    pub fn standing_folder(&self) -> Option<&Path> {
+        self.working_directory.as_deref().or_else(|| {
+            self.spawn_directory
+                .as_deref()
+                .filter(|_| !self.spawn_at_shell_home)
+        })
+    }
+
     /// Take delivery of an OSC 1337 payload the adapter already consumed.
     ///
     /// With image bands retired (`INLINE_IMAGE_BANDS`) this record is no longer a band: it is a
@@ -28339,6 +28356,71 @@ mod tests {
         std::fs::remove_dir(&nested).unwrap();
         std::fs::remove_file(directory.join("notes.md")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (issue #28) — **a pane stands in the folder it was opened in until its shell says
+    /// otherwise, and an unreadable report leaves it there rather than anywhere else.**
+    ///
+    /// `standing_folder` is what a files card and a files column are rooted at. Before the first
+    /// report it is the spawn directory (a profile's fixed folder here); a report replaces it; a
+    /// report this terminal cannot read forgets the reported folder (the standing OSC 7 rule) and
+    /// the pane is back in the folder it was opened in — never in the account's home. A spawn
+    /// directory that is the shell's home *mark* (`~`, handed to a launcher) names no folder on
+    /// this side and is not offered, though the pane's name still reads it.
+    ///
+    /// MUTATIONS, each observed red: answer `working_directory` alone (the birth and the
+    /// unreadable-report rows go `None`); drop the home-mark filter (the `~` row answers `~`).
+    #[test]
+    fn a_pane_stands_in_the_folder_it_was_opened_in_until_its_shell_reports_one() {
+        let opened_in = std::env::temp_dir().join("沙盒 sandbox");
+        let reported = opened_in.join("子 sub");
+        let mut session = DualPlaneSession::new(nz(80), nz(24));
+        session.set_spawn_directory(Some(opened_in.clone()));
+        assert_eq!(
+            session.standing_folder(),
+            Some(opened_in.as_path()),
+            "birth"
+        );
+
+        let uri = bt_transcript::paths::local_path_to_file_uri(&reported);
+        let expected = file_uri_to_local_path(&uri, &[]).expect("a local report");
+        session
+            .feed(format!("\x1b]7;{uri}\x07").as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.standing_folder(),
+            Some(expected.as_path()),
+            "reported"
+        );
+
+        // `%2F` decodes to a separator inside a segment, which the decoder refuses.
+        session
+            .feed("\x1b]7;file:///%E6%B2%99%2F%E7%9B%92\x07".as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.working_directory(),
+            None,
+            "the unreadable report is no folder"
+        );
+        assert_eq!(
+            session.standing_folder(),
+            Some(opened_in.as_path()),
+            "back in the folder it was opened in"
+        );
+
+        let mut wsl = DualPlaneSession::new(nz(80), nz(24));
+        wsl.set_spawn_directory(Some(std::path::PathBuf::from("~")));
+        wsl.set_spawn_at_shell_home(true);
+        assert_eq!(
+            wsl.standing_folder(),
+            None,
+            "a launcher's home mark is not a folder here"
+        );
+        assert_eq!(
+            wsl.reference_directory(),
+            Some(std::path::Path::new("~")),
+            "the pane's name still reads it"
+        );
     }
 
     /// RED (B-AUDIT-046 TRM-3) — **a working-directory report that names this machine is this

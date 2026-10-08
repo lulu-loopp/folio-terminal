@@ -922,6 +922,14 @@ Duplicate pane and splits start where it stands (its last reported folder, else 
 folder) whatever the profile's starting place; its `+` and picker rows do not. That fact
 lives on the pane for the life of the process only — the session document has no field for
 it, so a restored pane's folder is carried and its next shells follow its profile.
+**Where a pane is standing, as a folder to open** (2026-10-08, GitHub issue #28): the files
+card from a pane's folder button, a files column opened from the pane (`Ctrl+Shift+B`), the
+files column's root menu, the palette's place hint and the two folder choosers read the pane's
+last `OSC 7` report, else the folder it was opened in (what the order above chose), and the
+account's home only for a pane that has neither. A launcher's home mark (`~`) is not a folder
+on this side and is skipped. One reader: `DualPlaneSession::standing_folder`. An unreadable
+report forgets the reported folder (`docs/shell-integration.md`, OSC 7), which returns the pane to the folder it
+was opened in, never to the home folder.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration

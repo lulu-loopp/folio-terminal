@@ -6,7 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- A pane's files card, and a files column opened from it, show the folder the pane was opened in until its shell reports one, instead of your home folder — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
 
 ## 0.4.7-preview — 2026-10-06
 

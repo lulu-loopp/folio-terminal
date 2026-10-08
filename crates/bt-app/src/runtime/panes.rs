@@ -2698,14 +2698,15 @@ impl Runtime<'_> {
     /// is a popup nothing can dismiss: it takes no input while the dialog owns
     /// the loop, and the click that dismisses the dialog is spent on the dialog.
     ///
-    /// The chooser opens where the pane is standing, by that pane's own OSC 7
-    /// report — the same courtesy `browse_for_root` shows a column, and the same
+    /// The chooser opens where the pane is standing (`standing_folder`: its
+    /// shell's last report, else the folder it was opened in) — the same
+    /// courtesy `browse_for_root` shows a column, and the same
     /// one I88 asks of every arriving shell.
     fn browse_for_split_root(&mut self, seat: SeatId) {
         let start = self
             .sessions
             .get(&seat)
-            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
+            .and_then(|leaf| leaf.session.standing_folder().map(Path::to_path_buf));
         match self.window.folder_picker.request(start.as_deref()) {
             Ok(true) => self.window.folder_pick = Some(FolderPick::SplitInto(seat)),
             // Already queued or already open: a second request while one is up
