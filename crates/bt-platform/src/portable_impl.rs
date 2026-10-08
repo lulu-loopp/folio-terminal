@@ -502,13 +502,16 @@ pub struct SystemSettingsWatch {
     /// Windows — a wake that could fire after the watch was dropped is the one
     /// defect this type's shape exists to make impossible. Held for its drop and
     /// never called here, hence the leading underscore.
-    _wake: Box<dyn Fn()>,
+    _wake: Box<dyn Fn(crate::SystemNews)>,
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl SystemSettingsWatch {
     /// Install the watch. Constructs, subscribes to nothing, and never wakes.
-    pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
+    pub fn install(
+        window: NativeWindow,
+        wake: Box<dyn Fn(crate::SystemNews)>,
+    ) -> Result<Self, String> {
         let _ = window;
         Ok(Self { _wake: wake })
     }
@@ -1848,7 +1851,7 @@ mod refusal_tests {
         // is where it is held).
         #[cfg(not(any(windows, target_os = "macos")))]
         assert!(
-            SystemSettingsWatch::install(window(), Box::new(|| {})).is_ok(),
+            SystemSettingsWatch::install(window(), Box::new(|_| {})).is_ok(),
             "the system settings watch"
         );
         // `ImeSystemCaret::new` returns `Self` and has no failure to test; that

@@ -12,6 +12,7 @@
 //! `git.exe`, and Git for Windows has never shipped without its bash, so this is
 //! a real gate rather than one that quietly passes when the tool is missing.
 
+#![cfg(windows)]
 #![allow(clippy::disallowed_methods)]
 
 use std::{
@@ -23,6 +24,13 @@ use bt_term::DualPlaneSession;
 
 fn nz(value: u32) -> std::num::NonZeroU32 {
     std::num::NonZeroU32::new(value).unwrap()
+}
+
+/// **A session of this file**, made after the test host names are installed: the shell's OSC 7
+/// report reads them (`bt_term::local_host_names`, which panics before an installation).
+fn new_session(columns: u32, rows: u32) -> DualPlaneSession {
+    bt_term::install_test_host_names();
+    DualPlaneSession::new(nz(columns), nz(rows))
 }
 
 /// The script, as a path bash can open.
@@ -174,7 +182,7 @@ fn git_bash_reports_its_working_directory_as_the_windows_directory_it_is_in() {
         "a URI on the wire is ASCII with no literal space: {uri:?}"
     );
 
-    let mut session = DualPlaneSession::new(nz(120), nz(8));
+    let mut session = new_session(120, 8);
     session.feed(&bytes).unwrap();
     assert_eq!(
         session.working_directory(),

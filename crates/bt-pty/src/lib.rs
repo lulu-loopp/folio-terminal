@@ -4009,36 +4009,38 @@ mod tests {
         }
         output.extend(session.read_output());
         session.shutdown().unwrap();
+        // The output is the child's whole environment: a failure says which line is missing and
+        // never prints the output.
         let output = String::from_utf8_lossy(&output);
         assert!(
             output
                 .lines()
                 .any(|line| line.trim() == "COLORTERM=truecolor"),
-            "child environment did not contain COLORTERM=truecolor: {output:?}"
+            "child environment did not contain COLORTERM=truecolor"
         );
         assert!(
             output
                 .lines()
                 .any(|line| line.trim() == "TERM=xterm-256color"),
-            "child environment did not contain TERM=xterm-256color: {output:?}"
+            "child environment did not contain TERM=xterm-256color"
         );
         assert!(
             output
                 .lines()
                 .any(|line| line.trim() == "TERM_PROGRAM=Folio"),
-            "child environment did not contain TERM_PROGRAM=Folio: {output:?}"
+            "child environment did not contain TERM_PROGRAM=Folio"
         );
         let expected_version = format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION"));
         assert!(
             output.lines().any(|line| line.trim() == expected_version),
-            "child environment did not contain {expected_version}: {output:?}"
+            "child environment did not contain {expected_version}"
         );
         assert!(
             !output.lines().any(|line| line
                 .trim_start()
                 .to_ascii_uppercase()
                 .starts_with("NO_COLOR=")),
-            "child environment still carried an inherited NO_COLOR: {output:?}"
+            "child environment still carried an inherited NO_COLOR"
         );
     }
 

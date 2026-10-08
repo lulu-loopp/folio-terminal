@@ -687,6 +687,14 @@ jobs:
       - name: test
         run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
 
+      # **A contract of every build profile, run in the one it is easiest to lose in.** A read of
+      # the host names before the host installed them panics in release too (CC-4): this binary
+      # is a process of its own with nothing installed, and a `debug_assert!` in place of the
+      # panic is green in the step above and red here. Release artefacts are a second build of
+      # bt-term's graph (fat LTO) and go into the same cache.
+      - name: the host-installed facts hold in release
+        run: cargo test --release --locked -p bt-term --test host_capabilities
+
       # This canary belongs after the workspace build it needs. A leaf crate
       # makes the second harness query seconds rather than a second workspace
       # build in `gates-can-fail`.

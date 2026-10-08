@@ -114,8 +114,8 @@ pub(crate) enum State {
 #[must_use]
 pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
-        std::env::var_os(HOME_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(HOME_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
@@ -151,8 +151,8 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 #[must_use]
 pub(crate) fn config_path_shown() -> String {
     config_path_shown_from(
-        std::env::var_os(HOME_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(HOME_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 

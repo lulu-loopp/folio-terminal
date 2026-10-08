@@ -138,8 +138,7 @@ A same-layer or upward edge needs a row in
 `scripts/ci/crate-edge-exemptions.tsv` (from, to, kind, ledger row, reason).
 Dev-dependencies are not layer edges and are listed, not judged: they are
 not in the shipped graph, and Cargo allows them in both directions —
-`bt-term` and `bt-pty` each name the other as one, and so do `bt-platform`
-and `bt-pty`.
+`bt-platform` and `bt-pty` each name the other as one.
 It also fails on a first-party crate with no layer row, a layer row naming no
 crate, an exemption whose edge is gone or now goes down, an exemption that is
 not at the merge base, and zero crates read. A new crate gets its layer row in
@@ -159,8 +158,7 @@ The clock guard (gate G3, `clock-guard` in `logic`): `scripts/ci/check-clock-gua
 runs `crates/bt-source/tests/clock_guard.rs`, which refuses `std::time::Instant`
 and `std::time::SystemTime` in every spelling (qualified, flat or nested `use`,
 glob, alias) in the product code of an explicit source set — the library crates
-G1 checks except `bt-platform` (whose admission vocabulary, the part a browser
-build reads, is `bt-effects`' since CC-3), `vendor/vte`, and
+G1 checks, `vendor/vte`, and
 `vendor/alacritty_terminal` without `event_loop` and `tty`.
 Those crates read time through `web_time`, which is `std::time` on every native
 target. The script's header names the set and what is out of it; it refuses a
@@ -251,6 +249,13 @@ preparation worker's `PreparationEffects` is the shape). Reading source is allow
 **guard**, whose subject is how the code is written — a door census, "no X outside door Y", the
 window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
 guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
+
+### A test never prints an environment (T-TEST-ENV-LEAK)
+
+A test never prints an environment map, and never prints the value of a secret-shaped variable (one
+whose name holds `KEY`, `TOKEN`, `SECRET` or `PASS`); a give-up message may quote one named, non-secret
+variable it depends on (`PATH`, `ComSpec`, `PSModulePath`, `WSLENV`, `HOME`), and a test that compares
+environments names the differing keys only, a secret-shaped key as `<redacted>`.
 
 ### Where a test lives (K1)
 

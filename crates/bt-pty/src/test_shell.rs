@@ -1663,10 +1663,14 @@ mod tests {
             .as_ref()
             .expect("a test shell starts from a cleaned block");
         for list in [&refresh.fresh, &refresh.launch_overrides] {
-            assert!(
-                list.iter().all(|(key, _)| !is_pane_announcement(key)),
-                "{list:?}"
-            );
+            // The block is this process's environment: a failure names the announcements it
+            // kept, never a value.
+            let kept: Vec<&OsStr> = list
+                .iter()
+                .map(|(key, _)| key.as_os_str())
+                .filter(|key| is_pane_announcement(key))
+                .collect();
+            assert!(kept.is_empty(), "announcements kept: {kept:?}");
         }
         assert_eq!(
             value(&prepared, "TERM_PROGRAM").as_deref(),

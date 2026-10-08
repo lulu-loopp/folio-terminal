@@ -15,9 +15,10 @@
 # The list is the one place it is written (`.github/workflows/ci.yml` calls this
 # script). A crate joins it in the ticket that makes it pass or creates it; a
 # crate leaves it only in the ticket that ends its place in the wasm32 graph.
-# `bt-platform` is on it because `bt-term` still depends on it (D-14); it
-# leaves when that edge does. `bt-math` and `bt-render` name the admission
-# vocabulary and the file-read ledger through `bt-effects` (CC-3).
+# `bt-platform` left it with CC-4: no crate on the list depends on it (the host
+# installs what `bt-term` used to ask it, D-14 repaid). `bt-math` and
+# `bt-render` name the admission vocabulary and the file-read ledger through
+# `bt-effects` (CC-3).
 #
 # The target must be installed for the toolchain `rust-toolchain.toml` pins
 # (`rustup target add wasm32-unknown-unknown`); CI's toolchain action installs it
@@ -25,7 +26,7 @@
 
 $Packages = @(
     "bt-unicode", "bt-transcript", "bt-doc", "bt-layout", "bt-viewport",
-    "bt-detect", "bt-effects", "bt-platform", "bt-math", "bt-render", "bt-term"
+    "bt-detect", "bt-effects", "bt-math", "bt-render", "bt-term"
 )
 
 $ErrorActionPreference = "Stop"

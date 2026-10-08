@@ -63,7 +63,7 @@ pub(crate) use crate::attention_ownership::Outcome;
 use crate::attention_ownership::{self as ownership, Decision};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use bt_platform::HostPlatform;
 use serde_json::{Map, Value};
@@ -73,6 +73,10 @@ use crate::attention_map::{self, COPILOT};
 
 /// The variable copilot reads for its configuration directory.
 const HOME_VARIABLE: &str = "COPILOT_HOME";
+
+/// The built-in profile row whose program is this copilot (`profiles::windows_shipped`); the
+/// program walk moving it is a reason to ask the version again.
+pub(crate) const PROFILE_ID: &str = "copilot";
 
 /// The default directory's name beside the user's profile, for when the variable says nothing.
 const DEFAULT_DIRECTORY: &str = ".copilot";
@@ -200,8 +204,8 @@ pub(crate) enum State {
 #[must_use]
 pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
-        std::env::var_os(HOME_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(HOME_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
@@ -237,8 +241,8 @@ pub(crate) fn hooks_path() -> Option<PathBuf> {
 #[must_use]
 pub(crate) fn hooks_path_shown() -> String {
     hooks_path_shown_from(
-        std::env::var_os(HOME_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(HOME_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
@@ -771,9 +775,244 @@ pub(crate) fn apply_resolved(
 // Asking the machine which copilot it has
 // ---------------------------------------------------------------------------
 
-static PROBE: OnceLock<Option<Version>> = OnceLock::new();
-static PROBE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+/// **Why the probe was asked** — said in the diagnostics line, and nothing decides on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProbeTrigger {
+    /// The first time a page or card needed the answer.
+    FirstAsk,
+    /// The Agents page opened: the page the answer is printed on asks again at every visit.
+    AgentsPage,
+    /// The program walk found copilot somewhere else, or found it where it was not.
+    ProgramMoved,
+}
+
+impl ProbeTrigger {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::FirstAsk => "first asked",
+            Self::AgentsPage => "Agents page opened",
+            Self::ProgramMoved => "copilot moved",
+        }
+    }
+}
+
+/// **One answer**: the request it answers, and the version copilot said it is — `None` when no
+/// copilot was found or it would not say.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProbeAnswer {
+    generation: u64,
+    version: Option<Version>,
+}
+
+/// The requests, the probe out, and the newest answer.
+#[derive(Default)]
+struct ProbeState {
+    /// The number of the newest request; counted from `1`.
+    requested: u64,
+    /// The newest request not yet started: its number and why.
+    waiting: Option<(u64, ProbeTrigger)>,
+    /// The probe out now: its number, why, and how many requests were made while it was out.
+    out: Option<(u64, ProbeTrigger, u64)>,
+    /// A worker is running (started by a request, gone when nothing waits).
+    worker: bool,
+    /// The newest answer published — **a failure included, and it is not kept as a verdict**:
+    /// the next request asks again.
+    answer: Option<ProbeAnswer>,
+}
+
+/// What a probe runs: ask the machine, on the probe's worker, which copilot it has.
+type ProbeRun = dyn Fn(&bt_platform::admission::WorkerCtx) -> Option<Version> + Send + Sync;
+
+/// **The copilot version question, asked again whenever it matters** (T-FRESH-FACTS).
+///
+/// Until this ticket the answer was a `OnceLock` set by one probe per process, a failure
+/// included: a copilot installed — or a `node` it needs — while Folio ran stayed "not found" on
+/// the Agents page and the first-run card until a restart, and one upgraded past
+/// [`MINIMUM`] stayed "too old". Now a request numbers itself; one probe is out at a time; the
+/// requests made while it is out are answered by one more probe after it (said once in
+/// `diagnostics.log`); an answer older than the one held is refused. No timer: the page's open
+/// edge, the first ask, and the program walk finding copilot elsewhere are the triggers.
+///
+/// A type rather than statics so a test runs a probe of its own with a machine it writes.
+pub(crate) struct CopilotProbe {
+    state: Mutex<ProbeState>,
+    run: Box<ProbeRun>,
+    wake: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    note: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl CopilotProbe {
+    /// A probe that asks `run`, saying its diagnostics lines through `note`.
+    pub(crate) fn new(
+        run: impl Fn(&bt_platform::admission::WorkerCtx) -> Option<Version> + Send + Sync + 'static,
+        note: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            state: Mutex::new(ProbeState::default()),
+            run: Box::new(run),
+            wake: OnceLock::new(),
+            note: Box::new(note),
+        }
+    }
+
+    /// Teach the worker how to bring the event loop round. Once; a second call is ignored.
+    pub(crate) fn install_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
+        let _ = self.wake.set(Box::new(wake));
+    }
+
+    /// **Ask unless the question has been asked**: the page's call on every layout, and the
+    /// first-run card's. A lock and nothing else when an answer is held or a probe is out.
+    pub(crate) fn ask_once(&'static self) {
+        let asked = {
+            let state = self.lock();
+            state.answer.is_some() || state.out.is_some() || state.waiting.is_some()
+        };
+        if !asked {
+            self.ask(ProbeTrigger::FirstAsk);
+        }
+    }
+
+    /// **Number a request and see that a probe answers it.** Never waits for one: a lock, and —
+    /// when no worker is running — a thread start. A request made while a probe is out replaces
+    /// any request still waiting; the probe after the one out answers them all.
+    pub(crate) fn ask(&'static self, trigger: ProbeTrigger) -> u64 {
+        let mut state = self.lock();
+        state.requested += 1;
+        let generation = state.requested;
+        let replaced = state.waiting.replace((generation, trigger));
+        if let Some((_, _, joined)) = state.out.as_mut() {
+            *joined += 1;
+        }
+        let start_a_worker = !state.worker;
+        state.worker = true;
+        drop(state);
+        // Said after the lock is let go: the line is a file write.
+        if let Some((older, older_trigger)) = replaced {
+            (self.note)(&format!(
+                "copilot probe request {older} ({}) was replaced before it started by request \
+                 {generation} ({}), which answers both",
+                older_trigger.name(),
+                trigger.name()
+            ));
+        }
+        if !start_a_worker {
+            return generation;
+        }
+        // In the workers' band, `psreadline::begin_probe`'s rule: this starts a program written
+        // in JavaScript to ask it one question, and it must never be the reason a frame was late.
+        let started = bt_platform::spawn_at_priority(
+            "copilot-version-probe",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |ctx| self.serve(ctx),
+        );
+        if let Err(error) = started {
+            // The request stays standing and the next one tries the thread again.
+            self.lock().worker = false;
+            (self.note)(&format!(
+                "copilot probe: its worker would not start ({error}); request {generation} is \
+                 answered when the next request starts one"
+            ));
+        }
+        generation
+    }
+
+    /// The newest answer: `None` while no probe has answered, and `None` again when the newest
+    /// came back with nothing, which [`readiness_from`] treats as the same thing on purpose.
+    pub(crate) fn answer(&self) -> Option<Version> {
+        self.lock().answer.and_then(|answer| answer.version)
+    }
+
+    /// Whether a probe has answered at all, **whatever it answered**.
+    pub(crate) fn settled(&self) -> bool {
+        self.lock().answer.is_some()
+    }
+
+    /// **The worker's whole body**: take the newest request, probe, publish, and go when nothing
+    /// is waiting.
+    fn serve(&self, ctx: &bt_platform::admission::WorkerCtx) {
+        loop {
+            let (generation, trigger) = {
+                let mut state = self.lock();
+                let Some((generation, trigger)) = state.waiting.take() else {
+                    state.worker = false;
+                    return;
+                };
+                state.out = Some((generation, trigger, 0));
+                (generation, trigger)
+            };
+            // A probe that unwinds leaves the probe askable: the worker is marked gone, so the
+            // next request starts another.
+            let guard = ProbeOut { probe: self };
+            let version = (self.run)(ctx);
+            std::mem::forget(guard);
+            let joined = {
+                let mut state = self.lock();
+                let joined = state.out.take().map_or(0, |(_, _, joined)| joined);
+                publish(
+                    &mut state,
+                    ProbeAnswer {
+                        generation,
+                        version,
+                    },
+                );
+                joined
+            };
+            if joined > 0 {
+                (self.note)(&format!(
+                    "copilot probe {generation} ({}): {joined} request(s) made while it was out \
+                     were not probed on their own and are answered by the next probe",
+                    trigger.name()
+                ));
+            }
+            // After the answer is published, never before: a wake that raced the publication
+            // would send the loop to read an answer that is still missing.
+            if let Some(wake) = self.wake.get() {
+                wake();
+            }
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ProbeState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// **File an answer unless a newer one is held** — the one rule that keeps a slow probe from
+/// putting back what a later one replaced.
+fn publish(state: &mut ProbeState, answer: ProbeAnswer) {
+    if state
+        .answer
+        .is_none_or(|held| held.generation < answer.generation)
+    {
+        state.answer = Some(answer);
+    }
+}
+
+/// **A probe on its way**: dropped only by an unwind (a finished probe forgets it), when it marks
+/// the worker gone so the next request starts another.
+struct ProbeOut<'a> {
+    probe: &'a CopilotProbe,
+}
+
+impl Drop for ProbeOut<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self.probe.lock();
+            state.worker = false;
+            state.out = None;
+        }
+        (self.probe.note)(
+            "copilot probe ended before its answer; the answer held stays, and the next request \
+             asks again",
+        );
+    }
+}
+
+/// The product's probe, asking this machine and writing its lines to `diagnostics.log`.
+static PROBE: LazyLock<CopilotProbe> =
+    LazyLock::new(|| CopilotProbe::new(run_probe, crate::diagnostics::note));
 
 /// Teach the probe how to bring the event loop round when its answer lands.
 ///
@@ -781,43 +1020,30 @@ static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// Agents page while the probe is still out has a row that will not correct itself — a modal is up,
 /// so there is no shell output, no hover and no keystroke coming to produce a frame.
 pub(crate) fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
-    let _ = WAKE.set(Box::new(wake));
+    PROBE.install_wake(wake);
 }
 
-/// Start the probe, once per process, on a thread of its own.
+/// **Ask once, if nobody has asked yet** ([`CopilotProbe::ask_once`] on the product's probe).
 ///
-/// **One trigger, and it is the page the answer is printed on.** Nothing else in this program cares
-/// which copilot the machine has, and a user who never opens the Agents page never starts a node
-/// process to find out. Calling it again is free.
+/// Called by the page the answer is printed on while it is drawn, and by the first-run card. A
+/// user who never opens the Agents page never starts a node process to find out.
 pub(crate) fn begin_probe() {
-    if PROBE.get().is_some() || PROBE_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
-    // In the workers' band, `psreadline::begin_probe`'s rule: this starts a program written in
-    // JavaScript to ask it one question, and it must never be the reason a frame was late.
-    bt_platform::spawn_at_priority(
-        "copilot-version-probe",
-        bt_platform::ThreadPriority::BelowNormal,
-        |_ctx| {
-            let _ = PROBE.set(run_probe());
-            // After the answer is published, never before: a wake that raced the `set` would send
-            // the loop to read an answer that is still missing, and there is no second wake coming.
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
-        },
-    )
-    .ok();
+    PROBE.ask_once();
 }
 
-/// What the probe found, or `None` while it is still out — and `None` again if it came back with
-/// nothing, which [`readiness_from`] treats as the same thing on purpose.
+/// **Ask again** ([`CopilotProbe::ask`]): the Agents page opened, or copilot moved.
+pub(crate) fn reask_probe(trigger: ProbeTrigger) {
+    PROBE.ask(trigger);
+}
+
+/// What the newest probe found, or `None` while none has answered — and `None` again if it came
+/// back with nothing, which [`readiness_from`] treats as the same thing on purpose.
 #[must_use]
 pub(crate) fn probe() -> Option<Version> {
-    PROBE.get().copied().flatten()
+    PROBE.answer()
 }
 
-/// Whether the probe has come back at all, **whatever it came back with**.
+/// Whether a probe has come back at all, **whatever it came back with**.
 ///
 /// [`probe`] folds "still out" and "came back with nothing" together on purpose, because
 /// [`readiness_from`] treats them the same: neither is a refusal. One caller has to tell them
@@ -826,7 +1052,7 @@ pub(crate) fn probe() -> Option<Version> {
 /// for this rather than listing a row whose install would then be refused.
 #[must_use]
 pub(crate) fn probe_settled() -> bool {
-    PROBE.get().is_some()
+    PROBE.settled()
 }
 
 /// **Through `cmd.exe`, and that is not a shortcut.**
@@ -841,29 +1067,97 @@ pub(crate) fn probe_settled() -> bool {
 /// whatever folder the shell that started Folio was standing in. A `copilot.cmd` dropped into a
 /// cloned repository therefore ran the moment somebody opened Settings ▸ Agents — a page about
 /// agents, running a program nobody named, with no press on anything. So the search is this
-/// window's own ([`bt_platform::program_on_path`], which never looks at a working directory) and
-/// what `cmd` receives is the answer, quoted, with nothing left to resolve.
+/// window's own ([`bt_platform::program_in_directories`], which never looks at a working
+/// directory) and what `cmd` receives is the answer, quoted, with nothing left to resolve.
+///
+/// **In the environment a pane is born with** (T-FRESH-FACTS): the current logon block
+/// (`bt_platform::environment::fresh_logon_environment`, the door T-ENV-REFRESH's births and the
+/// program walk use), not this process's launch environment. Both the search (its `PATH` and
+/// `PATHEXT`) and the child (`copilot.cmd` starts `node` off its `PATH`) read it, so a copilot
+/// or a `node` installed while Folio runs is found and runs the way a pane would run it. A block
+/// that cannot be read is said, and the inherited environment is used, the pane birth's rule.
 #[cfg(windows)]
-fn run_probe() -> Option<Version> {
-    let copilot = bt_platform::program_on_path(Path::new("copilot"))?;
+fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
+    let environment = match bt_platform::environment::fresh_logon_environment(ctx) {
+        Ok(block) => block,
+        Err(error) => {
+            crate::diagnostics::note(&format!(
+                "copilot probe: the current environment could not be read ({error}); copilot is \
+                 looked for in the inherited one"
+            ));
+            None
+        }
+    };
+    let variable = |name: &str| match &environment {
+        Some(block) => block
+            .iter()
+            .find(|(held, _)| held.to_string_lossy().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone()),
+        None => std::env::var_os(name),
+    };
+    let directories: Vec<PathBuf> = variable("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                // Absolute entries only: an empty entry, and a relative one, both mean the
+                // working directory to Windows.
+                .filter(|entry| entry.is_absolute())
+                .collect()
+        })
+        .unwrap_or_default();
+    let pathext =
+        variable("PATHEXT").map_or_else(String::new, |value| value.to_string_lossy().into_owned());
+    let copilot = bt_platform::program_in_directories(
+        Path::new("copilot"),
+        &directories,
+        &pathext,
+        &|candidate| candidate.is_file(),
+    )?;
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
-    let command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
+    let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
+    if let Some(block) = &environment {
+        for (name, _) in std::env::vars_os() {
+            if !block.iter().any(|(held, _)| {
+                held.to_string_lossy()
+                    .eq_ignore_ascii_case(&name.to_string_lossy())
+            }) {
+                command.env_remove(name);
+            }
+        }
+        command.envs(block.iter().map(|(name, value)| (name, value)));
+    }
     // A raw tail and not `args`, because what is being built is a string `cmd`
     // parses for itself: the outer quotes are the pair it strips, and the inner
     // ones are what keep a program path holding a space one token.
-    let output = {
-        bt_platform::probe_output_with_raw_tail(
-            &command,
-            std::ffi::OsStr::new(&probe_command_tail(&copilot)),
-        )
-        .inspect(|output| {
-            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, output)
-        })
-        .ok()?
+    let ending = bt_platform::probe_output_with_raw_tail(
+        ctx,
+        &command,
+        std::ffi::OsStr::new(&probe_command_tail(&copilot)),
+        PROBE_DEADLINE,
+    )
+    .ok()?;
+    let output = match ending {
+        bt_platform::ProbeEnding::Finished(output) => output,
+        // Stopped at the deadline: the version is unknown (not "no copilot"), and the next
+        // trigger asks again.
+        bt_platform::ProbeEnding::Overran => {
+            crate::diagnostics::note(&format!(
+                "copilot probe: `{} --version` did not answer within {} s and was stopped; the \
+                 version is unknown until the next probe",
+                copilot.display(),
+                PROBE_DEADLINE.as_secs()
+            ));
+            return None;
+        }
     };
+    bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, &output);
     Version::parse(&String::from_utf8_lossy(&output.stdout))
 }
+
+/// **How long `copilot --version` may take** before the probe stops it and answers "unknown" —
+/// a node start, measured at ~150 ms idle and seconds under full load (T-FRESH-FACTS §2).
+#[cfg(windows)]
+const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The whole of what `cmd.exe` is handed, as one string it parses itself.
 ///
@@ -877,7 +1171,8 @@ fn probe_command_tail(copilot: &Path) -> String {
 }
 
 #[cfg(not(windows))]
-fn run_probe() -> Option<Version> {
+fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
+    let _ = ctx;
     None
 }
 
@@ -885,6 +1180,197 @@ fn run_probe() -> Option<Version> {
 mod tests {
     use super::*;
     use crate::attention::{MappedAction, Tier};
+    use std::sync::{Arc, Condvar, mpsc};
+
+    /// **A copilot a test writes**: what each probe answers, in order, and a gate that holds a
+    /// probe inside its run until the test lets it go.
+    #[derive(Clone, Default)]
+    struct FakeCopilot {
+        answers: Arc<Mutex<Vec<Option<Version>>>>,
+        runs: Arc<Mutex<u64>>,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl FakeCopilot {
+        fn run(&self) -> Option<Version> {
+            let (held, released) = &*self.gate;
+            let mut held = held.lock().unwrap();
+            while *held {
+                held = released.wait(held).unwrap();
+            }
+            drop(held);
+            *self.runs.lock().unwrap() += 1;
+            let mut answers = self.answers.lock().unwrap();
+            if answers.len() > 1 {
+                answers.remove(0)
+            } else {
+                answers[0]
+            }
+        }
+
+        fn hold(&self) {
+            *self.gate.0.lock().unwrap() = true;
+        }
+
+        fn release(&self) {
+            *self.gate.0.lock().unwrap() = false;
+            self.gate.1.notify_all();
+        }
+    }
+
+    /// A probe of the test's own over `copilot`, leaked for the `'static` its worker needs; its
+    /// wakes and its diagnostics lines come back on channels.
+    fn probe_over(
+        copilot: &FakeCopilot,
+    ) -> (
+        &'static CopilotProbe,
+        mpsc::Receiver<()>,
+        mpsc::Receiver<String>,
+    ) {
+        let (noted, notes) = mpsc::channel();
+        let noted = Mutex::new(noted);
+        let asked = copilot.clone();
+        let probe: &'static CopilotProbe = Box::leak(Box::new(CopilotProbe::new(
+            move |_ctx| asked.run(),
+            move |line: &str| {
+                let _ = noted.lock().unwrap().send(line.to_owned());
+            },
+        )));
+        let (woke, wakes) = mpsc::channel();
+        let woke = Mutex::new(woke);
+        probe.install_wake(move || {
+            let _ = woke.lock().unwrap().send(());
+        });
+        (probe, wakes, notes)
+    }
+
+    /// Wait, within the lane suite's patience, for the probe's next wake.
+    fn next_answer(wakes: &mpsc::Receiver<()>, awaited: &str) {
+        wakes
+            .recv_timeout(crate::lane::PATIENCE)
+            .unwrap_or_else(|_| panic!("no wake within the lane suite's patience: {awaited}"));
+    }
+
+    const NEW_ENOUGH: Version = Version {
+        major: 1,
+        minor: 0,
+        patch: 80,
+    };
+
+    /// RED (T-FRESH-FACTS) — **a probe that found no copilot is asked again, and a copilot
+    /// installed since is found.** The answer used to be a `OnceLock`, failure included.
+    ///
+    /// MUTATION (observed red): `ask` returning without a probe once any answer is held (the old
+    /// cached failure) — the second answer never comes.
+    #[test]
+    fn a_probe_that_found_nothing_is_asked_again_and_finds_the_copilot_installed_since() {
+        let copilot = FakeCopilot::default();
+        copilot
+            .answers
+            .lock()
+            .unwrap()
+            .extend([None, Some(NEW_ENOUGH)]);
+        let (probe, wakes, _) = probe_over(&copilot);
+        probe.ask_once();
+        next_answer(&wakes, "the first probe");
+        assert!(probe.settled());
+        assert_eq!(probe.answer(), None, "no copilot yet");
+        probe.ask_once();
+        assert_eq!(*copilot.runs.lock().unwrap(), 1, "asking once asks once");
+
+        probe.ask(ProbeTrigger::AgentsPage);
+        next_answer(&wakes, "the probe the page's open asked for");
+        assert_eq!(probe.answer(), Some(NEW_ENOUGH));
+    }
+
+    /// RED (T-FRESH-FACTS) — **requests made while a probe is out are answered by one more probe,
+    /// and that is said once in diagnostics.**
+    ///
+    /// MUTATION (observed red): `serve` going after its first probe without looking for a
+    /// request that arrived meanwhile — the requests are never answered.
+    #[test]
+    fn requests_made_while_a_probe_is_out_are_answered_by_one_more_probe() {
+        let copilot = FakeCopilot::default();
+        copilot.answers.lock().unwrap().push(Some(NEW_ENOUGH));
+        let (probe, wakes, notes) = probe_over(&copilot);
+        copilot.hold();
+        let first = probe.ask(ProbeTrigger::AgentsPage);
+        while probe.lock().out.is_none() {
+            std::thread::yield_now();
+        }
+        probe.ask(ProbeTrigger::AgentsPage);
+        probe.ask(ProbeTrigger::ProgramMoved);
+        let newest = probe.ask(ProbeTrigger::AgentsPage);
+        copilot.release();
+        next_answer(&wakes, "the held probe");
+        next_answer(&wakes, "the probe that answers the three");
+        assert_eq!(
+            *copilot.runs.lock().unwrap(),
+            2,
+            "three requests while one probe was out are one more probe"
+        );
+        assert_eq!(
+            probe.lock().answer.map(|answer| answer.generation),
+            Some(newest)
+        );
+        let lines: Vec<String> = notes.try_iter().collect();
+        let replaced: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("was replaced before it started"))
+            .collect();
+        assert_eq!(
+            replaced.len(),
+            2,
+            "each request replaced while it waited is said (round 2): {lines:?}"
+        );
+        assert!(
+            replaced[1].contains(&format!("by request {newest}")),
+            "{lines:?}"
+        );
+        let merged: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("3 request(s)"))
+            .collect();
+        assert_eq!(merged.len(), 1, "and the merge is said once: {lines:?}");
+        assert!(
+            merged[0].contains(&format!("copilot probe {first}")),
+            "{lines:?}"
+        );
+    }
+
+    /// RED (T-FRESH-FACTS) — **an older probe's answer never overwrites a newer one.**
+    ///
+    /// MUTATION (observed red): `publish` filing every answer — probe 3's "too old" replaces probe
+    /// 5's "new enough".
+    #[test]
+    fn an_older_probes_answer_never_overwrites_a_newer_one() {
+        let mut state = ProbeState::default();
+        publish(
+            &mut state,
+            ProbeAnswer {
+                generation: 5,
+                version: Some(NEW_ENOUGH),
+            },
+        );
+        publish(
+            &mut state,
+            ProbeAnswer {
+                generation: 3,
+                version: Some(Version {
+                    major: 1,
+                    minor: 0,
+                    patch: 2,
+                }),
+            },
+        );
+        assert_eq!(
+            state.answer,
+            Some(ProbeAnswer {
+                generation: 5,
+                version: Some(NEW_ENOUGH)
+            })
+        );
+    }
 
     #[test]
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {

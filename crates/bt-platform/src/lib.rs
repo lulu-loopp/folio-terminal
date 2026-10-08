@@ -4483,23 +4483,90 @@ pub fn probe_output(mut command: std::process::Command) -> std::io::Result<std::
     spawn_probe(&mut command, ProbeStdio::ANSWER)?.wait_with_output()
 }
 
+/// What a probe held to a deadline came back with ([`probe_output_with_raw_tail`]).
+#[derive(Debug)]
+pub enum ProbeEnding {
+    /// It ended by itself, with this output.
+    Finished(std::process::Output),
+    /// It was still running at the deadline: it was stopped (its contained tree ends with it),
+    /// and what it had said is dropped.
+    Overran,
+}
+
 /// [`probe_output`] for a command whose arguments end with `tail` exactly as
 /// written: a string the program parses for itself (`cmd /c "…"`), which the
 /// standard library's quoting would change. The command's own arguments, if
 /// any, come first and are quoted as [`std::process::Command::arg`] quotes them.
+///
+/// **Held to `deadline_after`**, the probes' child-wait shape (`shell_integration`'s
+/// `run_powershell_probe`): `try_wait` polled on the worker every 20 ms through
+/// [`wait::sleep_within`], and a child still running at the deadline killed and reported
+/// [`ProbeEnding::Overran`] (T-FRESH-FACTS round 2: a hung `copilot --version` wedged its
+/// probe for the life of the process).
 #[cfg(windows)]
 pub fn probe_output_with_raw_tail(
+    worker: &admission::WorkerCtx,
     command: &std::process::Command,
     tail: &std::ffi::OsStr,
-) -> std::io::Result<std::process::Output> {
-    spawn_probe_born(
+    deadline_after: std::time::Duration,
+) -> std::io::Result<ProbeEnding> {
+    let mut child = spawn_probe_born(
         command,
         ProbeStdio::ANSWER,
         Some(tail),
         probe_job(),
         ProbeBirthSeam::default(),
-    )?
-    .wait_with_output()
+    )?;
+    let deadline = std::time::Instant::now() + deadline_after;
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(ProbeEnding::Finished);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Ok(ProbeEnding::Overran);
+        }
+        wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    }
+}
+
+/// RED (T-FRESH-FACTS round 2) — **a raw-tail probe still running at its deadline is stopped and
+/// reported, not waited for.** The child would run for half a minute; the deadline has already
+/// passed when the probe starts, so the first look past its birth finds it running.
+///
+/// MUTATION (observed red): `probe_output_with_raw_tail` waiting for the output with no deadline
+/// — the probe answers `Finished` half a minute later.
+#[cfg(all(test, windows))]
+mod probe_deadline_tests {
+    #[test]
+    fn a_probe_past_its_deadline_is_stopped_and_reported() {
+        let (sent, answered) = std::sync::mpsc::channel();
+        crate::spawn_at_priority(
+            "probe-deadline-test",
+            crate::ThreadPriority::BelowNormal,
+            move |worker| {
+                let command =
+                    crate::quiet_command_named(std::path::Path::new("ping.exe")).expect("ping.exe");
+                let ending = crate::probe_output_with_raw_tail(
+                    worker,
+                    &command,
+                    std::ffi::OsStr::new("-n 30 127.0.0.1"),
+                    std::time::Duration::ZERO,
+                );
+                let _ =
+                    sent.send(ending.map(|ending| matches!(ending, crate::ProbeEnding::Overran)));
+            },
+        )
+        .expect("a worker");
+        assert!(
+            answered
+                .recv()
+                .expect("an answer")
+                .expect("the probe started"),
+            "the probe past its deadline is reported overrun"
+        );
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -5404,6 +5471,8 @@ mod probe_child_tests {
 
     /// The describing helper: it prints the command line it was given, its
     /// environment in the order it was handed over, and its working directory.
+    /// A variable's name and value are separated by a tab, which their
+    /// escaped spellings never hold.
     #[test]
     fn helper_describes_itself() {
         use windows::Win32::System::Environment::GetCommandLineW;
@@ -5414,7 +5483,7 @@ mod probe_child_tests {
         let line = unsafe { GetCommandLineW().to_string() }.expect("a UTF-16 command line");
         println!("twin: line {line:?}");
         for (name, value) in std::env::vars_os() {
-            println!("twin: env {name:?}={value:?}");
+            println!("twin: env {name:?}\t{value:?}");
         }
         println!(
             "twin: dir {:?}",
@@ -5423,90 +5492,313 @@ mod probe_child_tests {
         std::io::stdout().flush().expect("flush the description");
     }
 
+    /// What a describing helper said about itself. It has no `Debug`, so a
+    /// failing assertion cannot print the environment it holds; [`differences`]
+    /// is the only way to show one against another.
+    #[derive(PartialEq)]
+    struct Described {
+        line: String,
+        /// `(name, value)` as the helper spelled them, in its order.
+        environment: Vec<(String, String)>,
+        directory: String,
+    }
+
+    impl Described {
+        fn read(stdout: &[u8]) -> Self {
+            let mut described = Self {
+                line: String::new(),
+                environment: Vec::new(),
+                directory: String::new(),
+            };
+            for line in String::from_utf8_lossy(stdout).lines() {
+                if let Some(command_line) = line.strip_prefix("twin: line ") {
+                    command_line.clone_into(&mut described.line);
+                } else if let Some(variable) = line.strip_prefix("twin: env ") {
+                    let (name, value) = variable
+                        .split_once('\t')
+                        .expect("a described variable holds a tab");
+                    described
+                        .environment
+                        .push((name.to_owned(), value.to_owned()));
+                } else if let Some(directory) = line.strip_prefix("twin: dir ") {
+                    directory.clone_into(&mut described.directory);
+                }
+            }
+            described
+        }
+
+        fn has(&self, name: &str) -> bool {
+            let spelled = format!("{name:?}");
+            self.environment
+                .iter()
+                .any(|(known, _)| known.eq_ignore_ascii_case(&spelled))
+        }
+    }
+
+    /// A variable's name as a failure may print it: a name shaped like a
+    /// secret's is `<redacted>`.
+    fn shown_name(name: &str) -> &str {
+        let upper = name.to_uppercase();
+        if ["KEY", "TOKEN", "SECRET", "PASS"]
+            .iter()
+            .any(|shape| upper.contains(shape))
+        {
+            "<redacted>"
+        } else {
+            name
+        }
+    }
+
+    /// How `first` and `second` differ, one line each, empty when they are
+    /// the same. The command lines and working directories are the test's
+    /// own and are shown; of the environment only names are, never a value:
+    /// a name one side lacks, `<name>: differs` for a value, and whether the
+    /// order differs.
+    fn differences(first: (&str, &Described), second: (&str, &Described)) -> Vec<String> {
+        let ((first_name, first), (second_name, second)) = (first, second);
+        let mut found = Vec::new();
+        if first.line != second.line {
+            found.push(format!(
+                "command lines: {first_name} {} / {second_name} {}",
+                first.line, second.line
+            ));
+        }
+        if first.directory != second.directory {
+            found.push(format!(
+                "working directories: {first_name} {} / {second_name} {}",
+                first.directory, second.directory
+            ));
+        }
+        let value = |described: &Described, name: &str| {
+            described
+                .environment
+                .iter()
+                .find(|(known, _)| known == name)
+                .map(|(_, value)| value.clone())
+        };
+        for (name, held) in &first.environment {
+            match value(second, name) {
+                None => found.push(format!("only in {first_name}: {}", shown_name(name))),
+                Some(other) if &other != held => {
+                    found.push(format!("{}: differs", shown_name(name)));
+                }
+                Some(_) => {}
+            }
+        }
+        for (name, _) in &second.environment {
+            if value(first, name).is_none() {
+                found.push(format!("only in {second_name}: {}", shown_name(name)));
+            }
+        }
+        let names = |described: &Described, other: &Described| -> Vec<String> {
+            described
+                .environment
+                .iter()
+                .map(|(name, _)| name.clone())
+                .filter(|name| value(other, name).is_some())
+                .collect()
+        };
+        if names(first, second) != names(second, first) {
+            found.push("the environment's order differs".to_owned());
+        }
+        found
+    }
+
+    /// The probe twin's arguments: what the probe sites pass, and the
+    /// shapes that are hard to quote.
+    const TWIN_ARGUMENTS: [&str; 16] = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$m = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | \
+         Select-Object -First 1; if ($m) { $m.Version.ToString() } else { '' }; \
+         (Get-ExecutionPolicy).ToString()",
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+         $PROFILE.CurrentUserCurrentHost",
+        "Write-Output \"a \\\"quoted\\\" word\" ; $x = \"{0}\" -f 'y'",
+        "-C",
+        r"C:\Program Files\a path\with space\",
+        "core.quotepath=false",
+        "--format=%H%x00%s",
+        "",
+        "tab\there",
+        r#"back\\"slash"#,
+        r"trailing\\",
+        "na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1} \u{4e2d}\u{6587}",
+        "\"",
+    ];
+
+    /// A describing helper started in `directory` with the twin's arguments,
+    /// one variable changed and one removed in another case.
+    fn twin(directory: &std::path::Path) -> std::process::Command {
+        let mut command = quiet_command(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "probe_child_tests::helper_describes_itself",
+                "--nocapture",
+                "--",
+            ])
+            .args(TWIN_ARGUMENTS)
+            .env(HELPER_MODE, "describe")
+            .env("FOLIO_PROBE_TWIN", "na\u{ef}ve \u{3a9} \u{4e2d}\u{6587}")
+            .env_remove("psmodulepath")
+            .current_dir(directory);
+        command
+    }
+
+    /// What the standard library's start of `command` describes.
+    fn described_by_std(mut command: std::process::Command) -> Described {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        Described::read(
+            &command
+                .output()
+                .expect("the standard library's twin")
+                .stdout,
+        )
+    }
+
+    /// The comparing helper: it starts the twin once through the standard
+    /// library and once through the probe, and prints `compare: same` or one
+    /// `compare:` line per difference. Both starts build the child's block
+    /// from this process's environment, so they run here, in a process of
+    /// their own: in the test process another test changes that environment
+    /// between the two (the media stack a video test loads resolves a
+    /// drive-relative path, and Windows adds that drive's `=C:` variable).
+    #[test]
+    fn helper_compares_the_twins() {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("compare") {
+            return;
+        }
+        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join("probe twin \u{4e2d}\u{6587}");
+        std::fs::create_dir_all(&directory).expect("the twin's working directory");
+        let by_std = described_by_std(twin(&directory));
+        let by_probe = Described::read(
+            &spawn_probe(&mut twin(&directory), HELPER_STDIO)
+                .expect("the probe's twin")
+                .wait_with_output()
+                .expect("collect the probe's twin")
+                .stdout,
+        );
+        let mut found = Vec::new();
+        if !by_std.has("FOLIO_PROBE_TWIN") {
+            found.push("the standard library's child lacks the change".to_owned());
+        }
+        if by_std.has("psmodulepath") {
+            found.push("the standard library's child keeps the removed variable".to_owned());
+        }
+        found.extend(differences(
+            ("the probe's child", &by_probe),
+            ("the standard library's child", &by_std),
+        ));
+        if found.is_empty() {
+            println!("compare: same");
+        }
+        for difference in found {
+            println!("compare: {difference}");
+        }
+        std::io::stdout().flush().expect("flush the comparison");
+    }
+
     /// **The probe's child is given exactly what the standard library would
     /// give it**: the same command line for the arguments the probe sites
     /// pass (PowerShell commands with quotes, `$`, braces and semicolons; Git
     /// options; paths with spaces and trailing backslashes; empty, tabbed and
     /// mixed-script arguments), the same environment after a change and a
-    /// removal spelled in another case, and the same working directory.
+    /// removal spelled in another case, and the same working directory. The
+    /// comparison runs in a helper process of its own
+    /// ([`helper_compares_the_twins`]); a failure names what differs and
+    /// never an environment's value.
     ///
     /// RED mutation: in `probe_command_line`, drop the extra backslash before
     /// an escaped quote (`backslashes + 1` → `backslashes`); the two command
     /// lines differ.
     #[test]
     fn a_probe_s_child_receives_what_the_standard_library_would_give_it() {
-        const ARGUMENTS: [&str; 16] = [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$m = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | \
-             Select-Object -First 1; if ($m) { $m.Version.ToString() } else { '' }; \
-             (Get-ExecutionPolicy).ToString()",
-            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
-             $PROFILE.CurrentUserCurrentHost",
-            "Write-Output \"a \\\"quoted\\\" word\" ; $x = \"{0}\" -f 'y'",
-            "-C",
-            r"C:\Program Files\a path\with space\",
-            "core.quotepath=false",
-            "--format=%H%x00%s",
-            "",
-            "tab\there",
-            r#"back\\"slash"#,
-            r"trailing\\",
-            "na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1} \u{4e2d}\u{6587}",
-            "\"",
-        ];
-        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tb-tests")
-            .join("probe twin \u{4e2d}\u{6587}");
-        std::fs::create_dir_all(&directory).expect("the twin's working directory");
-        let twin = || {
-            let mut command = quiet_command(std::env::current_exe().expect("test executable"));
-            command
-                .args([
-                    "--exact",
-                    "probe_child_tests::helper_describes_itself",
-                    "--nocapture",
-                    "--",
-                ])
-                .args(ARGUMENTS)
-                .env(HELPER_MODE, "describe")
-                .env("FOLIO_PROBE_TWIN", "na\u{ef}ve \u{3a9} \u{4e2d}\u{6587}")
-                .env_remove("psmodulepath")
-                .current_dir(&directory);
-            command
-        };
-        let described = |stdout: &[u8]| -> Vec<String> {
-            String::from_utf8_lossy(stdout)
-                .lines()
-                .filter(|line| line.starts_with("twin: "))
-                .map(str::to_owned)
-                .collect()
-        };
-        let mut by_std = twin();
-        by_std
+        let mut compare = quiet_command(std::env::current_exe().expect("test executable"));
+        compare
+            .args([
+                "--exact",
+                "probe_child_tests::helper_compares_the_twins",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "compare")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let by_std = described(&by_std.output().expect("the standard library's twin").stdout);
-        let by_probe = described(
-            &spawn_probe(&mut twin(), HELPER_STDIO)
-                .expect("the probe's twin")
-                .wait_with_output()
-                .expect("collect the probe's twin")
-                .stdout,
-        );
+        let output = compare.output().expect("the comparing helper");
+        let verdict: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with("compare: "))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(verdict, ["compare: same"]);
+        assert!(output.status.success());
+    }
+
+    /// **A difference between two environments names keys, never a value,
+    /// and never a secret-shaped key.** Two describing children differ in a
+    /// planted `FAKE_SECRET_KEY` (present on one side, then present on both
+    /// with different values) and in an ordinary variable's mixed-script
+    /// value; the comparison's failure text holds the ordinary name, says
+    /// `<redacted>` for the secret one, and holds neither the secret's name
+    /// nor any planted value.
+    ///
+    /// RED mutation: in `differences`, print the values beside the name
+    /// (`"{}: differs"` → `"{}: differs ({held} / {other})"`), or make
+    /// `shown_name` return every name as it is; the planted value or name
+    /// appears in the failure text.
+    #[test]
+    fn a_differing_environment_is_reported_by_key_without_a_value() {
+        const SECRET: &str = "na\u{ef}ve-\u{4e2d}\u{6587}-planted-secret-value";
+        const OTHER_SECRET: &str = "\u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}-other-planted-value";
+        const PLAIN: &str = "plain-\u{4e2d}\u{6587}-first-value";
+        const OTHER_PLAIN: &str = "plain-\u{4e2d}\u{6587}-second-value";
+        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let child = |planted: &[(&str, &str)]| {
+            let mut command = twin(&directory);
+            for (name, value) in planted {
+                command.env(name, value);
+            }
+            described_by_std(command)
+        };
+        let without = child(&[("FOLIO_PROBE_PLAIN", PLAIN)]);
+        let with = child(&[("FOLIO_PROBE_PLAIN", PLAIN), ("FAKE_SECRET_KEY", SECRET)]);
+        let changed = child(&[
+            ("FOLIO_PROBE_PLAIN", OTHER_PLAIN),
+            ("FAKE_SECRET_KEY", OTHER_SECRET),
+        ]);
         assert!(
-            by_std.iter().any(|line| line.contains("FOLIO_PROBE_TWIN")),
-            "{by_std:#?}"
+            with.has("FAKE_SECRET_KEY"),
+            "the planted variable reached the child"
         );
-        assert!(
-            !by_std
-                .iter()
-                .any(|line| line.to_lowercase().contains("\"psmodulepath\"=")),
-            "{by_std:#?}"
-        );
-        assert_eq!(by_probe, by_std);
+        let added = differences(("the first child", &with), ("the second child", &without));
+        let altered = differences(("the first child", &with), ("the second child", &changed));
+        let text = [added.as_slice(), altered.as_slice()].concat().join("\n");
+        for never in [
+            "FAKE_SECRET_KEY",
+            SECRET,
+            OTHER_SECRET,
+            PLAIN,
+            OTHER_PLAIN,
+            "planted-secret-value",
+            "other-planted-value",
+            "first-value",
+            "second-value",
+        ] {
+            assert!(
+                !text.contains(never),
+                "a failure printed a planted name or value"
+            );
+        }
+        assert!(added.contains(&"only in the first child: <redacted>".to_owned()));
+        assert!(altered.contains(&"<redacted>: differs".to_owned()));
+        assert!(altered.contains(&"\"FOLIO_PROBE_PLAIN\": differs".to_owned()));
     }
 
     /// A relative program would be looked up in the working directory, so it
@@ -6962,10 +7254,11 @@ mod windows_impl {
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
-                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
-                WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE,
+                WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO,
+                WM_INPUTLANGCHANGE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN,
+                WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
+                WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
@@ -9325,9 +9618,9 @@ mod windows_impl {
         }
     }
 
-    /// **Windows saying a system-wide preference has moved.**
+    /// **Windows saying a system-wide preference, a display or the keyboard layout has moved.**
     ///
-    /// One subclass for one broadcast. `WM_SETTINGCHANGE` goes to every top-level
+    /// One subclass for three messages. `WM_SETTINGCHANGE` goes to every top-level
     /// window when somebody changes something in Settings — and the only thing
     /// this window does with it is *ask again*: the message's `wparam`/`lparam`
     /// name an area and a section, but the areas are not enumerated for
@@ -9340,6 +9633,13 @@ mod windows_impl {
     /// It exists because the preference used to be read exactly once, at
     /// start-up, and the code said so in a comment ending *"until this window
     /// listens for `WM_SETTINGCHANGE`"*. This is that.
+    ///
+    /// **The same ear hears two more machine facts** (T-FRESH-FACTS): a display
+    /// mode change (`WM_DISPLAYCHANGE`, sent to every top-level window when a
+    /// panel's rate or resolution moves or a panel comes or goes) and this
+    /// thread's input language moving (`WM_INPUTLANGCHANGE`). winit surfaces
+    /// neither. The wake is told which of the three it was ([`crate::SystemNews`]),
+    /// and the reading is still the loop's.
     pub struct SystemSettingsWatch {
         hwnd: HWND,
         /// Held for as long as the subclass is installed, because the subclass
@@ -9355,10 +9655,13 @@ mod windows_impl {
     /// arrive while this window is halfway through a frame; doing the work on the
     /// event loop's own turn is what keeps "when we read it" a property of the
     /// loop rather than of when Windows felt like talking.
-    struct SystemSettingsWake(Box<dyn Fn()>);
+    struct SystemSettingsWake(Box<dyn Fn(crate::SystemNews)>);
 
     impl SystemSettingsWatch {
-        pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
+        pub fn install(
+            window: NativeWindow,
+            wake: Box<dyn Fn(crate::SystemNews)>,
+        ) -> Result<Self, String> {
             let hwnd = window.as_hwnd();
             let wake = Box::new(SystemSettingsWake(wake));
             let reference_data = (&*wake as *const SystemSettingsWake) as usize;
@@ -9397,17 +9700,22 @@ mod windows_impl {
         }
     }
 
-    /// Whether a message is one that can have moved a system preference.
+    /// What a message says about the machine, if it is one this ear listens for.
     ///
     /// Pure, and its own function, for the reason every other pure half in this
     /// crate is: it is the part that can be wrong without a window, and therefore
-    /// the part a test can hold. `WM_THEMECHANGED` is in it beside
+    /// the part a test can hold. `WM_THEMECHANGED` is a preference beside
     /// `WM_SETTINGCHANGE` because the visual-effects page is where both the
     /// animation switch and the theme live, and a person turning one off often
     /// turns the other with it — a second re-read costs one `SystemParametersInfoW`.
     #[must_use]
-    pub(super) fn is_system_preference_message(message: u32) -> bool {
-        message == WM_SETTINGCHANGE || message == WM_THEMECHANGED
+    pub(super) fn system_news_of(message: u32) -> Option<crate::SystemNews> {
+        match message {
+            WM_SETTINGCHANGE | WM_THEMECHANGED => Some(crate::SystemNews::Preferences),
+            WM_DISPLAYCHANGE => Some(crate::SystemNews::Display),
+            WM_INPUTLANGCHANGE => Some(crate::SystemNews::InputLanguage),
+            _ => None,
+        }
     }
 
     unsafe extern "system" fn system_settings_subclass(
@@ -9418,13 +9726,13 @@ mod windows_impl {
         _subclass_id: usize,
         reference_data: usize,
     ) -> LRESULT {
-        if is_system_preference_message(message) {
+        if let Some(news) = system_news_of(message) {
             let wake = reference_data as *const SystemSettingsWake;
             if !wake.is_null() {
                 // SAFETY: the owning `SystemSettingsWatch` holds this box for the
                 // whole installed interval and removes the subclass before
                 // freeing it, on this same thread.
-                (unsafe { &*wake }.0)();
+                (unsafe { &*wake }.0)(news);
             }
         }
         // Forwarded either way: a broadcast this program answers is still a
@@ -15795,6 +16103,22 @@ pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
     Some(format!("{percent}%"))
 }
 
+/// **What a window's system-settings ear heard** ([`SystemSettingsWatch`]), so the loop
+/// re-reads the one fact it is about (T-FRESH-FACTS).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemNews {
+    /// A system-wide preference may have moved: `WM_SETTINGCHANGE` (the `Environment`
+    /// broadcast among them) and `WM_THEMECHANGED` on Windows; the appearance and the
+    /// accessibility display options on macOS.
+    Preferences,
+    /// A display's mode or the set of displays changed: `WM_DISPLAYCHANGE` on Windows,
+    /// `NSApplicationDidChangeScreenParametersNotification` on macOS.
+    Display,
+    /// This thread's input language or keyboard layout changed: `WM_INPUTLANGCHANGE`.
+    /// Windows only: the macOS summon key is a key position, which no layout moves.
+    InputLanguage,
+}
+
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
@@ -18529,7 +18853,7 @@ mod macos_window_backend_tests {
     /// winit.**
     ///
     /// The rule X-4 wrote down for every AppKit callback in this port: never do
-    /// the work inside the handler, hand it to the loop. The watch's two
+    /// the work inside the handler, hand it to the loop. The watch's three
     /// callbacks therefore call the wake and nothing else, and the wake
     /// `bt-app` hands in is one `EventLoopProxy::send_event` — winit's user
     /// event channel, delivered on the thread that owns the window. The other
@@ -18548,7 +18872,7 @@ mod macos_window_backend_tests {
             .expect("a method body is closed at eight spaces");
         let body = &rest[..end];
         assert!(
-            body.contains("(self.ivars().0)();"),
+            body.contains("(self.ivars().0)(crate::SystemNews::Preferences);"),
             "the observer does something other than nudge the loop:\n{body}"
         );
         for forbidden in ["effectiveAppearance()", "appearance_is_light", "NSScreen"] {
@@ -20420,9 +20744,11 @@ mod apartment_order_tests {
 /// forward; this is the part with an opinion in it.
 #[cfg(all(test, windows))]
 mod system_preference_message_tests {
-    use super::windows_impl::is_system_preference_message;
+    use super::windows_impl::system_news_of;
+    use crate::SystemNews;
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED,
+        WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE,
+        WM_THEMECHANGED,
     };
 
     /// PIN — the two broadcasts that mean "ask again", and nothing else.
@@ -20433,10 +20759,32 @@ mod system_preference_message_tests {
     /// something else happens to wake the loop.
     #[test]
     fn only_a_settings_or_theme_broadcast_asks_the_system_again() {
-        assert!(is_system_preference_message(WM_SETTINGCHANGE));
-        assert!(is_system_preference_message(WM_THEMECHANGED));
-        assert!(!is_system_preference_message(WM_MOUSEMOVE));
-        assert!(!is_system_preference_message(WM_NCHITTEST));
+        assert_eq!(
+            system_news_of(WM_SETTINGCHANGE),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(
+            system_news_of(WM_THEMECHANGED),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(system_news_of(WM_MOUSEMOVE), None);
+        assert_eq!(system_news_of(WM_NCHITTEST), None);
+    }
+
+    /// RED (T-FRESH-FACTS) — **a display mode change and a keyboard layout change
+    /// are heard, each as itself.** The rate a window paces its frames to and the
+    /// virtual key the summon is claimed on were read once and not again while the
+    /// window stayed where it was.
+    ///
+    /// MUTATION (observed red): drop either arm from `system_news_of` and its message answers
+    /// `None` — the window never hears that the panel's rate or the layout moved.
+    #[test]
+    fn a_display_change_and_a_layout_change_are_heard_as_themselves() {
+        assert_eq!(system_news_of(WM_DISPLAYCHANGE), Some(SystemNews::Display));
+        assert_eq!(
+            system_news_of(WM_INPUTLANGCHANGE),
+            Some(SystemNews::InputLanguage)
+        );
     }
 }
 

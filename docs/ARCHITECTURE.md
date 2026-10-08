@@ -54,7 +54,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | named sites / distinct names | **50 / 46**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **34** — 28 `mpsc::channel`, 6 `mpsc::sync_channel`; `bt-app` 27 (T-KEYBOARD-CTRLALT adds the layout-table request and answer pair), `bt-platform` 7 (T-UNINSTALL-UX adds the remover readiness pipe) — and **8** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 3 — T-PROGRAMS-REFRESH adds the program walk's requests and git's place); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
-| `AppEvent` variants | **37**, recounted at T-PROGRAMS-REFRESH (the row said 34 before it while the enum had 36; T-PROGRAMS-REFRESH added `ProgramsAnswered`; T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
+| `AppEvent` variants | **39**, recounted at T-PROGRAMS-REFRESH (the row said 34 before it while the enum had 36; T-PROGRAMS-REFRESH added `ProgramsAnswered`; T-FRESH-FACTS added `DisplayChanged` and `InputLanguageChanged`; T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
 | child-process construction | **one** `Command::new`, inside the doors `bt_platform::quiet_command` and `quiet_breakaway_command`, with **17** product callers — the existing probe, shell, Git, update, rescue and trial callers; `bt_platform::foreground_program` starts the private console-membership helper; `uninstall::leave_armed` starts `--uninstall [--remove-data] --after-pid <pid>`; and `bt_platform::deferred_removal::schedule` starts the internal native copy as `--uninstall-remove`. Both uninstall starts request `CREATE_BREAKAWAY_FROM_JOB` on Windows; a containing job that disallows breakaway makes creation fail and the caller reports failure instead of claiming a detached child exists. No command interpreter or mutable removal script is involved; besides this door, `bt-pty::PtySession::spawn`'s `spawn_command`, the one `ShellExecuteW` in `bt_platform::handoff` and the one `ShellExecuteExW` in `bt_platform::elevated_pipe` (verb `runas`, the elevated host, T-ADMIN-2) remain | `quiet_command(_named)?\(`, `quiet_breakaway_command\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(`, `ShellExecuteExW\(` |
 | `Runtime` methods | **1,424** — 1,223 in the 27 `runtime/*.rs` topics, 201 still in `main.rs` (§13) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
 
@@ -194,7 +194,7 @@ to the running process's update job where the launch lands (`Job::told_by_a_laun
 | `powershell.exe` — the PSReadLine probe | `psreadline::run_probe`, through `shell_integration::run_powershell_probe` and `spawn_probe` | once per process; within `POWERSHELL_PROBE_DEADLINE` (five seconds); the contained tree ends at the deadline, on completion, drop, panic or Folio exit |
 | `powershell.exe` — the `$PROFILE` probe | `shell_integration::run_profile_path_probe` through `run_powershell_probe` and `spawn_probe` | once per distinct program; five-second deadline; the whole contained tree ends at the deadline |
 | the resolved `powershell.exe` or `pwsh.exe` — the command-row parser probe | `shell_integration::run_parse_probe`, through `spawn_probe` on the existing `powershell-script-prepare` below-normal worker | at most three attempts per exact resolved executable and argv; the command text travels on UTF-8 stdin to a fixed `Parser::ParseInput` command, never on the probe's command line or environment; a five-second deadline ends the contained tree, and only a clean parse admits injection. Pending, invalid, failed and timed-out questions leave the row unchanged. A failure is unknown: a later birth may schedule the next background attempt but never waits for it; the per-key attempt limit prevents one child per birth |
-| `cmd.exe /c "<copilot> --version"` | `attention_copilot::run_probe`, through `probe_output_with_raw_tail` (the `/c` string is passed as written) | once per process, on opening the Agents page; the contained tree ends with the probe or Folio |
+| `cmd.exe /c "<copilot> --version"` | `attention_copilot::run_probe`, through `probe_output_with_raw_tail` (the `/c` string is passed as written), in the current logon environment | the first time the Agents page or the first-run card needs it, at every open of the Agents page, and when the program walk finds copilot elsewhere; one at a time, the requests made while one is out answered by one more, stopped at a 10 s deadline (T-FRESH-FACTS); the contained tree ends with the probe or Folio |
 | `git` | `git::git_command`, always from `bt-git-worker`; `clean`, `diff`, `for-each-ref`, `log`, `rev-list`, `rev-parse`, `show` and `status` use `spawn_probe`; `add`, `branch`, `checkout`, `restore` and `tag` retain only the direct child | never from the window thread; one status costs three threads. The contained commands invoke no Git hook (`status` also forces `core.fsmonitor=false` and forbids optional index locks), so their whole process tree shares the deadline. `add` and `restore` can invoke `post-index-change`, `checkout` can invoke `post-checkout`, and ref updates can invoke `reference-transaction`; a process deliberately backgrounded by those hooks is a hand-off and may outlive Git. The closed subcommand policy refuses a new verb until its hook lifetime is decided |
 | `explorer.exe`, the registered handler, Finder | `bt_platform::handoff` | fully detached: no handle, no wait, no kill |
 | `defaults read -g AppleLocale`, `locale -a` | `bt_platform::read_system_locale_declaration`, through `probe_output` | macOS; memoised, so twice per process; each command leads a contained process group |
@@ -299,7 +299,7 @@ bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty,
 bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
 bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
-bt-platform     ← bt-persist, bt-term, bt-app, bt-lint-probe
+bt-platform     ← bt-persist, bt-app, bt-lint-probe
 bt-viewport     ← bt-render, bt-term
 bt-detect       ← bt-term
 bt-math         ← bt-term
@@ -328,14 +328,14 @@ scheduling band and then calls `bt_effects::admission::lend_worker`, the one
 role-entering function, public for the door alone; and the re-exports
 `bt_platform::admission` (the vocabulary and the door) and `bt_platform::file_reads`,
 so every path through `bt-platform` still resolves. `bt-render` and `bt-math` have
-no `bt-platform` edge since CC-3; `bt-term`'s is D-14's remainder (§3.2). The
+no `bt-platform` edge since CC-3, and `bt-term` none since CC-4 (§3.2). The
 window-waits source guard holds `bt-effects` to starting no thread, waiting on
 nothing, naming the file system and the environment only inside `file_reads`, no
 standard-library clock and no `bt_platform` (§5.1).
 
 The library crates below `bt-app` that a browser build will reference —
 `bt-unicode`, `bt-transcript`, `bt-doc`, `bt-layout`, `bt-viewport`,
-`bt-detect`, `bt-effects`, `bt-platform`, `bt-math`, `bt-render` and `bt-term` — check for
+`bt-detect`, `bt-effects`, `bt-math`, `bt-render` and `bt-term` — check for
 `wasm32-unknown-unknown` in CI (`wasm-lib-check`, `scripts/ci/check-wasm-lib.ps1`,
 which holds the list).
 
@@ -353,29 +353,43 @@ own, outside the preparation and outside the relocation commit. **Done
 2026-09-21** (`21cf1ef8`): the probe lives in `bt-corpus`, and `bt-pty`'s
 manifest names `bt-term` only under `[dev-dependencies]`.
 
-**`bt-term → bt-platform` — wrong layer, recorded, enforced by the gate.**
-`bt-term` must build without the platform layer (the owner's ruling of
-2026-09-21), so the edge is a layer violation: `bt-term` and `bt-platform` share
-a layer of `scripts/ci/crate-layers.tsv`, and the edge passes only as its D-14
-row in `scripts/ci/crate-edge-exemptions.tsv` (§3.3), which J2's boundary crate
-deletes. It is also broader than its manifest says.
-The manifest comment called it one call; there were four product import surfaces:
-`inline_image::resample_pool` sets a thread priority, `session::verify_path`
-calls `handoff::resolved_for_a_door`,
-`inline_image::read_and_decode_local_image` goes through the read ledger, and
-`inline_image::local_host_names` reads `host_names`. The ruled repair is a
-**small headless observation/effect boundary** rather than a reorganised
-`bt-platform`. **Its first half landed 2026-10-08 (CC-3):** the read ledger is
-`bt-effects`' (§3.1), and the manifest comment now names the three surfaces that
-remain — the priority band, `resolved_for_a_door` and `host_names` — which CC-4
-turns into facts the host installs; the edge, and its exemption row, go then.
+**`bt-term → bt-platform` — gone (D-14, repaid by CC-4).** `bt-term` builds
+without the platform layer (the owner's ruling of 2026-09-21), and since CC-4 its
+manifest names `bt-platform` nowhere, not as a dev-dependency either:
+`cargo tree -p bt-term -i bt-platform` prints nothing. Its four former product
+surfaces are answered from outside. The read ledger is `bt-effects`' (CC-3,
+§3.1). The other three are the host's:
+
+- **The machine's names** (`bt_term::install_host_names`, read by
+  `bt_term::local_host_names` when a working-directory report names a host) — a
+  process-wide fact, one answer per process: the same names again are a no-op,
+  different ones a panic, and a read before any installation panics in every
+  build profile, release included ("host names read before the host installed
+  them").
+- **What a resample-pool thread runs first** (`bt_term::install_pool_thread_start`)
+  — a process-wide hook, installed once; a host that installs none (a browser)
+  gets a pool whose threads run no hook.
+- **The name a hand-off door would open** — not installed: `bt_term::verify_path`
+  takes the resolver as a parameter, and its one product caller,
+  `run_path_verify_worker`, hands it `bt_platform::resolved_for_a_door`.
+
+`bt-app` installs the first two in one place, `host_answers::install`, called by
+`main` right after the window thread is entered and before the event loop that
+makes every session exists (pinned by
+`host_answers::tests::the_host_answers_are_installed_before_the_first_session_can_exist`).
+The development tools in `bt-corpus` that replay a pane's bytes install the same
+answers first (`bt_corpus::install_host_answers`). A test process installs
+`bt_term::TEST_HOST_NAMES` (`bt_term::install_test_host_names`): `bt-term`'s own
+unit tests in the reader itself, every other test binary in the one function that
+makes its sessions. The tests that start a real shell through `bt_pty::test_shell`
+— whose door reaches the platform layer — live in `bt-pty/tests`, beside the
+transport they run on.
 
 **`bt-term → bt-math` — real coupling, recorded debt.** `session.rs` imports six
 math types and calls into the math crate in product code,
 `inline_image::decode_svg_bytes` rasterises through it,
-`crates/bt-term/src/lib.rs` re-exports the engine, and
-`crates/bt-term/src/bin/bt-repaint-oracle.rs` uses it in a binary target — the
-same target trap. Hiding it behind re-exports changes nothing. **Recorded as
+and `crates/bt-term/src/lib.rs` re-exports the engine. Hiding it behind
+re-exports changes nothing. **Recorded as
 debt** until the composition layer is designed.
 
 ### 3.3 The dependency policy — this file is now its address
@@ -424,11 +438,11 @@ those manifests actually practise, restated here from what they say:
   crate missing from that table fails. The exemptions live in
   `scripts/ci/crate-edge-exemptions.tsv`, one row per edge with its
   `docs/plans/structural-debt.md` row; the list only shrinks against the merge
-  base, and a row whose edge is gone or now goes down fails. Its two rows are
-  `bt-term → bt-platform` (D-14) and `bt-term → bt-math` (D-15).
+  base, and a row whose edge is gone or now goes down fails. Its one row is
+  `bt-term → bt-math` (D-15).
   Dev-dependencies are not layer edges: Cargo allows them in both directions,
-  and `bt-term`/`bt-pty` and `bt-platform`/`bt-pty` each name the other as one
-  (`bt-pty` naming `bt-term` only as one is §3.2's repair of D-13).
+  and `bt-platform`/`bt-pty` each name the other as one (`bt-pty` naming
+  `bt-term` only as one is §3.2's repair of D-13).
 - **`bt-workbench`'s entry, for that guard** (D-27 lands it; census-3 wrote it
   here because the guard does not exist yet —
   `docs/plans/design/ownership-census-2026-09-25.md` §5.4):
@@ -635,6 +649,7 @@ does not have to find it later.
 | **the pane's foreground program** (0.4.7, T-PANE-COLUMNS E8) — `Unknown` or one canonical local image name, never a process tree | `DualPlaneSession::foreground_program`, one fact per pane session | the addressed foreground-program worker answer, after window/tab/seat and shell-incarnation routing, is the only writer. `DualPlaneSession::live_capture` snapshots it into `ScreenFrame`; the detector classifies trust only through `multiplexer_allowlist.txt` | one window-thread writer; worker observation delivered by address | every OSC 133 command start is dispatched at once or retained as one pending successor behind the in-flight probe; a frame candidate asks every five seconds; WSL/ssh boundaries store `Unknown`; every identity change invalidates the full pane tier |
 | **each window's seat in the git watch** (0.4.8, T-WINDOWS-ALL — **an ownership split recorded under RULES §55**: the repositories a window's drawn Git pages show, and the kernel news it has been told and not yet acted on, were the first window's alone) — per window: the roots it wants and the roots it is owed | `bt-app::window_news::WindowSeats`, held inside the application's `git_watch::GitWatch` (`App::git_watch`), one seat per window keyed by `WindowId`; the kernel subscriptions and their clocks stay the application's, one per root, over the union of every seat | three writers on the window thread: the window directory's walk (`FolioApp::publish_window_directory` → `window_news::seat_every_holder`, which levels every `SeatedByDirectory` holder in one walk — today the git watch) seats every window the directory names and releases every other, with the subscriptions only it wanted (the walk only ever drops subscriptions); the window's own turn (`Runtime::advance_git_watch` → `GitWatch::want`, then `take`) says what it draws (`git_roots_on_glass`, R31's drawn rule) and takes its news; `FolioApp::ripen_git_news` (`GitWatch::ripen`), once a pass before the window turns, files each ripened root under every seat that wants it | one window-thread owner per window, filled by the application; the directory is the only registrar, so news reaches only a window the directory names | B2 and B3 reuse the `WindowSeats` shape through a separately owned `WindowSeats<WindowId, FreshnessSubject>`, leveled by the same directory walk; an all-seats broadcast operation (`WindowSeats::tell_all`, every current seat told once, whatever it wants) is added for Environment news, while accepted fact values remain with their fact owners; a preview's file watch is already one per window (`WindowRuntime::preview_watch`) and is not part of it |
 | **what this machine can start** (0.4.8, T-PROGRAMS-REFRESH) — each profile row's program, **known or unknown**, with the number of the walk that answered it and the program source it answered; WSL's installation; where git is | the application: `App::profile_programs` (`profiles::ProfilePrograms`), `wsl::INSTALLATION`, `git::GIT_LOCATION`; asked on the program-walk lane (`bt-app::programs_lane`, one `program-walk` worker) | the worker publishes row by row into the lane's mailbox (newest per row), then the WSL and git facts; the window thread is the one adopter (`adopt_program_answers`, read without waiting at the launch and in `FolioApp::adopt_program_walk` on `AppEvent::ProgramsAnswered`), which refuses an answer older than the one held for its row and an answer about a source the row no longer has; a table edit keeps the answers of the rows it did not change (`carried_into_live_table`) and asks again. Asked at the launch, on a table edit, when a menu that lists programs or the Profiles, Agents or a Git page opens, on `WM_SETTINGCHANGE` (`SystemPreferencesChanged`, the one listener) and when a pane's birth needs an unknown row — never on a timer | observation of external state; one window-thread owner for the application, told to every window through `App::program_news` (`WindowSeats::tell_all`) | built. **The invariant** (T-LAUNCH-PROBE's, re-implemented here): an unknown row is never "not here" — no fallback, banner, saved-pane rewrite, default, hidden agent or "git not found" is decided from unknown (`profiles::decided_from_answers`); a pane whose program depends on an unknown row is born **in birth** (`LeafSession::birth`, no process, its typed bytes held) and made again when the answer lands (`Runtime::land_pane_births`), asking for its shell like every other pane (T-BIRTH-OFF-WINDOW); a late answer is always used and nothing has a deadline |
+| **the machine facts frozen at launch, re-asked when the machine changes** (0.4.8, T-FRESH-FACTS; B1's survey row 15) — one owner per fact, each re-asked on its own signal, no timer, no window-thread wait | **git location, WSL** — the program walk (row above). **Copilot's version** — `attention_copilot::CopilotProbe` (`PROBE`): last answer + request number, one probe out, merged requests, a failure not kept as a verdict; asked at the Agents page's open edge, at the first ask, and when the walk moves the `copilot` row; looked up and run in the current logon environment. **the display's refresh rate** — each window's `frame_clock`, read again on `AppEvent::DisplayChanged` (`WM_DISPLAYCHANGE` / `NSApplicationDidChangeScreenParametersNotification`, heard by the window's `SystemSettingsWatch`, `bt_platform::SystemNews::Display`) besides a move and a scale change. **the summon's virtual key** — `quake::Quake::claimed_key`, asked of the layout again on `AppEvent::InputLanguageChanged` (`WM_INPUTLANGCHANGE`, the same ear); re-claimed only when it moved (macOS: a key position, no layout question). **`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME` and the home variable** — `attention_hooks::AGENT_HOMES`, the newest program walk's reading of the logon block (the launch environment until the first walk answers). **macOS font files** — each CoreText row carries its faces' files (`kCTFontURLAttribute`), so `set_terminal_font` loads a family installed after the renderer's database was built. **the palette's files under folded folders** — `palette_index::FileIndexes::reopened`: every palette open walks its roots again (an open while a walk is out is merged into it). **a hover peek of a file that failed** — `peek_reads_the_file`: a `Failed` entry for a named file is read again by the next settled hover | one writer each: the window thread (`adopt_program_answers` for `AGENT_HOMES`, the `DisplayChanged` / `InputLanguageChanged` arms, the palette's open, the peek's settle), the probe worker for its own answer, the font lane for its rows | process cells (`PROBE`, `AGENT_HOMES`), per-window values (`frame_clock`, `peek_cache`), the application's `Quake` and `file_indexes` | 0.4.8 T-FRESH-FACTS; `window_waits.tsv` unchanged (233); no spawn site added |
 
 ---
 
@@ -713,6 +728,16 @@ ignored by that holder's rule (`update_txn::next`), not by anything here.
 `H\journal.json` every 250 ms through `file_reads` on `Lane::UpdateJournal`,
 writes nothing, and ends at the transaction's decision (`update_trial`).
 
+**The copilot version has one probe at a time** (`copilot-version-probe`, `BelowNormal`,
+`attention_copilot::CopilotProbe`, T-FRESH-FACTS): requests are numbered, a request made while a
+probe is out waits (the newest replaces an older one) and is answered by one more probe, said once
+in `diagnostics.log`; an answer older than the one held is refused; a failure is an answer, not a
+verdict — the next request asks again. A request that replaces one still waiting is said too. The
+worker is started by a request and ends when nothing waits; nothing waits for it. Its child is held
+to a 10 s deadline (`bt_platform::probe_output_with_raw_tail`, the probes' `try_wait` poll through
+`wait::sleep_within`): one still running then is stopped and the version is unknown until the next
+probe.
+
 **What this machine can start has one observation worker** (`program-walk`, T-PROGRAMS-REFRESH;
 `bt-app::programs_lane`, a latest-value lane on `crate::lane`'s contract, `PROGRAMS`). Requests
 are numbered; the worker, started by the first request, serves the newest standing, and the
@@ -722,7 +747,7 @@ when that walk ends. A walk reads the **current logon environment**
 entry an installer wrote after Folio started is seen; it answers the rows the default's rule
 reads first and publishes row by row; it wakes the loop (`AppEvent::ProgramsAnswered`) after
 each row the request asked for first and at the walk's end, never for the other rows or the WSL and
-git facts, which the end's wake brings. A walk a pane waits on runs at normal priority and every
+git facts and the agent folders' variables (T-FRESH-FACTS), which the end's wake brings. A walk a pane waits on runs at normal priority and every
 other walk below normal: the request carries its band — urgent for the launch, for a birth, and for
 any request made while a pane is in birth (`programs_lane::PaneWaits`, held by each pane in birth) —
 the one worker sets it at the start of each walk, and raises a walk already out when a pane starts

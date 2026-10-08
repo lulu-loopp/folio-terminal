@@ -15,12 +15,6 @@ bt-detect = { path = "../bt-detect" }
 bt-math = { path = "../bt-math" }
 # The file-read ledger (`file_reads::open`, `Lane`) of the inline-image decoder.
 bt-effects = { path = "../bt-effects" }
-# Three product uses, recorded debt (docs/plans/structural-debt.md D-14) until
-# the host installs them: the priority band of the resample pool
-# (`set_current_thread_priority` in `inline_image::resample_pool`), the door-ready
-# path in `session::verify_path` (`resolved_for_a_door`), and the machine's host
-# names (`host_names`, `inline_image::local_host_names`).
-bt-platform = { path = "../bt-platform" }
 bt-viewport = { path = "../bt-viewport" }
 image.workspace = true
 rayon.workspace = true
@@ -33,11 +27,6 @@ bt-testpath = { path = "../bt-testpath" }
 # The grapheme-cluster ceiling this crate's captures are measured against lives there.
 bt-unicode = { path = "../bt-unicode" }
 proptest = "1"
-# **A real shell for a test** (T-TEST-SHELL-HYGIENE): the shell-integration tests start
-# Git Bash, cmd and PowerShell through `bt_pty::test_shell::Hygiene`, without the user's
-# startup files or history. `bt-pty` names this crate only as a dev-dependency of its own,
-# so the library graph has no cycle.
-bt-pty = { path = "../bt-pty", features = ["test-shell"] }
 
 [lints]
 workspace = true

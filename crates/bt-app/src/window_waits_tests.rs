@@ -3351,10 +3351,7 @@ const EXCLUDED_ROOT_FORM: &str = "allow(clippy::disallowed_methods)";
 
 /// The binaries of the product's packages that are not in the product, by package and name
 /// (revision (j)2: listed, or they are product — no third state).
-const DEVELOPMENT_BINARIES: [(&str, &str); 2] = [
-    ("bt-term", "bt-repaint-oracle"),
-    ("bt-winres", "render-info-plist"),
-];
+const DEVELOPMENT_BINARIES: [(&str, &str); 1] = [("bt-winres", "render-info-plist")];
 
 /// An attribute's body as one string with no spaces: `allow(clippy::disallowed_methods)`.
 fn spelled(src: &Src, toks: &[Tok]) -> String {

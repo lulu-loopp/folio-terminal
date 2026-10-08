@@ -7477,7 +7477,7 @@ mod tests {
     /// branches the probe had.**
     ///
     /// A shape test rather than a round trip, and the round trip is
-    /// `crates/bt-term/tests/shell_integration_wsl.rs`, which runs this exact
+    /// `crates/bt-pty/tests/shell_integration_wsl.rs`, which runs this exact
     /// string through a real POSIX `sh` against a password database it wrote.
     /// What is checked here is that the two branches are still *there*, because
     /// the failure they guard is silent in each direction: without the `bash`
@@ -9037,6 +9037,7 @@ mod tests {
         );
         assert_eq!(place.working_directory.as_deref(), Some(fixed.as_path()));
         let mut shell = start(hygiene, place.working_directory.clone());
+        crate::test_support::install_this_machines_names();
         let mut pane = bt_term::DualPlaneSession::new(
             std::num::NonZeroU32::new(120).unwrap(),
             std::num::NonZeroU32::new(30).unwrap(),

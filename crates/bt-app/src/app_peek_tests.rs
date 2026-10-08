@@ -275,6 +275,36 @@ fn a_stream_payload_is_a_peek_subject_with_nothing_to_read() {
     assert_ne!(payload, by_path);
 }
 
+/// RED (T-FRESH-FACTS) — **a file whose first peek failed is read again by the next hover**, and
+/// only by a new hover: one peek's own re-entries never re-read it.
+///
+/// MUTATION (observed red): `Failed` answering `false` whatever `settled` says (the old permanent
+/// negative entry) — the first assertion goes red.
+#[test]
+fn a_file_whose_peek_failed_is_read_again_by_the_next_hover() {
+    let failed = PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Io(
+        "系统找不到指定的文件".to_owned(),
+    ));
+    assert!(
+        peek_reads_the_file(Some(&failed), true, true),
+        "a new hover on a file that was missing reads it again"
+    );
+    assert!(
+        !peek_reads_the_file(Some(&failed), true, false),
+        "a re-entry of the same peek does not"
+    );
+    assert!(
+        !peek_reads_the_file(Some(&PeekCacheEntry::Pending), true, true),
+        "one read at a time"
+    );
+    assert!(peek_reads_the_file(None, true, false), "a miss reads");
+    assert!(
+        !peek_reads_the_file(None, false, true),
+        "a stream payload has nothing to read"
+    );
+    assert!(!peek_reads_the_file(Some(&failed), false, true));
+}
+
 /// PIN (verification ruling 2026-08-04, the warm peek): the decode a verified reference already
 /// paid for is filed under the very key the hover looks up, so the flyout opens from cache and
 /// no second read of the same file is ever scheduled.

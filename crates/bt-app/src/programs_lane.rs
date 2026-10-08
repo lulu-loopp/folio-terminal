@@ -1,10 +1,11 @@
 //! **What this machine can start, asked off the window thread** (T-PROGRAMS-REFRESH, 0.4.8 B2;
 //! `docs/ARCHITECTURE.md` §4.4 and §5.1's observation lane).
 //!
-//! One question, three answers: which program each profile row starts on this machine (the
+//! One question, four answers: which program each profile row starts on this machine (the
 //! `PATH` walk of `profiles::ProfilePrograms::resolve_row`), what WSL's installation says
-//! (`wsl::read_this_machine`, once the walk has found `wsl.exe`), and where git is
-//! (`profiles::find_git`). Until this lane the first was asked on the window thread at launch and
+//! (`wsl::read_this_machine`, once the walk has found `wsl.exe`), where git is
+//! (`profiles::find_git`), and where the agents keep their configuration
+//! (`attention_hooks::AgentHomes`, T-FRESH-FACTS — the same environment, four variables). Until this lane the first was asked on the window thread at launch and
 //! at every table edit, and all three were asked once and kept for the life of the process, so a
 //! program installed while Folio ran stayed missing from the new-tab menu, `Split with`, the
 //! default profile, the Agents page and the Git page until a restart.
@@ -59,6 +60,7 @@ use std::time::{Duration, Instant};
 use bt_platform::admission::WorkerCtx;
 use bt_pty::ShellEnvironment;
 
+use crate::attention_hooks::AgentHomes;
 use crate::profiles::{self, Profile, ProfilePrograms, RowVerdict};
 use crate::wsl::WslFacts;
 
@@ -74,6 +76,8 @@ pub enum Trigger {
     GitPage,
     Environment,
     Birth,
+    /// The walk before it ended before its last answer ([`ProgramsLane::request_after_death`]).
+    AfterDeath,
 }
 
 impl Trigger {
@@ -87,6 +91,7 @@ impl Trigger {
             Self::GitPage => "Git page opened",
             Self::Environment => "system setting changed",
             Self::Birth => "a pane waits for its program",
+            Self::AfterDeath => "the walk before it ended early",
         }
     }
 
@@ -123,6 +128,9 @@ pub struct MachineFacts {
     pub generation: u64,
     pub wsl: WslFacts,
     pub git: Option<PathBuf>,
+    /// Where the agents keep their configuration, out of the same environment
+    /// (`attention_hooks::AGENT_HOMES`, T-FRESH-FACTS).
+    pub agent_homes: AgentHomes,
 }
 
 /// **What the window thread finds** when it drains the mailbox.
@@ -270,10 +278,12 @@ fn walk(
         WslFacts::default()
     };
     let git = profiles::find_git(&counting);
+    let agent_homes = AgentHomes::in_environment(&|name| counting.var_os(name));
     publish(Published::Facts(MachineFacts {
         generation,
         wsl,
         git,
+        agent_homes,
     }));
     let path_entries = counting
         .var_os("PATH")
@@ -309,6 +319,9 @@ struct Asks {
     worker: bool,
     /// How many panes are in birth, each waiting on a walk's answer ([`PaneWaits`]).
     panes_waiting: usize,
+    /// The number of the last walk asked for because one died
+    /// ([`ProgramsLane::request_after_death`]); `0` before any.
+    asked_after_death: u64,
 }
 
 impl Asks {
@@ -443,6 +456,22 @@ impl ProgramsLane {
             ));
         }
         generation
+    }
+
+    /// **A walk that died is walked again, once** (T-FRESH-FACTS round 2): the window thread hands
+    /// the lane the number of a walk it was told died, and the lane asks for one walk in its place
+    /// unless that walk was itself the one asked for after a death, or older — so a walk that
+    /// dies every time is not walked in a loop, and its next ordinary trigger starts it again.
+    /// Answers the new request's number, or `None` when none was asked. The facts a dead walk
+    /// never published (WSL, git, the agent folders) are what a pane, the Git page and the
+    /// first-run card would otherwise wait on until some unrelated trigger.
+    pub fn request_after_death(&'static self, died: u64, request: WalkRequest) -> Option<u64> {
+        if died <= self.lock().asked_after_death {
+            return None;
+        }
+        let generation = self.request(request);
+        self.lock().asked_after_death = generation;
+        Some(generation)
     }
 
     /// **Count a pane in birth until the answer is dropped.** One lock; never waits for the worker.
@@ -641,6 +670,19 @@ pub fn request(trigger: Trigger, stored_default: &str, also_first: &[String]) ->
     })
 }
 
+/// [`ProgramsLane::request_after_death`] on the product's lane, over the live table and the rows
+/// the default's rule reads first.
+pub fn request_after_death(died: u64, stored_default: &str) -> Option<u64> {
+    LANE.request_after_death(
+        died,
+        WalkRequest {
+            rows: profiles::table().profiles().to_vec(),
+            first: profiles::default_chain(stored_default),
+            trigger: Trigger::AfterDeath,
+        },
+    )
+}
+
 /// [`ProgramsLane::pane_waits`] on the product's lane.
 pub fn pane_waits() -> PaneWaits {
     LANE.pane_waits()
@@ -672,6 +714,8 @@ pub(crate) mod tests {
         path: Vec<PathBuf>,
         files: Vec<PathBuf>,
         wsl: WslFacts,
+        /// Variables other than `PATH`, as the account has them now.
+        variables: Vec<(String, OsString)>,
         /// Every file question asked, in order, across every walk.
         asked: Arc<Mutex<Vec<PathBuf>>>,
     }
@@ -693,6 +737,13 @@ pub(crate) mod tests {
 
         pub(crate) fn set_wsl(&self, wsl: WslFacts) {
             self.lock().wsl = wsl;
+        }
+
+        /// The account sets `name` to `value` (`setx`, System Properties).
+        pub(crate) fn set_variable(&self, name: &str, value: &str) {
+            let mut state = self.lock();
+            state.variables.retain(|(held, _)| held != name);
+            state.variables.push((name.to_owned(), value.into()));
         }
 
         /// From now on every walk stops at its first file question until [`Self::release`].
@@ -717,6 +768,7 @@ pub(crate) mod tests {
 
     struct FakeEnvironment {
         path: OsString,
+        variables: Vec<(String, OsString)>,
         files: Vec<PathBuf>,
         gate: Arc<(Mutex<bool>, Condvar)>,
         asked: Arc<Mutex<Vec<PathBuf>>>,
@@ -724,7 +776,13 @@ pub(crate) mod tests {
 
     impl ShellEnvironment for FakeEnvironment {
         fn var_os(&self, key: &str) -> Option<OsString> {
-            (key == "PATH").then(|| self.path.clone())
+            if key == "PATH" {
+                return Some(self.path.clone());
+            }
+            self.variables
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
         }
 
         fn is_file(&self, path: &Path) -> bool {
@@ -743,6 +801,7 @@ pub(crate) mod tests {
             let state = self.lock();
             Box::new(FakeEnvironment {
                 path: std::env::join_paths(&state.path).unwrap(),
+                variables: state.variables.clone(),
                 files: state.files.clone(),
                 gate: Arc::clone(&self.gate),
                 asked: Arc::clone(&state.asked),
@@ -914,6 +973,36 @@ pub(crate) mod tests {
         assert_eq!(facts.generation, second);
         assert_eq!(facts.wsl, distributions);
         assert_eq!(facts.git, Some(bin(git)));
+    }
+
+    /// RED (T-FRESH-FACTS) — **an agent folder the account sets after launch is read by the next
+    /// walk**, beside the rows, out of the same environment.
+    ///
+    /// MUTATION (observed red): `walk` publishing `AgentHomes::default()` — the second walk
+    /// reports no `CODEX_HOME`.
+    #[test]
+    fn every_walk_reads_the_agent_folders_again() {
+        let machine = FakeMachine::with_path(&[bin_dir()]);
+        let (lane, wakes, _) = lane(machine.clone());
+        let rows = [row("rg", "rg.exe")];
+        let first = lane.request(request(&rows, Trigger::Launch));
+        let facts = answers_through(lane, &wakes, first)
+            .facts
+            .expect("a walk publishes the machine facts");
+        assert_eq!(facts.agent_homes, AgentHomes::default());
+
+        machine.set_variable("CODEX_HOME", r"D:\代理\codex home");
+        let second = lane.request(request(&rows, Trigger::Environment));
+        let facts = answers_through(lane, &wakes, second)
+            .facts
+            .expect("the second walk publishes its facts");
+        assert_eq!(
+            facts.agent_homes,
+            AgentHomes::in_environment(
+                &|name| (name == "CODEX_HOME").then(|| OsString::from(r"D:\代理\codex home"))
+            ),
+            "the variable set after the first walk is in the second walk's facts"
+        );
     }
 
     /// RED — **requests made while a walk is out are answered by one later walk, and that is
@@ -1130,6 +1219,64 @@ pub(crate) mod tests {
     ///
     /// MUTATION (observed red): `WalkOut::drop` returning at once — no death is reported and the
     /// next request is never served (the worker flag stays set).
+    /// RED (T-FRESH-FACTS round 2) — **a walk that died is walked again once, and only once.**
+    ///
+    /// MUTATION (observed red): `request_after_death` answering `None` at once (the death
+    /// ignored) — no walk answers in the dead one's place.
+    #[test]
+    fn a_walk_that_died_is_walked_again_once() {
+        struct DiesOnce(FakeMachine, Arc<Mutex<bool>>);
+        impl Machine for DiesOnce {
+            fn environment(
+                &self,
+                ctx: &WorkerCtx,
+                note: &dyn Fn(&str),
+            ) -> Box<dyn ShellEnvironment> {
+                let mut first = self.1.lock().unwrap();
+                if *first {
+                    *first = false;
+                    drop(first);
+                    panic!("the walk dies on purpose");
+                }
+                self.0.environment(ctx, note)
+            }
+            fn wsl(&self) -> WslFacts {
+                self.0.wsl()
+            }
+        }
+        let machine = FakeMachine::with_path(&[bin_dir()]);
+        machine.set_variable("CODEX_HOME", r"D:\代理\codex");
+        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::new(
+            DiesOnce(machine, Arc::new(Mutex::new(true))),
+            |_: &str| {},
+        )));
+        let (woke, wakes) = mpsc::channel();
+        let woke = Mutex::new(woke);
+        lane.install_wake(move || {
+            let _ = woke.lock().unwrap().send(());
+        });
+        let rows = [row("rg", "rg.exe")];
+        let dead = lane.request(request(&rows, Trigger::Launch));
+        assert_eq!(death_reported(lane, &wakes, dead), Some(dead));
+        let again = lane
+            .request_after_death(dead, request(&rows, Trigger::AfterDeath))
+            .expect("the dead walk is walked again");
+        let facts = answers_through(lane, &wakes, again)
+            .facts
+            .expect("the walk in its place publishes the facts the dead one never did");
+        assert_eq!(facts.generation, again);
+        assert_eq!(
+            lane.request_after_death(dead, request(&rows, Trigger::AfterDeath)),
+            None,
+            "the same death is not walked twice"
+        );
+        assert_eq!(
+            lane.request_after_death(again, request(&rows, Trigger::AfterDeath)),
+            None,
+            "nor is the walk asked for after a death, if it dies too"
+        );
+    }
+
     #[test]
     fn a_walk_that_dies_is_reported_and_the_next_request_is_answered() {
         struct Dies(FakeMachine, Arc<Mutex<bool>>);

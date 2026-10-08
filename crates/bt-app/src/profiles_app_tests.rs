@@ -2942,6 +2942,7 @@ fn a_recorded_powershell_block_runs_once_on_one_enter() {
         } else {
             panic!("{shell}: no recording of what a shell does with {sent:?}");
         };
+        crate::test_support::install_this_machines_names();
         let mut replay =
             DualPlaneSession::new(NonZeroU32::new(120).unwrap(), NonZeroU32::new(40).unwrap());
         let executed = |session: &DualPlaneSession| {
