@@ -8,7 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
-- A pane's files card, and a files column opened from it, show the folder the pane was opened in until its shell reports one, instead of your home folder — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
+- Before a pane's shell reports its folder, everything that offers "where this pane is" uses the folder the pane was opened in: the pane's files card and a files column opened from it (which showed your home folder), the files column's folder menu, the place hints in the command palette, and the folder picker of New terminal in folder… in the pane menu and the new-tab menu — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
 
 ## 0.4.7-preview — 2026-10-06
 

@@ -8860,48 +8860,66 @@ mod tests {
         shell.shutdown().unwrap();
     }
 
-    /// RED (issue #28) — **the reporter's configuration through the real PowerShell 7**: a
-    /// `pwsh.exe` row with Starting directory = a fixed folder and `-NoLogo` as its only argument,
-    /// composed as a birth composes it (`-NoLogo -NoExit -Command <loader>`). The files card shows
-    /// the fixed folder before the first prompt, the reported folder after it, and the subfolder
-    /// after `cd`.
+    /// RED (issue #28) — **the reporter's configuration through a real PowerShell**: a PowerShell
+    /// row with Starting directory = a fixed folder and `-NoLogo` as its only argument, composed as
+    /// a birth composes it (`-NoLogo -NoExit -Command <loader>`). The files card shows the fixed
+    /// folder before the first prompt, the reported folder after it, and the subfolder after `cd`.
+    ///
+    /// Both editions, by the rule `bt-pty`'s `shell_integration_osc133` keeps: Windows PowerShell
+    /// is part of Windows and is never skipped, so this test cannot pass with no shell under it;
+    /// PowerShell 7 — the reporter's edition — is optional on a machine and is resolved the way the
+    /// product resolves it (`bt_pty::resolve_powershell_seven`), its arm skipped with a line on
+    /// stderr when there is none.
     ///
     /// MUTATION, observed red: `files_root_of` reads `DualPlaneSession::working_directory`
     /// instead of `standing_folder` — the birth row answers the home folder.
     #[cfg(windows)]
     #[test]
-    fn the_files_card_follows_a_powershell_7_pane_from_its_fixed_starting_folder() {
-        let Some(pwsh) = bt_platform::program_on_path(Path::new("pwsh.exe")) else {
-            eprintln!("pwsh.exe: not installed; skipped");
-            return;
-        };
-        let root = temp_dir("files-card-pwsh");
+    fn the_files_card_follows_a_powershell_pane_from_its_fixed_starting_folder() {
+        let windows_powershell =
+            bt_platform::program_on_path(Path::new(bt_pty::WINDOWS_POWERSHELL))
+                .expect("Windows PowerShell is part of Windows");
+        let mut editions = vec![windows_powershell];
+        match bt_pty::resolve_powershell_seven(&bt_pty::SystemShellEnvironment) {
+            Some(pwsh) => editions.push(PathBuf::from(pwsh)),
+            None => eprintln!(
+                "files card, PowerShell 7 arm skipped: pwsh.exe is not installed \
+                 (the product's own resolver found none)"
+            ),
+        }
+        let root = temp_dir("files-card-powershell");
         std::fs::create_dir_all(&root).unwrap();
         let integration = root.join(SCRIPT_FILE_PS1);
         std::fs::write(&integration, SCRIPT_PS1).unwrap();
-        let arguments =
-            composed_powershell_arguments(&pwsh, &os_words(&["-NoLogo"]), &integration, None)
-                .expect("a `-NoLogo` row receives the loader");
-        assert_eq!(
-            arguments[..3],
-            os_words(&["-NoLogo", "-NoExit", "-Command"])
-        );
-        files_card_follows_a_real_shell_from_its_fixed_starting_folder(|hygiene, directory| {
-            let hygiene = hygiene.with_powershell_shape(test_shell_shape(&pwsh, &arguments));
-            bt_pty::test_shell::TestShell::spawn_shell_in(
-                hygiene,
-                pwsh.clone(),
-                &arguments,
-                &|| last_resort_arguments(false),
-                &[],
-                bt_pty::PtySize::cells(
-                    std::num::NonZeroU16::new(120).unwrap(),
-                    std::num::NonZeroU16::new(30).unwrap(),
-                ),
-                directory,
+        for program in editions {
+            let arguments = composed_powershell_arguments(
+                &program,
+                &os_words(&["-NoLogo"]),
+                &integration,
+                None,
             )
-            .unwrap()
-        });
+            .expect("a `-NoLogo` row receives the loader");
+            assert_eq!(
+                arguments[..3],
+                os_words(&["-NoLogo", "-NoExit", "-Command"])
+            );
+            files_card_follows_a_real_shell_from_its_fixed_starting_folder(|hygiene, directory| {
+                let hygiene = hygiene.with_powershell_shape(test_shell_shape(&program, &arguments));
+                bt_pty::test_shell::TestShell::spawn_shell_in(
+                    hygiene,
+                    program.clone(),
+                    &arguments,
+                    &|| last_resort_arguments(false),
+                    &[],
+                    bt_pty::PtySize::cells(
+                        std::num::NonZeroU16::new(120).unwrap(),
+                        std::num::NonZeroU16::new(30).unwrap(),
+                    ),
+                    directory,
+                )
+                .unwrap()
+            });
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8909,7 +8927,7 @@ mod tests {
     /// the `PROMPT` a pane gives it, started in a fixed folder.
     ///
     /// MUTATION, observed red: the one named on
-    /// `the_files_card_follows_a_powershell_7_pane_from_its_fixed_starting_folder`.
+    /// `the_files_card_follows_a_powershell_pane_from_its_fixed_starting_folder`.
     #[cfg(windows)]
     #[test]
     fn the_files_card_follows_a_command_prompt_pane_from_its_fixed_starting_folder() {
