@@ -790,8 +790,17 @@ impl LedgerPane {
     }
 }
 
+/// **This machine's names, installed for a test** — what `main` installs before its first
+/// session (`host_answers::install`). Every fixture here that makes a session calls it first: a
+/// working-directory report reads the names (`bt_term::local_host_names`, which panics before an
+/// installation), and the same names again install as nothing, so every test may call it.
+pub(crate) fn install_this_machines_names() {
+    bt_term::install_host_names(crate::host_answers::this_machines_names());
+}
+
 /// One session fed real bytes, the way a pane's child writes them.
 pub(crate) fn wired() -> bt_term::DualPlaneSession {
+    install_this_machines_names();
     bt_term::DualPlaneSession::new(
         std::num::NonZeroU32::new(80).expect("a width"),
         std::num::NonZeroU32::new(8).expect("a height"),
@@ -956,6 +965,7 @@ pub(crate) struct PtyPresentationHarness {
 
 impl PtyPresentationHarness {
     pub(crate) fn new(columns: u32, rows: u32) -> Self {
+        install_this_machines_names();
         let session = DualPlaneSession::new(
             NonZeroU32::new(columns).unwrap(),
             NonZeroU32::new(rows).unwrap(),
@@ -1144,6 +1154,7 @@ pub(crate) struct TwoPaneHarness {
 
 impl TwoPaneHarness {
     pub(crate) fn new(columns: u32, rows: u32) -> Self {
+        install_this_machines_names();
         let pane = || {
             let session = DualPlaneSession::new(
                 NonZeroU32::new(columns).unwrap(),
@@ -1385,6 +1396,7 @@ pub(crate) struct ResizeGateHarness {
 
 impl ResizeGateHarness {
     pub(crate) fn new(columns: u16, rows: u16) -> Self {
+        install_this_machines_names();
         let grid = grid_of(columns, rows);
         Self {
             session: DualPlaneSession::new(
@@ -2162,6 +2174,7 @@ pub(crate) fn cross_solve(seats: &seats::Seats) -> (SeatLayout, Option<seats::Fi
 }
 
 pub(crate) fn card_restore_fixture() -> LeafSession {
+    install_this_machines_names();
     let mut leaf = leaf_saying("");
     leaf.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
     leaf.grid = GridSize {
@@ -2290,6 +2303,7 @@ pub(crate) fn card_restore_settle(leaf: &mut LeafSession) {
 /// nothing here spawns a ConPTY, and the scrollback is still a real
 /// `DualPlaneSession`'s.
 pub(crate) fn leaf_saying(text: &str) -> LeafSession {
+    install_this_machines_names();
     let columns = NonZeroU32::new(40).unwrap();
     let rows = NonZeroU32::new(4).unwrap();
     let mut session = DualPlaneSession::with_quotas_and_cell_height(

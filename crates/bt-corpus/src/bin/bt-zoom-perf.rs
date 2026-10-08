@@ -81,6 +81,7 @@ impl From<RenderProbeSample> for RenderStats {
 }
 
 fn main() -> Result<()> {
+    bt_corpus::install_host_answers();
     let mut args = env::args().skip(1);
     let input_path = args
         .next()

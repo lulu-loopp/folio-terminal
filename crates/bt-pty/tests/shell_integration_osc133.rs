@@ -1,6 +1,6 @@
 //! The PowerShell half of shell integration, driven through a real ConPTY.
 //!
-//! `bt-term`'s `shell_integration_script.rs` already pins what
+//! `shell_integration_script.rs`, beside this file, already pins what
 //! `scripts/shell-integration/folio.ps1` *returns*: it calls the wrapped `prompt`
 //! by hand in a `-NonInteractive` host and reads the string back. That is a test of the
 //! script's arithmetic, and it cannot see the question these two ask, which is a
@@ -191,6 +191,9 @@ impl ShellProbe {
         let command = command.arg("-NoExit").arg("-Command").arg(startup);
         let pty = TestShell::spawn(command, PtySize::cells(columns, rows))
             .unwrap_or_else(|error| panic!("{shell} starts on a supported host: {error:?}"));
+        // Every session of this file is made here: the integration script's OSC 7 report reads
+        // the host names (`bt_term::local_host_names`, which panics before an installation).
+        bt_term::install_test_host_names();
         Self {
             pty,
             session: DualPlaneSession::new(

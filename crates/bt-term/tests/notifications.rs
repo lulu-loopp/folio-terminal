@@ -14,7 +14,10 @@ fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
 }
 
+/// Every session of this file: the test host names installed first, because an OSC 7 report
+/// reads them (`bt_term::local_host_names`).
 fn session() -> DualPlaneSession {
+    bt_term::install_test_host_names();
     DualPlaneSession::new(nz(80), nz(8))
 }
 

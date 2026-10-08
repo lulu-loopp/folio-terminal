@@ -138,8 +138,7 @@ A same-layer or upward edge needs a row in
 `scripts/ci/crate-edge-exemptions.tsv` (from, to, kind, ledger row, reason).
 Dev-dependencies are not layer edges and are listed, not judged: they are
 not in the shipped graph, and Cargo allows them in both directions —
-`bt-term` and `bt-pty` each name the other as one, and so do `bt-platform`
-and `bt-pty`.
+`bt-platform` and `bt-pty` each name the other as one.
 It also fails on a first-party crate with no layer row, a layer row naming no
 crate, an exemption whose edge is gone or now goes down, an exemption that is
 not at the merge base, and zero crates read. A new crate gets its layer row in
@@ -159,8 +158,7 @@ The clock guard (gate G3, `clock-guard` in `logic`): `scripts/ci/check-clock-gua
 runs `crates/bt-source/tests/clock_guard.rs`, which refuses `std::time::Instant`
 and `std::time::SystemTime` in every spelling (qualified, flat or nested `use`,
 glob, alias) in the product code of an explicit source set — the library crates
-G1 checks except `bt-platform` (whose admission vocabulary, the part a browser
-build reads, is `bt-effects`' since CC-3), `vendor/vte`, and
+G1 checks, `vendor/vte`, and
 `vendor/alacritty_terminal` without `event_loop` and `tty`.
 Those crates read time through `web_time`, which is `std::time` on every native
 target. The script's header names the set and what is out of it; it refuses a

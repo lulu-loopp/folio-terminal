@@ -4,5 +4,4 @@
 # or now goes down a layer (the change that removes the edge deletes the row), and on a row that is
 # not at the merge base with origin/main.
 from	to	kind	ledger	reason
-bt-term	bt-platform	normal	D-14	the resample pool's thread priority (set_current_thread_priority), resolved_for_a_door in session::verify_path, and host_names; the file-read ledger moved to bt-effects (CC-3); recorded debt until CC-4 installs these from the host and the edge goes
-bt-term	bt-math	normal	D-15	session.rs, inline_image::decode_svg_bytes, the MathEngine re-export and the bt-repaint-oracle binary use the math crate; recorded debt until the composition layer is designed
+bt-term	bt-math	normal	D-15	session.rs, inline_image::decode_svg_bytes and the MathEngine re-export use the math crate; recorded debt until the composition layer is designed

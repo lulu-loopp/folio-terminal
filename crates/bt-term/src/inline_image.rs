@@ -257,6 +257,12 @@ fn lanczos3_kernel(x: f32) -> f32 {
 /// change. A test binary is not a product, but it is a machine with other work
 /// on it, which is exactly what the band is for.
 ///
+/// **The band is the host's to say** (`crate::host`): every thread of the pool
+/// runs the hook the host installed with
+/// [`install_pool_thread_start`](crate::install_pool_thread_start) before it
+/// takes any work, and Folio's desktop build installs the step below normal. A
+/// host that installed none gets threads that run no hook.
+///
 /// Built once, on the first pass big enough to want it — see
 /// [`worth_the_machine`], which is why a program that never resamples anything
 /// large never starts these threads at all. A pool that cannot be built is not
@@ -264,16 +270,20 @@ fn lanczos3_kernel(x: f32) -> f32 {
 /// which is what it did before this ruling.
 fn resample_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .thread_name(|index| format!("bt-image-resample-{index}"))
-            .start_handler(|_| {
-                bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::BelowNormal);
-            })
-            .build()
-            .ok()
-    })
-    .as_ref()
+    POOL.get_or_init(|| build_resample_pool(crate::host::pool_thread_start()))
+        .as_ref()
+}
+
+/// The resample pool, its threads named and each running `start` first when there is one.
+fn build_resample_pool(start: Option<fn()>) -> Option<rayon::ThreadPool> {
+    let builder =
+        rayon::ThreadPoolBuilder::new().thread_name(|index| format!("bt-image-resample-{index}"));
+    match start {
+        Some(start) => builder.start_handler(move |_| start()),
+        None => builder,
+    }
+    .build()
+    .ok()
 }
 
 /// Whether a pass is big enough to be worth waking other cores for.
@@ -1500,9 +1510,9 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// stays rejected.
 ///
 /// A non-empty authority is accepted only when it is `localhost` or one of `local_hosts`, this
-/// machine's own names ([`local_host_names`]). Anything else is a remote share
-/// (`file://server/share/a.png`), which no local read may follow. Callers that must not honour a
-/// hostname at all pass an empty list.
+/// machine's own names ([`local_host_names`](crate::local_host_names)). Anything else is a
+/// remote share (`file://server/share/a.png`), which no local read may follow. Callers that must
+/// not honour a hostname at all pass an empty list.
 ///
 /// **This one accepts a POSIX root as well as a drive letter**, and that is what an OSC 7 report
 /// from a shell running inside WSL looks like: `file:///home/alice/src`. The directory a shell is
@@ -1533,21 +1543,6 @@ pub fn file_uri_to_local_path(uri: &str, local_hosts: &[String]) -> Option<PathB
         bt_transcript::paths::Rooting::DriveOrPosixRoot,
         bt_transcript::paths::Spelling::EncodedOrVerbatim,
     )
-}
-
-/// This machine's names — the authorities a `file://` URI may carry besides none and `localhost`.
-///
-/// **Asked of the operating system through [`bt_platform::host_names`]**, never of an environment
-/// variable (B-AUDIT-046 TRM-3). This used to read `COMPUTERNAME`, which exists only on Windows:
-/// on a Mac it answered nothing, so every OSC 7 of the form `file://<host>/path` — fish's own
-/// report, Apple's `zshrc_Apple_Terminal`, `vte.sh` — was taken for a remote share and the pane
-/// forgot its directory.
-///
-/// Read once: a machine does not rename itself inside one terminal session, and the OSC 7 path
-/// runs on the event thread.
-pub fn local_host_names() -> &'static [String] {
-    static LOCAL_HOSTS: OnceLock<Vec<String>> = OnceLock::new();
-    LOCAL_HOSTS.get_or_init(bt_platform::host_names)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2340,6 +2335,60 @@ mod tests {
     }
 
     use super::*;
+
+    /// The threads a start hook ran on, in [`a_pool_thread_runs_its_start_hook_and_a_bare_one_runs_none`].
+    static STARTED_ON: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+        std::sync::Mutex::new(Vec::new());
+
+    fn record_the_starting_thread() {
+        STARTED_ON.lock().unwrap().push(std::thread::current().id());
+    }
+
+    /// RED (CC-4) — **every thread of the resample pool runs the start hook it was built with,
+    /// before its first work; a pool built with none builds, and runs none.**
+    ///
+    /// The hook is the host's (`crate::host`): Folio's desktop build puts the thread in the band
+    /// below normal, and a browser build installs nothing.
+    ///
+    /// MUTATION: drop the `start_handler` arm of `build_resample_pool` — the hooked pool's
+    /// threads record nothing and the second assertion goes red. Call the hook from the bare arm
+    /// too (a stand-in that always installs one) and the last assertion goes red.
+    #[test]
+    fn a_pool_thread_runs_its_start_hook_and_a_bare_one_runs_none() {
+        let pool = build_resample_pool(Some(record_the_starting_thread)).expect("the pool builds");
+        let workers: std::collections::HashSet<_> = pool
+            .broadcast(|_| std::thread::current().id())
+            .into_iter()
+            .collect();
+        assert_eq!(
+            workers.len(),
+            pool.current_num_threads(),
+            "one id per thread"
+        );
+        let started: std::collections::HashSet<_> =
+            STARTED_ON.lock().unwrap().iter().copied().collect();
+        assert_eq!(
+            started, workers,
+            "each of the pool's threads ran the hook, and only they"
+        );
+        assert!(
+            pool.broadcast(|_| std::thread::current().name().map(ToOwned::to_owned))
+                .iter()
+                .all(|name| name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("bt-image-resample-"))),
+            "the threads keep the lane's name"
+        );
+
+        let before = STARTED_ON.lock().unwrap().len();
+        let bare = build_resample_pool(None).expect("a pool with no hook builds");
+        bare.broadcast(|_| ());
+        assert_eq!(
+            STARTED_ON.lock().unwrap().len(),
+            before,
+            "with no hook, nothing ran"
+        );
+    }
 
     // 1x1 opaque red PNG.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";

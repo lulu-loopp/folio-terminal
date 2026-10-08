@@ -80,6 +80,7 @@ mod handoff_lane;
 mod hang_watch;
 mod hex_peek;
 mod highlight;
+mod host_answers;
 mod i18n;
 mod icons;
 mod ime_outbound;
@@ -2298,7 +2299,7 @@ fn run_path_verify_worker(
     mut wake: impl FnMut(),
 ) {
     while let Ok(PathWorkerRequest { leaf, path }) = task_rx.recv() {
-        let verdict = bt_term::verify_path(&path);
+        let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
         if result_tx
             .send(MathWorkerResult {
                 leaf,
@@ -73080,6 +73081,10 @@ fn main() -> Result<()> {
     // first turn. Below the six argv doors, whose processes never have a window, and above the
     // hand-over, which is this phase's one wait (§5.3 row 18).
     bt_platform::admission::enter_window_thread();
+    // **The machine's answers for `bt-term`, before anything here can make a session**
+    // (`host_answers`): its names and the resample pool's priority band. Every session is made by
+    // the event loop below, and a session's first working-directory report reads the names.
+    host_answers::install();
     // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
     // taken shared here, before the data directory is resolved (which may move
     // it), before settings, sidecars and the hand-over below; then one look at
@@ -79843,7 +79848,7 @@ mod printed_path_provenance_tests {
         let file = directory.join("notes.md");
         std::fs::write(&file, b"x").expect("a file this test owns");
 
-        let verdict = bt_term::verify_path(&file);
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists && !verdict.directory);
         let target = verified_target_of(Some(&verdict));
         let resolved = target
@@ -79891,7 +79896,7 @@ mod printed_path_provenance_tests {
             "the door refuses a parent step, which is why it has to be folded before it"
         );
 
-        let verdict = bt_term::verify_path(&printed);
+        let verdict = bt_term::verify_path(&printed, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists && verdict.directory);
         let target = verified_target_of(Some(&verdict));
         let resolved = target.resolved.clone().expect("a folder that is there");
@@ -79925,7 +79930,7 @@ mod printed_path_provenance_tests {
         let file = directory.join(name);
         std::fs::write(&file, b"x").expect("a file this test owns");
 
-        let verdict = bt_term::verify_path(&file);
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists);
         let target = verified_target_of(Some(&verdict));
         let resolved = target.resolved.clone().expect("a name that is there");
@@ -79950,13 +79955,17 @@ mod printed_path_provenance_tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// PIN (closure review r6, B-2) — **the open door is asked about the name `main` asked it
-    /// about.**
+    /// GUARD (closure review r6, B-2; re-pointed by CC-4) — **the open door is asked about the name
+    /// `main` asked it about, and the resolved name is the doors' own transform.**
     ///
     /// `main`'s Windows `open_local_path` reads `names_a_program` off the *printed* spelling —
     /// there is no `canonicalize` in that door at all. For one round the branch handed it the
     /// resolved name instead, which is a different question about a symlink and a refusal `main`
-    /// does not make.
+    /// does not make. Its subject is how `Runtime::activate_hyperlink` and
+    /// `run_path_verify_worker` are written (CONVENTIONS, "A test pins behaviour by running it").
+    ///
+    /// MUTATION: hand `bt_term::verify_path` a raw `canonicalize` in `run_path_verify_worker`
+    /// instead of `bt_platform::resolved_for_a_door`, and the last assertion goes red.
     #[test]
     fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
         let press = method_body("Runtime", "activate_hyperlink");
@@ -79967,16 +79976,12 @@ mod printed_path_provenance_tests {
             .find("self.reveal_verified(&path, facts);")
             .expect("and so is the reveal, which takes the resolved name off the target");
         assert!(open < reveal, "the file arm stands before the folder arm");
-        // And the resolved name is the doors' own transform, not a second reading of it.
-        let door = ["resolved_for_a_", "door("].concat();
+        // And the resolved name is the doors' own transform, not a second reading of it: the
+        // path-verification lane hands `bt_term::verify_path` the door's own function as its
+        // resolver (CC-4; `bt-term` names no platform function itself).
+        let door = ["bt_platform::resolved_for_a_", "door"].concat();
         assert!(
-            !found_in_package(
-                "bt-term",
-                needle!(door.as_str()),
-                View::Raw,
-                Scope::Module("crate::session".to_owned()),
-            )
-            .is_empty(),
+            free_fn_body("run_path_verify_worker").contains(&door),
             "the worker produces the door's input with the door's own function"
         );
     }

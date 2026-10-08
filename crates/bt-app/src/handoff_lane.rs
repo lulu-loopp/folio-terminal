@@ -496,7 +496,10 @@ mod tests {
         });
         std::fs::create_dir_all(&program).expect("a scratch program");
         let missing = scratch.join("gone.md");
-        let facts = crate::verified_target_of(Some(&bt_term::verify_path(&program)));
+        let facts = crate::verified_target_of(Some(&bt_term::verify_path(
+            &program,
+            &bt_platform::resolved_for_a_door,
+        )));
         assert!(facts.exists, "the verifier saw the fixture");
 
         let mut lane = HandoffLane::spawn(|| {}).expect("the lane starts");

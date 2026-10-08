@@ -26,7 +26,11 @@
 //!
 //! **Nothing here touches the user's own shell**: `bt_pty::test_shell` starts it without the
 //! user's startup files, with a line editor that saves no history and a temporary home.
+//!
+//! Its shells are Windows PowerShell and zsh, macOS's own default shell; a Linux machine is
+//! promised neither, so the file is built on Windows and macOS.
 
+#![cfg(any(windows, target_os = "macos"))]
 #![allow(clippy::disallowed_methods)]
 
 use std::{
@@ -86,6 +90,8 @@ impl Probe {
         let rows = NonZeroU16::new(ROWS).unwrap();
         let pty = TestShell::spawn(command, PtySize::cells(columns, rows))
             .expect("the shell starts on a supported host");
+        // Every session of this file is made here: the shell's OSC 7 report reads the host names.
+        bt_term::install_test_host_names();
         let mut session = DualPlaneSession::new(
             NonZeroU32::new(u32::from(COLUMNS)).unwrap(),
             NonZeroU32::new(u32::from(ROWS)).unwrap(),

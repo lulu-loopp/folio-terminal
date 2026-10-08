@@ -13,6 +13,7 @@ const ROWS: u16 = 24;
 const FAMILY: &str = "👨\u{200d}👩\u{200d}👧\u{200d}👦";
 
 fn main() -> Result<(), Box<dyn Error>> {
+    bt_corpus::install_host_answers();
     let width_script = r#"
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8
