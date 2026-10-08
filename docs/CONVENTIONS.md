@@ -251,6 +251,11 @@ preparation worker's `PreparationEffects` is the shape). Reading source is allow
 window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
 guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
 
+### A test never prints an environment (T-TEST-ENV-LEAK)
+
+A test never prints an environment or any value from it: a failure names the differing keys only, and a
+secret-shaped key (one holding `KEY`, `TOKEN`, `SECRET` or `PASS`) as `<redacted>`.
+
 ### Where a test lives (K1)
 
 A test lives beside what it tests. A test written in a module's own scope is in that module's

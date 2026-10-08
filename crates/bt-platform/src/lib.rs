@@ -5403,6 +5403,8 @@ mod probe_child_tests {
 
     /// The describing helper: it prints the command line it was given, its
     /// environment in the order it was handed over, and its working directory.
+    /// A variable's name and value are separated by a tab, which their
+    /// escaped spellings never hold.
     #[test]
     fn helper_describes_itself() {
         use windows::Win32::System::Environment::GetCommandLineW;
@@ -5413,7 +5415,7 @@ mod probe_child_tests {
         let line = unsafe { GetCommandLineW().to_string() }.expect("a UTF-16 command line");
         println!("twin: line {line:?}");
         for (name, value) in std::env::vars_os() {
-            println!("twin: env {name:?}={value:?}");
+            println!("twin: env {name:?}\t{value:?}");
         }
         println!(
             "twin: dir {:?}",
@@ -5422,90 +5424,313 @@ mod probe_child_tests {
         std::io::stdout().flush().expect("flush the description");
     }
 
+    /// What a describing helper said about itself. It has no `Debug`, so a
+    /// failing assertion cannot print the environment it holds; [`differences`]
+    /// is the only way to show one against another.
+    #[derive(PartialEq)]
+    struct Described {
+        line: String,
+        /// `(name, value)` as the helper spelled them, in its order.
+        environment: Vec<(String, String)>,
+        directory: String,
+    }
+
+    impl Described {
+        fn read(stdout: &[u8]) -> Self {
+            let mut described = Self {
+                line: String::new(),
+                environment: Vec::new(),
+                directory: String::new(),
+            };
+            for line in String::from_utf8_lossy(stdout).lines() {
+                if let Some(command_line) = line.strip_prefix("twin: line ") {
+                    command_line.clone_into(&mut described.line);
+                } else if let Some(variable) = line.strip_prefix("twin: env ") {
+                    let (name, value) = variable
+                        .split_once('\t')
+                        .expect("a described variable holds a tab");
+                    described
+                        .environment
+                        .push((name.to_owned(), value.to_owned()));
+                } else if let Some(directory) = line.strip_prefix("twin: dir ") {
+                    directory.clone_into(&mut described.directory);
+                }
+            }
+            described
+        }
+
+        fn has(&self, name: &str) -> bool {
+            let spelled = format!("{name:?}");
+            self.environment
+                .iter()
+                .any(|(known, _)| known.eq_ignore_ascii_case(&spelled))
+        }
+    }
+
+    /// A variable's name as a failure may print it: a name shaped like a
+    /// secret's is `<redacted>`.
+    fn shown_name(name: &str) -> &str {
+        let upper = name.to_uppercase();
+        if ["KEY", "TOKEN", "SECRET", "PASS"]
+            .iter()
+            .any(|shape| upper.contains(shape))
+        {
+            "<redacted>"
+        } else {
+            name
+        }
+    }
+
+    /// How `first` and `second` differ, one line each, empty when they are
+    /// the same. The command lines and working directories are the test's
+    /// own and are shown; of the environment only names are, never a value:
+    /// a name one side lacks, `<name>: differs` for a value, and whether the
+    /// order differs.
+    fn differences(first: (&str, &Described), second: (&str, &Described)) -> Vec<String> {
+        let ((first_name, first), (second_name, second)) = (first, second);
+        let mut found = Vec::new();
+        if first.line != second.line {
+            found.push(format!(
+                "command lines: {first_name} {} / {second_name} {}",
+                first.line, second.line
+            ));
+        }
+        if first.directory != second.directory {
+            found.push(format!(
+                "working directories: {first_name} {} / {second_name} {}",
+                first.directory, second.directory
+            ));
+        }
+        let value = |described: &Described, name: &str| {
+            described
+                .environment
+                .iter()
+                .find(|(known, _)| known == name)
+                .map(|(_, value)| value.clone())
+        };
+        for (name, held) in &first.environment {
+            match value(second, name) {
+                None => found.push(format!("only in {first_name}: {}", shown_name(name))),
+                Some(other) if &other != held => {
+                    found.push(format!("{}: differs", shown_name(name)));
+                }
+                Some(_) => {}
+            }
+        }
+        for (name, _) in &second.environment {
+            if value(first, name).is_none() {
+                found.push(format!("only in {second_name}: {}", shown_name(name)));
+            }
+        }
+        let names = |described: &Described, other: &Described| -> Vec<String> {
+            described
+                .environment
+                .iter()
+                .map(|(name, _)| name.clone())
+                .filter(|name| value(other, name).is_some())
+                .collect()
+        };
+        if names(first, second) != names(second, first) {
+            found.push("the environment's order differs".to_owned());
+        }
+        found
+    }
+
+    /// The probe twin's arguments: what the probe sites pass, and the
+    /// shapes that are hard to quote.
+    const TWIN_ARGUMENTS: [&str; 16] = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$m = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | \
+         Select-Object -First 1; if ($m) { $m.Version.ToString() } else { '' }; \
+         (Get-ExecutionPolicy).ToString()",
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+         $PROFILE.CurrentUserCurrentHost",
+        "Write-Output \"a \\\"quoted\\\" word\" ; $x = \"{0}\" -f 'y'",
+        "-C",
+        r"C:\Program Files\a path\with space\",
+        "core.quotepath=false",
+        "--format=%H%x00%s",
+        "",
+        "tab\there",
+        r#"back\\"slash"#,
+        r"trailing\\",
+        "na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1} \u{4e2d}\u{6587}",
+        "\"",
+    ];
+
+    /// A describing helper started in `directory` with the twin's arguments,
+    /// one variable changed and one removed in another case.
+    fn twin(directory: &std::path::Path) -> std::process::Command {
+        let mut command = quiet_command(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "probe_child_tests::helper_describes_itself",
+                "--nocapture",
+                "--",
+            ])
+            .args(TWIN_ARGUMENTS)
+            .env(HELPER_MODE, "describe")
+            .env("FOLIO_PROBE_TWIN", "na\u{ef}ve \u{3a9} \u{4e2d}\u{6587}")
+            .env_remove("psmodulepath")
+            .current_dir(directory);
+        command
+    }
+
+    /// What the standard library's start of `command` describes.
+    fn described_by_std(mut command: std::process::Command) -> Described {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        Described::read(
+            &command
+                .output()
+                .expect("the standard library's twin")
+                .stdout,
+        )
+    }
+
+    /// The comparing helper: it starts the twin once through the standard
+    /// library and once through the probe, and prints `compare: same` or one
+    /// `compare:` line per difference. Both starts build the child's block
+    /// from this process's environment, so they run here, in a process of
+    /// their own: in the test process another test changes that environment
+    /// between the two (the media stack a video test loads resolves a
+    /// drive-relative path, and Windows adds that drive's `=C:` variable).
+    #[test]
+    fn helper_compares_the_twins() {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("compare") {
+            return;
+        }
+        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join("probe twin \u{4e2d}\u{6587}");
+        std::fs::create_dir_all(&directory).expect("the twin's working directory");
+        let by_std = described_by_std(twin(&directory));
+        let by_probe = Described::read(
+            &spawn_probe(&mut twin(&directory), HELPER_STDIO)
+                .expect("the probe's twin")
+                .wait_with_output()
+                .expect("collect the probe's twin")
+                .stdout,
+        );
+        let mut found = Vec::new();
+        if !by_std.has("FOLIO_PROBE_TWIN") {
+            found.push("the standard library's child lacks the change".to_owned());
+        }
+        if by_std.has("psmodulepath") {
+            found.push("the standard library's child keeps the removed variable".to_owned());
+        }
+        found.extend(differences(
+            ("the probe's child", &by_probe),
+            ("the standard library's child", &by_std),
+        ));
+        if found.is_empty() {
+            println!("compare: same");
+        }
+        for difference in found {
+            println!("compare: {difference}");
+        }
+        std::io::stdout().flush().expect("flush the comparison");
+    }
+
     /// **The probe's child is given exactly what the standard library would
     /// give it**: the same command line for the arguments the probe sites
     /// pass (PowerShell commands with quotes, `$`, braces and semicolons; Git
     /// options; paths with spaces and trailing backslashes; empty, tabbed and
     /// mixed-script arguments), the same environment after a change and a
-    /// removal spelled in another case, and the same working directory.
+    /// removal spelled in another case, and the same working directory. The
+    /// comparison runs in a helper process of its own
+    /// ([`helper_compares_the_twins`]); a failure names what differs and
+    /// never an environment's value.
     ///
     /// RED mutation: in `probe_command_line`, drop the extra backslash before
     /// an escaped quote (`backslashes + 1` → `backslashes`); the two command
     /// lines differ.
     #[test]
     fn a_probe_s_child_receives_what_the_standard_library_would_give_it() {
-        const ARGUMENTS: [&str; 16] = [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$m = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | \
-             Select-Object -First 1; if ($m) { $m.Version.ToString() } else { '' }; \
-             (Get-ExecutionPolicy).ToString()",
-            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
-             $PROFILE.CurrentUserCurrentHost",
-            "Write-Output \"a \\\"quoted\\\" word\" ; $x = \"{0}\" -f 'y'",
-            "-C",
-            r"C:\Program Files\a path\with space\",
-            "core.quotepath=false",
-            "--format=%H%x00%s",
-            "",
-            "tab\there",
-            r#"back\\"slash"#,
-            r"trailing\\",
-            "na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1} \u{4e2d}\u{6587}",
-            "\"",
-        ];
-        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tb-tests")
-            .join("probe twin \u{4e2d}\u{6587}");
-        std::fs::create_dir_all(&directory).expect("the twin's working directory");
-        let twin = || {
-            let mut command = quiet_command(std::env::current_exe().expect("test executable"));
-            command
-                .args([
-                    "--exact",
-                    "probe_child_tests::helper_describes_itself",
-                    "--nocapture",
-                    "--",
-                ])
-                .args(ARGUMENTS)
-                .env(HELPER_MODE, "describe")
-                .env("FOLIO_PROBE_TWIN", "na\u{ef}ve \u{3a9} \u{4e2d}\u{6587}")
-                .env_remove("psmodulepath")
-                .current_dir(&directory);
-            command
-        };
-        let described = |stdout: &[u8]| -> Vec<String> {
-            String::from_utf8_lossy(stdout)
-                .lines()
-                .filter(|line| line.starts_with("twin: "))
-                .map(str::to_owned)
-                .collect()
-        };
-        let mut by_std = twin();
-        by_std
+        let mut compare = quiet_command(std::env::current_exe().expect("test executable"));
+        compare
+            .args([
+                "--exact",
+                "probe_child_tests::helper_compares_the_twins",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "compare")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let by_std = described(&by_std.output().expect("the standard library's twin").stdout);
-        let by_probe = described(
-            &spawn_probe(&mut twin(), HELPER_STDIO)
-                .expect("the probe's twin")
-                .wait_with_output()
-                .expect("collect the probe's twin")
-                .stdout,
-        );
+        let output = compare.output().expect("the comparing helper");
+        let verdict: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with("compare: "))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(verdict, ["compare: same"]);
+        assert!(output.status.success());
+    }
+
+    /// **A difference between two environments names keys, never a value,
+    /// and never a secret-shaped key.** Two describing children differ in a
+    /// planted `FAKE_SECRET_KEY` (present on one side, then present on both
+    /// with different values) and in an ordinary variable's mixed-script
+    /// value; the comparison's failure text holds the ordinary name, says
+    /// `<redacted>` for the secret one, and holds neither the secret's name
+    /// nor any planted value.
+    ///
+    /// RED mutation: in `differences`, print the values beside the name
+    /// (`"{}: differs"` → `"{}: differs ({held} / {other})"`), or make
+    /// `shown_name` return every name as it is; the planted value or name
+    /// appears in the failure text.
+    #[test]
+    fn a_differing_environment_is_reported_by_key_without_a_value() {
+        const SECRET: &str = "na\u{ef}ve-\u{4e2d}\u{6587}-planted-secret-value";
+        const OTHER_SECRET: &str = "\u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}-other-planted-value";
+        const PLAIN: &str = "plain-\u{4e2d}\u{6587}-first-value";
+        const OTHER_PLAIN: &str = "plain-\u{4e2d}\u{6587}-second-value";
+        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let child = |planted: &[(&str, &str)]| {
+            let mut command = twin(&directory);
+            for (name, value) in planted {
+                command.env(name, value);
+            }
+            described_by_std(command)
+        };
+        let without = child(&[("FOLIO_PROBE_PLAIN", PLAIN)]);
+        let with = child(&[("FOLIO_PROBE_PLAIN", PLAIN), ("FAKE_SECRET_KEY", SECRET)]);
+        let changed = child(&[
+            ("FOLIO_PROBE_PLAIN", OTHER_PLAIN),
+            ("FAKE_SECRET_KEY", OTHER_SECRET),
+        ]);
         assert!(
-            by_std.iter().any(|line| line.contains("FOLIO_PROBE_TWIN")),
-            "{by_std:#?}"
+            with.has("FAKE_SECRET_KEY"),
+            "the planted variable reached the child"
         );
-        assert!(
-            !by_std
-                .iter()
-                .any(|line| line.to_lowercase().contains("\"psmodulepath\"=")),
-            "{by_std:#?}"
-        );
-        assert_eq!(by_probe, by_std);
+        let added = differences(("the first child", &with), ("the second child", &without));
+        let altered = differences(("the first child", &with), ("the second child", &changed));
+        let text = [added.as_slice(), altered.as_slice()].concat().join("\n");
+        for never in [
+            "FAKE_SECRET_KEY",
+            SECRET,
+            OTHER_SECRET,
+            PLAIN,
+            OTHER_PLAIN,
+            "planted-secret-value",
+            "other-planted-value",
+            "first-value",
+            "second-value",
+        ] {
+            assert!(
+                !text.contains(never),
+                "a failure printed a planted name or value"
+            );
+        }
+        assert!(added.contains(&"only in the first child: <redacted>".to_owned()));
+        assert!(altered.contains(&"<redacted>: differs".to_owned()));
+        assert!(altered.contains(&"\"FOLIO_PROBE_PLAIN\": differs".to_owned()));
     }
 
     /// A relative program would be looked up in the working directory, so it
