@@ -48,6 +48,11 @@ Nothing yet.
 
 ### Fixed
 
+- In Settings ▸ About, the Version row says "1 minute ago" (and "1 hour ago", "1 day ago") rather than "1 minutes ago", and an available update's version no longer runs into "What's new ↗".
+- On Windows, Settings ▸ About ▸ Uninstall no longer stops with "A Folio instance is running" after Folio has quit: it waits until the quitting Folio has fully gone, then removes Folio.
+- On Windows, Settings ▸ About ▸ Uninstall with "Also remove settings and data" on no longer refuses with "A process holds Folio data" naming `diagnostics.log`: the uninstaller was holding Folio's log itself. It now removes your settings and data as asked.
+- On Windows, `uninstall.cmd` answered `n` no longer says the local data folder was refused with "Access is denied" while removing it anyway, and it prints "Removal continues after this window closes." again.
+- The zip's `uninstall.cmd` no longer runs pieces of its own lines when the console uses UTF-8, and an `n` answer handed to it from a file or a pipe now removes settings and data as asked.
 - "Enable via $PROFILE" is offered only when your other PowerShell windows would load the profile too; on a machine whose policy refuses scripts it offers the command that allows them, so enabling it can no longer make every PowerShell window print an error.
 - Undo, removing the `$PROFILE` line and uninstalling also remove the profile file and folder Folio created and the one backup copy it kept; a file you had, or added to, stays.
 - Uninstalling no longer stops because a PowerShell was slow to start; it says which profile it could not check and goes on, and with "remove settings and data" on, nothing is deleted unless every other step succeeded.
@@ -58,6 +63,7 @@ Nothing yet.
 - A click on a pane's title-bar controls while the pane is moving lands only on a control that is drawn there.
 - In a narrow Settings window, a button whose edge is cut off no longer answers a click on the space beside it.
 - Commands Folio runs to learn about the machine no longer leave helper processes behind after a timeout or after Folio exits.
+- On Windows, ending Folio from outside (Task Manager, `Stop-Process`) or a crash no longer leaves behind a paused command that Folio had just started to learn about the machine.
 - PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
 - PowerShell's integration loader now keeps its PSReadLine reflection state process-wide and silently leaves the shell unchanged if its owned script cannot be read.
 - Folio left running now learns about a new version within a day.
@@ -126,6 +132,9 @@ Nothing yet.
 - About → Version says what an update is doing after the download: Verifying,
   then ready with Restart…, then Restarting…, instead of Downloading again or
   offering Update and restart for an update already downloaded.
+- Update and restart in About → Version now restarts Folio once the update is
+  downloaded and checked, instead of stopping at a second Restart button.
+  An update downloaded from the update card still asks before it restarts.
 - In Settings, Enter on About's buttons presses them, and when a focused
   button stops being pressable the focus moves to the nearest control before
   it on the page (after it when none is before) instead of staying on it with no
@@ -136,6 +145,12 @@ Nothing yet.
 
 ### Known issues
 
+- Windows, with PowerShell 7 installed from the Microsoft Store: if Folio is
+  ended from outside or crashes at the moment it starts that PowerShell to
+  learn about it, the PowerShell can stay behind, paused, until it is ended in
+  Task Manager. macOS: after a force quit or a crash, a command Folio had
+  started to learn about the machine finishes on its own instead of being
+  stopped.
 - When updating from 0.4.6 to any later version, a new version whose start
   could not be recorded (its record kept out by another program, or a folder
   made read-only) runs without saving what it changes until the next start or

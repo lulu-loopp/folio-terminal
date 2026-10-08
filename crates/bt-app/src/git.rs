@@ -55,7 +55,7 @@
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2127,10 +2127,7 @@ fn git_command(program: &Path, dir: &Path, arguments: &[&OsStr]) -> Command {
         .args(arguments)
         .env("LC_ALL", "C")
         .env("LANGUAGE", "")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("GIT_TERMINAL_PROMPT", "0");
     command
 }
 
@@ -2187,16 +2184,21 @@ enum GitChild {
 }
 
 impl GitChild {
-    fn spawn_product(command: &mut Command) -> io::Result<Self> {
+    fn spawn_product(command: &mut Command, stdio: bt_platform::ProbeStdio) -> io::Result<Self> {
         match git_hook_policy(command)? {
-            GitHookPolicy::Contained => bt_platform::spawn_probe(command).map(Self::Contained),
-            GitHookPolicy::HooksMayOutlive => command.spawn().map(Self::HooksMayOutlive),
+            GitHookPolicy::Contained => {
+                bt_platform::spawn_probe(command, stdio).map(Self::Contained)
+            }
+            GitHookPolicy::HooksMayOutlive => {
+                stdio.apply(command);
+                command.spawn().map(Self::HooksMayOutlive)
+            }
         }
     }
 
     #[cfg(test)]
-    fn spawn_fixture(command: &mut Command) -> io::Result<Self> {
-        bt_platform::spawn_probe(command).map(Self::Contained)
+    fn spawn_fixture(command: &mut Command, stdio: bt_platform::ProbeStdio) -> io::Result<Self> {
+        bt_platform::spawn_probe(command, stdio).map(Self::Contained)
     }
 
     fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
@@ -2206,17 +2208,17 @@ impl GitChild {
         }
     }
 
-    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+    fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
         match self {
-            Self::Contained(child) => child.take_stdout(),
-            Self::HooksMayOutlive(child) => child.stdout.take(),
+            Self::Contained(child) => Some(Box::new(child.take_stdout()?)),
+            Self::HooksMayOutlive(child) => Some(Box::new(child.stdout.take()?)),
         }
     }
 
-    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+    fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
         match self {
-            Self::Contained(child) => child.take_stderr(),
-            Self::HooksMayOutlive(child) => child.stderr.take(),
+            Self::Contained(child) => Some(Box::new(child.take_stderr()?)),
+            Self::HooksMayOutlive(child) => Some(Box::new(child.stderr.take()?)),
         }
     }
 
@@ -2331,20 +2333,22 @@ fn run_git_with_input(
     fixture: bool,
 ) -> GitOutcome<GitRun> {
     let feeding = !input.is_empty();
-    if feeding {
-        command.stdin(Stdio::piped());
-    }
+    let stdio = if feeding {
+        bt_platform::ProbeStdio::FED
+    } else {
+        bt_platform::ProbeStdio::ANSWER
+    };
     #[cfg(not(test))]
     let _ = fixture;
     #[cfg(test)]
-    let child = fixture.then(|| GitChild::spawn_fixture(&mut command));
+    let child = fixture.then(|| GitChild::spawn_fixture(&mut command, stdio));
     #[cfg(test)]
     let child = match child {
         Some(child) => child,
-        None => GitChild::spawn_product(&mut command),
+        None => GitChild::spawn_product(&mut command, stdio),
     };
     #[cfg(not(test))]
-    let child = GitChild::spawn_product(&mut command);
+    let child = GitChild::spawn_product(&mut command, stdio);
     let mut child = child.map_err(|error| {
         GitFault::GitMissing(format!(
             "{} would not start: {error}",
@@ -4799,12 +4803,10 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         /// Long enough that only a guard which never returns can reach it.
         const NEVER: Duration = Duration::from_secs(60);
 
-        let mut command = bt_platform::quiet_command("ping");
-        command
-            .args(["-t", "127.0.0.1"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut command = bt_platform::quiet_command(
+            bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
+        );
+        command.args(["-t", "127.0.0.1"]);
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let _ = tx.send(run_git(command, Duration::from_millis(150)).err());
