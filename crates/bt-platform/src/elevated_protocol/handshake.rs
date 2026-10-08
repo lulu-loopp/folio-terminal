@@ -346,16 +346,16 @@ mod tests {
             extra,
             short,
             replace(1, "+1"),
-            replace(1, "版本"),
+            replace(1, "one"),
             replace(2, r"\\.\pipe\folio-attention-0123456789abcdef-4242-00"),
             replace(2, r"\\server\pipe\folio-elevated-0123456789abcdef-4242-00"),
             replace(3, "0"),
             replace(3, "+4242"),
-            replace(3, "四二"),
+            replace(3, "fortytwo"),
             replace(4, "-1"),
             replace(5, &upper),
             replace(5, &good[5][..62]),
-            replace(5, "能力令牌"),
+            replace(5, "capability"),
         ] {
             assert_eq!(
                 HostLine::parse(words(&arguments)),
@@ -376,13 +376,11 @@ mod tests {
         assert!(!names_an_elevated_endpoint(
             &name.replace("0123456789abcdef", "0123456789abcdeF")
         ));
-        assert!(!names_an_elevated_endpoint(
-            &name.replace("folio", "管理员")
-        ));
+        assert!(!names_an_elevated_endpoint(&name.replace("folio", "admin")));
     }
 
     fn reason(code: u32) -> String {
-        format!("reason {code} 原因")
+        format!("reason {code} text")
     }
 
     /// The launch error table as states: each code `ShellExecuteExW` can

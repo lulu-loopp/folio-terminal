@@ -13,7 +13,7 @@
 //! # What admits a peer
 //!
 //! * **The descriptor**: a protected DACL granting the parent's logon SID and
-//!   Builtin Administrators, nothing else. Administrators are needed because a
+//!   Builtin Administrators read and write, nothing else. Administrators are needed because a
 //!   standard user may answer UAC with another administrator's credentials, and
 //!   that host's token carries neither the parent's logon SID nor its user.
 //! * **The kernel's pipe peer ids**: `GetNamedPipeClientProcessId` must equal
@@ -94,10 +94,16 @@ const MAX_MESSAGE_BYTES: usize = FRAME_HEADER_LENGTH + CONTROL_MAX_PAYLOAD;
 const READ_CHUNK_BYTES: usize = 4096;
 
 /// The descriptor of an elevated pane's pipe: protected, the parent's logon
-/// SID and Builtin Administrators, all access, nothing else.
+/// SID and Builtin Administrators, read and write, nothing else.
+///
+/// Both entries admit only the connecting host, which opens the pipe for
+/// reading and writing; the parent's own handle comes from creating the only
+/// instance and is not granted through this list. Neither entry carries
+/// `WRITE_DAC` or `WRITE_OWNER`. `P` is what design note §2 names; a pipe
+/// inherits nothing, so it changes no access here.
 #[must_use]
 pub fn elevated_descriptor_sddl(logon_sid: &str) -> String {
-    format!("D:P(A;;GA;;;{logon_sid})(A;;GA;;;BA)")
+    format!("D:P(A;;GRGW;;;{logon_sid})(A;;GRGW;;;BA)")
 }
 
 /// **One attempt's listening pipe**, created before the host is launched.
@@ -945,10 +951,13 @@ mod tests {
 
     /// The descriptor read back from the kernel object: protected, exactly
     /// two allow entries, the logon SID's and Builtin Administrators', each
-    /// with all access (`GA` is stored as the pipe's `FA`).
+    /// with read and write and nothing more (`GRGW` is stored as `0x12019f`,
+    /// `FILE_GENERIC_READ | FILE_GENERIC_WRITE`: no `WRITE_DAC`, no
+    /// `WRITE_OWNER`).
     ///
-    /// RED MUTATION: drop the `(A;;GA;;;BA)` entry from
-    /// `elevated_descriptor_sddl`; the read-back descriptor names one SID.
+    /// RED MUTATIONS: drop the `(A;;GRGW;;;BA)` entry from
+    /// `elevated_descriptor_sddl`, and the read-back descriptor names one SID;
+    /// grant the logon SID `GA` again, and its entry reads `FA`.
     #[test]
     fn the_endpoint_descriptor_is_protected_and_grants_the_logon_sid_and_administrators_only() {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
@@ -986,7 +995,7 @@ mod tests {
         let logon = logon_sid().expect("a logon SID");
         assert_eq!(
             wide_to_string(text),
-            format!("D:P(A;;FA;;;{logon})(A;;FA;;;BA)")
+            format!("D:P(A;;0x12019f;;;{logon})(A;;0x12019f;;;BA)")
         );
     }
 
@@ -1234,7 +1243,7 @@ mod tests {
         let mut child = crate::quiet_command(std::env::current_exe().expect("the test binary"))
             .args([
                 "--exact",
-                "elevated_pipe::tests::no_such_test_名前",
+                "elevated_pipe::tests::no_such_test_at_all",
                 "--list",
             ])
             .spawn()
@@ -1312,7 +1321,7 @@ mod tests {
     #[test]
     fn the_launch_answers_every_shell_code_through_the_error_table() {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
-        let program = PathBuf::from(r"C:\Program Files\Folio 终端\folio.exe");
+        let program = PathBuf::from(r"C:\Program Files\Folio Terminal\folio.exe");
         for (code, expected) in [
             (1223u32, LaunchRefusal::Cancelled),
             (0x5b3, LaunchRefusal::CouldNotStart(system_message(0x5b3))),
