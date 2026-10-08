@@ -426,7 +426,10 @@ fn an_emptied_probe_variable_is_off_and_not_a_nameless_file() {
             .expect("an emptied variable is off, not a file this run cannot open")
             .is_none(),
     );
-    let named = std::env::temp_dir().join(format!("folio-probe-input-{}.vt", std::process::id()));
+    let named = std::env::temp_dir().join(format!(
+        "{}.vt",
+        bt_testpath::unique_name("folio-probe-input")
+    ));
     std::fs::write(&named, b"\x1b[2J").expect("write a fixture into the scratch directory");
     assert_eq!(
         super::probe_input(Some(named.clone().into_os_string()))
@@ -1926,14 +1929,7 @@ fn a_directory_under_a_column_resolves_to_the_key_the_tree_walks_by() {
 /// and the first half of this test finds one file where it left two.
 #[test]
 fn a_rename_never_eats_the_file_that_already_has_the_name() {
-    let directory = std::env::temp_dir().join(format!(
-        "folio-rename-pin-{}-{:?}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or_default()
-    ));
+    let directory = bt_testpath::temp_path("folio-rename-pin");
     std::fs::create_dir_all(&directory).expect("a temp folder");
     let from = directory.join("notes.md");
     let taken = directory.join("taken.md");
@@ -1996,14 +1992,7 @@ fn a_rename_never_eats_the_file_that_already_has_the_name() {
 /// lower-cased — the collision road finds `theirs` replaced by `mine`.
 #[test]
 fn a_case_only_rename_never_replaces_a_different_file() {
-    let directory = std::env::temp_dir().join(format!(
-        "bt-audit046-rename-{}-{:?}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or_default()
-    ));
+    let directory = bt_testpath::temp_path("bt-audit046-rename");
     std::fs::create_dir_all(&directory).expect("a temp folder");
 
     let pairs = [
@@ -2874,7 +2863,7 @@ fn a_press_whose_row_is_gone_is_consumed() {
 /// wherever `path.exists()` folds case — which is every ordinary volume.
 #[test]
 fn a_case_different_duplicate_is_refused_in_the_box_on_this_volume() {
-    let dir = std::env::temp_dir().join(format!("bt-name-case-{}", std::process::id()));
+    let dir = bt_testpath::temp_path("bt-name-case");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a directory to ask about");
     std::fs::write(dir.join("Notes.md"), b"n").expect("one entry in it");
@@ -3380,7 +3369,7 @@ fn launch_plan_on_disk(session_path: &Path) -> (LaunchPlan, Vec<RevivedShape>) {
 }
 
 fn restore_home(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("bt-restore-pinned-{}-{name}", std::process::id()))
+    bt_testpath::temp_path(&format!("bt-restore-pinned-{name}"))
 }
 
 /// PIN (B-RESTORE-PINNED) — **after an unclean exit, a pinned tab comes back
@@ -3572,8 +3561,7 @@ struct EndSessionHome(PathBuf);
 impl EndSessionHome {
     fn new(name: &str) -> Self {
         session_end::forget();
-        let home =
-            std::env::temp_dir().join(format!("bt-endsession-{}-{name}", std::process::id()));
+        let home = bt_testpath::temp_path(&format!("bt-endsession-{name}"));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("a scratch home");
         Self(home)
@@ -8544,8 +8532,8 @@ fn the_look_that_spends_a_latch_is_the_runtimes_own_call() {
 #[test]
 fn the_attention_trace_writes_one_line_per_decision_and_none_otherwise() {
     let path = std::env::temp_dir().join(format!(
-        "bt-attention-trace-{}-stations.log",
-        std::process::id()
+        "{}.log",
+        bt_testpath::unique_name("bt-attention-trace-stations")
     ));
     let _ = std::fs::remove_file(&path);
     let trace = crate::trace::Trace::create(&path, "# pin");
@@ -9604,8 +9592,8 @@ fn one_alt_wheel_over_a_card_writes_its_entry_its_rail_its_aim_and_its_route() {
     const HEADER: &str = "# BT_MOUSE_TRACE_V1 elapsed_ms event field=value…";
 
     let path = std::env::temp_dir().join(format!(
-        "bt-wheel-trace-{}-alt-wheel.log",
-        std::process::id()
+        "{}.log",
+        bt_testpath::unique_name("bt-wheel-trace-alt-wheel")
     ));
     let _ = std::fs::remove_file(&path);
     let trace = trace::Trace::create(&path, HEADER);
@@ -12263,7 +12251,7 @@ fn a_share_handed_over_meets_the_same_program_list() {
 /// `preview_reference_row` — the base's answer — and the share rows go red.
 #[test]
 fn a_document_link_answers_the_same_row_as_a_terminal_reference() {
-    let directory = std::env::temp_dir().join("folio-t14-document-links");
+    let directory = bt_testpath::temp_path("folio-t14-document-links");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a scratch folder");
     let document = directory.join("README.md");
@@ -12732,11 +12720,7 @@ fn a_page_on_an_http_address_is_handed_to_the_browser_as_that_address() {
 /// `.png` and the `.exe` hand nothing (or, with the `file:` fork removed too, the address).
 #[test]
 fn a_file_address_hands_the_file_it_names_whatever_the_file_is() {
-    let dir = std::env::temp_dir().join(format!(
-        "folio-t39-page-file-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let dir = bt_testpath::temp_path("folio-t39-page-file");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     for (name, bytes) in [
@@ -13489,14 +13473,7 @@ fn the_peek_overlay_carries_display_sized_pixels_under_a_display_sized_key() {
 /// URI and the `file:` arm never fires.
 #[test]
 fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "betterterminal-app-printed-path-{}-{unique}",
-        std::process::id()
-    ));
+    let directory = bt_testpath::temp_path("betterterminal-app-printed-path");
     std::fs::create_dir(&directory).unwrap();
     let readable = directory.join("notes.md");
     std::fs::write(&readable, b"# notes\n").unwrap();
@@ -13622,14 +13599,7 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
 /// handler and to the files column that `file:///…/notes.md` always was.
 #[test]
 fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
-    let directory = std::env::temp_dir().join(format!(
-        "betterterminal-located-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = bt_testpath::temp_path("betterterminal-located");
     std::fs::create_dir(&directory).unwrap();
     let readable = directory.join("notes.md");
     std::fs::write(&readable, b"# notes\n").unwrap();
@@ -15458,7 +15428,7 @@ fn the_foot_distinguishes_a_long_file_from_a_large_frame() {
 /// on the glass.
 #[test]
 fn a_file_rewritten_under_the_loop_ends_the_playback_and_is_reopened() {
-    let directory = std::env::temp_dir().join(format!("bt-anim-rewrite-{}", std::process::id()));
+    let directory = bt_testpath::temp_path("bt-anim-rewrite");
     std::fs::create_dir_all(&directory).expect("a directory this test owns");
     let path = directory.join("capture.gif");
     std::fs::copy(an_animated_file(), &path).expect("the fixture, under a name this test owns");
@@ -25972,7 +25942,7 @@ fn panic_log_uses_the_process_temp_directory_without_requiring_stderr() {
 fn a_frame_shape_stop_records_its_cause_before_announcing() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/math-band-stop-tests")
-        .join(std::process::id().to_string());
+        .join(bt_testpath::unique_name("frame-shape-stop"));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("folio-panic.log");
     let error = anyhow::Error::new(bt_viewport::FrameProjectionError::FrameShape(
@@ -43360,7 +43330,7 @@ fn a_preview_seat_is_found_in_the_tab_that_owns_it() {
 /// A folder of this test's own, emptied first so a previous run cannot
 /// answer for this one.
 fn disk_scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("bt-disk-{name}-{}", std::process::id()));
+    let dir = bt_testpath::temp_path(&format!("bt-disk-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch folder");
     dir
@@ -43849,14 +43819,7 @@ fn a_picture_opened_again_after_a_rename_is_read_off_the_disk() {
         }
     }
 
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("a clock after 1970")
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "folio-picture-reopen-{}-{unique}",
-        std::process::id()
-    ));
+    let directory = bt_testpath::temp_path("folio-picture-reopen");
     std::fs::create_dir(&directory).expect("a scratch folder");
     let card = directory.join("card-3.png");
     let neighbour = directory.join("card-4.png");
@@ -45457,7 +45420,7 @@ pub(crate) fn cross_tab(id: u64, texts: &[&str]) -> TabState {
 /// seat never appears.
 #[test]
 fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
-    let directory = std::env::temp_dir().join("bt-leaf-dispatch-pin");
+    let directory = bt_testpath::temp_path("bt-leaf-dispatch-pin");
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("shot.png");
     std::fs::write(&path, [0u8; 16]).unwrap();
@@ -45582,7 +45545,7 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
 /// been rewritten is unchanged, which is a card showing yesterday's report.
 #[test]
 fn a_hovered_page_is_drawn_once_per_version_of_its_file() {
-    let dir = std::env::temp_dir().join(format!("bt-peek-page-{}", std::process::id()));
+    let dir = bt_testpath::temp_path("bt-peek-page");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let path = dir.join("report.pdf");
     std::fs::write(
@@ -51630,11 +51593,7 @@ fn a_pinned_page_is_asked_at_the_pin_and_asked_again_at_the_press() {
 /// user pressed is refused, exactly as it was on the real machine.
 #[test]
 fn a_local_page_is_kept_by_the_same_door_that_presses_it() {
-    let dir = std::env::temp_dir().join(format!(
-        "folio-switcher-pin-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let dir = bt_testpath::temp_path("folio-switcher-pin");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let page = dir.join("sidebar-focus-demo.html");
@@ -52987,11 +52946,7 @@ fn every_door_that_lands_a_source_opens_a_page_as_a_page() {
 /// the restart.
 #[test]
 fn a_restored_page_comes_back_as_a_page_however_it_was_stored() {
-    let dir = std::env::temp_dir().join(format!(
-        "folio-page-revival-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let dir = bt_testpath::temp_path("folio-page-revival");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let page = dir.join("report.html");
@@ -53184,11 +53139,7 @@ otes.md"
 /// one.
 #[test]
 fn a_stored_local_page_is_minted_from_the_disk_and_not_from_the_row() {
-    let dir = std::env::temp_dir().join(format!(
-        "folio-slice5-page-destination-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let dir = bt_testpath::temp_path("folio-slice5-page-destination");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let page = dir.join("report.html");
@@ -53695,8 +53646,7 @@ fn glance_subject(path: &Path, host: RowHost) -> FilePeekSubject {
 /// A real folder with a real file in it, for the glance-foot tests: the path
 /// the card holds is a path on this disk, not a spelling made up for the test.
 fn glance_fixture(name: &str) -> (PathBuf, PathBuf) {
-    let folder =
-        std::env::temp_dir().join(format!("folio-glance-foot-{name}-{}", std::process::id()));
+    let folder = bt_testpath::temp_path(&format!("folio-glance-foot-{name}"));
     std::fs::create_dir_all(folder.join("notes")).expect("the fixture folder is made");
     let file = folder.join("notes").join("plan.md");
     std::fs::write(&file, "# plan\n").expect("the fixture file is written");
@@ -54464,7 +54414,7 @@ fn a_single_line_paste_is_never_asked() {
 /// MUTATION: drop `!facts.clipboard_text ||` from `paste_road` — the second assertion goes red.
 #[test]
 fn a_dropped_path_is_never_asked() {
-    let dir = std::env::temp_dir().join(format!("bt-t02-drop-{}", std::process::id()));
+    let dir = bt_testpath::temp_path("bt-t02-drop");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("notes.txt");
     std::fs::write(&file, b"x").unwrap();
@@ -55577,7 +55527,7 @@ fn a_powershell_pane_is_never_shown_the_card_when_the_road_is_open() {
 /// would reach the road (the second assertion goes red).
 #[test]
 fn a_transformed_paste_never_takes_the_clipboard_road() {
-    let dir = std::env::temp_dir().join(format!("bt-t03-files-{}", std::process::id()));
+    let dir = bt_testpath::temp_path("bt-t03-files");
     std::fs::create_dir_all(&dir).unwrap();
     let first = dir.join("one.txt");
     let second = dir.join("two words.txt");
@@ -56625,11 +56575,7 @@ fn an_update_doors_panic_unwinds_through_its_exit_guard_under_mains_hook() {
         println!("u34: the door panic unwound");
         return;
     }
-    let folder = std::env::temp_dir().join(format!(
-        "bt-u34-door-panic-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let folder = bt_testpath::temp_path("bt-u34-door-panic");
     std::fs::create_dir_all(&folder).unwrap();
     let log = folder.join("folio-panic.log");
     let ran = bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))

@@ -2187,11 +2187,7 @@ pub(crate) mod tests {
     /// opposite-platform command-modifier translation both fail.
     #[test]
     fn keybindings_store_writes_each_platform_dialect_and_it_imports_by_meaning() {
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-keybindings-platform-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-keybindings-platform");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private keybindings directory");
 
@@ -2310,11 +2306,7 @@ pub(crate) mod tests {
     fn a_session_write_that_could_not_happen_is_reported_as_one() {
         // The session's waits are owner-thread doors, admitted only on the way out.
         crate::tests::on_the_window_thread_exiting();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-quit-flush-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-quit-flush");
         let _ = std::fs::remove_dir_all(&root);
 
         // Nothing has created `root`, so `root/session.json` has nowhere to be
@@ -2455,11 +2447,7 @@ pub(crate) mod tests {
     fn the_autosave_hands_the_document_over_and_hears_the_verdict_later() {
         // The session's waits are owner-thread doors, admitted only on the way out.
         crate::tests::on_the_window_thread_exiting();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-session-writer-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-session-writer");
         let _ = std::fs::remove_dir_all(&root);
 
         // Nowhere to write: no directory, so not even the atomic write's temporary sibling has a
@@ -2519,11 +2507,7 @@ pub(crate) mod tests {
     fn a_quit_leaves_a_writer_that_never_answers_behind() {
         // The session's waits are owner-thread doors, admitted only on the way out.
         crate::tests::on_the_window_thread_exiting();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-session-stall-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-session-stall");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         let sentinel = root.join("session.lock");
@@ -2592,11 +2576,7 @@ pub(crate) mod tests {
     fn a_write_that_misses_the_budget_still_answers_true_and_keeps_the_last_layout() {
         crate::tests::on_the_window_thread_exiting();
         crate::session_end::forget();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-endsession-stall-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-endsession-stall");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         let sentinel = root.join("session.lock");
@@ -2670,11 +2650,7 @@ pub(crate) mod tests {
     fn only_one_thread_ever_takes_the_session_writers_channel() {
         // The session's waits are owner-thread doors, admitted only on the way out.
         crate::tests::on_the_window_thread_exiting();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-session-one-writer-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-session-one-writer");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         let path = root.join("session.json");
@@ -2748,11 +2724,7 @@ pub(crate) mod tests {
     fn a_store_with_no_writer_thread_reports_rather_than_writing() {
         // The session's waits are owner-thread doors, admitted only on the way out.
         crate::tests::on_the_window_thread_exiting();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-session-no-writer-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-session-no-writer");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
 
@@ -2821,11 +2793,7 @@ pub(crate) mod tests {
     fn a_receipt_for_a_superseded_document_is_dropped() {
         // The session's waits are owner-thread doors, admitted only on the way out.
         crate::tests::on_the_window_thread_exiting();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-session-stale-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-session-stale");
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         let mut store = SessionStore::at(root.join("session.json"), root.join("session.lock"));
         // Two documents have gone out; the second is the one that speaks for the store.
@@ -2923,8 +2891,7 @@ pub(crate) mod tests {
     /// as well as out: a run that panicked half way through must not hand the
     /// next run a directory that already has both names in it.
     fn appdata(case: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("bt-app-relocate-{case}-{}", std::process::id()));
+        let root = bt_testpath::temp_path(&format!("bt-app-relocate-{case}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private APPDATA for this test");
         root
@@ -4113,11 +4080,7 @@ pub(crate) mod tests {
     #[test]
     fn on_the_way_out_the_quits_save_and_the_writers_retirement_are_each_one_admission() {
         crate::tests::on_the_window_thread_exiting();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-session-admitted-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-session-admitted");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         let sentinel = root.join("session.lock");
@@ -4165,11 +4128,7 @@ pub(crate) mod tests {
     #[test]
     fn a_session_wait_asked_before_the_way_out_is_the_stalled_answer() {
         crate::tests::on_the_window_thread();
-        let root = std::env::temp_dir().join(format!(
-            "bt-app-session-refused-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("bt-app-session-refused");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         let sentinel = root.join("session.lock");

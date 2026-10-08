@@ -2797,7 +2797,7 @@ mod tests {
     /// the bytes of both files.
     #[test]
     fn an_svg_cannot_make_folio_open_a_file_it_names() {
-        let dir = std::env::temp_dir().join(format!("bt-math-svg-href-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-math-svg-href");
         std::fs::create_dir_all(&dir).unwrap();
 
         // Each file is nothing but the one colour, so a single pixel of it in

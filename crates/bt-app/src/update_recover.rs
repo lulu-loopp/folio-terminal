@@ -755,8 +755,7 @@ mod tests {
     /// `install\folio.exe`, `install\.folio-update\<txn>\rescue\folio.exe` and,
     /// when `phase` is given, the journal in that phase.
     fn installation(tag: &str, phase: Option<Phase>) -> (PathBuf, PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("bt-update-recover-{tag}-{}", std::process::id()));
+        let root = bt_testpath::temp_path(&format!("bt-update-recover-{tag}"));
         let _ = std::fs::remove_dir_all(&root);
         let txn = TxnId::new([0x7a; 16]);
         let install = root.join("install");
@@ -970,11 +969,7 @@ mod tests {
 
         // Standard error elsewhere (this test process's): the append is the
         // line's one way into the log.
-        let folder = std::env::temp_dir().join(format!(
-            "bt-u42d-recover-{}-{}",
-            std::process::id(),
-            bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-        ));
+        let folder = bt_testpath::temp_path("bt-u42d-recover");
         std::fs::create_dir_all(&folder).unwrap();
         let log = folder.join("diagnostics.log");
         std::fs::write(&log, b"").unwrap();
@@ -1033,11 +1028,7 @@ mod tests {
     fn said_by_a_child_whose_stderr_is_the_symlinked_log(name: &str, child: &str) -> String {
         use std::process::Stdio;
 
-        let folder = std::env::temp_dir().join(format!(
-            "bt-u42d-recover-link-{}-{}",
-            std::process::id(),
-            bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-        ));
+        let folder = bt_testpath::temp_path("bt-u42d-recover-link");
         std::fs::create_dir_all(&folder).expect("make the log folder");
         let target = folder.join("diagnostics-target.log");
         std::fs::write(&target, b"").expect("make the log target");

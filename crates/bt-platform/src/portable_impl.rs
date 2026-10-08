@@ -2092,11 +2092,7 @@ mod stream_tests {
         let _turn = ONE_AT_A_TIME
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        let log = std::env::temp_dir().join(format!(
-            "folio-m3-7-{}-{:?}.log",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let log = bt_testpath::temp_path("folio-m3-7").with_extension("log");
         let _ = std::fs::remove_file(&log);
         let put_back = StreamsPutBack::taken();
         assert!(

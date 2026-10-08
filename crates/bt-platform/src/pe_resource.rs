@@ -150,10 +150,7 @@ mod tests {
     use super::read_rcdata;
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "bt-platform-pe-resource-{}-{name}",
-            std::process::id()
-        ));
+        let root = bt_testpath::temp_path(&format!("bt-platform-pe-resource-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root

@@ -1405,11 +1405,7 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/tb-tests")
-            .join(format!(
-                "folio-land-{name}-{}-{}",
-                std::process::id(),
-                today()
-            ));
+            .join(bt_testpath::unique_name(&format!("folio-land-{name}")));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         // Resolved once, here: `%TEMP%` on a real machine can be a short name or sit behind a

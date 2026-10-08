@@ -857,11 +857,7 @@ mod tests {
     /// the stat and the read is too.
     #[test]
     fn a_file_past_the_cap_is_refused_before_it_is_read() {
-        let dir = std::env::temp_dir().join(format!(
-            "folio-pdf-cap-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = bt_testpath::temp_path("folio-pdf-cap");
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let path = dir.join("huge.pdf");
         let file = std::fs::File::create(&path).expect("a scratch file");
@@ -881,7 +877,7 @@ mod tests {
     /// `None` rather than either of them being an error.**
     #[test]
     fn a_missing_or_empty_file_has_no_first_page() {
-        let missing = std::env::temp_dir().join("folio-no-such-file-at-all.pdf");
+        let missing = bt_testpath::temp_path("folio-no-such-file-at-all").with_extension("pdf");
         assert_eq!(page_raster(&missing, 0, FIT.0, FIT.1), None);
     }
 
@@ -1011,7 +1007,7 @@ mod tests {
     /// is not one.
     #[test]
     fn neither_reader_invents_a_count_for_what_is_not_a_document() {
-        let dir = std::env::temp_dir().join("folio-pdf-count-none-3f1a");
+        let dir = bt_testpath::temp_path("folio-pdf-count-none");
         std::fs::create_dir_all(&dir).expect("a directory under the temp dir");
         for (name, bytes) in [
             (

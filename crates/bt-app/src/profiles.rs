@@ -17642,7 +17642,7 @@ mod tests {
         let home = r"C:\Users\dev";
         let machine = FakeMachine::default().with_var("USERPROFILE", home);
         let live = std::env::temp_dir();
-        let gone = live.join("folio-restart-cwd-no-such-directory");
+        let gone = bt_testpath::temp_path("folio-restart-cwd-no-such-directory");
         for id in ["pwsh", "gitbash", "cmd"] {
             let profile = index_of_id(id);
             assert_eq!(
@@ -17955,7 +17955,7 @@ mod tests {
     #[test]
     fn a_saved_directory_is_only_checked_for_existence_where_that_is_answerable() {
         let real = std::env::temp_dir();
-        let gone = real.join("betterterminal-no-such-directory-here");
+        let gone = bt_testpath::temp_path("betterterminal-no-such-directory-here");
         for id in ["pwsh", "gitbash", "cmd"] {
             let profile = index_of_id(id);
             assert_eq!(

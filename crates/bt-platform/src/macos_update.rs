@@ -1318,8 +1318,7 @@ mod tests {
         use super::*;
 
         fn scratch(tag: &str) -> PathBuf {
-            let path =
-                std::env::temp_dir().join(format!("bt-macos-update-{tag}-{}", std::process::id()));
+            let path = bt_testpath::temp_path(&format!("bt-macos-update-{tag}"));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             path

@@ -604,24 +604,16 @@ impl FileIndexes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A scratch directory of this test's own, never shared with another.
     ///
-    /// Process id, wall-clock nanoseconds and a counter, because two tests in
-    /// one binary run at once and two binaries can run at once too — and a
+    /// Named by `bt_testpath`, whose name is unique across the tests of one
+    /// binary and across binaries, because two tests in one binary run at once
+    /// and two binaries can run at once too — and a
     /// fixture that two walks are writing into is the "shared fixture hides a
     /// bug" family from `docs/CONVENTIONS.md` §3 in its most literal form.
     fn scratch(name: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.subsec_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "folio-palette-index-{name}-{}-{nanos}-{unique}",
-            std::process::id()
-        ));
+        let dir = bt_testpath::temp_path(&format!("folio-palette-index-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir

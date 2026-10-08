@@ -2945,12 +2945,7 @@ mod tests {
     #[cfg(windows)]
     impl ProbeLatch {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "bt-probe-latch-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let path = bt_testpath::temp_path("bt-probe-latch");
             // The filesystem is the boundary here and a run that was killed between `release` and
             // `drop` really does leave this name behind. An inherited latch is already open, which
             // would let the child out before the storm had started — the exact failure this type
@@ -3690,7 +3685,7 @@ mod tests {
 
     #[test]
     fn input_dump_and_output_share_one_pane_and_clock() {
-        let path = std::env::temp_dir().join(format!("bt-input-clock-{}", std::process::id()));
+        let path = bt_testpath::temp_path("bt-input-clock");
         let origin = Instant::now();
         let (output, input) =
             PtyDump::from_paths(Some(path.clone()), Some(path), || (origin, 9876)).unwrap();
@@ -3742,7 +3737,7 @@ mod tests {
 
     #[test]
     fn input_dump_is_reached_by_labelled_and_plain_session_writes() {
-        let path = std::env::temp_dir().join(format!("bt-input-writes-{}", std::process::id()));
+        let path = bt_testpath::temp_path("bt-input-writes");
         let dump = PtyDump::create_at(&path, 3, Instant::now(), 1234).unwrap();
         // No process or pipe: exercise the product queue and recording door with synthetic bytes.
         let session = PtySession {
@@ -3796,7 +3791,7 @@ mod tests {
 
     #[test]
     fn input_dump_records_each_write_with_time_pane_reason_and_exact_bytes() {
-        let path = std::env::temp_dir().join(format!("bt-input-dump-{}", std::process::id()));
+        let path = bt_testpath::temp_path("bt-input-dump");
         let mut dump = PtyDump::create_at(&path, 17, Instant::now(), 1234).unwrap();
         dump.write_input_at(b"a\r\n\0\xff", "keyboard input", 42)
             .unwrap();
@@ -3825,12 +3820,8 @@ mod tests {
 
     #[test]
     fn pty_dump_is_an_exact_byte_sidecar_with_replayable_chunk_metadata() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
         let path =
-            std::env::temp_dir().join(format!("bt-pty-dump-{}-{unique}.vt", std::process::id()));
+            std::env::temp_dir().join(format!("{}.vt", bt_testpath::unique_name("bt-pty-dump")));
         let chunks_path = pty_dump_chunks_path(&path);
         let dump = PtyDump::create(&path, 0).unwrap();
         let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
@@ -3913,13 +3904,9 @@ mod tests {
     /// recording was cut to nothing under a reader that went on writing past the hole.
     #[test]
     fn a_second_recording_does_not_truncate_the_first_ones_file() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
         let base = std::env::temp_dir().join(format!(
-            "bt-pty-two-panes-{}-{unique}.vt",
-            std::process::id()
+            "{}.vt",
+            bt_testpath::unique_name("bt-pty-two-panes")
         ));
 
         let first = PtyDump::open(&base).unwrap();
@@ -3958,12 +3945,7 @@ mod tests {
     /// began, and says out loud that it reached the end of the stream with nothing in hand.
     #[test]
     fn a_recording_that_caught_nothing_still_says_whose_it_was() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base =
-            std::env::temp_dir().join(format!("bt-pty-silent-{}-{unique}.vt", std::process::id()));
+        let base = bt_testpath::temp_path("bt-pty-silent").with_extension("vt");
 
         let dump = PtyDump::open(&base).unwrap();
         let path = dump.path().to_path_buf();
@@ -4522,12 +4504,8 @@ mod tests {
     #[cfg(windows)]
     fn nonexistent_program(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "bt-pty-missing-{label}-{}-{}.exe",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "{}.exe",
+            bt_testpath::unique_name(&format!("bt-pty-missing-{label}"))
         ))
     }
 

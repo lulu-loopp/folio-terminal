@@ -257,7 +257,10 @@ mod tests {
     const HEADER: &str = "# BT_TRACE_TEST_V1 elapsed_ms event field=value…";
 
     fn scratch(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("bt-trace-{}-{name}.log", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "{}.log",
+            bt_testpath::unique_name(&format!("bt-trace-{name}"))
+        ));
         let _ = std::fs::remove_file(&path);
         path
     }

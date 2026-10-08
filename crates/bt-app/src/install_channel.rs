@@ -702,16 +702,10 @@ pub fn begin() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A temporary install folder, never the real one.
     fn install_folder(tag: &str) -> PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "folio-install-channel-{tag}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = bt_testpath::temp_path(&format!("folio-install-channel-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -748,12 +742,7 @@ mod tests {
     /// zip's own top folder, `folio-0.4.6\folio.exe` — a temporary folder,
     /// never winget's. Returns the location and the executable.
     fn winget_package(tag: &str) -> (PathBuf, PathBuf) {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let location = std::env::temp_dir().join(format!(
-            "bt-install-channel-winget-{tag}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let location = bt_testpath::temp_path(&format!("bt-install-channel-winget-{tag}"));
         let _ = std::fs::remove_dir_all(&location);
         let version = location.join("folio-0.4.6");
         std::fs::create_dir_all(&version).unwrap();

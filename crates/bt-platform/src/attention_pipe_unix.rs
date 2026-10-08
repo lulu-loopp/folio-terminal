@@ -802,10 +802,7 @@ mod tests {
     /// can run at once — and one that really exists, because the endpoint's name
     /// is the filesystem's answer about it.
     fn scratch(line: u32) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "bt-platform-attention-{}-{line}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path(&format!("bt-platform-attention-{line}"));
         std::fs::create_dir_all(&directory).expect("make the data directory");
         directory
     }

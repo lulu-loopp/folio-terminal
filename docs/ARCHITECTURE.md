@@ -279,9 +279,12 @@ it closes.
 
 ### 3.1 The graph
 
-Seventeen first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
-Normal and target-specific edges as the manifests declare them (2026-09-23;
-`bt-workbench` 2026-09-25):
+Seventeen first-party crates under `crates/`, plus `vendor/alacritty_terminal`,
+plus `bt-testpath` (2026-10-08), which no shipped build contains: it is every
+tested crate's dev-dependency and the optional dependency of the two test-support
+features, `bt-pty`'s `test-shell` and `bt-platform`'s `trust-harness`, and it
+depends on nothing. Normal and target-specific edges as the manifests declare
+them (2026-09-23; `bt-workbench` 2026-09-25):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
@@ -374,8 +377,8 @@ those manifests actually practise, restated here from what they say:
 
 **The layering rule, restated from what enforces it:**
 
-- **`scripts/check-portable-core.ps1`** — fifteen named crates (`bt-source`,
-  `bt-unicode`, `bt-doc`, `bt-detect`, `bt-layout`, `bt-persist`, `bt-winres`,
+- **`scripts/check-portable-core.ps1`** — sixteen named crates (`bt-source`,
+  `bt-testpath`, `bt-unicode`, `bt-doc`, `bt-detect`, `bt-layout`, `bt-persist`, `bt-winres`,
   `bt-math`, `bt-transcript`, `bt-viewport`, `bt-render`, `bt-term`, `bt-pty`,
   `bt-corpus`, `bt-workbench`) name no Win32 outside a `#[cfg(windows)]` gate. Platform-specific code lives
   behind `bt-platform`'s interface. This is the cheap local substitute for a

@@ -278,9 +278,10 @@ fn the_architecture_table_is_the_registry() {
 // (`Occurrence::in_the_product`), so test modules are out by their declaration. The reading is
 // `cfg`-blind, so every platform's arm is read on every host.
 
-/// The first-party packages that are not in `folio.exe`: development tools. Every other
-/// workspace member outside `vendor/` must be one `bt-app` depends on.
-const NOT_THE_PRODUCT: [&str; 3] = ["bt-corpus", "bt-lint-probe", "bt-source"];
+/// The first-party packages that are not in `folio.exe`: development tools, and `bt-testpath`,
+/// which only tests and the test-support features name. Every other workspace member outside
+/// `vendor/` must be one `bt-app` depends on.
+const NOT_THE_PRODUCT: [&str; 4] = ["bt-corpus", "bt-lint-probe", "bt-source", "bt-testpath"];
 
 /// **The product as a build of `folio.exe` sees it**: the first-party packages in it, each with
 /// the first-party packages its product code can name (its *product* dependency edges), and the
@@ -1151,7 +1152,7 @@ fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
 fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
     const OPTIONAL: &str = "bt-platform = { path = \"../bt-platform\", optional = true }";
-    const FEATURE: &str = "test-shell = [\"dep:bt-platform\"]";
+    const FEATURE: &str = "test-shell = [\"dep:bt-platform\", \"dep:bt-testpath\"]";
     let real = product_candidate_manifests();
     let with_pty = |manifest: String| {
         let mut manifests = real.clone();

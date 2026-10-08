@@ -514,8 +514,7 @@ mod tests {
     /// A folder of its own under the system's temporary folder, for the tests
     /// that touch a real file system.
     fn scratch(tag: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("bt-launch-agent-{tag}-{}", std::process::id()));
+        let path = bt_testpath::temp_path(&format!("bt-launch-agent-{tag}"));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path

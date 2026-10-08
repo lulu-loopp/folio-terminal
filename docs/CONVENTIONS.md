@@ -226,6 +226,31 @@ sleeper、完成信号或接收事件，不是改大数字。
 3. **锁中毒不连坐。** 它守的是 `()`，前一条测试 panic 把锁毒了不代表设备脏了——`unwrap_or_else(std::sync::PoisonError::into_inner)`,否则一条真红会把后面每一条都变成第二条假红。
 4. **锁只管本二进制。** `cargo` 让每个测试二进制各自是一个进程，进程之间不共享这把锁;上面那支六进程的脚本同时也是这件事的证据——每个进程内部串行之后,六个进程并行是干净的。真到了两个 crate 都要建无头设备的那天，先量跨进程会不会崩，别默认这把锁保得住。
 
+### A test's scratch path is named by `bt_testpath`, and nowhere else (incident, 2026-10-05)
+
+A test that needs a file, a directory, a registry key or a socket of its own takes its name from
+`bt_testpath::temp_path(tag)`, or `root.join(bt_testpath::unique_name(tag))` under a root of its
+own: `{tag}-{process id}-{ordinal}`, where the ordinal is one process-wide counter. The process id
+keeps two test processes apart; the ordinal keeps two calls of one process apart. The wall clock
+is in neither: a name made of the process id and `SystemTime::now()` nanoseconds is shared by two
+threads that sample the clock inside one tick (`shell_integration_script.rs`, a `remove_file`
+that found `NotFound` on main), and a name made of the process id alone is shared by every call
+of the helper in one binary. A test that needs the *same* path twice computes it once and passes
+it on. `bt-source`'s `temp_paths` guard refuses, in test code, a body that calls
+`process::id` beside `temp_dir()` or a wall-clock read. Product code names its own temporary
+files and is not covered.
+
+### A test pins behaviour by running it, not by reading the source (T-TEST-HYGIENE-048)
+
+A test that matches the program's own text to claim it *does* something (an order of calls, a
+worker nobody joins, a value) goes green on a rename and red on a refactor that changes nothing,
+and says nothing about what runs. Drive the behaviour through the door the product uses, with the
+machine effects handed in as stand-ins where they would touch the machine (the shell-integration
+preparation worker's `PreparationEffects` is the shape). Reading source is allowed only for a
+**guard**, whose subject is how the code is written — a door census, "no X outside door Y", the
+window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
+guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
+
 ### 【预防】产品代码不留占位符
 
 `todo!()` / `unimplemented!()` 由 clippy deny（当前为 0，**没有**因它出过事故——这是预防，不是教训）。做不完就如实写 no-go。

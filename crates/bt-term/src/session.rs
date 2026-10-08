@@ -26895,14 +26895,7 @@ mod tests {
     /// A real directory holding one real file with a name no image scan would ever admit, so the
     /// pins below can only be answered by the printed-path line and never by the image one.
     fn temporary_ordinary_file() -> (PathBuf, PathBuf) {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-printed-path-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-printed-path");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("notes.md");
         std::fs::write(&path, b"# notes\n").unwrap();
@@ -27052,14 +27045,7 @@ mod tests {
 
     /// A fresh folder under the temp directory holding `present` as small files, and the folder.
     fn temporary_pictures(present: &[&str]) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-image-placeholder-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-image-placeholder");
         std::fs::create_dir(&directory).unwrap();
         for name in present {
             std::fs::write(directory.join(name), b"not decoded here").unwrap();
@@ -28725,14 +28711,7 @@ mod tests {
     fn temporary_path_image_named(file_name: &str) -> (PathBuf, PathBuf) {
         use base64::Engine as _;
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-session-path-image-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-session-path-image");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join(file_name);
         let png = base64::engine::general_purpose::STANDARD
@@ -28946,14 +28925,7 @@ mod tests {
     /// it is a spelling and not a file: the tests below state every answer themselves through
     /// [`settle_printed_paths_against`], so no disk is read and no clock is waited on.
     fn unwritten_directory(tag: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "betterterminal-{tag}-{}-{unique}",
-            std::process::id()
-        ))
+        bt_testpath::temp_path(&format!("betterterminal-{tag}"))
     }
 
     /// One frame of the app's own loop with the **disk replaced by what the test says is on it**:
@@ -30230,9 +30202,8 @@ mod tests {
         session.restore_retired_image_bands();
         let started = Instant::now();
         let missing = std::env::temp_dir().join(format!(
-            "betterterminal-missing-{}-{}.png",
-            std::process::id(),
-            started.elapsed().as_nanos()
+            "{}.png",
+            bt_testpath::unique_name("betterterminal-missing")
         ));
         let line = format!("[Image: source: \"{}\"]", missing.display());
         session
@@ -30942,9 +30913,8 @@ mod tests {
         enable_path_detection(&mut session);
         let started = Instant::now();
         let missing = std::env::temp_dir().join(format!(
-            "betterterminal-missing-{}-{}.png",
-            std::process::id(),
-            started.elapsed().as_nanos()
+            "{}.png",
+            bt_testpath::unique_name("betterterminal-missing")
         ));
         let line = format!("[Image: source: \"{}\"]", missing.display());
         session
@@ -31549,14 +31519,7 @@ mod tests {
     fn temporary_relative_image_tree() -> (PathBuf, PathBuf, PathBuf) {
         use base64::Engine as _;
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "betterterminal 图 片-{}-{unique}",
-            std::process::id()
-        ));
+        let root = bt_testpath::temp_path("betterterminal 图 片");
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let image = root.join("shot.png");

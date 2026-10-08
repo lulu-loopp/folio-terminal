@@ -20727,11 +20727,7 @@ mod console_channel_tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "bt-console-channel-{}-{name}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let directory = bt_testpath::temp_path(&format!("bt-console-channel-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a private directory for this test");
         directory
@@ -20923,11 +20919,7 @@ mod dir_watch_tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "bt-dir-watch-{}-{name}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
+            let dir = bt_testpath::temp_path(&format!("bt-dir-watch-{name}"));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("make a scratch directory");
             Self(dir)
@@ -21206,7 +21198,7 @@ mod dir_watch_tests {
     /// not exist is the second.
     #[test]
     fn a_directory_that_is_not_there_declines_to_be_watched() {
-        let missing = std::env::temp_dir().join("bt-dir-watch-no-such-directory-ever");
+        let missing = bt_testpath::temp_path("bt-dir-watch-no-such-directory");
         let _ = std::fs::remove_dir_all(&missing);
         let error = DirWatch::start(&missing, || {})
             .err()
@@ -22625,16 +22617,15 @@ mod context_menu_registry_tests {
     /// `delete_registry_tree` on the store's own root and not
     /// `remove_context_menu`: the product's removal deliberately leaves the
     /// container keys standing (see its note), so a teardown built on it would
-    /// leave a growing pile of empty `test-context-menu\<pid>-…` keys in the
+    /// leave a growing pile of empty `folio-context-menu-test-…` keys in the
     /// registry of whoever runs the suite.
     struct Isolated(String);
 
     impl Isolated {
         fn new(name: &str) -> Self {
             let root = format!(
-                "Software\\folio-context-menu-test-{}-{:?}-{name}",
-                std::process::id(),
-                std::thread::current().id()
+                "Software\\{}",
+                bt_testpath::unique_name(&format!("folio-context-menu-test-{name}"))
             );
             let _ = delete_registry_tree(&root);
             Self(root)
@@ -22660,11 +22651,7 @@ mod context_menu_registry_tests {
 
     impl ScratchFolder {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "folio-context-menu-test-{}-{:?}-{name}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
+            let path = bt_testpath::temp_path(&format!("folio-context-menu-test-{name}"));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("a scratch folder to keep two installs in");
             Self(path)

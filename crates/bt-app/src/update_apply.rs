@@ -113,6 +113,16 @@ impl Limits {
     };
 }
 
+/// **A trial deadline no honest test run reaches**, on either platform's road, for a test whose
+/// verdict is the receipt it writes, or the recorded process's end, and
+/// not the deadline. Such a test writes the receipt from its own thread
+/// while the applier watches, so a deadline within its reach would make
+/// the verdict a measure of how busy the machine is. Ten minutes bounds a
+/// broken run; a working one never waits for it, because the watch reads
+/// the receipt before it reads the clock.
+#[cfg(test)]
+pub(crate) const TRIAL_NOT_UNDER_TEST_MS: u64 = 600_000;
+
 /// **Where the Windows applier, or the Windows recovery, stopped.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {

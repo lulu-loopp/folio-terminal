@@ -24,7 +24,6 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bt_term::DualPlaneSession;
@@ -50,11 +49,7 @@ fn shell_integration_source() -> String {
 }
 
 fn temporary_directory() -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!("folio-cmd-{}-{unique}", std::process::id()));
+    let directory = bt_testpath::temp_path("folio-cmd");
     std::fs::create_dir(&directory).unwrap();
     directory
 }

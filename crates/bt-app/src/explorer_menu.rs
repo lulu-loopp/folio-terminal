@@ -2763,8 +2763,7 @@ mod tests {
     /// An install folder of its own: a `folio.exe` and the `folio.msix` beside
     /// it.
     fn install_folder(tag: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("bt-explorer-renewal-{tag}-{}", std::process::id()));
+        let root = bt_testpath::temp_path(&format!("bt-explorer-renewal-{tag}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private install folder");
         std::fs::write(root.join(msix::PACKAGE_EXECUTABLE), b"exe").unwrap();
