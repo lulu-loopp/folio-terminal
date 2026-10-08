@@ -3668,9 +3668,14 @@ impl ProbeStdio {
 /// One kind of program cannot be born in a job: Windows refuses the job list
 /// for a packaged app's executable (PowerShell 7 from the Microsoft Store) when
 /// this process is not packaged itself. Such a probe is created suspended, put
-/// in its job, and resumed through the primary thread `CreateProcess` returned,
+/// in a fresh job (the refused attempt leaves its first job unassignable), and
+/// resumed through the primary thread `CreateProcess` returned,
 /// so its descendants are still contained; a termination of this process while
-/// that `CreateProcess` is still running can leave it behind, suspended.
+/// that `CreateProcess` is still running can leave it behind, suspended. Only
+/// that exact refusal (`PACKAGED_JOB_LIST_REFUSAL`) takes this road; any other
+/// failure of the first `CreateProcess` is the start's answer. If the
+/// assignment or the resume is refused, the suspended child is ended and the
+/// start fails: nothing suspended is left behind.
 ///
 /// The door creates the process itself, because the standard library cannot
 /// pass that attribute on stable Rust. It honours what the caller configured on
@@ -3684,6 +3689,16 @@ impl ProbeStdio {
 /// changes over this process's environment (`env_clear` cannot be observed and
 /// is not honoured); and the working directory. The window is refused
 /// (`CREATE_NO_WINDOW`).
+///
+/// What the door cannot observe on a `Command` it drops, because the standard
+/// library offers no way to read it back: `env_clear` (the child starts from
+/// this process's environment plus the changes), `creation_flags` (the door
+/// sets `CREATE_NO_WINDOW`, `CREATE_UNICODE_ENVIRONMENT` and
+/// `EXTENDED_STARTUPINFO_PRESENT` and nothing else — what [`quiet_command`]
+/// sets is the first of these), the `raw_arg`/`arg` difference, and any
+/// `stdin`/`stdout`/`stderr` set on it (the streams are `stdio`). Because none
+/// of these can be read, no assertion can pin that a caller leaves them unset;
+/// this sentence is the rule.
 ///
 /// The child inherits exactly its three standard handles
 /// (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), never another inheritable handle of
@@ -3765,6 +3780,38 @@ struct ProbeBirthSeam {
     /// packaged app's executable.
     #[cfg(test)]
     refuse_the_job_list: bool,
+    /// Treat the assignment after a refused job list as refused.
+    #[cfg(test)]
+    refuse_the_assignment: bool,
+    /// How many `CreateProcess` calls this birth made.
+    #[cfg(test)]
+    attempts: std::rc::Rc<std::cell::Cell<u32>>,
+    /// A handle to the child the refused-job-list arm created, kept so a
+    /// test can watch it end.
+    #[cfg(test)]
+    created: std::rc::Rc<std::cell::RefCell<Option<std::os::windows::io::OwnedHandle>>>,
+}
+
+/// What `CreateProcess` reports (as its last error) when Windows refuses a job
+/// list because the program is a packaged app's executable and this process is
+/// not packaged: `0xC0070005`, `ERROR_ACCESS_DENIED` (5) in the status form of
+/// facility Win32 (7), as the kernel's refusal comes back unconverted. Measured
+/// with PowerShell 7 from the Microsoft Store, from a parent in a job and not.
+#[cfg(windows)]
+const PACKAGED_JOB_LIST_REFUSAL: i32 = i32::from_ne_bytes(0xC007_0005_u32.to_ne_bytes());
+
+/// A refused `CreateProcess` as the standard library reports it: the Win32
+/// error itself (`ERROR_FILE_NOT_FOUND` is `NotFound`), not the `HRESULT` the
+/// `windows` crate wraps it in; a last error that is no Win32 code, such as
+/// [`PACKAGED_JOB_LIST_REFUSAL`], is kept as it is.
+#[cfg(windows)]
+fn start_error(error: windows::core::Error) -> std::io::Error {
+    let code = u32::from_ne_bytes(error.code().0.to_ne_bytes());
+    if code & 0xFFFF_0000 == 0x8007_0000 {
+        std::io::Error::from_raw_os_error(i32::from_ne_bytes((code & 0xFFFF).to_ne_bytes()))
+    } else {
+        std::io::Error::from_raw_os_error(error.code().0)
+    }
 }
 
 /// The kill-on-close job a Windows probe is born in.
@@ -3880,9 +3927,12 @@ fn spawn_probe_born(
         flags |= CREATE_SUSPENDED;
     }
     #[cfg(test)]
-    let refuse_the_job_list = seam.refuse_the_job_list;
+    let (refuse_the_job_list, refuse_the_assignment) =
+        (seam.refuse_the_job_list, seam.refuse_the_assignment);
     #[cfg(not(test))]
-    let refuse_the_job_list = false;
+    let (refuse_the_job_list, refuse_the_assignment) = (false, false);
+    #[cfg(test)]
+    let (attempts, created) = (seam.attempts.clone(), seam.created.clone());
     #[cfg(test)]
     if let Some(hook) = seam.while_inheritable {
         hook();
@@ -3895,6 +3945,8 @@ fn spawn_probe_born(
     let mut create = |born_in: Option<&[HANDLE; 1]>,
                       flags: PROCESS_CREATION_FLAGS|
      -> std::io::Result<(OwnedHandle, OwnedHandle, u32)> {
+        #[cfg(test)]
+        attempts.set(attempts.get() + 1);
         let mut attributes = ProbeAttributes::new(if born_in.is_some() { 2 } else { 1 })?;
         attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited)?;
         if let Some(jobs) = born_in {
@@ -3937,7 +3989,8 @@ fn spawn_probe_born(
                 &raw const startup.StartupInfo,
                 &raw mut information,
             )
-        }?;
+        }
+        .map_err(start_error)?;
         // SAFETY: `CreateProcessW` returned these two new handles to this
         // caller, which owns and closes each exactly once.
         Ok(unsafe {
@@ -3949,42 +4002,76 @@ fn spawn_probe_born(
         })
     };
 
-    let born = match &jobs {
-        Some(jobs) if !refuse_the_job_list => create(Some(jobs), flags).ok(),
-        _ => None,
-    };
-    let (process, thread, id) = match (born, &jobs) {
-        (Some(created), _) => created,
-        (None, None) => create(None, flags)?,
-        // Windows refuses a job list when the program is a packaged app's
-        // executable and this process is not packaged (`0xC0070005`, measured
-        // with PowerShell 7 from the Microsoft Store). Such a probe is created
-        // suspended, put in its job before it runs an instruction, and then
-        // resumed through the primary thread handle `CreateProcess` returned;
-        // only a termination of this process inside that `CreateProcess` can
-        // leave it behind.
-        (None, Some(jobs)) => {
-            let (process, thread, id) = create(None, flags | CREATE_SUSPENDED)?;
-            // SAFETY: both handles are live: the job is owned by `guard`, the
-            // process by this function.
-            if let Err(error) =
-                unsafe { AssignProcessToJobObject(jobs[0], HANDLE(process.as_raw_handle())) }
-            {
-                containment_unavailable(&error.into());
-                guard = ProbeChildGuard::uncontained();
-            }
-            if !flags.contains(CREATE_SUSPENDED) {
-                // SAFETY: the handle names the suspended primary thread.
-                if unsafe { ResumeThread(HANDLE(thread.as_raw_handle())) } == u32::MAX {
-                    let error = std::io::Error::last_os_error();
-                    // SAFETY: the child this call created and never resumed.
-                    unsafe {
-                        let _ = TerminateProcess(HANDLE(process.as_raw_handle()), 1);
+    let (process, thread, id) = match &jobs {
+        None => create(None, flags)?,
+        Some(jobs) => {
+            let born = if refuse_the_job_list {
+                Err(std::io::Error::from_raw_os_error(PACKAGED_JOB_LIST_REFUSAL))
+            } else {
+                create(Some(jobs), flags)
+            };
+            match born {
+                Ok(created) => created,
+                // Windows refuses a job list when the program is a packaged
+                // app's executable and this process is not packaged (measured
+                // with PowerShell 7 from the Microsoft Store, in a job or not).
+                // Such a probe is created suspended, put in its job before it
+                // runs an instruction, and then resumed through the primary
+                // thread handle `CreateProcess` returned; only a termination of
+                // this process inside that `CreateProcess` can leave it behind.
+                // Any other refusal is the start's own answer and is returned
+                // as it is, without a second attempt.
+                Err(error) if error.raw_os_error() == Some(PACKAGED_JOB_LIST_REFUSAL) => {
+                    // The refused attempt has already named its job, and
+                    // Windows then refuses to assign any process to that job
+                    // (`ERROR_ACCESS_DENIED`, measured): the child goes into a
+                    // fresh one.
+                    guard = probe_job().unwrap_or_else(|error| {
+                        containment_unavailable(&error);
+                        ProbeChildGuard::uncontained()
+                    });
+                    let fresh = guard.job.as_ref().map(|job| HANDLE(job.as_raw_handle()));
+                    let (process, thread, id) = create(None, flags | CREATE_SUSPENDED)?;
+                    #[cfg(test)]
+                    {
+                        *created.borrow_mut() = process.try_clone().ok();
                     }
-                    return Err(error);
+                    let assigned = match fresh {
+                        None => Ok(()),
+                        Some(_) if refuse_the_assignment => {
+                            Err(std::io::Error::other("injected assignment refusal"))
+                        }
+                        // SAFETY: both handles are live: the job is owned by
+                        // `guard`, the process by this function.
+                        Some(job) => unsafe {
+                            AssignProcessToJobObject(job, HANDLE(process.as_raw_handle()))
+                        }
+                        .map_err(std::io::Error::from),
+                    };
+                    let resumed = assigned.and_then(|()| {
+                        if flags.contains(CREATE_SUSPENDED) {
+                            return Ok(());
+                        }
+                        // SAFETY: the handle names the suspended primary thread.
+                        if unsafe { ResumeThread(HANDLE(thread.as_raw_handle())) } == u32::MAX {
+                            Err(std::io::Error::last_os_error())
+                        } else {
+                            Ok(())
+                        }
+                    });
+                    if let Err(error) = resumed {
+                        // Nothing suspended is left behind: the child this call
+                        // created, outside its job or never resumed, is ended.
+                        // SAFETY: the handle names that child and is live.
+                        unsafe {
+                            let _ = TerminateProcess(HANDLE(process.as_raw_handle()), 1);
+                        }
+                        return Err(error);
+                    }
+                    (process, thread, id)
                 }
+                Err(error) => return Err(error),
             }
-            (process, thread, id)
         }
     };
     drop((thread, stdin_theirs, stdout_theirs, stderr_theirs));
@@ -4908,6 +4995,69 @@ mod probe_child_tests {
         child.kill().expect("end the probe at its deadline");
         direct.wait_gone();
         grandchild.wait_gone();
+    }
+
+    /// **Only the packaged-app refusal takes the second road.** A start that
+    /// fails for another reason — here a program that does not exist — is
+    /// answered with the first `CreateProcess`'s own error, and nothing is
+    /// tried again.
+    ///
+    /// RED mutation: in `spawn_probe_born`, take the refused-job-list arm on
+    /// any first error (drop the `PACKAGED_JOB_LIST_REFUSAL` gate); the start
+    /// is attempted twice.
+    #[test]
+    fn a_start_refused_for_another_reason_is_answered_once_with_its_own_error() {
+        let missing = std::env::current_exe()
+            .expect("test executable")
+            .with_file_name("folio-no-such-probe-program.exe");
+        let seam = ProbeBirthSeam::default();
+        let attempts = seam.attempts.clone();
+        let refused = spawn_probe_born(
+            &quiet_command(&missing),
+            HELPER_STDIO,
+            None,
+            probe_job(),
+            seam,
+        )
+        .expect_err("a program that does not exist");
+        assert_eq!(refused.kind(), std::io::ErrorKind::NotFound, "{refused:?}");
+        assert_eq!(attempts.get(), 1, "the start was tried again");
+    }
+
+    /// **Nothing suspended is left behind.** When the child the refused-job-list
+    /// arm created cannot be put in its job (the seam refuses the assignment —
+    /// an outer job does not stage it: nesting a new, empty job is allowed
+    /// whatever its breakaway limits, as the inside-a-job tests show), the
+    /// still-suspended child is ended and the start fails.
+    ///
+    /// RED mutation: in that arm, skip the `TerminateProcess` before returning
+    /// the error; the suspended child stays alive.
+    #[test]
+    fn a_refused_assignment_ends_the_suspended_child_and_fails_the_start() {
+        let seam = ProbeBirthSeam {
+            refuse_the_job_list: true,
+            refuse_the_assignment: true,
+            ..ProbeBirthSeam::default()
+        };
+        let created = seam.created.clone();
+        let refused = spawn_probe_born(&helper_command(), HELPER_STDIO, None, probe_job(), seam)
+            .expect_err("a refused assignment fails the start");
+        assert_eq!(refused.to_string(), "injected assignment refusal");
+        let child = created
+            .borrow_mut()
+            .take()
+            .expect("the arm created a child");
+        // SAFETY: the handle is a duplicate this test owns; this is a failure
+        // ceiling, not a timing assertion.
+        let ended = unsafe { WaitForSingleObject(HANDLE(child.as_raw_handle()), 10_000) };
+        if ended != WAIT_OBJECT_0 {
+            // SAFETY: the test's own suspended helper, ended so a red run
+            // leaves nothing behind.
+            unsafe {
+                let _ = TerminateProcess(HANDLE(child.as_raw_handle()), 1);
+            }
+        }
+        assert_eq!(ended, WAIT_OBJECT_0, "the suspended child was left behind");
     }
 
     /// The job-report helper: its first act is to ask the kernel which
