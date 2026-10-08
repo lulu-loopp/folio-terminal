@@ -7705,9 +7705,7 @@ mod parse_sites {
         }
         let mut calls = BTreeMap::new();
         for (identity, count) in found.owners(index) {
-            if identity.variant.permits_product() {
-                *calls.entry(key(&identity)).or_insert(0) += count;
-            }
+            *calls.entry(key(&identity)).or_insert(0) += count;
         }
         calls
     }
