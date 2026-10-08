@@ -233,7 +233,7 @@ use bt_persist::{
 use text_scale::{TextScale, TextStep};
 // Step 2a moved these two names' last non-test users into `runtime/` (the
 // `peek` and `windows` topics), which import them themselves; the root keeps
-// them for `tests.rs`, which reads them through `use super::*`.
+// them for the root's test modules, which read them through `use super::*`.
 #[cfg(test)]
 use bt_doc::Bias;
 #[cfg(test)]
@@ -17082,7 +17082,7 @@ mod tab_identity_tests {
 
         // The seat half of the lookup is a free function so it can be pinned by
         // value as well as by shape — see
-        // `tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
+        // `app_preview_tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
         let among = free_fn_body("preview_tab_index_among");
         assert!(
             among.contains("state.id == tab"),
@@ -52744,9 +52744,9 @@ mod mouse_trace_station_tests {
     //
     // **One reading widens** (§4.1). The route sweep took this file; it now
     // takes every file the package declares, which is one site more — a fixture
-    // in `tests.rs` writing a declared word. The closed set of route words is a
-    // fact about the package and not about one file of it, and a reading
-    // watching one file could not say so.
+    // in one of the crate root's test files writing a declared word. The closed
+    // set of route words is a fact about the package and not about one file of
+    // it, and a reading watching one file could not say so.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -59432,7 +59432,7 @@ mod pty_drain_budget_tests {
     /// PIN — **no path reaches ConPTY with a rectangle except through the quiet window.**
     ///
     /// The behavioural half lives in
-    /// `tests::a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`; this
+    /// `app_panes_tests::a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`; this
     /// is the half that can actually be broken again, because the way it broke the first time
     /// was a *second* commit path being written beside the coalescer rather than the coalescer
     /// being wrong. `commit_leaf_resize` is the only thing that calls `PtySession::resize` for a
@@ -59448,9 +59448,10 @@ mod pty_drain_budget_tests {
             // Its declaration and the one production release, counted over every file a
             // product build of this package compiles. The number was the same when the
             // reading was "the whole of `main.rs`", and for a reason that had nothing to
-            // do with the rule: the six test callers are in `tests.rs`, which that
-            // reading did not open. Now they are not counted because the declaration that
-            // reaches that file is `#[cfg(test)]`, which is the fact meant all along.
+            // do with the rule: the six test callers are in the crate root's test files
+            // (`app_panes_tests.rs` and its siblings), which that reading did not open. Now
+            // they are not counted because the declarations that reach those files are
+            // `#[cfg(test)]`, which is the fact meant all along.
             2,
             "the commit has one caller in the product, and that caller is the release"
         );
@@ -72557,6 +72558,13 @@ fn main() -> Result<()> {
     bt_platform::leave_process(code)
 }
 
+// **The crate root's tests, by what they test** (`docs/DESIGN.md`, K1). Each file sits in
+// `src/` and is written in this file's scope (`use super::*`): `app_<theme>_tests` for items
+// this file owns, sorted by the theme sort of `docs/plans/bt-app-split-inventory-2026-09-15.md`
+// §0.3, and `<module>_app_tests` for tests whose first assertion is about another module.
+//
+// **`main.rs` is still not the same thing as this crate's product text**: it holds fifty-four
+// smaller inline test modules besides. Every pin that reads it says which of the two it means.
 #[cfg(test)]
 mod app_attention_tests;
 #[cfg(test)]
@@ -72697,21 +72705,13 @@ mod shell_literal_app_tests;
 mod shortcuts_app_tests;
 #[cfg(test)]
 mod table_block_app_tests;
+/// **The fixtures the crate root's test files share**, `pub(crate)` where another file
+/// reaches them.
 #[cfg(test)]
 mod test_support;
-/// **The largest of this file's test modules, in a file of its own**
-/// (`refactor/main-tests-out`, 2026-09-18).
-///
-/// A move and nothing else: the same tests under the same paths, reading the
-/// same fixtures from the same directory. It is out here because a module of
-/// forty-eight thousand lines is the reason an editor, a reviewer and a
-/// `cargo fmt` all have to carry the whole of this file to reach anything in
-/// it, and because the pins that count this file's own text now count a file
-/// that is that much closer to being the product's.
-///
-/// **`main.rs` is still not the same thing as this crate's product text**: it
-/// holds fifty-four smaller test modules besides. Every pin that reads it says
-/// which of the two it means.
+/// **The tests that keep the path `tests::<name>`** — the few that something outside
+/// their own body names by it (a row of `docs/plans/TIMING-BOUND-TESTS.tsv`, or a test that
+/// runs itself again with `--exact`); the file's head lists why.
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
