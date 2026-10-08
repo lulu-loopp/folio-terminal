@@ -4451,11 +4451,7 @@ mod linux_xdg_tests {
     }
 
     fn test_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "folio-linux-xdg-{label}-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = bt_testpath::temp_path(&format!("folio-linux-xdg-{label}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create the isolated test root");
         root
