@@ -1474,7 +1474,7 @@ fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathere
     };
     assert!(world.0.is_empty(), "the start said {:?}", world.0);
     let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut job = Job::with_offers(true).after_start(waiting, resume, {
+    let mut job = Job::with_offers(true).after_start(waiting.map(|home| *home), resume, {
         let checked = Arc::clone(&checked);
         move || checked.store(true, std::sync::atomic::Ordering::SeqCst)
     });

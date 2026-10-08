@@ -5966,3 +5966,199 @@ fn a_layout_that_refuses_to_activate_is_rolled_back_untried() {
         "nothing to move back"
     );
 }
+
+// ── the escape hatch (0.4.8 E1) ─────────────────────────────────────────────
+
+/// RED (E1; role #9, the Windows exit guard, sites H4 and J6 `opens_now`) —
+/// **over a journal this build cannot read whole, the exit opens what an
+/// unknown live set opens — the rescue copy with `--update-failed` — and
+/// never the installed build plainly**: an unknown header word (its
+/// envelope reads as `destructive`), an unknown body word under a
+/// `destructive` header, and bytes of which nothing reads. A header that
+/// reads keeps its frozen class's answer: a retired rollback over an unknown
+/// body opens the installed build with its card. The journal is byte for
+/// byte as it was.
+///
+/// MUTATION: in `opens_now`, answer `Opens::Installed { failed: false }` for
+/// a journal of which nothing reads (the pre-E1 answer).
+#[test]
+fn the_windows_exit_opens_the_rescue_over_what_it_cannot_read_whole() {
+    let Some(install) = Install::new("beyond-exit") else {
+        return;
+    };
+    install.write(Phase::Moving);
+    let known = std::fs::read(install.home.journal()).unwrap();
+    let road = install.road(limits(600, 20_000));
+    for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        assert_eq!(opens_now(&road), Opens::Rescue, "{what}");
+        let (program, words) = road.opening(&opens_now(&road));
+        assert_eq!(program, install.rescue.as_path(), "{what}");
+        assert_eq!(words, failed_words(&install.home).to_vec(), "{what}");
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+    install.write(Phase::Retired {
+        outcome: Outcome::RolledBack,
+        untried: false,
+    });
+    let retired = std::fs::read(install.home.journal()).unwrap();
+    let [_, (what, unknown_body), _] = crate::update_txn::beyond_inputs(&retired);
+    install_txn::durable_write(&install.home.journal(), &unknown_body).unwrap();
+    assert_eq!(
+        opens_now(&road),
+        Opens::Installed { failed: true },
+        "{what}: the frozen class decides"
+    );
+}
+
+/// RED (E1; role #10, the Windows lock holder, site J7 `read_journal` — the
+/// recovery's `hold` and the applier's `under_the_lock`) — **a lock holder
+/// stands aside from a journal this build cannot read whole**: the recovery
+/// and the applier each end `Ended::StoodAside`, recording, removing,
+/// moving and ending nothing, and the lock is let go. Handed a person's
+/// start, the recovery owes a window; at logon it owes none
+/// (`update_apply::owed_at_logon`). The applier's exit opens the rescue copy
+/// (`opens_now`, role #9).
+///
+/// MUTATION: in `hold`, answer the pre-E1 `Ended::Left` for a journal this
+/// build cannot read whole.
+#[test]
+fn the_windows_lock_holder_stands_aside_from_what_it_cannot_read_whole() {
+    let Some(install) = Install::new("beyond-holder") else {
+        return;
+    };
+    install.claim_window();
+    install.write(Phase::Moving);
+    let known = std::fs::read(install.home.journal()).unwrap();
+    for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        for start in [Some(handed()), None] {
+            let road = install.road(limits(600, 20_000));
+            let mut world = install.world(Trial::Answers);
+            let waits = start.is_some();
+            let recovered =
+                on_a_worker(move |worker| recover(worker, &road, &mut world, start.as_deref()));
+            assert!(
+                matches!(recovered.ended, Ended::StoodAside(_)),
+                "{what}: {:?}",
+                recovered.ended
+            );
+            assert_eq!(recovered.successor, None, "{what}");
+            assert_eq!(
+                recovered.waiting, waits,
+                "{what}: a window is owed to a person's start, none at logon"
+            );
+            assert_eq!(std::fs::read(install.home.journal()).unwrap(), bytes);
+        }
+        let (ended, world) = applied(&install, limits(600, 20_000), install.world(Trial::Answers));
+        assert!(matches!(ended, Ended::StoodAside(_)), "{what}: {ended:?}");
+        assert_eq!(
+            world.opened.first().map(|(program, _)| program.clone()),
+            Some(install.rescue.clone()),
+            "{what}: {:?}",
+            world.opened
+        );
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+        assert!(
+            install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+                .unwrap()
+                .is_some(),
+            "{what}: the lock is let go"
+        );
+        nothing_moved(&install);
+        assert!(!install.registry.holds(install.txn), "{what}: no entrance");
+    }
+}
+
+/// RED (E1; role #3, the trial's watchdog, site H3 `update_trial::hand_back`)
+/// — **a trial hands back a journal it cannot read whole to the rescue
+/// build its header acts on**: the envelope's, for an unknown header word;
+/// the header's, for an unknown body word; and nobody's when nothing reads
+/// (no holder could read it either). The journal is byte for byte as it was.
+///
+/// MUTATION: in `hand_back`, read the header alone again
+/// (`Header::parse(&bytes).ok()`): an unknown header word is never handed
+/// back, and nobody is asked to settle it.
+#[test]
+fn a_trial_hands_back_what_it_cannot_read_whole_to_the_rescue_its_header_names() {
+    let Some(install) = moved_in("beyond-hand-back") else {
+        return;
+    };
+    struct Recorded(Vec<(PathBuf, Vec<OsString>)>);
+    impl crate::update_trial::Starter for Recorded {
+        fn start(&mut self, program: &Path, line: &[OsString]) -> io::Result<u32> {
+            self.0.push((program.to_path_buf(), line.to_vec()));
+            Ok(std::process::id())
+        }
+    }
+    std::fs::remove_file(&install.rescue).unwrap();
+    bt_platform::trust_harness::program(
+        &install.rescue,
+        FileVersion([0, 4, 7, 0]),
+        bt_platform::trust_harness::Behaviour::Returns,
+    )
+    .unwrap();
+    let known = std::fs::read(install.home.journal()).unwrap();
+    for (index, (what, bytes)) in crate::update_txn::beyond_inputs(&known)
+        .into_iter()
+        .enumerate()
+    {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        let (home, txn) = (install.home.clone(), install.txn);
+        let recorded = on_a_worker(move |worker| {
+            let mut recorded = Recorded(Vec::new());
+            crate::update_trial::hand_back(
+                worker,
+                &home,
+                txn,
+                false,
+                crate::update_trial::FROM_TRIAL_SINCE,
+                &mut recorded,
+            );
+            recorded.0
+        });
+        let programs: Vec<PathBuf> = recorded.into_iter().map(|(program, _)| program).collect();
+        if index < 2 {
+            assert_eq!(programs, vec![install.rescue.clone()], "{what}");
+        } else {
+            assert!(programs.is_empty(), "{what}: {programs:?}");
+        }
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+}
+
+/// RED (E1 round 2; role #9, the Windows exit guard, `opens_now`) — **a
+/// journal file the exit cannot read at all is no absent journal**: it opens
+/// the rescue copy with `--update-failed`, as for any journal of which
+/// nothing reads, and never the installed build plainly; only a journal that
+/// is not there does that.
+///
+/// MUTATION: in `opens_now`, map a read that failed other than "no such
+/// file" back to no journal (`Opens::Installed { failed: false }`).
+#[test]
+fn the_windows_exit_opens_the_rescue_over_a_journal_it_cannot_read() {
+    let Some(install) = Install::new("unread-exit") else {
+        return;
+    };
+    let road = install.road(limits(600, 20_000));
+    let kind = crate::update_txn::a_journal_that_cannot_be_read(&install.home.journal());
+    assert_eq!(opens_now(&road), Opens::Rescue, "{kind:?}");
+    std::fs::remove_dir(install.home.journal()).unwrap();
+    assert_eq!(
+        opens_now(&road),
+        Opens::Installed { failed: false },
+        "no journal at all"
+    );
+}

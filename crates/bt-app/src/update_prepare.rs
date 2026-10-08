@@ -42,8 +42,8 @@ use crate::install_channel::Channel;
 use crate::update_handoff::Staged;
 use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
 use crate::update_txn::{
-    Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, TxnId, decide,
-    may,
+    Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, Role, TxnId,
+    decide, may,
 };
 
 /// The worker a Prepare runs on — one per press, one job per process (R.3).
@@ -267,6 +267,24 @@ pub(crate) enum AtLaunch {
     Left,
 }
 
+/// **Why a press finds a journal already there** (both Prepares, step 2): the
+/// installation is another transaction's ([`Stop::Busy`]), or that journal is
+/// one this build cannot read whole — another Folio's update is not finished,
+/// and the build that wrote it finishes it ([`Stop::Newer`], 0.4.8 E1,
+/// `update_txn::Role::JobOwner`) — a journal file that could not be read
+/// included (E1 round 2). One gone since the press looked is [`Stop::Busy`]:
+/// another holder had it.
+pub(crate) fn journal_there(home: &Home) -> Stop {
+    match Role::JobOwner.sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal())) {
+        Some(crate::update_txn::Sight::Known(_)) | None => Stop::Busy,
+        Some(
+            crate::update_txn::Sight::Header { .. }
+            | crate::update_txn::Sight::Envelope { .. }
+            | crate::update_txn::Sight::Unreadable(_),
+        ) => Stop::Newer,
+    }
+}
+
 /// **The job owner's pass at a launch** ((b).2's W1–W2 and M1–M2): the lock,
 /// one read of the journal, and `update_txn::decide` as the job owner.
 ///
@@ -281,14 +299,20 @@ pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, Str
     else {
         return Ok(AtLaunch::Busy);
     };
-    let bytes = match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(AtLaunch::Nothing),
-        Err(error) => return Err(error.to_string()),
-    };
-    let Ok(journal) = Journal::parse(&bytes) else {
-        return Ok(AtLaunch::Left);
-    };
+    // A journal this build cannot read whole — or whose file could not be
+    // read (E1 round 2) — is left to the build that wrote it (E1,
+    // `update_txn::Role::JobOwner`): the offer still shows, and the press
+    // says so (`update_job::Stop::Newer`).
+    let journal =
+        match Role::JobOwner.sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal())) {
+            None => return Ok(AtLaunch::Nothing),
+            Some(crate::update_txn::Sight::Known(journal)) => journal,
+            Some(
+                crate::update_txn::Sight::Header { .. }
+                | crate::update_txn::Sight::Envelope { .. }
+                | crate::update_txn::Sight::Unreadable(_),
+            ) => return Ok(AtLaunch::Left),
+        };
     // A job owner's answer is read from the phase alone (`decide`'s first
     // arm); the rest of the description is what an owner of no destructive
     // phase sees: no entrance, no receipt, no trial.
@@ -420,5 +444,89 @@ pub(crate) fn settle_at_launch(
             ));
             Landed::Ordinary
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::update_txn::{Adapter, Body, Inventories, Layout, Phase, beyond_inputs};
+
+    /// RED (E1; role #16, the job owner, site J11 `at_launch`, and the press,
+    /// both Prepares' `journal_there`) — **the job owner leaves a journal this
+    /// build cannot read whole to the build that wrote it, and the press says
+    /// so**: at a launch it is `AtLaunch::Left` (the offer still shows) and
+    /// the journal is byte for byte as it was, the lock let go; pressing
+    /// Update then answers `Stop::Newer`, whose card says that a newer
+    /// Folio's update is not finished — not *Another update is in
+    /// progress.*, which a journal this build reads still answers.
+    ///
+    /// MUTATION: in `journal_there`, answer `Stop::Busy` whatever the
+    /// journal is (the pre-E1 press).
+    #[test]
+    fn the_job_owner_leaves_what_it_cannot_read_whole_and_the_press_says_why() {
+        let root = bt_testpath::temp_path("bt-update-prepare-beyond");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::at(root.join("home"));
+        let txn = TxnId::new([0x4b; 16]);
+        std::fs::create_dir_all(home.transaction(txn)).unwrap();
+        let known = crate::update_txn::Journal {
+            txn,
+            rescue: "rescue".to_owned(),
+            body: Body {
+                phase: Phase::Prepared {
+                    deferred_launches: 0,
+                },
+                layout: Layout::Members(Inventories {
+                    old_shipped: vec!["folio.exe".to_owned()],
+                    old_present: Vec::new(),
+                    new: Vec::new(),
+                }),
+                adapter: Adapter::Ours,
+            },
+        }
+        .encode();
+        for (what, bytes) in beyond_inputs(&known) {
+            install_txn::durable_write(&home.journal(), &bytes).unwrap();
+            let at = home.clone();
+            let landed = bt_platform::spawn_at_priority(
+                "bt-update-prepare-test",
+                bt_platform::ThreadPriority::BelowNormal,
+                move |worker| matches!(at_launch(worker, &at), Ok(AtLaunch::Left)),
+            )
+            .unwrap()
+            .join()
+            .unwrap();
+            assert!(landed, "{what}: left to the build that wrote it");
+            assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
+            assert!(
+                install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                    .unwrap()
+                    .is_some(),
+                "{what}: the lock is let go"
+            );
+            assert_eq!(journal_there(&home), Stop::Newer, "{what}");
+        }
+        let paint = crate::update_card::paint(&crate::update_job::State::Failed(
+            None,
+            crate::update_job::Failure::Stopped(Stop::Newer),
+        ))
+        .expect("a failed job has a card");
+        assert_eq!(
+            paint.heading.as_deref(),
+            Some("An update by a newer Folio is not finished.")
+        );
+        assert_eq!(
+            paint.detail.as_deref(),
+            Some("It finishes when you next sign in.")
+        );
+
+        install_txn::durable_write(&home.journal(), &known).unwrap();
+        assert_eq!(
+            journal_there(&home),
+            Stop::Busy,
+            "a journal this build reads"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

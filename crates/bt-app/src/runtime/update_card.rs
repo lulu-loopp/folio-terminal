@@ -589,6 +589,7 @@ mod tests {
     fn an_incomplete_recovery_cannot_be_retried() {
         let mut job = Job::with_offers(true).after_rollback(Some(Failure::Incomplete {
             folder: Some(PathBuf::from("txn-更新-1")),
+            held: false,
         }));
         consider(&mut job, "v0.4.7");
         let driver = Starts::default();

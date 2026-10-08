@@ -12,6 +12,8 @@ All notable changes to Folio are recorded here. The format follows
 - Before a pane's shell reports its folder, everything that offers "where this pane is" uses the folder the pane was opened in: the pane's files card and a files column opened from it (which showed your home folder), the files column's folder menu, the place hints in the command palette, and the folder picker of New terminal in folder… in the pane menu and the new-tab menu — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
 - Every pasted picture's `[Image #N]` on an agent's input line can be opened, not only the last one.
 - A program that died with mouse or keyboard modes on no longer leaves the prompt typing junk (Ctrl+C interrupts again), and a full-screen program that died on its own screen no longer leaves the prompt stuck behind it, when the shell has Folio's integration. <!-- zh: pending T-RESET-MODES -->
+- If an update is interrupted and Folio cannot finish it straight away, Folio still opens, says the update is not finished and that changes made in that session are not kept, and the update is finished at your next sign-in — instead of opening as usual and keeping changes the unfinished update would later undo.
+- An older copy of Folio that finds an update started by a newer one now leaves it for the newer one to finish and says so, instead of ignoring it.
 
 ## 0.4.7-preview — 2026-10-06
 

@@ -499,8 +499,20 @@ pub(crate) enum Failure {
     /// journal is, which the card names and Show folder opens. `None` only for
     /// a report handed over from another start whose folder is not a local
     /// path (`launch_wire::accept`, U-36 round 2): the card then names no
-    /// folder.
-    Incomplete { folder: Option<PathBuf> },
+    /// folder. `held`: this start continues with its writes held, because
+    /// the rescue build could not be started (0.4.8 E1), and the card says
+    /// that this session's changes are not kept.
+    Incomplete { folder: Option<PathBuf>, held: bool },
+    /// **An update this build cannot read whole is not finished** (0.4.8
+    /// E1): the start continued past a journal another Folio wrote —
+    /// `version`, when the journal names a later build, and otherwise one
+    /// whose record cannot be read. `folder` is where the journal is; `held`
+    /// as for [`Failure::Incomplete`].
+    Newer {
+        folder: Option<PathBuf>,
+        version: Option<String>,
+        held: bool,
+    },
     /// **Recovery could not be launched, so this already-running new build is
     /// the recorded trial** (0.4.7 U-35). The update is still incomplete and
     /// `folder` is where its journal is; unlike [`Failure::Incomplete`], the
@@ -524,6 +536,10 @@ pub(crate) enum Stop {
     /// Another transaction holds this installation: its lock is taken, or its
     /// journal is still there. Nothing was written.
     Busy,
+    /// **The journal still there is one this build cannot read whole**
+    /// (0.4.8 E1): another Folio's update is not finished, and the build that
+    /// wrote it finishes it. Nothing was written.
+    Newer,
     /// The installation home, the transaction's folders or its journal could
     /// not be written.
     Journal,
@@ -562,6 +578,7 @@ impl Stop {
             Self::NotWritable => "this copy's folder cannot be written",
             Self::NotOurs => "this copy is not updated by Folio",
             Self::Busy => "another update holds this installation",
+            Self::Newer => "another Folio's unfinished update holds this installation",
             Self::Journal => "the update's folder or journal could not be written",
             Self::Download => "a file did not download",
             Self::Sums => "the image does not match its checksum",
@@ -1476,7 +1493,7 @@ impl<W: Copy + Eq> Job<W> {
     fn told(&mut self, failure: Failure) {
         self.said_incomplete |= matches!(
             failure,
-            Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
+            Failure::Incomplete { .. } | Failure::TrialIncomplete { .. } | Failure::Newer { .. }
         );
         self.last_failure = Some((None, failure.clone()));
         self.state = State::Failed(None, failure);
@@ -1537,7 +1554,9 @@ impl<W: Copy + Eq> Job<W> {
             self.state,
             State::Failed(
                 None,
-                Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
+                Failure::Incomplete { .. }
+                    | Failure::TrialIncomplete { .. }
+                    | Failure::Newer { .. }
             ) | State::Idle
         );
         if !(self.said_incomplete && standing) {
@@ -3602,13 +3621,15 @@ mod tests {
         let folder = PathBuf::from("/Applications/.Folio.app.folio-update");
         let mut job = job().after_rollback(Some(Failure::Incomplete {
             folder: Some(folder.clone()),
+            held: false,
         }));
         assert_eq!(
             job.state(),
             &State::Failed(
                 None,
                 Failure::Incomplete {
-                    folder: Some(folder)
+                    folder: Some(folder),
+                    held: false,
                 }
             )
         );
@@ -3656,6 +3677,7 @@ mod tests {
     fn incomplete() -> Failure {
         Failure::Incomplete {
             folder: Some(PathBuf::from(r"D:\工具\Folio 终端\.folio-update")),
+            held: false,
         }
     }
 

@@ -2834,8 +2834,9 @@ fn a_receipt_found_by_recovery_commits_forward() {
 /// RED (U-29b) — **a recovery that fails still opens Folio, and the start it
 /// makes says *Update incomplete.* and names the folder**: a transaction
 /// lock that cannot be opened (the old build live: it is started with
-/// `--update-failed`), and a journal body it cannot read (a trial, with the
-/// same card); the journal is kept.
+/// `--update-failed`), and a journal body it cannot read (a trial; since E1
+/// the holder stands aside from it and the card is the one of an update this
+/// build cannot read whole, `Failure::Newer`); the journal is kept.
 ///
 /// The coordinator's ruling 2: "If recovery itself fails (any error road),
 /// the bundle that is live is started under that same rule with
@@ -2875,6 +2876,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
     };
     let incomplete = |install: &Install| crate::update_job::Failure::Incomplete {
         folder: Some(install.home.root().to_path_buf()),
+        held: false,
     };
 
     // A folder where the transaction lock should be: the lock cannot be
@@ -2911,7 +2913,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
             .hands
             .said
             .iter()
-            .any(|line| line.contains("Refused")),
+            .any(|line| line.contains("StoodAside")),
         "{:?}",
         opened.hands.said
     );
@@ -2922,7 +2924,14 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
         unread.as_bytes()
     );
     let (card, trial) = card_of(&install, words);
-    assert_eq!(card, Some(incomplete(&install)));
+    assert_eq!(
+        card,
+        Some(crate::update_job::Failure::Newer {
+            folder: Some(install.home.root().to_path_buf()),
+            version: None,
+            held: false,
+        })
+    );
     assert_eq!(trial.map(|(txn, _)| txn), Some(install.txn), "held back");
 }
 
@@ -4704,4 +4713,201 @@ fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
             (Point::Locate, PhaseKind::Moving),
         ]
     );
+}
+
+// ── the escape hatch (0.4.8 E1) ─────────────────────────────────────────────
+
+/// RED (E1; role #11, the macOS exit guard, sites H5 and J8
+/// `opens_now_with`) — **over a journal this build cannot read whole, the
+/// exit opens what an unknown live set opens and never the installed build
+/// plainly**: a held-writes trial of the transaction for an unknown header
+/// word (the envelope's) and for an unknown body word under a `destructive`
+/// header; and when nothing reads, so no transaction can be named for a
+/// trial, the installed build with `--update-failed`, which continues past
+/// it with the card. The journal is byte for byte as it was. Runs on every
+/// host: the bundle is shaped of ordinary files, and no layout is asked.
+///
+/// MUTATION: in `opens_now_with`, answer `Opens::Installed { failed: false }`
+/// for a journal of which nothing reads (the pre-E1 answer).
+#[test]
+fn the_macos_exit_never_opens_the_installed_build_plainly_over_what_it_cannot_read() {
+    let install = shape_install("beyond-exit");
+    install.write(Phase::Moving);
+    let known = std::fs::read(install.home.journal()).unwrap();
+    for (index, (what, bytes)) in crate::update_txn::beyond_inputs(&known)
+        .into_iter()
+        .enumerate()
+    {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        let home = install.home.clone();
+        let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+        let expected = if index < 2 {
+            Opens::Trial { txn: install.txn }
+        } else {
+            Opens::Installed { failed: true }
+        };
+        assert_eq!(opens, expected, "{what}");
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+}
+
+/// RED (E1; role #12, the macOS lock holder, site J9 `Txn::hold`; and the
+/// recovery door's bundle branch, role #14) — **the macOS lock holder stands
+/// aside from a journal this build cannot read whole** — the rescue clone,
+/// or the installed build as R when the clone is missing: it ends
+/// `Ended::StoodAside`, recording, removing and exchanging nothing, and lets
+/// the lock go; handed a person's start it owes a window, at logon none.
+/// Through the recovery door, the start it leaves with is a held-writes trial
+/// of the envelope's transaction (or, when nothing reads, the installed
+/// build with `--update-failed`), never the installed build plainly.
+///
+/// MUTATION: in `Txn::hold`, answer the pre-E1 `Ended::Refused` for a
+/// journal this build cannot read whole.
+#[test]
+fn the_macos_lock_holder_stands_aside_from_what_it_cannot_read_whole() {
+    let install = shape_install("beyond-holder");
+    install.write(Phase::Moving);
+    let known = std::fs::read(install.home.journal()).unwrap();
+    let handed: Vec<OsString> = vec![OsString::from("--tab")];
+    for (index, (what, bytes)) in crate::update_txn::beyond_inputs(&known)
+        .into_iter()
+        .enumerate()
+    {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        for start in [Some(handed.clone()), None] {
+            let road = install.recovery(limits(500, 5_000));
+            let waits = start.is_some();
+            let recovered = on_a_worker(move |worker| {
+                let mut hands = Fake::default();
+                recover(worker, &road, &mut hands, start.as_deref())
+            });
+            assert!(
+                matches!(recovered.ended, Ended::StoodAside(_)),
+                "{what}: {:?}",
+                recovered.ended
+            );
+            assert_eq!(recovered.waiting, waits, "{what}");
+            assert_eq!(std::fs::read(install.home.journal()).unwrap(), bytes);
+        }
+        assert!(
+            install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+                .unwrap()
+                .is_some(),
+            "{what}: the lock is let go"
+        );
+
+        let (_, hands) = recover_door(&install, handed.clone(), Fake::default());
+        assert_eq!(hands.relaunched.len(), 1, "{what}: {:?}", hands.relaunched);
+        let (program, words) = &hands.relaunched[0];
+        assert_eq!(program, &install.installed.join(EXE), "{what}");
+        let failed = crate::update_apply::failed_words(&install.home).to_vec();
+        if index < 2 {
+            assert_eq!(words[0], OsString::from(cli::UPDATE_TRIAL_FLAG), "{what}");
+            assert_eq!(words[1], OsString::from(install.txn.to_string()), "{what}");
+            assert_eq!(words[3..5], failed[..], "{what}");
+        } else {
+            let mut expected = failed;
+            expected.extend(handed.iter().cloned());
+            assert_eq!(words, &expected, "{what}");
+        }
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+}
+
+/// RED (E1; role #13, the macOS lock holder's receipt watch, site R2
+/// `read_receipt`) — **a receipt this build cannot read is never
+/// accepted**: a later receipt version, a v1 receipt with a word this build
+/// does not read, and bytes that are no receipt each read as a refusal; the
+/// bytes are left as they are.
+///
+/// MUTATION: drop the version check from the receipt's read (`versioned` in
+/// `Receipt::parse`): a later receipt version is accepted.
+#[test]
+fn the_macos_receipt_watch_never_accepts_what_it_cannot_read() {
+    let install = shape_install("beyond-receipt");
+    let nonce = Nonce::new([0x2d; 32]);
+    let receipt = Receipt {
+        txn: install.txn,
+        nonce,
+        pid: 4242,
+        version: crate::update_txn::LATER_BUILD.to_owned(),
+        started: Some(7),
+    };
+    let path = install.home.receipt_path(install.txn, &nonce);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for (what, bytes) in crate::update_txn::receipt_beyond_inputs(&receipt) {
+        std::fs::write(&path, &bytes).unwrap();
+        let read = read_receipt(&path);
+        assert!(matches!(read, Some(Err(_))), "{what}: {read:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}");
+    }
+}
+
+/// RED (E1 round 2; role #11, the macOS exit guard, `opens_now_with`) — **a
+/// journal file the exit cannot read at all is no absent journal**: no
+/// transaction can be named for a trial, so the installed build opens with
+/// `--update-failed` and the card that says the record cannot be read —
+/// never plainly; only a journal that is not there opens it plainly.
+///
+/// MUTATION: in `opens_now_with`, map a read that failed other than "no such
+/// file" back to no journal (`Opens::Installed { failed: false }`).
+#[test]
+fn the_macos_exit_never_opens_the_installed_build_plainly_over_a_journal_it_cannot_read() {
+    let install = shape_install("unread-exit");
+    let kind = crate::update_txn::a_journal_that_cannot_be_read(&install.home.journal());
+    let home = install.home.clone();
+    let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+    assert_eq!(opens, Opens::Installed { failed: true }, "{kind:?}");
+    std::fs::remove_dir(install.home.journal()).unwrap();
+    let home = install.home.clone();
+    let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+    assert_eq!(
+        opens,
+        Opens::Installed { failed: false },
+        "no journal at all"
+    );
+}
+
+/// RED (E1 round 3; role #8 on macOS, the applier's window election) — **a
+/// macOS applier that finds a journal this build cannot read whole ends
+/// `Ended::StoodAside`, as the Windows applier does**: no mark, nothing
+/// recorded, the window duty left to the build that armed it (nothing is
+/// started here), the journal byte for byte as it was, and the exit code of
+/// every end that is neither a commit nor a refusal of its line (1).
+///
+/// MUTATION: remove the `Window::StoodAside` arm of `apply` (it falls into
+/// the catch-all and ends `Ended::Refused`, exit code 2).
+#[test]
+fn the_macos_applier_stands_aside_from_what_it_cannot_read_whole() {
+    let install = shape_install("beyond-applier");
+    let known = std::fs::read(install.home.journal()).unwrap();
+    for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        let (ended, world) = applied(install.road(limits(500, 5_000)), Fake::default());
+        assert!(matches!(ended, Ended::StoodAside(_)), "{what}: {ended:?}");
+        assert_eq!(ended.code(), 1, "{what}");
+        assert!(
+            world.relaunched.is_empty(),
+            "{what}: {:?}",
+            world.relaunched
+        );
+        assert!(
+            world.said.iter().any(|line| line.contains("stands aside")),
+            "{what}: {:?}",
+            world.said
+        );
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
 }

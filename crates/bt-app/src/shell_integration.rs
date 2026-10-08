@@ -3599,9 +3599,12 @@ pub fn powershell_script_for_birth() -> Option<PathBuf> {
 }
 
 /// A trial's own folder for the script: under the system temporary directory, which holds none
-/// of the old build's data, named by the transaction so two trials never share one.
+/// of the old build's data, named by the transaction so two trials never share one. A start that
+/// continues with its writes held (`update_startup::is_held`) uses its transaction's the same way.
 fn trial_script_directory() -> Option<PathBuf> {
-    let (txn, _) = crate::update_startup::trial()?;
+    let txn = crate::update_startup::trial()
+        .map(|(txn, _)| txn)
+        .or_else(crate::update_startup::held)?;
     Some(
         std::env::temp_dir()
             .join(format!("folio-trial-{txn}"))
