@@ -101,7 +101,7 @@ pub(crate) struct AgentHomes(Vec<(&'static str, OsString)>);
 impl AgentHomes {
     /// Read [`AGENT_HOME_VARIABLES`] out of an environment.
     #[must_use]
-    pub(crate) fn read(variable: &dyn Fn(&str) -> Option<OsString>) -> Self {
+    pub(crate) fn in_environment(variable: &dyn Fn(&str) -> Option<OsString>) -> Self {
         Self(
             AGENT_HOME_VARIABLES
                 .iter()
@@ -1069,7 +1069,9 @@ mod tests {
     fn an_older_walks_agent_folders_never_overwrite_a_newer_walks() {
         let cell = AgentHomesCell::new();
         let reading = |folder: &'static str| {
-            AgentHomes::read(&move |name| (name == CONFIG_DIR_VARIABLE).then(|| folder.into()))
+            AgentHomes::in_environment(&move |name| {
+                (name == CONFIG_DIR_VARIABLE).then(|| folder.into())
+            })
         };
         cell.adopt(5, reading(r"D:\新的\claude"));
         assert!(

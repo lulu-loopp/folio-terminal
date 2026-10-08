@@ -275,7 +275,7 @@ fn walk(
         WslFacts::default()
     };
     let git = profiles::find_git(&counting);
-    let agent_homes = AgentHomes::read(&|name| counting.var_os(name));
+    let agent_homes = AgentHomes::in_environment(&|name| counting.var_os(name));
     publish(Published::Facts(MachineFacts {
         generation,
         wsl,
@@ -963,7 +963,7 @@ pub(crate) mod tests {
             .expect("the second walk publishes its facts");
         assert_eq!(
             facts.agent_homes,
-            AgentHomes::read(
+            AgentHomes::in_environment(
                 &|name| (name == "CODEX_HOME").then(|| OsString::from(r"D:\代理\codex home"))
             ),
             "the variable set after the first walk is in the second walk's facts"

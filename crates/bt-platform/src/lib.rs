@@ -18561,7 +18561,7 @@ mod macos_window_backend_tests {
     /// winit.**
     ///
     /// The rule X-4 wrote down for every AppKit callback in this port: never do
-    /// the work inside the handler, hand it to the loop. The watch's two
+    /// the work inside the handler, hand it to the loop. The watch's three
     /// callbacks therefore call the wake and nothing else, and the wake
     /// `bt-app` hands in is one `EventLoopProxy::send_event` — winit's user
     /// event channel, delivered on the thread that owns the window. The other
@@ -18580,7 +18580,7 @@ mod macos_window_backend_tests {
             .expect("a method body is closed at eight spaces");
         let body = &rest[..end];
         assert!(
-            body.contains("(self.ivars().0)();"),
+            body.contains("(self.ivars().0)(crate::SystemNews::Preferences);"),
             "the observer does something other than nudge the loop:\n{body}"
         );
         for forbidden in ["effectiveAppearance()", "appearance_is_light", "NSScreen"] {
