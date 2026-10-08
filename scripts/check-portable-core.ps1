@@ -45,6 +45,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $portable = @(
     "bt-source",
     "bt-testpath",
+    "bt-effects",
     "bt-unicode",
     "bt-doc",
     "bt-detect",

@@ -9,6 +9,7 @@ members = [
     "crates/bt-doc",
     "crates/bt-viewport",
     "crates/bt-detect",
+    "crates/bt-effects",
     "crates/bt-layout",
     "crates/bt-math",
     "crates/bt-corpus",

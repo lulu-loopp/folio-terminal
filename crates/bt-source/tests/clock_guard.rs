@@ -13,14 +13,15 @@
 //! The product items of these, and nothing else (see [`SOURCE_SET`]):
 //!
 //! * `crates/{bt-unicode,bt-transcript,bt-doc,bt-layout,bt-viewport,bt-detect,
-//!   bt-math,bt-render,bt-term}/src` — every target the package roots there;
+//!   bt-effects,bt-math,bt-render,bt-term}/src` — every target the package roots
+//!   there;
 //! * `vendor/vte/src`;
 //! * `vendor/alacritty_terminal/src` minus the modules `crate::event_loop` and
-//!   `crate::tty`, which are not compiled for `wasm32`;
-//! * of `bt-platform`, the module `crate::admission` (`src/admission.rs`) only.
+//!   `crate::tty`, which are not compiled for `wasm32`.
 //!
-//! **Out of scope, by name:** the rest of `bt-platform` (whose `http`,
-//! `install_txn` and `instance` modules read `std::time` today), `bt-app`,
+//! **Out of scope, by name:** `bt-platform` (whose `http`, `install_txn` and
+//! `instance` modules read `std::time` today; its admission vocabulary, the one
+//! part a browser build reads, is `bt-effects`' since CC-3), `bt-app`,
 //! `bt-pty`, `bt-persist`, `bt-corpus`, `bt-winres`, `bt-workbench`,
 //! `bt-source`, `bt-lint-probe`, `vendor/mitex` and `vendor/mitex-parser`. None
 //! of them is in the wasm32 graph the browser build is heading for; each joins
@@ -71,8 +72,6 @@ enum Modules {
     All,
     /// Every module but these trees.
     AllBut(&'static [&'static str]),
-    /// Only these trees.
-    Only(&'static [&'static str]),
 }
 
 impl Modules {
@@ -86,7 +85,6 @@ impl Modules {
         match self {
             Self::All => true,
             Self::AllBut(trees) => !trees.iter().any(|tree| under(tree)),
-            Self::Only(trees) => trees.iter().any(|tree| under(tree)),
         }
     }
 }
@@ -99,6 +97,7 @@ const SOURCE_SET: [(&str, Modules); 12] = [
     ("bt-layout", Modules::All),
     ("bt-viewport", Modules::All),
     ("bt-detect", Modules::All),
+    ("bt-effects", Modules::All),
     ("bt-math", Modules::All),
     ("bt-render", Modules::All),
     ("bt-term", Modules::All),
@@ -107,7 +106,6 @@ const SOURCE_SET: [(&str, Modules); 12] = [
         "alacritty_terminal",
         Modules::AllBut(&["crate::event_loop", "crate::tty"]),
     ),
-    ("bt-platform", Modules::Only(&["crate::admission"])),
 ];
 
 /// The standard library's clocks.
