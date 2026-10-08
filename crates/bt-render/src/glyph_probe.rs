@@ -351,7 +351,7 @@ impl GlyphFixture {
     /// Under the `PresentFrame` door: the caller admits the present, and this forwards its token.
     pub fn present(
         &self,
-        token: bt_platform::admission::WaitToken<'_, bt_platform::admission::doors::PresentFrame>,
+        token: bt_effects::admission::WaitToken<'_, bt_effects::admission::doors::PresentFrame>,
         gpu: &mut GpuContext,
         window: &mut WindowRenderer,
     ) -> Result<PresentOutcome, RenderError> {

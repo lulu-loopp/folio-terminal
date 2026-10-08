@@ -450,7 +450,7 @@ impl MathEngine {
     /// [`convert_math`] are about *computation* rather than about reading files. A formula still
     /// may not carry code, because a loop nobody can interrupt is its own kind of harm.
     fn with_system_fonts(include_system_fonts: bool) -> Self {
-        let engine = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+        let engine = bt_effects::file_reads::opaque(bt_effects::file_reads::Lane::Fonts, || {
             TypstEngine::builder()
                 .main_file(TYPST_TEMPLATE)
                 .with_static_source_file_resolver([
@@ -1175,7 +1175,7 @@ fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
         // enumerating the installed faces costs of the order of a hundred
         // milliseconds, and it is paid on the lane that exists to keep tens of
         // milliseconds of typesetting off the window's thread.
-        bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+        bt_effects::file_reads::opaque(bt_effects::file_reads::Lane::Fonts, || {
             options.fontdb_mut().load_system_fonts()
         });
         options

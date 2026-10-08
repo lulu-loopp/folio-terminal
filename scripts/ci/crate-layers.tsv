@@ -8,15 +8,17 @@
 # them in both directions (bt-term and bt-pty each name the other as one, and so do bt-platform and
 # bt-pty; bt-pty naming bt-term only as a dev-dependency is ARCHITECTURE section 3.2's repair of D-13).
 #
-# 0  no first-party dependency: the Unicode tables, the layout solver, SHA-256 and the release format
+# 0  no first-party dependency: the Unicode tables, the layout solver, SHA-256 and the release format;
+#    bt-effects, the admission vocabulary and the file-read ledger every layer above names (std and
+#    web-time only)
 # 1  bt-transcript (the text model); bt-workbench, which depends on bt-layout and on nothing that
 #    reads a window, a clock, a file or the platform
 # 2  bt-doc
 # 3  detection and the viewport over documents
 # 4  bt-term and bt-platform, one layer: bt-term builds without the platform layer, and its
 #    dependency on bt-platform is recorded debt (section 3.2, structural-debt D-14)
-# 5  bt-render, bt-math, persistence and the PTY transport, over the platform; bt-term's dependency
-#    on bt-math goes upward and is recorded debt (section 3.2, structural-debt D-15)
+# 5  bt-render and bt-math (over bt-effects, not the platform), persistence and the PTY transport;
+#    bt-term's dependency on bt-math goes upward and is recorded debt (section 3.2, structural-debt D-15)
 # 6  bt-app; bt-corpus and bt-lint-probe, tools nothing depends on; bt-source, which only tests read
 crate	layer
 bt-unicode	0
@@ -38,3 +40,4 @@ bt-corpus	6
 bt-lint-probe	6
 bt-source	6
 bt-testpath	0
+bt-effects	0

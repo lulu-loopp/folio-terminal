@@ -13,12 +13,13 @@ bt-transcript = { path = "../bt-transcript" }
 bt-doc = { path = "../bt-doc" }
 bt-detect = { path = "../bt-detect" }
 bt-math = { path = "../bt-math" }
-# One call: the priority band this crate's resample pool stands in
-# (`inline_image::resample_pool`). The band is not decoration — it is the whole
-# reason a pass that now spreads over every core cannot take them from the
-# window thread — and Windows gives a new thread `Normal` regardless of who
-# created it, so it has to be said by whoever creates the thread. That is this
-# crate, and this is the crate that knows how to say it.
+# The file-read ledger (`file_reads::open`, `Lane`) of the inline-image decoder.
+bt-effects = { path = "../bt-effects" }
+# Three product uses, recorded debt (docs/plans/structural-debt.md D-14) until
+# the host installs them: the priority band of the resample pool
+# (`set_current_thread_priority` in `inline_image::resample_pool`), the door-ready
+# path in `session::verify_path` (`resolved_for_a_door`), and the machine's host
+# names (`host_names`, `inline_image::local_host_names`).
 bt-platform = { path = "../bt-platform" }
 bt-viewport = { path = "../bt-viewport" }
 image.workspace = true

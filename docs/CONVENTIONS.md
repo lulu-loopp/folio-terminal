@@ -159,8 +159,9 @@ The clock guard (gate G3, `clock-guard` in `logic`): `scripts/ci/check-clock-gua
 runs `crates/bt-source/tests/clock_guard.rs`, which refuses `std::time::Instant`
 and `std::time::SystemTime` in every spelling (qualified, flat or nested `use`,
 glob, alias) in the product code of an explicit source set — the library crates
-G1 checks except `bt-platform`, of which only `crate::admission` is read,
-`vendor/vte`, and `vendor/alacritty_terminal` without `event_loop` and `tty`.
+G1 checks except `bt-platform` (whose admission vocabulary, the part a browser
+build reads, is `bt-effects`' since CC-3), `vendor/vte`, and
+`vendor/alacritty_terminal` without `event_loop` and `tty`.
 Those crates read time through `web_time`, which is `std::time` on every native
 target. The script's header names the set and what is out of it; it refuses a
 run that read no file. Four canaries: a qualified clock in `bt-doc`, a nested

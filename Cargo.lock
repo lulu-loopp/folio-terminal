@@ -332,6 +332,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-effects"
+version = "0.4.7"
+dependencies = [
+ "web-time",
+]
+
+[[package]]
 name = "bt-layout"
 version = "0.4.7"
 dependencies = [
@@ -357,7 +364,7 @@ name = "bt-math"
 version = "0.4.7"
 dependencies = [
  "bt-doc",
- "bt-platform",
+ "bt-effects",
  "bt-testpath",
  "mitex",
  "mitex-lexer",
@@ -390,6 +397,7 @@ name = "bt-platform"
 version = "0.4.7"
 dependencies = [
  "block2 0.6.2",
+ "bt-effects",
  "bt-pty",
  "bt-testpath",
  "bt-transcript",
@@ -410,7 +418,6 @@ dependencies = [
  "objc2-user-notifications 0.3.2",
  "objc2-web-kit",
  "ttf-parser",
- "web-time",
  "webview2-com",
  "windows",
  "windows-core",
@@ -439,8 +446,8 @@ version = "0.4.7"
 dependencies = [
  "bt-detect",
  "bt-doc",
+ "bt-effects",
  "bt-math",
- "bt-platform",
  "bt-source",
  "bt-term",
  "bt-testpath",
@@ -476,6 +483,7 @@ dependencies = [
  "base64",
  "bt-detect",
  "bt-doc",
+ "bt-effects",
  "bt-math",
  "bt-platform",
  "bt-pty",

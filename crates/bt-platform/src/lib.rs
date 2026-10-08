@@ -5,13 +5,14 @@
 use std::num::NonZeroIsize;
 
 /// Which kind of thread this is, the window thread's phase, and the owner-thread doors'
-/// admission (`docs/ARCHITECTURE.md` §5.1; design note 2026-09-26). The one module of this
-/// crate that forbids `unsafe`.
+/// admission (`docs/ARCHITECTURE.md` §5.1; design note 2026-09-26): `bt-effects`' vocabulary,
+/// re-exported, and the thread door. The one module of this crate that forbids `unsafe`.
 pub mod admission;
 /// The platform-free elevated-pane wire codec and its pure lifecycle models.
 pub mod elevated_protocol;
 pub mod environment;
-pub mod file_reads;
+/// The process-wide file-read ledger, `bt-effects`' (re-exported whole).
+pub use bt_effects::file_reads;
 pub mod foreground_program;
 
 /// **The thread door** — one definition, in [`admission`], for every platform: a named thread in

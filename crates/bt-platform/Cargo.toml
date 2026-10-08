@@ -1202,4 +1202,6 @@ bt-unicode = { path = "../bt-unicode" }
 # `bt-transcript`. Keeping those grammars together is why this edge is general.
 bt-transcript = { path = "../bt-transcript" }
 bt-winres = { path = "../bt-winres" }
-web-time.workspace = true
+# The admission vocabulary and the file-read ledger (`admission`, `file_reads`):
+# re-exported whole; this crate keeps the thread door, which sets the band.
+bt-effects = { path = "../bt-effects" }

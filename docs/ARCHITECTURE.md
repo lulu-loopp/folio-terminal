@@ -48,7 +48,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | what | count | pattern |
 |---|---|---|
 | thread-spawn sites | **52** — `bt-app` 34, `bt-platform` 14, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **48** — `bt-app` 34, `bt-platform` 14; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site; T-ENV-REFRESH round 4 removes the launch-snapshot worker). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
+| through the thread door | **48** — `bt-app` 34, `bt-platform` 14; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; T-PROBE-CHILD adds the probe-output reader site; T-ENV-REFRESH round 4 removes the launch-snapshot worker). A source guard holds both crates to it, and holds `bt-effects`, the vocabulary the door lends from, to starting none (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
 | bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
 | of those through the door, in a door process rather than the window process | **4**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`), and `folio-remover-ready` (`deferred_removal::schedule`'s readiness pipe); each process's main thread waits as a worker, entered once through `enter_standalone_main`. The uninstaller and copied-remover doors enter once for their whole runs, so their process waits and retry backoff through `wait::sleep_within` are workers' waits too | `enter_standalone_main\(` |
 | named sites / distinct names | **49 / 45**, besides the pool | the first argument, or `.name(…)` |
@@ -281,21 +281,25 @@ it closes.
 
 ### 3.1 The graph
 
-Seventeen first-party crates under `crates/`, plus `vendor/alacritty_terminal`,
-plus `bt-testpath` (2026-10-08), which no shipped build contains: it is every
-tested crate's dev-dependency and the optional dependency of the two test-support
-features, `bt-pty`'s `test-shell` and `bt-platform`'s `trust-harness`, and it
-depends on nothing. Normal and target-specific edges as the manifests declare
-them (2026-09-23; `bt-workbench` 2026-09-25):
+Twenty first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
+Two of the twenty arrived on 2026-10-08: `bt-testpath`, which no shipped build
+contains: it is every tested crate's dev-dependency and the optional dependency
+of the two test-support features, `bt-pty`'s `test-shell` and `bt-platform`'s
+`trust-harness`, and it depends on nothing; and `bt-effects` (CC-3), layer 0. Normal and
+target-specific edges as the manifests declare them (2026-09-23; `bt-workbench`
+2026-09-25; `bt-effects` 2026-10-08):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
+bt-effects      ← bt-platform, bt-render, bt-math, bt-term (itself: std and
+                  web-time only; bt-app, bt-persist and bt-lint-probe name
+                  it through bt-platform's re-exports)
 bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty,
                   bt-platform
 bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
 bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
-bt-platform     ← bt-persist, bt-math, bt-render, bt-term, bt-app
+bt-platform     ← bt-persist, bt-term, bt-app, bt-lint-probe
 bt-viewport     ← bt-render, bt-term
 bt-detect       ← bt-term
 bt-math         ← bt-term
@@ -311,9 +315,27 @@ everywhere else). `bt-corpus` is a tool; `bt-source` is read by tests only
 what platform it is on, and only in the files named by
 `FILES_THAT_MAY_NAME_A_PLATFORM` in `main.rs`.
 
+**`bt-effects` is the effect vocabulary every layer shares** (CC-3, design
+T-COMPOSE-CRATE §2.3): `admission` — a thread's role, the window thread's phase,
+the door registry as types, the admission and its `WaitToken`, the `WorkerCtx`
+capability — and `file_reads`, the process-wide file-read ledger, both moved
+whole from `bt-platform`. It is standard-library code with no platform `cfg` and
+no first-party dependency, so it sits at layer 0; `bt-render`'s public API names
+`WaitToken`, which is why the vocabulary has to live below `bt-render` rather than
+behind an adapter. **What `bt-platform` still owns of it:** the thread door
+(`spawn_at_priority`, `spawn_at_priority_with_stack`), which sets the platform's
+scheduling band and then calls `bt_effects::admission::lend_worker`, the one
+role-entering function, public for the door alone; and the re-exports
+`bt_platform::admission` (the vocabulary and the door) and `bt_platform::file_reads`,
+so every path through `bt-platform` still resolves. `bt-render` and `bt-math` have
+no `bt-platform` edge since CC-3; `bt-term`'s is D-14's remainder (§3.2). The
+window-waits source guard holds `bt-effects` to starting no thread, waiting on
+nothing, naming the file system and the environment only inside `file_reads`, no
+standard-library clock and no `bt_platform` (§5.1).
+
 The library crates below `bt-app` that a browser build will reference —
 `bt-unicode`, `bt-transcript`, `bt-doc`, `bt-layout`, `bt-viewport`,
-`bt-detect`, `bt-platform`, `bt-math`, `bt-render` and `bt-term` — check for
+`bt-detect`, `bt-effects`, `bt-platform`, `bt-math`, `bt-render` and `bt-term` — check for
 `wasm32-unknown-unknown` in CI (`wasm-lib-check`, `scripts/ci/check-wasm-lib.ps1`,
 which holds the list).
 
@@ -337,13 +359,16 @@ manifest names `bt-term` only under `[dev-dependencies]`.
 a layer of `scripts/ci/crate-layers.tsv`, and the edge passes only as its D-14
 row in `scripts/ci/crate-edge-exemptions.tsv` (§3.3), which J2's boundary crate
 deletes. It is also broader than its manifest says.
-The manifest comment calls it one call; there are three product import surfaces:
+The manifest comment called it one call; there were four product import surfaces:
 `inline_image::resample_pool` sets a thread priority, `session::verify_path`
-calls `handoff::resolved_for_a_door`, and
-`inline_image::read_and_decode_local_image` goes through the read ledger. The
-ruled repair is to **extract a small headless observation/effect boundary**
-rather than reorganise `bt-platform`; lifting `file_reads` alone does not remove
-the edge. The manifest comment is a documentation defect fixed with the boundary.
+calls `handoff::resolved_for_a_door`,
+`inline_image::read_and_decode_local_image` goes through the read ledger, and
+`inline_image::local_host_names` reads `host_names`. The ruled repair is a
+**small headless observation/effect boundary** rather than a reorganised
+`bt-platform`. **Its first half landed 2026-10-08 (CC-3):** the read ledger is
+`bt-effects`' (§3.1), and the manifest comment now names the three surfaces that
+remain — the priority band, `resolved_for_a_door` and `host_names` — which CC-4
+turns into facts the host installs; the edge, and its exemption row, go then.
 
 **`bt-term → bt-math` — real coupling, recorded debt.** `session.rs` imports six
 math types and calls into the math crate in product code,
@@ -695,8 +720,9 @@ layouts plus the eight requests, so the worker's send never waits for room.
 The band is set by `bt_platform::spawn_at_priority` as the first statement of
 the closure, because Windows hands a new thread `Normal` whatever its creator
 stands in; the band call, `set_current_thread_priority`, is the one `unsafe`
-boundary for thread priority, and the door itself lives in `admission`, which
-forbids `unsafe`.
+boundary for thread priority, and the door itself lives in `bt-platform`'s
+`admission`, which forbids `unsafe` and re-exports the vocabulary it lends from
+(`bt_effects::admission`, §3.1).
 MMCSS is explicitly refused. Some threads stay at `Normal` by RULES 53's
 exceptions (playback, first-frame extraction, the two ingress endpoints,
 clipboard saves, the three standalone-process workers). The observation and
@@ -708,8 +734,9 @@ in a 0.4.7 ticket.
 
 **Which kind of thread this is** (0.4.6 ticket A1a;
 `docs/plans/design/thread-door-2026-09-26.md`, whose revisions (b)–(e) rule over
-its earlier sections). `bt_platform::admission` owns three facts, and forbids
-`unsafe`. **A thread's role** — `Unset`, `Window`, `Worker(name)`,
+its earlier sections). `bt_effects::admission` (re-exported whole as
+`bt_platform::admission`; moved from `bt-platform` in CC-3) owns three facts, and
+forbids `unsafe`. **A thread's role** — `Unset`, `Window`, `Worker(name)`,
 `Callback(name)` — is a thread-local written only by its entries:
 `enter_window_thread`, once, in `fn main` directly after the argument parse (the
 six argv doors above it never make a window); `enter_callback(name)` as the first
@@ -723,11 +750,13 @@ it is (AppKit and the message pump deliver most callbacks on the window thread,
 which is `Window` there); `enter_standalone_main`, once per process, for a door
 process's main thread (its three callers, since A1c: the `attention` verb's
 payload wait and the two Explorer-menu removals); and the thread door,
-`spawn_at_priority`, which since A1b lives in `admission`: inside the new
-thread it sets the band, then the role `Worker(name)`, then builds a `WorkerCtx`
-on the thread's own stack and lends it to the body — private fields, `!Send`,
-`!Sync`, made by one private function whose only callers are the door and
-`enter_standalone_main`. **A worker-only door takes `&WorkerCtx`**, so code with
+`spawn_at_priority`, which since A1b lives in `bt-platform`'s `admission`: inside
+the new thread it sets the band, then the role `Worker(name)`, then builds a
+`WorkerCtx` on the thread's own stack and lends it to the body — private fields,
+`!Send`, `!Sync`, made by one function, `bt_effects::admission::lend_worker`,
+public for the door alone (since CC-3; the band is the platform's and the
+vocabulary is not), whose only callers are the door and `enter_standalone_main` —
+the source guard's (3) below holds the product to those two. **A worker-only door takes `&WorkerCtx`**, so code with
 none — the window thread, a callback, a thread started outside the door — does
 not compile against it; the one such door today is the hand-off's
 (`ShellThread::enter`, below §6). **Every thread `bt-app` and `bt-platform`
@@ -787,7 +816,8 @@ difference:
 `bt-source`);
 (2) `WaitToken`, `WorkerCtx` and `admission::doors` are never named inside
 `unsafe` or inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, and
-`admission` keeps `#![forbid(unsafe_code)]` and writes no `unsafe`;
+both halves of `admission` — `bt-effects`', which builds the capabilities, and
+`bt-platform`'s, the door — keep `#![forbid(unsafe_code)]` and write no `unsafe`;
 (3) one `WorkerCtx` struct literal, in `admission::lend_worker`, called by the
 thread door and `enter_standalone_main` once each, and one inherent `impl` and no
 derive for `WorkerCtx` and `WaitToken`;
@@ -815,7 +845,13 @@ body (the first-party edges in order, the vocabulary effects by call site) and a
 repayment in `docs/plans/structural-debt.md` (D-40, D-78…D-82); any other `Drop`
 that names a wait, or calls a door or a pinned body, is red;
 (9) every thread `bt-app` and `bt-platform` start comes through the thread door
-(A1c's guard, absorbed under its own name).
+(A1c's guard, absorbed under its own name), and `bt-effects` starts none;
+(10) `bt-effects` waits on nothing (no blocking receive, sleep, park or lock), names
+the file system and the environment only inside `file_reads`, names no clock of the
+standard library and no `bt_platform` (CC-3). The world it reads reaches, from each
+package, its direct product dependencies and the crates those re-export with
+`pub use` — `bt-app`'s calls of `bt_platform::admission::admitted` resolve to
+`bt-effects`' function.
 It is a check over the stated inventories, not a whole-program analysis: a `Drop`
 outside the table that reaches a wait through a helper of its own is not seen, and
 neither is an inference-typed `transmute` inside `bt-platform`'s own `unsafe` (the
@@ -1125,7 +1161,7 @@ happen" has one answer and a guard can hold it.
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path`; machine probes execute through `spawn_probe`/`probe_output`, while deliberate hand-offs execute through `Command::spawn` and retain no guard | pinned as the only `Command` construction; helper-tree tests pin the contained probe road, and `a_real_update_handoff_is_not_probe_contained` crosses the product update hand-off |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace; the seven verbs are private to it and reached only through `ShellThread::hand_over`, and a `ShellThread` is entered only with the `WorkerCtx` the thread door lends (A1b), so a hand-off can happen only on a thread the door started | its own module, one function per verb; `compile_fail` doctests on `hand_over` name each verb by both spellings; `handoff_lane::no_handoff_runs_on_the_window_thread` |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |
-| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | the source guard's assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` (`hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e; A1c wrote it) finds `std::thread` spawning named in `bt-app`'s and `bt-platform`'s product code only inside the door; `admission`'s tests start their workers through it |
+| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `bt-platform`'s `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | the source guard's assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` (`hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e; A1c wrote it) finds `std::thread` spawning named in `bt-app`'s and `bt-platform`'s product code only inside the door, and none in `bt-effects`'; `bt-platform`'s `admission` tests start their worker through it, and `bt-effects`' make theirs with `lend_worker`, the function it calls |
 | waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; every door's function takes its token by value (A1d), and `tests::every_owner_door_takes_its_own_token_by_value` checks each signature; the source guard (§5.1, A1e) holds every function that takes a token to one registry door and to running its effect inside its own call |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |

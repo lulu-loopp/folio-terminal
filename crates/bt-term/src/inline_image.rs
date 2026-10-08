@@ -668,14 +668,14 @@ impl InlineImageDecoder {
         &mut self,
         task: InlineImageTask,
     ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
-        self.decode_in_lane(task, bt_platform::file_reads::Lane::InlineImage)
+        self.decode_in_lane(task, bt_effects::file_reads::Lane::InlineImage)
     }
 
     /// Attribution only; both callers retain the same decoder and memo.
     pub fn decode_in_lane(
         &mut self,
         task: InlineImageTask,
-        lane: bt_platform::file_reads::Lane,
+        lane: bt_effects::file_reads::Lane,
     ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
         let payload = match &task.source {
             InlineImageSource::Osc1337(encoded) => decode_osc_payload(encoded)?,
@@ -747,7 +747,7 @@ fn decode_osc_payload(encoded: &[u8]) -> Result<DecodedImagePayload, InlineImage
 
 fn read_and_decode_local_image(
     path: &Path,
-    lane: bt_platform::file_reads::Lane,
+    lane: bt_effects::file_reads::Lane,
 ) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     // The lexical gate, and then the disk's half of it: a drive-rooted name may still be a local
     // spelling of a share, and this is the line the bytes are about to be read behind. Both are
@@ -760,7 +760,7 @@ fn read_and_decode_local_image(
     {
         return Err(InlineImageDecodeError::InvalidPath);
     }
-    let mut file = bt_platform::file_reads::open(lane, path)
+    let mut file = bt_effects::file_reads::open(lane, path)
         .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
@@ -1173,7 +1173,7 @@ pub fn decode_background_image(
     if !is_admissible_local_image_path(path) {
         return Err(BackgroundImageError::InvalidPath);
     }
-    let mut file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::InlineImage, path)
+    let mut file = bt_effects::file_reads::open(bt_effects::file_reads::Lane::InlineImage, path)
         .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
