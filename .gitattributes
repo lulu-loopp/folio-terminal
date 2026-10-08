@@ -52,15 +52,27 @@
 # grammar that no longer loads.
 *.packdump binary
 
+# Batch files are read by `cmd.exe`, which takes CRLF as their line ending: it
+# reads a batch file a line at a time and finds its place again by offset, and
+# in a file of LF-only lines it loses that place — on the 0.4.7 clean VM the
+# bilingual `uninstall.cmd`, UTF-8 under code page 65001, ran fragments of its
+# own lines as commands and never started the uninstaller. So every `.cmd` and
+# `.bat` checks out with CRLF, whatever `core.autocrlf` says (the object store
+# keeps LF, as for every text file here). `scripts/release/package-tests.ps1`
+# and the archive's own test refuse a batch member with a bare LF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
 # The release archive's text members, by name (0.4.6 ticket U-9). `folio.exe`
 # carries the SHA-256 of each (`scripts/release/archive-members.txt`,
 # `FOLIO_RELEASE_MANIFEST`), computed where it is compiled — a CI runner — and
 # `package.ps1` refuses to pack a member whose bytes differ, on whichever machine
-# packs. So these six have to be the same bytes on every checkout. The first
-# line above already says LF for them; `text` here takes away the one thing it
-# leaves to chance, which is Git deciding by content that a file is text at all.
-packaging/folio-here.cmd text eol=lf
-packaging/uninstall.cmd text eol=lf
+# packs. So these six have to be the same bytes on every checkout: CRLF for the
+# two batch files (the lines above), LF for the four others. `text` here takes
+# away the one thing the general lines leave to chance, which is Git deciding
+# by content that a file is text at all.
+packaging/folio-here.cmd text eol=crlf
+packaging/uninstall.cmd text eol=crlf
 LICENSE-MIT text eol=lf
 LICENSE-APACHE text eol=lf
 THIRD-PARTY-NOTICES.md text eol=lf

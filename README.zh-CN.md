@@ -27,7 +27,11 @@ Folio 是一个开源的 Windows 和 macOS 终端。公式在命令输出中原�
 brew install --cask lulu-loopp/folio/folio
 ```
 
-<!-- winget: add when live -->
+Windows 上也可以用 winget：
+
+```sh
+winget install --id WeiyiShi.Folio --exact
+```
 
 其余内容见 [`docs/install.zh-CN.md`](docs/install.zh-CN.md)：压缩包里有什么、初次启动询问什么，以及系统弹出提示时该怎么办。
 
@@ -37,17 +41,13 @@ brew install --cask lulu-loopp/folio/folio
 
 - **Windows 压缩包**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后双击其文件夹中的 `uninstall.cmd`。
 - **scoop**——退出 Folio 后运行 `scoop uninstall folio`，自动完成同样的清理。
+- **winget**——退出 Folio 后运行 `cmd /c "folio --uninstall-cleanup && winget uninstall --id WeiyiShi.Folio --exact"`：先清理，清理成功后才运行 winget，因为 winget 不执行 Folio 的任何清理。用 winget 安装时，**设置 ▸ 关于**显示的就是这一行。
 - **macOS DMG**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后运行 `/Applications/Folio.app/Contents/MacOS/folio --uninstall`。两种方式均完整移除 Folio，包括应用。
 - **Homebrew**——退出 Folio 后运行 `brew uninstall --zap folio`。
 
 只移除 Folio 自身的文件，文件夹仅在其中没有其他内容时一并移除；你自己放在文件夹中的文件保留，卸载结束时会列出。
 
 若 Folio 设置的某项内容无法移除——例如另一个程序占用了文件——卸载会指出是哪项，保留程序以便你再次运行，并保留设置和数据，即使你要求一并移除。若移除文件期间断电，从同一文件夹再次运行卸载即可，会移除剩余的文件。
-
-<!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
-uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
-There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
-and the cleanup unregisters it. -->
 
 卸载移除 Folio 在自身文件夹外添加的内容——资源管理器或 Finder 的菜单、PowerShell 配置文件中的行（包括该文件本身及其备份，如果是 Folio 创建的）、agent 钩子——设置和数据保留。如需一并移除，在设置中打开**同时移除设置和数据**，在 `uninstall.cmd` 中回答 `n`，或加上 `--remove-data`；Homebrew 的 `--zap` 已包含设置文件夹。输出使用 Folio 当前设定的语言。[`docs/install.zh-CN.md`](docs/install.zh-CN.md#卸载) 说明退出码的含义。
 

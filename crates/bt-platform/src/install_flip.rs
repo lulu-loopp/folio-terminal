@@ -34,7 +34,11 @@
 //!   time is `proc_pidinfo`'s on macOS (microseconds since the epoch) and
 //!   `GetProcessTimes`'s creation time on Windows (100 ns since 1601); a
 //!   Windows process that has exited while a handle keeps its record is not
-//!   running.
+//!   running. **A Windows process runs until its process object is
+//!   signalled** — after its handles are closed and its image unmapped — and
+//!   not merely until its exit code can be read, which comes first (0.4.7
+//!   uninstall fix: the door that waits for its asker took the said exit code
+//!   for the end and met the asker's data-directory claim still held).
 //!   Linux reads field 22 of `/proc/PID/stat` in clock ticks since boot.
 //!   Process listing and signaling remain unavailable on Linux.
 //! * **[`ask`]** (U-29; Windows U-24): a recorded process asked to quit, or
@@ -470,7 +474,7 @@ mod imp {
     use std::path::Path;
     use windows::Win32::Foundation::{
         ERROR_INVALID_PARAMETER, ERROR_SHARING_VIOLATION, FILETIME, HANDLE, HWND, LPARAM,
-        STILL_ACTIVE, WPARAM,
+        STILL_ACTIVE, WAIT_TIMEOUT, WPARAM,
     };
     use windows::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
@@ -478,7 +482,7 @@ mod imp {
     use windows::Win32::System::ProcessStatus::K32EnumProcesses;
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_TERMINATE, TerminateProcess,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowThreadProcessId,
@@ -553,7 +557,14 @@ mod imp {
     pub(super) fn started_of(pid: u32) -> Option<u64> {
         // SAFETY: a call taking two flags and an integer; it answers an error
         // for a pid that has gone or that this token may not open.
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+        }
+        .ok()?;
         // SAFETY: the handle was opened here, is owned by nothing else, and is
         // closed when `owned` is dropped.
         let owned = unsafe { OwnedHandle::from_raw_handle(process.0) };
@@ -603,13 +614,21 @@ mod imp {
         None
     }
 
-    /// The creation time of the live process behind `process`, or `None` once
-    /// it has exited (its record outlives it while any handle is open).
+    /// The creation time of the process behind `process` while it runs, or
+    /// `None` once it has ended (its record outlives it while any handle is
+    /// open). `process` was opened with `PROCESS_SYNCHRONIZE`.
+    ///
+    /// **Ended is the process object signalled**, which the kernel does after
+    /// it has closed every handle the process held and unmapped its image —
+    /// not the exit code being readable, which comes first: a process leaving
+    /// by `ExitProcess` or by `TerminateProcess` on itself (Folio's way out)
+    /// has said its code while its handles — a data directory's claim among
+    /// them — and its image are still its own, for as long as its threads take
+    /// to leave the kernel. Whoever waits for a process to end waits for what
+    /// it held, so that stretch is still running.
     fn creation_of(process: HANDLE) -> Option<u64> {
-        let mut code = 0u32;
-        // SAFETY: `process` is live for the call; `code` is writable.
-        unsafe { GetExitCodeProcess(process, &raw mut code) }.ok()?;
-        if code != STILL_ACTIVE.0.cast_unsigned() {
+        // SAFETY: `process` is live for the call; a zero timeout only asks.
+        if unsafe { WaitForSingleObject(process, 0) } != WAIT_TIMEOUT {
             return None;
         }
         let mut created = FILETIME::default();
@@ -630,6 +649,15 @@ mod imp {
         Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
     }
 
+    /// Whether the process behind `process` has said its exit code: it has
+    /// ended, or it is leaving and its end can no longer be refused.
+    fn leaving(process: HANDLE) -> bool {
+        let mut code = 0u32;
+        // SAFETY: `process` is live for the call; `code` is writable.
+        unsafe { GetExitCodeProcess(process, &raw mut code) }
+            .is_ok_and(|()| code != STILL_ACTIVE.0.cast_unsigned())
+    }
+
     /// **Ask the process, or end it, through a handle that is that process**:
     /// its creation time is read again from the handle this opens, so a pid
     /// reused since the list was read is never touched. `false`: it has ended
@@ -639,7 +667,7 @@ mod imp {
         // for a pid that has gone or that this token may not open.
         let opened = unsafe {
             OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
                 false,
                 process.pid,
             )
@@ -673,8 +701,10 @@ mod imp {
                 // `PROCESS_TERMINATE`.
                 match unsafe { TerminateProcess(handle, ENDED_BY_A_ROLLBACK) } {
                     Ok(()) => Ok(true),
-                    // It ended on its own between the look and the end.
-                    Err(_) if creation_of(handle).is_none() => Ok(false),
+                    // It ended, or began leaving, on its own between the look
+                    // and the end: a process already leaving refuses to be
+                    // ended, and has said its exit code.
+                    Err(_) if leaving(handle) => Ok(false),
                     Err(error) => Err(io::Error::other(error)),
                 }
             }
@@ -1316,6 +1346,154 @@ mod tests {
         ended.unwrap();
         assert!(running_from(&program).unwrap().is_empty());
         assert!(running_from(&unstarted).unwrap().is_empty());
+    }
+
+    /// RED (0.4.7 uninstall fix) — **a process runs until its handles are
+    /// closed, not until its exit code is said**: held at its end — the exit
+    /// code set, the handle table not yet run down — the process that holds
+    /// a data directory's claim still runs by its pid and start instant, and
+    /// the claim is still refused to anybody else; once it has gone, it does
+    /// not run and the claim is free. A process it started while it held the
+    /// claim, still running, does not hold the claim: the claim is not
+    /// inherited across a spawn.
+    ///
+    /// The clean-VM rehearsal of 0.4.7 met that stretch: the uninstall door
+    /// waits for the Folio that asked for it to end, saw its exit code, took
+    /// it for gone, and was refused the claim its asker had not yet let go of.
+    ///
+    /// MUTATION: in the Windows arm, `creation_of` asks the exit code instead
+    /// of whether the process object is signalled (the first assertion goes
+    /// red).
+    #[test]
+    #[cfg(windows)]
+    fn a_process_runs_until_its_handles_are_closed_not_until_its_exit_code_is_said() {
+        if let Ok(directory) = std::env::var("BT_EXIT_CLAIM_CHILD") {
+            // The child: take the claim, start a process that outlives it,
+            // name that process, and leave by Folio's own way out.
+            let claim = crate::instance::claim_data_directory(Path::new(&directory))
+                .expect("the child is the first to claim its folder");
+            let program = std::env::var("BT_EXIT_CLAIM_GRANDCHILD").unwrap();
+            let grandchild = crate::quiet_command(&program)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // The stand-in's identity first, so the test can end it whatever
+            // happens after this line.
+            let stand_in = grandchild.id();
+            std::fs::write(
+                Path::new(&directory).join("stand-in"),
+                format!("{stand_in} {}", started_of(stand_in).unwrap()),
+            )
+            .unwrap();
+            let me = std::process::id();
+            std::fs::write(
+                Path::new(&directory).join("asker"),
+                format!("{me} {}", started_of(me).unwrap()),
+            )
+            .unwrap();
+            // The stand-in outlives this process, and the test ends it by its
+            // identity; nothing here waits for it.
+            std::mem::forget(grandchild);
+            std::mem::forget(claim);
+            crate::leave_process(7);
+        }
+        let scratch = Scratch::new("exit");
+        let data = scratch.0.join("Folio");
+        std::fs::create_dir(&data).unwrap();
+        let program = scratch.0.join("stays.exe");
+        crate::trust_harness::program(
+            &program,
+            crate::trust::FileVersion([0, 4, 7, 0]),
+            crate::trust_harness::Behaviour::StaysUp,
+        )
+        .unwrap();
+        // **The stand-in ends with the test, on every road out of it** — an
+        // assertion that fails, here or inside the held exit, included: it is
+        // not debugged, so nothing else would end it. By its recorded pid and
+        // start instant, from its own image, so nothing else is touched.
+        struct EndsTheStandIn<'a> {
+            data: &'a Path,
+            program: &'a Path,
+        }
+        impl EndsTheStandIn<'_> {
+            fn running(&self) -> Option<Running> {
+                let said = std::fs::read_to_string(self.data.join("stand-in")).ok()?;
+                let (pid, started) = said.split_once(' ')?;
+                Some(Running {
+                    pid: pid.parse().ok()?,
+                    started: started.parse().ok()?,
+                })
+            }
+            fn end(&self) -> bool {
+                self.running()
+                    .is_some_and(|running| ask(running, &[self.program], Ask::End).unwrap_or(false))
+            }
+        }
+        impl Drop for EndsTheStandIn<'_> {
+            fn drop(&mut self) {
+                self.end();
+            }
+        }
+        let stand_in = EndsTheStandIn {
+            data: &data,
+            program: &program,
+        };
+        let mut command = crate::quiet_command(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "install_flip::tests::a_process_runs_until_its_handles_are_closed_not_until_its_exit_code_is_said",
+                "--nocapture",
+            ])
+            .env("BT_EXIT_CLAIM_CHILD", &data)
+            .env("BT_EXIT_CLAIM_GRANDCHILD", &program)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let asker = || -> Running {
+            let said = std::fs::read_to_string(data.join("asker")).unwrap();
+            let (pid, started) = said.split_once(' ').unwrap();
+            Running {
+                pid: pid.parse().unwrap(),
+                started: started.parse().unwrap(),
+            }
+        };
+        let (at_exit, status) = crate::trust_harness::stopped_at_exit(&mut command, |pid, code| {
+            let child = asker();
+            assert_eq!(child.pid, pid);
+            (
+                code,
+                crate::instance::claim_data_directory(&data).is_none(),
+                still_running(child),
+            )
+        })
+        .unwrap();
+        let child = asker();
+        assert!(
+            stand_in.running().is_some_and(still_running),
+            "the process the child started runs"
+        );
+        // Asked while the process the child started still runs, which is
+        // then ended before anything is asserted.
+        let claim = crate::instance::claim_data_directory(&data);
+        assert!(stand_in.end());
+        assert_eq!(
+            at_exit,
+            (7, true, true),
+            "held at its end: (its exit code, the claim still held, still running)"
+        );
+        assert_eq!(status.code(), Some(7));
+        assert!(
+            !still_running(child),
+            "a process that has gone does not run"
+        );
+        assert_eq!(started_of(child.pid), None);
+        assert!(
+            claim.is_some(),
+            "a process started while the claim was held does not hold it"
+        );
     }
 
     /// RED (U-23) — **a file whose image a running process maps is held open,
