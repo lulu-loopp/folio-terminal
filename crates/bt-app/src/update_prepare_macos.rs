@@ -563,7 +563,10 @@ pub(crate) fn check(
     if !architectures.iter().any(|name| name == MACOS_ARCHITECTURE) {
         return Err(Stop::Identity);
     }
-    spoken(&macos_update::update_protocol(worker, bundle).map_err(|_| Stop::Identity)?)?;
+    spoken(
+        macos_update::update_protocol(worker, bundle).map_err(|refusal| refusal.to_string()),
+        &mut crate::diagnostics::note,
+    )?;
     let needs = macos_update::min_updater(worker, bundle).map_err(|_| Stop::Identity)?;
     let needed = crate::update::Version::parse(&needs).ok_or(Stop::Identity)?;
     let this = crate::update::Version::parse(crate::version::VERSION).ok_or(Stop::Identity)?;
@@ -581,27 +584,37 @@ pub(crate) fn check(
 }
 
 /// **The bundle speaks this build's update protocol**: its sealed
-/// `FolioUpdateProtocol`, `sealed`, is [`release_manifest::PROTOCOL`] — the
-/// rule and the words of the Windows archive reader's `protocol` check
-/// (`update_archive`'s `offered`, [`update_archive::Reason::Protocol`]). A
-/// value that is not a number is refused as a malformed manifest is there.
+/// `FolioUpdateProtocol` — `sealed`, or why it could not be read — is
+/// [`release_manifest::PROTOCOL`]: the rule and the words of the Windows
+/// archive reader's `protocol` check (`update_archive`'s `offered`,
+/// [`update_archive::Reason::Protocol`]). A key that is missing or
+/// unreadable, or a value that is not a number, is refused as a malformed
+/// manifest is there ([`update_archive::Reason::Manifest`]). Every refusal is
+/// one line, handed to `note` (`diagnostics.log` in the product), as every
+/// archive refusal is on Windows.
 ///
 /// Defence in depth for a hop, which the frozen surfaces already keep: it
 /// runs in Prepare, so it protects no downgrade, and no journal read.
 ///
 /// # Errors
-/// [`Stop::Identity`], with one line in `diagnostics.log` for another
-/// protocol.
+/// [`Stop::Identity`], after its line.
 ///
 /// [`release_manifest::PROTOCOL`]: bt_winres::release_manifest::PROTOCOL
-fn spoken(sealed: &str) -> Result<(), Stop> {
-    let protocol: u32 = sealed.parse().map_err(|_| Stop::Identity)?;
-    if protocol == bt_winres::release_manifest::PROTOCOL {
-        return Ok(());
-    }
-    crate::diagnostics::note(&format!(
-        "Folio: update job — the new bundle is refused: {}",
-        update_archive::Reason::Protocol(protocol)
+fn spoken(sealed: Result<String, String>, note: &mut dyn FnMut(&str)) -> Result<(), Stop> {
+    let reason = match sealed {
+        Err(why) => update_archive::Reason::Manifest(format!(
+            "its FolioUpdateProtocol could not be read: {why}"
+        )),
+        Ok(sealed) => match sealed.parse::<u32>() {
+            Ok(protocol) if protocol == bt_winres::release_manifest::PROTOCOL => return Ok(()),
+            Ok(protocol) => update_archive::Reason::Protocol(protocol),
+            Err(_) => update_archive::Reason::Manifest(format!(
+                "its FolioUpdateProtocol `{sealed}` is not a number"
+            )),
+        },
+    };
+    note(&format!(
+        "Folio: update job — the new bundle is refused: {reason}"
     ));
     Err(Stop::Identity)
 }

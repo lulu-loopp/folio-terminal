@@ -904,25 +904,48 @@ fn a_bundle_that_speaks_another_update_protocol_or_none_is_refused() {
 }
 
 /// RED (E1-a2) — **the protocol a bundle seals is held to this build's by the
-/// Windows archive reader's rule and words**: this build's protocol passes;
-/// another one, or a value that is no number, is *not verified*, and the
-/// line another one is refused with is the archive reader's own
-/// (`update_archive::Reason::Protocol`). Pure, so it runs everywhere.
+/// Windows archive reader's rule and words, and every refusal says why in one
+/// line**: this build's protocol passes and says nothing; another one is
+/// *not verified* with the archive reader's own words
+/// (`update_archive::Reason::Protocol`); a key that is missing or unreadable,
+/// or a value that is no number, is *not verified* in the words of a
+/// malformed manifest (`update_archive::Reason::Manifest`), as every archive
+/// refusal is a line on Windows. Pure, so it runs everywhere.
 ///
 /// MUTATION: make `spoken` answer `Ok(())` for every number: protocol 2
-/// passes.
+/// passes. Drop its `note(..)`: no refusal leaves a line.
 #[test]
 fn the_sealed_protocol_is_held_to_this_builds_as_the_archive_reader_holds_it() {
     let this = bt_winres::release_manifest::PROTOCOL;
-    assert_eq!(spoken(&this.to_string()), Ok(()));
-    assert_eq!(spoken(&(this + 1).to_string()), Err(Stop::Identity));
-    assert_eq!(spoken("one"), Err(Stop::Identity));
-    assert_eq!(spoken(""), Err(Stop::Identity));
+    let said = |sealed: Result<String, String>| {
+        let mut lines = Vec::new();
+        let answer = spoken(sealed, &mut |line| lines.push(line.to_owned()));
+        (answer, lines)
+    };
+    assert_eq!(said(Ok(this.to_string())), (Ok(()), Vec::new()));
+    let refused = |line: String| (Err(Stop::Identity), vec![line]);
     assert_eq!(
-        crate::update_archive::Reason::Protocol(this + 1).to_string(),
-        format!(
-            "the release speaks update protocol {}, this build {this}",
+        said(Ok((this + 1).to_string())),
+        refused(format!(
+            "Folio: update job — the new bundle is refused: the release speaks update protocol {}, \
+             this build {this}",
             this + 1
+        ))
+    );
+    assert_eq!(
+        said(Ok("one".to_owned())),
+        refused(
+            "Folio: update job — the new bundle is refused: the release manifest: its \
+             FolioUpdateProtocol `one` is not a number"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        said(Err("plutil: no such key (中文 Ω)".to_owned())),
+        refused(
+            "Folio: update job — the new bundle is refused: the release manifest: its \
+             FolioUpdateProtocol could not be read: plutil: no such key (中文 Ω)"
+                .to_owned()
         )
     );
 }
