@@ -760,16 +760,7 @@ mod tests {
     }
 
     fn open_process(pid: u32) -> OwnedHandle {
-        // SAFETY: opening a process by id for waiting and querying only.
-        let handle = unsafe {
-            OpenProcess(
-                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                false,
-                pid,
-            )
-        }
-        .expect("the process runs");
-        OwnedHandle(handle)
+        try_open_process(pid).expect("the process runs")
     }
 
     /// A launched host whose handle is this test process (never signalled
@@ -1342,6 +1333,101 @@ mod tests {
         assert!(!system_message(5).is_empty());
     }
 
+    /// `OpenProcess` for waiting and querying, answered rather than expected: an observer may be
+    /// refused a process it did not start (another user's elevated host, `ERROR_ACCESS_DENIED`).
+    fn try_open_process(pid: u32) -> windows::core::Result<OwnedHandle> {
+        // SAFETY: opening a process by id for waiting and querying only.
+        unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+        }
+        .map(OwnedHandle)
+    }
+
+    /// **The `observe` row's body**: wait until `waited` for a client the harness started,
+    /// name it by the kernel's pid and put it through the real handshake
+    /// ([`ElevatedEndpoint::accept_connected`]); answer the row's lines.
+    ///
+    /// The observer did not launch this client, so it holds no launch handle. The production
+    /// path never opens its host by pid — it keeps the handle `ShellExecuteExW` returned — and an
+    /// observer running as one user may be refused another user's elevated process. So the
+    /// client's process is opened with `open`, and when that is refused the row says
+    /// `process=unavailable (<code>)` and the handshake's waits watch this process's own handle,
+    /// which is never signalled while the row runs: they end at the deadline or when the pipe
+    /// breaks, and the admission (kernel pid, `Hello`, `Authenticate`, the lent identity) is the
+    /// same either way.
+    fn observe(
+        endpoint: ElevatedEndpoint,
+        waited: Instant,
+        open: impl FnOnce(u32) -> windows::core::Result<OwnedHandle>,
+    ) -> Vec<String> {
+        let mut said = Vec::new();
+        if let Err(failure) = connect(&endpoint.pipe, waited, None) {
+            said.push(format!("connect=Err({failure:?})"));
+            return said;
+        }
+        let pid =
+            peer_process_id(&endpoint.pipe, Peer::Client).expect("the kernel names the client");
+        said.push(format!("kernel_client_pid={pid}"));
+        let process = match open(pid) {
+            Ok(process) => {
+                said.push("process=opened".to_owned());
+                process
+            }
+            Err(error) => {
+                said.push(format!("process=unavailable ({:#x})", win32_of(&error)));
+                open_process(std::process::id())
+            }
+        };
+        let host = LaunchedHost { pid, process };
+        match endpoint.accept_connected(&host, far_deadline()) {
+            Ok(connection) => {
+                said.push("accept=Ok".to_owned());
+                let identity = client_identity(&connection.pipe);
+                said.push(format!(
+                    "host_pid={} host_user={} host_integrity={} lent_level={}",
+                    connection.host_pid(),
+                    identity.user,
+                    identity.integrity,
+                    identity.level.0
+                ));
+            }
+            Err(failure) => said.push(format!("accept=Err({failure:?})")),
+        }
+        said
+    }
+
+    /// RED — **the `observe` row completes when the observer may not open the client's
+    /// process**, as an observer of another user's elevated host may not (T-ADMIN-2's row 1 on
+    /// the clean guest): the client is admitted by its kernel pid, the row says the process was
+    /// unavailable with the system's code, and the handshake and the lent identity are reported.
+    ///
+    /// MUTATION (observed red): `observe` taking the process as `open(pid).expect("the process
+    /// runs")` — the row panics after the pipe accepted the client, as it did on the guest.
+    #[test]
+    fn the_observe_row_completes_without_the_clients_process_handle() {
+        let endpoint = ElevatedEndpoint::create().expect("an endpoint");
+        let host = host_thread(endpoint.host_line().clone(), far_deadline());
+        let said = observe(endpoint, far_deadline(), |_| {
+            Err(windows::core::Error::from(
+                windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult(),
+            ))
+        });
+        assert_eq!(host.join().expect("the host ends"), Ok(()));
+        assert_eq!(said[0], format!("kernel_client_pid={}", std::process::id()));
+        assert_eq!(said[1], "process=unavailable (0x5)");
+        assert_eq!(said[2], "accept=Ok");
+        assert!(
+            said[3].starts_with(&format!("host_pid={} host_user=S-1-5-", std::process::id())),
+            "{said:?}"
+        );
+        assert!(said[3].ends_with(" lent_level=1"), "{said:?}");
+        assert_eq!(said.len(), 4, "{said:?}");
+    }
+
     /// **A row of the clean-VM record (T-ADMIN-2), never run elsewhere**: it
     /// performs a real `runas` launch, which on an ordinary machine would show
     /// a UAC prompt. The guest harness sets `BT_ELEVATED_PIPE_VM_ROW` to
@@ -1400,25 +1486,7 @@ mod tests {
                 )
                 .expect("the line is written");
                 let waited = Instant::now() + Duration::from_secs(240);
-                match connect(&endpoint.pipe, waited, None) {
-                    Ok(()) => {
-                        let pid = peer_process_id(&endpoint.pipe, Peer::Client)
-                            .expect("the kernel names the client");
-                        said.push(format!("kernel_client_pid={pid}"));
-                        let host = LaunchedHost {
-                            pid,
-                            process: open_process(pid),
-                        };
-                        match endpoint.accept_connected(&host, far_deadline()) {
-                            Ok(connection) => {
-                                said.push("accept=Ok".to_owned());
-                                identify(&connection, &mut said);
-                            }
-                            Err(failure) => said.push(format!("accept=Err({failure:?})")),
-                        }
-                    }
-                    Err(failure) => said.push(format!("connect=Err({failure:?})")),
-                }
+                said.extend(observe(endpoint, waited, try_open_process));
             }
             other => said.push(format!("unknown row {other}")),
         }
