@@ -247,10 +247,6 @@ pub(crate) struct Start<'a> {
 }
 
 /// What the pass decided.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "permanent: one verdict per process, made once by `run` and moved once into `pass`; boxing it would buy nothing"
-)]
 pub(crate) enum Verdict {
     /// Start as usual, holding `admission` for the life of the process, with
     /// the card a rollback sent this start to raise, and the home whose
@@ -261,7 +257,9 @@ pub(crate) enum Verdict {
         trial: Option<(TxnId, Nonce)>,
         last_trial: bool,
         failed: Option<Failure>,
-        waiting: Option<Home>,
+        /// Boxed: the home is the variant's largest field, and `Exit` is an
+        /// exit code.
+        waiting: Option<Box<Home>>,
         /// The transaction this start continues past with its writes held
         /// ([`is_held`]): its rescue build could not be started.
         held: Option<TxnId>,
@@ -305,7 +303,7 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
                 let _ = HELD.set(txn);
             }
             if let Some(home) = waiting {
-                let _ = WAITING.set(home);
+                let _ = WAITING.set(*home);
             }
             if let Some((txn, nonce)) = trial {
                 let _ = TRIAL.set(Trial { txn, nonce, home });
@@ -431,8 +429,8 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     };
     // The start's lock is let go before the job owner asks for it: a
     // transaction continued past is the job's, at this launch (U-33).
-    let waiting =
-        matches!(header.class, Class::Preparing | Class::Deferred).then(|| start.home.clone());
+    let waiting = matches!(header.class, Class::Preparing | Class::Deferred)
+        .then(|| Box::new(start.home.clone()));
     match at_start(&view) {
         StartAction::Continue => Verdict::Continue {
             admission,

@@ -2834,8 +2834,9 @@ fn a_receipt_found_by_recovery_commits_forward() {
 /// RED (U-29b) — **a recovery that fails still opens Folio, and the start it
 /// makes says *Update incomplete.* and names the folder**: a transaction
 /// lock that cannot be opened (the old build live: it is started with
-/// `--update-failed`), and a journal body it cannot read (a trial, with the
-/// same card); the journal is kept.
+/// `--update-failed`), and a journal body it cannot read (a trial; since E1
+/// the holder stands aside from it and the card is the one of an update this
+/// build cannot read whole, `Failure::Newer`); the journal is kept.
 ///
 /// The coordinator's ruling 2: "If recovery itself fails (any error road),
 /// the bundle that is live is started under that same rule with
@@ -2912,7 +2913,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
             .hands
             .said
             .iter()
-            .any(|line| line.contains("Refused")),
+            .any(|line| line.contains("StoodAside")),
         "{:?}",
         opened.hands.said
     );
@@ -2923,7 +2924,14 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
         unread.as_bytes()
     );
     let (card, trial) = card_of(&install, words);
-    assert_eq!(card, Some(incomplete(&install)));
+    assert_eq!(
+        card,
+        Some(crate::update_job::Failure::Newer {
+            folder: Some(install.home.root().to_path_buf()),
+            version: None,
+            held: false,
+        })
+    );
     assert_eq!(trial.map(|(txn, _)| txn), Some(install.txn), "held back");
 }
 

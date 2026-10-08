@@ -1100,13 +1100,13 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
         panic!("a start with a waiting transaction continues");
     };
     assert!(quiet.0.is_empty(), "the start said {:?}", quiet.0);
-    assert_eq!(waiting.as_ref(), Some(&home), "left for the job owner");
+    assert_eq!(waiting.as_deref(), Some(&home), "left for the job owner");
 
     let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bundle = scene.running.clone();
     let resumer_tools = Arc::clone(&tools);
     let mut job: Job<u32> = Job::with_offers(true).after_start(
-        waiting,
+        waiting.map(|home| *home),
         Box::new(move |worker, staged, channel| {
             resume(worker, staged, &bundle, &*resumer_tools, channel)
         }),
