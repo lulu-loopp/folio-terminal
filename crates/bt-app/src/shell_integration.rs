@@ -7096,6 +7096,22 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let program = root.join("pwsh.exe");
         std::fs::write(&program, b"").unwrap();
+        // A program this machine could start: on Unix that is a file with an execute bit.
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &program,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        // The Windows seed's PowerShell 7 row as the template on every platform: the row is
+        // data, and what is under test is the door and the composer, not this machine's seed.
+        let template = profiles::shipped_for(
+            profiles::SeedPlatform::Windows,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .into_iter()
+        .find(|profile| profile.id == "pwsh")
+        .expect("the Windows seed ships a PowerShell 7 row");
         let theirs = Profile {
             id: "inject4-preask".to_owned(),
             program: ProgramSource::Path(program.clone()),
@@ -7104,7 +7120,7 @@ mod tests {
                 "-Command".to_owned(),
                 "Write-Host '你好, 世界'".to_owned(),
             ],
-            ..row("pwsh")
+            ..template
         };
         let programs = profiles::ProfilePrograms::probe_rows(
             std::slice::from_ref(&theirs),

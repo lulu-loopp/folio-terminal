@@ -680,7 +680,9 @@ fn wrote(world: &Fake) -> &str {
 ///
 /// **No total of its own** (CONVENTIONS §3, the child's silence and not the clock): a loaded
 /// machine walks the same road more slowly, and the only thing that can make the phase never come
-/// is the applier ending first — which is red here, at once, with the phase it left behind.
+/// is the applier ending first — which is red here, at once, with the phase it left behind. The
+/// wait is bounded only by the applier thread's end: an applier stuck alive hangs the test rather
+/// than turning it red.
 fn until_journal<T>(install: &Install, phase: PhaseKind, applier: &JoinHandle<T>) {
     while install.on_disk().body.phase.kind() != phase {
         assert!(

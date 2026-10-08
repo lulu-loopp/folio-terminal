@@ -654,7 +654,9 @@ fn a_healthy_trial(install: &Install, children: &Children, carried: Option<Nonce
 }
 
 /// Wait until the journal on disk satisfies `until`, for as long as `applier` is still on its
-/// road: the applier ending first is red at once, and nothing else bounds the wait.
+/// road: the applier ending first is red at once, and nothing else bounds the wait. The wait is
+/// bounded only by the applier thread's end: an applier stuck alive hangs the test rather than
+/// turning it red.
 fn journal_reaches<T>(
     install: &Install,
     applier: &JoinHandle<T>,
