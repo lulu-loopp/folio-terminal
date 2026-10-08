@@ -72558,19 +72558,57 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+mod app_attention_tests;
+#[cfg(test)]
+mod app_clipboard_tests;
+#[cfg(test)]
+mod app_configuration_tests;
+#[cfg(test)]
+mod app_diagnostics_tests;
+#[cfg(test)]
+mod app_dpi_tests;
+#[cfg(test)]
 mod app_files_tests;
+#[cfg(test)]
+mod app_first_run_tests;
+#[cfg(test)]
+mod app_floats_tests;
+#[cfg(test)]
+mod app_focus_tests;
+#[cfg(test)]
+mod app_frame_tests;
+#[cfg(test)]
+mod app_git_tests;
+#[cfg(test)]
+mod app_i18n_tests;
 #[cfg(test)]
 mod app_keyboard_tests;
 #[cfg(test)]
+mod app_launch_tests;
+#[cfg(test)]
+mod app_math_tests;
+#[cfg(test)]
 mod app_mouse_tests;
+#[cfg(test)]
+mod app_palette_tests;
 #[cfg(test)]
 mod app_panes_tests;
 #[cfg(test)]
+mod app_peek_tests;
+#[cfg(test)]
 mod app_preview_tests;
+#[cfg(test)]
+mod app_profiles_tests;
 #[cfg(test)]
 mod app_tabs_tests;
 #[cfg(test)]
 mod app_terminal_tests;
+#[cfg(test)]
+mod app_tooltips_tests;
+#[cfg(test)]
+mod app_unclassified_tests;
+#[cfg(test)]
+mod app_web_tests;
 #[cfg(test)]
 mod app_windows_tests;
 #[cfg(test)]
