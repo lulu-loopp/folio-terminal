@@ -2391,10 +2391,7 @@ pub(crate) mod tests {
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("folio-psreadline-{tag}-{}-{n}", std::process::id()));
+        let dir = bt_testpath::temp_path(&format!("folio-psreadline-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

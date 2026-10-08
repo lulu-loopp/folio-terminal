@@ -2049,11 +2049,7 @@ mod tests {
     #[test]
     fn nothing_that_is_not_a_video_plays() {
         let _ledger = ledger_gate();
-        let dir = std::env::temp_dir().join(format!(
-            "folio-video-engine-refusals-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = bt_testpath::temp_path("folio-video-engine-refusals");
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let text = dir.join("renamed.mp4");
         std::fs::write(&text, b"this is not a video at all, whatever it is called")

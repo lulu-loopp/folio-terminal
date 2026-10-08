@@ -501,8 +501,7 @@ mod tests {
     /// `contains(PROGRAM_REFUSED)` test, and the words differ.
     #[test]
     fn a_refused_handoff_raises_the_same_words_it_did_before() {
-        let scratch =
-            std::env::temp_dir().join(format!("folio-handoff-refusal-{}", std::process::id()));
+        let scratch = bt_testpath::temp_path("folio-handoff-refusal");
         let program = scratch.join(match bt_platform::host_platform() {
             bt_platform::HostPlatform::MacOs => "Payload.app",
             _ => "payload.exe",

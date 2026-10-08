@@ -31,8 +31,10 @@ use std::{
     sync::Arc,
     sync::OnceLock,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use bt_doc::{ContentAnchor, MathMode, ScreenId};
 use bt_platform::admission::{WaitToken, doors};
@@ -33950,12 +33952,7 @@ mod tests {
         fn font_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
             // A directory of its own per call: fontdb maps a loaded file, and
             // Windows refuses to rewrite a mapped file under another test.
-            static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "folio-bt-render-synthetic-bold-{}-{call}",
-                std::process::id()
-            ));
+            let dir = bt_testpath::temp_path("folio-bt-render-synthetic-bold");
             std::fs::create_dir_all(&dir).expect("a scratch directory");
             let path = dir.join(name);
             std::fs::write(&path, bytes).expect("the font file");

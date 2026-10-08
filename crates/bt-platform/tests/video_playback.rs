@@ -608,10 +608,7 @@ fn a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play() {
 ///
 /// MUTATION: let a track-less asset through and the error assertion names it.
 fn nothing_that_is_not_a_video_plays() {
-    let dir = std::env::temp_dir().join(format!(
-        "folio-video-playback-refusals-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("folio-video-playback-refusals");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let text = dir.join("renamed.mp4");
     std::fs::write(&text, b"this is not a video at all, whatever it is called")

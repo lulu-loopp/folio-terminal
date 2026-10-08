@@ -830,7 +830,7 @@ mod tests {
             bare
         );
         // The field, naming a file that is not there.
-        let missing = std::env::temp_dir().join("folio-no-such-transcript-4c71.jsonl");
+        let missing = bt_testpath::temp_path("folio-no-such-transcript").with_extension("jsonl");
         assert_eq!(
             stop(Some(&serde_json::json!({
                 "transcript_path": missing.to_string_lossy(),
@@ -991,8 +991,7 @@ mod tests {
         // A data directory of this test's own: where the endpoint is a socket
         // its name comes from this, and two tests sharing one name would be two
         // listeners fighting over one path.
-        let data =
-            std::env::temp_dir().join(format!("bt-app-attention-wire-{}", std::process::id()));
+        let data = bt_testpath::temp_path("bt-app-attention-wire");
         std::fs::create_dir_all(&data).expect("make the data directory");
         let endpoint = AttentionPipe::start(&data, move |line| {
             let _ = sender.send(line);
@@ -1158,10 +1157,8 @@ mod tests {
         use crate::attention::{AttentionLedger, NotificationSwitches, Reach, Site, Why};
         use bt_layout::SeatId;
 
-        let path = std::env::temp_dir().join(format!(
-            "folio-attention-wire-{}-transcript.jsonl",
-            std::process::id()
-        ));
+        let path =
+            bt_testpath::temp_path("folio-attention-wire-transcript").with_extension("jsonl");
         std::fs::write(
             &path,
             format!(
@@ -1245,7 +1242,7 @@ mod tests {
     fn the_attention_verb_waits_for_its_payload_on_its_main_thread_as_a_worker() {
         use bt_platform::admission::{Refused, Role, enter_standalone_main, role};
         const PAYLOAD: &str = r#"{"hook_event_name":"Stop"}"#;
-        if !crate::tests::alone_in_a_process(
+        if !crate::test_support::alone_in_a_process(
             "attention_wire::tests::the_attention_verb_waits_for_its_payload_on_its_main_thread_as_a_worker",
             PAYLOAD.as_bytes(),
         ) {

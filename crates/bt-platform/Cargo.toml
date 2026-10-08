@@ -922,6 +922,9 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "std",
 ] }
 
+[dev-dependencies]
+bt-testpath = { path = "../bt-testpath" }
+
 # **The macOS test venue** (M3-1; `tests/macos_dock_menu.rs` is the second
 # target to need it). `tests/macos_app_delegate.rs` proves that the selectors
 # added to `WinitApplicationDelegate` are delivered and that every
@@ -1202,7 +1205,7 @@ zbus.workspace = true
 # tests only: `bt-app` names it on its *dev-dependency* on this crate, so its
 # tests can verify a release signed here, and a build of the shipped program
 # never has it. It adds no package.
-trust-harness = []
+trust-harness = ["dep:bt-testpath"]
 
 [lints.clippy]
 todo = "deny"
@@ -1210,6 +1213,9 @@ unimplemented = "deny"
 dbg_macro = "deny"
 
 [dependencies]
+# **Only with `trust-harness`**, and for this crate's own tests: every test's scratch name comes
+# from one place (`bt_testpath`, T-TEST-HYGIENE-048). The shipped program never has it.
+bt-testpath = { path = "../bt-testpath", optional = true }
 ttf-parser.workspace = true
 bt-unicode = { path = "../bt-unicode" }
 # One owner for encoding and decoding `file:` addresses. Windows package
@@ -1218,3 +1224,4 @@ bt-unicode = { path = "../bt-unicode" }
 # `bt-transcript`. Keeping those grammars together is why this edge is general.
 bt-transcript = { path = "../bt-transcript" }
 bt-winres = { path = "../bt-winres" }
+web-time.workspace = true

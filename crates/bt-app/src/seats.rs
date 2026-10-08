@@ -26979,7 +26979,7 @@ mod tests {",
             }],
             ..SessionV1::default()
         };
-        let dir = std::env::temp_dir().join(format!("bt-app-seats-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-app-seats");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
         write_session_atomic(&path, &session).unwrap();

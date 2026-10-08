@@ -544,8 +544,7 @@ fn a_document_written_before_the_content_section_reads_as_no_preview_at_all() {
 /// serialized as `null` would have rewritten every session file on disk.
 #[test]
 fn a_tab_with_no_preview_writes_no_content_section() {
-    let dir =
-        std::env::temp_dir().join(format!("bt-persist-preview-absent-{}", std::process::id()));
+    let dir = bt_testpath::temp_path("bt-persist-preview-absent");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
     let session = SessionV1 {
@@ -583,10 +582,7 @@ fn a_tab_with_no_preview_writes_no_content_section() {
 /// `filter_map` over `cur` would quietly drop.
 #[test]
 fn the_content_section_round_trips_through_the_public_session_api() {
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-preview-roundtrip-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-preview-roundtrip");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
     let session = SessionV1 {
@@ -635,10 +631,7 @@ fn the_content_section_round_trips_through_the_public_session_api() {
 /// not.
 #[test]
 fn a_session_written_today_names_no_theme_and_a_pre_ruling_one_still_does() {
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-theme-retirement-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-theme-retirement");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
 
@@ -679,10 +672,8 @@ fn v3_dark_and_light_fixtures_migrate_and_their_mode_is_still_readable() {
             "the mode a v3 document names is still readable, or its owner loses it"
         );
 
-        let dir = std::env::temp_dir().join(format!(
-            "bt-persist-v3-theme-migration-{}-{expected_theme:?}",
-            std::process::id()
-        ));
+        let dir =
+            bt_testpath::temp_path(&format!("bt-persist-v3-theme-migration-{expected_theme:?}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
         write_session_atomic(&path, &migrated).unwrap();
@@ -708,10 +699,7 @@ fn every_cursor_style_round_trips_through_the_public_session_api() {
         SessionCursorStyleV1::Block,
         SessionCursorStyleV1::Underline,
     ] {
-        let dir = std::env::temp_dir().join(format!(
-            "bt-persist-cursor-roundtrip-{}-{cursor_style:?}",
-            std::process::id()
-        ));
+        let dir = bt_testpath::temp_path(&format!("bt-persist-cursor-roundtrip-{cursor_style:?}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
         let session = SessionV1 {
@@ -730,10 +718,8 @@ fn every_cursor_style_round_trips_through_the_public_session_api() {
 #[test]
 fn every_tab_layout_round_trips_through_the_public_session_api() {
     for tab_layout in [SessionTabLayoutV1::Horizontal, SessionTabLayoutV1::Vertical] {
-        let dir = std::env::temp_dir().join(format!(
-            "bt-persist-tab-layout-roundtrip-{}-{tab_layout:?}",
-            std::process::id()
-        ));
+        let dir =
+            bt_testpath::temp_path(&format!("bt-persist-tab-layout-roundtrip-{tab_layout:?}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
         let session = SessionV1 {
@@ -755,9 +741,8 @@ fn every_tab_layout_round_trips_through_the_public_session_api() {
 #[test]
 fn every_sidebar_mode_round_trips_through_the_public_session_api() {
     for sidebar_mode in [SessionSidebarModeV1::Expanded, SessionSidebarModeV1::Icons] {
-        let dir = std::env::temp_dir().join(format!(
-            "bt-persist-sidebar-mode-roundtrip-{}-{sidebar_mode:?}",
-            std::process::id()
+        let dir = bt_testpath::temp_path(&format!(
+            "bt-persist-sidebar-mode-roundtrip-{sidebar_mode:?}"
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
@@ -779,10 +764,7 @@ fn every_sidebar_mode_round_trips_through_the_public_session_api() {
 
 #[test]
 fn multi_tab_trees_and_active_index_round_trip_together() {
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-multi-tab-roundtrip-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-multi-tab-roundtrip");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
     let tabs = (0..3)
@@ -834,8 +816,7 @@ fn writing_the_parsed_session_produces_the_canonical_bytes_on_disk() {
     let (session, report, _) = read_session(&fixture_path("session_v1_nondefault_input.json"));
     assert_eq!(report, ReadReport::Loaded);
 
-    let dir =
-        std::env::temp_dir().join(format!("bt-persist-roundtrip-write-{}", std::process::id()));
+    let dir = bt_testpath::temp_path("bt-persist-roundtrip-write");
     std::fs::create_dir_all(&dir).unwrap();
     let out_path = dir.join("session.json");
 
@@ -858,9 +839,8 @@ fn display_formulas_round_trips_through_the_public_settings_api() {
     // stored value and always answered `true` would still pass a one-sided
     // test (`docs/CONVENTIONS.md` §三 "默认值会掩盖 bug").
     for display_formulas in [false, true] {
-        let dir = std::env::temp_dir().join(format!(
-            "bt-persist-display-formulas-roundtrip-{}-{display_formulas}",
-            std::process::id()
+        let dir = bt_testpath::temp_path(&format!(
+            "bt-persist-display-formulas-roundtrip-{display_formulas}"
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
@@ -1324,10 +1304,7 @@ fn a_v9_settings_file_that_names_both_schemes_keeps_both_names() {
 
     // And back out again, byte-for-byte in meaning: the pair a user chose is the
     // pair the next launch reads.
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v9-schemes-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v9-schemes");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &v9).unwrap();
@@ -1423,10 +1400,7 @@ fn a_v10_settings_file_that_describes_a_ground_keeps_every_part_of_it() {
 
     // And back out again, byte-for-byte in meaning: the ground a user chose is
     // the ground the next launch reads.
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v10-ground-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v10-ground");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &v10).unwrap();
@@ -1494,10 +1468,7 @@ fn settings_v10_migrates_with_every_group_shut_and_v11_keeps_the_pages_it_names(
 
     // And back out again: the pages a reader opened are the pages the next
     // launch opens.
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v11-advanced-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v11-advanced");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &named).unwrap();
@@ -1541,10 +1512,7 @@ fn settings_v11_migrates_with_tables_on_and_v12_keeps_the_answer_it_was_given() 
     assert_eq!(off.schema_version, SETTINGS_SCHEMA_VERSION);
     assert!(!off.tables, "a reader who said no is heard");
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v12-tables-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v12-tables");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &off).unwrap();
@@ -1587,10 +1555,7 @@ fn settings_v12_migrates_uncapped_and_v13_keeps_the_height_it_was_given() {
     assert_eq!(capped.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(capped.block_max_height, 240, "a reader who capped is heard");
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v13-blockmax-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v13-blockmax");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &capped).unwrap();
@@ -1653,10 +1618,7 @@ fn settings_v13_migrates_to_the_capacity_it_always_had_and_v14_keeps_the_number_
         "a reader who asked for less is heard"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v14-scrollback-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v14-scrollback");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &chosen).unwrap();
@@ -1708,10 +1670,7 @@ fn settings_v14_migrates_with_focus_mode_off_and_v15_keeps_the_shape_it_was_left
         "a reader who lives in the card column is heard"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v15-focus-mode-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v15-focus-mode");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &chosen).unwrap();
@@ -1767,10 +1726,7 @@ fn settings_v15_migrates_with_the_contrast_floor_off_and_v16_keeps_the_rung_it_w
         "a reader who asked for the WCAG AA bar is heard"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v16-minimum-contrast-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v16-minimum-contrast");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &chosen).unwrap();
@@ -1820,10 +1776,7 @@ fn settings_v16_migrates_with_notifications_on_and_v17_keeps_the_silence_it_was_
         "a reader who asked for silence is heard"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v17-notifications-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v17-notifications");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &silent).unwrap();
@@ -1874,10 +1827,7 @@ fn retired_profile_offer_keys_do_not_override_the_additive_shell_integration_def
     );
     assert_eq!(quiet.minimum_contrast, MinimumContrastV1::Ratio3);
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v18-powershell-offer-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v18-powershell-offer");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &quiet).unwrap();
@@ -1932,10 +1882,7 @@ fn settings_v18_migrates_to_the_height_cards_already_had_and_v19_keeps_a_taller_
         "a reader who asked for the tallest rung is heard"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v19-focus-card-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v19-focus-card");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &tall).unwrap();
@@ -2011,7 +1958,7 @@ fn the_git_page_migrates_on_and_every_files_column_arrives_on_its_tree() {
 
     // And the page a user actually chose survives a round trip, which is the
     // whole of what the field is for.
-    let dir = std::env::temp_dir().join(format!("bt-persist-git-view-{}", std::process::id()));
+    let dir = bt_testpath::temp_path("bt-persist-git-view");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
     let mut chosen = session.clone();
@@ -2061,10 +2008,7 @@ fn settings_v3_fixture_migrates_to_v4_with_no_profile_chosen() {
     // A file that *does* name a profile keeps naming it — the id is opaque here,
     // and this crate must not decide that a spelling it does not recognise is
     // wrong. Which profile it means is the reading build's question.
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v3-migration-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v3-migration");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     let chosen = SettingsV1 {
@@ -2123,10 +2067,7 @@ fn settings_v1_fixture_migrates_to_v2_preserving_theme_and_rendering_formulas() 
          product default rather than at a preserved behaviour — see migrate_settings_v2_to_v3"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v1-migration-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v1-migration");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &migrated).unwrap();
@@ -2336,10 +2277,7 @@ fn settings_v19_migrates_to_the_engine_the_feature_ships_with_and_v20_keeps_anot
         "a reader who has an account with one of the three is heard"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v20-search-engine-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v20-search-engine");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &chosen).unwrap();
@@ -2392,10 +2330,7 @@ fn settings_v20_migrates_still_wrapping_and_v21_keeps_a_flattened_pane() {
         "a reader who has turned wrapping off is heard"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v21-line-wrapping-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v21-line-wrapping");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &chosen).unwrap();
@@ -2460,10 +2395,7 @@ fn settings_v22_migrates_with_the_turn_end_lane_on_and_v23_keeps_the_silence_it_
         turn_end_notification: false,
         ..SettingsV1::default()
     };
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v23-turn-end-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v23-turn-end");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &quiet).unwrap();
@@ -2525,10 +2457,7 @@ fn settings_v23_migrates_still_owing_the_cards_hint_and_v24_remembers_having_pai
         cards_gesture_hint_offer: false,
         ..SettingsV1::default()
     };
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v24-cards-hint-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v24-cards-hint");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &spent).unwrap();
@@ -2596,10 +2525,7 @@ fn settings_v24_migrates_with_copy_on_select_on_and_v25_keeps_the_habit_it_alway
         copy_on_select: false,
         ..SettingsV1::default()
     };
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v25-copy-on-select-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v25-copy-on-select");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
     write_settings_atomic(&path, &opted_out).unwrap();
@@ -2647,10 +2573,7 @@ fn settings_v25_migrates_with_the_update_check_on_and_v26_keeps_an_answer_alread
         update_check: false,
         ..SettingsV1::default()
     };
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-settings-v26-update-check-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("bt-persist-settings-v26-update-check");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");

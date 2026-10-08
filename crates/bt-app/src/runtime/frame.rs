@@ -1821,21 +1821,18 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::SearchScan, || {
             self.advance_search_scan()
         })?;
-        // The watcher's own clock (R31's D), beside the rest of this window's:
-        // it asks for a wake-up only while it is holding news, and the
-        // subscriptions it keeps level with the screen are dropped here the turn
-        // after the page they were for went away.
-        //
-        // The application's, not this window's, since slice B raised it: the set
-        // it follows is the union of every window's pages, and one clock over a
-        // union is one clock. So one window turns it, as with the two watches
-        // above, and the news it produces reaches the pages through the caches
-        // those pages own.
+        // **This window's seat in the git watch** (R31's D; T-WINDOWS-ALL): the
+        // repositories its drawn Git pages show, and the news it was told about
+        // them. Every window, not only the one that turns the application's
+        // clocks: the subscriptions and their clocks are the application's, one
+        // clock over the union of every window's pages, and they were ripened for
+        // every seat before the first turn (`FolioApp::ripen_git_news`), so each
+        // window re-reads its own pages on the same pass.
+        hang_watch::at(hang_watch::Station::Watches);
+        hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
+            self.advance_git_watch()
+        })?;
         if application_clocks {
-            hang_watch::at(hang_watch::Station::Watches);
-            hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
-                self.advance_git_watch(now)
-            })?;
             // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very
@@ -2428,10 +2425,11 @@ impl Runtime<'_> {
             application_clocks
                 .then(|| self.app.storage_watch.deadline())
                 .flatten(),
-            // The debounce a change notification started (R31's D). Absent —
-            // and therefore costing nothing — for every window that is not
-            // currently holding unanswered news about a repository, which is
-            // every window most of the time.
+            // The debounce a change notification started (R31's D): the
+            // application's clock, folded by the window that turns the
+            // application's clocks; the next pass ripens it for every window.
+            // Absent — and therefore costing nothing — while no repository any
+            // window shows has unanswered news, which is most of the time.
             application_clocks
                 .then(|| self.app.git_watch.deadline())
                 .flatten(),

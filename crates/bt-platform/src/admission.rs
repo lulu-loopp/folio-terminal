@@ -49,7 +49,8 @@ use std::cell::Cell;
 use std::marker::PhantomData;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+
+use web_time::Instant;
 
 // ---------------------------------------------------------------------------
 // The role

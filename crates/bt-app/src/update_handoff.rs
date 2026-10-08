@@ -979,11 +979,7 @@ mod tests {
 
     impl Folder {
         fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "bt-update-handoff-{tag}-{}-{}",
-                std::process::id(),
-                bt_platform::attention_pipe::unguessable_bits()
-            ));
+            let path = bt_testpath::temp_path(&format!("bt-update-handoff-{tag}"));
             std::fs::create_dir_all(&path).expect("a scratch folder");
             Self(path)
         }

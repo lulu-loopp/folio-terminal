@@ -1418,8 +1418,6 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("folio-copilot-{name}-{}", std::process::id()));
-        path
+        bt_testpath::temp_path(&format!("folio-copilot-{name}"))
     }
 }

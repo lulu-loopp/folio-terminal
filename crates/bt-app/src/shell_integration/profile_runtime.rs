@@ -89,7 +89,11 @@ pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
             resolved.push(program);
         }
     }
-    spawn_profile_observation(persist::storage_dir(), resolved, parse_questions(programs));
+    spawn_profile_observation(
+        persist::storage_dir(),
+        resolved,
+        parse_questions(profiles::table().profiles(), programs),
+    );
 }
 
 fn spawn_profile_observation(data: PathBuf, programs: Vec<PathBuf>, questions: Vec<ParseQuestion>) {

@@ -7944,7 +7944,7 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("bt-preview-{tag}-{}", std::process::id()));
+        let dir = bt_testpath::temp_path(&format!("bt-preview-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -10414,7 +10414,7 @@ mod tests {
     /// `%20` rows go red on both.
     #[test]
     fn preview_links_resolve_file_urls_and_percent_encoded_relatives_on_both_platforms() {
-        let folder = std::env::temp_dir().join("bt-audit046-links");
+        let folder = bt_testpath::temp_path("bt-audit046-links");
         let document = folder.join("notes.md");
 
         // Relative references, escapes undone before the join.

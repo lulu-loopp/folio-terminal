@@ -2855,10 +2855,13 @@ impl ParseQuestion {
     }
 }
 
-fn parse_questions(programs: &profiles::ProfilePrograms) -> Vec<ParseQuestion> {
-    profiles::table()
-        .profiles()
-        .iter()
+/// Every command-bearing PowerShell row of `rows` that `programs` can start, as the question its
+/// target parser is asked.
+fn parse_questions(
+    rows: &[profiles::Profile],
+    programs: &profiles::ProfilePrograms,
+) -> Vec<ParseQuestion> {
+    rows.iter()
         .filter_map(|profile| {
             let program = PathBuf::from(programs.program(&profile.id)?);
             if !is_powershell(&program) {
@@ -2949,14 +2952,14 @@ fn publish_parse_attempt(key: ParseKey, number: u8, result: Result<bool, ParsePr
     }
 }
 
-fn run_parse_attempt(attempt: ParseAttempt) {
-    let result = run_parse_probe(&attempt.question.program, &attempt.question.text);
+fn run_parse_attempt(attempt: ParseAttempt, parse: ParseProbe) {
+    let result = parse(&attempt.question.program, &attempt.question.text);
     publish_parse_attempt(attempt.question.key, attempt.number, result);
 }
 
-fn ask_parse_question(question: ParseQuestion, asker: ParseAsker) {
+fn ask_parse_question(question: ParseQuestion, asker: ParseAsker, parse: ParseProbe) {
     if let Some(attempt) = claim_parse_attempt(question, asker) {
-        run_parse_attempt(attempt);
+        run_parse_attempt(attempt, parse);
     }
 }
 
@@ -2964,7 +2967,7 @@ fn ask_parse_question(question: ParseQuestion, asker: ParseAsker) {
 /// the visit's own observation worker; a question with an answer, or one in flight, is not asked.
 fn ask_failed_parse_questions_again(questions: Vec<ParseQuestion>) {
     for question in questions {
-        ask_parse_question(question, ParseAsker::Visit);
+        ask_parse_question(question, ParseAsker::Visit, run_parse_probe);
     }
 }
 
@@ -2988,7 +2991,10 @@ fn request_parse_retry(
 
 fn schedule_parse_retry(question: ParseQuestion) {
     request_parse_retry(question, |attempt| {
-        spawn_powershell_preparation(PowershellPreparation::ParseAttempt(attempt))
+        spawn_powershell_preparation(
+            PowershellPreparation::ParseAttempt(attempt),
+            PreparationEffects::MACHINE,
+        )
     });
 }
 
@@ -3085,6 +3091,9 @@ fn output_prefix(bytes: &[u8]) -> String {
     }
     format!("[{rendered}]")
 }
+
+/// How a parse question is put to a PowerShell: [`run_parse_probe`], or a test's stand-in.
+type ParseProbe = fn(&Path, &str) -> Result<bool, ParseProbeFailure>;
 
 fn run_parse_probe(program: &Path, text: &str) -> Result<bool, ParseProbeFailure> {
     let output = run_powershell_probe(
@@ -3647,38 +3656,77 @@ enum PowershellPreparation {
     ParseAttempt(ParseAttempt),
 }
 
-fn spawn_powershell_preparation(work: PowershellPreparation) -> Result<(), String> {
+/// **What the preparation worker does to the machine**: prepare `folio.ps1`, and put a parse
+/// question to a PowerShell. Everything else on the worker — claiming the attempt, publishing the
+/// answer, the thread door itself — is the same whoever does those two.
+#[derive(Clone, Copy)]
+struct PreparationEffects {
+    script: fn() -> Option<PathBuf>,
+    parse: ParseProbe,
+}
+
+impl PreparationEffects {
+    /// The product's: the durable script under the data folder, and a real PowerShell.
+    const MACHINE: Self = Self {
+        script: powershell_script_for_birth,
+        parse: run_parse_probe,
+    };
+}
+
+fn spawn_powershell_preparation(
+    work: PowershellPreparation,
+    effects: PreparationEffects,
+) -> Result<(), String> {
     bt_platform::spawn_at_priority(
         "powershell-script-prepare",
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| match work {
             PowershellPreparation::ScriptAndQuestions(questions) => {
-                let _ = powershell_script_for_birth();
+                let _ = (effects.script)();
                 for question in questions {
-                    ask_parse_question(question, ParseAsker::Background);
+                    ask_parse_question(question, ParseAsker::Background, effects.parse);
                 }
             }
-            PowershellPreparation::ParseAttempt(attempt) => run_parse_attempt(attempt),
+            PowershellPreparation::ParseAttempt(attempt) => {
+                run_parse_attempt(attempt, effects.parse);
+            }
         },
     )
     .map(drop)
     .map_err(|error| error.to_string())
 }
 
-fn begin_powershell_preparation(questions: Vec<ParseQuestion>) {
-    let _ = spawn_powershell_preparation(PowershellPreparation::ScriptAndQuestions(questions));
+fn begin_powershell_preparation(questions: Vec<ParseQuestion>, effects: PreparationEffects) {
+    let _ = spawn_powershell_preparation(
+        PowershellPreparation::ScriptAndQuestions(questions),
+        effects,
+    );
 }
 
 /// Prepare the script and ask the target parser about every command-bearing
 /// PowerShell row in this profile snapshot. Called at startup and after a table
 /// change; exact argv keys make unchanged rows free and changed rows new work.
 pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) {
-    begin_powershell_preparation(parse_questions(programs));
+    begin_powershell_preparation_over(
+        profiles::table().profiles(),
+        programs,
+        PreparationEffects::MACHINE,
+    );
+}
+
+/// [`begin_powershell_preparation_for`] over rows and effects handed in: the questions are
+/// formed here, on the caller's thread, and asked on the preparation worker, which nobody joins.
+fn begin_powershell_preparation_over(
+    rows: &[profiles::Profile],
+    programs: &profiles::ProfilePrograms,
+    effects: PreparationEffects,
+) {
+    begin_powershell_preparation(parse_questions(rows, programs), effects);
 }
 
 /// Re-prepare only the script when a trial releases its durable write.
 pub fn begin_powershell_script_preparation() {
-    begin_powershell_preparation(Vec::new());
+    begin_powershell_preparation(Vec::new(), PreparationEffects::MACHINE);
 }
 
 /// What one write into a profile did.
@@ -6388,9 +6436,8 @@ mod tests {
     /// PowerShell staging root together with the update transaction.
     #[test]
     fn retired_trial_removes_its_powershell_script_root() {
-        let mut bytes = [0x6d; 16];
-        bytes[..4].copy_from_slice(&std::process::id().to_le_bytes());
-        let txn = crate::update_txn::TxnId::new(bytes);
+        // Minted as the product mints one, so no other test's transaction is this one.
+        let txn = crate::update_job::mint_txn();
         let root = std::env::temp_dir().join(format!("folio-trial-{txn}"));
         let script = root.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1);
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
@@ -6986,31 +7033,166 @@ mod tests {
         }
     }
 
-    /// RED (mutation: remove the startup pre-ask or join its worker) — every
-    /// command-bearing row is asked before the first window, while neither the
-    /// startup path nor pane birth waits for that answer.
+    /// **A PowerShell that never answers a parse question until it is let go**, for
+    /// [`inject4_startup_preasks_power_shell_rows_without_a_birth_waiting`]: it says which
+    /// program it was asked about, then holds until the test lets it go — or until
+    /// [`NEVER_ANSWERS_CEILING`], which only a door or a birth that waits for it reaches, and
+    /// which it records so that such a run is red rather than slow.
+    struct NeverAnswers {
+        state: Mutex<NeverAnswersState>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct NeverAnswersState {
+        arrived: Vec<PathBuf>,
+        let_go: bool,
+        ceiling_reached: bool,
+    }
+
+    /// Far above any honest cost of a worker reaching its first question; a working run never
+    /// waits for it.
+    const NEVER_ANSWERS_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
+    static NEVER_ANSWERS: NeverAnswers = NeverAnswers {
+        state: Mutex::new(NeverAnswersState {
+            arrived: Vec::new(),
+            let_go: false,
+            ceiling_reached: false,
+        }),
+        changed: std::sync::Condvar::new(),
+    };
+
+    impl NeverAnswers {
+        fn state(&self) -> std::sync::MutexGuard<'_, NeverAnswersState> {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        /// The [`ParseProbe`] stand-in.
+        fn probe(program: &Path, _text: &str) -> Result<bool, ParseProbeFailure> {
+            let mut state = NEVER_ANSWERS.state();
+            state.arrived.push(program.to_path_buf());
+            NEVER_ANSWERS.changed.notify_all();
+            let (mut state, waited) = NEVER_ANSWERS
+                .changed
+                .wait_timeout_while(state, NEVER_ANSWERS_CEILING, |state| !state.let_go)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.ceiling_reached |= waited.timed_out();
+            Ok(true)
+        }
+
+        /// Until the probe has been asked about `program`, or the ceiling.
+        fn arrival_of(&self, program: &Path) -> bool {
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(self.state(), NEVER_ANSWERS_CEILING, |state| {
+                    !state.arrived.iter().any(|arrived| arrived == program)
+                })
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.arrived.iter().any(|arrived| arrived == program)
+        }
+
+        fn let_go(&self) -> bool {
+            let mut state = self.state();
+            state.let_go = true;
+            self.changed.notify_all();
+            !state.ceiling_reached
+        }
+    }
+
+    /// RED (T-TEST-HYGIENE-048; it read `main.rs`, this file and `pty_door.rs` before) —
+    /// **the startup door asks a command-bearing PowerShell row's parse question on a worker it
+    /// does not wait for, and a birth of that row while the answer has not arrived starts the row
+    /// as written without waiting either.**
+    ///
+    /// Through `begin_powershell_preparation_over` — `begin_powershell_preparation_for` with the
+    /// rows and the two machine effects handed in — so the thread door, the claim, the cache and
+    /// the birth's composer are the product's. The row is a real file named `pwsh.exe` carrying
+    /// `-NoExit -Command` text with CJK in it; the probe is [`NeverAnswers`] and the script is
+    /// none. The door returns, the question is seen arriving at the probe, the answer is still
+    /// not heard, the birth composes the row's own words, and only then is the probe let go.
+    ///
+    /// MUTATIONS: `.join()` the worker in `spawn_powershell_preparation` — the door returns only
+    /// at the ceiling, with the answer already heard; drop the questions in
+    /// `begin_powershell_preparation_over` — the probe is never asked.
     #[test]
     fn inject4_startup_preasks_power_shell_rows_without_a_birth_waiting() {
-        let source = include_str!("main.rs");
-        let ask = "shell_integration::begin_powershell_preparation_for(&profile_programs);";
-        assert!(source.contains(ask));
-        assert!(source.find(ask).unwrap() < source.find("opening_window_attributes(").unwrap());
-        let worker = include_str!("shell_integration.rs")
-            .split_once("pub fn begin_powershell_preparation_for(")
-            .unwrap()
-            .1
-            .split_once("pub fn begin_powershell_script_preparation()")
-            .unwrap()
-            .0;
-        assert!(!worker.contains(".join()"));
-        let birth = include_str!("pty_door.rs")
-            .split_once("pub(crate) fn spawn_shell(")
-            .unwrap()
-            .1
-            .split_once("pub(crate) fn resize(")
-            .unwrap()
-            .0;
-        assert!(!birth.contains("parse_worker.join()"));
+        let root = bt_testpath::temp_path("folio-inject4-preask");
+        std::fs::create_dir_all(&root).unwrap();
+        let program = root.join("pwsh.exe");
+        std::fs::write(&program, b"").unwrap();
+        // A program this machine could start: on Unix that is a file with an execute bit.
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &program,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        // The Windows seed's PowerShell 7 row as the template on every platform: the row is
+        // data, and what is under test is the door and the composer, not this machine's seed.
+        let template = profiles::shipped_for(
+            profiles::SeedPlatform::Windows,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .into_iter()
+        .find(|profile| profile.id == "pwsh")
+        .expect("the Windows seed ships a PowerShell 7 row");
+        let theirs = Profile {
+            id: "inject4-preask".to_owned(),
+            program: ProgramSource::Path(program.clone()),
+            args: vec![
+                "-NoExit".to_owned(),
+                "-Command".to_owned(),
+                "Write-Host '你好, 世界'".to_owned(),
+            ],
+            ..template
+        };
+        let programs = profiles::ProfilePrograms::probe_rows(
+            std::slice::from_ref(&theirs),
+            &bt_pty::SystemShellEnvironment,
+        );
+        assert_eq!(
+            programs.program(&theirs.id),
+            Some(program.as_os_str()),
+            "the row resolves to its own file"
+        );
+        let arguments: Vec<OsString> = profiles::launch_args(&theirs)
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+
+        fn no_script() -> Option<PathBuf> {
+            None
+        }
+        begin_powershell_preparation_over(
+            std::slice::from_ref(&theirs),
+            &programs,
+            PreparationEffects {
+                script: no_script,
+                parse: NeverAnswers::probe,
+            },
+        );
+        assert!(
+            NEVER_ANSWERS.arrival_of(&program),
+            "the startup door asked the row's question"
+        );
+        assert_eq!(
+            heard_parse(&program, &arguments),
+            Heard::NotYet,
+            "the door returned before the answer"
+        );
+        assert_eq!(
+            compose_powershell_birth(&program, &arguments, true),
+            arguments,
+            "a birth before the answer starts the row as written"
+        );
+        assert!(
+            NEVER_ANSWERS.let_go(),
+            "the probe was let go by this test, not by its ceiling"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// PIN — **what a pane is told it is, is one answer for every platform**
@@ -8587,10 +8769,7 @@ mod tests {
     // ── the PowerShell profile (§7.1.6j) ───────────────────────────────────
 
     pub(super) fn temp_dir(tag: &str) -> PathBuf {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("folio-ps-profile-{tag}-{}-{n}", std::process::id()));
+        let dir = bt_testpath::temp_path(&format!("folio-ps-profile-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -8989,5 +9168,221 @@ mod tests {
         assert_eq!(line, "ready\n");
         let output = stopped_output(child);
         assert_eq!(String::from_utf8_lossy(&output.stdout), said);
+    }
+
+    /// An environment whose home is a test shell's own.
+    #[cfg(windows)]
+    struct HomeIs(PathBuf);
+
+    #[cfg(windows)]
+    impl ShellEnvironment for HomeIs {
+        fn var_os(&self, key: &str) -> Option<OsString> {
+            (key == profiles::home_variable(profiles::SeedPlatform::of_this_build()))
+                .then(|| self.0.clone().into_os_string())
+        }
+
+        fn is_file(&self, _path: &Path) -> bool {
+            false
+        }
+    }
+
+    /// Feed `shell`'s output to `pane` until `done` holds, failing after a minute of it not.
+    #[cfg(windows)]
+    fn feed_until(
+        shell: &mut bt_pty::test_shell::TestShell,
+        pane: &mut bt_term::DualPlaneSession,
+        what: &str,
+        done: impl Fn(&bt_term::DualPlaneSession) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut seen = Vec::new();
+        while !done(pane) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: never reached; {}; output was {:?}",
+                shell.account(),
+                String::from_utf8_lossy(&seen)
+            );
+            let chunk = shell.read_output();
+            if chunk.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            pane.feed(&chunk).unwrap();
+            seen.extend(chunk);
+        }
+    }
+
+    /// Issue #28 through a real shell: a profile row whose starting folder is a fixed folder
+    /// (`profiles::place_for`, as `create_leaf_session` asks it), the shell started there by
+    /// `start`, its bytes read by a real session told its spawn directory as a pane is, and the
+    /// files card's folder (`crate::files_root_of`, the folder button's and `Ctrl+Shift+B`'s one
+    /// reader) asked at birth, at the first prompt and after `cd` into a subfolder.
+    ///
+    /// **What the card is compared with is what the product holds.** The pane keeps every folder
+    /// in the spelling it was given — the profile's folder as the profile names it, a report as
+    /// the shell spelled it — and does not canonicalise. A shell does not have to spell its folder
+    /// the way it was handed it: PowerShell answers `$PWD` with long names where its working
+    /// directory was given an 8.3 component (CI run 37739213188: handed the runner's account
+    /// folder by its 8.3 name, it reported the long name). So the card is the
+    /// profile's folder *as given* before the first report, and *the report itself* after it,
+    /// which must name the same directory (`bt_platform::same_file`). The folder is handed over
+    /// through an 8.3 component on every machine — a long-named folder, referred to by its short
+    /// name — so a comparison of spellings is red here and not only on a runner.
+    #[cfg(windows)]
+    fn files_card_follows_a_real_shell_from_its_fixed_starting_folder(
+        start: impl FnOnce(
+            bt_pty::test_shell::Hygiene,
+            Option<PathBuf>,
+        ) -> bt_pty::test_shell::TestShell,
+    ) {
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let home = hygiene.home();
+        let long = hygiene.root().join("a long folder name 长名");
+        std::fs::create_dir_all(long.join("sandbox 沙盒").join("sub 子")).unwrap();
+        let short = bt_platform::short_path_name(&long).unwrap();
+        assert_ne!(
+            short, long,
+            "the test folder's volume keeps 8.3 names, which the spelling under test needs"
+        );
+        let fixed = short.join("sandbox 沙盒");
+        let sub = fixed.join("sub 子");
+        let environment = HomeIs(home.clone());
+        let place = profiles::place_for(
+            &profiles::StartAt::Fixed(fixed.clone()),
+            &profiles::StartingDir::AccountHome,
+            profiles::PathNamespace::Windows,
+            None,
+            &environment,
+        );
+        assert_eq!(place.working_directory.as_deref(), Some(fixed.as_path()));
+        let mut shell = start(hygiene, place.working_directory.clone());
+        let mut pane = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(120).unwrap(),
+            std::num::NonZeroU32::new(30).unwrap(),
+        );
+        pane.set_spawn_directory(place.directory.clone());
+        let card = |pane: &bt_term::DualPlaneSession| {
+            PathBuf::from(crate::files_root_of(Some(pane), &environment))
+        };
+        assert_ne!(home, fixed);
+        assert_eq!(
+            card(&pane),
+            fixed,
+            "before the first prompt: the fixed folder"
+        );
+
+        feed_until(&mut shell, &mut pane, "the first report", |pane| {
+            pane.working_directory().is_some()
+        });
+        let reported = pane.working_directory().unwrap().to_path_buf();
+        assert!(
+            bt_platform::same_file(&reported, &fixed),
+            "the first report {reported:?} names the fixed folder {fixed:?}"
+        );
+        assert_eq!(
+            card(&pane),
+            reported,
+            "after the first prompt: the reported folder"
+        );
+
+        shell.write("cd \"sub 子\"\r".as_bytes()).unwrap();
+        feed_until(&mut shell, &mut pane, "the report after cd", |pane| {
+            pane.working_directory()
+                .is_some_and(|reported| bt_platform::same_file(reported, &sub))
+        });
+        let reported = pane.working_directory().unwrap().to_path_buf();
+        assert_eq!(card(&pane), reported, "after cd: the subfolder");
+        shell.write(b"exit\r").unwrap();
+        shell.shutdown().unwrap();
+    }
+
+    /// RED (issue #28) — **the reporter's configuration through a real PowerShell**: a PowerShell
+    /// row with Starting directory = a fixed folder and `-NoLogo` as its only argument, composed as
+    /// a birth composes it (`-NoLogo -NoExit -Command <loader>`). The files card shows the fixed
+    /// folder before the first prompt, the reported folder after it, and the subfolder after `cd`.
+    ///
+    /// Both editions, by the rule `bt-pty`'s `shell_integration_osc133` keeps: Windows PowerShell
+    /// is part of Windows and is never skipped, so this test cannot pass with no shell under it;
+    /// PowerShell 7 — the reporter's edition — is optional on a machine and is resolved the way the
+    /// product resolves it (`bt_pty::resolve_powershell_seven`), its arm skipped with a line on
+    /// stderr when there is none.
+    ///
+    /// MUTATION, observed red: `files_root_of` reads `DualPlaneSession::working_directory`
+    /// instead of `standing_folder` — the birth row answers the home folder.
+    #[cfg(windows)]
+    #[test]
+    fn the_files_card_follows_a_powershell_pane_from_its_fixed_starting_folder() {
+        let windows_powershell =
+            bt_platform::program_on_path(Path::new(bt_pty::WINDOWS_POWERSHELL))
+                .expect("Windows PowerShell is part of Windows");
+        let mut editions = vec![windows_powershell];
+        match bt_pty::resolve_powershell_seven(&bt_pty::SystemShellEnvironment) {
+            Some(pwsh) => editions.push(PathBuf::from(pwsh)),
+            None => eprintln!(
+                "files card, PowerShell 7 arm skipped: pwsh.exe is not installed \
+                 (the product's own resolver found none)"
+            ),
+        }
+        let root = temp_dir("files-card-powershell");
+        std::fs::create_dir_all(&root).unwrap();
+        let integration = root.join(SCRIPT_FILE_PS1);
+        std::fs::write(&integration, SCRIPT_PS1).unwrap();
+        for program in editions {
+            let arguments = composed_powershell_arguments(
+                &program,
+                &os_words(&["-NoLogo"]),
+                &integration,
+                None,
+            )
+            .expect("a `-NoLogo` row receives the loader");
+            assert_eq!(
+                arguments[..3],
+                os_words(&["-NoLogo", "-NoExit", "-Command"])
+            );
+            files_card_follows_a_real_shell_from_its_fixed_starting_folder(|hygiene, directory| {
+                let hygiene = hygiene.with_powershell_shape(test_shell_shape(&program, &arguments));
+                bt_pty::test_shell::TestShell::spawn_shell_in(
+                    hygiene,
+                    program.clone(),
+                    &arguments,
+                    &|| last_resort_arguments(false),
+                    &[],
+                    bt_pty::PtySize::cells(
+                        std::num::NonZeroU16::new(120).unwrap(),
+                        std::num::NonZeroU16::new(30).unwrap(),
+                    ),
+                    directory,
+                )
+                .unwrap()
+            });
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// RED (issue #28) — **the same through Command Prompt's `PROMPT`, unchanged**: `cmd.exe` with
+    /// the `PROMPT` a pane gives it, started in a fixed folder.
+    ///
+    /// MUTATION, observed red: the one named on
+    /// `the_files_card_follows_a_powershell_pane_from_its_fixed_starting_folder`.
+    #[cfg(windows)]
+    #[test]
+    fn the_files_card_follows_a_command_prompt_pane_from_its_fixed_starting_folder() {
+        let cmd = bt_platform::program_on_path(Path::new("cmd.exe")).expect("cmd.exe");
+        files_card_follows_a_real_shell_from_its_fixed_starting_folder(|hygiene, directory| {
+            bt_pty::test_shell::TestShell::spawn_shell_in(
+                hygiene,
+                cmd,
+                &[],
+                &|| last_resort_arguments(false),
+                &[(OsString::from(CMD_PROMPT), cmd_prompt(None))],
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(120).unwrap(),
+                    std::num::NonZeroU16::new(30).unwrap(),
+                ),
+                directory,
+            )
+            .unwrap()
+        });
     }
 }

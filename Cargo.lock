@@ -351,6 +351,7 @@ dependencies = [
  "bt-render",
  "bt-source",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -435,6 +436,7 @@ version = "0.4.7"
 dependencies = [
  "bt-doc",
  "bt-platform",
+ "bt-testpath",
  "mitex",
  "mitex-lexer",
  "mitex-spec-gen",
@@ -447,6 +449,7 @@ dependencies = [
  "typst-library",
  "typst-svg",
  "typst-syntax",
+ "web-time",
 ]
 
 [[package]]
@@ -454,6 +457,7 @@ name = "bt-persist"
 version = "0.4.7"
 dependencies = [
  "bt-platform",
+ "bt-testpath",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -466,6 +470,7 @@ dependencies = [
  "arboard",
  "block2 0.6.2",
  "bt-pty",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-winres",
@@ -489,6 +494,7 @@ dependencies = [
  "objc2-web-kit",
  "tokio",
  "ttf-parser",
+ "web-time",
  "webview2-com",
  "windows",
  "windows-core",
@@ -506,6 +512,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-winres",
  "miniz_oxide",
@@ -524,6 +531,7 @@ dependencies = [
  "bt-platform",
  "bt-source",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -535,6 +543,7 @@ dependencies = [
  "ttf-parser",
  "unicode-properties",
  "unicode-script",
+ "web-time",
  "wgpu",
 ]
 
@@ -542,6 +551,7 @@ dependencies = [
 name = "bt-source"
 version = "0.4.7"
 dependencies = [
+ "bt-testpath",
  "proc-macro2",
  "syn 2.0.119",
 ]
@@ -557,6 +567,7 @@ dependencies = [
  "bt-math",
  "bt-platform",
  "bt-pty",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -564,13 +575,19 @@ dependencies = [
  "proptest",
  "rayon",
  "unicode-width",
+ "web-time",
 ]
+
+[[package]]
+name = "bt-testpath"
+version = "0.4.7"
 
 [[package]]
 name = "bt-transcript"
 version = "0.4.7"
 dependencies = [
  "bitflags 2.13.0",
+ "bt-testpath",
  "bt-unicode",
  "regex",
  "unicode-properties",
@@ -5508,6 +5525,7 @@ dependencies = [
  "log",
  "memchr",
  "serde",
+ "web-time",
 ]
 
 [[package]]

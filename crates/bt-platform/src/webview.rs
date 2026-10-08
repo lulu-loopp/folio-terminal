@@ -3846,8 +3846,7 @@ mod webview2_runtime_probe {
 
     impl Scratch {
         fn make(tag: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("folio-web-probe-{}-{tag}", std::process::id()));
+            let root = bt_testpath::temp_path(&format!("folio-web-probe-{tag}"));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("a scratch directory");
             Self(root)

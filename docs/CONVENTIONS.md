@@ -147,6 +147,26 @@ the change that adds it. `gates-can-fail` plants an upward edge, a stale
 exemption and a crate with no layer and checks that each refusal names the
 crate and the reason. `scripts/ci/check-crate-edges-tests.ps1` plants an added
 exemption in a scratch repository.
+The wasm floor (gate G1, job `wasm-lib-check`): `scripts/ci/check-wasm-lib.ps1`
+runs `cargo check --locked --lib --target wasm32-unknown-unknown` over the
+library crates a browser build will reference — the list is in the script and
+nowhere else — and names every crate that reports a compile error; it refuses a
+run that checked fewer libraries than the list holds. A crate joins the list in
+the ticket that makes it pass. Its `gates-can-fail` canary plants a call of a
+`cfg(unix)`-only function in `bt-doc` and requires the refusal to name `bt-doc`.
+
+The clock guard (gate G3, `clock-guard` in `logic`): `scripts/ci/check-clock-guard.ps1`
+runs `crates/bt-source/tests/clock_guard.rs`, which refuses `std::time::Instant`
+and `std::time::SystemTime` in every spelling (qualified, flat or nested `use`,
+glob, alias) in the product code of an explicit source set — the library crates
+G1 checks except `bt-platform`, of which only `crate::admission` is read,
+`vendor/vte`, and `vendor/alacritty_terminal` without `event_loop` and `tty`.
+Those crates read time through `web_time`, which is `std::time` on every native
+target. The script's header names the set and what is out of it; it refuses a
+run that read no file. Four canaries: a qualified clock in `bt-doc`, a nested
+import in `bt-layout` and a crate-root nested import (`use ::std::{time::Instant}`)
+in `bt-viewport` are refused by file, and a clock planted in
+`bt-platform`'s `http` module (out of scope by name) is not.
 
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 
@@ -205,6 +225,42 @@ sleeper、完成信号或接收事件，不是改大数字。
 2. **门要有源码钉。** 光靠"大家记得用 helper"守不住:一个绕过去的调用点在自己那台机器上可以绿几个星期，然后在某天调度器把它和别人排到一起时掐掉合并门。`every_headless_device_in_a_test_is_taken_through_the_lock` 扫本 crate `src` 下每个文件的 `#[cfg(test)]` 模块，`headless(` / `headless_fallback(` / `headless_on(` 出现在那扇门以外即红（needle 用 `concat!` 拼两半，免得门自己成为反例）。
 3. **锁中毒不连坐。** 它守的是 `()`，前一条测试 panic 把锁毒了不代表设备脏了——`unwrap_or_else(std::sync::PoisonError::into_inner)`,否则一条真红会把后面每一条都变成第二条假红。
 4. **锁只管本二进制。** `cargo` 让每个测试二进制各自是一个进程，进程之间不共享这把锁;上面那支六进程的脚本同时也是这件事的证据——每个进程内部串行之后,六个进程并行是干净的。真到了两个 crate 都要建无头设备的那天，先量跨进程会不会崩，别默认这把锁保得住。
+
+### A test's scratch path is named by `bt_testpath`, and nowhere else (incident, 2026-10-05)
+
+A test that needs a file, a directory, a registry key or a socket of its own takes its name from
+`bt_testpath::temp_path(tag)`, or `root.join(bt_testpath::unique_name(tag))` under a root of its
+own: `{tag}-{process id}-{ordinal}`, where the ordinal is one process-wide counter. The process id
+keeps two test processes apart; the ordinal keeps two calls of one process apart. The wall clock
+is in neither: a name made of the process id and `SystemTime::now()` nanoseconds is shared by two
+threads that sample the clock inside one tick (`shell_integration_script.rs`, a `remove_file`
+that found `NotFound` on main), and a name made of the process id alone is shared by every call
+of the helper in one binary. A test that needs the *same* path twice computes it once and passes
+it on. `bt-source`'s `temp_paths` guard refuses, in test code, a body that calls
+`process::id` beside `temp_dir()` or a wall-clock read. Product code names its own temporary
+files and is not covered.
+
+### A test pins behaviour by running it, not by reading the source (T-TEST-HYGIENE-048)
+
+A test that matches the program's own text to claim it *does* something (an order of calls, a
+worker nobody joins, a value) goes green on a rename and red on a refactor that changes nothing,
+and says nothing about what runs. Drive the behaviour through the door the product uses, with the
+machine effects handed in as stand-ins where they would touch the machine (the shell-integration
+preparation worker's `PreparationEffects` is the shape). Reading source is allowed only for a
+**guard**, whose subject is how the code is written — a door census, "no X outside door Y", the
+window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
+guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
+
+### Where a test lives (K1)
+
+A test lives beside what it tests. A test written in a module's own scope is in that module's
+`mod tests` — inline, or a `#[path]` sibling `<module>_tests.rs`. A test written in the crate
+root's scope (it drives `App`, `Runtime`, `TabState` and the root's fixtures) is in a root-declared
+file in `src/` named for what it tests: `app_<theme>_tests.rs` for an item `main.rs` owns, by the
+theme sort of `docs/plans/bt-app-split-inventory-2026-09-15.md` §0.3, and `<module>_app_tests.rs`
+when its first assertion is about another module. A fixture two of those files use is in
+`test_support.rs`, `pub(crate)`. `tests.rs` holds only the tests something outside their body
+names as `tests::<name>`; a new test does not go there.
 
 ### 【预防】产品代码不留占位符
 

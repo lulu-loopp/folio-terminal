@@ -255,9 +255,15 @@ the live rows at and after the start of the shell's open region — the whole gr
 without integration or on the alternate screen, no row between regions — the
 placeholder becomes an implicit `file:` link once the verdict ledger says the
 file exists. A number with no learned target, in a pane that has learned one, is
-inferred as `<folder of the most recently learned target>/<k>.<its extension>`
-and is a link only once the verdict ledger says that file exists; a learned
-target wins, and nothing is inferred from an empty table.
+looked for in `<folder of the most recently learned target>` as `<k>.<that
+target's extension>` and then `<k>.png`, `.jpg`, `.gif`, `.webp` (the names
+Claude Code gives a stored picture), and is a link to the first of them the
+verdict ledger says exists; a learned target wins, and nothing is inferred from
+an empty table. A candidate's "no" is asked again whenever the program draws the
+placeholder's row again, and a placeholder the program's own word wrap split at
+its inner blank (`…[Image` over `#k]…` on the next line) is one link over both
+halves. Claude Code's number is its own counter, shared with pasted text, so it
+is never mapped to the pictures Folio itself saved for a paste.
 **From.** §7.1.5g *link activation and the five-arm routing table*; §7.1.5j ①
 (a hit folds into a `file:` target and feeds the existing table); §7.1.5k ①;
 trailing entry 2026-09-23 *Ctrl+click hands a share on another machine and a link
@@ -265,7 +271,9 @@ of any scheme to the system; a plain click and a hover are unchanged, and a
 document's links answer the same row*; trailing entry 2026-09-29 *in an agent's
 input line, `[Image #N]` is a link to the picture the pane saw that agent link the
 same label to*, and the owner's ruling of 2026-09-29 that a number not yet
-linked is inferred beside the newest learned picture, bounded by the disk.
+linked is inferred beside the newest learned picture, bounded by the disk;
+trailing entry 2026-10-08 *every pasted picture's `[Image #N]` on an agent's
+input line can be opened, not only the last one*.
 **Overrides.** §7.1.5g's original "plain click does nothing, Ctrl hands it over"
 was reversed by the 2026-08-20 ruling *plain click stays in the window, Ctrl+click
 hands it over*, aligning hyperlinks with image references. The owner's rulings of
@@ -922,6 +930,14 @@ Duplicate pane and splits start where it stands (its last reported folder, else 
 folder) whatever the profile's starting place; its `+` and picker rows do not. That fact
 lives on the pane for the life of the process only — the session document has no field for
 it, so a restored pane's folder is carried and its next shells follow its profile.
+**Where a pane is standing, as a folder to open** (2026-10-08, GitHub issue #28): the files
+card from a pane's folder button, a files column opened from the pane (`Ctrl+Shift+B`), the
+files column's root menu, the palette's place hint and the two folder choosers read the pane's
+last `OSC 7` report, else the folder it was opened in (what the order above chose), and the
+account's home only for a pane that has neither. A launcher's home mark (`~`) is not a folder
+on this side and is skipped. One reader: `DualPlaneSession::standing_folder`. An unreadable
+report forgets the reported folder (`docs/shell-integration.md`, OSC 7), which returns the pane to the folder it
+was opened in, never to the home folder.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration

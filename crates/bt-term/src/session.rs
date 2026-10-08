@@ -10,8 +10,10 @@ use std::{
     ops::{Bound, RangeInclusive},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
+
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
@@ -3249,12 +3251,34 @@ impl DualPlaneSession {
         }
         let live_rows = &self.live_rows;
         let ledger = &self.reprinted_path_links;
+        let input_area_from = self.input_area_first_live_row();
+        // The previous logical line, while it stands in the input area: the upper half of a
+        // placeholder the agent's own word wrap split (T-IMAGE-N-GAPS).
+        let mut upper: Option<(String, bool)> = None;
         self.for_each_live_logical_line(|text, segments| {
             let freshly_printed = segments.iter().any(|segment| {
                 live_rows
                     .get(segment.row as usize)
                     .is_some_and(|row| row.revision != row.path_pass_revision)
             });
+            let in_input_area = input_area_from
+                .zip(segments.first())
+                .is_some_and(|(from, first)| first.row >= from);
+            // T-IMAGE-N-GAPS. A placeholder the agent draws again on its input line is the program
+            // naming that picture again, and a "no" for one of its candidates — asked, say, before
+            // the agent's own asynchronous write landed — is asked once more, as a printed name's
+            // is. Read under the frame's own row rule: the input area and nowhere else.
+            if in_input_area {
+                if let Some((above, above_fresh)) = upper.take()
+                    && (above_fresh || freshly_printed)
+                {
+                    ledger.image_placeholder_link_across(&above, text, &mut named);
+                }
+                if freshly_printed {
+                    ledger.image_placeholder_links_in(text, &mut named);
+                }
+                upper = Some((text.to_owned(), freshly_printed));
+            }
             if !freshly_printed {
                 return;
             }
@@ -3484,14 +3508,14 @@ impl DualPlaneSession {
                 .collect(),
             &namespace,
         )
-        // The placeholders travel with the verdicts they are read against (T-IMAGE-N), and only in
-        // the frame's ledger: the re-ask pass below reads printed names, and a placeholder is not
-        // one.
+        // The placeholders travel with the verdicts they are read against (T-IMAGE-N).
         .with_image_placeholders(&self.image_placeholders);
         // And the same ledger for text this pane has **just printed**, which is the one reading in
         // which a standing "no" is not an answer (owner ruling 2026-09-20). Built here, beside its
         // twin and from the same three inputs, so neither can drift from the other about a
         // directory, a namespace or a yes.
+        // The placeholders travel here too (T-IMAGE-N-GAPS): an agent drawing `[Image #k]` again on
+        // its input line names that picture again, so its candidates' "no"s are asked once more.
         self.reprinted_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
             directory,
             self.path_verdicts
@@ -3500,7 +3524,8 @@ impl DualPlaneSession {
                 .map(|(path, verdict)| (path.clone(), verdict.exists))
                 .collect(),
             &namespace,
-        );
+        )
+        .with_image_placeholders(&self.image_placeholders);
     }
 
     /// Whether the decoration worker has **verified** this file: opened it, size-checked it,
@@ -11830,6 +11855,23 @@ impl DualPlaneSession {
         self.working_directory
             .as_deref()
             .or(self.spawn_directory.as_deref())
+    }
+
+    /// **The folder this pane is standing in, as a folder this side can open** — what a files card
+    /// or a files column taken from this pane is rooted at (issue #28).
+    ///
+    /// [`Self::reference_directory`]'s ladder, with its second rung read one way narrower: a spawn
+    /// directory that is the shell's own home *mark* ([`Self::set_spawn_at_shell_home`], the `~`
+    /// handed to `wsl.exe --cd`) is a word for a launcher and names no folder here, so it is not
+    /// offered. Every other spawn directory is the folder the pane was opened in — the profile's
+    /// fixed folder, a carried or named one, or the account's home — and it answers until the
+    /// shell's first report replaces it.
+    pub fn standing_folder(&self) -> Option<&Path> {
+        self.working_directory.as_deref().or_else(|| {
+            self.spawn_directory
+                .as_deref()
+                .filter(|_| !self.spawn_at_shell_home)
+        })
     }
 
     /// Take delivery of an OSC 1337 payload the adapter already consumed.
@@ -26870,14 +26912,7 @@ mod tests {
     /// A real directory holding one real file with a name no image scan would ever admit, so the
     /// pins below can only be answered by the printed-path line and never by the image one.
     fn temporary_ordinary_file() -> (PathBuf, PathBuf) {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-printed-path-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-printed-path");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("notes.md");
         std::fs::write(&path, b"# notes\n").unwrap();
@@ -27027,14 +27062,7 @@ mod tests {
 
     /// A fresh folder under the temp directory holding `present` as small files, and the folder.
     fn temporary_pictures(present: &[&str]) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-image-placeholder-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-image-placeholder");
         std::fs::create_dir(&directory).unwrap();
         for name in present {
             std::fs::write(directory.join(name), b"not decoded here").unwrap();
@@ -27261,8 +27289,14 @@ mod tests {
             }
         }
         asked.sort();
-        let mut expected = vec![learned.clone(), inferred.clone(), absent.clone()];
+        let mut expected = vec![learned.clone()];
+        for number in [4, 5] {
+            expected.extend(
+                bt_transcript::paths::ImagePlaceholderTargets::inferred_targets(&learned, number),
+            );
+        }
         expected.sort();
+        assert!(expected.contains(&inferred) && expected.contains(&absent));
         assert_eq!(asked, expected, "every candidate went to the worker");
         let after = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(
@@ -27360,6 +27394,214 @@ mod tests {
             "so its `[Image #3]` is text"
         );
         std::fs::remove_file(&present).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// One transcript row as Claude Code prints it for a picture of a sent message: Ink's OSC 8,
+    /// BEL-terminated (`ESC ]8;;<url> BEL <label> ESC ]8;; BEL`), over exactly the label, indented
+    /// under the echoed message (T-IMAGE-N-GAPS, the producer's own `As` row).
+    fn claude_code_image_row(number: u32, target: &Path) -> String {
+        format!(
+            "  \u{23bf}  \u{1b}]8;;{}\u{7}[Image #{number}]\u{1b}]8;;\u{7}",
+            bt_transcript::paths::local_path_to_file_uri(target)
+        )
+    }
+
+    /// What a stand-in program that prints exactly `bytes` puts on its output, started through the
+    /// test-shell door (T-IMAGE-N-GAPS). The fixture is Claude Code's own byte shapes; Claude Code
+    /// itself is never started.
+    fn printed_by_a_stand_in(bytes: &[u8]) -> Vec<u8> {
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let fixture = hygiene.root().join("claude-code-screen.bin");
+        std::fs::write(&fixture, bytes).unwrap();
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = hygiene.command("cmd", bt_platform::quiet_command);
+            command.arg("/C").arg("type").arg(&fixture);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = hygiene.command("cat", bt_platform::quiet_command);
+            command.arg(&fixture);
+            command
+        };
+        let output = command
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .expect("the stand-in program runs");
+        assert!(output.status.success(), "the stand-in printed its fixture");
+        assert_eq!(
+            output.stdout, bytes,
+            "byte for byte, as Claude Code wrote it"
+        );
+        output.stdout
+    }
+
+    /// The `file:` target the frame carries over `(row, column)`, if any.
+    fn link_target(frame: &ViewportFrame, row: u32, column: u32) -> Option<String> {
+        frame.hyperlink_at(row, column).map(|hit| hit.uri)
+    }
+
+    /// RED (T-IMAGE-N-GAPS, owner report 2026-10-08) — **every pasted picture on the input line is
+    /// a link, whichever extension Claude Code stored it under.**
+    ///
+    /// The owner's line held `[Image #104]`, `[Image #105]` and `[Image #106]` in one sentence, with
+    /// only `#106` lit. Claude Code names each stored picture `<k>.<ext>` by its content, and
+    /// resizes a large one into JPEG first, so one folder holds `103.png`, `104.jpg`, `105.jpg` and
+    /// `106.png`. The newest learned picture is `103.png`; inferring only `<k>.png` lit `#106`
+    /// alone.
+    ///
+    /// MUTATION: infer only the newest learned picture's own extension (the 2026-09-29 rule), and
+    /// `#104` and `#105` are text while `#106` lights — the screenshot.
+    #[test]
+    fn every_pasted_picture_on_the_input_line_lights_whichever_extension_it_was_stored_under() {
+        let directory = temporary_pictures(&["103.png", "104.jpg", "105.jpg", "106.png"]);
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        enable_path_detection(&mut session);
+        let screen = format!(
+            "{}\r\n> 你好世界[Image #104] 你好 [Image #105] [Image #106] 你好世",
+            claude_code_image_row(103, &directory.join("103.png"))
+        );
+        session
+            .feed(&printed_by_a_stand_in(screen.as_bytes()))
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        // The first pass learns 103 from the transcript row; the second asks about the rest.
+        frame_after_path_verification(&mut session, &mut projection);
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        for (column, name) in [(10, "104.jpg"), (28, "105.jpg"), (41, "106.png")] {
+            assert_eq!(
+                link_target(&frame, 1, column),
+                Some(bt_transcript::paths::local_path_to_file_uri(
+                    &directory.join(name)
+                )),
+                "the placeholder at column {column} is a link to {name}"
+            );
+        }
+        let (dotted, _) = underlined_columns(&frame, 1);
+        assert_eq!(
+            dotted,
+            (10..22).chain(28..40).chain(41..53).collect::<Vec<_>>(),
+            "each wears the resting mark over exactly its own cells"
+        );
+        for name in ["103.png", "104.jpg", "105.jpg", "106.png"] {
+            std::fs::remove_file(directory.join(name)).unwrap();
+        }
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (T-IMAGE-N-GAPS) — **a picture the disk did not hold yet when the input line was first
+    /// drawn lights when Claude Code draws the line again.**
+    ///
+    /// Claude Code puts `[Image #k]` into the input line at once and writes the file afterwards,
+    /// asynchronously; the first frame can ask before the file lands and hear "no". A still screen
+    /// asks nothing more — the rule every printed name follows — but the program drawing the row
+    /// again (the reader typing on) is the program naming the picture again, and the "no" is asked
+    /// once more.
+    ///
+    /// MUTATION: leave the placeholders out of the re-ask pass
+    /// (`paths_named_on_freshly_printed_rows`), and `#104` stays text after the row is redrawn
+    /// over a file that is now there.
+    #[test]
+    fn a_picture_written_after_the_input_line_was_drawn_lights_when_the_line_is_drawn_again() {
+        let directory = temporary_pictures(&["103.png"]);
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        enable_path_detection(&mut session);
+        let screen = format!(
+            "{}\r\n> 你好世界[Image #104]",
+            claude_code_image_row(103, &directory.join("103.png"))
+        );
+        session
+            .feed(&printed_by_a_stand_in(screen.as_bytes()))
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        // The first pass learns 103 from the transcript row; the second asks about 104 beside it.
+        frame_after_path_verification(&mut session, &mut projection);
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        assert_eq!(
+            link_target(&frame, 1, 10),
+            None,
+            "asked before the file landed: text"
+        );
+        assert!(
+            session
+                .path_verdict(&directory.join("104.png"))
+                .is_some_and(|verdict| !verdict.exists),
+            "and the disk's answer for it was no"
+        );
+
+        std::fs::write(directory.join("104.png"), b"written after the paste").unwrap();
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        assert_eq!(
+            link_target(&frame, 1, 10),
+            None,
+            "a still screen asks nothing again"
+        );
+
+        session
+            .feed(&printed_by_a_stand_in(
+                "\r> 你好世界[Image #104] 你好".as_bytes(),
+            ))
+            .unwrap();
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        assert_eq!(
+            link_target(&frame, 1, 10),
+            Some(bt_transcript::paths::local_path_to_file_uri(
+                &directory.join("104.png")
+            )),
+            "the program drew the placeholder again, the question was asked again, and the file \
+             is there"
+        );
+        for name in ["103.png", "104.png"] {
+            std::fs::remove_file(directory.join(name)).unwrap();
+        }
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (T-IMAGE-N-GAPS) — **a placeholder Claude Code's word wrap split across two rows of its
+    /// input box is one link over both halves.**
+    ///
+    /// Claude Code wraps its input itself (word wrap, `hard`, no trim) and draws each wrapped row as
+    /// a line of its own, so the space inside `[Image #104]` is where a row can end: `…[Image ` on
+    /// one row, `#104] …` on the next, indented under the prompt. No terminal wrap flag joins them.
+    ///
+    /// MUTATION: drop the seam pass for placeholders from `implicit_hyperlinks`, and neither half is
+    /// a link.
+    #[test]
+    fn a_placeholder_split_by_the_input_boxs_word_wrap_is_one_link_over_both_halves() {
+        let directory = temporary_pictures(&["103.png", "104.png"]);
+        let mut session = DualPlaneSession::new(nz(30), nz(8));
+        enable_path_detection(&mut session);
+        let screen = format!(
+            "{}\r\n> 你好世界你好世界你[Image \r\n  #104] 你好",
+            claude_code_image_row(103, &directory.join("103.png"))
+        );
+        session
+            .feed(&printed_by_a_stand_in(screen.as_bytes()))
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        frame_after_path_verification(&mut session, &mut projection);
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        let picture = Some(bt_transcript::paths::local_path_to_file_uri(
+            &directory.join("104.png"),
+        ));
+        assert_eq!(link_target(&frame, 1, 20), picture, "the upper half");
+        assert_eq!(link_target(&frame, 2, 2), picture, "and the lower half");
+        assert_eq!(
+            underlined_columns(&frame, 1).0,
+            (20..26).collect::<Vec<_>>(),
+            "the mark covers `[Image` and not the blank after it"
+        );
+        assert_eq!(
+            underlined_columns(&frame, 2).0,
+            (2..7).collect::<Vec<_>>(),
+            "and `#104]`, not the indent before it"
+        );
+        for name in ["103.png", "104.png"] {
+            std::fs::remove_file(directory.join(name)).unwrap();
+        }
         std::fs::remove_dir(&directory).unwrap();
     }
 
@@ -28341,6 +28583,71 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// RED (issue #28) — **a pane stands in the folder it was opened in until its shell says
+    /// otherwise, and an unreadable report leaves it there rather than anywhere else.**
+    ///
+    /// `standing_folder` is what a files card and a files column are rooted at. Before the first
+    /// report it is the spawn directory (a profile's fixed folder here); a report replaces it; a
+    /// report this terminal cannot read forgets the reported folder (the standing OSC 7 rule) and
+    /// the pane is back in the folder it was opened in — never in the account's home. A spawn
+    /// directory that is the shell's home *mark* (`~`, handed to a launcher) names no folder on
+    /// this side and is not offered, though the pane's name still reads it.
+    ///
+    /// MUTATIONS, each observed red: answer `working_directory` alone (the birth and the
+    /// unreadable-report rows go `None`); drop the home-mark filter (the `~` row answers `~`).
+    #[test]
+    fn a_pane_stands_in_the_folder_it_was_opened_in_until_its_shell_reports_one() {
+        let opened_in = std::env::temp_dir().join("沙盒 sandbox");
+        let reported = opened_in.join("子 sub");
+        let mut session = DualPlaneSession::new(nz(80), nz(24));
+        session.set_spawn_directory(Some(opened_in.clone()));
+        assert_eq!(
+            session.standing_folder(),
+            Some(opened_in.as_path()),
+            "birth"
+        );
+
+        let uri = bt_transcript::paths::local_path_to_file_uri(&reported);
+        let expected = file_uri_to_local_path(&uri, &[]).expect("a local report");
+        session
+            .feed(format!("\x1b]7;{uri}\x07").as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.standing_folder(),
+            Some(expected.as_path()),
+            "reported"
+        );
+
+        // `%2F` decodes to a separator inside a segment, which the decoder refuses.
+        session
+            .feed("\x1b]7;file:///%E6%B2%99%2F%E7%9B%92\x07".as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.working_directory(),
+            None,
+            "the unreadable report is no folder"
+        );
+        assert_eq!(
+            session.standing_folder(),
+            Some(opened_in.as_path()),
+            "back in the folder it was opened in"
+        );
+
+        let mut wsl = DualPlaneSession::new(nz(80), nz(24));
+        wsl.set_spawn_directory(Some(std::path::PathBuf::from("~")));
+        wsl.set_spawn_at_shell_home(true);
+        assert_eq!(
+            wsl.standing_folder(),
+            None,
+            "a launcher's home mark is not a folder here"
+        );
+        assert_eq!(
+            wsl.reference_directory(),
+            Some(std::path::Path::new("~")),
+            "the pane's name still reads it"
+        );
+    }
+
     /// RED (B-AUDIT-046 TRM-3) — **a working-directory report that names this machine is this
     /// machine's directory, and one that names another machine is still ignored.**
     ///
@@ -28486,14 +28793,7 @@ mod tests {
     fn temporary_path_image_named(file_name: &str) -> (PathBuf, PathBuf) {
         use base64::Engine as _;
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-session-path-image-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-session-path-image");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join(file_name);
         let png = base64::engine::general_purpose::STANDARD
@@ -28707,14 +29007,7 @@ mod tests {
     /// it is a spelling and not a file: the tests below state every answer themselves through
     /// [`settle_printed_paths_against`], so no disk is read and no clock is waited on.
     fn unwritten_directory(tag: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "betterterminal-{tag}-{}-{unique}",
-            std::process::id()
-        ))
+        bt_testpath::temp_path(&format!("betterterminal-{tag}"))
     }
 
     /// One frame of the app's own loop with the **disk replaced by what the test says is on it**:
@@ -29991,9 +30284,8 @@ mod tests {
         session.restore_retired_image_bands();
         let started = Instant::now();
         let missing = std::env::temp_dir().join(format!(
-            "betterterminal-missing-{}-{}.png",
-            std::process::id(),
-            started.elapsed().as_nanos()
+            "{}.png",
+            bt_testpath::unique_name("betterterminal-missing")
         ));
         let line = format!("[Image: source: \"{}\"]", missing.display());
         session
@@ -30703,9 +30995,8 @@ mod tests {
         enable_path_detection(&mut session);
         let started = Instant::now();
         let missing = std::env::temp_dir().join(format!(
-            "betterterminal-missing-{}-{}.png",
-            std::process::id(),
-            started.elapsed().as_nanos()
+            "{}.png",
+            bt_testpath::unique_name("betterterminal-missing")
         ));
         let line = format!("[Image: source: \"{}\"]", missing.display());
         session
@@ -31310,14 +31601,7 @@ mod tests {
     fn temporary_relative_image_tree() -> (PathBuf, PathBuf, PathBuf) {
         use base64::Engine as _;
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "betterterminal 图 片-{}-{unique}",
-            std::process::id()
-        ));
+        let root = bt_testpath::temp_path("betterterminal 图 片");
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let image = root.join("shot.png");

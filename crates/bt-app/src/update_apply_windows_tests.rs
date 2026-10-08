@@ -364,11 +364,7 @@ impl Install {
     /// The installation, or `None` off Windows, where no test root signs.
     fn new(tag: &str) -> Option<Self> {
         let ca = TestCa::new().ok()?;
-        let root = std::env::temp_dir().join(format!(
-            "bt-u24-{tag}-{}-{}",
-            std::process::id(),
-            bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-        ));
+        let root = bt_testpath::temp_path(&format!("bt-u24-{tag}"));
         let scratch = Scratch(root.clone());
         let install = root.join("Folio");
         std::fs::create_dir_all(&install).unwrap();
@@ -680,13 +676,19 @@ fn wrote(world: &Fake) -> &str {
         .map_or("", String::as_str)
 }
 
-/// Wait until the journal on disk is at `phase`.
-fn until_journal(install: &Install, phase: PhaseKind) {
-    let give_up = Instant::now() + Duration::from_secs(30);
+/// Wait until the journal on disk is at `phase`, for as long as `applier` is still on its road.
+///
+/// **No total of its own** (CONVENTIONS §3, the child's silence and not the clock): a loaded
+/// machine walks the same road more slowly, and the only thing that can make the phase never come
+/// is the applier ending first — which is red here, at once, with the phase it left behind. The
+/// wait is bounded only by the applier thread's end: an applier stuck alive hangs the test rather
+/// than turning it red.
+fn until_journal<T>(install: &Install, phase: PhaseKind, applier: &JoinHandle<T>) {
     while install.on_disk().body.phase.kind() != phase {
         assert!(
-            Instant::now() < give_up,
-            "the journal never got to {phase:?}"
+            !applier.is_finished(),
+            "the applier ended with the journal at {:?}, never at {phase:?}",
+            install.on_disk().body.phase.kind()
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -880,7 +882,7 @@ fn armed_is_durable_before_moving() {
         install.applier,
         world,
     );
-    until_journal(&install, PhaseKind::Armed);
+    until_journal(&install, PhaseKind::Armed, &applier);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(install.on_disk().body.phase, Phase::Armed);
     assert!(
@@ -2781,6 +2783,11 @@ fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
 /// reports no pid); this is the Windows half of U-40's table, unchanged: the
 /// pid is the launch's own.
 ///
+/// The deadline is not this test's subject, and nothing it asserts waits for
+/// it: the receipt the test writes ends the watch, or — under the mutation —
+/// the person's end does ([`crate::update_apply::TRIAL_NOT_UNDER_TEST_MS`]). The person
+/// leaves before the first assertion, so a red run is answered at once.
+///
 /// MUTATION: in `Txn::trial`, record the earliest-started process of the
 /// installed program in place of the pid the launch answered.
 #[test]
@@ -2793,18 +2800,18 @@ fn a_persons_start_beside_the_launch_is_never_the_recorded_trial() {
     world.beside_launch = Some(Arc::clone(&people));
     let children = world.children.clone();
     let applier = start(
-        install.road(limits(20_000, 20_000)),
+        install.road(limits(20_000, crate::update_apply::TRIAL_NOT_UNDER_TEST_MS)),
         install.txn,
         install.applier,
         world,
     );
-    until_journal(&install, PhaseKind::Trial);
+    until_journal(&install, PhaseKind::Trial, &applier);
     let Phase::Trial { process, nonce, .. } = install.on_disk().body.phase else {
         unreachable!()
     };
     let person = people.lock().unwrap()[0];
-    assert_ne!(process.pid, person, "the person's start is never the trial");
     children.end(person);
+    assert_ne!(process.pid, person, "the person's start is never the trial");
     install.receipt(nonce, nonce, process.pid);
     let (ended, world) = applier.join().unwrap();
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
@@ -5619,11 +5626,7 @@ pub(crate) fn said_by_a_child_whose_stderr_is_the_log(
     child: &str,
     tag: &str,
 ) -> String {
-    let folder = std::env::temp_dir().join(format!(
-        "bt-u42d-{tag}-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let folder = bt_testpath::temp_path(&format!("bt-u42d-{tag}"));
     std::fs::create_dir_all(&folder).unwrap();
     let log = folder.join("diagnostics.log");
     let stream = std::fs::OpenOptions::new()

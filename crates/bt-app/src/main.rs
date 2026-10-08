@@ -218,6 +218,7 @@ mod web_warmup;
 mod webhost;
 mod webnav;
 mod websheet;
+mod window_news;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -235,7 +236,7 @@ use bt_persist::{
 use text_scale::{TextScale, TextStep};
 // Step 2a moved these two names' last non-test users into `runtime/` (the
 // `peek` and `windows` topics), which import them themselves; the root keeps
-// them for `tests.rs`, which reads them through `use super::*`.
+// them for the root's test modules, which read them through `use super::*`.
 #[cfg(test)]
 use bt_doc::Bias;
 #[cfg(test)]
@@ -17232,7 +17233,7 @@ mod tab_identity_tests {
 
         // The seat half of the lookup is a free function so it can be pinned by
         // value as well as by shape — see
-        // `tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
+        // `app_preview_tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
         let among = free_fn_body("preview_tab_index_among");
         assert!(
             among.contains("state.id == tab"),
@@ -40929,6 +40930,38 @@ fn git_surfaces_wanting_reread(
         .collect()
 }
 
+/// **R31's fourth moment, the window's half: the repositories this window
+/// wants the kernel's news about** — the roots of its surfaces that are drawn.
+///
+/// The seat a window holds in [`git_watch::GitWatch`] is exactly this set, so a
+/// surface that is not on the glass (a column on its Files page, a page in a tab
+/// that is not on screen, which `Runtime::git_surfaces_on_screen` never lists)
+/// subscribes to nothing and is told nothing.
+#[must_use]
+fn git_roots_on_glass(surfaces: &[(GitOrigin, PathBuf, bool)]) -> BTreeSet<PathBuf> {
+    surfaces
+        .iter()
+        .filter(|(_, _, showing)| *showing)
+        .map(|(_, root, _)| root.clone())
+        .collect()
+}
+
+/// **And which of those surfaces the news it took is about**: every drawn
+/// surface standing on a repository the kernel said moved. Two columns and a
+/// graph can be looking at one repository, and all three are out of date
+/// together.
+#[must_use]
+fn git_surfaces_the_kernel_moved(
+    surfaces: &[(GitOrigin, PathBuf, bool)],
+    moved: &BTreeSet<PathBuf>,
+) -> Vec<GitOrigin> {
+    surfaces
+        .iter()
+        .filter(|(_, root, showing)| *showing && moved.contains(root))
+        .map(|(origin, _, _)| origin.clone())
+        .collect()
+}
+
 /// **What Explorer can be pointed at, for a buffer** (G-3).
 ///
 /// A file, always. A git document, only when the working-tree file it is a
@@ -48637,7 +48670,7 @@ impl Runtime<'_> {
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf| leaf.session.working_directory())
+            .filter_map(|leaf: &LeafSession| leaf.session.standing_folder())
             .map(|cwd| cwd.display().to_string())
             .collect();
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
@@ -49342,17 +49375,11 @@ impl Runtime<'_> {
                 .find(|tab| tab.id == leaf.tab)
                 .map(|tab| (tab, leaf.seat)),
         };
-        seat.and_then(|(tab, seat)| {
-            tab.sessions
-                .get(&seat)
-                .and_then(|leaf| leaf.session.working_directory())
-                .map(|path| path.display().to_string())
-        })
-        .or_else(|| {
-            profiles::home_directory(&bt_pty::SystemShellEnvironment)
-                .map(|home| home.display().to_string())
-        })
-        .unwrap_or_default()
+        files_root_of(
+            seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
+                .map(|leaf| &leaf.session),
+            &bt_pty::SystemShellEnvironment,
+        )
     }
 
     /// Hand one path to the system's default handler, and say so when the window
@@ -50724,7 +50751,7 @@ impl Runtime<'_> {
                     .unwrap_or_else(|| tab.display_title());
                 let hint = leaf
                     .session
-                    .working_directory()
+                    .standing_folder()
                     .map(|cwd| cwd.display().to_string())
                     .or_else(|| {
                         leaf.program
@@ -53305,9 +53332,9 @@ mod mouse_trace_station_tests {
     //
     // **One reading widens** (§4.1). The route sweep took this file; it now
     // takes every file the package declares, which is one site more — a fixture
-    // in `tests.rs` writing a declared word. The closed set of route words is a
-    // fact about the package and not about one file of it, and a reading
-    // watching one file could not say so.
+    // in one of the crate root's test files writing a declared word. The closed
+    // set of route words is a fact about the package and not about one file of
+    // it, and a reading watching one file could not say so.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -60016,7 +60043,7 @@ mod pty_drain_budget_tests {
     /// PIN — **no path reaches ConPTY with a rectangle except through the quiet window.**
     ///
     /// The behavioural half lives in
-    /// `tests::a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`; this
+    /// `app_panes_tests::a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`; this
     /// is the half that can actually be broken again, because the way it broke the first time
     /// was a *second* commit path being written beside the coalescer rather than the coalescer
     /// being wrong. `commit_leaf_resize` is the only thing that calls `PtySession::resize` for a
@@ -60032,9 +60059,10 @@ mod pty_drain_budget_tests {
             // Its declaration and the one production release, counted over every file a
             // product build of this package compiles. The number was the same when the
             // reading was "the whole of `main.rs`", and for a reason that had nothing to
-            // do with the rule: the six test callers are in `tests.rs`, which that
-            // reading did not open. Now they are not counted because the declaration that
-            // reaches that file is `#[cfg(test)]`, which is the fact meant all along.
+            // do with the rule: the six test callers are in the crate root's test files
+            // (`app_panes_tests.rs` and its siblings), which that reading did not open. Now
+            // they are not counted because the declarations that reach those files are
+            // `#[cfg(test)]`, which is the fact meant all along.
             2,
             "the commit has one caller in the product, and that caller is the release"
         );
@@ -62383,7 +62411,28 @@ impl FolioApp {
             })
             .collect();
         if let Some(app) = self.app.as_mut() {
+            // **Every window the directory names has a seat in every holder of
+            // per-window news, and no other** (T-WINDOWS-ALL): the walk that names
+            // a window seats it, and the walk that stops naming it — closed, or
+            // leaving — releases its seat, and in the git watch every subscription
+            // only it wanted. A new holder is one more entry in this list.
+            let ids: Vec<WindowId> = open.iter().map(|window| window.id).collect();
+            window_news::seat_every_holder(&mut [&mut app.git_watch], &ids);
             app.windows_open = open;
+        }
+    }
+
+    /// **Ripen the git watch's news for every window** (R31's D; T-WINDOWS-ALL).
+    ///
+    /// The application's clocks over the union of every window's Git pages,
+    /// read once a pass and before any window's turn: a repository whose tree
+    /// has gone quiet is filed under every seat that wants it, and each window
+    /// takes its own in [`Runtime::advance_git_watch`] on this same pass.
+    fn ripen_git_news(&mut self, now: Instant) {
+        if let Some(app) = self.app.as_mut() {
+            hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
+                app.git_watch.ripen(now);
+            });
         }
     }
 
@@ -65350,6 +65399,10 @@ impl FolioApp {
             });
             return;
         }
+        // **The kernel's news about repositories, filed under every window that
+        // shows them, before any window takes its turn** (T-WINDOWS-ALL), so each
+        // window's own turn takes what it was told on this same pass.
+        self.ripen_git_news(now);
         // **Every window's own turn, and the earliest wake-up any of them asked
         // for.** A loop that woke for the first window's clocks and not the
         // second's would be a second window whose caret blinks only when the
@@ -68686,6 +68739,27 @@ fn session_title(
         })
 }
 
+/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28): the
+/// folder the pane is standing in ([`DualPlaneSession::standing_folder`] — its shell's last report,
+/// else the folder it was opened in), and the account's home only for a pane that has neither.
+///
+/// One reader for both doors, the folder button's card ([`Runtime::trigger_root`]) and
+/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). The report alone is not enough: a pane
+/// opened in a profile's fixed folder has none until its shell's first prompt, and none for its
+/// whole life when the shell does not report, while its own tab is already named after the folder
+/// it stands in.
+fn files_root_of(
+    session: Option<&DualPlaneSession>,
+    environment: &dyn bt_pty::ShellEnvironment,
+) -> String {
+    session
+        .and_then(DualPlaneSession::standing_folder)
+        .map(Path::to_path_buf)
+        .or_else(|| profiles::home_directory(environment))
+        .map(|folder| folder.display().to_string())
+        .unwrap_or_default()
+}
+
 /// The folder layer on its own: the working directory as one reader writes it,
 /// sanitised at that reader's bound.
 ///
@@ -69695,7 +69769,7 @@ mod floated_page_tests {
         use crate::preview_watch::Stamp;
 
         // ① The buffer, end to end, on a real file.
-        let dir = std::env::temp_dir().join(format!("bt-page-source-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-page-source");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("index.html");
@@ -74790,23 +74864,190 @@ fn main() -> Result<()> {
     bt_platform::leave_process(code)
 }
 
-/// **The largest of this file's test modules, in a file of its own**
-/// (`refactor/main-tests-out`, 2026-09-18).
-///
-/// A move and nothing else: the same tests under the same paths, reading the
-/// same fixtures from the same directory. It is out here because a module of
-/// forty-eight thousand lines is the reason an editor, a reviewer and a
-/// `cargo fmt` all have to carry the whole of this file to reach anything in
-/// it, and because the pins that count this file's own text now count a file
-/// that is that much closer to being the product's.
-///
-/// **`main.rs` is still not the same thing as this crate's product text**: it
-/// holds fifty-four smaller test modules besides. Every pin that reads it says
-/// which of the two it means.
+// **The crate root's tests, by what they test** (`docs/DESIGN.md`, K1). Each file sits in
+// `src/` and is written in this file's scope (`use super::*`): `app_<theme>_tests` for items
+// this file owns, sorted by the theme sort of `docs/plans/bt-app-split-inventory-2026-09-15.md`
+// §0.3, and `<module>_app_tests` for tests whose first assertion is about another module.
+//
+// **`main.rs` is still not the same thing as this crate's product text**: it holds fifty-four
+// smaller inline test modules besides. Every pin that reads it says which of the two it means.
+#[cfg(test)]
+mod app_attention_tests;
+#[cfg(test)]
+mod app_clipboard_tests;
+#[cfg(test)]
+mod app_configuration_tests;
+#[cfg(test)]
+mod app_diagnostics_tests;
+#[cfg(test)]
+mod app_dpi_tests;
+#[cfg(test)]
+mod app_files_tests;
+#[cfg(test)]
+mod app_first_run_tests;
+#[cfg(test)]
+mod app_floats_tests;
+#[cfg(test)]
+mod app_focus_tests;
+#[cfg(test)]
+mod app_frame_tests;
+#[cfg(test)]
+mod app_git_tests;
+#[cfg(test)]
+mod app_i18n_tests;
+#[cfg(test)]
+mod app_keyboard_tests;
+#[cfg(test)]
+mod app_launch_tests;
+#[cfg(test)]
+mod app_math_tests;
+#[cfg(test)]
+mod app_mouse_tests;
+#[cfg(test)]
+mod app_palette_tests;
+#[cfg(test)]
+mod app_panes_tests;
+#[cfg(test)]
+mod app_peek_tests;
+#[cfg(test)]
+mod app_preview_tests;
+#[cfg(test)]
+mod app_profiles_tests;
+#[cfg(test)]
+mod app_tabs_tests;
+#[cfg(test)]
+mod app_terminal_tests;
+#[cfg(test)]
+mod app_tooltips_tests;
+#[cfg(test)]
+mod app_unclassified_tests;
+#[cfg(test)]
+mod app_web_tests;
+#[cfg(test)]
+mod app_windows_tests;
+#[cfg(test)]
+mod attention_map_app_tests;
+#[cfg(test)]
+mod attention_wire_app_tests;
+#[cfg(test)]
+mod card_trace_app_tests;
+#[cfg(test)]
+mod cli_app_tests;
+#[cfg(test)]
+mod cmdrail_app_tests;
+#[cfg(test)]
+mod file_peek_app_tests;
+#[cfg(test)]
+mod files_app_tests;
+#[cfg(test)]
+mod float_app_tests;
+#[cfg(test)]
+mod focus_thumb_app_tests;
+#[cfg(test)]
+mod foreground_program_app_tests;
+#[cfg(test)]
+mod formula_tools_app_tests;
+#[cfg(test)]
+mod git_app_tests;
+#[cfg(test)]
+mod input_app_tests;
+#[cfg(test)]
+mod install_channel_app_tests;
+#[cfg(test)]
+mod launch_wire_app_tests;
+#[cfg(test)]
+mod marks_app_tests;
+#[cfg(test)]
+mod menubar_app_tests;
+#[cfg(test)]
+mod notice_app_tests;
+#[cfg(test)]
+mod owner_door_app_tests;
+#[cfg(test)]
+mod pace_app_tests;
+#[cfg(test)]
+mod palette_app_tests;
+#[cfg(test)]
+mod persist_app_tests;
+#[cfg(test)]
+mod preview_app_tests;
+#[cfg(test)]
+mod preview_edit_app_tests;
+#[cfg(test)]
+mod preview_live_app_tests;
+#[cfg(test)]
+mod preview_provenance_app_tests;
+#[cfg(test)]
+mod preview_select_app_tests;
+#[cfg(test)]
+mod preview_text_app_tests;
+#[cfg(test)]
+mod preview_trace_app_tests;
+#[cfg(test)]
+mod preview_viewport_app_tests;
+#[cfg(test)]
+mod preview_wrap_app_tests;
+#[cfg(test)]
+mod profiles_app_tests;
+#[cfg(test)]
+mod restore_app_tests;
+#[cfg(test)]
+mod schemes_app_tests;
+#[cfg(test)]
+mod search_app_tests;
+#[cfg(test)]
+mod seats_app_tests;
+#[cfg(test)]
+mod seed_app_tests;
+#[cfg(test)]
+mod session_end_app_tests;
+#[cfg(test)]
+mod settings_app_tests;
+#[cfg(test)]
+mod shell_integration_app_tests;
+#[cfg(test)]
+mod shell_literal_app_tests;
+#[cfg(test)]
+mod shortcuts_app_tests;
+#[cfg(test)]
+mod table_block_app_tests;
+/// **The fixtures the crate root's test files share**, `pub(crate)` where another file
+/// reaches them.
+#[cfg(test)]
+mod test_support;
+/// **The tests that keep the path `tests::<name>`** — the few that something outside
+/// their own body names by it (a row of `docs/plans/TIMING-BOUND-TESTS.tsv`, or a test that
+/// runs itself again with `--exact`); the file's head lists why.
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod text_size_tests;
+#[cfg(test)]
+mod trace_app_tests;
+#[cfg(test)]
+mod update_apply_app_tests;
+#[cfg(test)]
+mod update_archive_app_tests;
+#[cfg(test)]
+mod update_card_app_tests;
+#[cfg(test)]
+mod update_job_app_tests;
+#[cfg(test)]
+mod update_prepare_macos_app_tests;
+#[cfg(test)]
+mod update_prepare_windows_app_tests;
+#[cfg(test)]
+mod update_startup_app_tests;
+#[cfg(test)]
+mod update_txn_app_tests;
+#[cfg(test)]
+mod video_seat_app_tests;
+#[cfg(test)]
+mod web_trace_app_tests;
+#[cfg(test)]
+mod webhost_app_tests;
+#[cfg(test)]
+mod webnav_app_tests;
 
 /// **The files in which `bt-app` is allowed to know what platform it is on**
 /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.3, ticket M1-10).
@@ -81703,7 +81944,7 @@ mod printed_path_provenance_tests {
 
     /// A scratch directory of this test's own, removed by the caller.
     fn scratch(name: &str) -> std::path::PathBuf {
-        let directory = std::env::temp_dir().join(format!("folio-door-{name}"));
+        let directory = bt_testpath::temp_path(&format!("folio-door-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a scratch folder");
         directory

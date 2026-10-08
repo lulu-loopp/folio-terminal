@@ -11,7 +11,7 @@
 //! pinned on the item bodies through `bt_source`.
 
 use super::*;
-use crate::tests::{
+use crate::test_support::{
     cross_metrics, cross_solve, cross_tab, focused_frame, leaf_saying, tab_holding,
 };
 use bt_source::{Index, ItemQuery, Pattern, Search, View, needle};
@@ -436,7 +436,7 @@ fn split_and_duplicate_start_at_100_and_tear_out_and_merge_keep_the_rung() {
     let leaf = arriving.sessions.get_mut(&SeatId(2)).unwrap();
     step_leaf_text_scale(leaf, TextStep::Smaller, 1, derive_at(1.0, BASE)).unwrap();
     let mut target = cross_tab(3, &["HOST"]);
-    let arrived = crate::tests::cross_merge(
+    let arrived = crate::test_support::cross_merge(
         &arriving.seats,
         &mut target,
         seats::LayoutAim::SeatEdge(SeatId(1), seats::DropEdge::Right),

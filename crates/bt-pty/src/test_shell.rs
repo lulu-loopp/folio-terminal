@@ -77,10 +77,7 @@
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -242,7 +239,7 @@ fn warmed_module_analysis_cache(program: &OsStr) -> PathBuf {
 /// A pane's PowerShell uses the account's cache, which its sessions keep warm; the copy gives a
 /// test child that same start without a test ever writing the account's file. The edition is
 /// asked where that file is ([`account_analysis_cache`]) — PowerShell 7 names it with a hash
-/// only it knows. The copy is written under a name of this process's own and renamed into
+/// only it knows. The copy is written under a scratch name of its own (`bt_testpath`) and renamed into
 /// place, so two test processes warming at once each put a whole file there and neither reads
 /// half of the other's. An account with no cache yet (a CI runner whose job has not started a
 /// Windows PowerShell before) leaves the whole analysis to [`complete_analysis_cache`].
@@ -261,7 +258,7 @@ fn warm_module_analysis_cache(
     let started = Instant::now();
     let copied = match account_analysis_cache(program) {
         Some(account) if account.is_file() => {
-            let staging = root.join(format!("ModuleAnalysisCache.{}.copy", std::process::id()));
+            let staging = root.join(bt_testpath::unique_name("ModuleAnalysisCache.copy"));
             match std::fs::copy(&account, &staging).and_then(|_| std::fs::rename(&staging, cache)) {
                 Ok(()) => format!("copied the account's {}", account.display()),
                 Err(error) => {
@@ -705,12 +702,7 @@ impl Hygiene {
     /// A fresh directory, with every location below it already made.
     #[must_use]
     pub fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "folio-test-shell-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root = bt_testpath::temp_path("folio-test-shell");
         // The filesystem is the boundary: a run killed before its `Drop` leaves
         // this name behind, and what it left must not be read as this run's.
         let _ = std::fs::remove_dir_all(&root);

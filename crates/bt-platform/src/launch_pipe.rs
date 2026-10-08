@@ -894,7 +894,7 @@ mod tests {
 
     /// A directory no other test in this process is using, so two of them can run at once.
     fn scratch(line: u32) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("bt-platform-launch-{}-{line}", std::process::id()))
+        bt_testpath::temp_path(&format!("bt-platform-launch-{line}"))
     }
 
     /// **RED — one request crosses, and it is answered.**

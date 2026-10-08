@@ -1,6 +1,7 @@
 # MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
 # alacritty_terminal 0.26.0 manifest.
-# Change: a path dependency on this repository's `bt-unicode` crate.
+# Change: a path dependency on this repository's `bt-unicode` crate, and
+# `home` and `polling` declared for every target but `wasm32`.
 # Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 # Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -62,9 +63,6 @@ path = "../../crates/bt-unicode"
 [dependencies.bitflags]
 version = "2.4.1"
 
-[dependencies.home]
-version = "0.5.5"
-
 [dependencies.libc]
 version = "0.2"
 
@@ -73,9 +71,6 @@ version = "0.4"
 
 [dependencies.parking_lot]
 version = "0.12.0"
-
-[dependencies.polling]
-version = "3.8.0"
 
 [dependencies.regex-automata]
 version = "0.4.3"
@@ -101,6 +96,12 @@ default-features = false
 
 [dev-dependencies.serde_json]
 version = "1.0.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.home]
+version = "0.5.5"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.polling]
+version = "3.8.0"
 
 [target."cfg(unix)".dependencies.rustix]
 version = "1.0.0"

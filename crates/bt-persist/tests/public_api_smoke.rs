@@ -6,7 +6,6 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
@@ -17,10 +16,7 @@ use bt_persist::{
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir =
-        std::env::temp_dir().join(format!("bt-persist-smoke-{tag}-{}-{n}", std::process::id()));
+    let dir = bt_testpath::temp_path(&format!("bt-persist-smoke-{tag}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

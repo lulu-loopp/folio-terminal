@@ -888,14 +888,7 @@ mod tests {
             "nothing at the path is nothing to start"
         );
 
-        let unreadable_as_a_program = env::temp_dir().join(format!(
-            "bt-pty-not-a-program-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let unreadable_as_a_program = bt_testpath::temp_path("bt-pty-not-a-program");
         std::fs::write(&unreadable_as_a_program, b"#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(
             &unreadable_as_a_program,

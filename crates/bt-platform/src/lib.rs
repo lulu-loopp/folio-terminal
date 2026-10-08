@@ -2192,6 +2192,14 @@ fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
 #[cfg(windows)]
 use windows_impl::file_identity;
 
+/// **The 8.3 spelling Windows keeps for an existing `path`** (`GetShortPathNameW`), each
+/// component that has a short name replaced by it — `C:\Users\alice\APPDAT~1\…` for
+/// `C:\Users\alice\AppData\…`, the kind of spelling a GitHub runner's `%TEMP%` arrives in. A
+/// component without a short name (a volume with 8.3 names off) keeps its long name, so the
+/// answer may equal `path`. An error when the path does not exist.
+#[cfg(windows)]
+pub use windows_impl::short_path_name;
+
 /// Where there is neither an inode nor a file id, nothing can be proved the same.
 #[cfg(not(any(unix, windows)))]
 fn file_identity(path: &std::path::Path) -> Option<()> {
@@ -12539,6 +12547,30 @@ mod windows_impl {
         ))
     }
 
+    /// See [`crate::short_path_name`].
+    pub fn short_path_name(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        use std::os::windows::ffi::OsStringExt as _;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        wide.push(0);
+        // The longest path the wide API can name, so one call always has room.
+        let mut buffer = vec![0u16; 32_768];
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call, and the
+        // output slice is exclusively borrowed for it; the call writes at most its length.
+        let written = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buffer)) };
+        let written = usize::try_from(written).unwrap_or(usize::MAX);
+        if written == 0 || written >= buffer.len() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            &buffer[..written],
+        )))
+    }
+
     /// Paint this window's own background in `rgb`, or in **nothing** at all.
     ///
     /// `None` installs the null brush, and that is what a translucent ground is
@@ -20873,11 +20905,7 @@ mod console_channel_tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "bt-console-channel-{}-{name}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let directory = bt_testpath::temp_path(&format!("bt-console-channel-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a private directory for this test");
         directory
@@ -21069,11 +21097,7 @@ mod dir_watch_tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "bt-dir-watch-{}-{name}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
+            let dir = bt_testpath::temp_path(&format!("bt-dir-watch-{name}"));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("make a scratch directory");
             Self(dir)
@@ -21352,7 +21376,7 @@ mod dir_watch_tests {
     /// not exist is the second.
     #[test]
     fn a_directory_that_is_not_there_declines_to_be_watched() {
-        let missing = std::env::temp_dir().join("bt-dir-watch-no-such-directory-ever");
+        let missing = bt_testpath::temp_path("bt-dir-watch-no-such-directory");
         let _ = std::fs::remove_dir_all(&missing);
         let error = DirWatch::start(&missing, || {})
             .err()
@@ -22771,16 +22795,15 @@ mod context_menu_registry_tests {
     /// `delete_registry_tree` on the store's own root and not
     /// `remove_context_menu`: the product's removal deliberately leaves the
     /// container keys standing (see its note), so a teardown built on it would
-    /// leave a growing pile of empty `test-context-menu\<pid>-…` keys in the
+    /// leave a growing pile of empty `folio-context-menu-test-…` keys in the
     /// registry of whoever runs the suite.
     struct Isolated(String);
 
     impl Isolated {
         fn new(name: &str) -> Self {
             let root = format!(
-                "Software\\folio-context-menu-test-{}-{:?}-{name}",
-                std::process::id(),
-                std::thread::current().id()
+                "Software\\{}",
+                bt_testpath::unique_name(&format!("folio-context-menu-test-{name}"))
             );
             let _ = delete_registry_tree(&root);
             Self(root)
@@ -22806,11 +22829,7 @@ mod context_menu_registry_tests {
 
     impl ScratchFolder {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "folio-context-menu-test-{}-{:?}-{name}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
+            let path = bt_testpath::temp_path(&format!("folio-context-menu-test-{name}"));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("a scratch folder to keep two installs in");
             Self(path)

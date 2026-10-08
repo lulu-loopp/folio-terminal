@@ -17677,7 +17677,7 @@ mod tests {
         let home = r"C:\Users\dev";
         let machine = FakeMachine::default().with_var("USERPROFILE", home);
         let live = std::env::temp_dir();
-        let gone = live.join("folio-restart-cwd-no-such-directory");
+        let gone = bt_testpath::temp_path("folio-restart-cwd-no-such-directory");
         for id in ["pwsh", "gitbash", "cmd"] {
             let profile = index_of_id(id);
             assert_eq!(
@@ -17990,7 +17990,7 @@ mod tests {
     #[test]
     fn a_saved_directory_is_only_checked_for_existence_where_that_is_answerable() {
         let real = std::env::temp_dir();
-        let gone = real.join("betterterminal-no-such-directory-here");
+        let gone = bt_testpath::temp_path("betterterminal-no-such-directory-here");
         for id in ["pwsh", "gitbash", "cmd"] {
             let profile = index_of_id(id);
             assert_eq!(
@@ -21044,7 +21044,7 @@ mod tests {
     /// [`PaneMenuLayout::holds`], the safety triangle — in both states. Leaving
     /// both surfaces closes a peek after the grace and leaves a pinned menu up.
     /// The submenu's opening and closing is `drive_pane_menu_hover`'s, which
-    /// reads no pin (`tests.rs` holds that by name).
+    /// reads no pin (`app_mouse_tests.rs` holds that by name).
     ///
     /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` and the
     /// pinned half goes red.

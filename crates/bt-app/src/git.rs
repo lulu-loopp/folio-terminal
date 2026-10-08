@@ -4824,11 +4824,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     /// nothing else. R17's single empty state depends on this classification.
     #[test]
     fn a_folder_outside_a_repository_lands_softly() {
-        let outside = std::env::temp_dir().join(format!(
-            "folio-git-probe-{}-{}",
-            std::process::id(),
-            RECORDED_AT
-        ));
+        let outside = bt_testpath::temp_path("folio-git-probe");
         std::fs::create_dir_all(&outside).expect("a scratch folder can be made");
         let question = GitQuestion::RepoProbe {
             dir: outside.clone(),
@@ -4876,9 +4872,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             }
         }
 
-        let bin = std::env::temp_dir()
-            .join(format!("folio-no-git-here-{}", std::process::id()))
-            .join("bin");
+        let bin = bt_testpath::temp_path("folio-no-git-here").join("bin");
         for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
             let name = crate::profiles::git_file_name_on(platform);
             let machine = Machine {
@@ -6066,11 +6060,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         const DEPTH: usize = GIT_LOG_PAGE + 1;
 
         let git = real_git();
-        let root = std::env::temp_dir().join(format!(
-            "folio-git-pages-{}-{}",
-            std::process::id(),
-            RECORDED_AT
-        ));
+        let root = bt_testpath::temp_path("folio-git-pages");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch folder can be made");
         let run = |arguments: &[&str]| {
@@ -6473,11 +6463,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     #[test]
     fn a_staged_rename_needs_both_names_to_read_as_a_rename() {
         let git = real_git();
-        let root = std::env::temp_dir().join(format!(
-            "folio-git-rename-{}-{}",
-            std::process::id(),
-            RECORDED_AT
-        ));
+        let root = bt_testpath::temp_path("folio-git-rename");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch folder can be made");
         let run = |arguments: &[&str]| {
@@ -6550,11 +6536,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     #[test]
     fn a_real_repository_answers_every_way_and_each_matches_the_command_line() {
         let git = real_git();
-        let root = std::env::temp_dir().join(format!(
-            "folio-git-diff-{}-{}",
-            std::process::id(),
-            RECORDED_AT
-        ));
+        let root = bt_testpath::temp_path("folio-git-diff");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch folder can be made");
         let run = |arguments: &[&str]| {

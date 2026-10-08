@@ -636,20 +636,22 @@ fn a_file_reached_two_ways_carries_the_gate_on_the_gated_path_only() {
 }
 
 /// RED — **"how many times does the *product* do this" is one predicate the
-/// crate owns**, and it takes both grains to answer.
+/// crate owns**, and it takes three grains to answer.
 ///
 /// Six copies of this rule were written out by hand in `bt-app`, four of them
 /// word for word, and each of the two shapes was wrong in a way the other was
 /// not: the file-grained one counted an inline `#[cfg(test)] mod` and a
 /// `#[cfg(test)]` function as product, and the item-grained one counted a file
 /// reached by `#[cfg(test)] mod x;` as product. The fixture writes one needle
-/// once in each of those places, plus the case neither grain alone can answer —
-/// bytes standing in no item at all.
+/// once in each of those places, plus the cases neither of those two grains
+/// can answer — bytes standing in no item at all, in a gated file and inside an
+/// inline gate (a `use` in a `#[cfg(test)] mod tests { … }` is the common one).
 ///
 /// MUTATION: drop the file half and the two rows in `crate::gate` come back;
-/// drop the item half and `only_in_tests` and `inside_the_braces` do; read the
-/// item's own file text instead of its identity and `reached_by_a_gate`
-/// does — which is the tree as it read before the commit before this one.
+/// drop the item half and `only_in_tests` and `inside_the_braces` do; drop the
+/// inline-module half and the `const` inside `crate::inline_gate` does; read
+/// the item's own file text instead of its identity and `reached_by_a_gate`
+/// does.
 #[test]
 fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
     let index = declaration_variant_fixture();
@@ -666,7 +668,7 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
         (found.len(), found.in_the_product(&index).len())
     };
 
-    assert_eq!(counted(Scope::Everything), (7, 3));
+    assert_eq!(counted(Scope::Everything), (8, 3));
     assert_eq!(
         counted(Scope::Item(ItemQuery::function("at_the_root"))),
         (1, 1),
@@ -686,6 +688,12 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
          the file's answer"
     );
     assert_eq!(
+        counted(Scope::Module("crate::inline_gate".to_owned())),
+        (2, 0),
+        "and the bytes of that inline module that stand in no item, which only \
+         the module's own gate can answer for"
+    );
+    assert_eq!(
         counted(Scope::Item(ItemQuery::function("reached_by_a_gate"))),
         (1, 0),
         "a file reached by `#[cfg(test)] mod gate;`, which writes no gate of \
@@ -699,9 +707,9 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
     );
     assert_eq!(
         counted(Scope::Module("crate".to_owned())),
-        (4, 2),
-        "lib.rs: the `const` and the free function, and neither of the two \
-         gated items beside them"
+        (5, 2),
+        "lib.rs: the `const` and the free function, and none of the three \
+         gated places beside them"
     );
     assert_eq!(
         counted(Scope::Item(ItemQuery::function("reached_two_ways"))),
@@ -719,7 +727,7 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
             View::Raw,
         ))
         .expect("a spelling of the fixture");
-    assert_eq!(found.outside_items(&index), 2, "the two `const`s");
+    assert_eq!(found.outside_items(&index), 3, "the three `const`s");
     let product = found.in_the_product(&index);
     assert_eq!(product.outside_items(&index), 1, "one of them is product");
     let mut names: Vec<String> = product

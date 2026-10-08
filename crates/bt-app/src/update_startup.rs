@@ -865,8 +865,7 @@ mod tests {
                 if bt_platform::host_platform() == bt_platform::HostPlatform::OtherUnix {
                     return None;
                 }
-                let root = std::env::temp_dir()
-                    .join(format!("bt-update-startup-{tag}-{}", std::process::id()));
+                let root = bt_testpath::temp_path(&format!("bt-update-startup-{tag}"));
                 let _ = std::fs::remove_dir_all(&root);
                 let install = root.join("Folio");
                 let home_root = install.join(crate::update_txn::WINDOWS_HOME);
