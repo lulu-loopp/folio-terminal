@@ -14,7 +14,6 @@ mitex.workspace = true
 mitex-lexer = "=0.2.4"
 mitex-spec-gen.workspace = true
 resvg.workspace = true
-thiserror.workspace = true
 typst-as-lib.workspace = true
 typst-layout.workspace = true
 typst-library.workspace = true

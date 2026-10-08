@@ -27,10 +27,11 @@ use bt_detect::{
 use bt_doc::{
     AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
     DetectionRevision, GridGeneration, GridPoint, HistoryDocument, InlineRunPlacement,
-    InvalidSourceTransition, LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId,
+    InvalidSourceTransition, LayoutKey, LiveRowRemoval, MathMode, SUBPIXELS_PER_PX, ScreenId,
     SourceLifecycle, VersionStamp, ViewGeneration, compare_anchors, content_anchor_between,
+    math::{MathFailureStage, MathRaster, MathRenderError, MathRenderKey},
 };
-use bt_math::{MathEngine, MathFailureStage, MathMode, MathRaster, MathRenderError, MathRenderKey};
+use bt_math::MathEngine;
 use bt_transcript::{
     CaptureResult, CapturedRow, CellFlags, DEFAULT_STAGING_QUOTA, FinalizedLine, FrozenLine,
     GraphemeOffset, SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId,

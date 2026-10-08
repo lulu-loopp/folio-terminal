@@ -4,6 +4,7 @@
 
 mod anchor;
 mod document;
+pub mod math;
 mod versions;
 
 pub use anchor::{
