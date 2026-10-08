@@ -109,6 +109,12 @@
   Folio is running has them.
 - Rarely, Folio's first window waits a moment at launch while it looks up the
   programs installed on the machine.
+- Windows, with PowerShell 7 installed from the Microsoft Store: if Folio is
+  ended from outside or crashes at the moment it starts that PowerShell to
+  learn about it, the PowerShell can stay behind, paused, until it is ended in
+  Task Manager. macOS: after a force quit or a crash, a command Folio had
+  started to learn about the machine finishes on its own instead of being
+  stopped.
 
 <details>
 <summary>Install notes (SmartScreen, Gatekeeper, checksums)</summary>
@@ -117,7 +123,7 @@
 
 | asset | what it is |
 | --- | --- |
-| `folio-0.4.7-windows-x64.zip` | the ten files that belong together, in one folder — `sha256:<ZIP_SHA256>` |
+| `folio-0.4.7-windows-x64.zip` | the ten files that belong together, in one folder — `sha256:a2d48c81b66b474d6e9d4ac010bb48c36712396d140102e579579dca4d609dad` |
 | `folio-windows-x64.zip` | the same archive under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS.txt` | the hash of the archive under each of its two names and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-0.4.7.cdx.json` | the CycloneDX bill of materials for what is in the build |
@@ -156,7 +162,7 @@ sha256sum -c SHA256SUMS.txt
 
 | asset | what it is |
 | --- | --- |
-| `Folio-0.4.7-macos-arm64.dmg` | the application, signed and notarized — `sha256:<DMG_SHA256>` |
+| `Folio-0.4.7-macos-arm64.dmg` | the application, signed and notarized — `sha256:d97b9f103aaa645b44d872505a2eb25f42e060812779b3d1b8bea65d300d56a1` |
 | `Folio-macos-arm64.dmg` | the same image under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS-macos.txt` | the hash of the image under each of its two names, in the format `shasum -c` reads |
 

@@ -887,6 +887,38 @@ use macos_handoff::{
     reveal_in_explorer, reveal_verified, shell_execute,
 };
 
+/// **The shape gate every Unix path handed to a native API keeps**, and it is
+/// three lines because a POSIX path has three ways of not being one.
+///
+/// The Windows twin, [`validate_openable_path`], is long because Win32 has a
+/// path *grammar*: drive letters, UNC shares, verbatim prefixes that turn
+/// normalisation off, a trailing-dot trim that makes two spellings one file.
+/// None of that exists here. A POSIX path is bytes with `/` between them, it is
+/// absolute when the first byte is `/`, and the one byte it may never contain
+/// is NUL — because that is the terminator of the C string the kernel is
+/// handed, so a path carrying one would reach the file system cut short at a
+/// different file.
+///
+/// **Relative is refused rather than resolved**, for `program_in_directories`'
+/// reason: what a relative path resolves against is this process's working
+/// directory, which is whatever folder the shell that started Folio was
+/// standing in — not something a reader pointed at.
+#[cfg(target_os = "macos")]
+pub(crate) fn openable_unix_path(path: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() {
+        return Err("path is empty".to_owned());
+    }
+    if bytes.contains(&0) {
+        return Err("path contains an embedded NUL".to_owned());
+    }
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_owned());
+    }
+    Ok(())
+}
+
 /// **Everything this product gives to the machine, on a Mac** — the macOS twin
 /// of `windows_handoff`, and the ninth unsafe boundary in this crate (M2-2).
 ///
@@ -952,7 +984,6 @@ use macos_handoff::{
 /// translations. See each for what it decided and what it costs.
 #[cfg(target_os = "macos")]
 mod macos_handoff {
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -968,36 +999,7 @@ mod macos_handoff {
     use crate::NativeWindow;
     use crate::macos_files::file_url;
 
-    /// **The shape gate every path this module hands to the workspace keeps**,
-    /// and it is three lines because a POSIX path has three ways of not being
-    /// one.
-    ///
-    /// The Windows twin, [`super::validate_openable_path`], is long because
-    /// Win32 has a path *grammar*: drive letters, UNC shares, verbatim prefixes
-    /// that turn normalisation off, a trailing-dot trim that makes two
-    /// spellings one file. None of that exists here. A POSIX path is bytes with
-    /// `/` between them, it is absolute when the first byte is `/`, and the one
-    /// byte it may never contain is NUL — because that is the terminator of the
-    /// C string the kernel is handed, so a path carrying one would reach the
-    /// file system cut short at a different file.
-    ///
-    /// **Relative is refused rather than resolved**, for `program_in_directories`'
-    /// reason one floor down: what a relative path resolves against is this
-    /// process's working directory, which is whatever folder the shell that
-    /// started Folio was standing in — not something a reader pointed at.
-    fn openable_unix_path(path: &Path) -> Result<(), String> {
-        let bytes = path.as_os_str().as_bytes();
-        if bytes.is_empty() {
-            return Err("path is empty".to_owned());
-        }
-        if bytes.contains(&0) {
-            return Err("path contains an embedded NUL".to_owned());
-        }
-        if !path.is_absolute() {
-            return Err("path must be absolute".to_owned());
-        }
-        Ok(())
-    }
+    use super::openable_unix_path;
 
     /// The narrower gate the image lane keeps: absolute, and a picture.
     ///

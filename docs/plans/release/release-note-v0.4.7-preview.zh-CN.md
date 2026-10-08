@@ -66,6 +66,7 @@
 - 如果开启了新键盘模式的程序——例如 Claude Code、Codex 或 neovim——被杀死或崩溃，在该窗格中输入的按键可能以 `[99;5u` 等文本形式出现；窗格菜单 ▸ 重置终端模式可恢复正常。
 - Windows 上，启动时恢复的标签页若其配置文件在 PowerShell 中运行启动命令（如 Developer PowerShell 或 conda 环境），启动时没有命令标记和当前目录；Folio 运行后新开的该配置文件标签页则有。
 - 极少数情况下，Folio 的首个窗口在启动时会短暂等待，因为正在查找本机已安装的程序。
+- Windows，从微软商店安装了 PowerShell 7 时：如果 Folio 恰在启动该 PowerShell 以了解其信息时被外部结束或崩溃，该 PowerShell 可能暂停并一直留在后台，直到在任务管理器中结束它。macOS：Folio 被强制退出或崩溃后，它为了解本机环境而启动的命令会自行运行结束，而不是被停止。
 
 <details>
 <summary>安装说明（SmartScreen、Gatekeeper、校验和）</summary>
@@ -74,7 +75,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `folio-0.4.7-windows-x64.zip` | 十个归属文件，打包在一个文件夹中 — `sha256:<ZIP_SHA256>` |
+| `folio-0.4.7-windows-x64.zip` | 十个归属文件，打包在一个文件夹中 — `sha256:a2d48c81b66b474d6e9d4ac010bb48c36712396d140102e579579dca4d609dad` |
 | `folio-windows-x64.zip` | 同一份压缩包，名称在各版本间固定不变 — 同一个 `sha256` |
 | `SHA256SUMS.txt` | 压缩包两个名称和物料清单的哈希，格式为 `sha256sum -c` 可读 |
 | `folio-0.4.7.cdx.json` | CycloneDX 物料清单 |
@@ -106,7 +107,7 @@ sha256sum -c SHA256SUMS.txt
 
 | 文件 | 说明 |
 | --- | --- |
-| `Folio-0.4.7-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:<DMG_SHA256>` |
+| `Folio-0.4.7-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:d97b9f103aaa645b44d872505a2eb25f42e060812779b3d1b8bea65d300d56a1` |
 | `Folio-macos-arm64.dmg` | 同一个磁盘映像，名称在各版本间固定不变 — 同一个 `sha256` |
 | `SHA256SUMS-macos.txt` | 磁盘映像两个名称的哈希，格式为 `shasum -c` 可读 |
 

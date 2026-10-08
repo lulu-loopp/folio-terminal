@@ -42,5 +42,6 @@ cask "folio" do
       },
       trash:  [
         "~/Library/Application Support/Folio",
+        "~/Library/Application Support/Folio-uninstall",
       ]
 end

@@ -260,6 +260,74 @@ function Compare-ReleaseMembers {
     return $problems.ToArray()
 }
 
+function Test-BatchMember {
+    <#
+        **What `cmd.exe` needs of a batch file the archive carries** (0.4.7
+        uninstall fix), for both scripts. `$Bytes` are member `$Name`'s; one
+        line per refusal is returned, naming the member, and nothing for a name
+        that does not end in `.cmd` or `.bat`.
+
+        `cmd.exe` reads a batch file a line at a time and finds its place again
+        by offset, which holds for CRLF lines: in an LF-only file holding UTF-8
+        text it lost its place on the 0.4.7 clean VM and ran fragments of its
+        lines as commands. It decodes each line in the console's code page as
+        it reads it, so a byte past ASCII reads as the UTF-8 it is only after a
+        line that sets code page 65001; a byte-order mark is three bytes of the
+        first command. And the first line begins with `@`, so that what the
+        file runs first is not echoed into the console before `@echo off` (or
+        the one command) has said not to.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [byte[]] $Bytes
+    )
+    if ($Name -notmatch '\.(cmd|bat)$') { return @() }
+    $problems = New-Object System.Collections.Generic.List[string]
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        $problems.Add("batch     : $Name starts with a byte-order mark, which cmd.exe reads as part of its first command")
+    }
+    elseif ($Bytes.Length -eq 0 -or $Bytes[0] -ne 0x40) {
+        $problems.Add("batch     : $Name does not begin with @")
+    }
+    $line = 1
+    $start = 0
+    $utf8From = -1
+    $lines = $true
+    for ($at = 0; $at -lt $Bytes.Length; $at++) {
+        if ($Bytes[$at] -eq 0x0D) {
+            if ($at + 1 -ge $Bytes.Length -or $Bytes[$at + 1] -ne 0x0A) {
+                $problems.Add("batch     : $Name line $line holds a CR that LF does not follow; cmd.exe reads batch lines that end in CRLF")
+                $lines = $false
+                break
+            }
+            continue
+        }
+        if ($Bytes[$at] -ne 0x0A) { continue }
+        if ($at -eq 0 -or $Bytes[$at - 1] -ne 0x0D) {
+            $problems.Add("batch     : $Name line $line ends in LF alone; cmd.exe reads batch lines that end in CRLF")
+            $lines = $false
+            break
+        }
+        $text = [Text.Encoding]::ASCII.GetString($Bytes, $start, $at - 1 - $start)
+        if ($utf8From -lt 0 -and $text -match '^\s*chcp\s+65001(\s|>|$)') { $utf8From = $at + 1 }
+        $line++
+        $start = $at + 1
+    }
+    if ($Bytes.Length -gt 0 -and $Bytes[$Bytes.Length - 1] -ne 0x0A) {
+        $problems.Add("batch     : $Name does not end its last line with CRLF")
+    }
+    # Where code page 65001 begins is a question about lines, asked only of a
+    # file whose lines cmd.exe can find.
+    for ($at = 0; $lines -and $at -lt $Bytes.Length; $at++) {
+        if ($Bytes[$at] -lt 0x80) { continue }
+        if ($utf8From -lt 0 -or $at -lt $utf8From) {
+            $problems.Add("batch     : $Name holds a byte past ASCII before a line that sets code page 65001")
+        }
+        break
+    }
+    return $problems.ToArray()
+}
+
 function Get-StreamSha256 {
     param([Parameter(Mandatory)] [IO.Stream] $Stream)
     $hasher = [Security.Cryptography.SHA256]::Create()

@@ -220,6 +220,64 @@ jobs:
           }
           exit 0
 
+      # The crate dependency direction (docs/ARCHITECTURE.md section 3). Three planted
+      # states, each of which must be refused with a message naming the planted crate
+      # and the reason: an upward edge in a copy of the real metadata, an exemption
+      # whose edge the copy no longer has, and a first-party crate with no layer row.
+      # The scratch-repository suite plants an added exemption and requires the
+      # merge-base comparison to refuse it.
+      - name: the crate-edge gate can actually fail
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $real = (cargo metadata --format-version 1 --no-deps --locked --offline) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed" }
+          $fixture = Join-Path $env:RUNNER_TEMP "crate-edges-planted.json"
+          function Assert-Refused([hashtable]$Arguments, [string[]]$Needles, [string]$Case) {
+            $failed = $false
+            $message = ""
+            try { & ./scripts/ci/check-crate-edges.ps1 @Arguments *> $null } catch {
+              $failed = $true
+              $message = $_.Exception.Message
+            }
+            if (-not $failed) { throw "the crate-edge gate accepted $Case" }
+            foreach ($needle in $Needles) {
+              if ($message -notmatch [regex]::Escape($needle)) {
+                throw "the crate-edge gate refused $Case for the wrong reason: $message"
+              }
+            }
+          }
+
+          $meta = $real | ConvertFrom-Json
+          $app = $meta.packages | Where-Object { $_.name -eq "bt-app" }
+          $unicode = $meta.packages | Where-Object { $_.name -eq "bt-unicode" }
+          $unicode.dependencies = @($unicode.dependencies) + [pscustomobject]@{
+            name = "bt-app"; source = $null; req = "*"; kind = $null; rename = $null
+            optional = $false; uses_default_features = $true; features = @(); target = $null
+            path = (Split-Path -Parent $app.manifest_path)
+          }
+          [IO.File]::WriteAllText($fixture, ($meta | ConvertTo-Json -Depth 64))
+          Assert-Refused @{ Metadata = $fixture } @("bt-unicode -> bt-app (normal)", "must go to a lower layer") "a planted upward edge"
+
+          $meta = $real | ConvertFrom-Json
+          $term = $meta.packages | Where-Object { $_.name -eq "bt-term" }
+          $term.dependencies = @($term.dependencies | Where-Object { $_.name -ne "bt-math" })
+          [IO.File]::WriteAllText($fixture, ($meta | ConvertTo-Json -Depth 64))
+          Assert-Refused @{ Metadata = $fixture } @("bt-term -> bt-math", "no longer exists") "an exemption whose edge is gone"
+
+          $layers = "scripts/ci/crate-layers.tsv"
+          $original = [IO.File]::ReadAllBytes($layers)
+          try {
+            $kept = [IO.File]::ReadAllLines($layers) | Where-Object { $_ -notmatch "^bt-workbench`t" }
+            [IO.File]::WriteAllLines($layers, [string[]]$kept)
+            Assert-Refused @{} @("bt-workbench", "missing from") "a crate with no layer"
+          } finally {
+            [IO.File]::WriteAllBytes($layers, $original)
+          }
+
+          & ./scripts/ci/check-crate-edges-tests.ps1
+          exit 0
+
       # The portable core is crates listed below, which must go on compiling on the two
       # platforms this workflow has one job each on.
       # `scripts/check-portable-core.ps1` is the cheap half of that guard and
@@ -467,6 +525,14 @@ jobs:
         run: |
           ./scripts/ci/check-no-nul.ps1
           ./scripts/ci/check-conflict-markers.ps1
+
+      # docs/ARCHITECTURE.md section 3's direction, read from `cargo metadata`:
+      # every normal and build edge between first-party crates goes down a layer
+      # of `scripts/ci/crate-layers.tsv`, or is a row of the exemption list,
+      # which only shrinks against the merge base.
+      - name: crate dependencies go down the layers
+        shell: pwsh
+        run: ./scripts/ci/check-crate-edges.ps1
 
       # Each vendored crate must stay a workspace member: its own upstream suite
       # is our regression line against our patches breaking its semantics, and it
@@ -898,12 +964,14 @@ jobs:
       - name: check the application, every target of it
         run: cargo check --locked --all-targets -p bt-app
 
-      # The application suite still contains Windows-fact fixtures, but these updater and tab-focus
-      # regressions must execute on macOS rather than merely compile. Each
+      # The application suite still contains Windows-fact fixtures, but these updater, uninstall-door,
+      # and tab-focus regressions must execute on macOS rather than merely compile. Each
       # filter is required to select at least one test so a renamed module cannot turn this step
       # green by running nothing. E-12 is the one test that deliberately launches `/usr/bin/open`;
       # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
-      - name: test the macOS updater and tab-focus regressions
+      # The uninstall door runs here too: its bundle, LaunchAgents and Application Support rows are
+      # macOS product code, and its per-platform labels were red here with nothing running them.
+      - name: test the macOS updater, uninstall, and tab-focus regressions
         run: |
           set -euo pipefail
           skip=the_trial_is_launched_through_launch_services_and_found_by_its_image
@@ -930,6 +998,7 @@ jobs:
           run_app_filter update_trial
           run_app_filter update_startup
           run_app_filter runtime::web::transfer_focus_tests::
+          run_app_filter uninstall::
           log="$RUNNER_TEMP/macos-updater-install-flip.log"
           cargo test --locked -p bt-platform install_flip | tee "$log"
           grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {

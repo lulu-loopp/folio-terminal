@@ -641,13 +641,22 @@ pub(crate) enum VersionLink {
 }
 
 impl VersionLink {
+    /// The words the link is drawn as: `What's new` wears the `↗` of a page
+    /// that opens outside the window (once, whichever column already carries
+    /// it); `Details` reopens a card in this window and wears none.
     #[must_use]
-    pub(crate) fn text(&self) -> &'static str {
+    pub(crate) fn label(&self) -> String {
         match self {
-            Self::WhatsNew { .. } => Text::VersionWhatsNew,
-            Self::Details => Text::VersionDetails,
+            Self::WhatsNew { .. } => {
+                let text = Text::VersionWhatsNew.text();
+                if text.ends_with('↗') {
+                    text.to_owned()
+                } else {
+                    format!("{text} ↗")
+                }
+            }
+            Self::Details => Text::VersionDetails.text().to_owned(),
         }
-        .text()
     }
 }
 

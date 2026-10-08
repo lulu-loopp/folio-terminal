@@ -814,6 +814,17 @@ pub struct DirWatch {
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl DirWatch {
+    /// Whether a successfully created subscription remains armed.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        match self._never {}
+    }
+
+    /// Take a subscription failure, if the platform reports failures asynchronously.
+    pub fn take_failure(&mut self) -> Option<std::io::Error> {
+        match self._never {}
+    }
+
     /// The tree contract. Refused; M2-1.
     pub fn start(path: &Path, wake: impl Fn() + Send + 'static) -> Result<Self, std::io::Error> {
         let _ = (path, wake);
