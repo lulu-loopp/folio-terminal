@@ -521,7 +521,6 @@ mod arm {
     use super::{Answer, OUTPUT_BOUND, Refusal, Stage, Why};
     use std::io::{self, Read};
     use std::os::fd::AsRawFd;
-    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     /// How often a waiting call looks at its child.
@@ -573,12 +572,9 @@ mod arm {
     ) -> Result<Answer, Refusal> {
         let refuse = |why| Refusal::at(stage, why);
         let mut command = crate::quiet_command(program);
-        command
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = crate::spawn_probe(&mut command).map_err(|_| refuse(Why::DidNotStart))?;
+        command.args(arguments);
+        let mut child = crate::spawn_probe(&mut command, crate::ProbeStdio::ANSWER)
+            .map_err(|_| refuse(Why::DidNotStart))?;
         let (mut stdout, mut stderr) = (
             child.take_stdout().expect("stdout was piped"),
             child.take_stderr().expect("stderr was piped"),

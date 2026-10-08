@@ -195,6 +195,7 @@ fn run_handoff_lane(
     mut execute: impl FnMut(&WorkerCtx, NativeWindow, &Handoff) -> Result<(), String>,
     wake: impl Fn(),
 ) {
+    let _ = worker;
     while let Ok(Request {
         id,
         window,
