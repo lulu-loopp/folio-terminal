@@ -72612,11 +72612,91 @@ mod app_web_tests;
 #[cfg(test)]
 mod app_windows_tests;
 #[cfg(test)]
+mod attention_map_app_tests;
+#[cfg(test)]
+mod attention_wire_app_tests;
+#[cfg(test)]
+mod card_trace_app_tests;
+#[cfg(test)]
+mod cli_app_tests;
+#[cfg(test)]
+mod cmdrail_app_tests;
+#[cfg(test)]
+mod file_peek_app_tests;
+#[cfg(test)]
+mod files_app_tests;
+#[cfg(test)]
+mod float_app_tests;
+#[cfg(test)]
+mod focus_thumb_app_tests;
+#[cfg(test)]
+mod foreground_program_app_tests;
+#[cfg(test)]
+mod formula_tools_app_tests;
+#[cfg(test)]
+mod git_app_tests;
+#[cfg(test)]
+mod input_app_tests;
+#[cfg(test)]
+mod install_channel_app_tests;
+#[cfg(test)]
+mod launch_wire_app_tests;
+#[cfg(test)]
+mod marks_app_tests;
+#[cfg(test)]
+mod menubar_app_tests;
+#[cfg(test)]
+mod notice_app_tests;
+#[cfg(test)]
+mod owner_door_app_tests;
+#[cfg(test)]
+mod pace_app_tests;
+#[cfg(test)]
+mod palette_app_tests;
+#[cfg(test)]
+mod persist_app_tests;
+#[cfg(test)]
 mod preview_app_tests;
+#[cfg(test)]
+mod preview_edit_app_tests;
+#[cfg(test)]
+mod preview_live_app_tests;
+#[cfg(test)]
+mod preview_provenance_app_tests;
+#[cfg(test)]
+mod preview_select_app_tests;
+#[cfg(test)]
+mod preview_text_app_tests;
+#[cfg(test)]
+mod preview_trace_app_tests;
+#[cfg(test)]
+mod preview_viewport_app_tests;
+#[cfg(test)]
+mod preview_wrap_app_tests;
 #[cfg(test)]
 mod profiles_app_tests;
 #[cfg(test)]
+mod restore_app_tests;
+#[cfg(test)]
+mod schemes_app_tests;
+#[cfg(test)]
+mod search_app_tests;
+#[cfg(test)]
 mod seats_app_tests;
+#[cfg(test)]
+mod seed_app_tests;
+#[cfg(test)]
+mod session_end_app_tests;
+#[cfg(test)]
+mod settings_app_tests;
+#[cfg(test)]
+mod shell_integration_app_tests;
+#[cfg(test)]
+mod shell_literal_app_tests;
+#[cfg(test)]
+mod shortcuts_app_tests;
+#[cfg(test)]
+mod table_block_app_tests;
 #[cfg(test)]
 mod test_support;
 /// **The largest of this file's test modules, in a file of its own**
@@ -72636,6 +72716,32 @@ mod test_support;
 mod tests;
 #[cfg(test)]
 mod text_size_tests;
+#[cfg(test)]
+mod trace_app_tests;
+#[cfg(test)]
+mod update_apply_app_tests;
+#[cfg(test)]
+mod update_archive_app_tests;
+#[cfg(test)]
+mod update_card_app_tests;
+#[cfg(test)]
+mod update_job_app_tests;
+#[cfg(test)]
+mod update_prepare_macos_app_tests;
+#[cfg(test)]
+mod update_prepare_windows_app_tests;
+#[cfg(test)]
+mod update_startup_app_tests;
+#[cfg(test)]
+mod update_txn_app_tests;
+#[cfg(test)]
+mod video_seat_app_tests;
+#[cfg(test)]
+mod web_trace_app_tests;
+#[cfg(test)]
+mod webhost_app_tests;
+#[cfg(test)]
+mod webnav_app_tests;
 
 /// **The files in which `bt-app` is allowed to know what platform it is on**
 /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.3, ticket M1-10).
