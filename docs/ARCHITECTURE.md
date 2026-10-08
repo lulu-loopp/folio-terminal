@@ -279,25 +279,25 @@ it closes.
 
 ### 3.1 The graph
 
-Seventeen first-party crates under `crates/`, plus `vendor/alacritty_terminal`,
-plus `bt-testpath` (2026-10-08), which no shipped build contains: it is every
-tested crate's dev-dependency and the optional dependency of the two test-support
-features, `bt-pty`'s `test-shell` and `bt-platform`'s `trust-harness`, and it
-depends on nothing; plus `bt-effects` (2026-10-08, CC-3), layer 0. Normal and
+Twenty first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
+Two of the twenty arrived on 2026-10-08: `bt-testpath`, which no shipped build
+contains: it is every tested crate's dev-dependency and the optional dependency
+of the two test-support features, `bt-pty`'s `test-shell` and `bt-platform`'s
+`trust-harness`, and it depends on nothing; and `bt-effects` (CC-3), layer 0. Normal and
 target-specific edges as the manifests declare them (2026-09-23; `bt-workbench`
 2026-09-25; `bt-effects` 2026-10-08):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
 bt-effects      ← bt-platform, bt-render, bt-math, bt-term (itself: std and
-                  web-time only; bt-app and bt-persist name it through
-                  bt-platform's re-exports)
+                  web-time only; bt-app, bt-persist and bt-lint-probe name
+                  it through bt-platform's re-exports)
 bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty,
                   bt-platform
 bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
 bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
-bt-platform     ← bt-persist, bt-term, bt-app
+bt-platform     ← bt-persist, bt-term, bt-app, bt-lint-probe
 bt-viewport     ← bt-render, bt-term
 bt-detect       ← bt-term
 bt-math         ← bt-term
