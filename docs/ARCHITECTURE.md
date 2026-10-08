@@ -321,7 +321,12 @@ own, outside the preparation and outside the relocation commit. **Done
 2026-09-21** (`21cf1ef8`): the probe lives in `bt-corpus`, and `bt-pty`'s
 manifest names `bt-term` only under `[dev-dependencies]`.
 
-**`bt-term → bt-platform` — right direction, broader than its manifest says.**
+**`bt-term → bt-platform` — wrong layer, recorded, enforced by the gate.**
+`bt-term` must build without the platform layer (the owner's ruling of
+2026-09-21), so the edge is a layer violation: `bt-term` and `bt-platform` share
+a layer of `scripts/ci/crate-layers.tsv`, and the edge passes only as its D-14
+row in `scripts/ci/crate-edge-exemptions.tsv` (§3.3), which J2's boundary crate
+deletes. It is also broader than its manifest says.
 The manifest comment calls it one call; there are three product import surfaces:
 `inline_image::resample_pool` sets a thread priority, `session::verify_path`
 calls `handoff::resolved_for_a_door`, and
@@ -384,10 +389,11 @@ those manifests actually practise, restated here from what they say:
   crate missing from that table fails. The exemptions live in
   `scripts/ci/crate-edge-exemptions.tsv`, one row per edge with its
   `docs/plans/structural-debt.md` row; the list only shrinks against the merge
-  base, and a row whose edge is gone or now goes down fails. Its one row is
-  `bt-term → bt-math` (D-15). `bt-term → bt-platform` goes down (§3.2: the right
-  direction), and dev-dependencies are not layer edges (`bt-pty` naming
-  `bt-term` only as one is §3.2's repair).
+  base, and a row whose edge is gone or now goes down fails. Its two rows are
+  `bt-term → bt-platform` (D-14) and `bt-term → bt-math` (D-15).
+  Dev-dependencies are not layer edges: Cargo allows them in both directions,
+  and `bt-term`/`bt-pty` and `bt-platform`/`bt-pty` each name the other as one
+  (`bt-pty` naming `bt-term` only as one is §3.2's repair of D-13).
 - **`bt-workbench`'s entry, for that guard** (D-27 lands it; census-3 wrote it
   here because the guard does not exist yet —
   `docs/plans/design/ownership-census-2026-09-25.md` §5.4):

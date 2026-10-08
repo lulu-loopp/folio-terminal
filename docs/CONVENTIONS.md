@@ -136,6 +136,10 @@ dependency between first-party crates (the workspace members under `crates/`)
 to go from a higher layer of `scripts/ci/crate-layers.tsv` to a lower one.
 A same-layer or upward edge needs a row in
 `scripts/ci/crate-edge-exemptions.tsv` (from, to, kind, ledger row, reason).
+Dev-dependencies are not layer edges and are listed, not judged: they are
+not in the shipped graph, and Cargo allows them in both directions —
+`bt-term` and `bt-pty` each name the other as one, and so do `bt-platform`
+and `bt-pty`.
 It also fails on a first-party crate with no layer row, a layer row naming no
 crate, an exemption whose edge is gone or now goes down, an exemption that is
 not at the merge base, and zero crates read. A new crate gets its layer row in

@@ -11,10 +11,13 @@
 #
 # THE RULE. Every normal and build dependency between two first-party crates goes from a higher
 # layer of `crate-layers.tsv` to a lower one. A same-layer or upward edge fails unless
-# `crate-edge-exemptions.tsv` names it (from, to, kind). Dev-dependencies are listed and not
-# judged: they are not in the shipped graph, Cargo allows them in both directions (`bt-term` and
-# `bt-pty` each name the other as one, and so do `bt-platform` and `bt-pty`), and section 3.2 rules
-# that `bt-pty` naming `bt-term` only as a dev-dependency is the repair of that edge.
+# `crate-edge-exemptions.tsv` names it (from, to, kind).
+#
+# DEV-DEPENDENCIES ARE NOT LAYER EDGES. They are listed and not judged: they are not in the shipped
+# graph, and Cargo allows them in both directions. Two pairs do exactly that: `bt-term` and `bt-pty`
+# each name the other as a dev-dependency, and so do `bt-platform` and `bt-pty` (the latter under
+# `cfg(unix)`). Section 3.2 rules that `bt-pty` naming `bt-term` only as a dev-dependency is the
+# repair of that edge (D-13).
 #
 # WHAT ELSE FAILS. A first-party crate with no layer row (a new crate is placed on purpose) and a
 # layer row naming no first-party crate. An exemption whose edge no longer exists or now goes down
