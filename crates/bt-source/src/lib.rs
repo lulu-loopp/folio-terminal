@@ -97,7 +97,7 @@
 //!   an identity that carried only the second called every item of a test-only
 //!   file unconditional.
 //! * [`Occurrence::in_the_product`] and [`Found::in_the_product`] — **what a
-//!   build of the shipped program contains**, at the two grains it takes, in
+//!   build of the shipped program contains**, at the three grains it takes, in
 //!   place of the six copies of that rule `bt-app` had written out.
 //! * [`Scope::Impls`] — **every `impl` block of one type** ([`ImplRecord`]),
 //!   which is the scope a prohibition about a type asks for and which had been

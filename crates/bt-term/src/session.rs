@@ -10,8 +10,10 @@ use std::{
     ops::{Bound, RangeInclusive},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
+
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,

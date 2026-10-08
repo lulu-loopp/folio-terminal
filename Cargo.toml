@@ -245,6 +245,14 @@ unicode-width = "0.2"
 # (`vendor/vte/CHANGES-FOLIO.md`), and a 0.15.x out-resolving the copy would
 # undo them.
 vte = { version = "=0.15.0", default-features = false, features = ["std"] }
+# **The clock a browser build can read.** `std::time::Instant::now()` and
+# `SystemTime::now()` panic on `wasm32-unknown-unknown`; `web_time`'s read
+# `performance.now()` and `Date.now()` there, and on every other target its
+# `Instant` and `SystemTime` are re-exports of `std::time`'s — the same types, so a
+# native build compiles exactly what it did. Every crate a browser build reads
+# names its clock through it (`crates/bt-source/tests/clock_guard.rs` holds the
+# set). Already in the lock file through `winit`, at this version.
+web-time = "=1.1.0"
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 

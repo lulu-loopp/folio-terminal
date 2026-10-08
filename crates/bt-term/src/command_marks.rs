@@ -25,10 +25,9 @@
 //! else, so its records carry a prompt and an end and no exit code, no command text and no
 //! duration — see [`CommandMarkLedger::note_prompt`].
 
-use std::{
-    collections::BTreeSet,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeSet, time::Duration};
+
+use web_time::Instant;
 
 use bt_doc::AnchorId;
 

@@ -42,7 +42,9 @@ License, at the licensee's option.
 
 `vendor/vte/` is the crates.io 0.15.0 archive with changes by the Folio
 contributors: three dispatch arms of the kitty keyboard protocol and xterm's
-modifyOtherKeys, and the parameter bookkeeping one of them needs. Every file that
+modifyOtherKeys, the parameter bookkeeping one of them needs, and the clock the
+synchronized-update timeout reads (`web-time`, which is `std::time` on every
+target but `wasm32-unknown-unknown`). Every file that
 differs carries a notice at the top of the file, as section 4(b) of the Apache
 License requires, and `vendor/vte/CHANGES-FOLIO.md` indexes them.
 

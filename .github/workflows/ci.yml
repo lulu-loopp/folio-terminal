@@ -296,6 +296,49 @@ jobs:
           }
           exit 0
 
+      # G3's three canaries. `clock-guard` reads source text, so each plant is a
+      # line appended to a file and nothing is compiled but bt-source's test. A
+      # qualified `std::time::Instant::now()` and a nested `use std::{time::{…}}`
+      # in a crate of the source set must each be refused by file; the same clock
+      # in bt-platform's `http` module, which is out of scope by name, must not be
+      # - the scope is the stated set and nothing outside it joins silently.
+      - name: the clock guard can actually fail, and its scope is the stated one
+        shell: pwsh
+        run: |
+          $plants = @(
+            @{ file = "crates/bt-doc/src/lib.rs"; line = "pub fn _clock_guard_probe() -> u128 { std::time::Instant::now().elapsed().as_nanos() }"; refused = $true },
+            @{ file = "crates/bt-layout/src/lib.rs"; line = "#[allow(unused_imports)] use std::{time::{SystemTime}};"; refused = $true },
+            @{ file = "crates/bt-platform/src/http.rs"; line = "pub fn _clock_guard_probe() -> u128 { std::time::Instant::now().elapsed().as_nanos() }"; refused = $false }
+          )
+          foreach ($plant in $plants) {
+            $original = [IO.File]::ReadAllText($plant.file)
+            try {
+              [IO.File]::AppendAllText($plant.file, "`n$($plant.line)`n")
+              $failed = $false
+              $message = ""
+              try {
+                & ./scripts/ci/check-clock-guard.ps1 *> $null
+              } catch {
+                $failed = $true
+                $message = $_.Exception.Message
+              }
+              if ($plant.refused) {
+                if (-not $failed) { throw "the clock guard accepted '$($plant.line)' in $($plant.file)" }
+                if ($message -notmatch [regex]::Escape($plant.file)) {
+                  throw "the clock guard failed for the wrong reason on $($plant.file): $message"
+                }
+                Write-Host "refused as required: $message"
+              } elseif ($failed) {
+                throw "the clock guard reported $($plant.file), which is out of its scope by name: $message"
+              } else {
+                Write-Host "not reported, as required: $($plant.file) is out of scope"
+              }
+            } finally {
+              [IO.File]::WriteAllText($plant.file, $original)
+            }
+          }
+          exit 0
+
       # **The split plan's budgets, watched where a red is information.**
       #
       # `bt-source`'s measurement runs in every ordinary `cargo test` and prints
@@ -610,6 +653,14 @@ jobs:
       - name: the migration-debt list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
+
+      # Gate G3: the crates a browser build reads name no clock of the standard
+      # library (`scripts/ci/check-clock-guard.ps1` states the source set and what
+      # is out of it by name). The workspace test above ran the same reading;
+      # this is its name, its counts and its refusals on their own line.
+      - name: clock-guard
+        shell: pwsh
+        run: ./scripts/ci/check-clock-guard.ps1
 
       - name: the timing-bound test list only shrinks
         shell: pwsh
