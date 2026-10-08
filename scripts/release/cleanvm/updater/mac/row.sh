@@ -92,7 +92,7 @@ case "$ROW" in
   M11-committed)  PLAN="$P_UPD";                  COND="phase:Committed"; NAMED="P";   THEN="plain quit plain" ;;
   R-W15)          PLAN="offer update ready rescue-000 restart o-gone rescue-back";     THEN="settle" ;;
   R-D5)           PLAN="offer update ready rescue-000 exe-000 restart alert";         THEN="exe-back rescue-back" ;;
-  D14)            PLAN="$P_UPD"; WOPTS="--lock-home-at-new";                          THEN="settle-door home-back quit plain settle" ;;
+  D14)            PLAN="$P_UPD"; WOPTS="--lock-home-at-new";                          THEN="settle-door home-back plain settle plain settle" ;;
   *) echo "unknown row '$ROW'"; sed -n 5,6p "$0"; exit 2 ;;
 esac
 

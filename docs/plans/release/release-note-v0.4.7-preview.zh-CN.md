@@ -66,7 +66,7 @@
 - 如果开启了新键盘模式的程序——例如 Claude Code、Codex 或 neovim——被杀死或崩溃，在该窗格中输入的按键可能以 `[99;5u` 等文本形式出现；窗格菜单 ▸ 重置终端模式可恢复正常。
 - Windows 上，启动时恢复的标签页若其配置文件在 PowerShell 中运行启动命令（如 Developer PowerShell 或 conda 环境），启动时没有命令标记和当前目录；Folio 运行后新开的该配置文件标签页则有。
 - 极少数情况下，Folio 的首个窗口在启动时会短暂等待，因为正在查找本机已安装的程序。
-- Windows：如果 Folio 正在启动某个为了解本机环境而运行的命令时被外部结束（任务管理器、`Stop-Process`）或崩溃，该命令可能暂停并一直留在后台，直到在任务管理器中结束它。macOS：Folio 被强制退出或崩溃后，此类命令会自行运行结束，而不是被停止。
+- Windows，从微软商店安装了 PowerShell 7 时：如果 Folio 恰在启动该 PowerShell 以了解其信息时被外部结束或崩溃，该 PowerShell 可能暂停并一直留在后台，直到在任务管理器中结束它。macOS：Folio 被强制退出或崩溃后，它为了解本机环境而启动的命令会自行运行结束，而不是被停止。
 
 <details>
 <summary>安装说明（SmartScreen、Gatekeeper、校验和）</summary>

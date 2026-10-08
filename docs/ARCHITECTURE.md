@@ -188,12 +188,12 @@ to the running process's update job where the launch lands (`Job::told_by_a_laun
 | the installed `folio.exe` with the arguments an ordinary start handed over (after a rollback on macOS, `--update-failed <journal>` first; at login, that word alone once a rollback finished, U-29; since U-29b on macOS exactly one start after any recovery — the new build before `Committed` only after `--update-trial <txn> <nonce>`, the word whenever the header is still `destructive`) | `update_recover::run`, through `quiet_command`, when `--update-recover --then-launch` meets a transaction an ordinary start would not hand back (0.4.6 U-22) | detached, never waited on; never while the class is `destructive`, so it cannot hand itself back. Since U-23 also the Windows applier's start of the old build again, with no argument, after a revert (`update_apply_windows::apply`); since U-24 the Windows applier's and recovery's start of the old build after a rollback, with `--update-failed <journal>` first (and the handed arguments, for a person's start), by `update_apply::Opens` |
 | the rescue copy, `<H>\<txn>\rescue\folio.exe --update-failed <journal>` and the arguments an ordinary start handed over — the old build, as an ordinary Folio | `update_recover::run_windows` and `update_apply_windows::apply`, through `quiet_command` — since U-24 only the fallback: the journal still `destructive` and the install folder holding neither whole set (a rollback that could not finish, or a layout that cannot be read); U-23 opened it for every still-`destructive` journal (0.4.6 U-23, U-24) | Windows; detached, never waited on; its own home (inside `rescue\`) holds no journal, so it cannot hand itself back; while it runs, `H\<txn>` cannot be deleted, which the next ordinary start retries |
 | the trial, `<install>\folio.exe --update-trial <txn> <nonce>` | the Windows applier (`update_apply_windows`'s `Machine::launch_trial`, through `quiet_command` by absolute path, 0.4.6 U-23), once per transaction after the moves; since U-24 also either Windows holder over a `Stuck` whose new set is installed (`--update-trial <txn> <nonce> --update-failed <journal>` and the handed command line, recorded as `RetrialBegan`) | Windows; detached, never waited on: its pid comes from the child and its start time from `GetProcessTimes`, both recorded in `Trial` (or `Stuck.trial`); a rollback stops it only through `install_flip::ask` |
-| the uninstaller, `folio.exe --uninstall [--remove-data] --after-pid <pid>` (macOS: the bundle's executable) | a Folio's very last act after *Uninstall* on the Settings card, `uninstall::leave_armed`, through `quiet_breakaway_command` by `current_exe` (0.4.7 T-UNINSTALL-UX) | detached and not reaped; it waits for the exact pid/start identity it is given (60 s) before cleanup. On Windows it asks for `CREATE_BREAKAWAY_FROM_JOB`; if the containing job disallows that, creation fails, the leaving Folio shows `standalone_alert`, and no uninstall is claimed |
-| the remover — a native copy of the running executable checked as a regular, single-link file with the expected size and SHA-256, in a random account-owned directory below `%LOCALAPPDATA%\Folio\` on Windows or a mode-0700 directory below `~/Library/Application Support/Folio/` on macOS, run through the internal, undocumented `--uninstall-remove` door | `bt_platform::deferred_removal::schedule`, from `uninstall::remove_the_program` (0.4.7 T-UNINSTALL-UX rounds 2 and 6) | the scheduler waits only for a readiness-pipe acknowledgement and then returns “scheduled”; the remover outlives the door, waits at most five minutes for every `(pid,start time)` in the explicit list plus every process whose image identity is the installed `folio.exe`, retries held files with bounded backoff, and checks each named file's single-link size and SHA-256 by path immediately before each deletion attempt. Final accounting uses a fallible existence read: only confirmed absence is success, and the last error for every uninspectable remaining path is written to `result.txt` and shown through bounded `standalone_alert`. The path-based check/delete instant is not defended against a deliberately racing same-account process. It removes the install folder only if empty and its copied executable last. On Windows it also requests breakaway; a job that refuses it makes scheduling fail synchronously. If the remover is ended or power is lost, deletion can be partial and no final reporter survives |
-| `powershell.exe` — the PSReadLine probe | `psreadline::run_probe`, through `probe_output` | once per process; blocks its worker with no timeout; the contained tree ends on completion, drop, panic or Folio exit |
+| the uninstaller, `folio.exe --uninstall [--remove-data] --after-pid <pid>` (macOS: the bundle's executable) | a Folio's very last act after *Uninstall* on the Settings card, `uninstall::leave_armed`, through `quiet_breakaway_command` by `current_exe` (0.4.7 T-UNINSTALL-UX) | detached and not reaped, with all three standard streams the null device (`quiet_breakaway_command`), so it holds nothing in the data folder it may remove; it waits for the exact pid/start identity it is given (60 s) before cleanup. On Windows it asks for `CREATE_BREAKAWAY_FROM_JOB`; if the containing job disallows that, creation fails, the leaving Folio shows `standalone_alert`, and no uninstall is claimed |
+| the remover — a native copy of the running executable checked as a regular, single-link file with the expected size and SHA-256, in a random account-owned directory below `%LOCALAPPDATA%\Folio-uninstall\` on Windows or a mode-0700 directory below `~/Library/Application Support/Folio-uninstall/` on macOS (`uninstall::REMOVER_HOME`, beside the data folders and inside none of them; the remover and a refused schedule both remove it once empty, `deferred_removal::retire_private`, and a purge takes what an ended remover left), run through the internal, undocumented `--uninstall-remove` door | `bt_platform::deferred_removal::schedule`, from `uninstall::remove_the_program` (0.4.7 T-UNINSTALL-UX rounds 2 and 6) | the scheduler waits only for a readiness-pipe acknowledgement and then returns “scheduled”; the remover outlives the door, waits at most five minutes for every `(pid,start time)` in the explicit list plus every process whose image identity is the installed `folio.exe`, retries held files with bounded backoff, and checks each named file's single-link size and SHA-256 by path immediately before each deletion attempt. Final accounting uses a fallible existence read: only confirmed absence is success, and the last error for every uninspectable remaining path is written to `result.txt` and shown through bounded `standalone_alert`. The path-based check/delete instant is not defended against a deliberately racing same-account process. It removes the install folder only if empty and its copied executable last. On Windows it also requests breakaway; a job that refuses it makes scheduling fail synchronously. If the remover is ended or power is lost, deletion can be partial and no final reporter survives |
+| `powershell.exe` — the PSReadLine probe | `psreadline::run_probe`, through `shell_integration::run_powershell_probe` and `spawn_probe` | once per process; within `POWERSHELL_PROBE_DEADLINE` (five seconds); the contained tree ends at the deadline, on completion, drop, panic or Folio exit |
 | `powershell.exe` — the `$PROFILE` probe | `shell_integration::run_profile_path_probe` through `run_powershell_probe` and `spawn_probe` | once per distinct program; five-second deadline; the whole contained tree ends at the deadline |
 | the resolved `powershell.exe` or `pwsh.exe` — the command-row parser probe | `shell_integration::run_parse_probe`, through `spawn_probe` on the existing `powershell-script-prepare` below-normal worker | at most three attempts per exact resolved executable and argv; the command text travels on UTF-8 stdin to a fixed `Parser::ParseInput` command, never on the probe's command line or environment; a five-second deadline ends the contained tree, and only a clean parse admits injection. Pending, invalid, failed and timed-out questions leave the row unchanged. A failure is unknown: a later birth may schedule the next background attempt but never waits for it; the per-key attempt limit prevents one child per birth |
-| `cmd.exe /c "<copilot> --version"` | `attention_copilot::run_probe`, through `probe_output` | once per process, on opening the Agents page; the contained tree ends with the probe or Folio |
+| `cmd.exe /c "<copilot> --version"` | `attention_copilot::run_probe`, through `probe_output_with_raw_tail` (the `/c` string is passed as written) | once per process, on opening the Agents page; the contained tree ends with the probe or Folio |
 | `git` | `git::git_command`, always from `bt-git-worker`; `clean`, `diff`, `for-each-ref`, `log`, `rev-list`, `rev-parse`, `show` and `status` use `spawn_probe`; `add`, `branch`, `checkout`, `restore` and `tag` retain only the direct child | never from the window thread; one status costs three threads. The contained commands invoke no Git hook (`status` also forces `core.fsmonitor=false` and forbids optional index locks), so their whole process tree shares the deadline. `add` and `restore` can invoke `post-index-change`, `checkout` can invoke `post-checkout`, and ref updates can invoke `reference-transaction`; a process deliberately backgrounded by those hooks is a hand-off and may outlive Git. The closed subcommand policy refuses a new verb until its hook lifetime is decided |
 | `explorer.exe`, the registered handler, Finder | `bt_platform::handoff` | fully detached: no handle, no wait, no kill |
 | `defaults read -g AppleLocale`, `locale -a` | `bt_platform::read_system_locale_declaration`, through `probe_output` | macOS; memoised, so twice per process; each command leads a contained process group |
@@ -208,20 +208,32 @@ Children reached through `bt_platform::quiet_command_named` are named by an
 absolute path resolved by `handoff::program_on_path`, never a bare name, so a
 program sitting in the working directory can never run.
 
-Machine probes then cross `bt_platform::spawn_probe`: Windows creates the child
-suspended, assigns it to a per-probe job with `KILL_ON_JOB_CLOSE`, and resumes
-its initial thread found by a process-local `PssCaptureSnapshot` thread walk, so
-it cannot spawn before containment without paying for a system-wide thread
-snapshot. Nested jobs have been supported since Windows 8; Folio's minimum is Windows 10 1809. A job creation,
-configuration or assignment refusal is diagnosed once and the resumed probe
-still runs uncontained. macOS and Linux put the child in a new process group
-before `exec`. Their guard observes the leader with `waitid(WNOWAIT)`, signals
-and unregisters the group under the registry's one lock, and only then reaps
-the leader, so a reused process-group id is never signalled. A probe settles
-once: whichever of `try_wait`, `wait` or `kill` first sees the leader exit does
-that and keeps the status, and every later wait answers from it, as
-`std::process::Child` does, so poll-then-collect and kill-then-collect are legal
-on every platform. Deliberate hand-offs above keep
+Machine probes then cross `bt_platform::spawn_probe`. On Windows the door
+creates a per-probe job with `KILL_ON_JOB_CLOSE` first and then the child
+already inside it (`PROC_THREAD_ATTRIBUTE_JOB_LIST` in an extended startup
+information, Windows 10 1703; Folio's minimum is 1809), through its own
+`CreateProcessW`: no process object of a probe ever exists outside its job.
+Windows refuses the job list for a packaged app's executable (PowerShell 7 from
+the Microsoft Store) when Folio is not packaged (`0xC0070005`; only that refusal,
+any other start failure is returned as it is). That probe is created suspended in
+a fresh job — the refused attempt leaves its job unassignable — then assigned and
+resumed through the primary thread `CreateProcess` returned; if the assignment or
+the resume is refused, the suspended child is ended and the start fails.
+The door takes the program (an absolute path, as every door above resolves it;
+a relative one is refused), the arguments (quoted as `std` quotes them, a raw
+`cmd /c` tail given separately through `probe_output_with_raw_tail`), the
+environment changes and the working directory from the caller's `Command`, and
+the three standard streams from an explicit `ProbeStdio`. The child inherits
+exactly those three handles (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). Nested jobs
+have been supported since Windows 8. A job creation or configuration refusal is
+diagnosed once and the probe still runs uncontained. macOS and Linux put the
+child in a new process group before `exec`. Their guard observes the leader with
+`waitid(WNOWAIT)`, signals and unregisters the group under the registry's one
+lock, and only then reaps the leader, so a reused process-group id is never
+signalled. A probe settles once: whichever of `try_wait`, `wait` or `kill` first
+sees the leader exit does that and keeps the status, and every later wait
+answers from it, as `std::process::Child` does, so poll-then-collect and
+kill-then-collect are legal on every platform. Deliberate hand-offs above keep
 using `Command::spawn` and are never given a probe guard.
 
 **Not a child: the Windows identity check.** `bt_platform::trust` (0.4.6 U-15)
@@ -245,19 +257,22 @@ A machine probe is not in that set: no descendant may outlive its probe owner.
 `ProbeChild` ends the Windows job or Unix process group on deadline, successful
 wait, early drop and unwind. Output readers drain both pipes concurrently; once
 the direct child exits, the owner ends descendants before collecting those readers,
-so an inherited pipe cannot hold a no-deadline probe open. Windows closes job
-handles at process exit, a hard termination included, and no child inherits one.
+so an inherited pipe cannot hold a no-deadline probe open. On Windows a probe's
+child ends are inheritable while it is created, so a `Command::spawn` elsewhere in
+Folio at that moment may inherit them; a probe's output pipe therefore ends when
+its direct child has exited and the pipe is drained, never when the last holder of
+its write end lets go. Windows closes job handles at process exit, a hard
+termination included, and no child inherits one; a probe is born inside its job,
+so there is no moment at which that close could miss it (but see below).
 The Unix non-unwinding exit door holds the same registry
 lock while it signals every group, then clears the registry before releasing it.
 
 Two ends of Folio are outside that promise, and both are named rather than
-counted. On Windows, a termination while `CreateProcess` is still returning a
-probe (5–8 ms per start on a fast desktop, nearly all of it inside
-`CreateProcess`) leaves that child suspended outside every job: it is born
-before its handle exists to assign, and a child born in its job needs
-`PROC_THREAD_ATTRIBUTE_JOB_LIST`, which `std` offers only unstably. On Unix, a
-`SIGKILL` or crash takes no exit door, so the groups run to their own end; no
-Unix handle ends a process group when it closes.
+counted. On Windows, a probe whose program is a packaged app's executable cannot
+be born in its job, and a termination while `CreateProcess` is still returning it
+leaves it suspended outside every job. On Unix, a `SIGKILL` or crash takes no exit
+door, so the groups run to their own end; no Unix handle ends a process group when
+it closes.
 
 ---
 
