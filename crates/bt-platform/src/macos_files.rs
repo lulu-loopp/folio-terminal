@@ -151,9 +151,9 @@ mod tests {
     /// the one direction nobody can undo.
     #[test]
     fn a_file_sent_to_the_trash_is_in_the_trash() {
-        let root = std::env::temp_dir().join(format!("folio-trash-{}", std::process::id()));
+        let root = bt_testpath::temp_path("folio-trash");
         std::fs::create_dir_all(&root).expect("a scratch directory");
-        let stem = format!("folio-m2-2-{}", std::process::id());
+        let stem = bt_testpath::unique_name("folio-m2-2");
         let file = root.join(format!("{stem}.txt"));
         std::fs::write(&file, b"M2-2 trashed this.\n").expect("a file to throw away");
 
@@ -193,7 +193,7 @@ mod tests {
     /// a person declined a prompt that this platform never shows.
     #[test]
     fn a_path_that_is_not_there_is_refused_rather_than_answered_no() {
-        let missing = std::env::temp_dir().join(format!("folio-gone-{}", std::process::id()));
+        let missing = bt_testpath::temp_path("folio-gone");
         let refusal = recycle(&missing).expect_err("nothing to trash");
         assert!(
             !refusal.is_empty(),

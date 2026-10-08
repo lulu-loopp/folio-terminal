@@ -4636,8 +4636,8 @@ mod tests {
 
     /// A scratch directory of this test's own, removed when the test that made it ends.
     ///
-    /// `std::env::temp_dir` and the process id rather than a crate: this workspace has no tempfile
-    /// dependency, and the one thing the hanging-indent cases want from a real disk is that the
+    /// A name from `bt_testpath` under `std::env::temp_dir` rather than a tempfile crate, which
+    /// this workspace does not have; the one thing the hanging-indent cases want from a real disk is that the
     /// name the two halves spell between them is a file somebody could actually open.
     ///
     /// **The caller's word comes first** so that the directory's own 8.3 short name is this test's
@@ -4648,8 +4648,7 @@ mod tests {
 
     impl Scratch {
         fn named(name: &str) -> Self {
-            let directory = std::env::temp_dir()
-                .join(format!("{name}-folio-rejoin-indent-{}", std::process::id()));
+            let directory = bt_testpath::temp_path(&format!("{name}-folio-rejoin-indent"));
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             Self(directory)
         }
@@ -8430,8 +8429,8 @@ mod posix_tests {
 
     /// A scratch directory of this test's own, removed when the test that made it ends.
     ///
-    /// `std::env::temp_dir` and the process id rather than a crate: this workspace has no tempfile
-    /// dependency, and the one thing the hanging-indent cases want from a real disk is that the
+    /// A name from `bt_testpath` under `std::env::temp_dir` rather than a tempfile crate, which
+    /// this workspace does not have; the one thing the hanging-indent cases want from a real disk is that the
     /// name the two halves spell between them is a file somebody could actually open.
     ///
     /// **The caller's word comes first** so that the directory's own 8.3 short name is this test's
@@ -8442,8 +8441,7 @@ mod posix_tests {
 
     impl Scratch {
         fn named(name: &str) -> Self {
-            let directory = std::env::temp_dir()
-                .join(format!("{name}-folio-rejoin-indent-{}", std::process::id()));
+            let directory = bt_testpath::temp_path(&format!("{name}-folio-rejoin-indent"));
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             Self(directory)
         }

@@ -23,6 +23,9 @@ thiserror.workspace = true
 # `bt-platform`'s door. The shipped program never turns the feature on, so its `bt-pty` has no
 # edge to `bt-platform` (docs/ARCHITECTURE.md §5).
 bt-platform = { path = "../bt-platform", optional = true }
+# **Only with `test-shell`** as well: the test shell names its scratch folders through the one
+# owner of a test's scratch name.
+bt-testpath = { path = "../bt-testpath", optional = true }
 
 # The build script unpacks the ConPTY sidecar out of its vendored NuGet package, which is a zip,
 # and inflates its entries with this (`src/conpty_sidecar.rs`). It is already in the lock file
@@ -50,6 +53,7 @@ bt-platform = { path = "../bt-platform" }
 # integration tests in `tests/` link the library built without `cfg(test)`, so they reach
 # `bt_pty::test_shell` only through the feature, named here on the package itself.
 bt-pty = { path = ".", features = ["test-shell"] }
+bt-testpath = { path = "../bt-testpath" }
 bt-term = { path = "../bt-term" }
 bt-winres = { path = "../bt-winres" }
 miniz_oxide = "=0.8.9"
@@ -66,7 +70,7 @@ nix = { version = "0.28", features = ["signal"] }
 # their history, under a temporary HOME/APPDATA/XDG. For tests only: `bt-app` and `bt-term`
 # name it on their *dev-dependency* on this crate, and so does this crate for its own
 # integration tests; a build of the shipped program never has it. It adds no package.
-test-shell = ["dep:bt-platform"]
+test-shell = ["dep:bt-platform", "dep:bt-testpath"]
 
 [lints]
 workspace = true

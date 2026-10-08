@@ -653,14 +653,21 @@ fn a_healthy_trial(install: &Install, children: &Children, carried: Option<Nonce
     })
 }
 
-/// Wait until the journal on disk satisfies `until`, or panic after 20 s.
-fn journal_reaches(install: &Install, until: impl Fn(&Journal) -> bool) -> Journal {
-    let give_up = Instant::now() + Duration::from_secs(20);
+/// Wait until the journal on disk satisfies `until`, for as long as `applier` is still on its
+/// road: the applier ending first is red at once, and nothing else bounds the wait.
+fn journal_reaches<T>(
+    install: &Install,
+    applier: &JoinHandle<T>,
+    until: impl Fn(&Journal) -> bool,
+) -> Journal {
     loop {
         if let Some(journal) = install.on_disk().filter(|journal| until(journal)) {
             return journal;
         }
-        assert!(Instant::now() < give_up, "the journal never got there");
+        assert!(
+            !applier.is_finished(),
+            "the applier ended before the journal got there"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -877,7 +884,9 @@ fn armed_is_durable_before_exchanging() {
         *seen.lock().unwrap() = Some(phase);
     }));
     let applier = start(install.road(limits(10_000, 10_000)), world);
-    journal_reaches(&install, |journal| journal.body.phase == Phase::Armed);
+    journal_reaches(&install, &applier, |journal| {
+        journal.body.phase == Phase::Armed
+    });
     let plist = std::fs::read_to_string(install.plist()).expect("the plist is there at Armed");
     let rescue = install.home.rescue_executable(install.txn).unwrap();
     assert!(plist.contains(&*rescue.to_string_lossy()));
@@ -1148,8 +1157,11 @@ fn a_start_beside(beside: Beside) -> BesideRoad {
             Ok(())
         }));
     }
-    let applier = start(install.road(limits(5_000, 20_000)), world);
-    let journal = journal_reaches(&install, |journal| {
+    let applier = start(
+        install.road(limits(5_000, crate::update_apply::TRIAL_NOT_UNDER_TEST_MS)),
+        world,
+    );
+    let journal = journal_reaches(&install, &applier, |journal| {
         journal.body.phase.kind() == PhaseKind::Trial
     });
     let Phase::Trial { process, nonce, .. } = journal.body.phase else {
@@ -1439,6 +1451,9 @@ fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
 /// icon, no window. The test writes the receipt the trial would, and ends the
 /// process by the pid the journal recorded.
 ///
+/// The deadline is not this test's subject: the receipt it writes ends the
+/// watch ([`crate::update_apply::TRIAL_NOT_UNDER_TEST_MS`]).
+///
 /// MUTATION: in `trial`, take no pid from the process list (only a
 /// receipt's).
 #[test]
@@ -1453,8 +1468,11 @@ fn the_trial_is_launched_through_launch_services_and_found_by_its_image() {
         ..Fake::default()
     };
     let launched = world.launched.clone();
-    let applier = start(install.road(limits(5_000, 20_000)), world);
-    let journal = journal_reaches(&install, |journal| {
+    let applier = start(
+        install.road(limits(5_000, crate::update_apply::TRIAL_NOT_UNDER_TEST_MS)),
+        world,
+    );
+    let journal = journal_reaches(&install, &applier, |journal| {
         journal.body.phase.kind() == PhaseKind::Trial
     });
     let Phase::Trial { process, nonce, .. } = journal.body.phase else {
@@ -4589,7 +4607,7 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
     let recorder = Recorder::of(&install);
     let road = recorded_road(&install, &recorder, limits(5_000, 20_000));
     let applier = start(road, world);
-    journal_reaches(&install, |journal| {
+    journal_reaches(&install, &applier, |journal| {
         journal.body.phase.kind() == PhaseKind::Trial
     });
     for pid in children.started.lock().unwrap().clone() {

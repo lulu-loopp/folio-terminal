@@ -2393,13 +2393,7 @@ mod tests {
     /// A temporary folder standing in for the folder `folio.exe` was installed
     /// into, never the real one.
     fn install_folder(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "folio-first-run-channel-{tag}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = bt_testpath::temp_path(&format!("folio-first-run-channel-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

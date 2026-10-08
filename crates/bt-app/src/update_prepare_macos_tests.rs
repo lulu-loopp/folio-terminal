@@ -73,11 +73,7 @@ pub(crate) mod fixture {
 
     impl Scratch {
         pub(crate) fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "bt-u27-{tag}-{}-{}",
-                std::process::id(),
-                bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-            ));
+            let root = bt_testpath::temp_path(&format!("bt-u27-{tag}"));
             std::fs::create_dir_all(&root).unwrap();
             // The real path: `/var` is `/private/var`, and a mount point is
             // reported by its real path.

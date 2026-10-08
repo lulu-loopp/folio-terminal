@@ -85,10 +85,8 @@ fn resolved(path: &Path) -> PathBuf {
 }
 
 fn sandbox(tag: &str) -> (PathBuf, Scope) {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let root =
-        link_free_temp_dir().join(format!("folio-uninstall-{tag}-{}-{n}", std::process::id()));
+        link_free_temp_dir().join(bt_testpath::unique_name(&format!("folio-uninstall-{tag}")));
     fs::create_dir_all(root.join("app")).unwrap();
     let exe = root.join("app/folio.exe");
     fs::write(&exe, b"fixture executable").unwrap();
@@ -1425,7 +1423,7 @@ fn a_link_inside_the_folio_named_part_is_still_refused() {
 /// macOS); canonicalize the whole root and `folio` becomes `elsewhere` (red everywhere).
 #[test]
 fn the_boundary_is_the_os_named_head() {
-    let name = format!("folio-uninstall-boundary-{}", std::process::id());
+    let name = bt_testpath::unique_name("folio-uninstall-boundary");
     let spelled = std::env::temp_dir().join(&name);
     let resolved = link_free_temp_dir().join(&name);
     fs::create_dir_all(resolved.join("elsewhere")).unwrap();

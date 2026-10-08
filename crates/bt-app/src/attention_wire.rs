@@ -830,7 +830,7 @@ mod tests {
             bare
         );
         // The field, naming a file that is not there.
-        let missing = std::env::temp_dir().join("folio-no-such-transcript-4c71.jsonl");
+        let missing = bt_testpath::temp_path("folio-no-such-transcript").with_extension("jsonl");
         assert_eq!(
             stop(Some(&serde_json::json!({
                 "transcript_path": missing.to_string_lossy(),
@@ -991,8 +991,7 @@ mod tests {
         // A data directory of this test's own: where the endpoint is a socket
         // its name comes from this, and two tests sharing one name would be two
         // listeners fighting over one path.
-        let data =
-            std::env::temp_dir().join(format!("bt-app-attention-wire-{}", std::process::id()));
+        let data = bt_testpath::temp_path("bt-app-attention-wire");
         std::fs::create_dir_all(&data).expect("make the data directory");
         let endpoint = AttentionPipe::start(&data, move |line| {
             let _ = sender.send(line);
@@ -1158,10 +1157,8 @@ mod tests {
         use crate::attention::{AttentionLedger, NotificationSwitches, Reach, Site, Why};
         use bt_layout::SeatId;
 
-        let path = std::env::temp_dir().join(format!(
-            "folio-attention-wire-{}-transcript.jsonl",
-            std::process::id()
-        ));
+        let path =
+            bt_testpath::temp_path("folio-attention-wire-transcript").with_extension("jsonl");
         std::fs::write(
             &path,
             format!(

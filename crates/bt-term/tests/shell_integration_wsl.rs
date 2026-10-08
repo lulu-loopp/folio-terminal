@@ -42,7 +42,6 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// The product's question, fragment by fragment, in the spelling its source
@@ -103,20 +102,9 @@ fn git_sh() -> PathBuf {
 }
 
 /// **Unique per call within one process, not merely per instant.** Two tests in one test
-/// binary run on two threads, and a clock that answers the same nanosecond to both — the CI
-/// runner did, once — handed them one directory and one `AlreadyExists`. The counter is
-/// the part of the name the clock cannot be trusted with.
+/// binary run on two threads, so the name is `bt_testpath`'s, whose ordinal no two calls share.
 fn temporary_directory() -> PathBuf {
-    static ORDINAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ordinal = ORDINAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "folio-wsl-{}-{unique}-{ordinal}",
-        std::process::id()
-    ));
+    let directory = bt_testpath::temp_path("folio-wsl");
     std::fs::create_dir(&directory).unwrap();
     directory
 }

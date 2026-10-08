@@ -1572,8 +1572,7 @@ mod receipt_tests {
     use crate::persist::SettingsStore;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("folio-web-receipt-{}-{tag}", std::process::id()));
+        let dir = bt_testpath::temp_path(&format!("folio-web-receipt-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch folder");
         dir

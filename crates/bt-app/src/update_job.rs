@@ -2350,11 +2350,7 @@ mod tests {
         use crate::update_handoff::Staged;
         use crate::update_txn::{Event, Home, Inventories, Journal, Layout, PhaseKind};
 
-        let folder = std::env::temp_dir().join(format!(
-            "bt-update-job-staged-{}-{}",
-            std::process::id(),
-            bt_platform::attention_pipe::unguessable_bits()
-        ));
+        let folder = bt_testpath::temp_path("bt-update-job-staged");
         let home = Home::at(folder.join(".folio-update"));
         std::fs::create_dir_all(home.root()).expect("the home");
         let mut job = available("v0.4.7");
@@ -3186,7 +3182,7 @@ mod tests {
                 Ok("v99.0.1".to_owned())
             }
         }
-        let base = std::env::temp_dir().join(format!("bt-update-job-gate-{}", std::process::id()));
+        let base = bt_testpath::temp_path("bt-update-job-gate");
         let _ = std::fs::remove_dir_all(&base);
         let me = bt_platform::install_evidence::current_account().unwrap();
         for (folder, marker) in [
@@ -3325,7 +3321,7 @@ mod tests {
                 Ok("v99.0.1".to_owned())
             }
         }
-        let base = std::env::temp_dir().join(format!("bt-update-job-seam-{}", std::process::id()));
+        let base = bt_testpath::temp_path("bt-update-job-seam");
         let _ = std::fs::remove_dir_all(&base);
         let data = base.join("data");
         std::fs::create_dir_all(&data).unwrap();

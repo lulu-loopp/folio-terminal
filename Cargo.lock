@@ -273,6 +273,7 @@ dependencies = [
  "bt-render",
  "bt-source",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -357,6 +358,7 @@ version = "0.4.7"
 dependencies = [
  "bt-doc",
  "bt-platform",
+ "bt-testpath",
  "mitex",
  "mitex-lexer",
  "mitex-spec-gen",
@@ -376,6 +378,7 @@ name = "bt-persist"
 version = "0.4.7"
 dependencies = [
  "bt-platform",
+ "bt-testpath",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -387,6 +390,7 @@ version = "0.4.7"
 dependencies = [
  "block2 0.6.2",
  "bt-pty",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-winres",
@@ -418,6 +422,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-winres",
  "miniz_oxide",
@@ -436,6 +441,7 @@ dependencies = [
  "bt-platform",
  "bt-source",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -454,6 +460,7 @@ dependencies = [
 name = "bt-source"
 version = "0.4.7"
 dependencies = [
+ "bt-testpath",
  "proc-macro2",
  "syn 2.0.119",
 ]
@@ -469,6 +476,7 @@ dependencies = [
  "bt-math",
  "bt-platform",
  "bt-pty",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -479,10 +487,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-testpath"
+version = "0.4.7"
+
+[[package]]
 name = "bt-transcript"
 version = "0.4.7"
 dependencies = [
  "bitflags 2.13.0",
+ "bt-testpath",
  "bt-unicode",
  "regex",
  "unicode-properties",

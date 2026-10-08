@@ -9,7 +9,6 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bt_term::DualPlaneSession;
@@ -45,13 +44,9 @@ fn prompt_bytes_outside_folio(directory: &Path) -> Vec<u8> {
 }
 
 fn prompt_bytes_declaring(directory: &Path, terminal: Option<&str>) -> Vec<u8> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
     let driver = std::env::temp_dir().join(format!(
-        "betterterminal-osc7-driver-{}-{unique}.ps1",
-        std::process::id()
+        "{}.ps1",
+        bt_testpath::unique_name("betterterminal-osc7-driver")
     ));
     std::fs::write(
         &driver,
@@ -89,14 +84,7 @@ fn prompt_bytes_declaring(directory: &Path, terminal: Option<&str>) -> Vec<u8> {
 /// the byte that must become `%20` and the multi-byte characters that must become their UTF-8
 /// escapes rather than anything the console codepage would produce.
 fn temporary_directory() -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "betterterminal 图 片-{}-{unique}",
-        std::process::id()
-    ));
+    let directory = bt_testpath::temp_path("betterterminal 图 片");
     std::fs::create_dir(&directory).unwrap();
     // The shell names its location in long form; on a host whose %TEMP% is
     // spelled with an 8.3 short component (RUNNER~1), the path just joined is

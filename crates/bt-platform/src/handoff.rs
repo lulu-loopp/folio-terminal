@@ -1417,10 +1417,9 @@ mod macos_handoff {
         }
 
         /// A directory of this test's own, under the system's temporary
-        /// directory and named for this process, removed however the case ends.
+        /// directory and named by `bt_testpath`, removed however the case ends.
         fn scratch(name: &str) -> PathBuf {
-            let directory =
-                std::env::temp_dir().join(format!("folio-handoff-{}-{name}", std::process::id()));
+            let directory = bt_testpath::temp_path(&format!("folio-handoff-{name}"));
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             directory
         }
@@ -1617,7 +1616,8 @@ mod macos_handoff {
         #[test]
         fn a_refusal_carries_its_own_reason_and_never_the_products() {
             let window = crate::NativeWindow::stand_in(0);
-            let missing = scratch("refusals").join("not-here.txt");
+            let directory = scratch("refusals");
+            let missing = directory.join("not-here.txt");
             let refusals = [
                 open_local_path(window, std::path::Path::new("notes/a.txt")),
                 open_local_path(window, &missing),
@@ -1633,7 +1633,7 @@ mod macos_handoff {
                     "a refusal about the machine wears the product's sentence: {reason:?}"
                 );
             }
-            let _ = std::fs::remove_dir_all(scratch("refusals"));
+            let _ = std::fs::remove_dir_all(&directory);
         }
 
         /// RED — **a reveal asks the disk before it asks Finder**, because
@@ -2646,8 +2646,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_reveal_names_a_path_that_is_really_there() {
-        let scratch =
-            std::env::temp_dir().join(format!("folio-reveal-argument-{}", std::process::id()));
+        let scratch = bt_testpath::temp_path("folio-reveal-argument");
         std::fs::create_dir_all(&scratch).expect("a scratch directory");
         let file = scratch.join("a,b .txt");
         std::fs::write(&file, b"x").expect("a scratch file");
@@ -2842,8 +2841,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_reveal_grants_the_foreground_before_it_hands_over() {
-        let scratch =
-            std::env::temp_dir().join(format!("folio-handoff-front-{}", std::process::id()));
+        let scratch = bt_testpath::temp_path("folio-handoff-front");
         std::fs::create_dir_all(&scratch).expect("a scratch directory");
         let file = scratch.join("notes.md");
         std::fs::write(&file, b"x").expect("a scratch file");

@@ -4410,7 +4410,7 @@ mod tests {
         if bt_platform::host_platform() != HostPlatform::MacOs {
             return;
         }
-        let agents = std::env::temp_dir().join(format!("bt-u26-armed-{}", std::process::id()));
+        let agents = bt_testpath::temp_path("bt-u26-armed");
         let _ = std::fs::remove_dir_all(&agents);
         std::fs::create_dir_all(&agents).unwrap();
         let home = Path::new("/Applications/.Folio.app.folio-update");

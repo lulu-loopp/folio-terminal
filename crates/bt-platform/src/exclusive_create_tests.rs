@@ -5,10 +5,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 fn scratch(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "bt-platform-exclusive-{}-{name}",
-        std::process::id()
-    ));
+    let root = bt_testpath::temp_path(&format!("bt-platform-exclusive-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     root

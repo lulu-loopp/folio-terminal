@@ -990,7 +990,7 @@ mod tests {
     #[test]
     fn only_a_local_directory_that_exists_is_taken() {
         let here = std::env::temp_dir();
-        let file = here.join(format!("bt-app-launch-wire-{}.txt", std::process::id()));
+        let file = bt_testpath::temp_path("bt-app-launch-wire").with_extension("txt");
         std::fs::write(&file, b"x").expect("write a fixture into the scratch directory");
         let asking = |cwd: Option<PathBuf>| {
             accept(LaunchRequest {
@@ -1003,7 +1003,7 @@ mod tests {
         assert_eq!(asking(None), Ok(()), "a launch that named no folder is one");
         assert_eq!(asking(Some(file.clone())), Err(Refusal::NoSuchFolder));
         assert_eq!(
-            asking(Some(here.join("no-such-folder-at-all"))),
+            asking(Some(bt_testpath::temp_path("no-such-folder-at-all"))),
             Err(Refusal::NoSuchFolder)
         );
         assert_eq!(
@@ -1420,7 +1420,7 @@ mod tests {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = take();
         // The listener's `accept` asks the disk, so the handed folder is one that exists.
-        let here = std::env::temp_dir().join(format!("bt-app-u36-笔记-{}", std::process::id()));
+        let here = bt_testpath::temp_path("bt-app-u36-笔记");
         std::fs::create_dir_all(&here).expect("a scratch folder");
         let start = argv(&[
             "--update-failed",
@@ -1515,7 +1515,7 @@ mod tests {
     fn a_report_landing_in_a_window_of_its_own_is_up_there_after_the_settle() {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = take();
-        let root = std::env::temp_dir().join(format!("bt-app-047-u36-card-{}", std::process::id()));
+        let root = bt_testpath::temp_path("bt-app-047-u36-card");
         let receiver = root.join("Folio 终端");
         let other = root.join("其他 copy");
         for home in [&receiver, &other] {
@@ -1663,7 +1663,7 @@ mod tests {
     fn a_report_folder_that_is_not_local_is_taken_away_and_the_report_kept() {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = take();
-        let local = std::env::temp_dir().join("工具").join(".folio-update");
+        let local = bt_testpath::temp_path("工具").join(".folio-update");
         for (sent, kept) in [
             (
                 PathBuf::from(r"\\server\share\Folio 终端\.folio-update"),

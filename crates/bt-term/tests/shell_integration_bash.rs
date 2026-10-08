@@ -17,8 +17,6 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bt_term::DualPlaneSession;
@@ -77,21 +75,10 @@ fn git_bash() -> PathBuf {
 /// percent-encoder is exercised on the byte that must become `%20` and on
 /// multi-byte characters that must become their UTF-8 escapes.
 ///
-/// The three tests of this file share one process and start together, and a
-/// coarse clock hands two of them the same instant (a CI runner did, once:
-/// `AlreadyExists` at the `create_dir`), so the name carries a counter as
-/// well as the clock.
+/// The three tests of this file share one process and start together, so the
+/// name is `bt_testpath`'s, whose ordinal no two calls share.
 fn temporary_directory() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir().join(format!(
-        "betterterminal 图 片-{}-{unique}-{ordinal}",
-        std::process::id()
-    ));
+    let directory = bt_testpath::temp_path("betterterminal 图 片");
     std::fs::create_dir(&directory).unwrap();
     directory
 }

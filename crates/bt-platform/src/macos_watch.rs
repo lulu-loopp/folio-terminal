@@ -997,11 +997,7 @@ mod tests {
                 .and_then(Path::parent)
                 .expect("a test binary lives in <target>/<profile>/deps")
                 .to_path_buf();
-            let dir = profile.join(format!(
-                "bt-dir-watch-{}-{name}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
+            let dir = profile.join(bt_testpath::unique_name(&format!("bt-dir-watch-{name}")));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("make a scratch directory");
             Self(dir)

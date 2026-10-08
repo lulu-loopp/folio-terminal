@@ -507,11 +507,7 @@ mod tests {
     /// `is_file` and `is_dir`, which is a question about a disk.
     #[test]
     fn a_linked_worktrees_gitdir_is_resolved_and_an_ordinary_clones_is_not() {
-        let base = std::env::temp_dir().join(format!(
-            "bt-git-watch-worktree-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let base = bt_testpath::temp_path("bt-git-watch-worktree");
         let _ = std::fs::remove_dir_all(&base);
         let tree = base.join("tree");
         let elsewhere = base.join("main").join(".git").join("worktrees").join("wt");

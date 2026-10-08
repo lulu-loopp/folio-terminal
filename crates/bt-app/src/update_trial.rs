@@ -1045,8 +1045,7 @@ mod tests {
 
     /// A private folder for one test, empty.
     fn scratch(tag: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("bt-update-trial-{tag}-{}", std::process::id()));
+        let root = bt_testpath::temp_path(&format!("bt-update-trial-{tag}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private folder for this test");
         // macOS hands out its temporary folder through a link (`/var` →

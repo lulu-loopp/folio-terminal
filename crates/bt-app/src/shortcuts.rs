@@ -4730,10 +4730,7 @@ mod tests {
     /// back to `Ctrl+Shift+N`.
     #[test]
     fn the_file_door_keeps_a_recorded_ctrl_letter() {
-        let dir = std::env::temp_dir().join(format!(
-            "bt-app-shortcuts-ctrl-letter-{}",
-            std::process::id()
-        ));
+        let dir = bt_testpath::temp_path("bt-app-shortcuts-ctrl-letter");
         std::fs::create_dir_all(&dir).expect("a scratch folder");
         let path = dir.join("keybindings.json");
         std::fs::write(

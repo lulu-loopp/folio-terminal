@@ -68159,7 +68159,7 @@ mod floated_page_tests {
         use crate::preview_watch::Stamp;
 
         // ① The buffer, end to end, on a real file.
-        let dir = std::env::temp_dir().join(format!("bt-page-source-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-page-source");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("index.html");
@@ -78604,7 +78604,7 @@ mod printed_path_provenance_tests {
 
     /// A scratch directory of this test's own, removed by the caller.
     fn scratch(name: &str) -> std::path::PathBuf {
-        let directory = std::env::temp_dir().join(format!("folio-door-{name}"));
+        let directory = bt_testpath::temp_path(&format!("folio-door-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a scratch folder");
         directory

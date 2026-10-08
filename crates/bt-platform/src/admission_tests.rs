@@ -709,8 +709,7 @@ fn a_callback_on_a_thread_the_door_started_is_that_worker() {
 #[cfg(any(windows, unix))]
 #[test]
 fn the_attention_endpoint_delivers_on_a_worker_the_door_started() {
-    let directory =
-        std::env::temp_dir().join(format!("bt-platform-attention-role-{}", std::process::id()));
+    let directory = bt_testpath::temp_path("bt-platform-attention-role");
     std::fs::create_dir_all(&directory).expect("make the data directory");
     let (sender, heard) = std::sync::mpsc::channel();
     let endpoint = crate::attention_pipe::AttentionPipe::start(&directory, move |line| {

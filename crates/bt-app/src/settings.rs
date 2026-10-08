@@ -17014,16 +17014,16 @@ mod tests {
                 self.geometry.clear();
                 return None;
             }
-            // Rebuild the input description from the CURRENT panel, just like
-            // Runtime. Accidentally keying geometry on hover/focus must go red.
-            let inputs = geometry::Inputs::new(
-                self.inputs.surface,
-                self.inputs.scale,
-                self.inputs.font_revision,
-                &self.panel,
-                self.inputs.scroll,
-                self.inputs.content(),
-            );
+            // Re-read the CURRENT panel on every reader, through the one door
+            // `Runtime` lets the panel into the key: keying geometry on
+            // hover/focus there must go red. The process's half — language,
+            // scheme and profile tables, font lists, row sentences — was read
+            // once when the harness was built. Other tests in this binary
+            // publish font lists and install tables while this one runs, and a
+            // budget on what one window's pointer costs is not a question about
+            // them.
+            let mut inputs = self.inputs.clone();
+            inputs.read_panel(&self.panel, self.inputs.scroll);
             self.geometry
                 .read(inputs, |inputs| inputs.layout(&mut measure))
         }
@@ -17833,10 +17833,7 @@ mod tests {
     /// this goes red.
     #[test]
     fn a_046_update_check_false_file_reads_as_automatic_check_off() {
-        let root = std::env::temp_dir().join(format!(
-            "bt-settings-update-on-about-{}",
-            std::process::id()
-        ));
+        let root = bt_testpath::temp_path("bt-settings-update-on-about");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private settings fixture directory");
         let path = root.join("settings.json");
@@ -18115,11 +18112,7 @@ mod tests {
     /// `bin` directory would start answering out of a sibling `Resources`.
     #[test]
     fn the_shipped_notices_are_looked_for_beside_the_binary_and_in_a_bundles_resources() {
-        let root = std::env::temp_dir().join(format!(
-            "folio-notices-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("folio-notices");
         let beside = root.join("archive");
         let bundle = root.join("Folio.app").join("Contents");
         std::fs::create_dir_all(&beside).expect("a directory to stand an archive in");
@@ -33723,8 +33716,7 @@ mod tests {
     /// The update-check owner over a fresh scratch directory, its one check
     /// answered with [`NewerRelease`] — the gear's own state, lit.
     fn lit_owner(name: &str) -> (std::path::PathBuf, crate::update::OfferState) {
-        let dir =
-            std::env::temp_dir().join(format!("folio-gear-mark-{name}-{}", std::process::id()));
+        let dir = bt_testpath::temp_path(&format!("folio-gear-mark-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch data directory");
         let owner = crate::update::OfferState::load(&dir, true);

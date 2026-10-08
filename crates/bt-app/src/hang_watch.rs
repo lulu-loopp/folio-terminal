@@ -5061,11 +5061,7 @@ mod tests {
     /// written and the deadline expires.
     #[test]
     fn a_report_and_its_line_do_not_wait_for_the_console() {
-        let private = std::env::temp_dir().join(format!(
-            "folio-hang-stalled-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let private = bt_testpath::temp_path("folio-hang-stalled");
         let _ = std::fs::remove_dir_all(&private);
         std::fs::create_dir_all(&private).expect("a private directory for this test");
         let reports = private.join("hang-reports");
@@ -5144,11 +5140,7 @@ mod tests {
     /// person put beside its output.
     #[test]
     fn pruning_keeps_the_newest_and_touches_nothing_that_is_not_ours() {
-        let directory = std::env::temp_dir().join(format!(
-            "folio-hang-prune-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let directory = bt_testpath::temp_path("folio-hang-prune");
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a private directory for this test");
         for index in 0..5 {

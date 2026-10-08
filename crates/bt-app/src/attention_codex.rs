@@ -853,11 +853,7 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/tb-tests")
-            .join(format!(
-                "folio-codex-{name}-{}-{}",
-                std::process::id(),
-                crate::attention_hooks::today()
-            ));
+            .join(bt_testpath::unique_name(&format!("folio-codex-{name}")));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir

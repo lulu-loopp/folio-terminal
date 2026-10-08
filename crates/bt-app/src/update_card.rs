@@ -2333,8 +2333,7 @@ mod tests {
 
         use crate::install_channel::{self, WINGET_PACKAGE_ID, WINGET_PORTABLE};
 
-        let location =
-            std::env::temp_dir().join(format!("bt-update-card-winget-{}", std::process::id()));
+        let location = bt_testpath::temp_path("bt-update-card-winget");
         let _ = std::fs::remove_dir_all(&location);
         let version = location.join("folio-0.4.6");
         std::fs::create_dir_all(&version).unwrap();
@@ -2394,7 +2393,7 @@ mod tests {
     /// calling the owner, and the file never learns the tag.
     #[test]
     fn skip_records_the_tag_through_offer_state() {
-        let root = std::env::temp_dir().join(format!("bt-update-card-skip-{}", std::process::id()));
+        let root = bt_testpath::temp_path("bt-update-card-skip");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         let owner = crate::update::OfferState::load(&root, true);

@@ -1685,7 +1685,7 @@ mod tests {
     /// A private directory for one test, cleaned on the way in as well as out —
     /// `persist::tests::appdata`'s rule, for its reason.
     fn dir(case: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("bt-update-{case}-{}", std::process::id()));
+        let root = bt_testpath::temp_path(&format!("bt-update-{case}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private directory for this test");
         root

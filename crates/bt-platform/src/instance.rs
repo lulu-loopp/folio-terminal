@@ -1035,11 +1035,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn one_directory_is_claimed_once_and_released_on_drop() {
-        let directory = std::env::temp_dir().join(format!(
-            "bt-platform-instance-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let directory = bt_testpath::temp_path("bt-platform-instance");
         let first = claim_data_directory(&directory).expect("the first claim is taken");
         assert!(
             claim_data_directory(&directory).is_none(),
@@ -1605,10 +1601,7 @@ mod tests {
     /// A directory no other test in this process is using, so two of them can
     /// run at once.
     fn scratch(line: u32) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "bt-platform-instance-{}-{line}",
-            std::process::id()
-        ))
+        bt_testpath::temp_path(&format!("bt-platform-instance-{line}"))
     }
 
     /// RED (U-43) — **a claim let go leaves no lock file behind, and a claim

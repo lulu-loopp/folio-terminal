@@ -204,11 +204,7 @@ impl Scene {
     /// The scene, or `None` off Windows, where no test root can sign.
     fn new(tag: &str) -> Option<Self> {
         let ca = TestCa::new().ok()?;
-        let root = std::env::temp_dir().join(format!(
-            "bt-u20-{tag}-{}-{}",
-            std::process::id(),
-            bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-        ));
+        let root = bt_testpath::temp_path(&format!("bt-u20-{tag}"));
         let scratch = Scratch(root.clone());
         let install = root.join("Folio");
         let release = root.join("release");
@@ -537,11 +533,7 @@ fn failed_with(job: &Job<u32>, txn: u8, stop: Stop) {
 /// (`trust` refuses by name), so no home is made.
 fn refused_off_windows() {
     assert_ne!(bt_platform::host_platform(), HostPlatform::Windows);
-    let root = std::env::temp_dir().join(format!(
-        "bt-u20-elsewhere-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path("bt-u20-elsewhere");
     let _scratch = Scratch(root.clone());
     std::fs::create_dir_all(&root).unwrap();
     let exe = root.join(EXECUTABLE);
@@ -1130,11 +1122,7 @@ fn every_failure_road_removes_the_transaction_and_says_nothing_changed() {
 
 /// What the scene's archive declares its members add up to.
 fn declared(archive: &[u8]) -> u64 {
-    let root = std::env::temp_dir().join(format!(
-        "bt-u20-declared-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path("bt-u20-declared");
     let _scratch = Scratch(root.clone());
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("release.zip");
@@ -1313,11 +1301,7 @@ fn feed_of(folder: &Path, archive: &[u8], sums: &str) -> crate::update::Feed {
 /// the Windows `fetch` (the wrong sum is `Verified`).
 #[test]
 fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
-    let root = std::env::temp_dir().join(format!(
-        "bt-u30b-copy-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path("bt-u30b-copy");
     let _scratch = Scratch(root.clone());
     let archive = b"a release archive, by the feed".repeat(5_000);
     let feed = feed_of(&root.join("feed"), &archive, &sums_for(&archive));
@@ -1556,11 +1540,7 @@ fn prepared_and_closed(scene: &Scene) {
 /// `Allocated`, as the Windows Prepare writes it, with part of an archive in
 /// `H\<txn>\download\`. No signature is needed: nothing here is verified.
 fn allocated_scene(tag: &str) -> (Scratch, PathBuf, Home, TxnId) {
-    let root = std::env::temp_dir().join(format!(
-        "bt-u33-{tag}-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path(&format!("bt-u33-{tag}"));
     let scratch = Scratch(root.clone());
     let install = root.join("Folio");
     std::fs::create_dir_all(&install).unwrap();

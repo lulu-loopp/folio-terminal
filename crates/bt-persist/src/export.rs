@@ -473,11 +473,7 @@ mod tests {
     #[test]
     fn an_export_read_off_a_disk_is_the_export_that_was_written() {
         let state = state();
-        let directory = std::env::temp_dir().join(format!(
-            "bt-persist-export-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let directory = bt_testpath::temp_path("bt-persist-export");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join(EXPORT_FILE_NAME);
         crate::atomic_write(&path, &export_of(&state)).unwrap();
