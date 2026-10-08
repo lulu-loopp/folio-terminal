@@ -165,9 +165,12 @@ bt_platform::WebHost::rehost	WebRehost
 crate	arm	item	effects	kind	authority	door
 bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::handoff_lane::run_handoff_lane	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
 bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::read_video_glance	std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::run_decoration_worker	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize

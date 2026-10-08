@@ -34,6 +34,14 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 impl Runtime<'_> {
+    pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
+        crate::take_owned_keyboard_focus(&self.window.window)
+    }
+
+    pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
+        crate::request_owned_window_close(&self.window.window)
+    }
+
     /// **Open a second window on this application** (multiwindow slice C).
     ///
     /// The first window's door reads four files, revives a saved tree, answers a
@@ -1406,13 +1414,8 @@ impl Runtime<'_> {
     /// there is nothing a person can do about a foreground lock, and the path is
     /// on the command line either way.
     pub(in crate::runtime) fn bring_this_window_forward(&mut self) {
-        if self.window.window.is_minimized() == Some(true) {
-            self.window.window.set_minimized(false);
-        }
-        if let Ok(native) = native_window(&self.window.window)
-            && !bt_platform::hotkey::give_foreground_to(native)
-        {
-            eprintln!("BT_DROP the window a file was dropped on could not take the keyboard");
+        if let Err(error) = crate::bring_owned_window_forward(&self.window.window) {
+            eprintln!("BT_DROP {error}");
         }
     }
 

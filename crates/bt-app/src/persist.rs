@@ -1436,8 +1436,8 @@ impl SettingsStore {
     /// be a worse product than one that starts with the default preferences.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let path = dir.join(SETTINGS_FILE_NAME);
-        make_data_folder(&dir);
+        let path = settings_write_path(&dir, SETTINGS_FILE_NAME);
+        make_data_folder(path.parent().unwrap_or(&dir));
         let (settings, report) = read_settings_keeping(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, |path| {
             let _ = read_settings(path);
@@ -1481,7 +1481,7 @@ impl SettingsStore {
     /// the refusal for its whole run.
     pub(crate) fn peek_language(directory: &Path) -> bt_persist::LanguageV1 {
         let (settings, _) = read_settings_keeping(
-            &directory.join(SETTINGS_FILE_NAME),
+            &settings_write_path(directory, SETTINGS_FILE_NAME),
             bt_persist::Keeping::Owed,
         );
         settings.language
@@ -1625,8 +1625,8 @@ impl KeybindingsStore {
     /// Read `keybindings.json`, falling back to *no overrides* on every failure.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let path = dir.join(KEYBINDINGS_FILE_NAME);
-        make_data_folder(&dir);
+        let path = settings_write_path(&dir, KEYBINDINGS_FILE_NAME);
+        make_data_folder(path.parent().unwrap_or(&dir));
         let (file, report) = read_keybindings_keeping(&path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &path, |path| {
             let _ = read_keybindings(path);
@@ -1930,6 +1930,11 @@ pub(crate) fn make_data_folder(dir: &Path) -> bool {
         return dir.is_dir();
     }
     std::fs::create_dir_all(dir).is_ok()
+}
+
+/// The file a settings write resolves to, under the data root it belongs to.
+fn settings_write_path(data_root: &Path, file_name: &str) -> PathBuf {
+    data_root.join(file_name)
 }
 
 /// The directory this build wrote its files under before the product was named,
