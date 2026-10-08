@@ -80,6 +80,16 @@ const MAX_OFFSCREEN_RECORDS: usize = 128;
 /// about the same kind of producer. Split reads of one repaint arrive one or two milliseconds apart,
 /// two orders of magnitude inside it.
 const REPAINT_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// **The statuses a shell reports for a job that was stopped, not ended**: 128 + the stop signal,
+/// as bash (`jobs.c`, `128 + WSTOPSIG`) and zsh (`jobs.c`, `0200 | WSTOPSIG`) write `$?` and
+/// `folio.bash`/`folio.zsh` carry it in `OSC 133;D`. The signal numbers differ by system and the
+/// shell may be on another one (ssh), so both sets are here: Linux `SIGSTOP` 19, `SIGTSTP` 20,
+/// `SIGTTIN` 21, `SIGTTOU` 22 (147–150); macOS and the BSDs `SIGSTOP` 17, `SIGTSTP` 18, `SIGTTIN`
+/// 21, `SIGTTOU` 22 (145, 146, 149, 150). None of these is 128 + a signal that ends a process on
+/// the other system (Linux 17/18 are `SIGCHLD`/`SIGCONT`, macOS 19/20 are `SIGCONT`/`SIGCHLD`, all
+/// of which a process survives by default). The stranded-screen rule does not fire on these.
+const JOB_STOPPED_EXIT_CODES: [i32; 6] = [145, 146, 147, 148, 149, 150];
 /// **What the disk said about one path the terminal named** — the ledger's value, and the one
 /// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
 ///
@@ -1493,6 +1503,27 @@ pub struct DualPlaneSession {
     /// this pane" is answered by any marker at all, which is what an offer to install it retracts
     /// itself on.
     shell_region_screens: BTreeSet<ScreenId>,
+    /// **What carries this pane's bytes** — the fact the app-side reset needs to know which modes
+    /// the carrier itself keeps on (focus reporting under ConPTY). Told once by the owner of the
+    /// pane's pty ([`Self::set_pty_transport`]); a session with no pty behind it is
+    /// [`PtyTransport::Unix`], which that variant's own definition covers.
+    pty_transport: PtyTransport,
+    /// **A shell's command end heard on an alternate screen it does not own, waiting for the
+    /// segment it arrived in to settle** — the exit code it carried. Written by the `OSC 133;D`
+    /// handler when it recognises a stranded alternate screen, taken by [`Self::feed_at`] before
+    /// the stream is resumed past that marker, so the return to the primary screen lands between
+    /// the `D` and the bytes after it. `None` at rest, which is every feed but that one.
+    stranded_command_end: Option<Option<i32>>,
+    /// **How many `OSC 133;C` markers the current alternate-screen canvas has carried that no `D`
+    /// there has answered** — every one written, whether or not the phase machine accepted it as
+    /// a command start (a `C` with no prompt before it is refused there, and is still a program on
+    /// that canvas pairing its own `D`). A repeated `C` inside an output region re-stamps the same
+    /// command and is not counted, as [`Self::shell_commands_running`] does not count it.
+    ///
+    /// The other half of the stranded-screen evidence: a `D` on the alternate screen is the
+    /// shell's own only while this is zero. Back to zero whenever the canvas changes hands — the
+    /// primary screen parked or restored.
+    alternate_command_starts: u32,
     /// The last working directory the shell reported over OSC 7, and the *only* authority relative
     /// image path text is ever resolved against (user ruling 2026-08-03). `None` — never reported,
     /// or reported as something unresolvable — means relative text yields no candidates at all;
@@ -2161,6 +2192,9 @@ impl DualPlaneSession {
             shell_commands_running: BTreeMap::new(),
             shell_prompt_cycle_in_order: BTreeSet::new(),
             shell_region_screens: BTreeSet::new(),
+            pty_transport: PtyTransport::Unix,
+            stranded_command_end: None,
+            alternate_command_starts: 0,
             working_directory: None,
             window_title: None,
             progress: None,
@@ -2418,7 +2452,26 @@ impl DualPlaneSession {
     /// visible or a mode that changes what the pane draws is a changed picture
     /// that arrived without a byte ([`Self::screen_revision`]).
     pub fn reset_program_modes(&mut self, transport: PtyTransport) -> Result<(), SessionError> {
-        let observed_at = Instant::now();
+        self.reset_program_modes_at(transport, Instant::now())
+    }
+
+    /// Say what carries this pane's bytes. The owner of the pane's pty calls it once, where the
+    /// pty is attached; see the field.
+    pub fn set_pty_transport(&mut self, transport: PtyTransport) {
+        self.pty_transport = transport;
+    }
+
+    /// What carries this pane's bytes, as [`Self::set_pty_transport`] was told.
+    #[must_use]
+    pub fn pty_transport(&self) -> PtyTransport {
+        self.pty_transport
+    }
+
+    fn reset_program_modes_at(
+        &mut self,
+        transport: PtyTransport,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
         let events = self.terminal.reset_program_modes(transport);
         let damage = self.terminal.take_damage();
         self.screen_revision = self.screen_revision.wrapping_add(1);
@@ -3936,6 +3989,9 @@ impl DualPlaneSession {
                     self.apply_events(events, observed_at)?;
                     self.observe_live_damage(damage, observed_at);
                     self.sync_staging_tail();
+                    if let Some(exit_code) = self.stranded_command_end.take() {
+                        self.return_from_stranded_alternate_screen(exit_code, observed_at)?;
+                    }
                     if !self.terminal.stream_paused() {
                         break;
                     }
@@ -3947,6 +4003,7 @@ impl DualPlaneSession {
         })();
         if result.is_err() {
             self.terminal.discard_paused_stream();
+            self.stranded_command_end = None;
             self.cursor_logical_line_memory = None;
             self.repaint_transaction_deadline = None;
             self.alternate_repaint_snapshot = None;
@@ -5562,6 +5619,11 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
             ShellIntegrationMarker::CommandExecuted => {
+                if screen == ScreenId::Alternate
+                    && !matches!(phase, Some(ShellIntegrationPhase::Output(_)))
+                {
+                    self.alternate_command_starts = self.alternate_command_starts.saturating_add(1);
+                }
                 // **A `C` is heard only inside a prompt cycle this session watched open.**
                 //
                 // OSC 133 is in band and unauthenticated: these bytes are a claim by whoever wrote
@@ -5639,6 +5701,54 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Output(region));
             }
             ShellIntegrationMarker::CommandFinished { exit_code } => {
+                // **A shell's command end on an alternate screen it does not own is the shell
+                // speaking through a dead program's canvas** (T-RESET-MODES, coordinator ruling
+                // 2026-10-08 (2)). A full-screen program that dies without its own teardown leaves
+                // the alternate screen up — on a Unix pty nothing leaves it on the program's behalf,
+                // and ConPTY does not either (measured: after the program is ended, the next bytes
+                // are the shell's `D`, `OSC 7`, `A` and prompt, all on the alternate screen) — and
+                // then the shell's markers and prompt land there, over mouse reports and key
+                // encodings nobody is reading.
+                //
+                // The evidence is the marker order, not the screen: this `D` answers no `C` written
+                // on the alternate screen (see [`Self::alternate_command_starts`]) while a command
+                // started on the primary screen is still running. A full-screen program running its
+                // own cycle on its own canvas pairs its `D` with its own `C` and is not this; one
+                // that writes `133;A` alone is not this either. What the order cannot tell apart,
+                // and what is accepted: a full-screen host that passes OSC 133 through unchanged and
+                // starts a child shell that inherited Folio's integration and writes a `D` with no
+                // `C` — a cmd-shaped child, whose `PROMPT` writes `D` at every prompt (a bash or zsh
+                // child writes `D` only for a command it ran, after that command's own `C` on the
+                // same canvas). The host's screen is then left, which the person can re-enter (tmux
+                // does not pass 133 through).
+                //
+                // **A stopped program is not a dead one** (T-RESET-MODES round 2, coordinator ruling
+                // 2026-10-08, after Kimi's review). Ctrl+Z on a full-screen program with no suspend
+                // handler leaves it alive and stopped with its alternate screen up, and the shell's
+                // `D` for that command arrives here exactly as a dead program's would; leaving the
+                // screen and resetting its modes would have `fg` resume it on the primary screen
+                // with its mouse and key encodings gone. bash and zsh report a stopped job's status as
+                // 128 + the stop signal, so a `D` carrying one of [`JOB_STOPPED_EXIT_CODES`] keeps
+                // the program's screen, as before this rule. fish and nushell cannot be told apart
+                // this way: fish leaves `$status` at the previous command's value when a job stops,
+                // and nushell reports a frozen job as 0.
+                //
+                // So the command end is held, the segment that carried it settles on the screen it
+                // was written to, and [`Self::return_from_stranded_alternate_screen`] does the rest
+                // before a byte after it is parsed.
+                if screen == ScreenId::Alternate {
+                    if self.alternate_command_starts == 0
+                        && !exit_code.is_some_and(|code| JOB_STOPPED_EXIT_CODES.contains(&code))
+                        && self
+                            .shell_commands_running
+                            .get(&ScreenId::Primary)
+                            .is_some_and(|running| *running > 0)
+                    {
+                        self.stranded_command_end = Some(exit_code);
+                        return;
+                    }
+                    self.alternate_command_starts = self.alternate_command_starts.saturating_sub(1);
+                }
                 // **`D` is only accepted on the primary screen, and that is a choice with a cost
                 // worth naming.** The symmetric case to `C` above is easy — a TUI must not be able
                 // to start the session running. This one is not: a command handed to a full-screen
@@ -5668,6 +5778,28 @@ impl DualPlaneSession {
                 if let Some(running) = self.shell_commands_running.get_mut(&screen) {
                     *running = running.saturating_sub(1);
                 }
+                // **And whatever input modes the command's program left on go with it** — once no
+                // command this session watched start on the primary screen is still running.
+                //
+                // The shell's own command end is the one moment no line editor's keyboard modes
+                // are on: see `TerminalAdapter::retire_dead_program_modes` for the shells read.
+                // The count is what keeps a live program's modes out of it: a primary-screen
+                // program that pushed kitty flags and then started a nested shell is still
+                // running when that nested shell's commands end, because its own `C` has had no
+                // `D` (the keyboard-protocol design note's §2.4 negative trace,
+                // `a_nested_shells_command_end_leaves_a_live_programs_keyboard_flags_alone`).
+                // A shell that writes `D` with no `C` at all — `cmd.exe`'s `PROMPT` — has nothing
+                // running and is heard at every prompt, which is how a program that died under
+                // cmd is covered; the same unpaired `D` from a nested shell of that kind inside a
+                // live program is the case the bytes cannot tell apart, and it is accepted.
+                if screen == ScreenId::Primary
+                    && self
+                        .shell_commands_running
+                        .get(&ScreenId::Primary)
+                        .is_none_or(|running| *running == 0)
+                {
+                    self.terminal.retire_dead_program_modes();
+                }
                 if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
                     self.failure_exit_code = Some(exit_code);
                 }
@@ -5689,6 +5821,36 @@ impl DualPlaneSession {
         }
         self.release_retired_mark_anchors();
         self.reconcile_decorations_against_semantic_input();
+    }
+
+    /// **The shell is back, on a screen a dead program left up: put the pane back under it.**
+    ///
+    /// Called by [`Self::feed_at`] with the exit code of the shell's `D` that the `OSC 133;D`
+    /// handler recognised as stranded, after the segment it arrived in has settled and before any
+    /// byte after it is parsed. The whole app-side reset runs — the same
+    /// [`Self::reset_program_modes`] the person's verb runs, for this pane's own transport, with
+    /// nothing written to the child — which returns from the alternate screen through the same
+    /// screen switch an in-stream `?1049l` takes. Then the command end is applied where it belongs,
+    /// to the command started on the primary screen (which would otherwise stay running for ever),
+    /// at the cursor the primary screen comes back with. The shell's `A` that follows is parsed on
+    /// the primary screen and opens an ordinary prompt there.
+    fn return_from_stranded_alternate_screen(
+        &mut self,
+        exit_code: Option<i32>,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
+        self.reset_program_modes_at(self.pty_transport, observed_at)?;
+        let cursor = self.terminal.cursor();
+        self.handle_shell_integration_marker(
+            ScreenId::Primary,
+            GridPoint {
+                row: cursor.row,
+                column: cursor.column,
+            },
+            ShellIntegrationMarker::CommandFinished { exit_code },
+            observed_at,
+        );
+        Ok(())
     }
 
     /// Register one of a command mark's own coordinates in the document's anchor registry.
@@ -5932,6 +6094,7 @@ impl DualPlaneSession {
     /// deleted, and an unmarked program's first screenful of drawing wore the last program's
     /// command (review 2026-09-17 second pass, F3 P2).
     fn retire_alternate_semantic_regions(&mut self) {
+        self.alternate_command_starts = 0;
         self.shell_phases.remove(&ScreenId::Alternate);
         self.shell_commands_running.remove(&ScreenId::Alternate);
         self.shell_prompt_cycle_in_order
@@ -11659,6 +11822,7 @@ impl DualPlaneSession {
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
                     self.live_screen = ScreenId::Alternate;
+                    self.alternate_command_starts = 0;
                     self.alternate_detection_context = DetectionContext::default();
                     for row in &mut self.live_rows {
                         *row = LiveRowStability::default();
@@ -38663,18 +38827,14 @@ mod tests {
         assert!(session.application_cursor_mode());
     }
 
-    /// **Only `A`.** `B` is the command line being typed, `C` is a command
-    /// starting — the instant a program is most likely to be turning tracking
-    /// *on* — and `D` is one finishing, which says nothing about what the next
-    /// thing wants. Retiring at any of them would be a terminal that switches the
-    /// mouse off underneath a program that just asked for it.
+    /// **Not `B`, not `C`.** `B` is the command line being typed and `C` is a
+    /// command starting — the instant a program is most likely to be turning
+    /// tracking *on*. Retiring at either would be a terminal that switches the
+    /// mouse off underneath a program that just asked for it. (`D`, a command
+    /// ending, is the other road and has its own tests below.)
     #[test]
-    fn only_the_prompt_start_marker_retires_program_input_modes() {
-        for marker in [
-            &b"\x1b]133;B\x1b\\"[..],
-            &b"\x1b]133;C\x1b\\"[..],
-            &b"\x1b]133;D;0\x1b\\"[..],
-        ] {
+    fn neither_command_start_nor_execution_retires_program_input_modes() {
+        for marker in [&b"\x1b]133;B\x1b\\"[..], &b"\x1b]133;C\x1b\\"[..]] {
             let mut session = DualPlaneSession::new(nz(80), nz(8));
             session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
             session.feed(marker).unwrap();
@@ -38776,6 +38936,348 @@ mod tests {
         session.reset_program_modes(PtyTransport::ConPty).unwrap();
         assert!(session.screen_revision() > held);
         assert!(session.terminal.cursor().visible);
+    }
+
+    /// The program of the T-RESET-MODES tests: it asks for any-motion tracking, SGR reports, the
+    /// kitty disambiguate flag and modifyOtherKeys 2, and dies without undoing any of it.
+    const DEAD_PROGRAM_MODES: &str = "\x1b[?1003h\x1b[?1006h\x1b[>1u\x1b[>4;2m";
+
+    /// A prompt, a command line and the command starting, as a shell with the integration
+    /// writes them on the primary screen.
+    fn a_command_started(session: &mut DualPlaneSession) {
+        session
+            .feed(format!("{PROMPT_A}主屏 $ {PROMPT_B}agent{OUTPUT_C}\r\n").as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.shell_commands_running.get(&ScreenId::Primary),
+            Some(&1)
+        );
+    }
+
+    fn assert_no_program_modes(session: &DualPlaneSession, case: &str) {
+        let modes = session.terminal_modes();
+        assert_eq!(
+            modes.mouse_tracking,
+            crate::adapter::MouseTracking::Off,
+            "{case}: mouse tracking"
+        );
+        assert!(!modes.sgr_mouse, "{case}: SGR reports");
+        assert_eq!(modes.keyboard.kitty, 0, "{case}: kitty flags");
+        assert_eq!(
+            modes.keyboard.modify_other_keys,
+            crate::adapter::ModifyOtherKeys::Off,
+            "{case}: modifyOtherKeys"
+        );
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (1)) — **the shell's command end on the primary
+    /// screen retires the mouse modes and the key encodings the command's program left on**, the
+    /// pushed kitty flag and the one fish's `CSI = … u` form sets without a push alike.
+    ///
+    /// Ledger #19: a program killed with the kitty protocol on left `Ctrl+C` typing `[99;5u` at the
+    /// prompt (the encoder half is `bt-app`'s
+    /// `a_shells_command_end_gives_ctrl_c_back_to_the_prompt`).
+    ///
+    /// MUTATION: drop the `retire_dead_program_modes` call from the `D` arm — every mode is still
+    /// on after the prompt.
+    #[test]
+    fn a_shells_command_end_retires_the_modes_a_dead_program_left_on() {
+        for program in [
+            DEAD_PROGRAM_MODES,
+            "\x1b[?1003h\x1b[?1006h\x1b[=1u\x1b[>4;2m",
+        ] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("{program}画面 frame").as_bytes())
+                .unwrap();
+            assert_eq!(session.terminal_modes().keyboard.kitty, 1, "{program:?}");
+            // The program is killed; the shell says so and draws its next prompt.
+            session
+                .feed(format!("\x1b]133;D;137\x07{PROMPT_A}主屏 $ {PROMPT_B}").as_bytes())
+                .unwrap();
+            assert_no_program_modes(&session, &format!("{program:?}"));
+            assert!(!session.working);
+        }
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (1)) — **a line editor that turns its own keyboard
+    /// modes on after the command end and before its prompt start keeps them**, through that
+    /// prompt start and through a prompt redraw after it.
+    ///
+    /// fish 4.9's order, read from its source: `133;D` after the command, then
+    /// `enable_tty_protocols` (`CSI = 5 u`, or modifyOtherKeys `CSI > 4;1 m` where kitty is not
+    /// answered) at the top of its read loop, then the prompt paint that writes `133;A` — and
+    /// `133;A` again on every repaint. This is why the keyboard modes are not retired at `A`.
+    ///
+    /// MUTATION: call `retire_dead_program_modes` in the `A` arm on the primary screen instead of
+    /// `retire_program_input_modes` — the flags read 0 after the prompt.
+    #[test]
+    fn a_line_editors_own_keyboard_modes_survive_its_prompt_and_its_redraws() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        a_command_started(&mut session);
+        session.feed(DEAD_PROGRAM_MODES.as_bytes()).unwrap();
+        session
+            .feed(
+                format!("\x1b]133;D;0\x07\x1b[=5u\x1b[>4;1m{PROMPT_A}主屏 $ {PROMPT_B}").as_bytes(),
+            )
+            .unwrap();
+        let keyboard = session.terminal_modes().keyboard;
+        assert_eq!(keyboard.kitty, 1, "fish's own flags, honoured to flag 1");
+        assert_eq!(
+            keyboard.modify_other_keys,
+            crate::adapter::ModifyOtherKeys::One
+        );
+        assert_eq!(
+            session.terminal_modes().mouse_tracking,
+            crate::adapter::MouseTracking::Off,
+            "the dead program's mouse is gone all the same"
+        );
+        // A resize: the prompt is drawn again, `A` and all.
+        session
+            .feed(format!("\r{PROMPT_A}主屏 $ {PROMPT_B}ls").as_bytes())
+            .unwrap();
+        assert_eq!(session.terminal_modes().keyboard, keyboard);
+    }
+
+    /// RED (T-RESET-MODES; the keyboard-protocol design note's §2.4 negative trace) — **a nested
+    /// shell's command end inside a live primary-screen program leaves that program's keyboard
+    /// flags alone.** The outer command's `C` has had no `D`, so a command is still running when
+    /// the nested shell's own command ends, and the program that pushed the flag is that command.
+    ///
+    /// MUTATION: retire at every primary `D`, without the "no command still running" condition —
+    /// the flag reads 0 after the nested command.
+    #[test]
+    fn a_nested_shells_command_end_leaves_a_live_programs_keyboard_flags_alone() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        a_command_started(&mut session);
+        session.feed(b"\x1b[>1u").unwrap();
+        session
+            .feed(
+                format!(
+                    "{PROMPT_A}sub$ {PROMPT_B}ls{OUTPUT_C}\r\n文件\r\n\x1b]133;D;0\x07\
+                     {PROMPT_A}sub$ {PROMPT_B}"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.terminal_modes().keyboard.kitty,
+            1,
+            "the nested shell's command ended; the program that pushed the flag did not"
+        );
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (2)) — **a full-screen program that died on the
+    /// alternate screen: the shell's `D` arriving there for the command started on the primary
+    /// screen puts the pane back on the primary screen, resets what the program left, ends that
+    /// command, and the `A` after it is an ordinary prompt on the primary screen.**
+    ///
+    /// The bytes after the kill are the shape both real-shell probes recorded (PowerShell over
+    /// ConPTY, zsh over a Unix pty): `D` with the exit code, `OSC 7`, `A`, the prompt, `B` — all
+    /// written while the alternate screen is still up, in one read.
+    ///
+    /// MUTATIONS: (1) drop the stranded-screen arm from the `D` handler — the pane stays on the
+    /// alternate screen with every mode on; (2) skip the replayed `D` in
+    /// `return_from_stranded_alternate_screen` — the command is left running and unfinished;
+    /// (3) skip the `stranded_command_end` hand-off in `feed_at` — the pane stays on the alternate
+    /// screen.
+    #[test]
+    fn a_shell_speaking_through_a_dead_programs_alternate_screen_gets_the_primary_back() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        a_command_started(&mut session);
+        session
+            .feed(format!("\x1b[?1049h\x1b[?25l{DEAD_PROGRAM_MODES}全屏 tui").as_bytes())
+            .unwrap();
+        assert_eq!(session.live_screen, ScreenId::Alternate);
+
+        session
+            .feed(
+                format!("\x1b]133;D;137\x07\x1b]7;file:///tmp\x07{PROMPT_A}主屏 $ {PROMPT_B}")
+                    .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(session.live_screen, ScreenId::Primary);
+        assert!(!session.terminal_modes().alternate_screen);
+        assert_no_program_modes(&session, "stranded");
+        assert!(session.terminal.cursor().visible, "the whole reset ran");
+        assert!(!session.working, "the command the program was is over");
+        let mark = session
+            .command_marks()
+            .iter()
+            .find(|mark| mark.command_text == "agent")
+            .expect("the command's mark");
+        assert_eq!(mark.exit_code, Some(137));
+        assert!(mark.finished.is_some());
+        assert!(
+            matches!(
+                session.shell_phases.get(&ScreenId::Primary),
+                Some(ShellIntegrationPhase::Input(_))
+            ),
+            "the prompt opened on the primary screen"
+        );
+        let screen = session.terminal.visible_text();
+        assert!(
+            screen.iter().any(|row| row.contains("agent"))
+                && screen
+                    .iter()
+                    .filter(|row| row.replace(' ', "").contains("主屏$"))
+                    .count()
+                    == 2,
+            "the primary grid, with the old command and the new prompt on it: {screen:?}"
+        );
+        assert!(session.take_pty_writes().is_empty(), "nothing to the child");
+    }
+
+    /// RED (T-RESET-MODES) — **the return from a stranded alternate screen is the person's reset
+    /// for this pane's own transport**: under ConPTY, focus reporting (on since the session's head)
+    /// stays on; on a Unix pty a dead program's focus reporting goes.
+    ///
+    /// MUTATION: run the reset for `PtyTransport::Unix` whatever the session was told — the ConPTY
+    /// row loses focus reporting.
+    #[test]
+    fn a_stranded_return_keeps_what_the_transport_keeps() {
+        for (transport, focus) in [(PtyTransport::ConPty, true), (PtyTransport::Unix, false)] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            session.set_pty_transport(transport);
+            session.feed(b"\x1b[?1004h").unwrap();
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}").as_bytes())
+                .unwrap();
+            session
+                .feed(format!("\x1b]133;D;1\x07{PROMPT_A}$ {PROMPT_B}").as_bytes())
+                .unwrap();
+            assert_eq!(session.live_screen, ScreenId::Primary, "{transport:?}");
+            assert_eq!(
+                session.terminal_modes().focus_reporting,
+                focus,
+                "{transport:?}"
+            );
+        }
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (2)) — **a full-screen program that is alive and
+    /// speaks OSC 133 on its own canvas is left where it is**: its `133;A` alone, and its own
+    /// `C`…`D` cycle, while the shell's command (the program itself) runs on the primary screen.
+    /// The evidence is the order — a `D` that answers no alternate-screen `C` — and neither of
+    /// these has it.
+    ///
+    /// MUTATION: drop the `alternate_command_starts == 0` condition from the stranded arm — the
+    /// program's own `D` evicts it (the second and third rows).
+    #[test]
+    fn a_live_full_screen_programs_own_marks_retire_nothing() {
+        for marks in [
+            format!("{PROMPT_A}tui> "),
+            format!(
+                "{PROMPT_A}tui> {PROMPT_B}run{OUTPUT_C}\r\n结果\r\n\x1b]133;D;0\x07{PROMPT_A}tui> "
+            ),
+            // A `C` with no prompt before it, which the phase machine refuses, and its `D`.
+            format!("{OUTPUT_C}结果\x1b]133;D;0\x07"),
+        ] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}").as_bytes())
+                .unwrap();
+            session.feed(marks.as_bytes()).unwrap();
+            let modes = session.terminal_modes();
+            assert_eq!(session.live_screen, ScreenId::Alternate, "{marks:?}");
+            assert!(modes.alternate_screen, "{marks:?}");
+            assert_eq!(
+                modes.mouse_tracking,
+                crate::adapter::MouseTracking::Motion,
+                "{marks:?}"
+            );
+            assert_eq!(modes.keyboard.kitty, 1, "{marks:?}");
+            assert!(session.working, "{marks:?}");
+        }
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (2)) — **a bare `D` on the alternate screen with no
+    /// command started on the primary screen retires nothing**: there is no shell command for it
+    /// to be the end of. A pane without the integration, or a full-screen program started some way
+    /// the shell did not mark, stays exactly as it is, and the verb is the road there. (The shape
+    /// the order cannot tell apart — a host passing OSC 133 through to a child shell that
+    /// inherited the integration, inside a marked command — is accepted and written at the `D`
+    /// handler.)
+    ///
+    /// MUTATION: drop the "a command is running on the primary screen" condition from the
+    /// stranded arm — the bare `D` evicts the program.
+    #[test]
+    fn a_bare_command_end_on_the_alternate_screen_with_no_primary_command_retires_nothing() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        session.feed("主屏 primary\r\n".as_bytes()).unwrap();
+        session
+            .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}全屏").as_bytes())
+            .unwrap();
+        session
+            .feed(format!("\x1b]133;D\x07{PROMPT_A}> ").as_bytes())
+            .unwrap();
+        let modes = session.terminal_modes();
+        assert_eq!(session.live_screen, ScreenId::Alternate);
+        assert!(modes.alternate_screen);
+        assert_eq!(modes.mouse_tracking, crate::adapter::MouseTracking::Motion);
+        assert_eq!(modes.keyboard.kitty, 1);
+        assert_eq!(
+            modes.keyboard.modify_other_keys,
+            crate::adapter::ModifyOtherKeys::Two
+        );
+    }
+
+    /// RED (T-RESET-MODES round 2, coordinator ruling 2026-10-08) — **a stopped full-screen program
+    /// keeps its screen**: Ctrl+Z on a program with no suspend handler leaves it alive with its
+    /// alternate screen up, and the shell's `D` for it carries 128 + the stop signal. No return, no
+    /// reset — `fg` resumes the program on its own screen with its own modes — for every stop
+    /// signal on Linux (147–150) and on macOS (145, 146, 149, 150). A killed program's codes
+    /// (137, 143, 130, 1) are the stranded tests' and still return.
+    ///
+    /// MUTATION: drop the `JOB_STOPPED_EXIT_CODES` check from the stranded arm — the pane leaves
+    /// the alternate screen and the program's modes are reset.
+    #[test]
+    fn a_stopped_full_screen_program_keeps_its_screen() {
+        for code in JOB_STOPPED_EXIT_CODES {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}全屏 tui").as_bytes())
+                .unwrap();
+            session
+                .feed(
+                    format!("\r\nzsh: suspended  tui\r\n\x1b]133;D;{code}\x07{PROMPT_A}主屏 $ {PROMPT_B}")
+                        .as_bytes(),
+                )
+                .unwrap();
+            let modes = session.terminal_modes();
+            assert_eq!(session.live_screen, ScreenId::Alternate, "{code}");
+            assert!(modes.alternate_screen, "{code}");
+            assert_eq!(
+                modes.mouse_tracking,
+                crate::adapter::MouseTracking::Motion,
+                "{code}"
+            );
+            assert_eq!(modes.keyboard.kitty, 1, "{code}");
+            assert_eq!(
+                modes.keyboard.modify_other_keys,
+                crate::adapter::ModifyOtherKeys::Two,
+                "{code}"
+            );
+        }
+        for code in [130, 137, 143, 1] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}").as_bytes())
+                .unwrap();
+            session
+                .feed(format!("\x1b]133;D;{code}\x07{PROMPT_A}$ {PROMPT_B}").as_bytes())
+                .unwrap();
+            assert_eq!(
+                session.live_screen,
+                ScreenId::Primary,
+                "{code}: a killed program"
+            );
+        }
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **the first time a session is asked for a keyboard flag it does
