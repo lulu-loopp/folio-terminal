@@ -8804,6 +8804,17 @@ mod tests {
     /// `start`, its bytes read by a real session told its spawn directory as a pane is, and the
     /// files card's folder (`crate::files_root_of`, the folder button's and `Ctrl+Shift+B`'s one
     /// reader) asked at birth, at the first prompt and after `cd` into a subfolder.
+    ///
+    /// **What the card is compared with is what the product holds.** The pane keeps every folder
+    /// in the spelling it was given — the profile's folder as the profile names it, a report as
+    /// the shell spelled it — and does not canonicalise. A shell does not have to spell its folder
+    /// the way it was handed it: PowerShell answers `$PWD` with long names where its working
+    /// directory was given an 8.3 component (CI run 37739213188: handed the runner's account
+    /// folder by its 8.3 name, it reported the long name). So the card is the
+    /// profile's folder *as given* before the first report, and *the report itself* after it,
+    /// which must name the same directory (`bt_platform::same_file`). The folder is handed over
+    /// through an 8.3 component on every machine — a long-named folder, referred to by its short
+    /// name — so a comparison of spellings is red here and not only on a runner.
     #[cfg(windows)]
     fn files_card_follows_a_real_shell_from_its_fixed_starting_folder(
         start: impl FnOnce(
@@ -8813,9 +8824,15 @@ mod tests {
     ) {
         let hygiene = bt_pty::test_shell::Hygiene::new();
         let home = hygiene.home();
-        let fixed = hygiene.root().join("sandbox 沙盒");
+        let long = hygiene.root().join("a long folder name 长名");
+        std::fs::create_dir_all(long.join("sandbox 沙盒").join("sub 子")).unwrap();
+        let short = bt_platform::short_path_name(&long).unwrap();
+        assert_ne!(
+            short, long,
+            "the test folder's volume keeps 8.3 names, which the spelling under test needs"
+        );
+        let fixed = short.join("sandbox 沙盒");
         let sub = fixed.join("sub 子");
-        std::fs::create_dir_all(&sub).unwrap();
         let environment = HomeIs(home.clone());
         let place = profiles::place_for(
             &profiles::StartAt::Fixed(fixed.clone()),
@@ -8844,18 +8861,24 @@ mod tests {
         feed_until(&mut shell, &mut pane, "the first report", |pane| {
             pane.working_directory().is_some()
         });
-        assert_eq!(pane.working_directory(), Some(fixed.as_path()));
+        let reported = pane.working_directory().unwrap().to_path_buf();
+        assert!(
+            bt_platform::same_file(&reported, &fixed),
+            "the first report {reported:?} names the fixed folder {fixed:?}"
+        );
         assert_eq!(
             card(&pane),
-            fixed,
+            reported,
             "after the first prompt: the reported folder"
         );
 
         shell.write("cd \"sub 子\"\r".as_bytes()).unwrap();
         feed_until(&mut shell, &mut pane, "the report after cd", |pane| {
-            pane.working_directory() == Some(sub.as_path())
+            pane.working_directory()
+                .is_some_and(|reported| bt_platform::same_file(reported, &sub))
         });
-        assert_eq!(card(&pane), sub, "after cd: the subfolder");
+        let reported = pane.working_directory().unwrap().to_path_buf();
+        assert_eq!(card(&pane), reported, "after cd: the subfolder");
         shell.write(b"exit\r").unwrap();
         shell.shutdown().unwrap();
     }
