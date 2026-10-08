@@ -72558,6 +72558,8 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+mod app_preview_tests;
+#[cfg(test)]
 mod test_support;
 /// **The largest of this file's test modules, in a file of its own**
 /// (`refactor/main-tests-out`, 2026-09-18).
