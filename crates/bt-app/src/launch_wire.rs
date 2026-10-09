@@ -2136,8 +2136,10 @@ mod tests {
         .unwrap();
         assert_eq!(carried, crate::update_apply::Carried::Taken);
         assert_eq!(
+            // The listener commits once this end has confirmed `Taken`: its one
+            // message is the completion signal.
             landed
-                .recv_timeout(std::time::Duration::from_secs(30))
+                .recv()
                 .expect("the window's Folio was handed the start"),
             request
         );
