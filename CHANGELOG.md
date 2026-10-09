@@ -12,6 +12,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- `folio --with-environment` opens a tab that keeps the environment of the terminal you started it from — an activated Python or conda environment, a developer prompt — also when Folio is already running. <!-- zh: pending F-SWEEP-2-048 -->
 - A link an agent printed with a stray full-width mark after it, such as `http://example.com：`, now opens the right address, and a link Folio will not open says why — the address is invalid, it is blocked, or no program opens it — instead of always saying it was blocked. <!-- zh: pending F-SWEEP-2-048 -->
 - On a Mac with two copies of Folio installed, opening the second one joins the one already running instead of opening a window that saves nothing; this includes the copy an update restores after it fails. <!-- zh: pending T-MAC-CROSS-COPY-HANDOVER -->
 - An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
@@ -70,7 +71,7 @@ All notable changes to Folio are recorded here. The format follows
 - On Windows, new panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
 - Folio's PowerShell integration script does nothing when your `$PROFILE` is read by another terminal. By default, a PowerShell you start by typing `pwsh` or `powershell` in a pane is not integrated; it is when your `$PROFILE` has Folio's line. A PowerShell on another machine reached by ssh is integrated only if ssh forwards `TERM_PROGRAM`. The bash and zsh scripts are unchanged: a copy you source yourself, for example on a server you ssh into from Folio, keeps working.
 - On Windows, a newly installed command is found in a new tab without restarting Folio.
-- On Windows, a pane starts from your account's environment as it is now and no longer inherits variables that were set only in the shell Folio was started from (for example an activated Python or conda environment). For a pane that needs a prepared environment, use a profile.
+- On Windows, a pane starts from your account's environment as it is now and no longer inherits variables that were set only in the shell Folio was started from (for example an activated Python or conda environment). For a pane that needs a prepared environment, use a profile. (After 0.4.7: `folio --with-environment` opens a tab that keeps the environment of the terminal you started it from.)
 - PowerShell panes have command marks, folder tracking and inline formulas without setup when their command line can be safely extended; Settings offers the per-edition `$PROFILE` fallback for rows that cannot be extended.
 - PowerShell profile rows that run a command at startup — including Visual Studio Developer PowerShell and conda environments — now keep that command and receive the same command marks, folder tracking and inline formulas when PowerShell confirms the command parses.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.

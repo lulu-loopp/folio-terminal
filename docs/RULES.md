@@ -983,10 +983,23 @@ each pane birth reads the current account block and then applies only launcher
 overrides a caller identified explicitly, followed by Folio's declarations and
 the profile's. A difference from Folio's inherited environment is never itself
 an override: the parent may be a terminal, Explorer, a resident hotkey process,
-or the old build handing off an update. No current product start road identifies
-an override. If the account read fails, that birth alone uses ordinary process
-inheritance and the next birth asks again. On non-Windows hosts the platform has
-no fresh-account block and pane birth retains ordinary inheritance.
+or the old build handing off an update (owner ruling 2026-10-05, choice A). **The
+one road that identifies overrides is the explicit entry** (F-SWEEP-2-048):
+`folio --with-environment` carries the starting process's whole environment as the
+overrides of the one tab that launch opens — on a first launch, and across the
+launch wire (key `env`, inside the endpoint's 256 KiB frame) to a Folio already
+running; an environment that does not fit the frame, or that the wire cannot write
+as itself, refuses the launch with one line on its console and in
+`diagnostics.log`, and is never cut. The overrides are an overlay: a carried
+variable wins over the account's, an account variable the launcher lacks stays,
+and Folio's pane variables and the profile's are laid over both. They are held in
+memory for that one birth: never saved, and a revived, split, duplicated or
+restarted pane takes the account's environment. Folio's own process environment —
+its `BT_*` configuration — is not changed by any of this. If the account read
+fails, that birth alone uses ordinary process inheritance, with the carried
+overrides over it, and the next birth asks again. On non-Windows hosts the
+platform has no fresh-account block and pane birth retains ordinary inheritance,
+with the carried overrides over it.
 **The contrast that matters**: `profiles.json` and the pins are watched live
 through the storage watch on the data directory, re-read behind the shared quiet
 window and compared field by field, with an unparseable mid-run file leaving the
@@ -1487,7 +1500,10 @@ window, unless you say otherwise* (owner's ruling 2026-09-11); §7.59b *a launch
 needs one thing that sees it from end to end*; the 2026-10-09 entry *a second
 installed copy that shares the data directory hands its launch to the one running*
 (D3): the copy already running is any Folio of this user holding the data directory,
-whichever installed copy it was started from. The Unix stale-claim sweep and
+whichever installed copy it was started from. The endpoint's frame is its own
+256 KiB (`launch_pipe::MAX_FRAME_BYTES`), not the doorbell's 4 KiB, so a launch
+carrying its environment (`--with-environment`, row 33) crosses; a frame past it is
+refused whole on both ends. The Unix stale-claim sweep and
 its `sweep.guard` protocol are one unreleased change; no released build may
 sweep without participating in that guard.
 

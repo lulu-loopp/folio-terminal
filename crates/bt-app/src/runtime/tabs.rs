@@ -13,7 +13,7 @@ use crate::{
     restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
     strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
 };
-use crate::{LeafView, TextScale};
+use crate::{LeafSeed, LeafView, TextScale};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -65,6 +65,7 @@ impl Runtime<'_> {
         place: Option<PathBuf>,
         source_profile: &str,
         source_cwd: Option<profiles::SeedPlace>,
+        environment: Option<crate::cli::CarriedEnvironment>,
     ) -> Result<()> {
         // No assertion that the table still holds this id, and that is the point
         // of the id: `Duplicate tab` names the profile the source pane is
@@ -81,12 +82,16 @@ impl Runtime<'_> {
         let seats = seats::Seats::lone_terminal();
         let leaves = BTreeMap::from([(
             seats.identity(),
-            new_tab_leaf_seed(
-                profile,
-                place.as_deref(),
-                source_profile,
-                source_cwd.as_ref(),
-            ),
+            LeafSeed {
+                // What a launch carried, for the tab it opens; nothing for any other new tab.
+                environment,
+                ..new_tab_leaf_seed(
+                    profile,
+                    place.as_deref(),
+                    source_profile,
+                    source_cwd.as_ref(),
+                )
+            },
         )]);
         let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
         let (tab, _) = create_tab_state(
@@ -1290,7 +1295,8 @@ impl Runtime<'_> {
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the
         // same place — said in the one function that knows how to say it.
-        self.new_tab_seeded_from(&profile, None, &profile, cwd)
+        // A duplicate is a new shell: the account's environment, never a launch's.
+        self.new_tab_seeded_from(&profile, None, &profile, cwd, None)
     }
 
     /// **`Move tab to new window`** — the row 丙2 exists for.

@@ -44,6 +44,30 @@ fn environment_refresh(
     }
 }
 
+/// **The second layer of a pane's environment** (`bt_pty::spawn_environment`'s `launch_overrides`):
+/// what `--with-environment` carried, whole, or nothing (owner ruling 2026-10-05, choice A — a pane
+/// takes the account's current environment and never the launcher's unless asked).
+///
+/// The seam is an overlay: every carried variable is laid over the account's environment at the
+/// launcher's value, and an account variable the launcher does not have stays.
+fn launch_overrides(carried: Option<&crate::cli::CarriedEnvironment>) -> Vec<(OsString, OsString)> {
+    carried.map_or_else(Vec::new, |carried| carried.pairs().to_vec())
+}
+
+/// **The environment a pane's derived declarations read** — the account's with the launch layer
+/// over it, or, where there is no account environment to read, this process's with the same layer
+/// over it.
+fn before_folio(
+    refresh: Option<&EnvironmentRefresh>,
+    inherited: &[(OsString, OsString)],
+    launch_overrides: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    refresh.map_or_else(
+        || bt_pty::spawn_environment(inherited, launch_overrides, &[], &[]),
+        EnvironmentRefresh::before_folio,
+    )
+}
+
 /// **Everything one shell's birth is made of**, composed on the window thread by
 /// `create_leaf_session` and finished on the `bt-pty-birth` worker.
 pub(crate) struct ShellSpec {
@@ -53,6 +77,10 @@ pub(crate) struct ShellSpec {
     pub(crate) environment_derivation: shell_integration::EnvironmentDerivation,
     pub(crate) folio_environment: Vec<(OsString, OsString)>,
     pub(crate) profile_environment: Vec<(OsString, OsString)>,
+    /// What `--with-environment` carried into this pane, laid over the account's environment as
+    /// the `launch_overrides` layer; `None` for every pane no launch asked it for (owner ruling
+    /// 2026-10-05).
+    pub(crate) carried_environment: Option<crate::cli::CarriedEnvironment>,
     pub(crate) size: PtySize,
     pub(crate) working_directory: Option<PathBuf>,
     /// The carried folder this birth asks the disk about first, and the command line and working
@@ -108,6 +136,7 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
         environment_derivation,
         mut folio_environment,
         profile_environment,
+        carried_environment,
         size,
         working_directory,
         unless_gone,
@@ -125,17 +154,16 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
     );
     let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let launch_overrides = launch_overrides(carried_environment.as_ref());
     let refresh = environment_refresh(
         || {
             bt_platform::environment::fresh_logon_environment(ctx)
                 .map_err(|error| error.to_string())
         },
-        Vec::new(),
+        launch_overrides.clone(),
         |line| eprintln!("{line}"),
     );
-    let before_folio = refresh
-        .as_ref()
-        .map_or_else(|| inherited.clone(), EnvironmentRefresh::before_folio);
+    let before_folio = before_folio(refresh.as_ref(), &inherited, &launch_overrides);
     shell_integration::derive_environment_for_birth(
         environment_derivation,
         &before_folio,
@@ -154,12 +182,15 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
             wake,
             working_directory,
         ),
+        // No account environment to read: the shell inherits this process's, and what a launch
+        // carried is laid over it in the same place it is laid over the account's.
         None => PtySession::spawn_shell_in(
             program,
             &args,
             &fallback_args,
-            &folio_environment
+            &launch_overrides
                 .into_iter()
+                .chain(folio_environment)
                 .chain(profile_environment)
                 .collect::<Vec<_>>(),
             size,
@@ -378,6 +409,86 @@ mod tests {
             &profile,
         );
         bt_pty::spawn_environment(&before_folio, &[], &folio, &profile)
+    }
+
+    /// RED (F-SWEEP-2-048, owner ruling 2026-10-05) — **`launch_overrides` carry the launcher's
+    /// environment into the pane only when the launch asked**, over the account's current
+    /// environment, and under Folio's own pane variables.
+    ///
+    /// The account here has never heard of `FSWEEP2_CARRIED_环境`, and the launcher's shell has it;
+    /// so does the launcher's `PATH`, which differs from the account's. Names are asserted and
+    /// printed, never values.
+    ///
+    /// MUTATIONS: ① `launch_overrides` answering nothing for a carried environment and the first
+    /// half goes red; ② answering the carried environment for `None` (the launcher's environment
+    /// in every pane, the rule 2026-10-05 retired) and the second half goes red.
+    #[test]
+    fn launch_overrides_carry_the_launchers_environment_only_when_asked() {
+        let account = environment(&[("PATH", "C:\\Windows"), ("USERNAME", "账户")]);
+        let carried = crate::cli::CarriedEnvironment::from_pairs(environment(&[
+            ("PATH", "D:\\venv\\Scripts;C:\\Windows"),
+            ("FSWEEP2_CARRIED_环境", "1"),
+            ("TERM_PROGRAM", "launcher"),
+        ]));
+        let has =
+            |pairs: &[(OsString, OsString)], name: &str| pairs.iter().any(|(key, _)| key == name);
+        let value_of = |pairs: &[(OsString, OsString)], name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+
+        // Asked: the account's environment with the launcher's laid over it.
+        let overrides = launch_overrides(Some(&carried));
+        let refresh = environment_refresh(|| Ok(Some(account.clone())), overrides.clone(), |_| {})
+            .expect("the account's environment was read");
+        let pane = refresh.before_folio();
+        assert!(
+            has(&pane, "FSWEEP2_CARRIED_环境"),
+            "the launcher's variable reached the pane"
+        );
+        assert!(has(&pane, "USERNAME"), "and the account's own stayed");
+        assert!(
+            value_of(&pane, "PATH") == value_of(carried.pairs(), "PATH"),
+            "the launcher's PATH is the pane's (values not printed)"
+        );
+        // Folio's own pane variables are laid over it, as over the account's.
+        let folio = environment(&[("TERM_PROGRAM", "Folio")]);
+        let composed = bt_pty::spawn_environment(&account, &overrides, &folio, &[]);
+        assert!(
+            value_of(&composed, "TERM_PROGRAM") == value_of(&folio, "TERM_PROGRAM"),
+            "Folio's own variable wins over the launcher's"
+        );
+        // Where no account environment can be read, the same layer goes over this process's.
+        let inherited = environment(&[("PATH", "/usr/bin")]);
+        assert!(has(
+            &before_folio(None, &inherited, &overrides),
+            "FSWEEP2_CARRIED_环境"
+        ));
+
+        // Not asked: the account's environment and nothing of the launcher's.
+        let refresh =
+            environment_refresh(|| Ok(Some(account.clone())), launch_overrides(None), |_| {})
+                .expect("the account's environment was read");
+        let pane = refresh.before_folio();
+        assert!(
+            !has(&pane, "FSWEEP2_CARRIED_环境"),
+            "no launch asked for it"
+        );
+        let names = |pairs: &[(OsString, OsString)]| {
+            pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&pane),
+            names(&account),
+            "exactly the account's variables"
+        );
+        assert!(pane == account, "at the account's values (not printed)");
+        assert_eq!(
+            names(&before_folio(None, &inherited, &launch_overrides(None))),
+            names(&inherited)
+        );
     }
 
     /// RED (T-ENV-REFRESH-3, mutation `derive_prompt_from_launch_environment`) — a prompt added

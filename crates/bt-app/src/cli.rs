@@ -49,6 +49,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::i18n;
 use crate::profiles;
@@ -99,6 +100,15 @@ pub struct CliRequest {
     /// `Settings ▸ General ▸ Opening Folio again`. Neither reads the row: the
     /// running Folio does, and only where neither flag was given.
     pub tab: bool,
+    /// `--with-environment` — **carry the environment this command line was started in into the
+    /// tab it opens** (owner ruling 2026-10-05, choice A: a pane takes the account's current
+    /// environment and never the launcher's; this flag is the one explicit way to carry it).
+    ///
+    /// A word about *what* the pane is born with, so it asks for a pane as a place does
+    /// ([`resolve`]'s `wants_pane`), and it crosses the launch wire to a Folio that is already
+    /// running (`crate::launch_wire`). The environment itself is not here: parsing is pure, and
+    /// what the process was started with is read by the caller ([`CarriedEnvironment::of_this_process`]).
+    pub with_environment: bool,
     /// **Why this launch happened**, as the thing that started it said so.
     ///
     /// Not a decision and deliberately not one — see [`LaunchOrigin`]. The
@@ -313,6 +323,53 @@ pub const NEW_WINDOW_FLAG: &str = "--new-window";
 /// `--tab`, spelled once — see [`CWD_FLAG`]. Public for [`NEW_WINDOW_FLAG`]'s
 /// reason: it is named in the usage block and in `crate::launch_wire`.
 pub const TAB_FLAG: &str = "--tab";
+/// `--with-environment`, spelled once — see [`CWD_FLAG`]. Public for [`NEW_WINDOW_FLAG`]'s reason:
+/// `crate::launch_wire` names it in the line it writes when an environment is too large to hand
+/// over.
+pub const WITH_ENVIRONMENT_FLAG: &str = "--with-environment";
+
+/// **The environment a launch carries into its tab** (`--with-environment`, owner ruling
+/// 2026-10-05): every variable of the process that read the command line, names and values as
+/// that process holds them.
+///
+/// Laid over the account's current environment as the pane's `launch_overrides` layer
+/// (`bt_pty::spawn_environment`), under Folio's own pane variables and the profile's — so the
+/// launcher's value wins wherever it has one, and a variable the launcher does not have keeps the
+/// account's. Held in memory only: it is never written to `session.json` or any other file, and
+/// its [`Debug`] names the variables and never prints a value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CarriedEnvironment(Arc<[(OsString, OsString)]>);
+
+impl CarriedEnvironment {
+    /// The environment of this process — at the front door, the one its launcher gave it.
+    #[must_use]
+    pub fn of_this_process() -> Self {
+        Self::from_pairs(std::env::vars_os().collect())
+    }
+
+    /// The environment given as a list, in its order.
+    #[must_use]
+    pub fn from_pairs(pairs: Vec<(OsString, OsString)>) -> Self {
+        Self(pairs.into())
+    }
+
+    /// Every variable, in order.
+    #[must_use]
+    pub fn pairs(&self) -> &[(OsString, OsString)] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CarriedEnvironment {
+    /// The names, never the values: an environment holds tokens and passwords, and a `Debug`
+    /// reaches panic messages and test output.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("CarriedEnvironment")
+            .field(&self.0.iter().map(|(name, _)| name).collect::<Vec<_>>())
+            .finish()
+    }
+}
 
 /// **The marker Explorer's two entries pass**, spelled once.
 ///
@@ -380,7 +437,7 @@ pub const UPDATE_FEED_FLAG: &str = "--update-feed";
 /// # The grammar
 ///
 /// ```text
-/// folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] [--] [<path>]
+/// folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] [--with-environment] [--] [<path>]
 /// folio --help | --version
 /// ```
 ///
@@ -449,6 +506,13 @@ where
                     return Err(CliFault::Repeated(TAB_FLAG));
                 }
                 request.tab = true;
+            }
+            // The same exact arm: the environment is the process's, not a value on the line.
+            Some(flag) if flag == WITH_ENVIRONMENT_FLAG => {
+                if request.with_environment {
+                    return Err(CliFault::Repeated(WITH_ENVIRONMENT_FLAG));
+                }
+                request.with_environment = true;
             }
             // **The two origin markers, and one rule for a line that carries
             // both.** They are written by two different programs and a launch
@@ -716,6 +780,10 @@ pub struct CliPlan {
     pub cwd: Option<PathBuf>,
     /// A document to open a preview on, once there is a window.
     pub preview: Option<PathBuf>,
+    /// What `--with-environment` carries into the pane — `None` here, always: [`resolve`] reads
+    /// no process environment, and the launch that holds the request fills it in
+    /// ([`CarriedEnvironment::of_this_process`]).
+    pub environment: Option<CarriedEnvironment>,
     /// Everything the caller asked for that this launch could not do. One card
     /// each, on the window, after it opens.
     pub refusals: Vec<CliRefusal>,
@@ -1361,10 +1429,12 @@ pub fn resolve(
         crossed
     });
     CliPlan {
-        wants_pane: request.names_a_place(),
+        // A launch that carries its environment asks for the pane to carry it into, wherever.
+        wants_pane: request.names_a_place() || request.with_environment,
         profile,
         cwd,
         preview,
+        environment: None,
         refusals,
     }
 }
@@ -1384,6 +1454,43 @@ mod tests {
 
     fn refused(list: &[&str]) -> CliFault {
         parse(args(list)).expect_err("this command line was meant to be refused")
+    }
+
+    /// RED (F-SWEEP-2-048) — **`--with-environment` is one exact word that asks for a pane**,
+    /// and what it carries never prints a value.
+    ///
+    /// MUTATIONS: leave the flag out of `wants_pane` and `folio --with-environment` opens no tab to
+    /// carry it into; derive `Debug` on `CarriedEnvironment` and the value is printed.
+    #[test]
+    fn with_environment_is_an_exact_word_that_asks_for_a_pane() {
+        let request = parsed(&[WITH_ENVIRONMENT_FLAG, "."]);
+        assert!(request.with_environment);
+        assert!(!parsed(&["."]).with_environment);
+        assert_eq!(
+            refused(&[WITH_ENVIRONMENT_FLAG, WITH_ENVIRONMENT_FLAG]),
+            CliFault::Repeated(WITH_ENVIRONMENT_FLAG)
+        );
+        assert_eq!(
+            refused(&["--with-environment=1"]),
+            CliFault::UnknownFlag("--with-environment=1".to_owned())
+        );
+        let alone = resolve(&parsed(&[WITH_ENVIRONMENT_FLAG]), Some(0), |_| {
+            PathKind::Absent
+        });
+        assert!(
+            alone.wants_pane,
+            "the flag alone asks for the pane it carries into"
+        );
+        assert_eq!(
+            alone.environment, None,
+            "resolve reads no process environment"
+        );
+        assert!(!resolve(&parsed(&[]), Some(0), |_| PathKind::Absent).wants_pane);
+        let carried =
+            CarriedEnvironment::from_pairs(vec![("FSWEEP2_NAME".into(), "secret-值".into())]);
+        let printed = format!("{carried:?}");
+        assert!(printed.contains("FSWEEP2_NAME"), "{printed}");
+        assert!(!printed.contains("secret"), "the value is never printed");
     }
 
     #[test]
@@ -1622,6 +1729,7 @@ mod tests {
                 embedding: false,
                 new_window: false,
                 tab: false,
+                with_environment: false,
                 origin: LaunchOrigin::Plain,
                 update_trial: None,
                 update_failed: None,

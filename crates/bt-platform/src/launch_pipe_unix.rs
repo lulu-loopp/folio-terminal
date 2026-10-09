@@ -29,7 +29,7 @@
 //! * **A framing.** `PIPE_TYPE_MESSAGE` made "one frame" a kernel fact. A
 //!   `SOCK_STREAM` socket has no frames, so this module writes its own: four
 //!   bytes of big-endian length and then that many bytes, bounded by
-//!   [`crate::attention_pipe::MAX_MESSAGE_BYTES`] on the way in *and* on the
+//!   [`MAX_FRAME_BYTES`] on the way in *and* on the
 //!   way out. A grammar above it never sees the difference.
 //!
 //! # Who is on the other end, and the answer is not a DACL
@@ -73,8 +73,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::attention_pipe::MAX_MESSAGE_BYTES;
 use crate::instance::SOCKET_PATH_LIMIT;
+
+/// **The most bytes one frame on this endpoint may carry** — 256 KiB (F-SWEEP-2-048).
+///
+/// Its own bound and not the doorbell's four kilobytes, because a launch may carry the
+/// environment it was started in (`folio --with-environment`): a full environment block is a few
+/// kilobytes on a plain account and tens of kilobytes on a developer's — a long `PATH`, an
+/// activated virtual environment or toolchain prompt — and it crosses as JSON, which doubles every
+/// backslash of a Windows path. A quarter of a mebibyte is several times the largest such block
+/// and still one read into one buffer. A request past it is refused whole before it is written,
+/// never cut. An earlier build reading with the doorbell's bound refuses a frame past four
+/// kilobytes, and the launch that sent it opens a window of its own.
+pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 /// **How long a second launch will wait for the running Folio before opening a
 /// window of its own.** Wire policy, and the Windows module's own number for
@@ -404,7 +415,7 @@ pub fn hand_over(
     request: &str,
     on_reply: impl FnOnce(u32, &str),
 ) -> io::Result<()> {
-    if request.len() > MAX_MESSAGE_BYTES {
+    if request.len() > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "request longer than the launch endpoint's frame bound",
@@ -614,7 +625,7 @@ fn self_pipe() -> io::Result<(RawFd, RawFd)> {
 /// way in — `crate::attention_pipe`'s own rule: this end has no reason to trust
 /// that the far end applied the bound, and neither has that one.
 fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
-    if payload.len() > MAX_MESSAGE_BYTES {
+    if payload.len() > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "a frame longer than the launch endpoint's bound",
@@ -641,7 +652,7 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header)?;
     let length = u32::from_be_bytes(header) as usize;
-    if length > MAX_MESSAGE_BYTES {
+    if length > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "a frame longer than the launch endpoint's bound",
@@ -712,6 +723,43 @@ mod tests {
             committed.recv_timeout(Duration::from_secs(5)).ok(),
             Some("one request".to_owned()),
             "and the request is committed once the caller has let go"
+        );
+    }
+
+    /// **RED (F-SWEEP-2-048) — a request far past the doorbell's four kilobytes crosses whole.**
+    ///
+    /// A launch carrying its environment is tens of kilobytes; the frame bound is this endpoint's
+    /// own ([`MAX_FRAME_BYTES`]).
+    ///
+    /// MUTATION: bound the endpoint by `attention_pipe::MAX_MESSAGE_BYTES` again and the request is
+    /// refused before it is written.
+    #[test]
+    fn a_request_of_an_environments_size_crosses_whole() {
+        let directory = scratch(line!());
+        let (sender, committed) = mpsc::channel();
+        let endpoint = LaunchPipe::start(
+            &directory,
+            |line| {
+                Some(Decision {
+                    reply: format!("{} bytes", line.len()),
+                    admitted: Some(line.len()),
+                })
+            },
+            move |admitted: usize| {
+                let _ = sender.send(admitted);
+            },
+        )
+        .expect("open the launch endpoint");
+        let request = "环境".repeat(20_000);
+        let mut reply = None;
+        hand_over(endpoint.name(), &request, |_, line| {
+            reply = Some(line.to_owned());
+        })
+        .expect("hand the request over");
+        assert_eq!(reply, Some(format!("{} bytes", request.len())));
+        assert_eq!(
+            committed.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(request.len())
         );
     }
 
@@ -826,7 +874,7 @@ mod tests {
     /// this process.**
     #[test]
     fn a_request_past_the_frame_bound_is_refused_before_it_is_written() {
-        let oversized = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        let oversized = "x".repeat(MAX_FRAME_BYTES + 1);
         let refused = hand_over("/nowhere/folio.sock", &oversized, |_, _| {
             panic!("an oversized request must not reach a socket at all");
         })

@@ -803,6 +803,7 @@ impl Runtime<'_> {
                         unknown_profile_id,
                         card_skip: 0,
                         prefill: None,
+                        environment: None,
                     },
                 )]);
                 (seats, manual_name, leaves, BTreeMap::new())

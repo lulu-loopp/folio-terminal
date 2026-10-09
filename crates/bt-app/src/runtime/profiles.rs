@@ -38,6 +38,7 @@ impl Runtime<'_> {
                 embedding: false,
                 new_window: request.new_window,
                 tab: request.tab,
+                with_environment: request.environment.is_some(),
                 origin: request.origin,
                 update_trial: None,
                 update_failed: None,
@@ -85,6 +86,17 @@ impl Runtime<'_> {
         profile: &str,
         place: Option<PathBuf>,
     ) -> Result<()> {
+        self.new_tab_with_profile_carrying(profile, place, None)
+    }
+
+    /// [`Self::new_tab_with_profile`], with the environment a launch carried into the tab
+    /// (`--with-environment`, owner ruling 2026-10-05) — the door a handed-over launch takes.
+    pub(crate) fn new_tab_with_profile_carrying(
+        &mut self,
+        profile: &str,
+        place: Option<PathBuf>,
+        environment: Option<crate::cli::CarriedEnvironment>,
+    ) -> Result<()> {
         // **Both facts are read off the *same* leaf** — the focused session,
         // which is also what `working_directory()` is asked of. A profile taken
         // from one pane and a directory from another would be the exact mismatch
@@ -99,7 +111,7 @@ impl Runtime<'_> {
             .focused()
             .and_then(LeafSession::place_for_a_new_tab_beside);
         let source_profile = self.session_profile();
-        self.new_tab_seeded_from(profile, place, &source_profile, source_cwd)
+        self.new_tab_seeded_from(profile, place, &source_profile, source_cwd, environment)
     }
 
     /// Where the profile picker hangs right now, or `None` when it is shut.

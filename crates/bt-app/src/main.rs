@@ -9564,6 +9564,9 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
         unknown_profile_id: None,
         card_skip: 0,
         prefill: None,
+        // `--with-environment` (owner ruling 2026-10-05): the launcher's environment, when the
+        // command line asked for it, and the account's otherwise.
+        environment: plan.environment.clone(),
     }
 }
 
@@ -9607,6 +9610,9 @@ fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> Leaf
         card_skip: 0,
         // A restart is a new shell in the same place; nothing is owed to its prompt.
         prefill: None,
+        // A restart is a new shell and takes the account's environment: what a launch carried
+        // was for the shell it was carried to (owner ruling 2026-10-05).
+        environment: None,
     }
 }
 
@@ -35806,6 +35812,7 @@ fn revive_plan(
                     // so "this shell never reported one" and "this rung does not restore them"
                     // arrive as one case (§7.54e ④).
                     prefill: Some(leaf.last_command.clone()).filter(|it| !it.is_empty()),
+                    environment: None,
                 },
             )
         })
@@ -36673,6 +36680,14 @@ struct LeafSeed {
     /// one place the rung is read, so an empty `last_command` on the leaf and "this rung does not
     /// restore commands" are the same fact and cannot disagree.
     prefill: Option<String>,
+    /// **The environment a launch carried into this pane** (`--with-environment`, owner ruling
+    /// 2026-10-05), laid over the account's as the birth's `launch_overrides`.
+    ///
+    /// `None` everywhere but the pane a launch asked for — the first launch's command-line tab
+    /// ([`cli_leaf_seed`]) and a handed-over launch's tab (`launch_wire::LaunchRequest`). Never
+    /// saved: a revived, split, duplicated or restarted pane is a new shell and takes the
+    /// account's environment.
+    environment: Option<cli::CarriedEnvironment>,
 }
 
 /// **The profile a saved pane comes back as, and the id its banner names** — one reading of a
@@ -38100,6 +38115,7 @@ fn new_tab_leaf_seed(
         unknown_profile_id: None,
         card_skip: 0,
         prefill: None,
+        environment: None,
     }
 }
 
@@ -38238,6 +38254,7 @@ impl SplitSeed {
                 card_skip: 0,
                 // A split is not a restore; nothing is owed to its prompt.
                 prefill: None,
+                environment: None,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: profile.clone(),
@@ -38252,6 +38269,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                environment: None,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -38270,6 +38288,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                environment: None,
             },
         }
     }
@@ -39105,6 +39124,7 @@ mod shell_birth_tests {
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
+            environment: None,
         }
     }
 
@@ -40038,6 +40058,7 @@ fn create_leaf_session(
                     environment_derivation: command.environment_derivation,
                     folio_environment: command.environment,
                     profile_environment: command.profile_environment,
+                    carried_environment: seed.environment.clone(),
                     size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     working_directory: place.working_directory,
                     unless_gone: gone_spec,
@@ -40839,6 +40860,7 @@ fn create_tab_state(
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                environment: None,
             }),
             programs,
             stored_default,
@@ -44253,6 +44275,11 @@ impl Runtime<'_> {
         // profile's namespace. Everything it could not honour comes back in the
         // plan's own list and is said on a card once the window is up.
         let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        // **`--with-environment` reads this process's environment, which on a first launch is
+        // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
+        cli_plan.environment = cli
+            .with_environment
+            .then(cli::CarriedEnvironment::of_this_process);
         // Pinned tabs are an answer already given, so they simply open; the rest
         // become a question the prompt will ask over a window that already works.
         let plan = if probe_input.is_some() {
@@ -54059,7 +54086,8 @@ mod launch_landing_tests {
     fn a_request_opens_its_tab_where_it_asked_and_raises_the_window() {
         let tab = method_body("FolioApp", "open_a_tab_for_a_launch");
         assert!(
-            tab.contains("runtime.new_tab_with_profile(&profile, request.cwd.clone())"),
+            tab.contains("runtime.new_tab_with_profile_carrying(")
+                && tab.contains("request.cwd.clone(),"),
             "the tab door is not reached with the request's own folder:\n{tab}"
         );
         assert!(
@@ -64441,7 +64469,11 @@ impl FolioApp {
             return Ok(());
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile_carrying(
+            &profile,
+            request.cwd.clone(),
+            request.environment.clone(),
+        )?;
         runtime.report_launch_refusals(refusals)
     }
 
@@ -64473,7 +64505,8 @@ impl FolioApp {
         let Some(opened) = self.windows.key_at(self.windows.len().saturating_sub(1)) else {
             return Ok(None);
         };
-        if request.cwd.is_none() && request.profile.is_none() {
+        // A launch that carries its environment asks for its own tab, as one naming a place does.
+        if request.cwd.is_none() && request.profile.is_none() && request.environment.is_none() {
             return Ok(Some(opened));
         }
         let stand_in = self
@@ -64485,7 +64518,11 @@ impl FolioApp {
             return Ok(Some(opened));
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile_carrying(
+            &profile,
+            request.cwd.clone(),
+            request.environment.clone(),
+        )?;
         if let Some(stand_in) = stand_in {
             runtime.retire_the_stand_in(stand_in)?;
         }
