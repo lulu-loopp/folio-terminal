@@ -18340,6 +18340,16 @@ mod tests {
         visible_rows(TabLayoutMode::Horizontal)
     }
 
+    /// [`visible_rows`] asked of a named platform — the page a Windows row (`PsReadLine`,
+    /// `Acrylic`, the Explorer verb) stands on, read on every runner. On the platform this
+    /// build is, it is [`visible_rows`] itself.
+    fn rows_on(platform: bt_platform::HostPlatform, tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
+        uninstall_rows_for(
+            visible_rows_for(platform, tab_layout),
+            crate::uninstall::managed_uninstall().map(|(manager, _)| manager),
+        )
+    }
+
     /// The shortcut table as the panel would show it, for the claims that are
     /// about it.
     fn shortcut_lines() -> Vec<crate::shortcuts::ShortcutRow> {
@@ -18432,7 +18442,17 @@ mod tests {
     /// about a row in the lower half is a claim about a row a reader would have
     /// to scroll to. [`scroll_showing`] is what turns a band into this number.
     fn open_scrolled(scale: f32, menu_open: bool, scroll: f32) -> SettingsLayout {
-        let rows = flat_rows();
+        open_scrolled_on(bt_platform::host_platform(), scale, menu_open, scroll)
+    }
+
+    /// [`open_scrolled`] holding a named platform's rows.
+    fn open_scrolled_on(
+        platform: bt_platform::HostPlatform,
+        scale: f32,
+        menu_open: bool,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = rows_on(platform, TabLayoutMode::Horizontal);
         layout_for_menu(
             (SURFACE.0 * scale).round(),
             (SURFACE.1 * scale).round(),
@@ -18498,15 +18518,48 @@ mod tests {
         tab_layout: TabLayoutMode,
         widest_option: f32,
     ) -> SettingsLayout {
+        open_rows_measured_on(
+            bt_platform::host_platform(),
+            scale,
+            menu,
+            tab_layout,
+            widest_option,
+        )
+    }
+
+    /// [`open_rows_measured`] holding a named platform's rows.
+    fn open_rows_measured_on(
+        platform: bt_platform::HostPlatform,
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+        widest_option: f32,
+    ) -> SettingsLayout {
         let category = menu.map_or(PAGE, SettingsRow::category);
         let scroll = match menu {
             Some(row) => {
-                let at_rest = open_page(scale, None, tab_layout, category, widest_option);
+                let at_rest = open_page_scrolled_on(
+                    platform,
+                    scale,
+                    None,
+                    tab_layout,
+                    category,
+                    widest_option,
+                    UNSCROLLED,
+                );
                 scroll_to_row(&at_rest, row)
             }
             None => UNSCROLLED,
         };
-        open_page_scrolled(scale, menu, tab_layout, category, widest_option, scroll)
+        open_page_scrolled_on(
+            platform,
+            scale,
+            menu,
+            tab_layout,
+            category,
+            widest_option,
+            scroll,
+        )
     }
 
     /// One named page of the dialog.
@@ -18529,7 +18582,28 @@ mod tests {
         widest_option: f32,
         scroll: f32,
     ) -> SettingsLayout {
-        let rows = visible_rows(tab_layout);
+        open_page_scrolled_on(
+            bt_platform::host_platform(),
+            scale,
+            menu,
+            tab_layout,
+            category,
+            widest_option,
+            scroll,
+        )
+    }
+
+    /// [`open_page_scrolled`] holding a named platform's rows.
+    fn open_page_scrolled_on(
+        platform: bt_platform::HostPlatform,
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+        category: SettingsCategory,
+        widest_option: f32,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = rows_on(platform, tab_layout);
         let shortcuts = shortcut_lines();
         layout_for_menu(
             SURFACE.0 * scale,
@@ -18661,7 +18735,24 @@ mod tests {
         menu: Option<SettingsRow>,
         scroll: f32,
     ) -> SettingsLayout {
-        let rows = flat_rows();
+        shaped_scrolled_on(
+            bt_platform::host_platform(),
+            category,
+            advanced,
+            menu,
+            scroll,
+        )
+    }
+
+    /// [`shaped_scrolled`] holding a named platform's rows.
+    fn shaped_scrolled_on(
+        platform: bt_platform::HostPlatform,
+        category: SettingsCategory,
+        advanced: AdvancedOpen,
+        menu: Option<SettingsRow>,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = rows_on(platform, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         layout_for_menu(
             SURFACE.0,
@@ -23458,32 +23549,41 @@ mod tests {
         ellipsised.retain(|row| *row != SettingsRow::TerminalFont);
         ellipsised.retain(|row| *row != SettingsRow::TerminalCjkFont);
         ellipsised.sort_by_key(|row| format!("{row:?}"));
+        // The default profile's button carries the fallback profile's title, which is this
+        // build's table's: `Windows PowerShell 5.1` on Windows does not fit, and the `sh` a Unix
+        // build falls back to does.
+        let long_default = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => Some(SettingsRow::DefaultProfile),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => None,
+        };
         assert_eq!(
             ellipsised,
-            vec![
-                SettingsRow::DefaultProfile,
-                // And the launch row's second answer (§7.59): `A tab in the
-                // window you used last` is a sentence rather than a word,
-                // because what it names is a window the reader has to be able to
-                // picture. The row's own line underneath carries the rest.
-                SettingsRow::LaunchOpens,
-                // The light-scheme picker (since ticket 17, `UI-SPEC.md` I1
-                // grew the chevron column from 8.5 to 13, narrowing every
-                // button's value box by 4.5px): `Solarized Light`, the longest
-                // of the built-in light catalogue's own names, no longer fits
-                // 118px where it used to clear it by a hair.
-                SettingsRow::LightScheme,
-                // Two of the summoned terminal's own (§7.54e ⑤): its first
-                // profile item is the sentence "whatever the default profile
-                // is", and the third rung of `What comes back` names two things
-                // and a condition. Both are values a picker button has to carry
-                // and neither fits 118px, which is exactly the case this pin
-                // exists for — the button says as much of it as fits and the
-                // row's sentence underneath carries the rest.
-                SettingsRow::QuakeProfile,
-                SettingsRow::QuakeRestore,
-                SettingsRow::SplitDirection,
-            ],
+            long_default
+                .into_iter()
+                .chain([
+                    // And the launch row's second answer (§7.59): `A tab in the
+                    // window you used last` is a sentence rather than a word,
+                    // because what it names is a window the reader has to be able to
+                    // picture. The row's own line underneath carries the rest.
+                    SettingsRow::LaunchOpens,
+                    // The light-scheme picker (since ticket 17, `UI-SPEC.md` I1
+                    // grew the chevron column from 8.5 to 13, narrowing every
+                    // button's value box by 4.5px): `Solarized Light`, the longest
+                    // of the built-in light catalogue's own names, no longer fits
+                    // 118px where it used to clear it by a hair.
+                    SettingsRow::LightScheme,
+                    // Two of the summoned terminal's own (§7.54e ⑤): its first
+                    // profile item is the sentence "whatever the default profile
+                    // is", and the third rung of `What comes back` names two things
+                    // and a condition. Both are values a picker button has to carry
+                    // and neither fits 118px, which is exactly the case this pin
+                    // exists for — the button says as much of it as fits and the
+                    // row's sentence underneath carries the rest.
+                    SettingsRow::QuakeProfile,
+                    SettingsRow::QuakeRestore,
+                    SettingsRow::SplitDirection,
+                ])
+                .collect::<Vec<_>>(),
             "the long profile title, the launch row's second answer, \
              `Solarized Light`, the summoned terminal's two and \
              `Auto (longer edge)` are the values this build's own tables can \
@@ -25610,7 +25710,17 @@ mod tests {
     /// So the press, the hover and the ink are asserted together.
     #[test]
     fn a_shell_this_machine_lacks_is_greyed_in_the_startup_picker_and_cannot_be_chosen() {
-        let missing = profiles::index_of_id("gitbash");
+        // A row this build ships that is neither the fallback nor the default, so the only
+        // mark of its colour on the page is its own item's.
+        let lacked = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => "gitbash",
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => "bash",
+        };
+        assert!(
+            profiles::has_id(lacked),
+            "{lacked} is a row this build ships"
+        );
+        let missing = profiles::index_of_id(lacked);
         let mut available = vec![true; profiles::count()];
         available[missing] = false;
         let lacking = SettingsValues {
@@ -26806,7 +26916,9 @@ mod tests {
     /// arm and this fails on the first item.
     #[test]
     fn a_press_on_a_greyed_item_names_it_instead_of_being_swallowed() {
-        let placed = open_rows_measured(
+        // The PSReadLine row is a Windows page's, read on every runner.
+        let placed = open_rows_measured_on(
+            bt_platform::HostPlatform::Windows,
             1.0,
             Some(SettingsRow::PsReadLine),
             TabLayoutMode::Horizontal,
@@ -26906,8 +27018,15 @@ mod tests {
         assert_eq!(SettingsRow::PsReadLine.value_text(&installed), None);
         assert_eq!(SettingsRow::PsReadLine.selected_index(&installed), Some(0));
 
-        // The word is drawn where the button is, and not only computed.
-        let placed = shaped(SettingsCategory::Terminal, AdvancedOpen::default(), None);
+        // The word is drawn where the button is, and not only computed — on the Windows
+        // page, which is the one that holds this row, read on every runner.
+        let placed = shaped_scrolled_on(
+            bt_platform::HostPlatform::Windows,
+            SettingsCategory::Terminal,
+            AdvancedOpen::default(),
+            None,
+            UNSCROLLED,
+        );
         let labels = labels_of(&placed, None, &updatable);
         assert!(
             labels
@@ -27262,10 +27381,12 @@ mod tests {
     fn a_slider_row_answers_the_pointer_as_a_slider_and_a_picker_row_as_a_picker() {
         // Each control asked on a dialog scrolled to show its own row: all six
         // live inside the Advanced group, which takes this page past the
-        // dialog's 600px cap.
-        let at_rest = open(1.0, false);
+        // dialog's 600px cap. The Windows page, read on every runner, because
+        // `Acrylic` is one of the six.
+        let windows = bt_platform::HostPlatform::Windows;
+        let at_rest = open_scrolled_on(windows, 1.0, false, UNSCROLLED);
         for row in [SettingsRow::ImageOpacity, SettingsRow::BackgroundOpacity] {
-            let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
+            let placed = open_scrolled_on(windows, 1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
             assert_eq!(hit(&placed, &values(), x, y), SettingsTarget::Slider(row));
             assert!(row.control().range().is_some());
@@ -27277,7 +27398,7 @@ mod tests {
             SettingsRow::Acrylic,
             SettingsRow::AlwaysOnTop,
         ] {
-            let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
+            let placed = open_scrolled_on(windows, 1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
             assert_eq!(hit(&placed, &values(), x, y), SettingsTarget::Combo(row));
             assert!(row.control().range().is_none());
@@ -27408,8 +27529,12 @@ mod tests {
         let palette = chrome_palette();
         // Both rows are inside the Advanced group, which takes this page past
         // the dialog's 600px cap, so each is read on a dialog scrolled to it.
-        let at_rest = open(1.0, false);
-        let showing = |row: SettingsRow| open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
+        // The Windows page, read on every runner, because `Acrylic` is a row of
+        // its and not of a Mac's.
+        let windows = bt_platform::HostPlatform::Windows;
+        let at_rest = open_scrolled_on(windows, 1.0, false, UNSCROLLED);
+        let showing =
+            |row: SettingsRow| open_scrolled_on(windows, 1.0, false, scroll_to_row(&at_rest, row));
 
         let mut lacking = values();
         lacking.acrylic_available = false;
@@ -27467,7 +27592,7 @@ mod tests {
 
         // The ring may still stand on it — a ring is not an action — and Enter
         // is refused there, which is what "no dead controls" actually forbids.
-        let rows = flat_rows();
+        let rows = rows_on(windows, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         let mut panel = SettingsPanel::default();
         panel.toggle(content(&rows, &lines));
@@ -28742,7 +28867,15 @@ mod tests {
     }
 
     fn keyboarded_on(category: SettingsCategory) -> SettingsPanel {
-        let rows = flat_rows();
+        keyboarded_in(bt_platform::host_platform(), category)
+    }
+
+    /// [`keyboarded_on`] holding a named platform's rows.
+    fn keyboarded_in(
+        platform: bt_platform::HostPlatform,
+        category: SettingsCategory,
+    ) -> SettingsPanel {
+        let rows = rows_on(platform, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         let mut panel = SettingsPanel::default();
         panel.toggle(content(&rows, &lines));
@@ -29493,7 +29626,10 @@ mod tests {
     /// on would be the pointer's own bug, arrived at through the other door.
     #[test]
     fn the_keyboard_skips_an_option_this_machine_cannot_start() {
-        let flat = flat_rows();
+        // The Windows page, read on every runner: the walk below counts its rows from the
+        // Explorer row that closes it.
+        let windows = bt_platform::HostPlatform::Windows;
+        let flat = rows_on(windows, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         let mut lacking = values();
         // Only the fallback shell is installed.
@@ -29502,7 +29638,7 @@ mod tests {
             .collect();
         lacking.default_profile = Some(profiles::fallback_profile());
 
-        let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
+        let mut panel = keyboarded_in(windows, SettingsRow::DefaultProfile.category());
         // `End` and then two steps back: `Explorer context menu` closes this
         // page (§7.4), `Opening Folio again` stands above it, and `Default
         // profile` above that. The summoned terminal's rows used to stand between

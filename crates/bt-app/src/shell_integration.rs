@@ -4384,9 +4384,21 @@ mod tests {
         assert!(line.ends_with("# Folio shell integration v1"));
     }
 
-    /// One shipped row, whole — what the spawn path is handed.
+    /// One row of the **Windows** seed, whole — what the spawn path is handed. The rows these
+    /// cases are about (PowerShell, WSL, Git Bash, Command Prompt) are Windows rows, taken as
+    /// data on every platform: the composer is under test, not this machine's seed.
     fn row(id: &str) -> Profile {
-        profiles::row_of(id).expect("a shipped id")
+        profiles::shipped_for(profiles::SeedPlatform::Windows, &bare())
+            .into_iter()
+            .find(|profile| profile.id == id)
+            .expect("a Windows seed id")
+    }
+
+    /// `parts` joined by this platform's own separator: `[r"C:\", "Git", "bash.exe"]` is
+    /// `C:\Git\bash.exe` on Windows, and on every platform a path whose leaf the platform's
+    /// own parser finds — which is what a program's family is read from.
+    fn joined(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
     }
 
     /// That row with an environment of its own.
@@ -5860,7 +5872,16 @@ mod tests {
         }
         assert_eq!(compose(&["-Command", "Get-Date"], None), None);
         assert_eq!(compose(&["-Command", "Get-Date"], Some(false)), None);
+        // The ceiling is `CreateProcessW`'s, so a line past it is refused where that is the
+        // launcher and composed whole where there is no such ceiling.
         let huge = "x".repeat(40_000);
+        let past_the_ceiling = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => None,
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => Some(vec![
+                OsString::from("-Command"),
+                OsString::from(format!("{huge}\r\n{loader}")),
+            ]),
+        };
         assert_eq!(
             composed_powershell_arguments(
                 program,
@@ -5868,7 +5889,7 @@ mod tests {
                 script,
                 Some(true)
             ),
-            None
+            past_the_ceiling
         );
     }
 
@@ -7224,12 +7245,11 @@ mod tests {
         assert_eq!(bt_pty::TERM_PROGRAM, "Folio");
         // And this module leaves them alone: the floor profile is a row every
         // platform has, and what it is handed here names none of the four.
-        let command = shell_command(
-            &row(profiles::fallback_profile_id()),
-            &[],
-            Scripts::default(),
-            &bare(),
-        );
+        let floor = profiles::shipped()
+            .into_iter()
+            .find(|profile| profile.id == profiles::fallback_profile_id())
+            .expect("the floor is a row this build ships");
+        let command = shell_command(&floor, &[], Scripts::default(), &bare());
         for (name, _) in &command.environment {
             for declared in DECLARED {
                 assert!(
@@ -7406,6 +7426,9 @@ mod tests {
     /// filename with a drive letter and backslashes, which it cannot open — so
     /// `--init-file` names nothing, bash starts with no startup file at all, and
     /// the user loses their own `~/.bashrc` as well as our markers.
+    ///
+    /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
+    #[cfg(windows)]
     #[test]
     fn the_first_wsl_pane_is_told_the_place_the_question_and_the_script_in_wsls_own_spelling() {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
@@ -7706,7 +7729,7 @@ mod tests {
             Integration::ZshDotDir
         );
         let theirs = Profile {
-            program: ProgramSource::Path(PathBuf::from(r"C:\msys64\usr\bin\zsh.exe")),
+            program: ProgramSource::Path(joined(&[r"C:\", "msys64", "usr", "bin", "zsh.exe"])),
             args: vec!["-l".to_owned()],
             paths: profiles::PathNamespace::Windows,
             ..row("gitbash")
@@ -7919,11 +7942,16 @@ mod tests {
     /// it silently does not have.
     #[test]
     fn a_bourne_shell_is_told_it_has_no_integration_rather_than_handed_one() {
-        for program in ["/bin/sh", "/usr/bin/dash", r"C:\msys64\usr\bin\sh.exe"] {
+        for program in [
+            PathBuf::from("/bin/sh"),
+            PathBuf::from("/usr/bin/dash"),
+            joined(&[r"C:\", "msys64", "usr", "bin", "sh.exe"]),
+        ] {
             assert_eq!(
-                profiles::derive_integration(&ProgramSource::Path(PathBuf::from(program))),
+                profiles::derive_integration(&ProgramSource::Path(program.clone())),
                 Integration::None,
-                "{program}"
+                "{}",
+                program.display()
             );
         }
         let theirs = Profile {
@@ -7957,6 +7985,9 @@ mod tests {
     ///
     /// MUTATION: hand the zsh branch nothing and a WSL login that lands in zsh
     /// is back to a pane with no marks and no directory.
+    ///
+    /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
+    #[cfg(windows)]
     #[test]
     fn the_question_asked_inside_the_distribution_names_both_doors() {
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
@@ -8033,7 +8064,17 @@ mod tests {
                 profile.args.iter().map(OsString::from).collect::<Vec<_>>(),
                 "{id}"
             );
-            assert!(command.environment.is_empty(), "{id}");
+            // Nothing of a door's: what is there is the system's locale and nothing else, and
+            // where the system declares none (Windows) that is nothing at all.
+            assert_eq!(
+                command.environment,
+                locale_declaration(
+                    bt_platform::system_locale_declaration(),
+                    &bare(),
+                    &profile.env
+                ),
+                "{id}"
+            );
         }
     }
 
@@ -8096,6 +8137,11 @@ mod tests {
     /// PowerShell whose owner had installed the opt-in script and in no other
     /// pane in the window — a capability of the terminal reachable only through
     /// one profile's optional file.
+    ///
+    /// Windows only, because its last half is the WSL boundary, which a drive-letter path
+    /// crosses; the shells a Mac ships are
+    /// `the_shells_a_mac_ships_are_told_this_terminal_renders_hyperlinks_unless_already_told`.
+    #[cfg(windows)]
     #[test]
     fn every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told() {
         let forced = |id: &str, environment: &dyn ShellEnvironment| {
@@ -8143,6 +8189,49 @@ mod tests {
                 && value.to_string_lossy().contains("FORCE_HYPERLINK/u")),
             "the user's own answer has to cross too"
         );
+    }
+
+    /// PIN — the macOS twin of
+    /// `every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told`:
+    /// every shell a Mac ships is told that this terminal renders hyperlinks, and none is
+    /// told over the top of an answer already in its environment.
+    ///
+    /// MUTATION: drop the `FORCE_HYPERLINK` declaration from `shell_command` and the zsh row
+    /// is the first to go red.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_shells_a_mac_ships_are_told_this_terminal_renders_hyperlinks_unless_already_told() {
+        struct Mac;
+        impl ShellEnvironment for Mac {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                (key == "SHELL").then(|| OsString::from("/bin/zsh"))
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                ["/bin/zsh", "/bin/bash", "/bin/sh"]
+                    .iter()
+                    .any(|shell| path == Path::new(shell))
+            }
+        }
+        let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
+        assert!(!rows.is_empty(), "a Mac ships its shells");
+        for row in &rows {
+            let forced = |environment: &dyn ShellEnvironment| {
+                shell_command(row, &[], both("/F/folio.bash", "/F/zdotdir"), environment)
+                    .environment
+                    .into_iter()
+                    .find(|(key, _)| key == "FORCE_HYPERLINK")
+                    .map(|(_, value)| value.to_string_lossy().into_owned())
+            };
+            assert_eq!(forced(&bare()).as_deref(), Some("1"), "{}", row.id);
+            for theirs in ["0", "1", ""] {
+                assert_eq!(
+                    forced(&Env(vec![("FORCE_HYPERLINK", theirs)])),
+                    None,
+                    "{} must not overwrite an inherited {theirs:?}",
+                    row.id
+                );
+            }
+        }
     }
 
     /// PIN — a prompt the user wrote survives, and is not doubled.
@@ -8389,26 +8478,36 @@ mod tests {
         // the honest answer: `--init-file` handed to something that is not a
         // bash is a filename it will try to open.
         for (program, door) in [
-            (r"C:\Users\me\.local\bin\claude.exe", Integration::None),
             (
-                r"C:\Program Files\Git\bin\bash.exe",
+                joined(&[r"C:\", "Users", "me", ".local", "bin", "claude.exe"]),
+                Integration::None,
+            ),
+            (
+                joined(&[r"C:\", "Program Files", "Git", "bin", "bash.exe"]),
                 Integration::BashInitFile,
             ),
-            (r"C:\Windows\System32\wsl.exe", Integration::BashInitFile),
+            (
+                joined(&[r"C:\", "Windows", "System32", "wsl.exe"]),
+                Integration::BashInitFile,
+            ),
             // A zsh has a door of its own: `ZDOTDIR`, because `--init-file` is
             // bash's flag and zsh refuses it (review row R3-6).
-            ("/usr/bin/zsh", Integration::ZshDotDir),
+            (PathBuf::from("/usr/bin/zsh"), Integration::ZshDotDir),
             // And a Bourne shell has none, rather than one it accepts and
             // ignores in silence.
-            ("/bin/sh", Integration::None),
-            ("/usr/bin/dash", Integration::None),
-            (r"C:\Windows\System32\cmd.exe", Integration::CmdPrompt),
-            (r"D:\pwsh.exe", Integration::PowerShellOptIn),
+            (PathBuf::from("/bin/sh"), Integration::None),
+            (PathBuf::from("/usr/bin/dash"), Integration::None),
+            (
+                joined(&[r"C:\", "Windows", "System32", "cmd.exe"]),
+                Integration::CmdPrompt,
+            ),
+            (joined(&[r"D:\", "pwsh.exe"]), Integration::PowerShellOptIn),
         ] {
             assert_eq!(
-                profiles::derive_integration(&ProgramSource::Path(PathBuf::from(program))),
+                profiles::derive_integration(&ProgramSource::Path(program.clone())),
                 door,
-                "{program}"
+                "{}",
+                program.display()
             );
         }
     }
@@ -8420,6 +8519,10 @@ mod tests {
     /// gate, and it is the one failure with no symptom on this side: the row is
     /// stored, written to the launcher and honoured by every check except the
     /// only one that matters, which is `echo $FOO` inside the distribution.
+    ///
+    /// Windows only: `WSLENV` is the boundary between Win32 and a WSL distribution, and the
+    /// script is named across it through a drive-letter path.
+    #[cfg(windows)]
     #[test]
     fn a_wsl_profiles_own_variables_are_listed_in_wslenv() {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
@@ -8538,7 +8641,14 @@ mod tests {
             id: "claude-7f3a".to_owned(),
             compared_title: None,
             display_title: "Claude".to_owned(),
-            program: ProgramSource::Path(PathBuf::from(r"C:\Users\me\.local\bin\claude.exe")),
+            program: ProgramSource::Path(joined(&[
+                r"C:\",
+                "Users",
+                "me",
+                ".local",
+                "bin",
+                "claude.exe",
+            ])),
             args: vec!["--verbose".to_owned()],
             env: vec![("ANTHROPIC_LOG".to_owned(), "debug".to_owned())],
             integration: profiles::IntegrationChoice::Auto,
@@ -8600,16 +8710,31 @@ mod tests {
     /// Which programs are asked about at all.
     #[test]
     fn the_program_name_says_whether_this_is_a_powershell() {
-        assert!(is_powershell(Path::new(
-            r"C:\Program Files\PowerShell\7\pwsh.exe"
-        )));
-        assert!(is_powershell(Path::new(
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-        )));
-        assert!(!is_powershell(Path::new(
-            r"C:\Program Files\Git\bin\bash.exe"
-        )));
-        assert!(!is_powershell(Path::new(r"C:\Windows\System32\cmd.exe")));
+        assert!(is_powershell(&joined(&[
+            r"C:\",
+            "Program Files",
+            "PowerShell",
+            "7",
+            "pwsh.exe"
+        ])));
+        assert!(is_powershell(&joined(&[
+            r"C:\",
+            "Windows",
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe"
+        ])));
+        assert!(!is_powershell(&joined(&[
+            r"C:\",
+            "Program Files",
+            "Git",
+            "bin",
+            "bash.exe"
+        ])));
+        assert!(!is_powershell(&joined(&[
+            r"C:\", "Windows", "System32", "cmd.exe"
+        ])));
     }
 
     /// The criterion, and the whole of it: a line that dot-sources the script.
