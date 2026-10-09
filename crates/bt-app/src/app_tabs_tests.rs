@@ -16,6 +16,16 @@ use bt_source::ItemQuery;
 use std::time::Duration;
 use winit::keyboard::{Key, NamedKey};
 
+/// **This host's command modifier** — Control, or Command on a Mac — read off
+/// [`input::is_command_chord`], which is the modifier `rename_key` opens its
+/// verbs on. The pins below that say `Ctrl` press this.
+fn command_modifier() -> ModifiersState {
+    [ModifiersState::CONTROL, ModifiersState::SUPER]
+        .into_iter()
+        .find(|modifiers| input::is_command_chord(*modifiers))
+        .expect("one of the two is the host's command modifier")
+}
+
 /// The braces one type's members are written in, and what is between them.
 fn type_body(name: &str) -> &'static str {
     item_body(&ItemQuery::type_item(name))
@@ -661,9 +671,9 @@ fn the_open_editor_owns_the_keyboard_and_gives_back_only_two_keys() {
 /// assertion finds an empty string on the clipboard instead of nothing.
 #[test]
 fn the_name_editor_carries_a_selection_word_verbs_and_a_clipboard() {
-    let ctrl = ModifiersState::CONTROL;
+    let ctrl = command_modifier();
     let shift = ModifiersState::SHIFT;
-    let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let ctrl_shift = command_modifier() | ModifiersState::SHIFT;
     let left = Key::Named(NamedKey::ArrowLeft);
     let right = Key::Named(NamedKey::ArrowRight);
 
@@ -779,7 +789,7 @@ const LEAF_ONE: LeafId = LeafId {
 /// the count is in the hundreds for a draft this field will hold at all.
 #[test]
 fn a_long_pasted_name_costs_one_shaping_pass() {
-    let ctrl = ModifiersState::CONTROL;
+    let ctrl = command_modifier();
     let mut editor = TabRename::open_files_new(LEAF_ONE, "", false, true);
     press_with_clipboard(
         &mut editor,
@@ -839,7 +849,7 @@ fn a_long_pasted_name_costs_one_shaping_pass() {
 /// and the first assertion reads 200 000.
 #[test]
 fn a_name_field_accepts_no_more_than_a_name() {
-    let ctrl = ModifiersState::CONTROL;
+    let ctrl = command_modifier();
     let huge = "j".repeat(200_000);
 
     let mut name = TabRename::open_files_new(LEAF_ONE, "", false, true);

@@ -12,6 +12,15 @@ use crate::test_support::{
 use bt_source::{Pattern, View, needle};
 use winit::keyboard::{Key, NamedKey};
 
+/// **This host's command modifier** — Control, or Command on a Mac — read off
+/// [`input::is_command_chord`] rather than decided a second time here.
+fn command_modifier() -> ModifiersState {
+    [ModifiersState::CONTROL, ModifiersState::SUPER]
+        .into_iter()
+        .find(|modifiers| input::is_command_chord(*modifiers))
+        .expect("one of the two is the host's command modifier")
+}
+
 /// PIN (user ruling 2026-08-25, B5) — **the breadcrumb's last segment is the
 /// same editor the head's name is, and the files column grows a `Rename` row
 /// that is a third door onto it.**
@@ -179,9 +188,12 @@ fn a_files_box_opens_with_its_stem_selected() {
 /// Red gate: take the `Ctrl+A` arm out of `rename_key` and the chord falls
 /// back into the swallow-every-chord arm, so the file's selection stays at
 /// the stem and the typing assertion writes `todo.md` instead of `todo`.
+///
+/// Pressed with this host's command modifier — `Ctrl+A` here, `Cmd+A` on a
+/// Mac — because that is the modifier `rename_key` opens its verbs on.
 #[test]
 fn ctrl_a_selects_the_whole_draft() {
-    let ctrl = ModifiersState::CONTROL;
+    let ctrl = command_modifier();
     let a = || Key::Character("a".into());
 
     let mut file = TabRename::open_file(

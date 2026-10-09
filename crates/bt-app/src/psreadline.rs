@@ -3957,6 +3957,11 @@ pub(crate) mod tests {
     /// MUTATION: make `apply` return anything without a sentence on a failed
     /// write — an early `return`, a swallowed `Err`, an `Outcome::Installed`
     /// on a path nothing was written to — and this fails.
+    ///
+    /// Windows only: the module path is Windows PowerShell's
+    /// (`WindowsPowerShell\Modules\PSReadLine`), whose `\` is a separator only
+    /// there.
+    #[cfg(windows)]
     #[test]
     fn a_refused_install_says_why_instead_of_staying_off() {
         let documents = temp_dir("refused-write");
@@ -4003,6 +4008,9 @@ pub(crate) mod tests {
     ///
     /// MUTATION: `create_dir` in place of `create_dir_all` and this fails on
     /// the first file.
+    ///
+    /// Windows only, for the same module path's reason.
+    #[cfg(windows)]
     #[test]
     fn the_module_directory_is_created_level_by_level() {
         let parent = temp_dir("levels");

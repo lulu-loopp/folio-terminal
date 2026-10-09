@@ -41,42 +41,6 @@ fn method_body(owner: &str, name: &str) -> &'static str {
     item_body(&bt_source::ItemQuery::method(owner, name))
 }
 
-/// **The temporary directory with every link above it resolved, in its ordinary spelling.**
-///
-/// The door refuses a root with a link anywhere among its ancestors, on purpose — a planted link
-/// must never turn a deletion into authority over its target. A sandbox is a place the door is
-/// pointed at, so its own spelling must carry no link, or every row reads as a planted one. On
-/// macOS it would: `$TMPDIR` is `/var/folders/…`, and `/var` is the system's link to
-/// `/private/var`, so every sandbox under the unresolved name was refused whole (12 tests red on
-/// the Mac, ticket 72). `canonicalize` is the resolution; on Windows it answers the verbatim
-/// `\\?\` form, where `/` is not a separator and the fixtures' `root.join("app/folio.exe")` would
-/// name no file, so a verbatim drive or share prefix is spelled back the ordinary way. Nothing here
-/// names a platform: a path with no prefix (every Unix path) is the canonical answer itself.
-///
-/// Production resolves the same link in its own roots since ticket 73, but only in the head the
-/// operating system names (`purge_root`); a sandbox root is not such a head, so it is resolved here.
-fn link_free_temp_dir() -> PathBuf {
-    use std::path::{Component, Prefix};
-    let real = fs::canonicalize(std::env::temp_dir()).expect("the temporary directory exists");
-    let mut components = real.components();
-    let Some(Component::Prefix(prefix)) = components.next() else {
-        return real;
-    };
-    let head = match prefix.kind() {
-        Prefix::VerbatimDisk(letter) => format!("{}:\\", char::from(letter)),
-        Prefix::VerbatimUNC(server, share) => format!(
-            r"\\{}\{}\",
-            server.to_string_lossy(),
-            share.to_string_lossy()
-        ),
-        _ => return real,
-    };
-    let rest: PathBuf = components
-        .filter(|component| !matches!(component, Component::RootDir))
-        .collect();
-    PathBuf::from(head).join(rest)
-}
-
 /// The spelling production hands to the removal boundary: resolved to its
 /// existing target, with Windows' verbatim prefix returned to an ordinary
 /// drive or share spelling.
@@ -84,9 +48,13 @@ fn resolved(path: &Path) -> PathBuf {
     bt_platform::handoff::strip_verbatim_prefix(&bt_platform::instance::canonical_path(path))
 }
 
+/// A removal sandbox. The door refuses a root with a link anywhere among its ancestors, on
+/// purpose — a planted link must never turn a deletion into authority over its target — so the
+/// sandbox stands where the temporary directory's own spelling carries none. Production resolves
+/// the same link in its own roots, but only in the head the operating system names
+/// (`purge_root`); a sandbox root is not such a head.
 fn sandbox(tag: &str) -> (PathBuf, Scope) {
-    let root =
-        link_free_temp_dir().join(bt_testpath::unique_name(&format!("folio-uninstall-{tag}")));
+    let root = bt_testpath::link_free_temp_path(&format!("folio-uninstall-{tag}"));
     fs::create_dir_all(root.join("app")).unwrap();
     let exe = root.join("app/folio.exe");
     fs::write(&exe, b"fixture executable").unwrap();
@@ -1415,7 +1383,7 @@ fn a_link_inside_the_folio_named_part_is_still_refused() {
 ///
 /// The head is spelled the way `std::env::temp_dir()` spells it (through `/var` on macOS, possibly
 /// a short 8.3 name on Windows) and must come back as its canonical, ordinary spelling — the same
-/// one this file's `link_free_temp_dir` derives independently. Folio's part carries a link
+/// one `bt_testpath::link_free_temp_dir` derives independently. Folio's part carries a link
 /// (`folio` → `elsewhere`) and must come back as `folio/clipboard`, not as the link's target. A
 /// head that does not exist yet is resolved as far as it exists.
 ///
@@ -1425,7 +1393,7 @@ fn a_link_inside_the_folio_named_part_is_still_refused() {
 fn the_boundary_is_the_os_named_head() {
     let name = bt_testpath::unique_name("folio-uninstall-boundary");
     let spelled = std::env::temp_dir().join(&name);
-    let resolved = link_free_temp_dir().join(&name);
+    let resolved = bt_testpath::link_free_temp_dir().join(&name);
     fs::create_dir_all(resolved.join("elsewhere")).unwrap();
     plant_directory_link(&resolved.join("folio"), &resolved.join("elsewhere"));
     assert_eq!(

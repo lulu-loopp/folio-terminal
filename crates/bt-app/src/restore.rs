@@ -4202,16 +4202,20 @@ in the folders you left them, as new shells."
     /// gone was wearing.
     #[test]
     fn a_row_is_named_by_your_name_for_it_or_by_the_folder_it_stood_in() {
+        // A Windows-spelled folder in this platform's own spelling.
+        let here = crate::test_support::host_spelling;
+        // The first row this build ships.
+        let first = profiles::id(0);
         let named = RestoreRow::from_seed(
             &Seed::Term {
-                profile_id: "pwsh".to_owned(),
-                cwd: "C:\\Users\\you\\repo".to_owned(),
+                profile_id: first.clone(),
+                cwd: here("C:\\Users\\you\\repo"),
                 manual_name: Some("build".to_owned()),
             },
             2,
         );
         assert_eq!(named.label, "build", "your name for it");
-        assert_eq!(named.cwd, "C:\\Users\\you\\repo");
+        assert_eq!(named.cwd, here("C:\\Users\\you\\repo"));
         assert_eq!(
             named.mark,
             profiles::mark(0),
@@ -4221,8 +4225,8 @@ in the folders you left them, as new shells."
 
         let unnamed = RestoreRow::from_seed(
             &Seed::Term {
-                profile_id: "pwsh".to_owned(),
-                cwd: "C:\\Users\\you\\notes".to_owned(),
+                profile_id: first,
+                cwd: here("C:\\Users\\you\\notes"),
                 manual_name: None,
             },
             1,
@@ -4232,7 +4236,7 @@ in the folders you left them, as new shells."
 
         let files = RestoreRow::from_seed(
             &Seed::Files {
-                root: "C:\\Users\\you\\docs\\".to_owned(),
+                root: here("C:\\Users\\you\\docs\\"),
             },
             1,
         );
@@ -4240,16 +4244,32 @@ in the folders you left them, as new shells."
         assert_eq!(files.mark, ChromeMark::Folder);
 
         // A profile this build does not have costs the tab its shell choice and
-        // never the tab — §5.4 逐叶降级, which `index_of_id` already rules on.
+        // never the tab — §5.4 逐叶降级, which `index_of_id` already rules on: it
+        // wears the fallback profile's mark.
         let stranger = RestoreRow::from_seed(
             &Seed::Term {
                 profile_id: "nushell".to_owned(),
-                cwd: "C:\\Users\\you\\notes".to_owned(),
+                cwd: here("C:\\Users\\you\\notes"),
                 manual_name: None,
             },
             1,
         );
-        assert_eq!(stranger.mark, profiles::mark(0));
+        // The mark itself, read off the floor's own seed row rather than through the table's
+        // index: on Windows the floor is Windows PowerShell and wears PowerShell's mark.
+        let floor = profiles::shipped()
+            .into_iter()
+            .find(|profile| profile.id == profiles::fallback_profile_id())
+            .expect("the floor is a row this build ships");
+        assert_eq!(stranger.mark, floor.mark);
+        assert_eq!(stranger.mark, profiles::mark(profiles::fallback_profile()));
+        let windows_floor = profiles::shipped_for(
+            profiles::SeedPlatform::Windows,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .into_iter()
+        .find(|profile| profile.id == profiles::WINDOWS_POWERSHELL_ID)
+        .expect("the Windows floor is a Windows seed row");
+        assert_eq!(windows_floor.mark, ChromeMark::ProfilePowerShell);
     }
 
     /// PIN (i18n slice, 2026-08-17) — **Chinese wraps, and it wraps between

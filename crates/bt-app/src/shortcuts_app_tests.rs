@@ -17,10 +17,14 @@ use winit::keyboard::Key;
 /// the shell. Asserted through the registry rather than against a deleted
 /// function, because "no code claims it" is the property, and the registry
 /// is the only thing left that could.
+///
+/// Asked of the Windows column by name: the scaffold's chord and the palette's
+/// `Ctrl+Shift+P` are that column's, and the macOS column's palette chord is
+/// asserted beside them.
 #[test]
 fn the_retired_preview_chord_reaches_the_shell_like_any_other_key() {
     let key = Key::Character("p".into());
-    let table = shortcuts::Shortcuts::defaults();
+    let table = shortcuts::Shortcuts::defaults_for(bt_platform::HostPlatform::Windows);
     let claimed = |modifiers| {
         table.lookup(
             &key,
@@ -70,6 +74,16 @@ fn the_retired_preview_chord_reaches_the_shell_like_any_other_key() {
         claimed(ModifiersState::CONTROL | ModifiersState::SHIFT),
         Some(shortcuts::Action::CommandPalette),
         "Ctrl+Shift+P is the palette's - see shortcuts::Action::CommandPalette"
+    );
+    // The macOS column gives the palette `Shift+Cmd+P`.
+    assert_eq!(
+        shortcuts::Shortcuts::defaults_for(bt_platform::HostPlatform::MacOs).lookup(
+            &key,
+            &key,
+            ModifiersState::SUPER | ModifiersState::SHIFT,
+            shortcuts::Focus::default(),
+        ),
+        Some(shortcuts::Action::CommandPalette)
     );
 }
 
