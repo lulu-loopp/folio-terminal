@@ -289,7 +289,7 @@ of the two test-support features, `bt-pty`'s `test-shell` and `bt-platform`'s
 `bt-compose` (CC-6a), layer 6. Normal and
 target-specific edges as the manifests declare them (2026-09-23; `bt-workbench`
 2026-09-25; `bt-effects` and `bt-compose` 2026-10-08; `bt-compose`'s math edges
-2026-10-09):
+and `bt-term`'s last `bt-math` edge gone 2026-10-09):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
@@ -304,11 +304,12 @@ bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only excep
 bt-platform     ← bt-persist, bt-app, bt-lint-probe
 bt-viewport     ← bt-render, bt-term, bt-compose
 bt-detect       ← bt-term, bt-compose
-bt-math         ← bt-term (the SVG codec and the engine re-export, until CC-7),
-                  bt-compose
+bt-math         ← bt-compose (not bt-term since CC-7: the host installs the
+                  SVG codec into it)
 bt-term         ← bt-compose, bt-app (bt-pty only as a dev-dependency, since
                   2026-09-21; bt-term's own tests name bt-compose as one, for
-                  a real typesetter, since 2026-10-09)
+                  a real typesetter, since 2026-10-09 — the engine and its em
+                  key through bt-compose's re-export)
 bt-render       ← bt-compose, bt-app
 bt-compose      ← bt-app, bt-corpus (itself: bt-term, bt-viewport, bt-render,
                   bt-doc, bt-detect, bt-math, unicode-width and web-time)
@@ -367,8 +368,8 @@ empty raster a proven table comes back with. It moved out of `bt-term`
 verbatim; `bt-term` files the task, settles a live task's band
 (`extend_live_task_band`) and reads its logical line
 (`live_snapshot_logical_line_text`), and judges the answer, and runs no engine
-for a formula any more (its `bt-math` edge is the SVG codec and the `MathEngine`
-re-export until CC-7, structural-debt D-15). **`pump`** is the bounded step for
+for a formula any more; since CC-7 it names `bt-math` nowhere (§3.2,
+structural-debt D-15). **`pump`** is the bounded step for
 a host with no lane of its own: it takes at most `Budget::tasks` decoration
 tasks and answers each through the host's `Executor` (`math`, `table`, `image`,
 `scale`, `verify`), giving every task taken one terminal completion — the
@@ -404,7 +405,8 @@ without the platform layer (the owner's ruling of 2026-09-21), and since CC-4 it
 manifest names `bt-platform` nowhere, not as a dev-dependency either:
 `cargo tree -p bt-term -i bt-platform` prints nothing. Its four former product
 surfaces are answered from outside. The read ledger is `bt-effects`' (CC-3,
-§3.1). The other three are the host's:
+§3.1). The other three are the host's, and so is the SVG codec that replaced
+`bt-term`'s last `bt-math` call (CC-7, below):
 
 - **The machine's names** (`bt_term::install_host_names`, read by
   `bt_term::local_host_names` when a working-directory report names a host) — a
@@ -415,11 +417,19 @@ surfaces are answered from outside. The read ledger is `bt-effects`' (CC-3,
 - **What a resample-pool thread runs first** (`bt_term::install_pool_thread_start`)
   — a process-wide hook, installed once; a host that installs none (a browser)
   gets a pool whose threads run no hook.
+- **The SVG codec** (`bt_term::install_svg_rasterizer`, a
+  `bt_term::SvgRasterizer` — `fn(&[u8]) -> Result<SvgRaster, SvgRasterError>`,
+  the two types `bt_doc::svg`'s) — what an inline picture whose bytes no raster
+  container claims is handed to; `bt-app` installs
+  `bt_math::rasterize_svg_document`. One answer per process: the same codec
+  again is a no-op, a different one a panic, and a read before any installation
+  panics in every build profile, release included ("the SVG rasterizer read
+  before the host installed it").
 - **The name a hand-off door would open** — not installed: `bt_term::verify_path`
   takes the resolver as a parameter, and its one product caller,
   `run_path_verify_worker`, hands it `bt_platform::resolved_for_a_door`.
 
-`bt-app` installs the first two in one place, `host_answers::install`, called by
+`bt-app` installs the other three in one place, `host_answers::install`, called by
 `main` right after the window thread is entered and before the event loop that
 makes every session exists (pinned by
 `host_answers::tests::the_host_answers_are_installed_before_the_first_session_can_exist`).
@@ -427,11 +437,17 @@ The development tools in `bt-corpus` that replay a pane's bytes install the same
 answers first (`bt_corpus::install_host_answers`). A test process installs
 `bt_term::TEST_HOST_NAMES` (`bt_term::install_test_host_names`): `bt-term`'s own
 unit tests in the reader itself, every other test binary in the one function that
-makes its sessions. The tests that start a real shell through `bt_pty::test_shell`
+makes its sessions. Its unit tests install the test codec the same way, in the
+codec's reader (`bt_term::test_svg_rasterizer`: one known document is one known
+raster, every other payload is not a document); `bt-app`'s tests install the
+desktop codec with the names (`host_answers::install_the_repeatable_answers`),
+and `bt-compose`'s pump tests in the function that makes their panes. The tests that start a real shell through `bt_pty::test_shell`
 — whose door reaches the platform layer — live in `bt-pty/tests`, beside the
 transport they run on.
 
-**`bt-term → bt-math` — real coupling, recorded debt (D-15).** The math data
+**`bt-term → bt-math` — gone (D-15, repaid by CC-7).** `bt-term`'s manifest
+names `bt-math` nowhere, as a normal or a dev-dependency:
+`cargo tree -p bt-term -i bt-math -e normal,build` prints nothing. The math data
 types — `MathRenderKey`, `MathRaster`, `MathRenderError` and `MathFailureStage` —
 are `bt-doc`'s (`bt_doc::math`, since CC-5): renderer-neutral, standard-library
 types only, so `bt-term` files a render, carries its raster and records its
@@ -439,12 +455,12 @@ failure without naming the engine. `bt-math` re-exports the four at its root, so
 every `bt_math::MathRaster`-style path still resolves; the two limits their
 messages name (`MAX_NESTING_DEPTH`, `MAX_LAYOUT_CELLS`) are `bt_doc::math`
 constants that `bt-math` asserts at compile time equal the limits it enforces.
-What still couples the crates is execution: `session.rs` typesets through
-`MathEngine` and `key_for_em_px`, `inline_image::decode_svg_bytes` rasterises
-through `rasterize_svg_document`, and `crates/bt-term/src/lib.rs` re-exports the
-engine. Hiding that behind re-exports changes nothing. **Recorded as debt**
-until the composition layer takes math execution (design T-COMPOSE-CRATE §3.4:
-CC-6b moves `typeset`, CC-7 the SVG codec).
+Math execution is `bt-compose`'s (`typeset`, CC-6b), and the SVG raster is the
+host's installed codec (CC-7, above), whose two types are `bt_doc::svg`'s and
+re-exported by `bt-math` the same way. `bt-term`'s session tests that need real
+rasters typeset through its dev-dependency on `bt-compose`, which names
+`bt-math`: the default `cargo tree -p bt-term -i bt-math` (dev edges included)
+prints that one path, and nothing else.
 
 ### 3.3 The dependency policy — this file is now its address
 
@@ -492,8 +508,8 @@ those manifests actually practise, restated here from what they say:
   crate missing from that table fails. The exemptions live in
   `scripts/ci/crate-edge-exemptions.tsv`, one row per edge with its
   `docs/plans/structural-debt.md` row; the list only shrinks against the merge
-  base, and a row whose edge is gone or now goes down fails. Its one row is
-  `bt-term → bt-math` (D-15).
+  base, and a row whose edge is gone or now goes down fails. It has no rows:
+  the last, `bt-term → bt-math` (D-15), went with CC-7.
   Dev-dependencies are not layer edges: Cargo allows them in both directions,
   and `bt-platform`/`bt-pty` each name the other as one (`bt-pty` naming
   `bt-term` only as one is §3.2's repair of D-13).

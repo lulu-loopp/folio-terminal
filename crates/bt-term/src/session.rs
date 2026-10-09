@@ -17284,9 +17284,9 @@ mod publication_revision_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_compose::MathEngine;
     use bt_doc::DecorationLifecycle;
     use bt_doc::math::MathRenderKey;
-    use bt_math::MathEngine;
     use bt_transcript::TerminalColor;
     use proptest::prelude::*;
 
@@ -36028,7 +36028,7 @@ mod tests {
         let at_26 = engine
             .render(
                 "x",
-                bt_math::key_for_em_px(26.0, [220; 3], MathMode::Inline).unwrap(),
+                bt_compose::key_for_em_px(26.0, [220; 3], MathMode::Inline).unwrap(),
             )
             .unwrap();
         assert_eq!(blocks[0].artifact.width_px, at_26.width_px);
@@ -36049,7 +36049,7 @@ mod tests {
         let at_20 = engine
             .render(
                 "x",
-                bt_math::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
+                bt_compose::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
             )
             .unwrap();
         assert_eq!(blocks[0].artifact.width_px, at_20.width_px);
@@ -36082,7 +36082,8 @@ mod tests {
                     mode: MathMode::Inline,
                 };
                 let em_key =
-                    bt_math::key_for_em_px(em as f32, [220, 220, 220], MathMode::Inline).unwrap();
+                    bt_compose::key_for_em_px(em as f32, [220, 220, 220], MathMode::Inline)
+                        .unwrap();
                 for (label, key) in [("12pt", old_key), ("pane-em", em_key)] {
                     let raster = engine.render(source, key).unwrap();
                     let split = ((baseline as f32 / raster.baseline_px)
@@ -36214,7 +36215,7 @@ mod tests {
         let natural = MathEngine::new()
             .render(
                 r"\dfrac{a}{b}",
-                bt_math::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
+                bt_compose::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
             )
             .unwrap();
         assert!(

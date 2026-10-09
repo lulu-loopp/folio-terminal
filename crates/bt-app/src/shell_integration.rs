@@ -9981,7 +9981,7 @@ mod tests {
         );
         assert_eq!(place.working_directory.as_deref(), Some(fixed.as_path()));
         let mut shell = start(hygiene, place.working_directory.clone());
-        crate::test_support::install_this_machines_names();
+        crate::test_support::install_host_answers();
         let mut pane = bt_term::DualPlaneSession::new(
             std::num::NonZeroU32::new(120).unwrap(),
             std::num::NonZeroU32::new(30).unwrap(),

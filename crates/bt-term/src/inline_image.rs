@@ -7,6 +7,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bt_doc::svg::SvgRasterError;
 use image::{ImageFormat, ImageReader, Limits, codecs::png::PngDecoder};
 use rayon::prelude::*;
 
@@ -986,11 +987,11 @@ fn decode_image_bytes_within(
 }
 
 fn decode_svg_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
-    let raster = bt_math::rasterize_svg_document(bytes).map_err(|error| match error {
+    let raster = crate::host::svg_rasterizer()(bytes).map_err(|error| match error {
         // Bytes that fail the SVG parse are simply not any admitted format — the same quiet
         // verdict a text file with a .png extension has always received.
-        bt_math::SvgRasterError::Parse(_) => InlineImageDecodeError::UnsupportedFormat,
-        bt_math::SvgRasterError::Dimensions(_) => InlineImageDecodeError::InvalidDimensions,
+        SvgRasterError::Parse(_) => InlineImageDecodeError::UnsupportedFormat,
+        SvgRasterError::Dimensions(_) => InlineImageDecodeError::InvalidDimensions,
     })?;
     Ok(DecodedImagePayload {
         key: format!("image:{:032x}", content_hash_128(bytes)),
@@ -3513,30 +3514,63 @@ mod tests {
         );
     }
 
+    /// RED (CC-7) — **an SVG payload is rasterized by the codec the host installed, on both
+    /// roads a picture arrives by**, at the size and in the pixels that codec answers; and bytes
+    /// the codec does not take for a document are an unsupported format.
+    ///
+    /// This crate's unit tests install `test_svg_rasterizer` in the reader (`host::svg_rasterizer`),
+    /// which parses nothing: a 3x2 raster of `TEST_SVG_PIXEL` can only have come from it.
+    ///
+    /// MUTATION ①: drop the reader's `#[cfg(test)]` install — red: the decode panics with "the SVG
+    /// rasterizer read before the host installed it". MUTATION ②: map the codec's `Parse` to
+    /// `InvalidDimensions` in `decode_svg_bytes` — the last assertion goes red.
     #[test]
-    fn svg_local_path_decodes_through_the_rasterizer_at_intrinsic_size() {
+    fn an_svg_payload_decodes_through_the_installed_codec() {
         let directory = bt_testpath::temp_path("betterterminal-inline-svg");
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("probe.svg");
-        std::fs::write(
-            &path,
-            br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6">
-                <rect x="0" y="0" width="8" height="6" fill="#00ff00"/>
-            </svg>"##,
-        )
-        .unwrap();
+        let path = directory.join("probe-\u{e9}t\u{e9}.svg");
+        std::fs::write(&path, crate::TEST_SVG_DOCUMENT).unwrap();
 
         let mut decoder = InlineImageDecoder::default();
-        let decoded = decoder
+        let from_file = decoder
             .decode(InlineImageTask {
                 occurrence_id: 71,
                 source: InlineImageSource::LocalPath(path.clone()),
             })
             .unwrap();
-        assert_eq!((decoded.width_px, decoded.height_px), (8, 6));
-        assert!(!decoded.animated);
-        assert_eq!(&decoded.rgba[..4], &[0, 255, 0, 255]);
-        assert!(decoded.key.starts_with("image:"));
+        let printed = decode_inline_image(InlineImageTask {
+            occurrence_id: 72,
+            source: InlineImageSource::Osc1337(
+                STANDARD.encode(crate::TEST_SVG_DOCUMENT).into_bytes(),
+            ),
+        })
+        .unwrap();
+        for decoded in [&from_file, &printed] {
+            assert_eq!((decoded.width_px, decoded.height_px), (3, 2));
+            assert!(!decoded.animated);
+            assert!(
+                decoded
+                    .rgba
+                    .chunks_exact(4)
+                    .all(|pixel| pixel == crate::TEST_SVG_PIXEL),
+                "the installed codec's pixels, straight alpha as it answered them"
+            );
+            assert!(decoded.key.starts_with("image:"));
+        }
+        assert_eq!(from_file.key, printed.key, "one document, one content key");
+
+        let not_a_document = decode_inline_image(InlineImageTask {
+            occurrence_id: 73,
+            source: InlineImageSource::Osc1337(
+                STANDARD
+                    .encode("<svg>\u{3b1}\u{e9} not the codec's document</svg>")
+                    .into_bytes(),
+            ),
+        });
+        assert_eq!(
+            not_a_document,
+            Err(InlineImageDecodeError::UnsupportedFormat)
+        );
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
