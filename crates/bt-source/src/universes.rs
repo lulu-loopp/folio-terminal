@@ -4,9 +4,12 @@
 //! onto the same words they are written in today — and so that the difference
 //! between a text walk and a declaration walk is a diff somebody reads rather
 //! than a change nobody notices. The guards named below read through them, and
-//! each refuses an index whose scope holds a file no declaration reaches
-//! ([`crate::FileSetDiff::only_on_disk`]), so the declaration walk answers for
-//! every file the directory walk it replaced read.
+//! each says what it does with a file under its scope that no declaration
+//! reaches ([`crate::FileSetDiff::only_on_disk`]): the three `bt-platform`
+//! guards refuse one by name, and the `BT_` catalogue reads it as text, because
+//! a crate patched in by path (`vendor/conpty/portable-pty`) is compiled into
+//! the program without being a workspace member whose targets this crate
+//! reads.
 //!
 //! | Guard | Its universe |
 //! | --- | --- |

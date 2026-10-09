@@ -54497,7 +54497,7 @@ mod key_hint_spend_tests {
     //
     // Both claims are about which line stands before which in a handler that
     // needs a whole window to reach, so they are source pins. They used to read
-    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // the text of `main.rs`; they now ask `bt-source` about an *item* of
     // this crate, so neither is bound to the file the handler happens to be
     // written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
     // before this one ran both readings side by side and asserted they agree.
@@ -54590,7 +54590,7 @@ mod key_hint_spend_tests {
 mod git_hover_heal_tests {
     // ── what this module asks the crate ───────────────────────────────────
     //
-    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // Both pins used to read the text of `main.rs`; they now ask
     // `bt-source` about an *item* of this crate, so neither is bound to the
     // file the method happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -55100,7 +55100,7 @@ mod recent_folder_door_tests {
     //
     // The two rulings below are about *where* one call is made, which has no
     // value to read back — so they are counted. That count used to be taken off
-    // `include_str!("main.rs")` line by line; it is now asked of `bt-source`,
+    // the text of `main.rs` line by line; it is now asked of `bt-source`,
     // of an *item* of this crate or of the package, so neither ruling is bound
     // to the file the doors happen to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -56562,7 +56562,7 @@ mod file_peek_fade_tests {
 
     // ── what this module asks the crate ───────────────────────────────────
     //
-    // The wiring pins used to read `include_str!("main.rs")`; they now ask
+    // The wiring pins used to read the text of `main.rs`; they now ask
     // `bt-source` about an *item* of this crate, so none of them is bound to
     // the file the method happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -59346,7 +59346,7 @@ mod page_under_a_laden_hand_tests {
     //
     // Both claims are about where one question is asked and about how wide a
     // list is, and neither returns a value — so they are source pins. They used
-    // to read `include_str!("main.rs")`; they now ask `bt-source` about *items*
+    // to read the text of `main.rs`; they now ask `bt-source` about *items*
     // of this crate, so neither is bound to the file a method or a struct
     // happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -60400,7 +60400,7 @@ mod quit_transaction_tests {
         // own `#[cfg(test)]` declaration — holds the one test that drives a
         // shutdown by hand. So the crate's answer is filtered to the files a
         // product build compiles, which is the question this pin was always
-        // asking and the one `include_str!("main.rs")` could only approximate.
+        // asking and the one the text of `main.rs` could only approximate.
         assert_eq!(
             in_product(&found(needle!(Pattern::text(&on_this_thread)), View::Raw)),
             // None at all, counted over every file a product build of this package
@@ -61946,7 +61946,7 @@ mod textless_present_tests {
     // A `WindowRuntime` is a surface, a compositor and four Win32 bridges, so
     // the two present sites cannot be stood up and what can be held about them
     // is the shape of their `match`. That used to be read out of
-    // `include_str!("main.rs")`; it is now asked of `bt-source` about an *item*
+    // the text of `main.rs`; it is now asked of `bt-source` about an *item*
     // of this crate, so no claim here is bound to the file the method happens to
     // be written in (`docs/plans/bt-app-split-prep.md` §6.3). The commit before
     // this one ran both readings side by side and asserted they agree.
@@ -70045,7 +70045,7 @@ mod resize_skirt_order_tests {
 
     // ── what this module asks the crate ───────────────────────────────────
     //
-    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // Both pins used to read the text of `main.rs`; they now ask
     // `bt-source` about an *item* of this crate, so neither is bound to the
     // file the method happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -75105,7 +75105,7 @@ mod webnav_app_tests;
 ///   §13.6). Nothing `cli.rs` *does* is platform-shaped any more.
 #[cfg(test)]
 mod platform_gate_tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
@@ -75176,27 +75176,33 @@ mod platform_gate_tests {
     /// and `feature = …` are not statements about a machine and are not counted.
     const PLATFORM_WORDS: [&str; 5] = ["windows", "unix", "macos", "target_os", "target_family"];
 
-    /// Every `.rs` file under this crate's `src`, relative path first.
-    fn sources() -> Vec<(String, String)> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut found = Vec::new();
-        let mut stack = vec![root.clone()];
-        while let Some(directory) = stack.pop() {
-            for entry in std::fs::read_dir(&directory).expect("a directory of this crate") {
-                let path: PathBuf = entry.expect("a directory entry").path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    let relative = path
-                        .strip_prefix(&root)
-                        .expect("a file under src")
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let text = std::fs::read_to_string(&path).expect("a source file");
-                    found.push((relative, text));
-                }
-            }
-        }
+    /// Every file this crate's declarations reach, relative path first, with
+    /// its text — read through `bt-source` ([`source`] below), so a module added
+    /// under a new directory is read the day it is declared. A file under `src/`
+    /// that no declaration reaches is refused by name, because this reading
+    /// would pass it by.
+    fn sources() -> Vec<(String, &'static str)> {
+        let index = source();
+        let unreached = &index.cross_check().only_on_disk;
+        assert!(
+            unreached.is_empty(),
+            "these files are under bt-app's src/ and no `mod` declaration reaches them: \
+             {unreached:#?}"
+        );
+        let root = bt_source::normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+        let mut found: Vec<(String, &'static str)> = index
+            .files()
+            .iter()
+            .map(|file| {
+                let relative = file
+                    .path()
+                    .strip_prefix(&root)
+                    .expect("a file of this crate's own src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (relative, index.text(file.span()))
+            })
+            .collect();
         found.sort();
         found
     }
@@ -75231,9 +75237,9 @@ mod platform_gate_tests {
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
     // both readings side by side and asserted they agree.
     //
-    // `sources()` above stays a directory walk because this Rust test is the
-    // single owner of the file-list rule. T-GATES-047 retired the PowerShell
-    // twin and its agreement test; a second reader added no protection.
+    // `sources()` above reads the same index: this Rust test is the single
+    // owner of the file-list rule, and the files it judges are the ones the
+    // crate's declarations reach.
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
     // module's header is where the six points behind `source`, `item_body` and
@@ -75288,7 +75294,7 @@ mod platform_gate_tests {
         let mut asking: Vec<String> = Vec::new();
         let mut strangers: Vec<String> = Vec::new();
         for (relative, text) in sources() {
-            let Some((line, _)) = code_lines(&text).find(|(_, line)| names_a_platform(line)) else {
+            let Some((line, _)) = code_lines(text).find(|(_, line)| names_a_platform(line)) else {
                 continue;
             };
             asking.push(relative.clone());
@@ -77832,7 +77838,7 @@ mod quit_with_no_window_tests {
     //
     // Both rulings are about the order of two lines and about which doors write
     // one flag, neither of which returns a value — so they are source pins.
-    // They used to read `include_str!("main.rs")`; they now ask `bt-source`
+    // They used to read the text of `main.rs`; they now ask `bt-source`
     // about an *item* of this crate, so no claim here is bound to the file the
     // door happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -78646,7 +78652,7 @@ mod refused_preview_card_tests {
     //
     // Eleven of the joints below are wiring, and wiring has no value to assert
     // without a window — so they are held as source pins. They used to read
-    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // the text of `main.rs`; they now ask `bt-source` about an *item* of
     // this crate, so no claim here is bound to the file the method happens to
     // be written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
     // before this one ran both readings side by side and asserted they agree.
