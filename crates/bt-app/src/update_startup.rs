@@ -404,7 +404,10 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     // ([`unfinished`]). A hold of the journal that outlasted its holder's
     // window, named on the command line by that holder, is said over
     // whichever of them the journal shows.
-    let is_the_trial = trial_for_view.is_some_and(|(txn, _)| txn == header.txn);
+    // Over a journal this build cannot read whole the card stays E1's (an
+    // unfinished update by a newer Folio): its facts are not this build's to read.
+    let is_the_trial =
+        matches!(seen, Sight::Known(_)) && trial_for_view.is_some_and(|(txn, _)| txn == header.txn);
     let failed = start
         .failed
         .and_then(|_| after_rollback(&header))
@@ -2679,7 +2682,8 @@ mod tests {
         /// journal (one heading for R7) — the never-tried rows read *did not
         /// start*; (2) `run` takes only U-35's reserved trial as the trial
         /// (`is_last_trial` for `is_the_trial`) — the W14long row reads *did
-        /// not start*.
+        /// not start*; (3) `is_the_trial` without its `Sight::Known` — a
+        /// journal this build cannot read whole reads *did not finish*.
         #[test]
         fn one_heading_per_cause_from_the_journals_facts() {
             use crate::i18n::Text;
@@ -2759,6 +2763,20 @@ mod tests {
                 Text::UpdateFailedTrialRunning.text(),
                 "the new version runs here: never *did not start*"
             );
+
+            // The same start over a journal this build cannot read whole keeps
+            // E1's card: its facts are not this build's to read.
+            let known = write_phase(&scene, Phase::Moving);
+            for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+                std::fs::write(scene.home.journal(), &bytes).unwrap();
+                let mut world = Recorded::default();
+                let (failed, ..) =
+                    continued_with(run_reporting(&scene, Some(&as_trial), None, &mut world));
+                assert!(
+                    matches!(failed, Some(Failure::Newer { .. })),
+                    "{what}: {failed:?}"
+                );
+            }
         }
 
         /// RED (0.4.8 E4, W14) — **a start told that another program held the
