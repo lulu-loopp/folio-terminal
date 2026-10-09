@@ -133,6 +133,11 @@ pub struct Advanced {
 /// **Step 2 — release what has run out at `now`**: a synchronized update whose
 /// timeout passed is committed first, then the live rows that have settled are
 /// advanced — the order a native turn takes them in.
+///
+/// The web host's road: `bt-app` does not call it. Its turn runs the same two steps
+/// apart — `finish_synchronized_update_if_due` (which reads a pane's name evidence
+/// between "due" and "finish") and `advance_live_math_if_due` (through
+/// [`advance_live_stability`]).
 pub fn advance(session: &mut DualPlaneSession, now: Instant) -> Result<Advanced, SessionError> {
     let synchronized_update_finished = deadlines(session).synchronized_update_due(now)
         && session.finish_synchronized_update(now)?;

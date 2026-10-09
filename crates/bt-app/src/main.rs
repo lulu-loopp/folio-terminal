@@ -50896,6 +50896,9 @@ impl Runtime<'_> {
             // Per leaf: a synchronized update is a property of one screen, and
             // two shells in one tab time out independently.
             for (seat, leaf) in tab.leaves_mut() {
+                // The product's "if due, finish": `bt_compose::advance` is the same step for a
+                // single-call host (the web road); this loop keeps its own to read the name evidence
+                // between the two, for a due leaf only.
                 if !bt_compose::deadlines(&leaf.session).synchronized_update_due(now) {
                     continue;
                 }

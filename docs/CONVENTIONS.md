@@ -162,9 +162,9 @@ G1 checks, `vendor/vte`, and
 `vendor/alacritty_terminal` without `event_loop` and `tty`.
 Those crates read time through `web_time`, which is `std::time` on every native
 target. The script's header names the set and what is out of it; it refuses a
-run that read no file. Four canaries: a qualified clock in `bt-doc`, a nested
-import in `bt-layout` and a crate-root nested import (`use ::std::{time::Instant}`)
-in `bt-viewport` are refused by file, and a clock planted in
+run that read no file. Five canaries: a qualified clock in `bt-doc` and in
+`bt-compose`, a nested import in `bt-layout` and a crate-root nested import
+(`use ::std::{time::Instant}`) in `bt-viewport` are refused by file, and a clock planted in
 `bt-platform`'s `http` module (out of scope by name) is not.
 
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
