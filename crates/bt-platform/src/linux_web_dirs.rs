@@ -160,11 +160,7 @@ mod tests {
 
     #[test]
     fn the_cache_directory_is_created_on_the_worker_under_its_data_tag() {
-        let root = std::env::temp_dir().join(format!(
-            "folio-linux-web-dir-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let root = bt_testpath::temp_path("folio-linux-web-dir");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir(&root).expect("create the test root");
         let cache_home = root.join("cache");
