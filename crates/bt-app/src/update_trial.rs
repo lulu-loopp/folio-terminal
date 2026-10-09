@@ -691,147 +691,165 @@ pub(crate) fn watch(
     let (mut retry_at, mut pause) = (Instant::now(), RECEIPT_RETRY_FIRST);
     let mut said_commit_refusal = false;
     let mut said_mark_refusal = false;
+    let mut taking_back: Option<Instant> = None;
     loop {
-        // (1) The receipt.
-        if let Some(written) = gate.receipt_answered() {
-            match written.result {
-                Ok(()) => eprintln!(
-                    "BT_UPDATE_TRIAL receipt of {txn} written by {:?}",
-                    written.by
-                ),
-                Err(error) => {
-                    eprintln!(
-                        "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}; the watch writes it again",
+        // A commit was read and the mark is still to be taken back: only
+        // that, each turn, until it goes or the window passes (0.4.8 E4).
+        'turn: {
+            if let Some(until) = taking_back {
+                if mark_taken_back(unkept, txn, until) {
+                    return;
+                }
+                break 'turn;
+            }
+            // (1) The receipt.
+            if let Some(written) = gate.receipt_answered() {
+                match written.result {
+                    Ok(()) => eprintln!(
+                        "BT_UPDATE_TRIAL receipt of {txn} written by {:?}",
                         written.by
-                    );
-                    gate.owe_receipt();
-                    retry_at = Instant::now() + pause;
-                }
-            }
-        }
-        if Instant::now() >= retry_at {
-            match gate.write_owed_receipt() {
-                Some(Ok(())) => {
-                    eprintln!("BT_UPDATE_TRIAL receipt of {txn} written by the trial's watch");
-                }
-                Some(Err(_)) => {
-                    pause = pause.saturating_mul(2).min(RECEIPT_RETRY_CAP);
-                    retry_at = Instant::now() + pause;
-                }
-                None => {}
-            }
-        }
-        // The mark that a person's change is held until the commit.
-        if gate.owes_unkept_mark() {
-            match bt_platform::install_txn::durable_write(unkept, b"") {
-                Ok(()) => {
-                    gate.unkept_marked();
-                    eprintln!(
-                        "BT_UPDATE_TRIAL transaction {txn}: a change made in this trial is held until the commit; {} says so meanwhile",
-                        unkept.display()
-                    );
-                }
-                Err(failure) if !said_mark_refusal => {
-                    said_mark_refusal = true;
-                    eprintln!(
-                        "BT_UPDATE_TRIAL transaction {txn}: a change made in this trial is held and {failure}; the watch asks again"
-                    );
-                }
-                Err(_) => {}
-            }
-        }
-        // U-35's reserved trial, once ready: the ordinary readiness edge, and
-        // what commits is the receipt as it is on disk, under the lock.
-        if gate.ready()
-            && let Some(commit) = commit_itself.as_deref_mut()
-        {
-            match commit() {
-                Ok(LastTrialCommit::Committed) => {
-                    if gate.decide(TrialSight::Committed) {
+                    ),
+                    Err(error) => {
                         eprintln!(
-                            "BT_UPDATE_TRIAL transaction {txn} is committed by its own receipt; its writes are released"
+                            "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}; the watch writes it again",
+                            written.by
+                        );
+                        gate.owe_receipt();
+                        retry_at = Instant::now() + pause;
+                    }
+                }
+            }
+            if Instant::now() >= retry_at {
+                match gate.write_owed_receipt() {
+                    Some(Ok(())) => {
+                        eprintln!("BT_UPDATE_TRIAL receipt of {txn} written by the trial's watch");
+                    }
+                    Some(Err(_)) => {
+                        pause = pause.saturating_mul(2).min(RECEIPT_RETRY_CAP);
+                        retry_at = Instant::now() + pause;
+                    }
+                    None => {}
+                }
+            }
+            // The mark that a person's change is held until the commit.
+            if gate.owes_unkept_mark() {
+                match bt_platform::install_txn::durable_write(unkept, b"") {
+                    Ok(()) => {
+                        gate.unkept_marked();
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn}: a change made in this trial is held until the commit; {} says so meanwhile",
+                            unkept.display()
+                        );
+                    }
+                    Err(failure) if !said_mark_refusal => {
+                        said_mark_refusal = true;
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn}: a change made in this trial is held and {failure}; the watch asks again"
+                        );
+                    }
+                    Err(_) => {}
+                }
+            }
+            // U-35's reserved trial, once ready: the ordinary readiness edge, and
+            // what commits is the receipt as it is on disk, under the lock.
+            if gate.ready()
+                && let Some(commit) = commit_itself.as_deref_mut()
+            {
+                match commit() {
+                    Ok(LastTrialCommit::Committed) => {
+                        if gate.decide(TrialSight::Committed) {
+                            eprintln!(
+                                "BT_UPDATE_TRIAL transaction {txn} is committed by its own receipt; its writes are released"
+                            );
+                            wake();
+                        }
+                        if !gate.has_marked_unkept() {
+                            return;
+                        }
+                        taking_back =
+                            Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
+                        break 'turn;
+                    }
+                    Ok(LastTrialCommit::Pending) => {}
+                    Ok(LastTrialCommit::NotItsOwn) => commit_itself = None,
+                    Ok(LastTrialCommit::StoodAside) => {
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn}: the journal is one this build cannot read whole; it is not committed by itself, and the build that wrote it decides"
+                        );
+                        commit_itself = None;
+                    }
+                    Ok(LastTrialCommit::Unprovable) => {
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn}: this process cannot read its own start instant, so its receipt names nobody; it is not committed by itself, and a recovery decides"
+                        );
+                        commit_itself = None;
+                    }
+                    Err(error) => {
+                        if !said_commit_refusal {
+                            said_commit_refusal = true;
+                            eprintln!(
+                                "BT_UPDATE_TRIAL transaction {txn} could not be committed by its own receipt: {error}"
+                            );
+                        }
+                    }
+                }
+            }
+            // (2) The journal.
+            let read = match file_reads::read(Lane::UpdateJournal, journal) {
+                Ok(bytes) => Read::Seen(trial_sight(Some(&bytes), &txn)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    Read::Seen(trial_sight(None, &txn))
+                }
+                // Held by its writer for the instant of a rename, or a share that
+                // stopped answering: not an answer about the transaction.
+                Err(_) => Read::Unreadable,
+            };
+            match read {
+                Read::Seen(sight @ TrialSight::Committed) => {
+                    if gate.decide(sight) {
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn} is committed; its writes are released"
                         );
                         wake();
                     }
-                    take_back_the_mark(gate, unkept, txn);
+                    if !gate.has_marked_unkept() {
+                        return;
+                    }
+                    taking_back = Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
+                    break 'turn;
+                }
+                Read::Seen(sight @ TrialSight::Ended) => {
+                    gate.decide(sight);
+                    eprintln!(
+                        "BT_UPDATE_TRIAL transaction {txn} ended without a commit; this run writes nothing"
+                    );
                     return;
                 }
-                Ok(LastTrialCommit::Pending) => {}
-                Ok(LastTrialCommit::NotItsOwn) => commit_itself = None,
-                Ok(LastTrialCommit::StoodAside) => {
+                Read::Seen(TrialSight::Undecided) => unreadable_since = None,
+                Read::Unreadable => {
+                    unreadable_since.get_or_insert_with(Instant::now);
+                }
+            }
+            // (3) The watchdog.
+            if spent < HAND_BACKS && Instant::now() >= begun + watchdog.every * (1 << spent) {
+                spent += 1;
+                if let Some(since) = unreadable_since {
                     eprintln!(
-                        "BT_UPDATE_TRIAL transaction {txn}: the journal is one this build cannot read whole; it is not committed by itself, and the build that wrote it decides"
+                        "BT_UPDATE_TRIAL transaction {txn}: the journal has been unreadable for {} s; it is not handed back",
+                        since.elapsed().as_secs()
                     );
-                    commit_itself = None;
-                }
-                Ok(LastTrialCommit::Unprovable) => {
+                } else if recovery.is_some_and(bt_platform::install_flip::still_running) {
                     eprintln!(
-                        "BT_UPDATE_TRIAL transaction {txn}: this process cannot read its own start instant, so its receipt names nobody; it is not committed by itself, and a recovery decides"
+                        "BT_UPDATE_TRIAL transaction {txn} is undecided; the recovery handed it before still runs"
                     );
-                    commit_itself = None;
+                } else {
+                    recovery = (watchdog.hand_back)(gate.ready());
                 }
-                Err(error) => {
-                    if !said_commit_refusal {
-                        said_commit_refusal = true;
-                        eprintln!(
-                            "BT_UPDATE_TRIAL transaction {txn} could not be committed by its own receipt: {error}"
-                        );
-                    }
-                }
-            }
-        }
-        // (2) The journal.
-        let read = match file_reads::read(Lane::UpdateJournal, journal) {
-            Ok(bytes) => Read::Seen(trial_sight(Some(&bytes), &txn)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Read::Seen(trial_sight(None, &txn))
-            }
-            // Held by its writer for the instant of a rename, or a share that
-            // stopped answering: not an answer about the transaction.
-            Err(_) => Read::Unreadable,
-        };
-        match read {
-            Read::Seen(sight @ TrialSight::Committed) => {
-                if gate.decide(sight) {
+                if spent == HAND_BACKS {
                     eprintln!(
-                        "BT_UPDATE_TRIAL transaction {txn} is committed; its writes are released"
+                        "BT_UPDATE_TRIAL transaction {txn}: the watchdog is spent; the next start or logon decides"
                     );
-                    wake();
                 }
-                take_back_the_mark(gate, unkept, txn);
-                return;
-            }
-            Read::Seen(sight @ TrialSight::Ended) => {
-                gate.decide(sight);
-                eprintln!(
-                    "BT_UPDATE_TRIAL transaction {txn} ended without a commit; this run writes nothing"
-                );
-                return;
-            }
-            Read::Seen(TrialSight::Undecided) => unreadable_since = None,
-            Read::Unreadable => {
-                unreadable_since.get_or_insert_with(Instant::now);
-            }
-        }
-        // (3) The watchdog.
-        if spent < HAND_BACKS && Instant::now() >= begun + watchdog.every * (1 << spent) {
-            spent += 1;
-            if let Some(since) = unreadable_since {
-                eprintln!(
-                    "BT_UPDATE_TRIAL transaction {txn}: the journal has been unreadable for {} s; it is not handed back",
-                    since.elapsed().as_secs()
-                );
-            } else if recovery.is_some_and(bt_platform::install_flip::still_running) {
-                eprintln!(
-                    "BT_UPDATE_TRIAL transaction {txn} is undecided; the recovery handed it before still runs"
-                );
-            } else {
-                recovery = (watchdog.hand_back)(gate.ready());
-            }
-            if spent == HAND_BACKS {
-                eprintln!(
-                    "BT_UPDATE_TRIAL transaction {txn}: the watchdog is spent; the next start or logon decides"
-                );
             }
         }
         // (4) The pause.
@@ -840,34 +858,26 @@ pub(crate) fn watch(
 }
 
 /// **The commit was read: the mark that a person's change is held goes**
-/// (0.4.8 E4) — the change is released with the rest. A removal refused (a
-/// scanner still reading the mark it just saw written) is asked again every
-/// [`MARK_RETRY`] for a journal write's window
-/// (`update_apply::JOURNAL_HELD_WITHIN`), on this worker, after the release
-/// was woken. One that still fails is said; the mark then outlives the
-/// commit, and the start that retires the transaction says the changes were
-/// not kept although they were written.
-fn take_back_the_mark(gate: &Gate, unkept: &Path, txn: TxnId) {
-    if !gate.has_marked_unkept() {
-        return;
-    }
-    let until = Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN;
-    loop {
-        match bt_platform::install_txn::durable_remove(unkept) {
-            Ok(()) => return,
-            Err(_) if Instant::now() < until => std::thread::sleep(MARK_RETRY),
-            Err(failure) => {
-                eprintln!(
-                    "BT_UPDATE_TRIAL transaction {txn} is committed, and its mark could not be taken back: {failure}"
-                );
-                return;
-            }
+/// (0.4.8 E4) — the change is released with the rest. One ask; the watch asks
+/// again at its next turn while a removal is refused (a scanner still reading
+/// the mark it just saw written) and `until` — a journal write's window
+/// (`update_apply::JOURNAL_HELD_WITHIN`) after the commit was read — has not
+/// passed. `true` when the watch is done: the mark is gone, or it could not
+/// be taken back in time, which is said; the mark then outlives the commit,
+/// and the start that retires the transaction says the changes were not kept
+/// although they were written.
+fn mark_taken_back(unkept: &Path, txn: TxnId, until: Instant) -> bool {
+    match bt_platform::install_txn::durable_remove(unkept) {
+        Ok(()) => true,
+        Err(_) if Instant::now() < until => false,
+        Err(failure) => {
+            eprintln!(
+                "BT_UPDATE_TRIAL transaction {txn} is committed, and its mark could not be taken back: {failure}"
+            );
+            true
         }
     }
 }
-
-/// The pause between two asks to take the mark back ([`take_back_the_mark`]).
-const MARK_RETRY: Duration = Duration::from_millis(100);
 
 // ───────────────────────────── the claim and the receipt ─────────────────────────────
 
@@ -1397,16 +1407,18 @@ mod tests {
     }
 
     /// RED (0.4.8 E4, R3) — **a person's change a trial holds is marked in the
-    /// transaction's folder until the watch reads the commit, which takes the
-    /// mark back**: a trial that ended in between leaves the mark for the
-    /// start that retires the commit (`update_startup`'s
-    /// `a_commit_after_the_trial_ended_says_its_changes_were_not_kept`). Only
-    /// the documents a person edits owe it: the start's own writers (the
-    /// session, the update check, a migration) are made again by the next
-    /// start.
+    /// transaction's folder by the watch; a trial whose transaction ends
+    /// without its commit leaves the mark for the start that retires a commit
+    /// (`update_startup`'s
+    /// `a_commit_after_the_trial_ended_says_its_changes_were_not_kept`), and a
+    /// commit the watch reads takes the mark back.** Only the documents a
+    /// person edits owe it: the start's own writers (the session, the update
+    /// check, a migration) are made again by the next start. The watch runs on
+    /// this thread to its own end; nothing here waits.
     ///
-    /// MUTATION: `Gate::owes_unkept_mark` answers `false` (the clean VM's
-    /// silent loss) — no mark while the change is held.
+    /// MUTATIONS: `Gate::owes_unkept_mark` answers `false`; the watch never
+    /// writes the mark — the ended trial leaves no mark (the clean VM's
+    /// silent loss).
     #[test]
     fn a_persons_change_held_by_a_trial_is_marked_until_its_commit() {
         assert!(
@@ -1429,46 +1441,40 @@ mod tests {
         let root = scratch("unkept-设置");
         let journal = root.join("journal.json");
         let mark = root.join(crate::update_txn::UNKEPT_FILE);
-        std::fs::write(&journal, journal_bytes(TXN, trial_phase())).unwrap();
-        let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
-        assert!(gate.defer(true, Writer::Session));
-        assert!(
-            gate.defer(true, Writer::Settings),
-            "a setting changed in the trial"
-        );
-        assert!(gate.owes_unkept_mark());
-
-        let watched = (journal.clone(), mark.clone());
-        let watcher = std::thread::spawn(move || {
+        for (phase, kept_mark) in [
+            // Rolled back before this trial saw a commit: the mark stays.
+            (
+                Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried: false,
+                },
+                true,
+            ),
+            // Committed: the watch takes it back.
+            (Phase::Committed, false),
+        ] {
+            let _ = std::fs::remove_file(&mark);
+            std::fs::write(&journal, journal_bytes(TXN, phase.clone())).unwrap();
+            let gate = Gate::new();
+            assert!(gate.defer(true, Writer::Session));
+            assert!(
+                gate.defer(true, Writer::Settings),
+                "a setting changed in the trial"
+            );
+            assert!(gate.owes_unkept_mark());
             watch(
-                gate,
-                (&watched.0, &watched.1),
+                &gate,
+                (&journal, &mark),
                 TXN,
                 Duration::from_millis(5),
                 &|| {},
                 None,
                 &mut watchdog_asleep(),
             );
-        });
-        // The watch's first turn writes it; a broken run is bounded.
-        let asked = Instant::now();
-        while gate.owes_unkept_mark() {
-            assert!(
-                asked.elapsed() < Duration::from_secs(30),
-                "the held change was never marked"
-            );
-            std::thread::sleep(Duration::from_millis(5));
+            assert!(gate.has_marked_unkept(), "{phase:?}: marked while held");
+            assert!(!gate.owes_unkept_mark(), "{phase:?}: once");
+            assert_eq!(mark.exists(), kept_mark, "{phase:?}");
         }
-        assert!(mark.exists(), "marked in the transaction's folder");
-        std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
-        watcher
-            .join()
-            .expect("the watch stops once it has read the commit");
-        assert!(!mark.exists(), "the commit takes the mark back");
-        assert_eq!(
-            gate.take_released(),
-            vec![Writer::Session, Writer::Settings]
-        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -2877,10 +2877,18 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
         };
         (failed, trial)
     };
+    // The heading follows the journal: no trial begun reads *The update
+    // stopped before the new version started.* (0.4.8 E4).
     let incomplete = |install: &Install| crate::update_job::Failure::Incomplete {
         folder: Some(install.home.root().to_path_buf()),
         held: false,
-        untried: false,
+        untried: !crate::update_txn::Journal::parse(
+            &std::fs::read(install.home.journal()).unwrap(),
+        )
+        .unwrap()
+        .body
+        .phase
+        .trial_begun(),
     };
 
     // A folder where the transaction lock should be: the lock cannot be
