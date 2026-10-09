@@ -684,7 +684,11 @@ pub fn begin() {
         |_ctx| {
             let fact = FACT.get_or_init(|| {
                 derive_fact(
-                    std::env::current_exe(),
+                    // The program's own file, links followed (G-SWEEP-048): a winget alias is a
+                    // link whose folder is not the install's.
+                    bt_platform::running_image()
+                        .map(|image| image.path.clone())
+                        .map_err(io::Error::other),
                     bt_platform::host_platform(),
                     install_evidence::current_account(),
                     || install_evidence::uninstall_records(&WINGET_RECORD_VALUES),

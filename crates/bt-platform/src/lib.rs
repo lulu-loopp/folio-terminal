@@ -2958,6 +2958,139 @@ pub const fn host_platform() -> HostPlatform {
     }
 }
 
+/// **This process's executable as the system loaded it: the path it was started by, and the file
+/// that path leads to** (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS) — the one answer to "where are my
+/// own files": the ConPTY pair, `folio.msix`, the folder the install-channel marker reads and the
+/// program the Explorer verb names are all beside [`Self::path`].
+///
+/// A link is the reason the two differ. winget's portable alias is a symbolic link
+/// (`%LOCALAPPDATA%\Microsoft\WinGet\Links\folio.exe`); a process started through it is told the
+/// link's path (`GetModuleFileNameW`), and its folder holds none of the files that came with the
+/// program, so a lookup beside the started path ran on the inbox ConPTY with no key records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningImage {
+    /// The path this process was started by.
+    pub started_as: std::path::PathBuf,
+    /// The file it leads to, every link on the way followed (on Windows `GetFinalPathNameByHandleW`;
+    /// elsewhere the started path: a macOS bundle is found from its own executable's path).
+    pub path: std::path::PathBuf,
+}
+
+impl RunningImage {
+    /// The folder the image is in — where everything that came with it is.
+    #[must_use]
+    pub fn folder(&self) -> Option<&std::path::Path> {
+        self.path.parent()
+    }
+
+    /// The `diagnostics.log` line that says which file was resolved, when the started path is not
+    /// that file.
+    #[must_use]
+    pub fn note(&self) -> Option<String> {
+        (self.started_as != self.path).then(|| {
+            format!(
+                "Folio was started as {} and runs from {}; its own files are looked for there",
+                self.started_as.display(),
+                self.path.display()
+            )
+        })
+    }
+}
+
+/// **[`RunningImage`] of this process**, resolved on the first ask and kept for its life (the
+/// executable does not move under a running process); the error says why it could not be
+/// resolved. Asked first by the start's sidecar naming, off the window thread's loop.
+pub fn running_image() -> Result<&'static RunningImage, String> {
+    static IMAGE: std::sync::OnceLock<Result<RunningImage, String>> = std::sync::OnceLock::new();
+    IMAGE
+        .get_or_init(|| {
+            let started_as = std::env::current_exe()
+                .map_err(|error| format!("the running executable's path is unknown ({error})"))?;
+            image_of(started_as)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// **The folder this program's own files are in** — [`running_image`]'s, or why there is none.
+pub fn own_files_folder() -> Result<std::path::PathBuf, String> {
+    running_image().and_then(|image| {
+        image
+            .folder()
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| format!("{} has no folder", image.path.display()))
+    })
+}
+
+/// The [`RunningImage`] of an executable started by `started_as`.
+#[cfg(windows)]
+pub(crate) fn image_of(started_as: std::path::PathBuf) -> Result<RunningImage, String> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
+        GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
+    };
+
+    let refused = |error: &dyn std::fmt::Display| {
+        format!(
+            "the file {} leads to cannot be named ({error})",
+            started_as.display()
+        )
+    };
+    let wide = wide_with_nul(started_as.as_os_str()).map_err(|error| refused(&error))?;
+    // SAFETY: `wide` is NUL-terminated and live for the call; an attributes-only open that
+    // follows links, shared with every other opener; the handle moves to `OwnedHandle` at once.
+    let file = unsafe {
+        CreateFileW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .map_err(|error| refused(&error))?;
+    // SAFETY: as above.
+    let file = unsafe { OwnedHandle::from_raw_handle(file.0) };
+    let mut name = vec![0_u16; 512];
+    loop {
+        // SAFETY: the handle is live; the call writes at most `name.len()` units.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                HANDLE(file.as_raw_handle()),
+                &mut name,
+                GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
+            )
+        };
+        let length = usize::try_from(length).unwrap_or(usize::MAX);
+        if length == 0 {
+            return Err(refused(&std::io::Error::last_os_error()));
+        }
+        if length < name.len() {
+            name.truncate(length);
+            break;
+        }
+        // Too small: the answer is the size needed, its terminating NUL included.
+        name.resize(length, 0);
+    }
+    let path =
+        handoff::strip_verbatim_prefix(std::path::Path::new(&std::ffi::OsString::from_wide(&name)));
+    Ok(RunningImage { started_as, path })
+}
+
+/// The [`RunningImage`] of an executable started by `started_as`: the started path itself.
+#[cfg(not(windows))]
+pub(crate) fn image_of(started_as: std::path::PathBuf) -> Result<RunningImage, String> {
+    Ok(RunningImage {
+        path: started_as.clone(),
+        started_as,
+    })
+}
 #[must_use]
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[cfg_attr(
@@ -4915,6 +5048,136 @@ pub fn probe_output_with_raw_tail(
     }
 }
 
+/// **Where this program's own files are: beside the file it runs from, not beside the path it was
+/// started by** (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS).
+#[cfg(all(test, windows))]
+mod running_image_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    const HELPER_MODE: &str = "RUNNING_IMAGE_HELPER_MODE";
+
+    /// The helper: says what this process resolved its image to.
+    #[test]
+    fn helper_says_its_image() {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("say") {
+            return;
+        }
+        let image = running_image().expect("the helper's image");
+        println!("started {}", image.started_as.display());
+        println!("folder {}", own_files_folder().expect("a folder").display());
+    }
+
+    /// A folder for the links, beside this test executable (inside the build's own `target`),
+    /// named by `bt_testpath`.
+    fn link_folder() -> PathBuf {
+        let exe = std::env::current_exe().expect("this test executable");
+        exe.parent()
+            .expect("its folder")
+            .join(bt_testpath::unique_name("folio-image-link"))
+    }
+
+    /// How this account can link to the test executable: a file symbolic link (winget's own
+    /// kind; needs the privilege Developer Mode or an administrator gives), else a directory
+    /// junction to its folder (no privilege needed). `None` with the reason when neither can be
+    /// made. Answers the path to start and what was made.
+    fn linked_executable(folder: &Path) -> Result<(PathBuf, &'static str), String> {
+        let exe = std::env::current_exe().expect("this test executable");
+        let name = exe.file_name().expect("a file name");
+        std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+        let link = folder.join(name);
+        match std::os::windows::fs::symlink_file(&exe, &link) {
+            Ok(()) => return Ok((link, "file symbolic link")),
+            Err(error) if error.raw_os_error() == Some(1314) => {}
+            Err(error) => return Err(format!("the symbolic link was refused: {error}")),
+        }
+        let junction = folder.join("junction");
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let made = hygiene
+            .command(r"C:\Windows\System32\cmd.exe", quiet_command)
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(exe.parent().expect("its folder"))
+            .output()
+            .map_err(|error| error.to_string())?;
+        if made.status.success() {
+            Ok((junction.join(name), "directory junction"))
+        } else {
+            Err(format!(
+                "this account can make neither a symbolic link (privilege not held) nor a \
+                 junction ({})",
+                String::from_utf8_lossy(&made.stderr).trim()
+            ))
+        }
+    }
+
+    /// RED (mutation: use the started path — `image_of` answering `started_as` as the file): a
+    /// helper started through a link is told the link's path, and its own files are looked for
+    /// in the real executable's folder all the same.
+    #[test]
+    fn a_program_started_through_a_link_finds_its_files_beside_the_real_file() {
+        let folder = link_folder();
+        let (link, how) = match linked_executable(&folder) {
+            Ok(made) => made,
+            Err(why) => {
+                let _ = std::fs::remove_dir_all(&folder);
+                eprintln!("SKIPPED: {why}");
+                return;
+            }
+        };
+        let output = quiet_command(&link)
+            .args([
+                "--exact",
+                "running_image_tests::helper_says_its_image",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "say")
+            .output()
+            .expect("start the helper through the link");
+        // The junction or link goes first, never what it leads to.
+        let _ = std::fs::remove_dir(folder.join("junction"));
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir(&folder);
+        let said = String::from_utf8_lossy(&output.stdout);
+        let line = |word: &str| {
+            said.lines()
+                .find_map(|line| line.strip_prefix(word))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("the helper says `{word}`: {said}"))
+        };
+        let real = image_of(std::env::current_exe().expect("this test executable"))
+            .expect("this executable's image");
+        assert_eq!(
+            line("started "),
+            link,
+            "through a {how}, the helper is told the path it was started by"
+        );
+        assert_eq!(
+            Some(line("folder ").as_path()),
+            real.folder(),
+            "through a {how}, its own files are where the real file is"
+        );
+    }
+
+    /// An executable started by its own path is that file, and has nothing to say about it.
+    #[test]
+    fn a_program_started_by_its_own_path_is_that_file() {
+        let image = image_of(std::env::current_exe().expect("this test executable"))
+            .expect("this executable's image");
+        assert_eq!(image.note(), None, "{image:?}");
+        let moved = RunningImage {
+            started_as: PathBuf::from(r"C:\链接\folio.exe"),
+            path: PathBuf::from(r"D:\程序\folio.exe"),
+        };
+        assert_eq!(
+            moved.note().as_deref(),
+            Some(
+                r"Folio was started as C:\链接\folio.exe and runs from D:\程序\folio.exe; its own files are looked for there"
+            )
+        );
+        assert_eq!(moved.folder(), Some(Path::new(r"D:\程序")));
+    }
+}
 /// **A probe's owner reads life, not the clock alone** (G-SWEEP-048, T-PROBE-COLD-CACHE): the
 /// rule of [`ProbeWatch`] over synthetic looks — no process, no clock.
 #[cfg(test)]

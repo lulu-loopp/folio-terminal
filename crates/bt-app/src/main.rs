@@ -39341,6 +39341,31 @@ mod shell_birth_tests {
         drop(leaf);
         drop(hygiene.recv().expect("the shell's directory"));
     }
+
+    /// PIN (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS) — **both roads that make a pseudoconsole name the
+    /// folder of the program's own file before the first one**: the elevated host before it
+    /// serves, and the resident run after its diagnostics are in the log (the line that says which
+    /// file was resolved goes there) and before the event loop that makes the first pane. A road
+    /// that names nothing runs every pane on the inbox ConPTY (`bt_pty::use_sidecars_in`).
+    ///
+    /// MUTATION (observed red): drop the resident run's `use_sidecars_in`.
+    #[test]
+    fn the_program_names_its_sidecar_folder_before_any_pane() {
+        use bt_source::{Index, ItemQuery};
+        let main = Index::of_package("bt-app")
+            .body_of(&ItemQuery::function("main"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let naming = "bt_pty::use_sidecars_in(bt_platform::own_files_folder())";
+        let named: Vec<usize> = main.match_indices(naming).map(|(at, _)| at).collect();
+        assert_eq!(named.len(), 2, "the host and the resident run each name it");
+        let at = |needle: &str| {
+            main.find(needle)
+                .unwrap_or_else(|| panic!("`main` no longer does `{needle}`"))
+        };
+        assert!(named[0] < at("elevated_host::serve("));
+        assert!(at("diagnostics::enter_resident_run(") < named[1]);
+        assert!(named[1] < at("EventLoop::<AppEvent>::with_user_event()"));
+    }
     /// RED — **the pane is there before its shell is, and what was typed meanwhile reaches the
     /// shell first, in order.** The shell is not even started until the test opens the gate; the
     /// pane already has a frame of its own grid, holds two typed lines (one Chinese), and, once
@@ -74131,6 +74156,8 @@ fn main() -> Result<()> {
     // host is a headless process that authenticates its pipe and is otherwise nothing.
     if let Some(line) = bt_platform::elevated_protocol::HostLine::parse(std::env::args_os().skip(1))
     {
+        // The host makes the elevated pane's pseudoconsole: its sidecars are named first.
+        bt_pty::use_sidecars_in(bt_platform::own_files_folder());
         std::process::exit(match line {
             Ok(line) => elevated_host::serve(&line),
             Err(_) => elevated_host::USAGE,
@@ -74353,6 +74380,16 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // **Where this program's own files are, said once and named before any pane** (G-SWEEP-048,
+    // T-EXE-SYMLINK-SIDECARS): the loaded image with its links followed, so a start through
+    // winget's alias finds its ConPTY pair beside the real file and says which file that is.
+    if let Some(note) = bt_platform::running_image()
+        .ok()
+        .and_then(bt_platform::RunningImage::note)
+    {
+        diagnostics::note(&note);
+    }
+    bt_pty::use_sidecars_in(bt_platform::own_files_folder());
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and
