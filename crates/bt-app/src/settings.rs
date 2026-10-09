@@ -5532,7 +5532,7 @@ impl SettingsRow {
             // not index 0 showed stale words until touched. Reading state is the
             // whole of the fix, and it is free here because there is no second
             // place holding the button's caption.
-            Self::DefaultProfile => Some(values.default_profile),
+            Self::DefaultProfile => values.default_profile,
             // Ticked on what the window is actually doing: `None` is ticked
             // while no picture is named, and neither item is ticked once one
             // is — because the answer then is the file itself, and the button is
@@ -6671,7 +6671,10 @@ pub struct SettingsValues {
     /// which is what the row's own description promises. The *stored* id is left
     /// alone by that degradation, so nothing here can quietly consume a choice
     /// the user made before they uninstalled something.
-    pub default_profile: usize,
+    ///
+    /// `None` while the machine has not answered the rows the default is decided from
+    /// (T-PROGRAMS-REFRESH): the combo names no profile until it is decided.
+    pub default_profile: Option<usize>,
     /// Which row of the family picker is ticked — an index, resolved against
     /// this machine's list, never the stored name.
     ///
@@ -6862,7 +6865,7 @@ impl SettingsValues {
             minimum_contrast: MinimumContrastV1::Off,
             web_color_scheme: WebColorSchemeV1::FollowTheme,
             language: LanguageV1::System,
-            default_profile: profiles::fallback_profile(),
+            default_profile: Some(profiles::fallback_profile()),
             terminal_font: 0,
             terminal_cjk_font: 0,
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
@@ -8396,9 +8399,8 @@ impl SettingsPanel {
                 SettingsKeyVerdict::Chose(target)
             }
             // **`Enter` on a row of the Profiles list opens its editor** (plan
-            // §3.5). `Space` does not, and the asymmetry is the point: a row is
-            // not a switch, and the key that toggles things everywhere else in
-            // this dialog must not half-open a page here.
+            // §3.5). `Space` reaches here as the same `Activate`
+            // (`settings_key_of` maps both keys to it), so it opens the editor too.
             Some(SettingsTarget::ProfileRow(index)) => {
                 SettingsKeyVerdict::Chose(SettingsTarget::ProfileEdit(index))
             }
@@ -8455,6 +8457,28 @@ impl SettingsPanel {
             // action, and the press leaves through `apply_settings_choice`'s `Link` arm on both
             // roads. This arm was missing, so the keyboard reached every door and opened none.
             Some(target @ SettingsTarget::Link(_)) => SettingsKeyVerdict::Chose(target),
+            // **Every stop answers `Enter` with what its press does** (F-SWEEP-048): the Profiles
+            // list's `↑`/`↓` move the row, and an environment ghost is adopted, each through
+            // `apply_settings_choice` — the door the pointer's press on them already leaves by.
+            Some(target @ (SettingsTarget::ProfileUp(_) | SettingsTarget::ProfileDown(_))) => {
+                SettingsKeyVerdict::Chose(target)
+            }
+            // The ghost's press shuts an open picker before it adopts the row ([`Self::press_verb`]),
+            // and so does its `Enter`.
+            Some(target @ SettingsTarget::EnvGhost(_)) => {
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
+            }
+            // The summoned terminal's caps box starts the capture on the summon line, as its press
+            // does (`Runtime::press_settings`), and as `Record` starts it here: starting to listen
+            // changes nothing outside this dialog. A build with no summon row has nothing to record.
+            Some(SettingsTarget::QuakeChord) => {
+                let Some(line) = crate::shortcuts::summon_line(content.shortcuts) else {
+                    return SettingsKeyVerdict::Inert;
+                };
+                self.begin_recording(line);
+                SettingsKeyVerdict::Moved
+            }
             // A field has already taken its own `Enter` before the walk got
             // here (`Runtime::settings_field_key`), so reaching this arm means
             // the field is not the focus after all.
@@ -8463,7 +8487,114 @@ impl SettingsPanel {
                 | SettingsTarget::EnvName(_)
                 | SettingsTarget::EnvValue(_),
             ) => SettingsKeyVerdict::Inert,
-            _ => SettingsKeyVerdict::Inert,
+            // **Not stops**: the scrim, the dialog's own body, an open picker's body and a greyed
+            // item are never in `page_order`, so the ring is never on them; and with nothing
+            // focused there is nothing to press. Listed rather than caught by a wildcard, so that a
+            // target added to this enum has to say here what `Enter` on it does.
+            Some(
+                SettingsTarget::Scrim
+                | SettingsTarget::Panel
+                | SettingsTarget::Menu(_)
+                | SettingsTarget::ChoiceRefused(..),
+            )
+            | None => SettingsKeyVerdict::Inert,
+        }
+    }
+
+    /// **A press on one target, as far as this dialog's own state goes** — the pointer's road,
+    /// spoken in the verdict [`Self::activate`] answers `Enter` with, so the two roads can be
+    /// held to one another (F-SWEEP-048).
+    ///
+    /// The focus follows the finger (with the ring off, [`Self::press`]); then the press's own
+    /// change to the dialog is made here, and what only the window can do is returned: `Chose` for
+    /// a verb `apply_settings_choice` (or, for the shortcut page's resets, `apply_shortcut_edit`)
+    /// runs, `Moved` when the dialog changed, `Closed` when it shut, `Inert` when the press
+    /// did nothing here. `Runtime::press_settings` runs what comes back; a slider's value at the
+    /// pointer and a picker's scroll to its ticked item are the window's halves of `Slider` and
+    /// `Combo`, because they need the layout.
+    pub fn press_verb(
+        &mut self,
+        target: SettingsTarget,
+        content: SettingsContent<'_>,
+    ) -> SettingsKeyVerdict {
+        self.press(target);
+        match target {
+            SettingsTarget::Scrim | SettingsTarget::Close => {
+                self.close();
+                SettingsKeyVerdict::Closed
+            }
+            SettingsTarget::Combo(row) => {
+                self.toggle_menu(row);
+                SettingsKeyVerdict::Moved
+            }
+            SettingsTarget::Slider(_) => {
+                self.close_menu();
+                SettingsKeyVerdict::Moved
+            }
+            SettingsTarget::Choice(..) => {
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
+            }
+            // A press on a greyed item leaves the picker standing and still speaks (§7.47): it
+            // leaves through the door a chosen press leaves by, so a row that knows why its item
+            // is dark can say so.
+            SettingsTarget::ChoiceRefused(..) => SettingsKeyVerdict::Chose(target),
+            SettingsTarget::Nav(category) => {
+                SettingsKeyVerdict::from_moved(self.select_category(category))
+            }
+            SettingsTarget::Record(line) => {
+                self.begin_recording(line);
+                SettingsKeyVerdict::Moved
+            }
+            // The capture on the summon line (§7.54e ⑤); a build with no summon row has nothing
+            // to record.
+            SettingsTarget::QuakeChord => match crate::shortcuts::summon_line(content.shortcuts) {
+                Some(line) => {
+                    self.begin_recording(line);
+                    SettingsKeyVerdict::Moved
+                }
+                None => SettingsKeyVerdict::Inert,
+            },
+            SettingsTarget::RestoreRow(_)
+            | SettingsTarget::RestoreAll
+            | SettingsTarget::Advanced(_)
+            | SettingsTarget::ResetAdvanced(_)
+            | SettingsTarget::ProfileUp(_)
+            | SettingsTarget::ProfileDown(_)
+            | SettingsTarget::ProfileEnable(_)
+            | SettingsTarget::ProfileCopyPolicyCommand(_)
+            | SettingsTarget::MenuAction(_)
+            | SettingsTarget::MenuItemEdit(..)
+            | SettingsTarget::MenuItemDelete(..)
+            | SettingsTarget::Link(_) => SettingsKeyVerdict::Chose(target),
+            // The dialog's own body and an open menu's body land nowhere and do not close; a press
+            // on a Profiles row's band is a press on the row and not on a verb — it moves the
+            // focus so that `Enter` opens the editor from there.
+            SettingsTarget::Panel | SettingsTarget::Menu(_) | SettingsTarget::ProfileRow(_) => {
+                SettingsKeyVerdict::Inert
+            }
+            SettingsTarget::ProfileMore(index) => {
+                self.toggle_row_menu(index);
+                SettingsKeyVerdict::Moved
+            }
+            SettingsTarget::ProfileEdit(_)
+            | SettingsTarget::ProfileMoreItem(..)
+            | SettingsTarget::ProfileNew
+            | SettingsTarget::EditorBack
+            | SettingsTarget::EditorBrowse
+            | SettingsTarget::EnvRemove(_)
+            | SettingsTarget::EnvGhost(_)
+            | SettingsTarget::EnvAdd
+            | SettingsTarget::EditorRestore
+            | SettingsTarget::EditorDelete => {
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
+            }
+            // A press into a field puts the caret there and nothing more.
+            SettingsTarget::Field(_) | SettingsTarget::EnvName(_) | SettingsTarget::EnvValue(_) => {
+                self.close_menu();
+                SettingsKeyVerdict::Inert
+            }
         }
     }
 
@@ -9202,8 +9333,8 @@ pub enum SettingsTarget {
     /// folder button and the pane head's run are shown the same way — and a
     /// reveal that only triggered on the buttons themselves would be a set of
     /// buttons you have to already be on to see. `Enter` on the row opens the
-    /// editor, which is the plan's own keyboard model (§3.5); `Space` does
-    /// nothing, so that a row is never confused with a switch.
+    /// editor, which is the plan's own keyboard model (§3.5), and so does `Space`,
+    /// which this dialog reads as the same `Activate`.
     ProfileRow(usize),
     /// `Edit` on one row — the one verb in the open, and what a person came to
     /// this list to do.
@@ -9626,7 +9757,8 @@ impl ProfileButton {
             | Fallback::PolicyLocation
             | Fallback::Unreadable
             | Fallback::Undetermined
-            | Fallback::Unsupported => None,
+            | Fallback::Unsupported
+            | Fallback::Constrained => None,
         }
     }
 
@@ -17014,16 +17146,16 @@ mod tests {
                 self.geometry.clear();
                 return None;
             }
-            // Rebuild the input description from the CURRENT panel, just like
-            // Runtime. Accidentally keying geometry on hover/focus must go red.
-            let inputs = geometry::Inputs::new(
-                self.inputs.surface,
-                self.inputs.scale,
-                self.inputs.font_revision,
-                &self.panel,
-                self.inputs.scroll,
-                self.inputs.content(),
-            );
+            // Re-read the CURRENT panel on every reader, through the one door
+            // `Runtime` lets the panel into the key: keying geometry on
+            // hover/focus there must go red. The process's half — language,
+            // scheme and profile tables, font lists, row sentences — was read
+            // once when the harness was built. Other tests in this binary
+            // publish font lists and install tables while this one runs, and a
+            // budget on what one window's pointer costs is not a question about
+            // them.
+            let mut inputs = self.inputs.clone();
+            inputs.read_panel(&self.panel, self.inputs.scroll);
             self.geometry
                 .read(inputs, |inputs| inputs.layout(&mut measure))
         }
@@ -17123,6 +17255,69 @@ mod tests {
         host.panel.toggle(host.inputs.content());
         host.settings_geometry();
         assert_eq!(LAYOUT_CALLS.get(), 3, "reopening computes once");
+    }
+
+    /// RED — **the pointer budget is a question about one window, so the
+    /// process changing its language and its profile table mid-operation
+    /// costs that window's pointer nothing.**
+    ///
+    /// The load-only red of 2026-10-07 in the budget test above was this
+    /// shape: other tests of the binary moved process-wide facts the key
+    /// reads while the budget was being counted. Here the move is planted, so
+    /// it is not a matter of load: the test runs alone in a process of its
+    /// own (the language and the profile revision are the process's; moving
+    /// them beside other tests would be the flake itself), opens the panel,
+    /// switches the language to Chinese and back and advances the profile
+    /// revision, then makes the pointer moves and their draws.
+    ///
+    /// MUTATION: in `SettingsPointerHarness::settings_geometry`, build the
+    /// key with `geometry::Inputs::new` on every reader (the global key) in
+    /// place of the harness's own inputs re-read for the panel — the first
+    /// draw after the switch is a second layout.
+    #[test]
+    fn a_language_switched_mid_operation_costs_the_pointer_budget_nothing() {
+        use geometry::PointerHost;
+        if !crate::test_support::alone_in_a_process(
+            "settings::tests::a_language_switched_mid_operation_costs_the_pointer_budget_nothing",
+            b"",
+        ) {
+            return;
+        }
+        let mut host = settings_pointer_harness();
+        LAYOUT_CALLS.set(0);
+        let layout = host.settings_geometry().unwrap();
+        assert_eq!(LAYOUT_CALLS.get(), 1, "opening: one layout");
+        let before = (
+            crate::i18n::lang_revision(),
+            crate::profiles::profile_revision(),
+        );
+        assert!(crate::i18n::install(crate::i18n::Lang::Chinese));
+        assert!(crate::i18n::install(crate::i18n::Lang::English));
+        crate::profiles::names_changed();
+        assert_ne!(
+            (
+                crate::i18n::lang_revision(),
+                crate::profiles::profile_revision()
+            ),
+            before,
+            "the process's facts moved under the open panel"
+        );
+        let row = layout.rows[0].band;
+        for index in 0..64 {
+            let (x, y) = if index % 2 == 0 {
+                (1.0, 1.0)
+            } else {
+                (f64::from(row[0] + 2.0), f64::from(row[1] + 2.0))
+            };
+            host.settings_geometry();
+            assert!(geometry::pointer_moved(&mut host, x, y).unwrap());
+            host.settings_geometry();
+        }
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            1,
+            "64 pointer moves and their draws after the switch: zero layouts"
+        );
     }
 
     #[test]
@@ -17606,7 +17801,7 @@ mod tests {
     /// empty and the files are gone.
     #[test]
     fn launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread() {
-        crate::tests::on_the_window_thread();
+        crate::test_support::on_the_window_thread();
         let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
         let expected = looked_up_by_name(name)
             .map(|found| found.files)
@@ -17651,7 +17846,7 @@ mod tests {
     /// machine's.
     #[test]
     fn the_launch_face_is_looked_up_by_name_and_the_picker_list_comes_from_the_lane() {
-        crate::tests::on_the_window_thread();
+        crate::test_support::on_the_window_thread();
         let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
         let looked_up = looked_up_by_name(name);
         let files = monospace_family_files(name);
@@ -17833,10 +18028,7 @@ mod tests {
     /// this goes red.
     #[test]
     fn a_046_update_check_false_file_reads_as_automatic_check_off() {
-        let root = std::env::temp_dir().join(format!(
-            "bt-settings-update-on-about-{}",
-            std::process::id()
-        ));
+        let root = bt_testpath::temp_path("bt-settings-update-on-about");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private settings fixture directory");
         let path = root.join("settings.json");
@@ -18115,11 +18307,7 @@ mod tests {
     /// `bin` directory would start answering out of a sibling `Resources`.
     #[test]
     fn the_shipped_notices_are_looked_for_beside_the_binary_and_in_a_bundles_resources() {
-        let root = std::env::temp_dir().join(format!(
-            "folio-notices-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("folio-notices");
         let beside = root.join("archive");
         let bundle = root.join("Folio.app").join("Contents");
         std::fs::create_dir_all(&beside).expect("a directory to stand an archive in");
@@ -18344,6 +18532,16 @@ mod tests {
         visible_rows(TabLayoutMode::Horizontal)
     }
 
+    /// [`visible_rows`] asked of a named platform — the page a Windows row (`PsReadLine`,
+    /// `Acrylic`, the Explorer verb) stands on, read on every runner. On the platform this
+    /// build is, it is [`visible_rows`] itself.
+    fn rows_on(platform: bt_platform::HostPlatform, tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
+        uninstall_rows_for(
+            visible_rows_for(platform, tab_layout),
+            crate::uninstall::managed_uninstall().map(|(manager, _)| manager),
+        )
+    }
+
     /// The shortcut table as the panel would show it, for the claims that are
     /// about it.
     fn shortcut_lines() -> Vec<crate::shortcuts::ShortcutRow> {
@@ -18436,7 +18634,17 @@ mod tests {
     /// about a row in the lower half is a claim about a row a reader would have
     /// to scroll to. [`scroll_showing`] is what turns a band into this number.
     fn open_scrolled(scale: f32, menu_open: bool, scroll: f32) -> SettingsLayout {
-        let rows = flat_rows();
+        open_scrolled_on(bt_platform::host_platform(), scale, menu_open, scroll)
+    }
+
+    /// [`open_scrolled`] holding a named platform's rows.
+    fn open_scrolled_on(
+        platform: bt_platform::HostPlatform,
+        scale: f32,
+        menu_open: bool,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = rows_on(platform, TabLayoutMode::Horizontal);
         layout_for_menu(
             (SURFACE.0 * scale).round(),
             (SURFACE.1 * scale).round(),
@@ -18502,15 +18710,48 @@ mod tests {
         tab_layout: TabLayoutMode,
         widest_option: f32,
     ) -> SettingsLayout {
+        open_rows_measured_on(
+            bt_platform::host_platform(),
+            scale,
+            menu,
+            tab_layout,
+            widest_option,
+        )
+    }
+
+    /// [`open_rows_measured`] holding a named platform's rows.
+    fn open_rows_measured_on(
+        platform: bt_platform::HostPlatform,
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+        widest_option: f32,
+    ) -> SettingsLayout {
         let category = menu.map_or(PAGE, SettingsRow::category);
         let scroll = match menu {
             Some(row) => {
-                let at_rest = open_page(scale, None, tab_layout, category, widest_option);
+                let at_rest = open_page_scrolled_on(
+                    platform,
+                    scale,
+                    None,
+                    tab_layout,
+                    category,
+                    widest_option,
+                    UNSCROLLED,
+                );
                 scroll_to_row(&at_rest, row)
             }
             None => UNSCROLLED,
         };
-        open_page_scrolled(scale, menu, tab_layout, category, widest_option, scroll)
+        open_page_scrolled_on(
+            platform,
+            scale,
+            menu,
+            tab_layout,
+            category,
+            widest_option,
+            scroll,
+        )
     }
 
     /// One named page of the dialog.
@@ -18533,7 +18774,28 @@ mod tests {
         widest_option: f32,
         scroll: f32,
     ) -> SettingsLayout {
-        let rows = visible_rows(tab_layout);
+        open_page_scrolled_on(
+            bt_platform::host_platform(),
+            scale,
+            menu,
+            tab_layout,
+            category,
+            widest_option,
+            scroll,
+        )
+    }
+
+    /// [`open_page_scrolled`] holding a named platform's rows.
+    fn open_page_scrolled_on(
+        platform: bt_platform::HostPlatform,
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+        category: SettingsCategory,
+        widest_option: f32,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = rows_on(platform, tab_layout);
         let shortcuts = shortcut_lines();
         layout_for_menu(
             SURFACE.0 * scale,
@@ -18665,7 +18927,24 @@ mod tests {
         menu: Option<SettingsRow>,
         scroll: f32,
     ) -> SettingsLayout {
-        let rows = flat_rows();
+        shaped_scrolled_on(
+            bt_platform::host_platform(),
+            category,
+            advanced,
+            menu,
+            scroll,
+        )
+    }
+
+    /// [`shaped_scrolled`] holding a named platform's rows.
+    fn shaped_scrolled_on(
+        platform: bt_platform::HostPlatform,
+        category: SettingsCategory,
+        advanced: AdvancedOpen,
+        menu: Option<SettingsRow>,
+        scroll: f32,
+    ) -> SettingsLayout {
+        let rows = rows_on(platform, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         layout_for_menu(
             SURFACE.0,
@@ -20152,6 +20431,7 @@ mod tests {
             crate::update_card::Outcome::Restored,
             crate::update_card::Outcome::Incomplete {
                 folder: Some(std::path::PathBuf::new()),
+                held: false,
             },
         ] {
             version_values.push(line(crate::update_card::version_failed_in(
@@ -22352,6 +22632,229 @@ mod tests {
         );
     }
 
+    /// What `Enter` (or Space) on one kind of target is held to — **the table every stop of
+    /// [`page_order`] answers to** (F-SWEEP-048). Exhaustive with no wildcard, so a target added
+    /// to [`SettingsTarget`] does not compile here until it says which of these it is.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum EnterOn {
+        /// `Enter` does what a press does: the same verdict and the same dialog afterwards.
+        AsPress,
+        /// `Enter` acts, but not as the press does, by ruling: on a rail item it steps into the
+        /// page the press selects (the arrows already selected it), and on a Profiles row it opens
+        /// the editor where the press only lands on the row (plan §3.5).
+        ActsOtherwise,
+        /// The control takes its own keys: a slider's arrows, a field's caret (a field's `Enter`
+        /// is taken before the walk, `Runtime::settings_field_key`).
+        OwnKeys,
+        /// Never a keyboard stop.
+        NotAStop,
+    }
+
+    fn enter_on(target: SettingsTarget) -> EnterOn {
+        match target {
+            SettingsTarget::Close
+            | SettingsTarget::Combo(_)
+            | SettingsTarget::Link(_)
+            | SettingsTarget::Choice(..)
+            | SettingsTarget::QuakeChord
+            | SettingsTarget::Record(_)
+            | SettingsTarget::RestoreRow(_)
+            | SettingsTarget::RestoreAll
+            | SettingsTarget::ProfileUp(_)
+            | SettingsTarget::ProfileDown(_)
+            | SettingsTarget::ProfileEnable(_)
+            | SettingsTarget::ProfileCopyPolicyCommand(_)
+            | SettingsTarget::ProfileEdit(_)
+            | SettingsTarget::ProfileMore(_)
+            | SettingsTarget::ProfileMoreItem(..)
+            | SettingsTarget::ProfileNew
+            | SettingsTarget::EditorBack
+            | SettingsTarget::EditorBrowse
+            | SettingsTarget::EnvGhost(_)
+            | SettingsTarget::EnvRemove(_)
+            | SettingsTarget::EnvAdd
+            | SettingsTarget::EditorRestore
+            | SettingsTarget::EditorDelete
+            | SettingsTarget::Advanced(_)
+            | SettingsTarget::ResetAdvanced(_)
+            | SettingsTarget::MenuAction(_)
+            | SettingsTarget::MenuItemEdit(..)
+            | SettingsTarget::MenuItemDelete(..) => EnterOn::AsPress,
+            SettingsTarget::Nav(_) | SettingsTarget::ProfileRow(_) => EnterOn::ActsOtherwise,
+            SettingsTarget::Slider(_)
+            | SettingsTarget::Field(_)
+            | SettingsTarget::EnvName(_)
+            | SettingsTarget::EnvValue(_) => EnterOn::OwnKeys,
+            SettingsTarget::Scrim
+            | SettingsTarget::Panel
+            | SettingsTarget::Menu(_)
+            | SettingsTarget::ChoiceRefused(..) => EnterOn::NotAStop,
+        }
+    }
+
+    /// What one road left behind: its verdict — which, for `Chose`, names the verb the window
+    /// runs — and every part of the dialog a press or a key can change apart from where the ring
+    /// stands (the keyboard moves the ring into what it opened; the pointer does not).
+    type RoadResult = (
+        SettingsKeyVerdict,
+        bool,
+        Option<SettingsRow>,
+        Option<usize>,
+        Option<usize>,
+        SettingsCategory,
+    );
+
+    fn road_result(panel: &SettingsPanel, verdict: SettingsKeyVerdict) -> RoadResult {
+        (
+            verdict,
+            panel.is_open(),
+            panel.menu(),
+            panel.recording_row(),
+            panel.row_menu(),
+            panel.category(),
+        )
+    }
+
+    /// RED (F-SWEEP-048, the About `Link` bug's twins; round 2) — **every stop in
+    /// [`page_order`] answers `Enter` with what its press does**, on every page: the rows pages,
+    /// the shortcut page, the Profiles list (every row's buttons placed) and the profile editor
+    /// with its ghosts.
+    ///
+    /// Each stop is driven down both roads on two fresh panels in the same state: the pointer's
+    /// ([`SettingsPanel::press_verb`], what `Runtime::press_settings` runs) and the keyboard's (the
+    /// ring put on it, then `Enter`). For an [`EnterOn::AsPress`] stop the two must leave the
+    /// same verdict — so `Chose` names the same verb for the window to run — and the same dialog
+    /// (open or shut, the open picker, the capture, the open row menu, the page), and neither may
+    /// be `Inert` unless the row is one this machine cannot honour. An [`EnterOn::ActsOtherwise`]
+    /// stop must still not be `Inert`; an [`EnterOn::OwnKeys`] stop must be; no stop may be one the
+    /// table calls [`EnterOn::NotAStop`].
+    ///
+    /// MUTATION: answer `ProfileUp`'s `Enter` with `Chose(ProfileDown)` — a wrong arm that is not
+    /// `Inert` — or start the caps box's capture on line 0; or answer `ProfileUp` with `Inert` (the
+    /// stand-in for "a stop added to `page_order` without an arm": with the wildcard gone, a
+    /// missing arm does not compile).
+    #[test]
+    fn every_stop_on_every_page_answers_enter_as_its_press_does() {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let profiles = profile_lines();
+        let placed = (0..profiles.len()).collect::<Vec<_>>();
+        let pages = content(&rows, &lines);
+        let list = SettingsContent {
+            profiles: &profiles,
+            ..pages
+        };
+        let editor = editing_content(&rows, &profiles, editor_subject(true));
+        let mut seen = std::collections::HashSet::new();
+        let mut compared = 0;
+        for (content, categories) in [
+            (pages, SettingsCategory::ALL.to_vec()),
+            (list, vec![SettingsCategory::Profiles]),
+            (editor, vec![SettingsCategory::Profiles]),
+        ] {
+            // A page the dialog does not hold is not walked: `keep_focus_reachable` leaves it (the
+            // rows-only fixture has no profiles, so its Profiles page is not there; the list and
+            // the editor below are).
+            for category in categories
+                .into_iter()
+                .filter(|category| content.has_content(*category))
+            {
+                for stop in page_order(content, category, &placed) {
+                    let fresh = || {
+                        let mut panel = SettingsPanel::default();
+                        panel.toggle(content);
+                        panel.select_category(category);
+                        panel.note_placed(placed.clone());
+                        panel
+                    };
+                    let mut pressed = fresh();
+                    let by_press = pressed.press_verb(stop, content);
+                    let by_press = road_result(&pressed, by_press);
+                    let mut keyed = fresh();
+                    keyed.press(stop);
+                    assert_eq!(
+                        keyed.focus(),
+                        Some(stop),
+                        "{stop:?} on {category:?} takes the ring"
+                    );
+                    let by_enter = keyed.key(SettingsKey::Activate, content, content.values);
+                    let by_enter = road_result(&keyed, by_enter);
+                    let unavailable = matches!(
+                        stop,
+                        SettingsTarget::Combo(row) if !row.available(content.values)
+                    );
+                    match enter_on(stop) {
+                        EnterOn::AsPress if unavailable => assert_eq!(
+                            by_enter.0,
+                            SettingsKeyVerdict::Inert,
+                            "{stop:?} cannot be honoured here and refuses Enter"
+                        ),
+                        EnterOn::AsPress => {
+                            assert_eq!(
+                                by_enter, by_press,
+                                "Enter on {stop:?} ({category:?}) does what its press does"
+                            );
+                            assert_ne!(
+                                by_enter.0,
+                                SettingsKeyVerdict::Inert,
+                                "and {stop:?} ({category:?}) does something"
+                            );
+                            compared += 1;
+                        }
+                        EnterOn::ActsOtherwise => assert_ne!(
+                            by_enter.0,
+                            SettingsKeyVerdict::Inert,
+                            "Enter on {stop:?} ({category:?}) acts"
+                        ),
+                        EnterOn::OwnKeys => assert_eq!(
+                            by_enter.0,
+                            SettingsKeyVerdict::Inert,
+                            "{stop:?} takes its own keys"
+                        ),
+                        EnterOn::NotAStop => panic!("{stop:?} is in {category:?}'s page_order"),
+                    }
+                    seen.insert(std::mem::discriminant(&stop));
+                }
+            }
+        }
+        for named in [
+            SettingsTarget::ProfileUp(0),
+            SettingsTarget::ProfileDown(0),
+            SettingsTarget::EnvGhost(0),
+            SettingsTarget::QuakeChord,
+        ] {
+            assert!(
+                seen.contains(&std::mem::discriminant(&named)),
+                "the walk reached a {named:?} — the four stops this ticket is about"
+            );
+        }
+        assert!(
+            compared > 80,
+            "every page was walked: {compared} stops compared"
+        );
+
+        // The caps box's capture is the summon line's, on both roads.
+        let summon_page = SettingsCategory::ALL
+            .into_iter()
+            .find(|category| {
+                page_order(pages, *category, &[]).contains(&SettingsTarget::QuakeChord)
+            })
+            .expect("a page holds the caps box");
+        let mut panel = SettingsPanel::default();
+        panel.toggle(pages);
+        panel.select_category(summon_page);
+        panel.press(SettingsTarget::QuakeChord);
+        assert_eq!(
+            panel.key(SettingsKey::Activate, pages, pages.values),
+            SettingsKeyVerdict::Moved
+        );
+        assert_eq!(
+            panel.recording_row(),
+            crate::shortcuts::summon_line(&lines),
+            "Enter on the caps box records the summon line"
+        );
+    }
+
     /// PIN (user ruling 2026-08-17) — **the disclosure is a keyboard stop and
     /// Enter turns it.**
     ///
@@ -23461,32 +23964,41 @@ mod tests {
         ellipsised.retain(|row| *row != SettingsRow::TerminalFont);
         ellipsised.retain(|row| *row != SettingsRow::TerminalCjkFont);
         ellipsised.sort_by_key(|row| format!("{row:?}"));
+        // The default profile's button carries the fallback profile's title, which is this
+        // build's table's: `Windows PowerShell 5.1` on Windows does not fit, and the `sh` a Unix
+        // build falls back to does.
+        let long_default = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => Some(SettingsRow::DefaultProfile),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => None,
+        };
         assert_eq!(
             ellipsised,
-            vec![
-                SettingsRow::DefaultProfile,
-                // And the launch row's second answer (§7.59): `A tab in the
-                // window you used last` is a sentence rather than a word,
-                // because what it names is a window the reader has to be able to
-                // picture. The row's own line underneath carries the rest.
-                SettingsRow::LaunchOpens,
-                // The light-scheme picker (since ticket 17, `UI-SPEC.md` I1
-                // grew the chevron column from 8.5 to 13, narrowing every
-                // button's value box by 4.5px): `Solarized Light`, the longest
-                // of the built-in light catalogue's own names, no longer fits
-                // 118px where it used to clear it by a hair.
-                SettingsRow::LightScheme,
-                // Two of the summoned terminal's own (§7.54e ⑤): its first
-                // profile item is the sentence "whatever the default profile
-                // is", and the third rung of `What comes back` names two things
-                // and a condition. Both are values a picker button has to carry
-                // and neither fits 118px, which is exactly the case this pin
-                // exists for — the button says as much of it as fits and the
-                // row's sentence underneath carries the rest.
-                SettingsRow::QuakeProfile,
-                SettingsRow::QuakeRestore,
-                SettingsRow::SplitDirection,
-            ],
+            long_default
+                .into_iter()
+                .chain([
+                    // And the launch row's second answer (§7.59): `A tab in the
+                    // window you used last` is a sentence rather than a word,
+                    // because what it names is a window the reader has to be able to
+                    // picture. The row's own line underneath carries the rest.
+                    SettingsRow::LaunchOpens,
+                    // The light-scheme picker (since ticket 17, `UI-SPEC.md` I1
+                    // grew the chevron column from 8.5 to 13, narrowing every
+                    // button's value box by 4.5px): `Solarized Light`, the longest
+                    // of the built-in light catalogue's own names, no longer fits
+                    // 118px where it used to clear it by a hair.
+                    SettingsRow::LightScheme,
+                    // Two of the summoned terminal's own (§7.54e ⑤): its first
+                    // profile item is the sentence "whatever the default profile
+                    // is", and the third rung of `What comes back` names two things
+                    // and a condition. Both are values a picker button has to carry
+                    // and neither fits 118px, which is exactly the case this pin
+                    // exists for — the button says as much of it as fits and the
+                    // row's sentence underneath carries the rest.
+                    SettingsRow::QuakeProfile,
+                    SettingsRow::QuakeRestore,
+                    SettingsRow::SplitDirection,
+                ])
+                .collect::<Vec<_>>(),
             "the long profile title, the launch row's second answer, \
              `Solarized Light`, the summoned terminal's two and \
              `Auto (longer edge)` are the values this build's own tables can \
@@ -25360,7 +25872,7 @@ mod tests {
         let quake_page = open_shut_showing(SettingsRow::QuakeProfile);
         for chosen in 0..profiles::count() {
             let general = SettingsValues {
-                default_profile: chosen,
+                default_profile: Some(chosen),
                 ..values()
             };
             let drawn = button_marks(&general_page, SettingsRow::DefaultProfile, &general);
@@ -25573,7 +26085,7 @@ mod tests {
     fn the_default_profile_combo_shows_the_profile_that_would_actually_start() {
         for chosen in 0..profiles::count() {
             let values = SettingsValues {
-                default_profile: chosen,
+                default_profile: Some(chosen),
                 ..values()
             };
             assert_eq!(
@@ -25613,7 +26125,17 @@ mod tests {
     /// So the press, the hover and the ink are asserted together.
     #[test]
     fn a_shell_this_machine_lacks_is_greyed_in_the_startup_picker_and_cannot_be_chosen() {
-        let missing = profiles::index_of_id("gitbash");
+        // A row this build ships that is neither the fallback nor the default, so the only
+        // mark of its colour on the page is its own item's.
+        let lacked = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => "gitbash",
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => "bash",
+        };
+        assert!(
+            profiles::has_id(lacked),
+            "{lacked} is a row this build ships"
+        );
+        let missing = profiles::index_of_id(lacked);
         let mut available = vec![true; profiles::count()];
         available[missing] = false;
         let lacking = SettingsValues {
@@ -26809,7 +27331,9 @@ mod tests {
     /// arm and this fails on the first item.
     #[test]
     fn a_press_on_a_greyed_item_names_it_instead_of_being_swallowed() {
-        let placed = open_rows_measured(
+        // The PSReadLine row is a Windows page's, read on every runner.
+        let placed = open_rows_measured_on(
+            bt_platform::HostPlatform::Windows,
             1.0,
             Some(SettingsRow::PsReadLine),
             TabLayoutMode::Horizontal,
@@ -26909,8 +27433,15 @@ mod tests {
         assert_eq!(SettingsRow::PsReadLine.value_text(&installed), None);
         assert_eq!(SettingsRow::PsReadLine.selected_index(&installed), Some(0));
 
-        // The word is drawn where the button is, and not only computed.
-        let placed = shaped(SettingsCategory::Terminal, AdvancedOpen::default(), None);
+        // The word is drawn where the button is, and not only computed — on the Windows
+        // page, which is the one that holds this row, read on every runner.
+        let placed = shaped_scrolled_on(
+            bt_platform::HostPlatform::Windows,
+            SettingsCategory::Terminal,
+            AdvancedOpen::default(),
+            None,
+            UNSCROLLED,
+        );
         let labels = labels_of(&placed, None, &updatable);
         assert!(
             labels
@@ -27265,10 +27796,12 @@ mod tests {
     fn a_slider_row_answers_the_pointer_as_a_slider_and_a_picker_row_as_a_picker() {
         // Each control asked on a dialog scrolled to show its own row: all six
         // live inside the Advanced group, which takes this page past the
-        // dialog's 600px cap.
-        let at_rest = open(1.0, false);
+        // dialog's 600px cap. The Windows page, read on every runner, because
+        // `Acrylic` is one of the six.
+        let windows = bt_platform::HostPlatform::Windows;
+        let at_rest = open_scrolled_on(windows, 1.0, false, UNSCROLLED);
         for row in [SettingsRow::ImageOpacity, SettingsRow::BackgroundOpacity] {
-            let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
+            let placed = open_scrolled_on(windows, 1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
             assert_eq!(hit(&placed, &values(), x, y), SettingsTarget::Slider(row));
             assert!(row.control().range().is_some());
@@ -27280,7 +27813,7 @@ mod tests {
             SettingsRow::Acrylic,
             SettingsRow::AlwaysOnTop,
         ] {
-            let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
+            let placed = open_scrolled_on(windows, 1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
             assert_eq!(hit(&placed, &values(), x, y), SettingsTarget::Combo(row));
             assert!(row.control().range().is_none());
@@ -27411,8 +27944,12 @@ mod tests {
         let palette = chrome_palette();
         // Both rows are inside the Advanced group, which takes this page past
         // the dialog's 600px cap, so each is read on a dialog scrolled to it.
-        let at_rest = open(1.0, false);
-        let showing = |row: SettingsRow| open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
+        // The Windows page, read on every runner, because `Acrylic` is a row of
+        // its and not of a Mac's.
+        let windows = bt_platform::HostPlatform::Windows;
+        let at_rest = open_scrolled_on(windows, 1.0, false, UNSCROLLED);
+        let showing =
+            |row: SettingsRow| open_scrolled_on(windows, 1.0, false, scroll_to_row(&at_rest, row));
 
         let mut lacking = values();
         lacking.acrylic_available = false;
@@ -27470,7 +28007,7 @@ mod tests {
 
         // The ring may still stand on it — a ring is not an action — and Enter
         // is refused there, which is what "no dead controls" actually forbids.
-        let rows = flat_rows();
+        let rows = rows_on(windows, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         let mut panel = SettingsPanel::default();
         panel.toggle(content(&rows, &lines));
@@ -28745,7 +29282,15 @@ mod tests {
     }
 
     fn keyboarded_on(category: SettingsCategory) -> SettingsPanel {
-        let rows = flat_rows();
+        keyboarded_in(bt_platform::host_platform(), category)
+    }
+
+    /// [`keyboarded_on`] holding a named platform's rows.
+    fn keyboarded_in(
+        platform: bt_platform::HostPlatform,
+        category: SettingsCategory,
+    ) -> SettingsPanel {
+        let rows = rows_on(platform, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         let mut panel = SettingsPanel::default();
         panel.toggle(content(&rows, &lines));
@@ -29496,16 +30041,19 @@ mod tests {
     /// on would be the pointer's own bug, arrived at through the other door.
     #[test]
     fn the_keyboard_skips_an_option_this_machine_cannot_start() {
-        let flat = flat_rows();
+        // The Windows page, read on every runner: the walk below counts its rows from the
+        // Explorer row that closes it.
+        let windows = bt_platform::HostPlatform::Windows;
+        let flat = rows_on(windows, TabLayoutMode::Horizontal);
         let lines = shortcut_lines();
         let mut lacking = values();
         // Only the fallback shell is installed.
         lacking.profile_available = (0..profiles::count())
             .map(|index| index == profiles::fallback_profile())
             .collect();
-        lacking.default_profile = profiles::fallback_profile();
+        lacking.default_profile = Some(profiles::fallback_profile());
 
-        let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
+        let mut panel = keyboarded_in(windows, SettingsRow::DefaultProfile.category());
         // `End` and then two steps back: `Explorer context menu` closes this
         // page (§7.4), `Opening Folio again` stands above it, and `Default
         // profile` above that. The summoned terminal's rows used to stand between
@@ -33723,8 +34271,7 @@ mod tests {
     /// The update-check owner over a fresh scratch directory, its one check
     /// answered with [`NewerRelease`] — the gear's own state, lit.
     fn lit_owner(name: &str) -> (std::path::PathBuf, crate::update::OfferState) {
-        let dir =
-            std::env::temp_dir().join(format!("folio-gear-mark-{name}-{}", std::process::id()));
+        let dir = bt_testpath::temp_path(&format!("folio-gear-mark-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch data directory");
         let owner = crate::update::OfferState::load(&dir, true);

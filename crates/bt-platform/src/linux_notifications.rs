@@ -747,12 +747,7 @@ mod tests {
 
     impl PrivateBus {
         fn start() -> Self {
-            static NEXT_BUS: AtomicU32 = AtomicU32::new(0);
-            let directory = std::env::temp_dir().join(format!(
-                "folio-private-notifications-{}-{}",
-                std::process::id(),
-                NEXT_BUS.fetch_add(1, Ordering::Relaxed)
-            ));
+            let directory = bt_testpath::temp_path("folio-private-notifications");
             std::fs::create_dir(&directory).expect("create a private bus config directory");
             let services = directory.join("services");
             std::fs::create_dir(&services).expect("create an empty private bus service directory");

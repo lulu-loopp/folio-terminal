@@ -12,19 +12,25 @@
 //! `git.exe`, and Git for Windows has never shipped without its bash, so this is
 //! a real gate rather than one that quietly passes when the tool is missing.
 
+#![cfg(windows)]
 #![allow(clippy::disallowed_methods)]
 
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bt_term::DualPlaneSession;
 
 fn nz(value: u32) -> std::num::NonZeroU32 {
     std::num::NonZeroU32::new(value).unwrap()
+}
+
+/// **A session of this file**, made after the test host names are installed: the shell's OSC 7
+/// report reads them (`bt_term::local_host_names`, which panics before an installation).
+fn new_session(columns: u32, rows: u32) -> DualPlaneSession {
+    bt_term::install_test_host_names();
+    DualPlaneSession::new(nz(columns), nz(rows))
 }
 
 /// The script, as a path bash can open.
@@ -77,21 +83,10 @@ fn git_bash() -> PathBuf {
 /// percent-encoder is exercised on the byte that must become `%20` and on
 /// multi-byte characters that must become their UTF-8 escapes.
 ///
-/// The three tests of this file share one process and start together, and a
-/// coarse clock hands two of them the same instant (a CI runner did, once:
-/// `AlreadyExists` at the `create_dir`), so the name carries a counter as
-/// well as the clock.
+/// The three tests of this file share one process and start together, so the
+/// name is `bt_testpath`'s, whose ordinal no two calls share.
 fn temporary_directory() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir().join(format!(
-        "betterterminal 图 片-{}-{unique}-{ordinal}",
-        std::process::id()
-    ));
+    let directory = bt_testpath::temp_path("betterterminal 图 片");
     std::fs::create_dir(&directory).unwrap();
     directory
 }
@@ -187,7 +182,7 @@ fn git_bash_reports_its_working_directory_as_the_windows_directory_it_is_in() {
         "a URI on the wire is ASCII with no literal space: {uri:?}"
     );
 
-    let mut session = DualPlaneSession::new(nz(120), nz(8));
+    let mut session = new_session(120, 8);
     session.feed(&bytes).unwrap();
     assert_eq!(
         session.working_directory(),

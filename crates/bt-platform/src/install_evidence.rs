@@ -593,8 +593,7 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("bt-install-evidence-{tag}-{}", std::process::id()));
+        let dir = bt_testpath::temp_path(&format!("bt-install-evidence-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -698,7 +697,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A key of the test's own, `HKCU\Software\Folio-test-<pid>`, deleted with
+    /// A key of the test's own, `HKCU\Software\Folio-test-<pid>-<ordinal>`, deleted with
     /// everything in it when dropped. Never the real uninstall key.
     #[cfg(windows)]
     struct TestRoot(String);
@@ -706,7 +705,7 @@ mod tests {
     #[cfg(windows)]
     impl TestRoot {
         fn new() -> Self {
-            let root = format!(r"Software\Folio-test-{}", std::process::id());
+            let root = format!(r"Software\{}", bt_testpath::unique_name("Folio-test"));
             assert_ne!(root, UNINSTALL_KEY);
             Self(root)
         }

@@ -746,6 +746,12 @@ pub struct ModuleRecord {
     pub(crate) module_paths: Vec<String>,
     pub(crate) span: Span,
     pub(crate) body: ModuleShape,
+    /// What the `cfg`s written on this module's own declaration and on every
+    /// inline module around it inside the same file say about a product build.
+    /// A module whose body is a file writes nothing here — the declarations that
+    /// reach a file are [`FileRecord::permits_product`]'s — so it is always
+    /// [`Compilation::AlwaysInProduct`].
+    pub(crate) compilation: Compilation,
 }
 
 /// Where a module's bytes are.
@@ -771,6 +777,13 @@ impl ModuleRecord {
     #[must_use]
     pub const fn body(&self) -> ModuleShape {
         self.body
+    }
+
+    /// Whether a build of the shipped program can contain this module's bytes,
+    /// as far as the declarations inside its file say (see the field).
+    #[must_use]
+    pub const fn permits_product(&self) -> bool {
+        self.compilation.permits_product()
     }
 }
 

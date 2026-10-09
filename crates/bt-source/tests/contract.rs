@@ -562,15 +562,15 @@ fn a_needle_built_inside_a_union_of_modules_excludes_its_own_construction() {
 /// RED — **a needle built outside the universe being read is a recorded answer,
 /// not a failure** (§2.6 rule 1).
 ///
-/// This is the shape of `bt-term/tests/shell_integration_cmd.rs` and
-/// `shell_integration_wsl.rs`: both join a relative path onto their own
-/// manifest directory and read `bt-app`'s source, and their caller file will
-/// never resolve into `bt-app`'s enumeration. Resolution goes through the
+/// This is the shape of `bt-pty/tests/shell_integration_cmd.rs` and
+/// `shell_integration_wsl.rs`: both ask `bt-app`'s index for the product's own
+/// spelling, and their caller file will never resolve into `bt-app`'s
+/// enumeration. Resolution goes through the
 /// caller's own crate — this file is found through `bt-source`'s manifest
 /// directory — and the exclusion then applies to nothing, because the queried
 /// source does not contain the site.
 ///
-/// MUTATION: panic when the site is outside and both `bt-term` readers become
+/// MUTATION: panic when the site is outside and both `bt-pty` readers become
 /// unmigratable; exclude by file name instead of by site and the occurrences
 /// below vanish.
 #[test]

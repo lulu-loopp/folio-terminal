@@ -1444,13 +1444,12 @@ mod tests {
     /// these tests need one, and none of them may go looking for somewhere to
     /// put it on the machine that is running them.
     ///
-    /// Named for the test and the process, so two of them running at once are
-    /// two files.
+    /// Named by `bt_testpath`, so two of them running at once are two files.
     fn scratch(name: &str) -> std::path::PathBuf {
         let directory =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/animation-tests");
         std::fs::create_dir_all(&directory).expect("a scratch directory under the build directory");
-        directory.join(format!("{name}-{}.gif", std::process::id()))
+        directory.join(format!("{}.gif", bt_testpath::unique_name(name)))
     }
 
     /// The same, written and handed back — and removed by the caller.

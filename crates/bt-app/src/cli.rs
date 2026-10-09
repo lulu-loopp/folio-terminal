@@ -49,6 +49,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::i18n;
 use crate::profiles;
@@ -99,6 +100,15 @@ pub struct CliRequest {
     /// `Settings ▸ General ▸ Opening Folio again`. Neither reads the row: the
     /// running Folio does, and only where neither flag was given.
     pub tab: bool,
+    /// `--with-environment` — **carry the environment this command line was started in into the
+    /// tab it opens** (owner ruling 2026-10-05, choice A: a pane takes the account's current
+    /// environment and never the launcher's; this flag is the one explicit way to carry it).
+    ///
+    /// A word about *what* the pane is born with, so it asks for a pane as a place does
+    /// ([`resolve`]'s `wants_pane`), and it crosses the launch wire to a Folio that is already
+    /// running (`crate::launch_wire`). The environment itself is not here: parsing is pure, and
+    /// what the process was started with is read by the caller ([`CarriedEnvironment::of_this_process`]).
+    pub with_environment: bool,
     /// **Why this launch happened**, as the thing that started it said so.
     ///
     /// Not a decision and deliberately not one — see [`LaunchOrigin`]. The
@@ -136,6 +146,12 @@ pub struct CliRequest {
     /// incomplete.* and the folder), and past a rollback that did not finish
     /// the start continues instead of handing itself back to the rescue build.
     pub update_failed: Option<PathBuf>,
+    /// `--update-journal-held <error>` — **beside `--update-failed`: a journal
+    /// write of the lock holder that sent this start was refused because
+    /// another program held the journal open, past the holder's window**
+    /// (0.4.8 E4). The value is the operating system's last refusal, kept as
+    /// given; `crate::update_startup` puts it on the card.
+    pub update_journal_held: Option<String>,
     /// `--update-feed <file-URL>` — **this process's update check and
     /// download read a local release feed instead of github.com** (0.4.6
     /// U-30b; `crate::update::Feed`).
@@ -307,6 +323,66 @@ pub const NEW_WINDOW_FLAG: &str = "--new-window";
 /// `--tab`, spelled once — see [`CWD_FLAG`]. Public for [`NEW_WINDOW_FLAG`]'s
 /// reason: it is named in the usage block and in `crate::launch_wire`.
 pub const TAB_FLAG: &str = "--tab";
+/// `--with-environment`, spelled once — see [`CWD_FLAG`]. Public for [`NEW_WINDOW_FLAG`]'s reason:
+/// `crate::launch_wire` names it in the line it writes when an environment is too large to hand
+/// over.
+pub const WITH_ENVIRONMENT_FLAG: &str = "--with-environment";
+
+/// **The environment a launch carries into its tab** (`--with-environment`, owner ruling
+/// 2026-10-05): every variable of the process that read the command line, names and values as
+/// that process holds them.
+///
+/// Laid over the account's current environment as the pane's `launch_overrides` layer
+/// (`bt_pty::spawn_environment`), under Folio's own pane variables and the profile's — so the
+/// launcher's value wins wherever it has one, and a variable the launcher does not have keeps the
+/// account's. Held in memory only: it is never written to `session.json` or any other file, and
+/// its [`Debug`] names the variables and never prints a value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CarriedEnvironment(Arc<[(OsString, OsString)]>);
+
+impl CarriedEnvironment {
+    /// The environment of this process — at the front door, the one its launcher gave it.
+    #[must_use]
+    pub fn of_this_process() -> Self {
+        Self::from_pairs(std::env::vars_os().collect())
+    }
+
+    /// The environment given as a list, in its order.
+    #[must_use]
+    pub fn from_pairs(pairs: Vec<(OsString, OsString)>) -> Self {
+        Self(pairs.into())
+    }
+
+    /// Every variable, in order.
+    #[must_use]
+    pub fn pairs(&self) -> &[(OsString, OsString)] {
+        &self.0
+    }
+
+    /// **The one line that says this environment could not be carried** — on the wire
+    /// (`crate::launch_wire`) or into a shell (`crate::pty_door`): what it could not be given to,
+    /// why, and what happened instead. It names the variable count and, in `why`, at most a
+    /// variable's name and sizes; never a value.
+    #[must_use]
+    pub fn refusal_line(&self, given_to: &str, why: &str, instead: &str) -> String {
+        format!(
+            "Folio: {WITH_ENVIRONMENT_FLAG} — the environment of this launch ({} variables) cannot \
+             be {given_to}: {why}; {instead}",
+            self.0.len()
+        )
+    }
+}
+
+impl std::fmt::Debug for CarriedEnvironment {
+    /// The names, never the values: an environment holds tokens and passwords, and a `Debug`
+    /// reaches panic messages and test output.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("CarriedEnvironment")
+            .field(&self.0.iter().map(|(name, _)| name).collect::<Vec<_>>())
+            .finish()
+    }
+}
 
 /// **The marker Explorer's two entries pass**, spelled once.
 ///
@@ -351,6 +427,11 @@ pub const UPDATE_APPLY_FLAG: &str = "--update-apply";
 /// rises at `Failed` ([`CliRequest::update_failed`], U-29). Written first on
 /// the line, before whatever the start that handed itself over was given.
 pub const UPDATE_FAILED_FLAG: &str = "--update-failed";
+/// `--update-journal-held <error>`: written after [`UPDATE_FAILED_FLAG`] by a
+/// lock holder whose journal write another program's hold refused past its
+/// window ([`CliRequest::update_journal_held`], 0.4.8 E4). One value; like the
+/// other update words, never typed by a person and not in the usage block.
+pub const UPDATE_JOURNAL_HELD_FLAG: &str = "--update-journal-held";
 /// `--update-feed <file-URL>`: an ordinary start whose update check and
 /// download read a local release feed (U-30b, [`CliRequest::update_feed`]) —
 /// typed by the person rehearsing an update on a clean machine
@@ -369,7 +450,7 @@ pub const UPDATE_FEED_FLAG: &str = "--update-feed";
 /// # The grammar
 ///
 /// ```text
-/// folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] [--] [<path>]
+/// folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] [--with-environment] [--] [<path>]
 /// folio --help | --version
 /// ```
 ///
@@ -439,6 +520,13 @@ where
                 }
                 request.tab = true;
             }
+            // The same exact arm: the environment is the process's, not a value on the line.
+            Some(flag) if flag == WITH_ENVIRONMENT_FLAG => {
+                if request.with_environment {
+                    return Err(CliFault::Repeated(WITH_ENVIRONMENT_FLAG));
+                }
+                request.with_environment = true;
+            }
             // **The two origin markers, and one rule for a line that carries
             // both.** They are written by two different programs and a launch
             // has one origin, so `--from-explorer --from-here` is a line no
@@ -485,6 +573,14 @@ where
                 }
                 let journal = value_for(UPDATE_FAILED_FLAG, flag, &arg, &mut args)?;
                 request.update_failed = Some(PathBuf::from(journal));
+            }
+            // The same rule: the word and the refusal are two arguments.
+            Some(flag) if flag == UPDATE_JOURNAL_HELD_FLAG => {
+                if request.update_journal_held.is_some() {
+                    return Err(CliFault::Repeated(UPDATE_JOURNAL_HELD_FLAG));
+                }
+                let error = value_for(UPDATE_JOURNAL_HELD_FLAG, flag, &arg, &mut args)?;
+                request.update_journal_held = Some(error.to_string_lossy().into_owned());
             }
             // The same rule once more: the word and the feed's URL are two
             // arguments.
@@ -687,13 +783,20 @@ pub struct CliPlan {
     /// they did not ask.
     pub wants_pane: bool,
     /// Which profile that pane starts as — the caller's, or this machine's
-    /// default when they named none or named one this build has not got.
-    pub profile: usize,
-    /// Where it opens, **already in that profile's namespace**, or `None` for
-    /// "wherever a fresh shell of it would".
+    /// default when they named none or named one this build has not got; `None`
+    /// while that default is undecided (T-PROGRAMS-REFRESH), when the pane is the
+    /// unresolved default and its birth decides.
+    pub profile: Option<usize>,
+    /// Where it opens, **already in that profile's namespace** — or, for the
+    /// unresolved default, in the host's own, crossed at the pane's birth — or
+    /// `None` for "wherever a fresh shell of it would".
     pub cwd: Option<PathBuf>,
     /// A document to open a preview on, once there is a window.
     pub preview: Option<PathBuf>,
+    /// What `--with-environment` carries into the pane — `None` here, always: [`resolve`] reads
+    /// no process environment, and the launch that holds the request fills it in
+    /// ([`CarriedEnvironment::of_this_process`]).
+    pub carried_environment: Option<CarriedEnvironment>,
     /// Everything the caller asked for that this launch could not do. One card
     /// each, on the window, after it opens.
     pub refusals: Vec<CliRefusal>,
@@ -1280,12 +1383,12 @@ impl CliRefusal {
 /// what `--cwd` already said.
 pub fn resolve(
     request: &CliRequest,
-    default_profile: usize,
+    default_profile: Option<usize>,
     kind: impl Fn(&Path) -> PathKind,
 ) -> CliPlan {
     let mut refusals = Vec::new();
     let profile = match request.profile.as_deref() {
-        Some(id) if profiles::has_id(id) => profiles::index_of_id(id),
+        Some(id) if profiles::has_id(id) => Some(profiles::index_of_id(id)),
         Some(id) => {
             refusals.push(CliRefusal::NoSuchProfile(id.to_owned()));
             default_profile
@@ -1320,7 +1423,14 @@ pub fn resolve(
     // that pane starts as may not speak them — so the crossing is asked here,
     // through the same function a split's folder chooser goes through, and the
     // pairs that cannot cross are reported rather than dropped.
+    //
+    // The unresolved default has no namespace yet: its folder stays as it was
+    // written, and the pane's birth crosses it (and says the same refusal there
+    // when it cannot).
     let cwd = folder.and_then(|folder| {
+        let Some(profile) = profile else {
+            return Some(folder);
+        };
         let crossed = profiles::translate_cwd(
             profiles::PathNamespace::Windows,
             profiles::paths(profile),
@@ -1332,10 +1442,12 @@ pub fn resolve(
         crossed
     });
     CliPlan {
-        wants_pane: request.names_a_place(),
+        // A launch that carries its environment asks for the pane to carry it into, wherever.
+        wants_pane: request.names_a_place() || request.with_environment,
         profile,
         cwd,
         preview,
+        carried_environment: None,
         refusals,
     }
 }
@@ -1343,6 +1455,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::host_path;
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
@@ -1354,6 +1467,43 @@ mod tests {
 
     fn refused(list: &[&str]) -> CliFault {
         parse(args(list)).expect_err("this command line was meant to be refused")
+    }
+
+    /// RED (F-SWEEP-2-048) — **`--with-environment` is one exact word that asks for a pane**,
+    /// and what it carries never prints a value.
+    ///
+    /// MUTATIONS: leave the flag out of `wants_pane` and `folio --with-environment` opens no tab to
+    /// carry it into; derive `Debug` on `CarriedEnvironment` and the value is printed.
+    #[test]
+    fn with_environment_is_an_exact_word_that_asks_for_a_pane() {
+        let request = parsed(&[WITH_ENVIRONMENT_FLAG, "."]);
+        assert!(request.with_environment);
+        assert!(!parsed(&["."]).with_environment);
+        assert_eq!(
+            refused(&[WITH_ENVIRONMENT_FLAG, WITH_ENVIRONMENT_FLAG]),
+            CliFault::Repeated(WITH_ENVIRONMENT_FLAG)
+        );
+        assert_eq!(
+            refused(&["--with-environment=1"]),
+            CliFault::UnknownFlag("--with-environment=1".to_owned())
+        );
+        let alone = resolve(&parsed(&[WITH_ENVIRONMENT_FLAG]), Some(0), |_| {
+            PathKind::Absent
+        });
+        assert!(
+            alone.wants_pane,
+            "the flag alone asks for the pane it carries into"
+        );
+        assert_eq!(
+            alone.carried_environment, None,
+            "resolve reads no process environment"
+        );
+        assert!(!resolve(&parsed(&[]), Some(0), |_| PathKind::Absent).wants_pane);
+        let carried =
+            CarriedEnvironment::from_pairs(vec![("FSWEEP2_NAME".into(), "secret-值".into())]);
+        let printed = format!("{carried:?}");
+        assert!(printed.contains("FSWEEP2_NAME"), "{printed}");
+        assert!(!printed.contains("secret"), "the value is never printed");
     }
 
     #[test]
@@ -1592,9 +1742,11 @@ mod tests {
                 embedding: false,
                 new_window: false,
                 tab: false,
+                with_environment: false,
                 origin: LaunchOrigin::Plain,
                 update_trial: None,
                 update_failed: None,
+                update_journal_held: None,
                 update_feed: None,
             }
         );
@@ -1612,30 +1764,32 @@ mod tests {
     /// a drive-qualified path joined onto another drive keeps the wrong drive.
     #[test]
     fn a_named_folder_is_made_absolute_lexically_and_nothing_else_is() {
-        let here = Path::new(r"D:\Developer\Ledger");
-        let asked = |folder: &str| absolute_from(Some(here), Path::new(folder));
-        assert_eq!(asked("."), PathBuf::from(r"D:\Developer\Ledger"));
+        let here = &host_path(r"D:\Developer\Ledger");
+        // A relative folder, joined with this host's separator.
+        let relative = |names: &[&str]| names.iter().collect::<PathBuf>();
+        let asked = |folder: &Path| absolute_from(Some(here), folder);
+        assert_eq!(asked(Path::new(".")), host_path(r"D:\Developer\Ledger"));
         assert_eq!(
-            asked("crates"),
-            PathBuf::from(r"D:\Developer\Ledger\crates")
+            asked(Path::new("crates")),
+            host_path(r"D:\Developer\Ledger\crates")
         );
         assert_eq!(
-            asked(r"crates\bt-app"),
-            PathBuf::from(r"D:\Developer\Ledger\crates\bt-app")
+            asked(&relative(&["crates", "bt-app"])),
+            host_path(r"D:\Developer\Ledger\crates\bt-app")
         );
-        assert_eq!(asked(".."), PathBuf::from(r"D:\Developer"));
+        assert_eq!(asked(Path::new("..")), host_path(r"D:\Developer"));
         assert_eq!(
-            asked(r"..\bt-wt\launch-window"),
-            PathBuf::from(r"D:\Developer\bt-wt\launch-window")
+            asked(&relative(&["..", "bt-wt", "launch-window"])),
+            host_path(r"D:\Developer\bt-wt\launch-window")
         );
         assert_eq!(
-            asked(r"..\..\..\..\..\.."),
-            PathBuf::from(r"D:\"),
+            asked(&relative(&[".."; 6])),
+            host_path(r"D:\"),
             "a walk above the root stops at the root, which is what every shell does"
         );
         assert_eq!(
-            asked(r"D:\Other"),
-            PathBuf::from(r"D:\Other"),
+            asked(host_path(r"D:\Other").as_path()),
+            host_path(r"D:\Other"),
             "a folder that was already absolute is left exactly as it was written"
         );
         assert_eq!(
@@ -1885,7 +2039,7 @@ mod tests {
         }
     }
 
-    const PWSH: usize = 0;
+    const PWSH: Option<usize> = Some(0);
 
     /// PIN — a folder that is there is where the pane opens, and nothing is
     /// refused.
@@ -1946,15 +2100,15 @@ mod tests {
         for index in 0..profiles::count() {
             let id = profiles::id(index);
             let plan = resolve(&parsed(&["--profile", &id]), PWSH, table(&[]));
-            assert_eq!(plan.profile, index, "{id}");
+            assert_eq!(plan.profile, Some(index), "{id}");
             assert!(plan.refusals.is_empty(), "{id}");
         }
         let plan = resolve(
             &parsed(&["--profile", "fish"]),
-            profiles::fallback_profile(),
+            Some(profiles::fallback_profile()),
             table(&[]),
         );
-        assert_eq!(plan.profile, profiles::fallback_profile());
+        assert_eq!(plan.profile, Some(profiles::fallback_profile()));
         assert!(plan.wants_pane);
         assert_eq!(
             plan.refusals,
@@ -2023,6 +2177,10 @@ mod tests {
     /// This is the rule a split's folder chooser already obeys
     /// (`SplitSeed::Folder`), asked at the other door: a Windows path handed to
     /// a WSL shell unconverted names nothing at all.
+    ///
+    /// Windows only: the WSL profile and the drive-letter crossing into `/mnt/<drive>` exist only
+    /// on Windows.
+    #[cfg(windows)]
     #[test]
     fn a_windows_folder_crosses_into_the_profiles_namespace_or_is_refused() {
         let wsl = profiles::index_of_id("wsl");
@@ -2031,7 +2189,7 @@ mod tests {
             PWSH,
             table(&[(r"D:\Developer", PathKind::Directory)]),
         );
-        assert_eq!(plan.profile, wsl);
+        assert_eq!(plan.profile, Some(wsl));
         assert_eq!(plan.cwd, Some(PathBuf::from("/mnt/d/Developer")));
         assert!(plan.refusals.is_empty());
         let plan = resolve(
@@ -2050,19 +2208,39 @@ mod tests {
         assert!(!plan.refusals[0].notice().trim().is_empty());
     }
 
+    /// RED (T-PROGRAMS-REFRESH) — **while the default is undecided, a command line's folder is
+    /// kept as it was written**: the pane is the unresolved default, and its birth crosses the
+    /// folder into the profile the default resolves to (and refuses it there if it must). Nothing
+    /// is crossed for, or refused on behalf of, a profile nobody has decided.
+    ///
+    /// MUTATION (observed red): `let profile = profile?;` in the crossing — a folder named while
+    /// the default is undecided is dropped instead of kept for the birth to cross.
+    #[test]
+    fn an_undecided_default_keeps_the_folder_as_written_for_its_birth_to_cross() {
+        let plan = resolve(
+            &parsed(&["--cwd", r"\\服务器\共享"]),
+            None,
+            table(&[(r"\\服务器\共享", PathKind::Directory)]),
+        );
+        assert_eq!(plan.profile, None);
+        assert_eq!(plan.cwd, Some(PathBuf::from(r"\\服务器\共享")));
+        assert!(plan.refusals.is_empty());
+        assert!(plan.wants_pane);
+    }
+
     /// PIN — a launch nobody passed anything to asks for nothing and refuses
     /// nothing, whatever the machine looks like.
     #[test]
     fn an_empty_request_resolves_to_a_plan_that_wants_nothing() {
         let plan = resolve(
             &CliRequest::default(),
-            profiles::fallback_profile(),
+            Some(profiles::fallback_profile()),
             table(&[]),
         );
         assert!(!plan.wants_pane);
         assert_eq!(plan.cwd, None);
         assert_eq!(plan.preview, None);
-        assert_eq!(plan.profile, profiles::fallback_profile());
+        assert_eq!(plan.profile, Some(profiles::fallback_profile()));
         assert!(plan.refusals.is_empty());
     }
 
@@ -2216,6 +2394,42 @@ mod tests {
             CliFault::Repeated(UPDATE_FAILED_FLAG)
         );
         assert_eq!(update_door(args(&["--update-failed", journal])), None);
+    }
+
+    /// RED (0.4.8 E4) — **`--update-journal-held <error>` is one value, kept
+    /// as given (a refusal in the system's own language), and refused like
+    /// any other flag when the value is missing or the word is given twice.**
+    ///
+    /// MUTATION: drop the `UPDATE_JOURNAL_HELD_FLAG` arm of `parse` (the word
+    /// is an unknown flag).
+    #[test]
+    fn the_journal_held_word_takes_the_refusal_as_given() {
+        let journal = r"C:\Folio 终端\.folio-update\journal.json";
+        let refusal = "拒绝访问。 (os error 5)";
+        let request = parsed(&[
+            "--update-failed",
+            journal,
+            "--update-journal-held",
+            refusal,
+            "--tab",
+        ]);
+        assert_eq!(request.update_journal_held.as_deref(), Some(refusal));
+        assert_eq!(request.update_failed, Some(PathBuf::from(journal)));
+        assert!(request.tab);
+        assert_eq!(parsed(&[]).update_journal_held, None);
+        assert_eq!(
+            refused(&["--update-journal-held"]),
+            CliFault::MissingValue(UPDATE_JOURNAL_HELD_FLAG)
+        );
+        assert_eq!(
+            refused(&[
+                "--update-journal-held",
+                refusal,
+                "--update-journal-held",
+                refusal
+            ]),
+            CliFault::Repeated(UPDATE_JOURNAL_HELD_FLAG)
+        );
     }
 
     /// RED (U-28) — **`--update-apply` takes exactly the home, the

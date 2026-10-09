@@ -6,11 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use bt_compose::{render_detection_task, render_live_detection_task};
+use bt_math::MathEngine;
 use bt_render::{HeadlessRenderProbe, RenderProbeSample};
-use bt_term::{
-    DualPlaneSession, LayoutKey, MathEngine, SessionMathTask, render_detection_task,
-    render_live_detection_task,
-};
+use bt_term::{DualPlaneSession, LayoutKey, SessionMathTask};
 use bt_viewport::ViewportProjection;
 
 const FOREGROUND_RGB: [u8; 3] = [0xd8, 0xdc, 0xe8];
@@ -81,6 +80,7 @@ impl From<RenderProbeSample> for RenderStats {
 }
 
 fn main() -> Result<()> {
+    bt_corpus::install_host_answers();
     let mut args = env::args().skip(1);
     let input_path = args
         .next()

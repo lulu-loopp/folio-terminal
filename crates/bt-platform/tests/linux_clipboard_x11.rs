@@ -60,16 +60,7 @@ fn private_xorg_copy_paste_uses_confirmed_owner() {
     let keep_artifacts = std::env::var_os("FOLIO_PRIVATE_XORG_EVIDENCE_DIR").is_some();
     let scratch = std::env::var_os("FOLIO_PRIVATE_XORG_EVIDENCE_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "folio-private-xorg-clipboard-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ))
-        });
+        .unwrap_or_else(|| bt_testpath::temp_path("folio-private-xorg-clipboard"));
     std::fs::create_dir_all(&scratch).unwrap();
     let display_log = scratch.join("Xorg.log");
     let (display_parent, display_child) = UnixStream::pair().unwrap();

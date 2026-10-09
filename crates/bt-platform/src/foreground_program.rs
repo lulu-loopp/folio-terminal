@@ -456,7 +456,6 @@ mod tests {
         fs,
         io::{BufRead, BufReader, Write},
         process::Stdio,
-        time::SystemTime,
     };
 
     fn process(pid: u32, parent: u32, image: &str, started: u64) -> ProcessEntry {
@@ -644,12 +643,7 @@ mod tests {
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn foreground_program_observes_a_real_named_grandchild() {
-        let nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("system clock after epoch")
-            .as_nanos();
-        let sandbox =
-            std::env::temp_dir().join(format!("foreground-program-{}-{nonce}", std::process::id()));
+        let sandbox = bt_testpath::temp_path("foreground-program");
         fs::create_dir(&sandbox).expect("create helper sandbox under target");
         let current = std::env::current_exe().expect("current test executable");
         let named = sandbox.join(if cfg!(windows) { "tmux.exe" } else { "tmux" });

@@ -2000,16 +2000,8 @@ mod stalled_server_tests {
             return;
         }
         let server = StalledX11Server::start();
-        let authority = std::env::temp_dir().join(format!(
-            "folio-pr20-xauth-{}-{}",
-            std::process::id(),
-            server.display
-        ));
-        let stderr_path = std::env::temp_dir().join(format!(
-            "folio-pr20-x11-stderr-{}-{}",
-            std::process::id(),
-            server.display
-        ));
+        let authority = bt_testpath::temp_path("folio-pr20-xauth");
+        let stderr_path = bt_testpath::temp_path("folio-pr20-x11-stderr");
         std::fs::write(&authority, []).expect("write empty Xauthority data");
         let stderr_file = std::fs::File::create(&stderr_path).expect("capture child diagnostics");
         let mut child = ChildGuard(

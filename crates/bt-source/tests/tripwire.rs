@@ -747,16 +747,10 @@ fn planted_reader() -> String {
 
 /// A directory of our own under the machine's temporary one.
 ///
-/// No `tempfile`: this crate has no dev-dependencies and one test does not earn
-/// the first. The shape is `bt_term`'s own `temporary_directory`, process id and
-/// clock, which is enough for a directory two runs of one suite will not share.
+/// No `tempfile`: the name is `bt_testpath`'s, the one owner of a test's scratch
+/// name, which no other call in this or any running process is given.
 fn temporary_directory(name: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("a clock set after 1970")
-        .as_nanos();
-    let path =
-        std::env::temp_dir().join(format!("bt-source-{name}-{}-{unique}", std::process::id()));
+    let path = bt_testpath::temp_path(&format!("bt-source-{name}"));
     std::fs::create_dir_all(&path).expect("a directory of our own");
     path
 }

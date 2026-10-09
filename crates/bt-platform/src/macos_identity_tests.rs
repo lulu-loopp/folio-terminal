@@ -319,10 +319,7 @@ mod on_macos {
 
     /// A fresh folder for one test, under the system's temporary folder.
     fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "bt-platform-macos-identity-{}-{name}",
-            std::process::id()
-        ));
+        let root = bt_testpath::temp_path(&format!("bt-platform-macos-identity-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root.canonicalize().unwrap()

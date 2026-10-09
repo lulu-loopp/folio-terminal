@@ -1,6 +1,7 @@
 //! `keyboard` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::PtyTarget;
 use crate::TextStep;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
@@ -873,6 +874,7 @@ impl Runtime<'_> {
                         Some(profiles::TermMenuHover::Row(entry)) => Some(entry),
                         Some(profiles::TermMenuHover::Submenu(_)) | None => None,
                     };
+                    menu.lit_by = profiles::LitBy::Keyboard;
                     menu.hover = profiles::term_menu_step(
                         current,
                         menu.subject,
@@ -1617,6 +1619,7 @@ impl Runtime<'_> {
                             profiles::PaneMenuHover::step(menu.hover, step, rows, &shown)
                     {
                         menu.hover = Some(moved);
+                        menu.lit_by = profiles::LitBy::Keyboard;
                     }
                     // The keyboard's walk lights the same window the pointer's
                     // would (B9) — one aim, read off the highlight either hand
@@ -2092,7 +2095,13 @@ impl Runtime<'_> {
             &event.logical_key,
             &event.key_without_modifiers(),
             event.location,
-            self.window.modifiers,
+            // Option-as-text's one exception: Option+Backspace keeps its Alt (owner ruling
+            // 2026-10-09).
+            input::encoder_modifiers(
+                &event.logical_key,
+                self.window.modifiers,
+                self.window.modifiers_held,
+            ),
             application_cursor_mode,
             keyboard,
             // What a win32-input-mode record is built from (T-KEYBOARD-RECORDS): where the key
@@ -2443,7 +2452,8 @@ impl Runtime<'_> {
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
                 write_pty_input(
-                    self.focused().and_then(|leaf| leaf.pty.as_ref()),
+                    self.focused()
+                        .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
                     &ime_commit_bytes(&text),
                     "write IME UTF-8 commit to PTY",
                 )?;
