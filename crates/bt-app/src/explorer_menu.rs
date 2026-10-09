@@ -2966,7 +2966,7 @@ mod tests {
         std::fs::write(&path, journal.encode()).unwrap();
         watch(
             &gate,
-            &path,
+            (&path, &path.with_file_name(crate::update_txn::UNKEPT_FILE)),
             txn,
             Duration::from_millis(5),
             &|| {},

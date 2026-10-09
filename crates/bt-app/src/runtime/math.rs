@@ -305,7 +305,7 @@ impl Runtime<'_> {
                 restore::update_card_build(
                     &layout,
                     self.window.update_card.hover(),
-                    crate::update_card::paint(self.app.update_job.state())
+                    crate::update_card::paint_of(&self.app.update_job)
                         .and_then(|paint| self.window.update_card.ring(&paint.verbs)),
                 ),
                 ModalBand::Fixed,

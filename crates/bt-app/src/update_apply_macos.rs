@@ -162,8 +162,8 @@ use bt_platform::{HostPlatform, launch_agent};
 use crate::cli;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    BeforeDeciding, Deferral, ExitGuard, Leave, Recording, Watch, Watched, Window, stop_trial,
-    trial_runs,
+    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, Recording, Watch, Watched, Window,
+    stop_trial, trial_runs,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -177,9 +177,9 @@ enum Pre {
 }
 pub(crate) use crate::update_apply::{Opener, Opens, failed_words, trial_words};
 use crate::update_txn::{
-    Action, Actor, Asker, BundleIdentity, Class, Disk, Effect, Event, HeaderOutcome, Home, Journal,
-    Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, Role, Sight, TrialProcess, TxnId,
-    decide,
+    Action, Actor, Asker, BundleIdentity, Carried, Class, Disk, Effect, Event, HeaderOutcome, Home,
+    Journal, Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, Role, Sight, TrialProcess,
+    TxnId, decide,
 };
 
 /// `open`, by its absolute path: LaunchServices starts the trial as it starts
@@ -369,10 +369,60 @@ impl ApplyPoints for Ours {
     }
 }
 
-/// **The layouts of this road** as the product has them: [`Ours`] alone.
+/// **Homebrew's layout** (0.4.8 ticket D1, U-41b; managed-update §2.2, §4):
+/// [`Ours`]' exchange at the app target Homebrew recorded — the extended
+/// attributes the cask wrote belong to the bundle directory and travel with
+/// it through `RENAME_SWAP`, so the new bundle the Prepare carried them onto
+/// goes live with them, and a swap back brings the old bundle back with its
+/// own (M4). `Activate` holds both sides to the marks the journal recorded:
+/// before the exchange, on the live bundle and on the staged one (M2: a mark
+/// changed since `Allocated` refuses, and nothing is exchanged); after it, on
+/// the live side (M1: refused, and the road rolls back by what is live).
+/// Homebrew itself is never run (R3).
+pub(crate) struct Homebrew;
+
+impl Homebrew {
+    /// Whether the bundle at `bundle` carries exactly the marks `places`
+    /// records.
+    fn carries(places: &Places<'_>, bundle: &Path) -> Result<(), String> {
+        let found = crate::install_channel::homebrew_marks(bundle).map(|marks| Carried {
+            install: marks.marker,
+            caskroom: Some(marks.caskroom),
+        });
+        match (found, places.carried) {
+            (Ok(found), Some(recorded)) if found == *recorded => Ok(()),
+            (Err(why), _) => Err(format!("the Homebrew marks: {why}")),
+            _ => Err("the Homebrew marks are not the ones the journal recorded".to_owned()),
+        }
+    }
+}
+
+impl ApplyPoints for Homebrew {
+    fn activate(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        Self::carries(places, places.installed)?;
+        Self::carries(places, places.stage)?;
+        Ours.activate(places, hands)?;
+        Self::carries(places, places.installed)
+    }
+
+    fn activate_back(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        Ours.activate_back(places, hands)
+    }
+
+    fn locate(
+        &self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+    ) -> (Option<BundleIdentity>, Option<BundleIdentity>) {
+        Ours.locate(worker, places)
+    }
+}
+
+/// **The layouts of this road** as the product has them: [`Ours`], and
+/// [`Homebrew`]'s.
 #[must_use]
 pub(crate) fn own_layouts() -> Layouts<dyn ApplyPoints> {
-    Layouts::of(Arc::new(Ours))
+    Layouts::of(Arc::new(Ours) as Arc<dyn ApplyPoints>).with_homebrew(Arc::new(Homebrew))
 }
 
 /// **The effects of a lock holder that a test stands in for**: its lines, the
@@ -520,6 +570,9 @@ pub(crate) struct Recovered {
     /// Whether anybody waits for a window: a person's start always; the run
     /// at login only after a revert or a rollback it finished.
     pub(crate) waiting: bool,
+    /// **Whom a person's start was deferred to** (0.4.8 E3), as
+    /// `update_apply_windows::Recovered::deferred_to` says it.
+    pub(crate) deferred_to: Option<Ahead>,
 }
 
 /// **How the macOS applier leaves** (`update_apply::ExitGuard`, U-34): the
@@ -807,7 +860,7 @@ pub(crate) fn recover(
         Opener::Login
     };
     let handed = start.unwrap_or(&[]);
-    let (ended, successor) = match Txn::hold(
+    let (ended, successor, deferred_to) = match Txn::hold(
         road,
         worker,
         Asker::Rescue,
@@ -851,9 +904,23 @@ pub(crate) fn recover(
                 "BT_UPDATE_RECOVER transaction {} wrote {:?}",
                 road.txn, txn.written
             ));
-            (ended, txn.successor)
+            let deferred_to = match (&ended, txn.successor) {
+                (_, Some(_)) if txn.successor_has_the_start => None,
+                (_, Some(successor)) => Some(Ahead::Process(successor)),
+                (Ended::Deferred(Deferral::WindowDuty), None) => Some(Ahead::Election {
+                    home: road.home.clone(),
+                    txn: road.txn,
+                    me: crate::update_apply::this_process(),
+                }),
+                (Ended::Deferred(Deferral::Held), None) => Some(Ahead::DataHolder),
+                _ => None,
+            };
+            (ended, txn.successor, deferred_to)
         }
-        Err(ended) => (ended, None),
+        // Another holder kept the transaction lock through the wait: it opens
+        // the window.
+        Err(Ended::LockHeld) => (Ended::LockHeld, None, Some(Ahead::Lock(road.home.lock()))),
+        Err(ended) => (ended, None, None),
     };
     // At login, every end that attempted the transaction owes a window; only
     // the no-op ends do not (U-34, round 2, blocker 4 — as
@@ -874,6 +941,7 @@ pub(crate) fn recover(
         ended,
         successor,
         waiting,
+        deferred_to: deferred_to.filter(|_| opener == Opener::Start),
     }
 }
 
@@ -964,6 +1032,7 @@ fn exit_places(home: &Home, journal: &Journal) -> Option<Bundles> {
         rescue_program,
         old,
         new,
+        carried: journal.body.marker.clone(),
     })
 }
 
@@ -976,6 +1045,7 @@ struct Bundles {
     rescue_program: PathBuf,
     old: BundleIdentity,
     new: BundleIdentity,
+    carried: Option<Carried>,
 }
 
 impl Bundles {
@@ -988,6 +1058,7 @@ impl Bundles {
             rescue_program: &self.rescue_program,
             old: &self.old,
             new: &self.new,
+            carried: self.carried.as_ref(),
         }
     }
 }
@@ -1004,6 +1075,8 @@ pub(crate) struct Places<'a> {
     rescue_program: &'a Path,
     old: &'a BundleIdentity,
     new: &'a BundleIdentity,
+    /// What the journal records was carried onto the staged set (D1, M1).
+    carried: Option<&'a Carried>,
 }
 
 /// **One transaction under its lock**: the journal as it stands durably, and
@@ -1029,6 +1102,10 @@ struct Txn<'a> {
     /// nothing (U-34; U-29b's ruling 2's "exactly one"); a trial a rollback
     /// stopped no longer runs.
     successor: Option<Running>,
+    /// **A trial this holder started was handed the person's start** with its
+    /// words ([`Txn::begin_trial`]): that start is delivered with it and
+    /// nothing is carried (0.4.8 E3).
+    successor_has_the_start: bool,
 }
 
 impl<'a> Txn<'a> {
@@ -1086,6 +1163,7 @@ impl<'a> Txn<'a> {
             .map_err(|not_built| Ended::Refused(not_built.to_string()))?;
         let inside = program.strip_prefix(&installed).unwrap_or(&program);
         let stage_program = stage.join(inside);
+        let carried = journal.body.marker.clone();
         let txn = Txn {
             road,
             worker,
@@ -1099,6 +1177,7 @@ impl<'a> Txn<'a> {
             written: Vec::new(),
             layout,
             successor: None,
+            successor_has_the_start: false,
         };
         Ok((
             txn,
@@ -1110,6 +1189,7 @@ impl<'a> Txn<'a> {
                 rescue_program,
                 old,
                 new,
+                carried,
             },
         ))
     }
@@ -1121,6 +1201,22 @@ impl<'a> Txn<'a> {
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
     /// to this actor, then durable.
     fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
+        // A replacing rename is never refused for an open target on macOS
+        // (`install_txn::Failure::refused_while_open`), so a write here has no
+        // held rounds to say; the sink is standard error, which is the
+        // diagnostics log of the Folio that started this process.
+        self.record_saying(actor, event, &mut |line| {
+            bt_platform::write_std_error(format!("{line}\n").as_bytes());
+        })
+    }
+
+    /// [`Self::record`], the rounds of a held write said through `say`.
+    fn record_saying(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
         let next = self
             .journal
             .advance(event)
@@ -1129,7 +1225,14 @@ impl<'a> Txn<'a> {
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
         }
-        crate::update_apply::write_journal(self.worker, &self.road.home.journal(), &next.encode())?;
+        crate::update_apply::write_journal(
+            self.worker,
+            &self.road.home.journal(),
+            &next.encode(),
+            crate::update_apply::JOURNAL_HELD_WITHIN,
+            say,
+        )
+        .map_err(|unwritten| unwritten.said)?;
         self.journal = next;
         self.written.push(phase);
         if let Event::TrialBegan { process, .. } | Event::RetrialBegan { process, .. } = event {
@@ -1376,7 +1479,10 @@ impl<'a> Txn<'a> {
         }
         args.extend_from_slice(handed);
         let mut launch = match hands.launch_trial(places.installed, &args) {
-            Ok(launch) => launch,
+            Ok(launch) => {
+                self.successor_has_the_start = true;
+                launch
+            }
             Err(error) => {
                 hands.say(&format!("BT_UPDATE_APPLY {OPEN} did not start: {error}"));
                 return if over_stuck {
@@ -1971,8 +2077,13 @@ impl Recording for Txn<'_> {
         &self.journal
     }
 
-    fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
-        Txn::record(self, actor, event)
+    fn record(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        Txn::record_saying(self, actor, event, say)
     }
 }
 

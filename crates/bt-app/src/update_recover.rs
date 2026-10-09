@@ -116,7 +116,7 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::update_apply::{ExitGuard, Leave, Left, Opens};
+use crate::update_apply::{Ahead, Carried, ExitGuard, Leave, Left, Opens};
 use crate::update_apply_macos::{self, Hands, Limits, Road};
 use crate::update_txn::{Actor, Class, Header, Home, Role, Sight};
 
@@ -125,6 +125,16 @@ use crate::update_txn::{Actor, Class, Header, Home, Role, Sight};
 pub(crate) trait World: Hands {
     /// Start `program` with `args`, detached: never waited on.
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()>;
+    /// **Carry a person's start this recovery deferred to the window**
+    /// (0.4.8 E3), as `update_apply_windows::World::carry` says it.
+    fn carry(
+        &mut self,
+        worker: &WorkerCtx,
+        data: &Path,
+        ahead: &Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        within: std::time::Duration,
+    ) -> Carried;
 }
 
 /// **What one run of the door is over**: the home, the installed program, the
@@ -236,6 +246,7 @@ pub(crate) fn run_here(
                         handed,
                         worker: None,
                         actor: None,
+                        journal_held: None,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -352,7 +363,7 @@ impl<W: World> Leave for DoorLeave<'_, W> {
 /// nothing was recovered).
 fn code_of(left: &Left, ended: i32) -> i32 {
     match left {
-        Left::Started(_) => 0,
+        Left::Started(_) | Left::Carried => 0,
         Left::ShownHere(_) => 1,
         _ => ended,
     }
@@ -449,6 +460,25 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
             if recovered.ended.deferred_to_a_holder() {
                 guard.window_elsewhere();
             }
+            let within = road.limits.old_within
+                + std::time::Duration::from_millis(road.limits.trial_within_ms);
+            if let Some((carried, said)) = carry_on(
+                recovered.deferred_to.as_ref(),
+                door.then_launch,
+                |ahead, request| {
+                    guard
+                        .inner()
+                        .world
+                        .carry(worker, door.data, ahead, request, within)
+                },
+            ) {
+                Logged {
+                    world: &mut *guard.inner().world,
+                    log: appended,
+                }
+                .say(&said);
+                after_carrying(&mut guard, carried);
+            }
             (
                 format!("recovery ended {:?}", recovered.ended),
                 Some(recovered.ended),
@@ -506,6 +536,7 @@ pub(crate) fn run_windows(
         handed: then_launch.unwrap_or(&[]),
         worker: Some(worker),
         actor: Some(Actor::Recovery),
+        journal_held: None,
     });
     let (log, whereabouts) = log_file(&road.home, &road.data);
     let appended = appended_to(&log);
@@ -518,12 +549,34 @@ pub(crate) fn run_windows(
         },
         then_launch,
     );
+    guard.inner().journal_held = recovered.journal_held.clone();
     guard.succeeded_by(recovered.successor);
     if !recovered.waiting {
         guard.nobody_waiting();
     }
     if recovered.ended.deferred_to_a_holder() {
         guard.window_elsewhere();
+    }
+    let within =
+        road.limits.old_within + std::time::Duration::from_millis(road.limits.trial_within_ms);
+    if let Some((carried, said)) = carry_on(
+        recovered.deferred_to.as_ref(),
+        then_launch,
+        |ahead, request| {
+            guard
+                .inner()
+                .world
+                .carry(worker, &road.data, ahead, request, within)
+        },
+    ) {
+        crate::update_apply_windows::World::say(
+            &mut LoggedWindows {
+                world: &mut *guard.inner().world,
+                log: appended,
+            },
+            &said,
+        );
+        after_carrying(&mut guard, carried);
     }
     let left = guard.leave();
     let now = header_of(&road.home);
@@ -542,6 +595,58 @@ pub(crate) fn run_windows(
         ));
     }
     code_of(&left, recovered.ended.code())
+}
+
+/// **A person's start this recovery deferred, carried to the window** (0.4.8
+/// E3, the owner's ruling for #12): when the recovery started nothing because
+/// another process opens the window (`deferred_to`) and it was handed a
+/// person's start (`then_launch`), that start's request is handed over the
+/// launch wire to the Folio that holds the data directory once it does
+/// (`carry`: the world's, `update_apply::carry_the_start` in the product).
+/// `None` when there is nothing to carry;
+/// otherwise what became of it — `None` for a command line the wire cannot
+/// carry — and the line that says so.
+fn carry_on(
+    deferred_to: Option<&Ahead>,
+    then_launch: Option<&[OsString]>,
+    carry: impl FnOnce(&Ahead, &crate::launch_wire::LaunchRequest) -> Carried,
+) -> Option<(Option<Carried>, String)> {
+    let (ahead, handed) = deferred_to.zip(then_launch)?;
+    let Some(request) =
+        crate::launch_wire::carried(handed, std::env::current_dir().ok().as_deref())
+    else {
+        return Some((
+            None,
+            String::from(
+                "BT_UPDATE_RECOVER the start handed here names a document, which a running Folio is not handed; it is not carried",
+            ),
+        ));
+    };
+    let carried = carry(ahead, &request);
+    let said = match carried {
+        Carried::Taken => "the Folio that holds the data directory took it",
+        Carried::FolderGone => {
+            "the Folio that holds the data directory refused it: its folder is not there"
+        }
+        Carried::NotTaken => "a Folio holds the data directory and did not take it",
+        Carried::NoFolio => {
+            "no Folio held the data directory once the update's road was done; it is started here"
+        }
+    };
+    Some((
+        Some(carried),
+        format!("BT_UPDATE_RECOVER the start handed here was deferred to {ahead:?}: {said}"),
+    ))
+}
+
+/// What the exit guard does after a carry: nothing more once it was taken,
+/// and the start the disk names when the window it waited for never came.
+fn after_carrying<L: Leave>(guard: &mut ExitGuard<L>, carried: Option<Carried>) {
+    match carried {
+        Some(Carried::Taken) => guard.carried(),
+        Some(Carried::NoFolio) => guard.owed_a_start(),
+        Some(Carried::FolderGone | Carried::NotTaken) | None => {}
+    }
 }
 
 /// **A Windows world whose every line is also appended to the log** — the
@@ -589,6 +694,17 @@ impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
 
     fn moved(&mut self, done: &crate::update_txn::Move) {
         self.world.moved(done);
+    }
+
+    fn carry(
+        &mut self,
+        worker: &WorkerCtx,
+        data: &Path,
+        ahead: &Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        within: std::time::Duration,
+    ) -> Carried {
+        self.world.carry(worker, data, ahead, request, within)
     }
 
     fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
@@ -713,6 +829,17 @@ impl World for Machine {
             .spawn()
             .map(drop)
     }
+
+    fn carry(
+        &mut self,
+        worker: &WorkerCtx,
+        data: &Path,
+        ahead: &Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        within: std::time::Duration,
+    ) -> Carried {
+        crate::update_apply::carry_the_start(worker, data, ahead, request, within)
+    }
 }
 
 #[cfg(test)]
@@ -768,6 +895,17 @@ mod tests {
             self.spawned.push((program.to_path_buf(), args.to_vec()));
             Ok(())
         }
+
+        fn carry(
+            &mut self,
+            _worker: &WorkerCtx,
+            _data: &Path,
+            ahead: &Ahead,
+            _request: &crate::launch_wire::LaunchRequest,
+            _within: std::time::Duration,
+        ) -> Carried {
+            panic!("a home this door does not recover defers to nobody: {ahead:?}")
+        }
     }
 
     /// `install\folio.exe`, `install\.folio-update\<txn>\rescue\folio.exe` and,
@@ -791,6 +929,7 @@ mod tests {
                 rescue: rescue.display().to_string(),
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
+                    marker: None,
                     phase,
                     layout: Layout::Members(Inventories {
                         old_shipped: Vec::new(),

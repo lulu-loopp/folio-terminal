@@ -6,13 +6,23 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- A Folio installed with Homebrew now updates itself in place from About, like a copy you dragged to Applications; Homebrew keeps managing and uninstalling it. <!-- zh: pending D1 -->
+
 ### Fixed
 
+- An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
+- The card after an unfinished update says what happened — that the update stopped before the new version started, or that it did not finish while the new version is already running — instead of always saying the new version did not start. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
+- If you change a setting in the first window of a new version and the update is only finished later, the next start says those changes were not kept, instead of losing them without a word. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
 - Alt+Backspace (on a Mac, Option+Backspace as well) deletes a word and Ctrl+Space reaches the program, as in other terminals, in panes that do not carry key records — every pane on macOS, and Windows panes on the system's own console host. <!-- zh: pending F-SWEEP-048 -->
 - In a web preview, a link or a page that asks for a new window opens it as a new pane beside the page (issue #27). Addresses a preview would not open when typed stay refused, and so does a pop-up you did not ask for. <!-- zh: pending F-SWEEP-048 -->
 - Enter works on every item in Settings — moving a profile up or down, taking over one of a profile's suggested environment variables, and the summoned terminal's key box — and on Load more commits on the Git page. <!-- zh: pending F-SWEEP-048 -->
 - After Restart to update, Folio always comes back, also when the update cannot write to its own folder and the closing Folio takes a long time to go away — before, nothing reopened until you started Folio again. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - If the updater stops on an internal error before it starts working, one Folio opens afterwards, not two. <!-- zh: pending T-UPDATE-LOCK-RACE -->
+- Opening Folio in a folder while an update is being installed (Open in Folio, `folio-here.cmd`, starting Folio again) now opens that folder in the Folio that comes back, instead of being forgotten. <!-- zh: pending T-UPDATE-HANDOFF-DEBT -->
+- A downloaded update is no longer thrown away because the computer lost power or Folio crashed; only choosing Later twice does that. If you pressed Restart to update and the restart did not happen, Folio says so the next time it opens and offers Restart again. <!-- zh: pending T-UPDATE-HANDOFF-DEBT -->
+- Starting Folio a second time while an interrupted update's new version is still finishing no longer waits 30 seconds and shows nothing: the folder opens in the running Folio, or, if it does not answer, in a window of its own that says the update is not finished. <!-- zh: pending T-UPDATE-HANDOFF-DEBT -->
 - A second window's Git page now follows changes on disk as the first window's does.
 - Before a pane's shell reports its folder, everything that offers "where this pane is" uses the folder the pane was opened in: the pane's files card and a files column opened from it (which showed your home folder), the files column's folder menu, the place hints in the command palette, and the folder picker of New terminal in folder… in the pane menu and the new-tab menu — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
 - Every pasted picture's `[Image #N]` on an agent's input line can be opened, not only the last one.
