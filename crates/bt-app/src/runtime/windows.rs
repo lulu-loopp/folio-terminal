@@ -1492,31 +1492,22 @@ impl Runtime<'_> {
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
-        if answer == restore::GateAnswer::Cancel {
+        match (request, answer) {
+            // **The two exits answer all three buttons in one place**
+            // ([`Self::answer_exit`]): a window's own shut, and the run's end
+            // asked in the summoned terminal, whose confirmed answer re-runs the
+            // close of the ordinary window that ends it.
+            (restore::GateRequest::Shut, answer) => self.answer_exit(self.window_id(), answer),
+            (restore::GateRequest::ShutWithTheRun(closing), answer) => {
+                self.answer_exit(closing, answer)
+            }
             // "取消不关" — nothing happens, and nothing is lost. The one answer a
             // gate must be able to give.
-            return Ok(());
-        }
-        // **`Save all` writes first and closes only if all of it landed** (B1,
-        // user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
-        // surface down and for its reason: a shut that closed the window after a
-        // half-finished save would take the half that is still only in memory
-        // with it. The failures are already named on their own pane by
-        // `quit_save`; the window stays, so the reader can see them there.
-        //
-        // Only the shut can be answered this way (`GateRequest::offers_save`),
-        // so there is no per-request branch here — the button that would send
-        // any other request down this path is not drawn.
-        if answer == restore::GateAnswer::Save {
-            let report = self.quit_save()?;
-            if !report.is_complete() {
-                return Ok(());
-            }
-            self.window.window_close_requested = true;
-            return Ok(());
-        }
-        match request {
-            restore::GateRequest::ClosePane(seat) => {
+            (_, restore::GateAnswer::Cancel) => Ok(()),
+            // Only an exit offers `Save all` (`GateRequest::offers_save`), so from
+            // here the answer goes through with the request: the button that
+            // would send any of these down a save is not drawn.
+            (restore::GateRequest::ClosePane(seat), _) => {
                 // The pool is the tab's, so emptying it leaves *every* surface
                 // naming a buffer that is gone — the view each of them was on has
                 // to be filed and let go, not only the pane being closed.
@@ -1526,44 +1517,25 @@ impl Runtime<'_> {
                 }
                 self.close_pane(seat)
             }
-            restore::GateRequest::CloseTab(index) => {
+            (restore::GateRequest::CloseTab(index), _) => {
                 if let Some(tab) = self.window.tabs.get_mut(index) {
                     tab.preview_pool.clear();
                 }
                 self.close_tab(index)
-            }
-            restore::GateRequest::Shut => {
-                // **Only the dirty ones.** A shut is the one answer whose pool
-                // has somewhere to go afterwards: every tab is about to be
-                // written to `session.json`, and its pool goes with it as the
-                // list of files the switcher will list next launch
-                // (`TabState::preview_content`). Emptying it here would answer
-                // "discard my unsaved changes" by also throwing away a browsing
-                // history nobody was asked about — measured on the real machine,
-                // where one dirty buffer wrote `"pool": []` and a three-file
-                // history came back empty. The gate raises itself off
-                // `dirty_names`, so dropping the dirty buffers is all it takes
-                // for the re-requested shut not to ask again.
-                for tab in &mut self.window.tabs {
-                    tab.preview_pool.discard_dirty();
-                }
-                // The shut is the one verb this does not own: it is the event
-                // loop's, and it is re-requested rather than performed here so
-                // that everything else `CloseRequested` does still happens in the
-                // order it always did.
-                self.window.window_close_requested = true;
-                Ok(())
             }
             // The one request whose confirmed verb is not a re-run of something
             // that was interrupted: nothing was in flight, because the gate is in
             // front of the write rather than behind it. So this is where the
             // question is actually asked of the repository (R13's pessimism
             // starts one line later, when the row dims).
-            restore::GateRequest::GitDiscard {
-                origin,
-                path,
-                untracked,
-            } => {
+            (
+                restore::GateRequest::GitDiscard {
+                    origin,
+                    path,
+                    untracked,
+                },
+                _,
+            ) => {
                 let verb = if untracked {
                     git::GitWriteVerb::DiscardUntracked
                 } else {
@@ -1576,7 +1548,7 @@ impl Runtime<'_> {
             // and either surface on this repository can carry the write — every
             // cache on it re-reads when the receipt lands
             // ([`git::GitWriteVerb::moves_refs`]).
-            restore::GateRequest::GitDeleteBranch { root, name } => {
+            (restore::GateRequest::GitDeleteBranch { root, name }, _) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1586,7 +1558,7 @@ impl Runtime<'_> {
                     Vec::new(),
                 )
             }
-            restore::GateRequest::GitDeleteTag { root, name } => {
+            (restore::GateRequest::GitDeleteTag { root, name }, _) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1595,9 +1567,12 @@ impl Runtime<'_> {
             // **The detaching checkout**, on the two deletions' own shape: the
             // gate stands in front of the verb rather than behind it, so this is
             // where the repository is actually asked.
-            restore::GateRequest::GitCheckout {
-                root, target, kind, ..
-            } => {
+            (
+                restore::GateRequest::GitCheckout {
+                    root, target, kind, ..
+                },
+                _,
+            ) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1606,8 +1581,39 @@ impl Runtime<'_> {
             // The gate stands *in front of* this one too (`GitDiscard`'s shape),
             // so the confirmed answer is the deletion itself rather than a re-run
             // of something that was interrupted.
-            restore::GateRequest::ClearScrollback(seat) => self.clear_pane_scrollback(seat),
+            (restore::GateRequest::ClearScrollback(seat), _) => self.clear_pane_scrollback(seat),
         }
+    }
+
+    /// **Spend an answer to one of the two exits**, whose confirmed verb is the
+    /// close of `closes` — this window for its own shut, the run's last ordinary
+    /// window for the run's end asked in the summoned terminal
+    /// (T-SUMMON-DIRTY-PREVIEW).
+    ///
+    /// **`Save all` writes first and closes only if all of it landed** (B1,
+    /// user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
+    /// surface down and for its reason: a shut that closed the window after a
+    /// half-finished save would take the half that is still only in memory
+    /// with it. The failures are already named on their own pane by
+    /// `quit_save`; the window stays, so the reader can see them there.
+    ///
+    /// **`Discard` drops only the dirty buffers**: every tab is about to be
+    /// written to `session.json`, and its pool goes with it as the list of files
+    /// the switcher will list next launch (`TabState::preview_content`) —
+    /// measured on the real machine, where emptying it wrote `"pool": []` and a
+    /// three-file history came back empty. See [`crate::answer_an_exit_over`],
+    /// which is the whole of this but the write.
+    ///
+    /// The close is the one verb this does not own: it is the event loop's, and
+    /// it is re-requested ([`crate::WindowRuntime::close_requested`]) rather than
+    /// performed here so that everything else a close does still happens in the
+    /// order it always did — and, for the run's end, so that `Cancel` leaves the
+    /// ordinary window open and the summoned terminal never stands alone.
+    fn answer_exit(&mut self, closes: WindowId, answer: restore::GateAnswer) -> Result<()> {
+        let saved_all = answer == restore::GateAnswer::Save && self.quit_save()?.is_complete();
+        self.window.close_requested =
+            crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, saved_all);
+        Ok(())
     }
 
     /// **What this window would lose if the process left now**, by name.

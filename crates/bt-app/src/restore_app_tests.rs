@@ -322,10 +322,10 @@ fn cancel_keeps_the_buffer_and_save_and_discard_replay_the_accepted_request() {
         .find("self.window.dirty_gate.take()")
         .expect("the answer takes its request");
     for rerun in [
-        "self.quit_save()",
+        "self.answer_exit(self.window_id(),answer)",
         "self.close_pane(seat)",
         "self.close_tab(index)",
-        "self.window.window_close_requested=true",
+        "self.answer_exit(closing,answer)",
         "self.issue_git_write(",
         "self.checkout_at(",
         "self.clear_pane_scrollback(seat)",
@@ -657,6 +657,266 @@ fn esc_under_the_restore_card_closes_it_unanswered_and_reaches_nothing_beneath()
     );
 }
 
+// ── T-SUMMON-DIRTY-PREVIEW: the run's end asks the summoned terminal ───────
+
+/// The ordinary window whose close ends the run, as the summoned terminal's
+/// question carries it.
+fn the_last_ordinary_window() -> WindowId {
+    WindowId::from(7_u64)
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **the last ordinary window closing asks the
+/// summoned terminal about its unsaved preview edit, and nothing is lost.**
+///
+/// Before this ticket `FolioApp::close` closed the summoned terminal with the
+/// run (`retire_the_summon_with_the_run`, `close_window(true)`) without asking
+/// its gate, and the edit went with the window. Now an ending close first puts
+/// `ShutWithTheRun` to the summoned terminal's gate over its own tabs; raised,
+/// the close stops and the question is the existing unsaved-changes card — the
+/// shut's title, buttons and lines (no new string).
+///
+/// The decision runs for real (`raise_dirty_gate_over` on a real tab over a
+/// file typed into); `FolioApp` cannot be built without an
+/// event loop, so its wiring is read through `bt_source`.
+///
+/// MUTATION: in `FolioApp::close`, drop the `the_summon_lets_the_run_end` line
+/// (close the summoned window directly, the pre-ticket behaviour) — the wiring
+/// assertion goes red; in `dirty_gate_names`, answer `ShutWithTheRun` with an
+/// empty list — the first assertion goes red.
+#[test]
+fn the_last_ordinary_window_closing_asks_the_summoned_terminal_about_its_unsaved_edit() {
+    let (path, buffer) = a_file_being_edited("summon-asks");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let request = restore::GateRequest::ShutWithTheRun(the_last_ordinary_window());
+
+    let raised = raise_dirty_gate_over(&mut gate, &summoned, 0, request.clone());
+    assert_eq!(
+        raised,
+        restore::GateRaise::Raised,
+        "the run's end asks the summoned terminal about its unsaved edit"
+    );
+    assert!(
+        !raised.proceeds(),
+        "so the last ordinary window does not close"
+    );
+    assert_eq!(gate.request(), Some(&request));
+    assert!(
+        still_holds_the_edit(&summoned[0], &path),
+        "the summoned terminal still holds what was typed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the file back"),
+        "one\n",
+        "and nothing was written behind the reader's back"
+    );
+
+    // The existing card: the shut's question, its three buttons, its lines.
+    let shut = restore::GateRequest::Shut;
+    assert_eq!(request.title(), shut.title());
+    assert_eq!(request.answer_text(), shut.answer_text());
+    assert!(request.offers_save(), "an exit offers Save all");
+    let names = dirty_gate_names(&summoned, 0, &request);
+    assert_eq!(names, dirty_gate_names(&summoned, 0, &shut));
+    assert_eq!(request.lines(&names), shut.lines(&names));
+
+    let close = squeezed(method_body("FolioApp", "close"));
+    let asked = close
+        .find("ifending&&!self.the_summon_lets_the_run_end(id)?{returnOk(());}")
+        .unwrap_or_else(|| panic!("an ending close does not ask the summoned terminal:\n{close}"));
+    let told = close
+        .find("runtime.close_window(ending)")
+        .expect("the close tells the window");
+    assert!(
+        asked < told,
+        "the question comes before the window is told:\n{close}"
+    );
+    let summon = squeezed(method_body("FolioApp", "the_summon_lets_the_run_end"));
+    assert!(
+        summon.contains(
+            "runtime.raise_dirty_gate(restore::GateRequest::ShutWithTheRun(closing))?;ifraised.proceeds(){returnOk(true);}self.summon_quake()?;Ok(false)"
+        ),
+        "the summoned terminal's own gate decides, and a held close brings it up:\n{summon}"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **Cancel keeps the edit and the run: the
+/// last ordinary window stays open.**
+///
+/// The summoned terminal never stands alone (§7.54e ①: the run ends with the
+/// last ordinary window, and the summoned terminal's `×` hides it), so the
+/// close Cancel refuses is the ordinary window's: no close is re-requested, the
+/// window and with it the run stay, and the next close asks again.
+///
+/// MUTATION: in `answer_an_exit_over`, let Cancel close (`Cancel =>
+/// Some(closes)`) — the first assertion goes red.
+#[test]
+fn cancel_on_the_summoned_terminals_question_keeps_the_edit_and_the_run() {
+    let (path, buffer) = a_file_being_edited("summon-cancel");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let closing = the_last_ordinary_window();
+    let _ = raise_dirty_gate_over(
+        &mut gate,
+        &summoned,
+        0,
+        restore::GateRequest::ShutWithTheRun(closing),
+    );
+    assert_eq!(
+        gate.take(),
+        Some(restore::GateRequest::ShutWithTheRun(closing)),
+        "the answer takes the one question it was"
+    );
+
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Cancel, false),
+        None,
+        "Cancel re-requests no close: the last ordinary window, and the run, stay"
+    );
+    assert!(
+        still_holds_the_edit(&summoned[0], &path),
+        "the summoned terminal still holds what was typed"
+    );
+    assert_eq!(
+        raise_dirty_gate_over(
+            &mut gate,
+            &summoned,
+            0,
+            restore::GateRequest::ShutWithTheRun(closing)
+        ),
+        restore::GateRaise::Raised,
+        "and the next close of that window asks again"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **Save all and Discard close the last
+/// ordinary window, and the run ends as before.**
+///
+/// The confirmed answer is spent in the summoned terminal, but the close it
+/// re-runs is the ordinary window's (`WindowRuntime::close_requested`, spent by
+/// the event loop through `FolioApp::close`); that close asks the summoned
+/// terminal again, finds nothing, and ends the run, retiring the summoned
+/// terminal with it. Discard drops the dirty buffer and only that; Save all
+/// writes it (the pool's `save_dirty`, `quit_save`'s door) and closes only when
+/// every write landed.
+///
+/// MUTATION: in `answer_an_exit_over`, answer Discard with `None` — the Discard
+/// block's first assertion goes red; answer Save with `Some(closes)` whatever
+/// `saved_all` says — the half-saved assertion goes red; spend the requested
+/// close on the asking window (`self.close(window_id)` for every request) — the
+/// wiring assertion goes red.
+#[test]
+fn save_and_discard_on_the_summoned_terminals_question_close_the_last_ordinary_window() {
+    let closing = the_last_ordinary_window();
+
+    // Discard.
+    let (path, buffer) = a_file_being_edited("summon-discard");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let request = restore::GateRequest::ShutWithTheRun(closing);
+    let _ = raise_dirty_gate_over(&mut gate, &summoned, 0, request.clone());
+    let accepted = gate.take().expect("the answer takes its request");
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Discard, false),
+        Some(closing),
+        "Discard re-runs the close of the last ordinary window"
+    );
+    assert!(!still_holds_the_edit(&summoned[0], &path));
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &summoned, 0, accepted),
+        restore::GateRaise::NothingToAsk,
+        "the re-run close finds nothing to ask, so the run ends"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the file back"),
+        "one\n",
+        "and the file is as it was"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+
+    // Save all.
+    let (path, buffer) = a_file_being_edited("summon-save");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let _ = raise_dirty_gate_over(&mut gate, &summoned, 0, request.clone());
+    let accepted = gate.take().expect("the answer takes its request");
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Save, false),
+        None,
+        "a save that did not all land closes nothing"
+    );
+    assert_eq!(
+        summoned[0].preview_pool.save_dirty(),
+        vec![("notes.md".to_owned(), preview::SaveOutcome::Saved)],
+        "every dirty buffer written back"
+    );
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Save, true),
+        Some(closing),
+        "Save all re-runs the close of the last ordinary window"
+    );
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &summoned, 0, accepted),
+        restore::GateRaise::NothingToAsk,
+        "the re-run close finds nothing to ask, so the run ends"
+    );
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("read the file back")
+            .contains("typed by hand"),
+        "and what was typed is on the disk"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+
+    // The re-run close is the ordinary window's, spent at the loop's one door.
+    let event = window_event_squeezed();
+    assert!(
+        event.contains(
+            "letrequested=std::mem::take(&mutruntime.window.close_requested);shutting|=requested==Some(window_id);"
+        ) && event.contains(
+            "matchrequested.filter(|closing|*closing!=window_id){Some(closing)=>result.and(hang_watch::during(hang_watch::Station::EventShut,||{self.close(closing)})),"
+        ),
+        "the answer's close is spent on the window it names:\n{event}"
+    );
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **a summoned terminal with no unsaved edit
+/// lets the run end at once, with no card.**
+///
+/// The regression half: a summoned terminal whose buffers are all clean — a
+/// file opened and read, not typed into — is nothing to ask, so the last
+/// ordinary window's close goes on and the summoned terminal goes with it as it
+/// always did.
+///
+/// MUTATION: in `DirtyGate::verdict`, answer an empty list with `Raised`'s
+/// branch (`Busy`) — the first assertion goes red.
+#[test]
+fn a_summoned_terminal_with_nothing_unsaved_lets_the_run_end_without_a_card() {
+    let dir = disk_scratch("summon-clean");
+    let path = dir.join("说明.md");
+    std::fs::write(&path, "one\n").expect("write the file");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer_read_from(&path)]);
+    let summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+
+    let answer = raise_dirty_gate_over(
+        &mut gate,
+        &summoned,
+        0,
+        restore::GateRequest::ShutWithTheRun(the_last_ordinary_window()),
+    );
+    assert_eq!(answer, restore::GateRaise::NothingToAsk);
+    assert!(answer.proceeds(), "the run ends on the first close");
+    assert!(!gate.is_open(), "without a card ever going up");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── D-4, 0.4.8 G7: a stop that cannot ask keeps what it would lose ──────────
 
 /// RED (D-4, 0.4.8 G7; ledger #28) — **a dirty preview buffer and a controlled failure: the file
@@ -889,7 +1149,7 @@ mod failure_road {
         row(
             "crate::FolioApp::retire_the_summon_with_the_run",
             1,
-            "the summoned terminal, closed with the run's last ordinary window",
+            "the summoned terminal, closed with the run's last ordinary window through DirtyGate",
         ),
         row(
             "crate::FolioApp::transfer_tab",
