@@ -15,10 +15,13 @@ use winit::keyboard::{Key, NamedKey};
 impl Runtime<'_> {
     /// What the Terminal page's PSReadLine row is describing.
     pub(crate) fn psreadline_row_state(&self) -> psreadline::RowState {
-        psreadline::row_state(
-            psreadline::probe(),
-            self.app.settings_store.loaded().psreadline_invite,
-            self.app.psreadline_installed.unwrap_or_default(),
+        psreadline::after_the_newest_check(
+            psreadline::row_state(
+                psreadline::probe(),
+                self.app.settings_store.loaded().psreadline_invite,
+                self.app.psreadline_installed.unwrap_or_default(),
+            ),
+            psreadline::probe_failed(),
         )
     }
 

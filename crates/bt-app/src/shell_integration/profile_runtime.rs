@@ -70,9 +70,7 @@ pub fn begin_startup_migration() {
     if STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    let data = persist::storage_dir();
-    let programs = installed_powershells();
-    spawn_profile_observation(data, programs, Vec::new());
+    spawn_profile_observation(persist::storage_dir(), Vec::new(), Vec::new());
 }
 
 /// Refresh the two edition facts when the Profiles page opens. This is an edge
@@ -80,7 +78,7 @@ pub fn begin_startup_migration() {
 /// the observation, a failed `$PROFILE` path, and every parse question that got
 /// no answer (release read m2).
 pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
-    let mut resolved = installed_powershells();
+    let mut resolved = Vec::new();
     for profile in profiles::table().profiles() {
         let Some(program) = programs.program(&profile.id).map(PathBuf::from) else {
             continue;
@@ -96,13 +94,23 @@ pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
     );
 }
 
-fn spawn_profile_observation(data: PathBuf, programs: Vec<PathBuf>, questions: Vec<ParseQuestion>) {
+/// **The observation's worker**: the installed PowerShells — looked up in the environment it reads,
+/// so on the worker and never on the window thread — and `rows` (the profile rows' own programs,
+/// as the program walk answered them), each observed; then the parse questions that got no answer.
+fn spawn_profile_observation(data: PathBuf, rows: Vec<PathBuf>, questions: Vec<ParseQuestion>) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-observation",
         bt_platform::ThreadPriority::BelowNormal,
         move |worker| {
-            let report = observe_profile_lines(worker, &data, &programs);
-            ask_failed_parse_questions_again(questions);
+            let environment = ProbeEnvironment::current(worker, "PowerShell profile observation");
+            let mut programs = installed_powershells(&environment);
+            for program in rows {
+                if !programs.contains(&program) {
+                    programs.push(program);
+                }
+            }
+            let report = observe_profile_lines(&data, &programs, &environment);
+            ask_failed_parse_questions_again(questions, &environment);
             for refusal in report.refusals() {
                 eprintln!(
                     "BT_SHELL_PROFILE {}: {}",
@@ -154,23 +162,30 @@ fn owned_forms(marks: &Marks, data: &Path) -> Forms {
 /// Read-only startup discovery for the conditional Settings remover. Legacy marks remain useful
 /// as candidate locations, but no migration is allowed to rewrite a profile now that integration
 /// is process-scoped.
+///
+/// The observations run first: each one that answers files its `$PROFILE` path as the newest
+/// answer for its program ([`file_profile_answer`]), so the removal's path question below is
+/// asked only of an edition that did not answer.
 fn observe_profile_lines(
-    worker: &bt_platform::admission::WorkerCtx,
     data: &Path,
     programs: &[PathBuf],
+    environment: &ProbeEnvironment,
 ) -> Report {
-    let answers = profile_answers(data, POWERSHELL_PROBE_DEADLINE);
+    // Numbered as it starts: a run that overlaps a later one never files over it.
+    let observation = next_observation();
     if !profile_sandboxed() {
         for program in programs {
-            match probe_profile_observation(worker, program) {
+            match probe_profile_observation(program, environment) {
                 Some(mut observed) => {
                     observed.line_present = profile_line_is_present(&observed.path);
-                    publish_profile_observation(program, observed);
+                    file_profile_answer(program, observed.path.clone(), observation, environment);
+                    publish_profile_observation(program, observation, observed);
                 }
-                None => publish_profile_observation_failed(program),
+                None => publish_profile_observation_failed(program, observation),
             }
         }
     }
+    let answers = profile_answers(data, POWERSHELL_PROBE_DEADLINE, environment);
     let (marks, files) = match Marks::read(data).and_then(|marks| {
         let files = ProfileFiles::read(data)?;
         Ok((marks, files))
@@ -257,8 +272,11 @@ fn candidates(marks: &Marks, files: &ProfileFiles, answers: PathAnswers) -> (Vec
 /// `asker` says which of the two this run is: the Settings row's own worker
 /// inside a running Folio, or somebody at a command line in a process of their
 /// own. See [`Asker`].
-pub fn remove_shell_integration(asker: Asker) -> Report {
-    operate(&persist::storage_dir(), asker, Action::Remove)
+///
+/// `environment` is where its PowerShells are looked up and asked: the current logon block on the
+/// Settings remover's worker, this process's own for the command-line verb.
+pub fn remove_shell_integration(asker: Asker, environment: &ProbeEnvironment) -> Report {
+    operate(&persist::storage_dir(), asker, Action::Remove, environment)
 }
 
 /// The cleanup door supplies its resolved data root without triggering storage migration.
@@ -268,7 +286,7 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
     // already refused if a Folio is running. Only a run that will ask the machine
     // where its profiles are pays for asking.
     let answers = match profiles {
-        None => profile_answers(data, REMOVAL_PROBE_DEADLINE),
+        None => profile_answers(data, REMOVAL_PROBE_DEADLINE, &ProbeEnvironment::Inherited),
         Some(_) => Vec::new(),
     };
     operate_with(
@@ -296,15 +314,19 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
 /// fallback for a line an older Folio wrote without that record (release read M1). `patience` is
 /// the asker's ([`POWERSHELL_PROBE_DEADLINE`], [`REMOVAL_PROBE_DEADLINE`]). The record is read here without
 /// the lock — to decide only which editions to ask; the removal reads it again under the lock.
-fn profile_answers(data: &Path, patience: std::time::Duration) -> PathAnswers {
+fn profile_answers(
+    data: &Path,
+    patience: std::time::Duration,
+    environment: &ProbeEnvironment,
+) -> PathAnswers {
     // The sandbox door replaces the whole candidate set, so no shell is asked.
     if profile_sandboxed() {
         return Vec::new();
     }
     answers_for(
         &ProfileFiles::read(data).unwrap_or_default(),
-        installed_powershells(),
-        |program| cached_profile_answer(program, patience),
+        installed_powershells(environment),
+        |program| cached_profile_answer(program, environment, ProfileQuestion::Ask(patience)),
     )
 }
 
@@ -325,8 +347,8 @@ fn answers_for(
         .collect()
 }
 
-fn operate(data: &Path, asker: Asker, action: Action) -> Report {
-    let answers = profile_answers(data, REMOVAL_PROBE_DEADLINE);
+fn operate(data: &Path, asker: Asker, action: Action, environment: &ProbeEnvironment) -> Report {
+    let answers = profile_answers(data, REMOVAL_PROBE_DEADLINE, environment);
     operate_with(data, asker, action, Ok(MANAGED_LINE), |marks, files| {
         candidates(marks, files, answers)
     })
@@ -482,12 +504,20 @@ fn install_for_program(
     program: &Path,
     arguments: &[OsString],
 ) -> io::Result<PathBuf> {
-    let Some(mut observed) = probe_profile_observation(worker, program) else {
-        publish_profile_observation_failed(program);
+    let environment = ProbeEnvironment::current(worker, "PowerShell profile install");
+    let observation = next_observation();
+    let Some(mut observed) = probe_profile_observation(program, &environment) else {
+        publish_profile_observation_failed(program, observation);
         return Err(io::Error::other(Text::ShellProfileProbeFailed.text()));
     };
     observed.line_present = profile_line_is_present(&observed.path);
-    publish_profile_observation(program, observed.clone());
+    file_profile_answer(program, observed.path.clone(), observation, &environment);
+    publish_profile_observation(program, observation, observed.clone());
+    // A line in a Constrained Language Mode session loads the script into that mode, where it
+    // does nothing: refused with the row's own sentence.
+    if !observed.full_language {
+        return Err(io::Error::other(Text::CapPowerShellConstrained.text()));
+    }
     if let Some(sentence) =
         edition_cause(&observed, row_process_scope(program, arguments)).sentence()
     {
@@ -495,7 +525,7 @@ fn install_for_program(
     }
     let data = persist::storage_dir();
     let script = install_script_at(&data.join(SCRIPT_DIRECTORY), SCRIPT_FILE_PS1, SCRIPT_PS1)
-        .ok_or_else(|| io::Error::other(Text::ShellProfileRefused.text()))?;
+        .map_err(|_| io::Error::other(Text::ShellProfileRefused.text()))?;
     install_recorded(
         &observed.path,
         &data,
@@ -505,7 +535,7 @@ fn install_for_program(
         Some(powershell_edition(program)),
     )?;
     observed.line_present = true;
-    publish_profile_observation(program, observed.clone());
+    publish_profile_observation(program, observation, observed.clone());
     publish_powershell_profile_line_present(true);
     Ok(observed.path)
 }
@@ -558,7 +588,9 @@ pub fn begin_profile_install_undo(
             let data = persist::storage_dir();
             let outcome = match undo_profile_install(&profile, &data) {
                 Ok(()) => {
-                    let _ = observe_profile_lines(worker, &data, &[program]);
+                    let environment =
+                        ProbeEnvironment::current(worker, "PowerShell profile observation");
+                    let _ = observe_profile_lines(&data, &[program], &environment);
                     ProfileInstallOutcome::Undone
                 }
                 Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
@@ -592,8 +624,9 @@ pub fn begin_removal() {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-removal",
         bt_platform::ThreadPriority::BelowNormal,
-        |_ctx| {
-            let report = remove_shell_integration(Asker::InApp);
+        |worker| {
+            let environment = ProbeEnvironment::current(worker, "PowerShell profile removal");
+            let report = remove_shell_integration(Asker::InApp, &environment);
             if let Ok(mut outcome) = REMOVAL.lock() {
                 *outcome = Some(report);
             }
