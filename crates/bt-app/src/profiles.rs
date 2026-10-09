@@ -3097,7 +3097,7 @@ pub fn rename(index: usize, title: &str) -> NameVerdict {
 /// sentence re-derives from it because [`capability_text`] reads the
 /// integration and the namespace rather than the id.
 pub fn set_program_path(index: usize, path: &Path) -> bool {
-    registry().edit(index, |profile| {
+    registry().edit(index, |profile: &mut Profile| {
         let program = ProgramSource::Path(path.to_path_buf());
         if profile.program == program {
             return false;
@@ -3793,7 +3793,7 @@ pub fn integration_choice(index: usize) -> IntegrationChoice {
 /// namespace following would go on translating directories for a shell it is no
 /// longer starting.
 pub fn set_integration(index: usize, choice: IntegrationChoice) -> bool {
-    registry().edit(index, |profile| {
+    registry().edit(index, |profile: &mut Profile| {
         if profile.integration == choice {
             return false;
         }
