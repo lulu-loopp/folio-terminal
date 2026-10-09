@@ -1740,7 +1740,7 @@ may ask what platform it is on, and only in the files its own list names.
 `scripts/check-portable-core.ps1` is the local guard over the fifteen named
 portable crates; CI's macOS and Linux compiles are its authoritative CI proof.
 `bt_app::platform_gate_tests` alone holds `bt-app`'s file list.
-`scripts/check-adapter-boundary.ps1` holds the separate two vendor-seam files,
+`bt_term::adapter_boundary_tests` holds the separate two vendor-seam modules,
 which may not import a policy crate.
 **From.** §13.1 *the rule is one sentence, and it is not new*; §13.2 *the portable
 core, named one crate at a time*; §13.3 *two guards, and they are two different

@@ -30,6 +30,11 @@ proptest = "1"
 # owns math execution (CC-6b). A dev-dependency only: its functions take `bt-detect`/`bt-doc`
 # types, which this crate's tests and that crate's `bt-term` share.
 bt-compose = { path = "../bt-compose" }
+# **The crate the adapter-boundary gate asks** (`docs/plans/bt-app-split-prep.md`):
+# the seam is the `adapter` and `cell_capture` module trees, read through
+# `bt-source` by their paths rather than as two named files. Tests only, and
+# `bt-source`'s own manifest says that nothing in `folio.exe` may ever depend on it.
+bt-source = { path = "../bt-source" }
 
 [lints]
 workspace = true

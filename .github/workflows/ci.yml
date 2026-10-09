@@ -104,9 +104,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
-      # terminal facts; importing document, detection, or viewport policy here recreates the
-      # layering bug Task 00b removed.
+      # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
+      # report terminal facts; importing document, detection, or viewport policy there recreates
+      # the layering bug Task 00b removed. `bt_term::adapter_boundary_tests` holds the rule; the
+      # canary plants the import and requires that test to fail.
       - name: the adapter boundary gate can actually fail
         shell: pwsh
         run: |
@@ -114,14 +115,13 @@ jobs:
           $original = [IO.File]::ReadAllText($file)
           try {
             [IO.File]::AppendAllText($file, "`nuse bt_doc::HistoryDocument as _AdapterBoundaryProbe;`n")
-            $failed = $false
-            try {
-              & ./scripts/check-adapter-boundary.ps1 *> $null
-            } catch {
-              $failed = $true
+            $said = (cargo test -p bt-term --lib --locked -- adapter_boundary_tests 2>&1 | Out-String)
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+              throw "the adapter boundary test accepted a planted bt_doc import"
             }
-            if (-not $failed) {
-              throw "adapter boundary check accepted a planted bt_doc import"
+            if ($said -notmatch 'the adapter seam names a policy crate') {
+              throw "the probe failed without the adapter boundary test refusing it: $said"
             }
           } finally {
             [IO.File]::WriteAllText($file, $original)
@@ -602,10 +602,6 @@ jobs:
       # action, so the two files cannot drift apart again.
       - uses: ./.github/actions/toolchain
 
-      - name: adapter modules do not import policy crates
-        shell: pwsh
-        run: ./scripts/check-adapter-boundary.ps1
-
       - name: tracked text is visible to source readers
         shell: pwsh
         run: |
@@ -944,6 +940,16 @@ jobs:
 
       - name: build folio.exe
         run: cargo build -p bt-app --locked
+
+      # `package.ps1` and `smoke.ps1 -ArchiveOnly` against the release manifest,
+      # on a real archive packed from the debug build above with the runner's
+      # Windows SDK `makeappx` (no `-Sign`, nothing started). It is what holds
+      # "package.ps1 packs from archive-members.txt": its
+      # `the_manifest_lists_every_member_but_the_two_signed_ones` packs and
+      # refuses a member the list does not name.
+      - name: package.ps1 against the release manifest
+        shell: pwsh
+        run: ./scripts/release/package-tests.ps1 -Binaries target/debug
 
       - name: install WARP
         shell: pwsh
