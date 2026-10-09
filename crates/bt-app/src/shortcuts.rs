@@ -3374,6 +3374,20 @@ impl Chord {
 mod tests {
     use super::*;
 
+    /// **The table as it ships on Windows**, held on whatever machine is reading
+    /// this — [`mac_table`]'s twin.
+    ///
+    /// The ruled rows below are the Windows column's (`Ctrl+Shift+N`, a bare
+    /// `Ctrl+letter` left to the shell, `Ctrl+Alt` as AltGr), so they are asked
+    /// of that column by name and hold on every host. The mechanisms they run
+    /// through — `lookup`, `apply_overrides`, `verdict_for`, the hint fold — read
+    /// no platform of their own; the column is the only thing a dialect changes,
+    /// and the macOS column is pinned whole by
+    /// `the_mac_dialect_is_the_one_this_ticket_wrote`.
+    fn windows_table() -> Shortcuts {
+        Shortcuts::defaults_for(bt_platform::HostPlatform::Windows)
+    }
+
     /// Shorthand for the common case where Shift does not change the produced character.
     ///
     /// Pressed with the keyboard **on a terminal**, which is the focus every
@@ -3384,13 +3398,15 @@ mod tests {
     /// specifically *a terminal showing the alternate screen* — the harshest
     /// reading of "on a terminal", and the right one for the assertions that say
     /// what must reach the child.
+    ///
+    /// Asked of [`windows_table`], like every `press_*` below.
     fn press(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        Shortcuts::defaults().lookup(&key, &key, modifiers, Focus::default())
+        windows_table().lookup(&key, &key, modifiers, Focus::default())
     }
 
     /// The same press with the preview seat holding the focus.
     fn press_in_preview(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        Shortcuts::defaults().lookup(
+        windows_table().lookup(
             &key,
             &key,
             modifiers,
@@ -3407,7 +3423,7 @@ mod tests {
     /// The same press with a **page** holding the keyboard inside a preview
     /// seat, and the capsule down.
     fn press_on_a_page(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        Shortcuts::defaults().lookup(
+        windows_table().lookup(
             &key,
             &key,
             modifiers,
@@ -3423,7 +3439,7 @@ mod tests {
 
     /// The same press on a page with the capsule up over it.
     fn press_on_a_page_with_search_open(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        Shortcuts::defaults().lookup(
+        windows_table().lookup(
             &key,
             &key,
             modifiers,
@@ -3439,7 +3455,7 @@ mod tests {
 
     /// The same press on a terminal that is showing its own scrollback.
     fn press_on_primary_screen(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        Shortcuts::defaults().lookup(
+        windows_table().lookup(
             &key,
             &key,
             modifiers,
@@ -3456,7 +3472,7 @@ mod tests {
     /// The same press with the search capsule up and the keyboard back on the shell — B81's
     /// second stance, which is the only one `F3` is about.
     fn press_with_search_open(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        Shortcuts::defaults().lookup(
+        windows_table().lookup(
             &key,
             &key,
             modifiers,
@@ -3476,7 +3492,7 @@ mod tests {
         modifiers: ModifiersState,
         focus: Focus,
     ) -> Option<Action> {
-        Shortcuts::defaults().lookup(logical, base, modifiers, focus)
+        windows_table().lookup(logical, base, modifiers, focus)
     }
 
     fn character(text: &str) -> Key {
@@ -3853,7 +3869,7 @@ mod tests {
             search_open: false,
             web_page: true,
         };
-        let table = Shortcuts::defaults();
+        let table = windows_table();
         for letter in ["z", "y"] {
             assert_eq!(
                 table.lookup(&character(letter), &character(letter), CTRL, on_a_page),
@@ -4619,7 +4635,7 @@ mod tests {
     ///     that changes answer with the language the window started in.
     #[test]
     fn a_chord_is_refused_for_altgr_and_for_a_row_that_has_it() {
-        let table = Shortcuts::defaults();
+        let table = windows_table();
         let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
         for modifiers in [ctrl_alt, ctrl_alt.union(ModifiersState::SHIFT)] {
             assert_eq!(
@@ -4956,7 +4972,7 @@ mod tests {
     ///    launch with nothing said about it.
     #[test]
     fn a_summon_chord_with_no_modifier_is_refused_at_both_doors() {
-        let table = Shortcuts::defaults();
+        let table = windows_table();
         for bare in [
             Chord::new(ModifiersState::empty(), super::character("k")),
             Chord::new(ModifiersState::SHIFT, super::character("k")),
@@ -5002,7 +5018,7 @@ mod tests {
 
         // The file's door: a persisted bare chord is refused, the row keeps the
         // default it shipped with, and the refusal says why.
-        let mut loaded = Shortcuts::defaults();
+        let mut loaded = windows_table();
         let faults = loaded.apply_overrides(&[Override {
             id: "summon-quake".to_owned(),
             chord: Some("K".to_owned()),
@@ -5088,7 +5104,7 @@ mod tests {
     ///     answers again after being cleared.
     #[test]
     fn overrides_land_on_the_defaults_and_only_the_departures_come_back() {
-        let mut table = Shortcuts::defaults();
+        let mut table = windows_table();
         assert!(
             table.overrides().is_empty(),
             "a fresh table departs nowhere"
@@ -5169,7 +5185,7 @@ mod tests {
 
         table.restore("next-match");
         assert!(table.overrides().is_empty());
-        assert_eq!(table, Shortcuts::defaults());
+        assert_eq!(table, windows_table());
     }
 
     /// PIN — **restore, per row and whole.**
@@ -5281,7 +5297,7 @@ mod tests {
     /// second assertion goes red.
     #[test]
     fn a_file_naming_the_retired_alias_still_loads_and_says_which_row_it_lost() {
-        let mut table = Shortcuts::defaults();
+        let mut table = windows_table();
         let faults = table.apply_overrides(&[
             Override {
                 id: "open-search-alias".to_owned(),
@@ -5357,7 +5373,7 @@ mod tests {
     ///     user can bind a chord the audit never decided to take.
     #[test]
     fn the_editor_lists_every_row_of_the_table_once_and_the_declined_ones_after_it() {
-        let table = Shortcuts::defaults();
+        let table = windows_table();
         let lines = table.editor_rows();
 
         let mut seen: Vec<&str> = Vec::new();
@@ -5678,7 +5694,7 @@ mod tests {
     /// answering to.
     #[test]
     fn a_chord_recorded_on_one_slot_lands_on_that_slot_alone() {
-        let mut table = Shortcuts::defaults();
+        let mut table = windows_table();
         let chord = Chord::new(CTRL_SHIFT, super::character("0"));
         assert_eq!(
             table.verdict_for("summon-pip-2", &chord),
@@ -5760,7 +5776,7 @@ mod tests {
         // for them, read by this build, laid over the defaults, and the chord
         // still on the row it was recorded on — hidden, doing nothing, and
         // theirs.
-        let mut relaunched = Shortcuts::defaults();
+        let mut relaunched = windows_table();
         let faults = relaunched.apply_overrides(&table.overrides());
         assert!(
             faults.is_empty(),
@@ -5846,9 +5862,21 @@ mod tests {
     /// Each table row must be reachable through the same lookup dispatch uses —
     /// **inside its own scope**, which is the only place a scoped row claims to
     /// be reachable at all.
+    ///
+    /// Asked of both columns, each through its own table: a row is reachable in
+    /// the dialect it ships in, whichever machine is reading.
     #[test]
     fn every_table_row_round_trips_through_lookup() {
-        for binding in BINDINGS {
+        for platform in [
+            bt_platform::HostPlatform::Windows,
+            bt_platform::HostPlatform::MacOs,
+        ] {
+            every_row_of_this_column_round_trips_through_lookup(&Shortcuts::defaults_for(platform));
+        }
+    }
+
+    fn every_row_of_this_column_round_trips_through_lookup(table: &Shortcuts) {
+        for binding in table.rows() {
             let Some(chord) = &binding.chord else {
                 continue;
             };
@@ -5909,10 +5937,11 @@ mod tests {
                 },
             };
             assert_eq!(
-                lookup_action(&key, &key, chord.modifiers, focus),
+                table.lookup(&key, &key, chord.modifiers, focus),
                 Some(binding.action),
-                "{:?} is in the table but unreachable",
-                binding.action
+                "{:?} is in the {:?} table but unreachable",
+                binding.action,
+                table.dialect
             );
         }
     }
@@ -5930,7 +5959,7 @@ mod tests {
     };
 
     fn hint_titles(modifiers: ModifiersState, focus: Focus) -> Vec<&'static str> {
-        Shortcuts::defaults()
+        windows_table()
             .hint_lines(modifiers, focus)
             .into_iter()
             .map(|line| line.title)
@@ -6065,7 +6094,7 @@ mod tests {
     /// Mutation: list the members instead of folding them.
     #[test]
     fn the_nine_tab_ordinals_fold_to_one_line() {
-        let lines = Shortcuts::defaults().hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
+        let lines = windows_table().hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
         let folded: Vec<&HintLine> = lines
             .iter()
             .filter(|line| line.title == Text::ShortcutFamilyGotoTab.text())
@@ -6085,7 +6114,7 @@ mod tests {
     /// Mutation: fold whenever `head.family` is `Some`.
     #[test]
     fn a_family_with_a_member_rebound_elsewhere_is_not_folded() {
-        let mut table = Shortcuts::defaults();
+        let mut table = windows_table();
         table.set("goto-tab-5", parse_chord("Alt+Shift+5"));
         let lines = table.hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
         assert!(
@@ -6170,9 +6199,18 @@ mod tests {
         );
         assert_eq!(chord.key, super::character("`"));
         assert_eq!(
-            format_chord(chord),
+            format_chord_on(chord, bt_platform::HostPlatform::Windows),
             "Win+`",
             "and it is spelled the way the file and the caps spell it"
+        );
+        // The macOS column's own key for the same row, spelled in its own hand:
+        // Control, which no window there is offered (see `MAC_DIALECT`).
+        let mac = row
+            .chord_on(bt_platform::HostPlatform::MacOs)
+            .expect("the summon ships with a key on macOS too");
+        assert_eq!(
+            format_chord_on(mac, bt_platform::HostPlatform::MacOs),
+            "Ctrl+`"
         );
         assert!(
             row.family.is_none(),
@@ -6213,7 +6251,7 @@ mod tests {
                 .union(ModifiersState::SHIFT),
             super::character("k"),
         );
-        let written = format_chord(&chord);
+        let written = format_chord_on(&chord, bt_platform::HostPlatform::Windows);
         assert_eq!(
             written, "Win+Ctrl+Shift+k",
             "the Windows key is written first, which is the order Microsoft's own \
@@ -6225,14 +6263,28 @@ mod tests {
             "and it comes back off the file as the chord that was written"
         );
         assert_eq!(
-            chord_caps(&chord),
+            chord_caps_on(&chord, bt_platform::HostPlatform::Windows),
             vec!["Win", "Ctrl", "Shift", "K"],
             "and the caps read left to right in the same order"
         );
         assert_eq!(
-            chord_caps(&Chord::new(ModifiersState::SUPER, super::character("`"))),
+            chord_caps_on(
+                &Chord::new(ModifiersState::SUPER, super::character("`")),
+                bt_platform::HostPlatform::Windows
+            ),
             vec!["Win", "`"],
             "the summon's own default included"
+        );
+        // The same flag on a Mac keyboard is Command: the file names it by that
+        // cap, first as on Windows, the caps put it last as Apple does, and the
+        // file reads back the chord that was written.
+        let mac = bt_platform::HostPlatform::MacOs;
+        let written = format_chord_on(&chord, mac);
+        assert_eq!(written, "Cmd+Ctrl+Shift+k");
+        assert_eq!(parse_chord(&written).as_ref(), Some(&chord));
+        assert_eq!(
+            chord_caps_on(&chord, mac),
+            vec!["Ctrl", "Shift", "Cmd", "K"]
         );
     }
 
@@ -6257,20 +6309,28 @@ mod tests {
     #[test]
     fn a_hand_on_the_windows_key_raises_nothing_even_now_that_a_row_wears_it() {
         assert!(
-            Shortcuts::defaults()
+            windows_table()
                 .hint_lines(ModifiersState::SUPER, ON_A_TERMINAL)
                 .is_empty(),
             "the summon wears this key and is still not on the card: Windows \
              answers it, not this window"
         );
         assert!(
-            Shortcuts::defaults()
+            windows_table()
                 .hint_lines(
                     ModifiersState::CONTROL.union(ModifiersState::SUPER),
                     ON_A_TERMINAL
                 )
                 .is_empty(),
             "and nothing wears it with Ctrl"
+        );
+        // The macOS column's summon wears Control alone, and the same clause
+        // keeps that hold silent there: the system answers it, not this window.
+        assert!(
+            mac_table()
+                .hint_lines(ModifiersState::CONTROL, ON_A_TERMINAL)
+                .is_empty(),
+            "the macOS summon is not on the card either"
         );
     }
 
@@ -6310,7 +6370,7 @@ mod tests {
     /// reads correctly and takes the chord off nothing.
     #[test]
     fn a_conflict_carries_the_id_of_the_row_that_has_the_chord() {
-        let table = Shortcuts::defaults();
+        let table = windows_table();
         let taken = Chord::new(CTRL_SHIFT, super::character("w"));
         let verdict = table.verdict_for("new-tab", &taken);
         assert_eq!(verdict.holder(), Some("close-pane"));
@@ -6345,7 +6405,7 @@ mod tests {
     /// table has forbidden since it was flat.
     #[test]
     fn taking_a_chord_from_a_row_leaves_that_row_unbound_and_this_one_holding_it() {
-        let mut table = Shortcuts::defaults();
+        let mut table = windows_table();
         let taken = Chord::new(CTRL_SHIFT, super::character("w"));
         let ChordVerdict::AlreadyUsed { holder, .. } = table.verdict_for("new-tab", &taken) else {
             panic!("Ctrl+Shift+W is close-pane's in this build");
@@ -6418,7 +6478,7 @@ mod tests {
             if order == 1 {
                 lines.reverse();
             }
-            let mut table = Shortcuts::defaults();
+            let mut table = windows_table();
             let faults = table.apply_overrides(&lines);
             assert!(faults.is_empty(), "order {order}: {faults:?}");
             let chord_of = |id: &str| {
@@ -6436,7 +6496,7 @@ mod tests {
         }
 
         // The trade: two rows, two chords, each line naming the other's.
-        let mut table = Shortcuts::defaults();
+        let mut table = windows_table();
         let faults = table.apply_overrides(&[
             Override {
                 id: "new-tab".to_owned(),
@@ -6470,7 +6530,7 @@ mod tests {
         // And a file that really does claim one chord twice is still refused —
         // the second line, and only the second, with the first row left holding
         // the key it asked for.
-        let mut table = Shortcuts::defaults();
+        let mut table = windows_table();
         let faults = table.apply_overrides(&[
             Override {
                 id: "new-tab".to_owned(),
@@ -6637,7 +6697,7 @@ mod tests {
     /// is a second answer to "what key is this".
     #[test]
     fn a_menu_row_reads_its_chord_off_the_effective_table() {
-        let table = Shortcuts::defaults();
+        let table = windows_table();
         assert_eq!(
             table.accelerator(Action::ClosePane).as_deref(),
             Some("Ctrl+Shift+W")
@@ -6652,10 +6712,19 @@ mod tests {
         );
         // A row that ships with no chord at all has nothing to print.
         assert_eq!(table.accelerator(Action::SummonPip(1)), None);
+        // The macOS column answers the same question in its own hand.
+        assert_eq!(
+            mac_table().accelerator(Action::ClosePane).as_deref(),
+            Some("Cmd+W")
+        );
+        assert_eq!(
+            mac_table().accelerator(Action::ZoomPane).as_deref(),
+            Some("Shift+Cmd+X")
+        );
 
         // The reader's own table, and not this build's: a rebind follows, and an
         // unbind takes the annotation away with it.
-        let mut rebound = Shortcuts::defaults();
+        let mut rebound = windows_table();
         rebound.apply_overrides(&[
             Override {
                 id: "close-pane".to_owned(),
