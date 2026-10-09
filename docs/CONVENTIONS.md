@@ -268,6 +268,35 @@ when its first assertion is about another module. A fixture two of those files u
 `test_support.rs`, `pub(crate)`. `tests.rs` holds only the tests something outside their body
 names as `tests::<name>`; a new test does not go there.
 
+### A test that is not limited to one platform asserts a fact of every platform (H1)
+
+Every test runs on Windows and on macOS (CI's `core-macos` runs `bt-term`, `bt-pty` and the portable
+crates). A test whose fixture is spelled the Windows way — a drive letter, a `\`, a shipped `pwsh` row,
+`Ctrl` as the command modifier — is red on the Mac for a reason that is not a defect, and a suite with
+reds nobody reads hides the one that is. Each test is exactly one of three things:
+
+1. **Platform-neutral.** The fact holds everywhere once the fixture is spelled through the platform's
+   own paths, shells and modifiers. Either the product's door takes the platform as a value
+   (`…_on(platform)`, `defaults_for(platform)`, `shipped_for(SeedPlatform::Windows, …)`) and the test
+   names the platform whose table it pins, or the fixture is built the host's way (`std::path` joins
+   on a host-rooted base, `bt_testpath::temp_path`, the host seed's rows by role, the host's command
+   modifier) and the expected value is computed from the same fixture. A platform branch may choose
+   an expected value; it never chooses the assertion's structure.
+2. **Windows-only by nature.** The fact exists only on Windows (ConPTY, `cmd`, PowerShell 5.1, the
+   MSIX, `%APPDATA%`, WebView2, the Explorer verb, WSL and MSYS namespaces, drive letters as a
+   grammar). The test carries `#[cfg(windows)]`, and when the feature has a macOS arm a macOS twin
+   test pins that arm — a Windows-only test of a cross-platform feature without its twin is a miss.
+3. **A real macOS defect.** The test is right and the product is wrong: the product is fixed by its
+   own ticket, never by changing the test, and the ledger names the test, the expected and actual
+   values and the ticket. The ignored-tests gate (`scripts/ci/check-ignored-tests.ps1`) asks the
+   harness on Windows only, so a `#[cfg_attr(target_os = "macos", ignore = "T-<NAME>: …")]` cannot
+   stand on its list today; until the gate learns a platform column such a test stays red on
+   macOS, which is why `bt-app`'s suite is not yet a `core-macos` step.
+
+A test whose subject refuses links among a path's ancestors (the uninstall door, the profile writer)
+stands under `bt_testpath::link_free_temp_dir()`: on macOS the temporary directory itself is reached
+through `/var`, a link.
+
 ### 【预防】产品代码不留占位符
 
 `todo!()` / `unimplemented!()` 由 clippy deny（当前为 0，**没有**因它出过事故——这是预防，不是教训）。做不完就如实写 no-go。
