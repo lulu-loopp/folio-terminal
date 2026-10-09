@@ -2481,7 +2481,7 @@ mod tests {
             assert!(!update_startup::is_last_trial());
             assert_eq!(update_startup::held(), Some(TXN));
             assert!(
-                !run_the_start_writers(&root),
+                !run_the_start_writers(&root, false),
                 "the marks' migration started (ProfileMigration)"
             );
             assert!(writes_are_deferred());
@@ -2861,7 +2861,7 @@ mod tests {
         if let Some(root) = child_root(SELECTOR) {
             assert!(update_startup::become_held(TXN));
             assert!(
-                !run_the_start_writers(&root),
+                !run_the_start_writers(&root, false),
                 "the marks' migration started (ProfileMigration)"
             );
             let pending = GATE.pending();
