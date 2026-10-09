@@ -220,7 +220,12 @@ When a PowerShell row must instead be spawned as written (`File`, `CommandWithAr
 `NonInteractive`, or an unknown/invalid host line), Settings > Profiles offers one **Enable via
 profile** button for that edition. One click uses the existing managed-line writer to add Folio's
 guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation is interposed, and the success
-toast offers Undo. The line takes effect in panes started after it; the pane that showed the
+toast offers Undo. The click is made against the file as the check its row is drawn from read it,
+and the Undo against the file as the click wrote it: the writer reads the file again immediately
+before the edit and, when it differs, writes nothing and says the profile was changed elsewhere and
+the page should be reloaded. Undo puts back the bytes the file held before the click, so it never
+takes out a line the person wrote or edited; a click that finds a line Folio owns already there
+writes nothing and offers no Undo. The line takes effect in panes started after it; the pane that showed the
 button keeps running without it. The installed fact is per edition, so every such row for that
 edition changes to the ordinary capability sentence together. The one existing **PowerShell
 `$PROFILE` line** row remains the only lasting removal surface, and it stands only while a line in
@@ -283,11 +288,13 @@ Folio records — in `integration-profile-files.json` beside its marks record, u
 which edition named the file, whether it is creating the file and which folders it is creating for
 it, and, for a file that was there, the one copy it takes before its first write into that file
 (`<profile>.bak-YYYYMMDD[-n]`), with the SHA-256 of the bytes it will hold. A later write while
-the line is installed takes no further copy, and a removal takes none: it takes out the managed
-line and its own line ending and keeps every other byte, including any edit made since. It does not
-take out the blank line Enable put in front of the managed line when the file already held text, so
-a file that was there before keeps one more blank line than it had — inert to PowerShell, and the
-one byte-level difference a removal leaves. When the line is taken out — by Undo, by the Settings
+the line is installed takes no further copy, and a removal takes none. The Settings row, the
+command-line remover and the uninstall verbs take out the managed line and its own line ending and
+keep every other byte, including any edit made since. They do not take out the blank line Enable
+put in front of the managed line when the file already held text, so a file that was there before
+keeps one more blank line than it had — inert to PowerShell, and the one byte-level difference such
+a removal leaves. Undo, made only while the file is exactly what its click wrote, puts back every
+byte, that blank line included. When the line is taken out — by Undo, by the Settings
 row, by `--remove-shell-integration` or by either uninstall verb — the copy is deleted, since the
 write it guarded is undone, but only while it still holds the recorded bytes: a file of that name
 Folio did not write stays; a file Folio
@@ -425,7 +432,7 @@ order for a login shell: `/etc/profile`, then the first of `~/.bash_profile`, `~
 `~/.bashrc` and nothing else. Which is which is a fact about the profile's own arguments, and only
 the Windows side can read them. This is not cosmetic on Git for Windows:
 `/etc/profile` is what puts `/mingw64/bin` on the path, so a shell that skipped it is a Git Bash
-that cannot find git. The chain is a pinned test (`crates/bt-term/tests/shell_integration_bash.rs`),
+that cannot find git. The chain is a pinned test (`crates/bt-pty/tests/shell_integration_bash.rs`),
 and `PATH`, `MSYSTEM` and `command -v git` were verified byte-identical to a plain `--login` shell.
 
 Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced — as a
@@ -561,7 +568,7 @@ markers that build the region (`B`, `C`) and by no others, so a screen carrying 
 keeps the heuristic it always had. The old measurement named this as its own exit — "if that test
 ever goes red the reason has expired" — and the new one is
 `a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic`, beside a round trip through a
-real `cmd.exe` in `crates/bt-term/tests/shell_integration_cmd.rs`.
+real `cmd.exe` in `crates/bt-pty/tests/shell_integration_cmd.rs`.
 
 What it buys is the capability this profile's reader has no other way to get. Every other profile
 can be handed a script; `cmd` cannot, and until now its command rail was empty however many commands

@@ -3,10 +3,11 @@ use std::{
     io::{Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
-    time::SystemTime,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bt_doc::svg::SvgRasterError;
 use image::{ImageFormat, ImageReader, Limits, codecs::png::PngDecoder};
 use rayon::prelude::*;
 
@@ -257,6 +258,12 @@ fn lanczos3_kernel(x: f32) -> f32 {
 /// change. A test binary is not a product, but it is a machine with other work
 /// on it, which is exactly what the band is for.
 ///
+/// **The band is the host's to say** (`crate::host`): every thread of the pool
+/// runs the hook the host installed with
+/// [`install_pool_thread_start`](crate::install_pool_thread_start) before it
+/// takes any work, and Folio's desktop build installs the step below normal. A
+/// host that installed none gets threads that run no hook.
+///
 /// Built once, on the first pass big enough to want it — see
 /// [`worth_the_machine`], which is why a program that never resamples anything
 /// large never starts these threads at all. A pool that cannot be built is not
@@ -264,16 +271,20 @@ fn lanczos3_kernel(x: f32) -> f32 {
 /// which is what it did before this ruling.
 fn resample_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .thread_name(|index| format!("bt-image-resample-{index}"))
-            .start_handler(|_| {
-                bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::BelowNormal);
-            })
-            .build()
-            .ok()
-    })
-    .as_ref()
+    POOL.get_or_init(|| build_resample_pool(crate::host::pool_thread_start()))
+        .as_ref()
+}
+
+/// The resample pool, its threads named and each running `start` first when there is one.
+fn build_resample_pool(start: Option<fn()>) -> Option<rayon::ThreadPool> {
+    let builder =
+        rayon::ThreadPoolBuilder::new().thread_name(|index| format!("bt-image-resample-{index}"));
+    match start {
+        Some(start) => builder.start_handler(move |_| start()),
+        None => builder,
+    }
+    .build()
+    .ok()
 }
 
 /// Whether a pass is big enough to be worth waking other cores for.
@@ -523,6 +534,10 @@ pub enum InlineImageDecodeError {
     /// answered by resampling, the sentence has to be able to say which happened.
     TooManyPixels,
     InvalidDimensions,
+    /// The host that answers this session's decoration work does not decode pictures, and said so
+    /// for this one (`bt_compose::Outcome::Declined`). Final: the reference stays text, and it is
+    /// not a failure of the file — a missing file is [`Self::Io`].
+    HostDeclined,
 }
 
 impl fmt::Display for InlineImageDecodeError {
@@ -548,6 +563,7 @@ impl fmt::Display for InlineImageDecodeError {
             Self::InvalidDimensions => {
                 formatter.write_str("inline image dimensions are invalid or too large")
             }
+            Self::HostDeclined => formatter.write_str("this host does not decode pictures"),
         }
     }
 }
@@ -577,9 +593,16 @@ struct DecodedImagePayload {
 /// `None` is a real answer — the file is not there — and it compares equal to
 /// itself, which is what lets a refusal about a missing file be remembered
 /// rather than re-asked on every occurrence of it in a screenful.
+///
+/// The modified time is the file system's, kept as its offset from the Unix
+/// epoch — `Ok` at or after it, `Err` before it — which is the same value one to
+/// one, without naming the standard library's clock type: on
+/// `wasm32-unknown-unknown` that type is not the one the rest of this crate
+/// reads time through (`crates/bt-source/tests/clock_guard.rs`), and nothing here
+/// reads a clock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocalImageStamp {
-    modified: Option<SystemTime>,
+    modified: Option<Result<Duration, Duration>>,
     len: u64,
 }
 
@@ -587,7 +610,10 @@ impl LocalImageStamp {
     fn of(path: &Path) -> Option<Self> {
         let metadata = std::fs::metadata(path).ok()?;
         Some(Self {
-            modified: metadata.modified().ok(),
+            modified: metadata.modified().ok().map(|at| {
+                at.duration_since(UNIX_EPOCH)
+                    .map_err(|before| before.duration())
+            }),
             len: metadata.len(),
         })
     }
@@ -658,14 +684,14 @@ impl InlineImageDecoder {
         &mut self,
         task: InlineImageTask,
     ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
-        self.decode_in_lane(task, bt_platform::file_reads::Lane::InlineImage)
+        self.decode_in_lane(task, bt_effects::file_reads::Lane::InlineImage)
     }
 
     /// Attribution only; both callers retain the same decoder and memo.
     pub fn decode_in_lane(
         &mut self,
         task: InlineImageTask,
-        lane: bt_platform::file_reads::Lane,
+        lane: bt_effects::file_reads::Lane,
     ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
         let payload = match &task.source {
             InlineImageSource::Osc1337(encoded) => decode_osc_payload(encoded)?,
@@ -737,7 +763,7 @@ fn decode_osc_payload(encoded: &[u8]) -> Result<DecodedImagePayload, InlineImage
 
 fn read_and_decode_local_image(
     path: &Path,
-    lane: bt_platform::file_reads::Lane,
+    lane: bt_effects::file_reads::Lane,
 ) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     // The lexical gate, and then the disk's half of it: a drive-rooted name may still be a local
     // spelling of a share, and this is the line the bytes are about to be read behind. Both are
@@ -750,7 +776,7 @@ fn read_and_decode_local_image(
     {
         return Err(InlineImageDecodeError::InvalidPath);
     }
-    let mut file = bt_platform::file_reads::open(lane, path)
+    let mut file = bt_effects::file_reads::open(lane, path)
         .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
@@ -961,11 +987,11 @@ fn decode_image_bytes_within(
 }
 
 fn decode_svg_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
-    let raster = bt_math::rasterize_svg_document(bytes).map_err(|error| match error {
+    let raster = crate::host::svg_rasterizer()(bytes).map_err(|error| match error {
         // Bytes that fail the SVG parse are simply not any admitted format — the same quiet
         // verdict a text file with a .png extension has always received.
-        bt_math::SvgRasterError::Parse(_) => InlineImageDecodeError::UnsupportedFormat,
-        bt_math::SvgRasterError::Dimensions(_) => InlineImageDecodeError::InvalidDimensions,
+        SvgRasterError::Parse(_) => InlineImageDecodeError::UnsupportedFormat,
+        SvgRasterError::Dimensions(_) => InlineImageDecodeError::InvalidDimensions,
     })?;
     Ok(DecodedImagePayload {
         key: format!("image:{:032x}", content_hash_128(bytes)),
@@ -1163,7 +1189,7 @@ pub fn decode_background_image(
     if !is_admissible_local_image_path(path) {
         return Err(BackgroundImageError::InvalidPath);
     }
-    let mut file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::InlineImage, path)
+    let mut file = bt_effects::file_reads::open(bt_effects::file_reads::Lane::InlineImage, path)
         .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
@@ -1490,9 +1516,9 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// stays rejected.
 ///
 /// A non-empty authority is accepted only when it is `localhost` or one of `local_hosts`, this
-/// machine's own names ([`local_host_names`]). Anything else is a remote share
-/// (`file://server/share/a.png`), which no local read may follow. Callers that must not honour a
-/// hostname at all pass an empty list.
+/// machine's own names ([`local_host_names`](crate::local_host_names)). Anything else is a
+/// remote share (`file://server/share/a.png`), which no local read may follow. Callers that must
+/// not honour a hostname at all pass an empty list.
 ///
 /// **This one accepts a POSIX root as well as a drive letter**, and that is what an OSC 7 report
 /// from a shell running inside WSL looks like: `file:///home/alice/src`. The directory a shell is
@@ -1523,21 +1549,6 @@ pub fn file_uri_to_local_path(uri: &str, local_hosts: &[String]) -> Option<PathB
         bt_transcript::paths::Rooting::DriveOrPosixRoot,
         bt_transcript::paths::Spelling::EncodedOrVerbatim,
     )
-}
-
-/// This machine's names — the authorities a `file://` URI may carry besides none and `localhost`.
-///
-/// **Asked of the operating system through [`bt_platform::host_names`]**, never of an environment
-/// variable (B-AUDIT-046 TRM-3). This used to read `COMPUTERNAME`, which exists only on Windows:
-/// on a Mac it answered nothing, so every OSC 7 of the form `file://<host>/path` — fish's own
-/// report, Apple's `zshrc_Apple_Terminal`, `vte.sh` — was taken for a remote share and the pane
-/// forgot its directory.
-///
-/// Read once: a machine does not rename itself inside one terminal session, and the OSC 7 path
-/// runs on the event thread.
-pub fn local_host_names() -> &'static [String] {
-    static LOCAL_HOSTS: OnceLock<Vec<String>> = OnceLock::new();
-    LOCAL_HOSTS.get_or_init(bt_platform::host_names)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2330,10 +2341,103 @@ mod tests {
     }
 
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The threads a start hook ran on, in [`a_pool_thread_runs_its_start_hook_and_a_bare_one_runs_none`].
+    static STARTED_ON: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+        std::sync::Mutex::new(Vec::new());
+
+    fn record_the_starting_thread() {
+        STARTED_ON.lock().unwrap().push(std::thread::current().id());
+    }
+
+    /// RED (CC-4) — **every thread of the resample pool runs the start hook it was built with,
+    /// before its first work; a pool built with none builds, and runs none.**
+    ///
+    /// The hook is the host's (`crate::host`): Folio's desktop build puts the thread in the band
+    /// below normal, and a browser build installs nothing.
+    ///
+    /// MUTATION: drop the `start_handler` arm of `build_resample_pool` — the hooked pool's
+    /// threads record nothing and the second assertion goes red. Call the hook from the bare arm
+    /// too (a stand-in that always installs one) and the last assertion goes red.
+    #[test]
+    fn a_pool_thread_runs_its_start_hook_and_a_bare_one_runs_none() {
+        let pool = build_resample_pool(Some(record_the_starting_thread)).expect("the pool builds");
+        let workers: std::collections::HashSet<_> = pool
+            .broadcast(|_| std::thread::current().id())
+            .into_iter()
+            .collect();
+        assert_eq!(
+            workers.len(),
+            pool.current_num_threads(),
+            "one id per thread"
+        );
+        let started: std::collections::HashSet<_> =
+            STARTED_ON.lock().unwrap().iter().copied().collect();
+        assert_eq!(
+            started, workers,
+            "each of the pool's threads ran the hook, and only they"
+        );
+        assert!(
+            pool.broadcast(|_| std::thread::current().name().map(ToOwned::to_owned))
+                .iter()
+                .all(|name| name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("bt-image-resample-"))),
+            "the threads keep the lane's name"
+        );
+
+        let before = STARTED_ON.lock().unwrap().len();
+        let bare = build_resample_pool(None).expect("a pool with no hook builds");
+        bare.broadcast(|_| ());
+        assert_eq!(
+            STARTED_ON.lock().unwrap().len(),
+            before,
+            "with no hook, nothing ran"
+        );
+    }
 
     // 1x1 opaque red PNG.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    /// Whether this platform's absolute paths are drive-rooted with `\` between names (Windows)
+    /// rather than rooted at `/` — which spelling the fixtures below are written in, and the
+    /// expected answer of the few rows whose fact is the grammar itself.
+    const DRIVE_ROOTED: bool = cfg!(windows);
+
+    /// `below` (written with `/`) as this platform spells an absolute path: under the drive `D:`
+    /// with `\` on Windows, under `/` elsewhere. Every absolute fixture of this module is built
+    /// here, so a fact about detection is asserted in the spelling a shell on this platform prints.
+    fn rooted(below: &str) -> String {
+        if DRIVE_ROOTED {
+            format!(r"D:\{}", below.replace('/', r"\"))
+        } else {
+            format!("/{below}")
+        }
+    }
+
+    /// [`rooted`] with `/` between the names — the spelling `C:/tmp/a.png` a Windows program may
+    /// also print, and the only spelling there is elsewhere.
+    fn rooted_with_slashes(below: &str) -> String {
+        if DRIVE_ROOTED {
+            format!("D:/{below}")
+        } else {
+            format!("/{below}")
+        }
+    }
+
+    /// The `file:` URI naming [`rooted`]`(below)`; `below` is written already percent-encoded.
+    fn rooted_uri(below: &str) -> String {
+        format!("file://{}", rooted_uri_path(below))
+    }
+
+    /// The path part of [`rooted_uri`], authority excluded: `/D:/below` or `/below`.
+    fn rooted_uri_path(below: &str) -> String {
+        if DRIVE_ROOTED {
+            format!("/D:/{below}")
+        } else {
+            format!("/{below}")
+        }
+    }
 
     /// PIN — **the image lane reads the one lexicon, so what the boundary rules learn, it learns**
     /// (§7.1.5j ⑧, checked after the 2026-08-21 slice moved two of them).
@@ -2352,8 +2456,9 @@ mod tests {
                 .map(|candidate| candidate.path)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(spans("见 D:\\shots\\a.png。"), ["D:\\shots\\a.png"]);
-        assert_eq!(spans("D:\\shots\\a.png:12"), ["D:\\shots\\a.png"]);
+        let shot = rooted("shots/a.png");
+        assert_eq!(spans(&format!("见 {shot}。")), std::slice::from_ref(&shot));
+        assert_eq!(spans(&format!("{shot}:12")), std::slice::from_ref(&shot));
         // The **sentence's** full stop, learned here the same way and on the same day it was ruled
         // on (2026-09-05, boundary table rows 57–61; row 16 overturned). A stop at the end of a
         // token is a seam, so the token offers `a.png` behind `a.png.` — and the extension question
@@ -2361,7 +2466,7 @@ mod tests {
         // exactly as the one at the end of a Chinese sentence became one above. The whole string
         // still goes first and still fails the extension list, which is why only one span comes
         // back.
-        assert_eq!(spans("D:\\shots\\a.png."), ["D:\\shots\\a.png"]);
+        assert_eq!(spans(&format!("{shot}.")), [shot]);
     }
 
     #[test]
@@ -2580,40 +2685,44 @@ mod tests {
 
     #[test]
     fn local_path_candidate_boundaries_are_conservative_and_cc_exact() {
+        let picture = rooted("Users/alice/Pictures/1.png");
         assert_eq!(
-            detect_local_image_path_candidates(r#"[Image: source: C:\Users\alice\Pictures\1.png]"#),
+            detect_local_image_path_candidates(&format!("[Image: source: {picture}]")),
             vec![LocalImagePathCandidate {
-                path: r"C:\Users\alice\Pictures\1.png".to_owned(),
+                path: picture.clone(),
                 byte_start: 16,
-                byte_end: 45,
+                byte_end: 16 + picture.len(),
                 shape: ImageReferenceShape::Native,
             }]
         );
+        let spaced = rooted("Users/alice/My Pictures/one two.WEBP");
         assert_eq!(
-            detect_local_image_path_candidates(
-                r#"[Image: source: "C:\Users\alice\My Pictures\one two.WEBP"]"#
-            )[0]
-            .path,
-            r"C:\Users\alice\My Pictures\one two.WEBP"
+            detect_local_image_path_candidates(&format!(r#"[Image: source: "{spaced}"]"#))[0].path,
+            spaced
         );
+        let slashed = rooted_with_slashes("tmp/picture.jpeg");
         assert_eq!(
-            detect_local_image_path_candidates(r"source=C:/tmp/picture.jpeg]ignored.png")[0].path,
-            "C:/tmp/picture.jpeg"
+            detect_local_image_path_candidates(&format!("source={slashed}]ignored.png"))[0].path,
+            slashed
         );
+        let svg = rooted("tmp/image.svg");
         assert_eq!(
-            detect_local_image_path_candidates(r"[Image: source: C:\tmp\image.svg]")[0].path,
-            r"C:\tmp\image.svg",
+            detect_local_image_path_candidates(&format!("[Image: source: {svg}]"))[0].path,
+            svg,
             "svg joined the admissible extensions with the 2026-08-02 static-raster slice"
         );
         for rejected in [
-            r"[Image: source: relative\image.png]",
-            r"[Image: source: \\server\share\image.png]",
-            r"[Image: source: C:\tmp\image.bmp]",
-            r#"[Image: source: "C:\tmp\unterminated image.png]"#,
-            r"prefixXC:\tmp\image.png",
+            r"[Image: source: relative\image.png]".to_owned(),
+            r"[Image: source: \\server\share\image.png]".to_owned(),
+            format!("[Image: source: {}]", rooted("tmp/image.bmp")),
+            format!(
+                r#"[Image: source: "{}]"#,
+                rooted("tmp/unterminated image.png")
+            ),
+            format!("prefixX{}", rooted("tmp/image.png")),
         ] {
             assert!(
-                detect_local_image_path_candidates(rejected).is_empty(),
+                detect_local_image_path_candidates(&rejected).is_empty(),
                 "unexpected candidate in {rejected:?}"
             );
         }
@@ -2626,25 +2735,28 @@ mod tests {
     /// continuation byte and the byte after `.png` was another one.
     #[test]
     fn path_candidates_open_after_any_non_token_character_and_close_at_any_closing_delimiter() {
-        for accepted in [
-            "（D:\\Developer\\folio-terminal\\layout-preview.png）",
-            "见图（D:\\Developer\\folio-terminal\\layout-preview.png）",
-            "「D:\\Developer\\folio-terminal\\layout-preview.png」",
-            "【D:\\Developer\\folio-terminal\\layout-preview.png】",
-            "路径：D:\\Developer\\folio-terminal\\layout-preview.png",
-            "(D:\\Developer\\folio-terminal\\layout-preview.png)",
-            "<D:\\Developer\\folio-terminal\\layout-preview.png>",
-            "《D:\\Developer\\folio-terminal\\layout-preview.png》",
-            "“D:\\Developer\\folio-terminal\\layout-preview.png”",
-            "图\u{3000}D:\\Developer\\folio-terminal\\layout-preview.png",
+        let preview = rooted("Developer/folio-terminal/layout-preview.png");
+        for (open, close) in [
+            ("（", "）"),
+            ("见图（", "）"),
+            ("「", "」"),
+            ("【", "】"),
+            ("路径：", ""),
+            ("(", ")"),
+            ("<", ">"),
+            ("《", "》"),
+            ("“", "”"),
+            ("图\u{3000}", ""),
         ] {
+            let accepted = format!("{open}{preview}{close}");
+            let accepted = accepted.as_str();
             let candidates = detect_local_image_path_candidates(accepted);
             assert_eq!(
                 candidates
                     .iter()
                     .map(|candidate| candidate.path.as_str())
                     .collect::<Vec<_>>(),
-                vec![r"D:\Developer\folio-terminal\layout-preview.png"],
+                vec![preview.as_str()],
                 "a path in {accepted:?} must be seen whole"
             );
             assert_eq!(
@@ -2653,26 +2765,28 @@ mod tests {
                 "the span must address the path text exactly in {accepted:?}"
             );
         }
+        let nested = rooted("a/b.png");
         for rejected in [
-            // A drive prefix that continues a token is a suffix of that token, never a path. The
-            // `/` case is load-bearing: it is what keeps a `file://` URI out of the native scan.
-            "file:///D:/Developer/folio-terminal/layout-preview.png",
-            "见D:\\a\\b.png",
-            "v1.D:\\a\\b.png",
-            "x-D:\\a\\b.png",
-            "x_D:\\a\\b.png",
-            "sub\\D:\\a\\b.png",
+            // A root that continues a token is a suffix of that token, never a path. The `/` case
+            // is load-bearing: it is what keeps a `file://` URI out of the native scan.
+            rooted_uri("Developer/folio-terminal/layout-preview.png"),
+            format!("见{nested}"),
+            format!("v1.{nested}"),
+            format!("x-{nested}"),
+            format!("x_{nested}"),
+            format!(r"sub\{nested}"),
         ] {
             assert!(
-                detect_local_image_path_candidates(rejected).is_empty(),
+                detect_local_image_path_candidates(&rejected).is_empty(),
                 "unexpected native candidate in {rejected:?}"
             );
         }
         // A quoted path keeps every delimiter it contains; quoting is how a filename that really
         // ends in `）` is spelled.
         assert_eq!(
-            detect_local_image_path_candidates("（\"D:\\a\\b（1）.png\"）")[0].path,
-            "D:\\a\\b（1）.png"
+            detect_local_image_path_candidates(&format!("（\"{}\"）", rooted("a/b（1）.png")))[0]
+                .path,
+            rooted("a/b（1）.png")
         );
     }
 
@@ -2684,22 +2798,46 @@ mod tests {
     fn file_uris_resolve_to_local_image_paths_under_the_same_admission_gates() {
         for (uri, expected) in [
             (
-                "file:///D:/Developer/folio-terminal/layout-preview.png",
-                r"D:\Developer\folio-terminal\layout-preview.png",
+                rooted_uri("Developer/folio-terminal/layout-preview.png"),
+                rooted("Developer/folio-terminal/layout-preview.png"),
             ),
-            ("file:///D:/x%20y.png", r"D:\x y.png"),
-            ("file:///D:/%E5%9B%BE%E7%89%87.PNG", r"D:\图片.PNG"),
-            ("FILE:///D:/a.png", r"D:\a.png"),
-            ("file://localhost/D:/a.png", r"D:\a.png"),
-            ("file:///D:/a.png#anchor", r"D:\a.png"),
-            ("file:///D:/a.png?v=2", r"D:\a.png"),
+            (rooted_uri("x%20y.png"), rooted("x y.png")),
+            (rooted_uri("%E5%9B%BE%E7%89%87.PNG"), rooted("图片.PNG")),
+            (
+                format!("FILE://{}", rooted_uri_path("a.png")),
+                rooted("a.png"),
+            ),
+            (
+                format!("file://localhost{}", rooted_uri_path("a.png")),
+                rooted("a.png"),
+            ),
+            (rooted_uri("a.png#anchor"), rooted("a.png")),
+            (rooted_uri("a.png?v=2"), rooted("a.png")),
         ] {
             assert_eq!(
-                file_uri_to_local_image_path(uri),
+                file_uri_to_local_image_path(&uri),
                 Some(PathBuf::from(expected)),
                 "{uri:?}"
             );
         }
+        // A URI rooted at `/` is a drive-less name on Windows, which no reference there may be,
+        // and an ordinary absolute path everywhere else.
+        for (posix_rooted, elsewhere) in [
+            ("file:///etc/a.png", "/etc/a.png"),
+            ("file:///a.png", "/a.png"),
+        ] {
+            assert_eq!(
+                file_uri_to_local_image_path(posix_rooted),
+                (!DRIVE_ROOTED).then(|| PathBuf::from(elsewhere)),
+                "{posix_rooted:?}"
+            );
+        }
+        // `%5C` decodes to `\`, a separator on Windows — where it is refused like `%2F` below —
+        // and an ordinary character of a name everywhere else.
+        assert_eq!(
+            file_uri_to_local_image_path(&rooted_uri("a%5Cb.png")),
+            (!DRIVE_ROOTED).then(|| PathBuf::from(r"/a\b.png"))
+        );
         for rejected in [
             // **An escaped separator is refused** (R3-1). This row used to read the other
             // way, on the reasoning that `%2F` is a literal slash inside one name and that
@@ -2709,27 +2847,28 @@ mod tests {
             // file from the one the URI named. The same escape in the OSC 7 decoder rebuilt
             // a share out of two `%5C`s. An escape that decodes to a separator moves a
             // boundary the URI did not have, so the URI names nothing.
-            "file:///D:/a%2Fb.png",
-            "file:///D:/a%5Cb.png",
+            rooted_uri("a%2Fb.png"),
             // A remote share is not the local image peek's business.
-            "file://host/share/a.png",
-            "file://192.168.0.2/pics/a.png",
-            // The same allowlist and drive-root gate printed paths meet.
-            "file:///D:/notes.txt",
-            "file:///D:/a.bmp",
-            "file:///etc/a.png",
-            "file:///a.png",
+            "file://host/share/a.png".to_owned(),
+            "file://192.168.0.2/pics/a.png".to_owned(),
+            // The same allowlist printed paths meet.
+            rooted_uri("notes.txt"),
+            rooted_uri("a.bmp"),
             // Not a file URI, or not a URI at all.
-            "https://example.test/a.png",
-            "file://",
-            "file://host",
+            "https://example.test/a.png".to_owned(),
+            "file://".to_owned(),
+            "file://host".to_owned(),
             // Malformed escapes and names no filesystem may hold.
-            "file:///D:/a%zz.png",
-            "file:///D:/a%2.png",
-            "file:///D:/a%00.png",
-            "file:///D://a.png",
+            rooted_uri("a%zz.png"),
+            rooted_uri("a%2.png"),
+            rooted_uri("a%00.png"),
+            rooted_uri("/a.png"),
         ] {
-            assert_eq!(file_uri_to_local_image_path(rejected), None, "{rejected:?}");
+            assert_eq!(
+                file_uri_to_local_image_path(&rejected),
+                None,
+                "{rejected:?}"
+            );
         }
     }
 
@@ -2737,8 +2876,14 @@ mod tests {
     /// text is, and reports the resolved path under the span of the URI that must be hovered.
     #[test]
     fn file_uri_candidates_are_found_in_prose_and_carry_the_resolved_path() {
-        let text = "see file:///D:/a/layout-preview.png, and （file:///D:/b.png）, not \
-                    file:///D:/notes.txt or xfile:///D:/c.png";
+        let text = format!(
+            "see {}, and （{}）, not {} or x{}",
+            rooted_uri("a/layout-preview.png"),
+            rooted_uri("b.png"),
+            rooted_uri("notes.txt"),
+            rooted_uri("c.png")
+        );
+        let text = text.as_str();
         let candidates = detect_local_image_uri_candidates(text);
         assert_eq!(
             candidates
@@ -2750,13 +2895,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (
-                    r"D:\a\layout-preview.png",
-                    "file:///D:/a/layout-preview.png"
+                    rooted("a/layout-preview.png").as_str(),
+                    rooted_uri("a/layout-preview.png").as_str()
                 ),
-                (r"D:\b.png", "file:///D:/b.png"),
+                (rooted("b.png").as_str(), rooted_uri("b.png").as_str()),
             ]
         );
-        // The two shapes never claim the same text: the `D:/…` inside a URI is not a native path.
+        // The two shapes never claim the same text: the path inside a URI is not a native path.
         assert!(detect_local_image_path_candidates(text).is_empty());
         assert_eq!(
             detect_peek_image_candidates(text, None).len(),
@@ -2830,37 +2975,41 @@ mod tests {
     fn working_directory_uris_decode_without_the_image_extension_gate() {
         for (uri, expected) in [
             (
-                "file:///D:/Developer/folio-terminal",
-                r"D:\Developer\folio-terminal",
+                rooted_uri("Developer/folio-terminal"),
+                rooted("Developer/folio-terminal"),
             ),
             // A trailing slash is how a URI names a directory, not an empty final segment.
-            ("file:///D:/Developer/", r"D:\Developer"),
-            ("file:///D:/", r"D:\"),
-            ("file:///D:/My%20Pictures", r"D:\My Pictures"),
-            ("file:///D:/%E5%9B%BE%20%E7%89%87", r"D:\图 片"),
-            ("file://localhost/D:/src", r"D:\src"),
-            ("FILE:///D:/src", r"D:\src"),
+            (rooted_uri("Developer/"), rooted("Developer")),
+            (rooted_uri(""), rooted("")),
+            (rooted_uri("My%20Pictures"), rooted("My Pictures")),
+            (rooted_uri("%E5%9B%BE%20%E7%89%87"), rooted("图 片")),
+            (
+                format!("file://localhost{}", rooted_uri_path("src")),
+                rooted("src"),
+            ),
+            (format!("FILE://{}", rooted_uri_path("src")), rooted("src")),
         ] {
             assert_eq!(
-                file_uri_to_local_path(uri, &[]),
+                file_uri_to_local_path(&uri, &[]),
                 Some(PathBuf::from(expected)),
                 "{uri:?}"
             );
         }
         // This machine's own name is the third spelling of "this host"; any other authority is a
         // remote share and names no directory this terminal may resolve against.
+        let on_this_machine = format!("file://MACHINE{}", rooted_uri_path("src"));
         assert_eq!(
-            file_uri_to_local_path("file://MACHINE/D:/src", &["machine".to_owned()]),
-            Some(PathBuf::from(r"D:\src"))
+            file_uri_to_local_path(&on_this_machine, &["machine".to_owned()]),
+            Some(PathBuf::from(rooted("src")))
         );
         for rejected in [
-            "file://server/share/src",
-            "file://MACHINE/D:/src",
-            "file:///D://src",
-            "",
-            "not a uri",
+            "file://server/share/src".to_owned(),
+            on_this_machine.clone(),
+            rooted_uri("/src"),
+            String::new(),
+            "not a uri".to_owned(),
         ] {
-            assert_eq!(file_uri_to_local_path(rejected, &[]), None, "{rejected:?}");
+            assert_eq!(file_uri_to_local_path(&rejected, &[]), None, "{rejected:?}");
         }
         // Two of these used to be on that list and are answers now, not refusals.
         // `%zz` opens no escape, so the payload was never percent-encoded and the
@@ -2869,8 +3018,8 @@ mod tests {
         // the root of a POSIX namespace, which is a place a shell really stands
         // in (review row R3-11).
         assert_eq!(
-            file_uri_to_local_path("file:///D:/a%zz", &[]),
-            Some(PathBuf::from(r"D:\a%zz"))
+            file_uri_to_local_path(&rooted_uri("a%zz"), &[]),
+            Some(PathBuf::from(rooted("a%zz")))
         );
         assert_eq!(
             file_uri_to_local_path("file:///", &[]),
@@ -2879,10 +3028,10 @@ mod tests {
         // The image peek keeps its own stricter reading: no hostname authority, and a trailing
         // slash names a directory, which is never an image.
         assert_eq!(
-            file_uri_to_local_image_path("file://MACHINE/D:/a.png"),
+            file_uri_to_local_image_path(&format!("file://MACHINE{}", rooted_uri_path("a.png"))),
             None
         );
-        assert_eq!(file_uri_to_local_image_path("file:///D:/a.png/"), None);
+        assert_eq!(file_uri_to_local_image_path(&rooted_uri("a.png/")), None);
     }
 
     /// A Windows shell may spell its directory the only way it can spell it.
@@ -2909,6 +3058,10 @@ mod tests {
     /// (`Rooting::DriveOrPosixRoot`, pinned below), which is WSL's and is a different question.
     /// `cmd.exe` cannot reach that door in any case: `$P` is always drive-rooted, because `cmd`
     /// refuses to stand in a UNC directory at all.
+    ///
+    /// Windows only: a drive letter and a `\` are this spelling, and no shell elsewhere has
+    /// either; the POSIX spelling is the next test's.
+    #[cfg(windows)]
     #[test]
     fn a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it() {
         for (uri, expected) in [
@@ -2987,10 +3140,14 @@ mod tests {
             file_uri_to_local_path("file:///home/%zz", &[]),
             Some(PathBuf::from("/home/%zz"))
         );
-        // **The image peek does not widen with it.** A reference is something this terminal opens,
-        // and it opens through Windows; `/mnt/d/a.png` is a path only the shell that printed it can
-        // resolve, so it is not a candidate here however plausible it looks.
-        assert_eq!(file_uri_to_local_image_path("file:///mnt/d/a.png"), None);
+        // **On Windows the image peek does not widen with it.** A reference is something this
+        // terminal opens, and there it opens through Windows; `/mnt/d/a.png` is a path only the
+        // shell that printed it can resolve, so it is not a candidate however plausible it looks.
+        // Everywhere else `/` is this machine's own root and the same URI is an ordinary picture.
+        assert_eq!(
+            file_uri_to_local_image_path("file:///mnt/d/a.png"),
+            (!DRIVE_ROOTED).then(|| PathBuf::from("/mnt/d/a.png"))
+        );
     }
 
     /// PIN (relative path ruling, 2026-08-03, as widened the same day): the relative scan reads
@@ -3001,12 +3158,17 @@ mod tests {
     fn relative_candidates_are_anchored_or_bare_with_a_separator_and_report_their_printed_text() {
         let text = r#"see ./a.png and ..\b\c.svg and "./my pic.webp" and dir/d.png"#;
         let candidates = detect_relative_image_path_candidates(text);
+        // `..\b\c.svg` is a reference where `\` separates names (Windows) and one name elsewhere.
+        let separated = ["./a.png", r"..\b\c.svg", "./my pic.webp", "dir/d.png"];
         assert_eq!(
             candidates
                 .iter()
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["./a.png", r"..\b\c.svg", "./my pic.webp", "dir/d.png"]
+            separated
+                .into_iter()
+                .filter(|reference| DRIVE_ROOTED || !reference.contains('\\'))
+                .collect::<Vec<_>>()
         );
         for candidate in candidates
             .iter()
@@ -3043,8 +3205,8 @@ mod tests {
             "dir/notes.txt",
             // A dot that continues a token opens nothing, which is what keeps the `./` inside a
             // URI and the `\.\` inside a native path out of this scan.
-            "file:///D:/./a.png",
-            r"D:\a\.\b.png",
+            rooted_uri("./a.png").as_str(),
+            rooted("a/./b.png").as_str(),
             // A quoted candidate must close its quote (the unquoted re-read that follows stops at
             // the space, exactly as it does for an unterminated quoted absolute path).
             r#""./unterminated image.png"#,
@@ -3210,10 +3372,16 @@ mod tests {
     /// scan's URIs without touching either.
     #[test]
     fn overlapping_scans_never_claim_the_same_text_twice() {
-        let cwd = PathBuf::from(r"D:\work");
-        let text = "D:\\abs.png file:///D:/uri.png local-images/sunset.svg ./a.png \
-                    https://a.b/x.png";
+        let cwd = PathBuf::from(rooted("work"));
+        let (absolute, uri) = (rooted("abs.png"), rooted_uri("uri.png"));
+        let text = format!(
+            "{absolute} {uri} local-images/sunset.svg ./a.png \
+             https://a.b/x.png"
+        );
+        let text = text.as_str();
         let candidates = detect_peek_image_candidates(text, Some(&cwd));
+        let (sunset, near) = (rooted("work/local-images/sunset.svg"), rooted("work/a.png"));
+        let (uri_path, absolute_path) = (rooted("uri.png"), absolute.clone());
         assert_eq!(
             candidates
                 .iter()
@@ -3223,13 +3391,10 @@ mod tests {
                 ))
                 .collect::<std::collections::BTreeSet<_>>(),
             [
-                (r"D:\abs.png", r"D:\abs.png"),
-                ("file:///D:/uri.png", r"D:\uri.png"),
-                (
-                    "local-images/sunset.svg",
-                    r"D:\work\local-images\sunset.svg"
-                ),
-                ("./a.png", r"D:\work\a.png"),
+                (absolute.as_str(), absolute_path.as_str()),
+                (uri.as_str(), uri_path.as_str()),
+                ("local-images/sunset.svg", sunset.as_str()),
+                ("./a.png", near.as_str()),
             ]
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>()
@@ -3251,14 +3416,13 @@ mod tests {
     /// shape meets. A climb past the drive root names nothing.
     #[test]
     fn relative_candidates_resolve_lexically_against_a_working_directory() {
-        let cwd = PathBuf::from(r"D:\a\b");
+        let cwd = PathBuf::from(rooted("a/b"));
         for (relative, expected) in [
-            ("./x.png", r"D:\a\b\x.png"),
-            (r".\x.png", r"D:\a\b\x.png"),
-            ("./sub/x.png", r"D:\a\b\sub\x.png"),
-            ("../y.svg", r"D:\a\y.svg"),
-            ("../../z.PNG", r"D:\z.PNG"),
-            ("../b/./x.png", r"D:\a\b\x.png"),
+            ("./x.png", rooted("a/b/x.png")),
+            ("./sub/x.png", rooted("a/b/sub/x.png")),
+            ("../y.svg", rooted("a/y.svg")),
+            ("../../z.PNG", rooted("z.PNG")),
+            ("../b/./x.png", rooted("a/b/x.png")),
         ] {
             assert_eq!(
                 resolve_relative_image_path(&cwd, relative),
@@ -3266,9 +3430,19 @@ mod tests {
                 "{relative:?}"
             );
         }
+        // `.\x.png` is anchored where `\` separates names (Windows); elsewhere it is one name, the
+        // file `.\x.png` in the working directory itself.
         assert_eq!(
-            resolve_relative_image_path(Path::new(r"D:\"), "./x.png"),
-            Some(PathBuf::from(r"D:\x.png"))
+            resolve_relative_image_path(&cwd, r".\x.png"),
+            Some(PathBuf::from(if DRIVE_ROOTED {
+                rooted("a/b/x.png")
+            } else {
+                rooted(r"a/b/.\x.png")
+            }))
+        );
+        assert_eq!(
+            resolve_relative_image_path(Path::new(&rooted("")), "./x.png"),
+            Some(PathBuf::from(rooted("x.png")))
         );
         for rejected in [
             // Above the drive root there is no path to name.
@@ -3294,14 +3468,19 @@ mod tests {
     /// directory yields the resolved absolute path under the span of the relative text.
     #[test]
     fn relative_text_is_no_candidate_at_all_without_a_working_directory() {
-        let text = "see ./a.png and D:\\abs.png and file:///D:/uri.png";
+        let text = format!(
+            "see ./a.png and {} and {}",
+            rooted("abs.png"),
+            rooted_uri("uri.png")
+        );
+        let text = text.as_str();
         let without = detect_peek_image_candidates(text, None);
         assert_eq!(
             without
                 .iter()
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![r"D:\abs.png", r"D:\uri.png"],
+            vec![rooted("abs.png"), rooted("uri.png")],
             "no directory, no relative candidate — and every other shape is untouched"
         );
         assert!(
@@ -3310,18 +3489,18 @@ mod tests {
                 .all(|candidate| candidate.path != "./a.png")
         );
 
-        let cwd = PathBuf::from(r"D:\work");
+        let cwd = PathBuf::from(rooted("work"));
         let with = detect_inline_image_candidates(text, Some(&cwd));
         assert_eq!(
             with.iter()
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![r"D:\abs.png", r"D:\work\a.png"],
+            vec![rooted("abs.png"), rooted("work/a.png")],
             "inline admission reads the native path and the resolved relative one"
         );
         let relative = with
             .iter()
-            .find(|candidate| candidate.path == r"D:\work\a.png")
+            .find(|candidate| candidate.path == rooted("work/a.png"))
             .unwrap();
         assert_eq!(
             &text[relative.byte_start..relative.byte_end],
@@ -3335,37 +3514,63 @@ mod tests {
         );
     }
 
+    /// RED (CC-7) — **an SVG payload is rasterized by the codec the host installed, on both
+    /// roads a picture arrives by**, at the size and in the pixels that codec answers; and bytes
+    /// the codec does not take for a document are an unsupported format.
+    ///
+    /// This crate's unit tests install `test_svg_rasterizer` in the reader (`host::svg_rasterizer`),
+    /// which parses nothing: a 3x2 raster of `TEST_SVG_PIXEL` can only have come from it.
+    ///
+    /// MUTATION ①: drop the reader's `#[cfg(test)]` install — red: the decode panics with "the SVG
+    /// rasterizer read before the host installed it". MUTATION ②: map the codec's `Parse` to
+    /// `InvalidDimensions` in `decode_svg_bytes` — the last assertion goes red.
     #[test]
-    fn svg_local_path_decodes_through_the_rasterizer_at_intrinsic_size() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-inline-svg-{}-{unique}",
-            std::process::id()
-        ));
+    fn an_svg_payload_decodes_through_the_installed_codec() {
+        let directory = bt_testpath::temp_path("betterterminal-inline-svg");
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("probe.svg");
-        std::fs::write(
-            &path,
-            br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6">
-                <rect x="0" y="0" width="8" height="6" fill="#00ff00"/>
-            </svg>"##,
-        )
-        .unwrap();
+        let path = directory.join("probe-\u{e9}t\u{e9}.svg");
+        std::fs::write(&path, crate::TEST_SVG_DOCUMENT).unwrap();
 
         let mut decoder = InlineImageDecoder::default();
-        let decoded = decoder
+        let from_file = decoder
             .decode(InlineImageTask {
                 occurrence_id: 71,
                 source: InlineImageSource::LocalPath(path.clone()),
             })
             .unwrap();
-        assert_eq!((decoded.width_px, decoded.height_px), (8, 6));
-        assert!(!decoded.animated);
-        assert_eq!(&decoded.rgba[..4], &[0, 255, 0, 255]);
-        assert!(decoded.key.starts_with("image:"));
+        let printed = decode_inline_image(InlineImageTask {
+            occurrence_id: 72,
+            source: InlineImageSource::Osc1337(
+                STANDARD.encode(crate::TEST_SVG_DOCUMENT).into_bytes(),
+            ),
+        })
+        .unwrap();
+        for decoded in [&from_file, &printed] {
+            assert_eq!((decoded.width_px, decoded.height_px), (3, 2));
+            assert!(!decoded.animated);
+            assert!(
+                decoded
+                    .rgba
+                    .chunks_exact(4)
+                    .all(|pixel| pixel == crate::TEST_SVG_PIXEL),
+                "the installed codec's pixels, straight alpha as it answered them"
+            );
+            assert!(decoded.key.starts_with("image:"));
+        }
+        assert_eq!(from_file.key, printed.key, "one document, one content key");
+
+        let not_a_document = decode_inline_image(InlineImageTask {
+            occurrence_id: 73,
+            source: InlineImageSource::Osc1337(
+                STANDARD
+                    .encode("<svg>\u{3b1}\u{e9} not the codec's document</svg>")
+                    .into_bytes(),
+            ),
+        });
+        assert_eq!(
+            not_a_document,
+            Err(InlineImageDecodeError::UnsupportedFormat)
+        );
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
@@ -3410,14 +3615,7 @@ mod tests {
     /// screenful of reads.
     #[test]
     fn local_decoder_reads_once_but_never_serves_a_file_that_has_been_replaced() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-inline-path-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-inline-path");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("card-3.png");
         std::fs::write(&path, png_of(4, 2, [255, 0, 0, 255])).unwrap();
@@ -3512,14 +3710,7 @@ mod tests {
     /// A directory of this test module's own, named so that two of these
     /// running at once cannot meet in it.
     fn a_scratch_directory(what: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-{what}-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path(&format!("betterterminal-{what}"));
         std::fs::create_dir(&directory).unwrap();
         directory
     }
@@ -3881,14 +4072,7 @@ mod tests {
     /// everything ever decoded still held.
     #[test]
     fn the_local_decode_memo_is_bounded_and_keeps_what_was_asked_for_last() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-inline-memo-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-inline-memo");
         std::fs::create_dir(&directory).unwrap();
         // One megapixel each, so four megabytes of RGBA a picture; forty of them
         // is well past the memo's own ceiling.
@@ -4266,14 +4450,7 @@ mod tests {
             u64::from(SIDE) * u64::from(SIDE) * 4 < MAX_BACKGROUND_IMAGE_RGBA_BYTES,
             "and inside the background's, or it proves the wrong thing"
         );
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-background-budget-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-background-budget");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("wallpaper.png");
         {

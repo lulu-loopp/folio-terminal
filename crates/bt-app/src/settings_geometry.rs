@@ -40,7 +40,7 @@ impl Inputs {
         scroll: f32,
         content: SettingsContent<'_>,
     ) -> Self {
-        Self {
+        let mut inputs = Self {
             surface,
             scale,
             font_revision,
@@ -62,12 +62,31 @@ impl Inputs {
             advanced_reveal: content.advanced_reveal,
             editor: content.editor,
             values: content.values.clone(),
-            category: panel.category(),
-            menu: panel.menu(),
-            row_menu: panel.row_menu(),
+            category: SettingsCategory::default(),
+            menu: None,
+            row_menu: None,
             scroll,
-            menu_scroll: panel.menu_scroll(),
-        }
+            menu_scroll: 0.0,
+        };
+        inputs.read_panel(panel, scroll);
+        inputs
+    }
+
+    /// **The one place a window's own panel enters the key**: the page it is
+    /// on, the picker it has open, and where the page and the picker are
+    /// scrolled. Hover and focus are paint state and are not read here.
+    ///
+    /// Everything else [`Self::new`] reads belongs to the process — the
+    /// language, the scheme and profile tables, the published font lists and
+    /// the row sentences they decide — and a reader that is asking only what
+    /// its window did re-reads this half alone
+    /// (`settings_pointer_complete_operation_layout_budget`).
+    pub fn read_panel(&mut self, panel: &SettingsPanel, scroll: f32) {
+        self.category = panel.category();
+        self.menu = panel.menu();
+        self.row_menu = panel.row_menu();
+        self.scroll = scroll;
+        self.menu_scroll = panel.menu_scroll();
     }
 
     pub fn content(&self) -> SettingsContent<'_> {

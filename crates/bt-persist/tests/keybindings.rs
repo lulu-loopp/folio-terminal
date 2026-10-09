@@ -13,7 +13,6 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bt_persist::{
     BindingOverrideV1, FallbackReason, KEYBINDINGS_MIGRATIONS, KEYBINDINGS_SCHEMA_VERSION,
@@ -21,12 +20,7 @@ use bt_persist::{
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "bt-persist-keybindings-{tag}-{}-{n}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path(&format!("bt-persist-keybindings-{tag}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

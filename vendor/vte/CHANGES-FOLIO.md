@@ -55,8 +55,20 @@ change beyond the three arms, and it is additive: the `Perform` trait is
 unchanged, which is why `bt-corpus` — which uses `Parser` and `Perform` only — is
 unaffected.
 
+## `src/ansi.rs` and `Cargo.toml` — the clock a browser build can read
+
+`StdSyncHandler` holds the deadline of a synchronized update (`CSI ? 2026 h`) and
+reads the clock to set it. It reads `web_time::Instant` rather than
+`std::time::Instant`: on every target but `wasm32-unknown-unknown` the two are
+the same type (`web_time` re-exports `std::time`), so `sync_timeout` returns what
+it did and every caller compiles unchanged; on `wasm32-unknown-unknown`
+`std::time::Instant::now()` panics and `web_time`'s reads `performance.now()`.
+`Cargo.toml` declares `web-time` 1.1.0 as an optional dependency the `std`
+feature enables, which is the feature `StdSyncHandler` already stood behind. The
+directory's own `Cargo.lock` is upstream's and is not regenerated: the workspace
+resolves this crate through its own lock file.
+
 ## Every other file
 
-Byte for byte the published archive, including `Cargo.toml`, its `Cargo.lock`
-and `.gitignore` (tracked here although that `.gitignore` names `Cargo.lock`,
+Byte for byte the published archive, including its `Cargo.lock` and `.gitignore` (tracked here although that `.gitignore` names `Cargo.lock`,
 because the notices gate compares file sets).

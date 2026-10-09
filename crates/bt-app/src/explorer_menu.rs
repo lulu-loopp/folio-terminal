@@ -376,7 +376,7 @@ pub fn serve() -> i32 {
     crate::i18n::install(crate::door_language(
         &crate::persist::storage_dir_as_it_stands(),
     ));
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(exe) = bt_platform::running_image().map(|image| image.path.clone()) else {
         // Without this there is no icon to name and no program to start. There
         // is also nowhere to report it: this process has no console and no
         // window, and Explorer's answer to a class that will not start is to
@@ -531,9 +531,9 @@ pub fn supported() -> bool {
 /// classic verb and cannot have this one, and the row says which.
 #[must_use]
 pub fn package_file() -> Option<PathBuf> {
-    let beside = std::env::current_exe()
+    let beside = bt_platform::running_image()
         .ok()?
-        .parent()?
+        .folder()?
         .join(PACKAGE_FILE_NAME);
     beside.is_file().then_some(beside)
 }
@@ -575,11 +575,11 @@ fn read_state() -> PackageState {
     )
 }
 
-/// The folder this executable is in.
+/// The folder this executable is in, links followed (`bt_platform::running_image`).
 fn this_folder() -> Option<PathBuf> {
-    std::env::current_exe()
+    bt_platform::running_image()
         .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .and_then(|image| image.folder().map(Path::to_path_buf))
 }
 
 /// **What the deployment database's answer means for the row** — [`classify`]
@@ -814,7 +814,7 @@ pub fn removal_for(state: &PackageState) -> Removal<'_> {
 /// install's registration alone: a process that cannot say which file it is has
 /// no business claiming to be the one over there.
 fn is_this_executable(exe: &Path) -> bool {
-    std::env::current_exe().is_ok_and(|ours| same_path(exe, &ours))
+    bt_platform::running_image().is_ok_and(|ours| same_path(exe, &ours.path))
 }
 
 // ── `--remove-explorer-menu`: the mark taken back off, with no window ───────
@@ -2000,6 +2000,11 @@ mod tests {
     ///    compares them and the moved install goes red for the same reason;
     /// ④ act on `Absent` as well and its assertion goes red, which is a launch
     ///    registering a package on a machine that never asked for one.
+    ///
+    /// Windows only: the package is the Explorer verb's, and "the same file,
+    /// spelled the way Windows also spells it" is Windows' case-blind path
+    /// comparison.
+    #[cfg(windows)]
     #[test]
     fn the_launch_takes_over_a_dead_registration_and_leaves_a_live_one_standing() {
         let elsewhere = |at: &str| PackageState::Elsewhere {
@@ -2626,7 +2631,7 @@ mod tests {
                 exit_code: 0,
             }
         }
-        if !crate::tests::alone_in_a_process(
+        if !crate::test_support::alone_in_a_process(
             "explorer_menu::tests::the_menu_removal_process_waits_on_its_main_thread_as_a_worker",
             b"",
         ) {
@@ -2669,7 +2674,7 @@ mod tests {
                 CleanupRegistration::Refused(format!("{:?}", role())),
             )]
         }
-        if !crate::tests::alone_in_a_process(
+        if !crate::test_support::alone_in_a_process(
             "explorer_menu::tests::the_uninstall_cleanup_waits_on_its_main_thread_as_a_worker",
             b"",
         ) {
@@ -2763,8 +2768,7 @@ mod tests {
     /// An install folder of its own: a `folio.exe` and the `folio.msix` beside
     /// it.
     fn install_folder(tag: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("bt-explorer-renewal-{tag}-{}", std::process::id()));
+        let root = bt_testpath::temp_path(&format!("bt-explorer-renewal-{tag}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private install folder");
         std::fs::write(root.join(msix::PACKAGE_EXECUTABLE), b"exe").unwrap();
@@ -2962,7 +2966,7 @@ mod tests {
         std::fs::write(&path, journal.encode()).unwrap();
         watch(
             &gate,
-            &path,
+            (&path, &path.with_file_name(crate::update_txn::UNKEPT_FILE)),
             txn,
             Duration::from_millis(5),
             &|| {},

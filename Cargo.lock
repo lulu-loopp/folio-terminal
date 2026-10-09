@@ -325,6 +325,7 @@ version = "0.4.7"
 dependencies = [
  "anyhow",
  "base64",
+ "bt-compose",
  "bt-detect",
  "bt-doc",
  "bt-layout",
@@ -335,6 +336,7 @@ dependencies = [
  "bt-render",
  "bt-source",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -359,10 +361,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-compose"
+version = "0.4.7"
+dependencies = [
+ "bt-detect",
+ "bt-doc",
+ "bt-math",
+ "bt-render",
+ "bt-term",
+ "bt-testpath",
+ "bt-transcript",
+ "bt-viewport",
+ "unicode-width",
+ "web-time",
+]
+
+[[package]]
 name = "bt-corpus"
 version = "0.4.7"
 dependencies = [
  "anyhow",
+ "bt-compose",
+ "bt-detect",
+ "bt-math",
+ "bt-platform",
  "bt-pty",
  "bt-render",
  "bt-term",
@@ -373,6 +395,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "vte",
+ "web-time",
 ]
 
 [[package]]
@@ -390,6 +413,13 @@ version = "0.4.7"
 dependencies = [
  "bt-transcript",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "bt-effects"
+version = "0.4.7"
+dependencies = [
+ "web-time",
 ]
 
 [[package]]
@@ -418,19 +448,21 @@ name = "bt-math"
 version = "0.4.7"
 dependencies = [
  "bt-doc",
- "bt-platform",
+ "bt-effects",
+ "bt-testpath",
+ "fontconfig-parser",
  "mitex",
  "mitex-lexer",
  "mitex-spec-gen",
  "resvg",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "typst-as-lib",
  "typst-layout",
  "typst-library",
  "typst-svg",
  "typst-syntax",
+ "web-time",
 ]
 
 [[package]]
@@ -438,6 +470,7 @@ name = "bt-persist"
 version = "0.4.7"
 dependencies = [
  "bt-platform",
+ "bt-testpath",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -448,11 +481,12 @@ name = "bt-platform"
 version = "0.4.7"
 dependencies = [
  "block2 0.6.2",
+ "bt-effects",
  "bt-pty",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-winres",
- "fontconfig-parser",
  "fontdb",
  "futures-util",
  "libc",
@@ -486,8 +520,11 @@ version = "0.4.7"
 dependencies = [
  "bt-platform",
  "bt-pty",
+ "bt-source",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
+ "bt-viewport",
  "bt-winres",
  "miniz_oxide",
  "nix",
@@ -501,10 +538,11 @@ version = "0.4.7"
 dependencies = [
  "bt-detect",
  "bt-doc",
+ "bt-effects",
  "bt-math",
- "bt-platform",
  "bt-source",
  "bt-term",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -516,6 +554,7 @@ dependencies = [
  "ttf-parser",
  "unicode-properties",
  "unicode-script",
+ "web-time",
  "wgpu",
 ]
 
@@ -523,6 +562,7 @@ dependencies = [
 name = "bt-source"
 version = "0.4.7"
 dependencies = [
+ "bt-testpath",
  "proc-macro2",
  "syn 2.0.119",
 ]
@@ -533,11 +573,11 @@ version = "0.4.7"
 dependencies = [
  "alacritty_terminal",
  "base64",
+ "bt-compose",
  "bt-detect",
  "bt-doc",
- "bt-math",
- "bt-platform",
- "bt-pty",
+ "bt-effects",
+ "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
@@ -545,17 +585,24 @@ dependencies = [
  "proptest",
  "rayon",
  "unicode-width",
+ "web-time",
 ]
+
+[[package]]
+name = "bt-testpath"
+version = "0.4.7"
 
 [[package]]
 name = "bt-transcript"
 version = "0.4.7"
 dependencies = [
  "bitflags 2.13.0",
+ "bt-testpath",
  "bt-unicode",
  "regex",
  "unicode-properties",
  "unicode-segmentation",
+ "url",
 ]
 
 [[package]]
@@ -5409,6 +5456,7 @@ dependencies = [
  "log",
  "memchr",
  "serde",
+ "web-time",
 ]
 
 [[package]]

@@ -37,7 +37,7 @@
 //! ruling: a machine that merely has WSL installed boots no virtual machine for
 //! Folio, and neither does one whose reader opens a WSL pane.
 
-use std::{ffi::OsStr, sync::OnceLock};
+use std::sync::Mutex;
 
 /// Where Windows writes down this user's WSL installation, below
 /// `HKEY_CURRENT_USER`.
@@ -198,56 +198,80 @@ fn read_installation(registry: &dyn Registry) -> WslFacts {
 /// One machine, one answer — and one place it is kept.
 ///
 /// Process-wide rather than owned by `Runtime`, for the reason
-/// `bt_term::local_host_names` is: a machine does not install a WSL distribution
-/// *inside* one terminal session, and the readers are the places a profile is
+/// `bt_term::local_host_names` is: the readers are the places a profile is
 /// **named** — a menu row, a tooltip, a settings option — which are scattered
 /// through the chrome and would otherwise each need this threaded down to them
 /// through layout code that has no other reason to know what WSL is.
 ///
-/// Untouched by any test: [`facts`] answers `WslFacts::default()` until [`start`]
-/// is called, which nothing but `main` does, so a unit test of anything that
-/// names a profile gets the bare titles deterministically rather than whatever
-/// the machine running the test happens to have installed.
-static INSTALLATION: OnceLock<WslFacts> = OnceLock::new();
-
-/// Read what Windows knows, once. `program` is what
-/// [`crate::profiles::ProfilePrograms`] resolved the WSL profile to, so a
-/// machine without WSL is one that reads nothing.
+/// **It follows the machine** (T-PROGRAMS-REFRESH). A distribution installed or
+/// made the default while Folio runs used to stay unknown until a restart,
+/// because this was a `OnceLock` set at launch. It is now read by the program
+/// walk (`crate::programs_lane`, on its worker — this module still starts
+/// nothing) every time the walk is asked for, and [`adopt`]ed between frames on
+/// the window thread, which is its one writer.
 ///
-/// **Synchronous, and that is the point** (§7.40 ②). This used to spawn a worker
-/// that ran two `wsl.exe` invocations, and the opening window's own title then
-/// joined that worker — so the launch waited for a virtual machine to boot
-/// before it could draw a window. Three registry reads take microseconds; there
-/// is nothing here worth a thread, and nothing left for a frame to wait on.
-pub fn start(program: Option<&OsStr>) {
-    let installation = if program.is_some() {
-        read_installation(&CurrentUser)
-    } else {
-        WslFacts::default()
-    };
-    let _ = INSTALLATION.set(installation);
+/// Untouched by any test: [`facts`] answers `WslFacts::default()` until
+/// [`adopt`] is called, which nothing but the application's adoption of a walk
+/// does, so a unit test of anything that names a profile gets the bare titles
+/// deterministically rather than whatever the machine running the test happens
+/// to have installed.
+static INSTALLATION: Mutex<Option<WslFacts>> = Mutex::new(None);
+
+/// **Read what Windows knows** — the program walk's WSL question, asked on its
+/// worker (`crate::programs_lane`) once the walk has found `wsl.exe`.
+///
+/// Three registry reads and no processes (§7.40 ②): a machine that merely has
+/// WSL installed boots no virtual machine for Folio.
+#[must_use]
+pub fn read_this_machine() -> WslFacts {
+    read_installation(&CurrentUser)
 }
 
-/// What the machine says, right now, without waiting for anything.
+/// **Take a walk's reading**, on the window thread. Answers whether [`facts`]
+/// now says something else — whether a title may have to be composed again.
+pub fn adopt(installation: WslFacts) -> bool {
+    let mut held = INSTALLATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = held.replace(installation).unwrap_or_default();
+    held.as_ref() != Some(&before)
+}
+
+/// What the machine said at the last walk, without waiting for anything.
 ///
-/// **There is no blocking twin to tell this apart from** (§7.40 ④), which is why
-/// it is not called `try_facts`: the installation is already in hand — it was
-/// read from the registry before the window existed — and there is no second
-/// half that might not have arrived. Nothing in this module can make a caller
-/// wait, and since 2026-09-07 nothing in it can start a process either.
+/// **There is no blocking twin to tell this apart from** (§7.40 ④): nothing in
+/// this module can make a caller wait, and nothing in it can start a process.
+/// The empty installation until the first walk has read one.
 ///
 /// Owned rather than borrowed because it is a handful of short strings, read
 /// once per rebuild of the profile titles, and every reader of it is a place a
 /// profile is *named*.
 #[must_use]
 pub fn facts() -> WslFacts {
-    INSTALLATION.get().cloned().unwrap_or_default()
+    INSTALLATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_default()
+}
+
+/// An installation with these distributions and this default, for tests outside this module.
+#[cfg(test)]
+pub(crate) fn facts_of(distributions: &[&str], default: &str) -> WslFacts {
+    let mut distributions: Vec<String> = distributions.iter().map(|it| (*it).to_owned()).collect();
+    distributions.sort();
+    WslFacts {
+        distributions,
+        default: Some(DefaultDistribution {
+            name: default.to_owned(),
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, sync::mpsc, time::Duration};
+    use std::collections::BTreeMap;
 
     /// A registry somebody wrote down, shaped exactly like the one Windows keeps.
     ///
@@ -454,14 +478,18 @@ mod tests {
     /// the real window.
     ///
     /// It leaves no state behind for the rest of the suite: `INSTALLATION` is
-    /// never set — no test calls [`start`] — so `facts()` answers the empty
+    /// never set — no test calls [`adopt`] — so `facts()` answers the empty
     /// installation here as it does everywhere else.
+    ///
+    /// Windows only: the WSL row is the Windows seed's, and its script is named across the
+    /// boundary through a drive-letter path.
+    #[cfg(windows)]
     #[test]
     fn the_first_frame_and_the_first_pane_do_not_wait_for_a_distribution() {
         /// Long enough that only a read which never returns can reach it.
-        const NEVER: Duration = Duration::from_secs(60);
+        const NEVER: std::time::Duration = std::time::Duration::from_secs(60);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let facts = facts();
             let _ = crate::profiles::title(0);

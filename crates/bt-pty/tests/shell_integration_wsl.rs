@@ -36,13 +36,13 @@
 //! `crates/bt-app/src/shell_integration.rs` and requires every one of them to be
 //! in it, character for character.
 
+#![cfg(windows)]
 #![allow(clippy::disallowed_methods)]
 
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// The product's question, fragment by fragment, in the spelling its source
@@ -71,12 +71,22 @@ fn question() -> String {
     QUESTION.concat()
 }
 
-/// The product's own source, so that the copy above cannot drift away from it.
-fn shell_integration_source() -> String {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bt-app/src/shell_integration.rs");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{} is in the repository: {error}", path.display()))
+/// Whether `bt-app`'s product code in `crate::shell_integration` spells `text` — comments
+/// masked, literals kept, test items left out (`bt_source`) — so that the copy above cannot drift
+/// away from the product's own declaration.
+fn the_product_spells(text: &str) -> bool {
+    let index = bt_source::Index::of_package("bt-app");
+    let search = bt_source::Search::new(
+        bt_source::needle!(bt_source::Pattern::text(text)),
+        bt_source::View::CodeKeepingLiterals,
+    )
+    .in_scope(bt_source::Scope::Module(
+        "crate::shell_integration".to_owned(),
+    ));
+    let found = index
+        .search(&search)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    !found.in_the_product(index).is_empty()
 }
 
 /// `<git root>\bin\sh.exe`, reached through the `git.exe` the machine already
@@ -103,20 +113,9 @@ fn git_sh() -> PathBuf {
 }
 
 /// **Unique per call within one process, not merely per instant.** Two tests in one test
-/// binary run on two threads, and a clock that answers the same nanosecond to both — the CI
-/// runner did, once — handed them one directory and one `AlreadyExists`. The counter is
-/// the part of the name the clock cannot be trusted with.
+/// binary run on two threads, so the name is `bt_testpath`'s, whose ordinal no two calls share.
 fn temporary_directory() -> PathBuf {
-    static ORDINAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ordinal = ORDINAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "folio-wsl-{}-{unique}-{ordinal}",
-        std::process::id()
-    ));
+    let directory = bt_testpath::temp_path("folio-wsl");
     std::fs::create_dir(&directory).unwrap();
     directory
 }
@@ -365,10 +364,9 @@ fn a_distribution_that_will_not_say_still_gets_a_shell() {
 /// would leave it exercising a script nothing ships.
 #[test]
 fn the_question_this_test_runs_is_the_question_the_product_asks() {
-    let source = shell_integration_source();
     for fragment in QUESTION {
         assert!(
-            source.contains(fragment),
+            the_product_spells(fragment),
             "crates/bt-app/src/shell_integration.rs no longer spells {fragment:?} — the copy in \
              this file is the thing under test and has to follow it"
         );

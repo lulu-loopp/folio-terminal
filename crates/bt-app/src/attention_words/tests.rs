@@ -7,15 +7,14 @@ use super::*;
 
 /// A scratch file with a name of its own, removed when the test that made it ends.
 ///
-/// `std::env::temp_dir` and a counter rather than a crate: this workspace has no tempfile
-/// dependency and one transcript fixture is not a reason to add one.
+/// Named by `bt_testpath`, the workspace's one owner of a test's scratch name.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn holding(name: &str, text: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "folio-attention-words-{}-{name}.jsonl",
-            std::process::id()
+            "{}.jsonl",
+            bt_testpath::unique_name(&format!("folio-attention-words-{name}"))
         ));
         std::fs::write(&path, text).expect("a scratch transcript");
         Self(path)
@@ -198,7 +197,7 @@ fn the_transcript_is_quoted_from_its_last_main_thread_message() {
 /// is the same: the caller goes on and says what it said before.
 #[test]
 fn a_transcript_that_answers_nothing_is_not_a_failure() {
-    let missing = std::env::temp_dir().join("folio-no-such-transcript-9db2.jsonl");
+    let missing = bt_testpath::temp_path("folio-no-such-transcript").with_extension("jsonl");
     assert_eq!(transcript_lede(&missing, LIMIT), None);
 
     let empty = Scratch::holding("empty", "");

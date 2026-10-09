@@ -7,21 +7,27 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-bt-platform = { path = "../bt-platform" }
+# The file-read ledger (`file_reads::opaque` around the system font scans).
+bt-effects = { path = "../bt-effects" }
 bt-doc = { path = "../bt-doc" }
 mitex.workspace = true
 mitex-lexer = "=0.2.4"
 mitex-spec-gen.workspace = true
 resvg.workspace = true
-thiserror.workspace = true
 typst-as-lib.workspace = true
 typst-layout.workspace = true
 typst-library.workspace = true
 typst-svg.workspace = true
 # Already pinned transitively by Typst; parse emitted math without rewriting text literals.
 typst-syntax = "=0.15.1"
+web-time.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fontconfig-parser.workspace = true
 
 [dev-dependencies]
+# Every test's scratch name comes from one place (`bt_testpath`, T-TEST-HYGIENE-048).
+bt-testpath = { path = "../bt-testpath" }
 serde.workspace = true
 serde_json.workspace = true
 

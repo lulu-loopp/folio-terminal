@@ -497,12 +497,26 @@ impl Drop for OurTurn {
 /// **The record's lock: the OS lock on `integration-marks.lock`, and this
 /// process's turn at it.** Held for as long as the value lives.
 ///
-/// Field order is the release order: the file (and with it the OS lock) is
-/// closed first and the turn given back second, so the next writer of ours
-/// never finds the file still held by the one ahead of it.
+/// Release order: the OS lock is let go explicitly ([`Drop`] below), then the
+/// file is closed, then the turn is given back (field order), so the next
+/// writer of ours never finds the file still held by the one ahead of it.
 pub struct MarksLock {
     _file: fs::File,
     _turn: OurTurn,
+}
+
+impl Drop for MarksLock {
+    /// **Unlocked, not merely closed.** Windows lets go of a closed handle's
+    /// locks when it gets round to it — "the time it takes for the operating
+    /// system to unlock these locks depends upon available system resources"
+    /// (`LockFileEx`) — and the turn is given back the moment the fields drop.
+    /// Closed without this, the next writer of ours could be through [`OURS`]
+    /// while the file still reads as held, and spend [`OUR_TURN`] on a holder
+    /// that is no other process at all, then refuse. An unlock that fails
+    /// leaves only the close, which is what there was before.
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
 }
 
 /// Hold across read/modify/write AND the corresponding profile operation.
@@ -1129,6 +1143,7 @@ mod tests {
                 line,
                 std::time::UNIX_EPOCH,
                 None,
+                &ProfileRevision::read(&profile),
             )
             .unwrap();
             assert_eq!(fs::read_to_string(&profile).unwrap(), line);

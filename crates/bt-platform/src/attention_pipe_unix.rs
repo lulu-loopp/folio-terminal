@@ -80,8 +80,8 @@
 //!
 //! # The peer is checked for its user and **not** for its executable
 //!
-//! [`crate::launch_pipe`]'s server refuses a peer whose executable is not the
-//! same file as its own, and that is right *there*: the only thing that ever
+//! [`crate::launch_pipe`]'s server refuses a peer whose executable is not a
+//! Folio (its file name), and that is right *there*: the only thing that ever
 //! speaks the launch wire is a second Folio. **Nothing of the sort is true
 //! here, and the check is deliberately absent rather than forgotten.** The
 //! programs on the other end of this socket are other people's — `claude`,
@@ -802,10 +802,7 @@ mod tests {
     /// can run at once — and one that really exists, because the endpoint's name
     /// is the filesystem's answer about it.
     fn scratch(line: u32) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "bt-platform-attention-{}-{line}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path(&format!("bt-platform-attention-{line}"));
         std::fs::create_dir_all(&directory).expect("make the data directory");
         directory
     }

@@ -34,7 +34,8 @@ use std::path::PathBuf;
 
 use crate::enumerate::FileOwner;
 use crate::index::{
-    Certainty, FileRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralValue, Span,
+    Certainty, FileRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralValue, ModuleRecord,
+    ModuleShape, Span,
 };
 use crate::scope::FileScoped;
 
@@ -1143,6 +1144,12 @@ impl Occurrence {
     ///   It is the only grain that sees an inline `#[cfg(test)] mod` or a
     ///   `#[cfg(test)]` function, neither of which is a file and neither of
     ///   which moves the file's answer.
+    /// * **The inline module** ([`ModuleRecord::permits_product`]): whether the
+    ///   innermost inline `mod x { … }` holding these bytes stands on an arm
+    ///   some product build compiles. It is the only grain for the bytes inside
+    ///   an inline test module that stand in no item — a `use`, a `const`, an
+    ///   attribute — which the file grain calls product (the file is) and the
+    ///   item grain has no item to ask about.
     ///
     /// An item is in the product if **any** of its identities is, which is
     /// §2.3's "any owning path" said one level down: a product file that a test
@@ -1163,7 +1170,9 @@ impl Occurrence {
                 .identities()
                 .any(|identity| identity.variant.permits_product())
         });
-        file_permits && item_permits
+        let module_permits =
+            innermost_inline_module(index, self.span).is_none_or(ModuleRecord::permits_product);
+        file_permits && item_permits && module_permits
     }
 }
 
@@ -1246,7 +1255,7 @@ impl Found {
     /// **The same answer, narrowed to what a build of the shipped program
     /// contains** — [`Occurrence::in_the_product`] over every match.
     ///
-    /// The rule and both of its grains are on that method; this is the filter,
+    /// The rule and its three grains are on that method; this is the filter,
     /// and it hands back a [`Found`] rather than a count so that
     /// [`Found::owners`], [`Found::report`] and the rest go on working on the
     /// narrowed answer. What was excluded and where the needle came from are
@@ -1363,6 +1372,17 @@ fn at(index: &Index, span: Span) -> String {
 }
 
 /// The smallest callable whose bytes hold `span`.
+/// The innermost inline `mod x { … }` holding `span`. Its record carries the
+/// gates of every inline module around it in the same file, so it is the only
+/// one that needs asking.
+fn innermost_inline_module(index: &Index, span: Span) -> Option<&ModuleRecord> {
+    index
+        .modules()
+        .iter()
+        .filter(|module| module.body() == ModuleShape::Inline && span.within(module.span()))
+        .min_by_key(|module| module.span().len())
+}
+
 fn innermost_item(index: &Index, span: Span) -> Option<&ItemRecord> {
     index
         .items()

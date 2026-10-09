@@ -41,42 +41,6 @@ fn method_body(owner: &str, name: &str) -> &'static str {
     item_body(&bt_source::ItemQuery::method(owner, name))
 }
 
-/// **The temporary directory with every link above it resolved, in its ordinary spelling.**
-///
-/// The door refuses a root with a link anywhere among its ancestors, on purpose — a planted link
-/// must never turn a deletion into authority over its target. A sandbox is a place the door is
-/// pointed at, so its own spelling must carry no link, or every row reads as a planted one. On
-/// macOS it would: `$TMPDIR` is `/var/folders/…`, and `/var` is the system's link to
-/// `/private/var`, so every sandbox under the unresolved name was refused whole (12 tests red on
-/// the Mac, ticket 72). `canonicalize` is the resolution; on Windows it answers the verbatim
-/// `\\?\` form, where `/` is not a separator and the fixtures' `root.join("app/folio.exe")` would
-/// name no file, so a verbatim drive or share prefix is spelled back the ordinary way. Nothing here
-/// names a platform: a path with no prefix (every Unix path) is the canonical answer itself.
-///
-/// Production resolves the same link in its own roots since ticket 73, but only in the head the
-/// operating system names (`purge_root`); a sandbox root is not such a head, so it is resolved here.
-fn link_free_temp_dir() -> PathBuf {
-    use std::path::{Component, Prefix};
-    let real = fs::canonicalize(std::env::temp_dir()).expect("the temporary directory exists");
-    let mut components = real.components();
-    let Some(Component::Prefix(prefix)) = components.next() else {
-        return real;
-    };
-    let head = match prefix.kind() {
-        Prefix::VerbatimDisk(letter) => format!("{}:\\", char::from(letter)),
-        Prefix::VerbatimUNC(server, share) => format!(
-            r"\\{}\{}\",
-            server.to_string_lossy(),
-            share.to_string_lossy()
-        ),
-        _ => return real,
-    };
-    let rest: PathBuf = components
-        .filter(|component| !matches!(component, Component::RootDir))
-        .collect();
-    PathBuf::from(head).join(rest)
-}
-
 /// The spelling production hands to the removal boundary: resolved to its
 /// existing target, with Windows' verbatim prefix returned to an ordinary
 /// drive or share spelling.
@@ -84,11 +48,13 @@ fn resolved(path: &Path) -> PathBuf {
     bt_platform::handoff::strip_verbatim_prefix(&bt_platform::instance::canonical_path(path))
 }
 
+/// A removal sandbox. The door refuses a root with a link anywhere among its ancestors, on
+/// purpose — a planted link must never turn a deletion into authority over its target — so the
+/// sandbox stands where the temporary directory's own spelling carries none. Production resolves
+/// the same link in its own roots, but only in the head the operating system names
+/// (`purge_root`); a sandbox root is not such a head.
 fn sandbox(tag: &str) -> (PathBuf, Scope) {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root =
-        link_free_temp_dir().join(format!("folio-uninstall-{tag}-{}-{n}", std::process::id()));
+    let root = bt_testpath::link_free_temp_path(&format!("folio-uninstall-{tag}"));
     fs::create_dir_all(root.join("app")).unwrap();
     let exe = root.join("app/folio.exe");
     fs::write(&exe, b"fixture executable").unwrap();
@@ -751,6 +717,11 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             "try_claim_data_directory",
         ),
         (
+            Remover::TrialFolder,
+            include_str!("shell_integration.rs"),
+            "trial_script_directory",
+        ),
+        (
             Remover::Data(HostPlatform::Windows, Base::Roaming, "Folio"),
             include_str!("persist.rs"),
             "storage_location",
@@ -851,7 +822,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 28);
+    assert_eq!(INVENTORY.len(), 29);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
     // is the one function that writes a `Run` value, and the row names it.
@@ -1417,7 +1388,7 @@ fn a_link_inside_the_folio_named_part_is_still_refused() {
 ///
 /// The head is spelled the way `std::env::temp_dir()` spells it (through `/var` on macOS, possibly
 /// a short 8.3 name on Windows) and must come back as its canonical, ordinary spelling — the same
-/// one this file's `link_free_temp_dir` derives independently. Folio's part carries a link
+/// one `bt_testpath::link_free_temp_dir` derives independently. Folio's part carries a link
 /// (`folio` → `elsewhere`) and must come back as `folio/clipboard`, not as the link's target. A
 /// head that does not exist yet is resolved as far as it exists.
 ///
@@ -1425,9 +1396,9 @@ fn a_link_inside_the_folio_named_part_is_still_refused() {
 /// macOS); canonicalize the whole root and `folio` becomes `elsewhere` (red everywhere).
 #[test]
 fn the_boundary_is_the_os_named_head() {
-    let name = format!("folio-uninstall-boundary-{}", std::process::id());
+    let name = bt_testpath::unique_name("folio-uninstall-boundary");
     let spelled = std::env::temp_dir().join(&name);
-    let resolved = link_free_temp_dir().join(&name);
+    let resolved = bt_testpath::link_free_temp_dir().join(&name);
     fs::create_dir_all(resolved.join("elsewhere")).unwrap();
     plant_directory_link(&resolved.join("folio"), &resolved.join("elsewhere"));
     assert_eq!(
@@ -3201,4 +3172,132 @@ fn a_purge_takes_a_removers_folder_left_behind() {
         );
     }
     fs::remove_dir_all(home).unwrap();
+}
+
+/// RED (0.4.8 G7, ledger #32; journal role U1, `Role::Uninstall`) — **the uninstall
+/// removes the temporary folder of the update trial its copy's journal names**, and
+/// reads that journal as every reader does: a journal it cannot read whole still
+/// names its transaction by its header, and one of which nothing reads names no folder
+/// and leaves it, saying the record cannot be read.
+///
+/// The journal is at `Trial` and the trial's folder holds its script, as a trial that
+/// was running when the uninstall started leaves them (its process gone: the door's
+/// own wait). The copy is the platform's own shape — a Windows install folder, a macOS
+/// bundle — because the journal is where `update_txn::Home` says it is; on another
+/// Unix there is no updater home and the row is `not present`.
+///
+/// MUTATION: in `trial_folder`, answer `Fate::Absent` without removing anything (leave
+/// the folder) — the first assertion goes red.
+#[test]
+fn uninstall_removes_the_folder_of_the_trial_its_journal_names() {
+    use crate::update_txn::{
+        Adapter, Body, Inventories, Journal, Layout, Nonce, Phase, TrialProcess, beyond_inputs,
+    };
+    let root = bt_testpath::link_free_temp_path("folio-uninstall-trial-folder");
+    let exe = match bt_platform::host_platform() {
+        HostPlatform::MacOs => bundle_exe(&root),
+        HostPlatform::Windows | HostPlatform::OtherUnix => root.join("app/folio.exe"),
+    };
+    fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    fs::write(&exe, b"fixture executable").unwrap();
+    let scope = Scope::sandbox(&root, exe).unwrap();
+    let label = "Update trial folder (per-copy)";
+    let Some(journal) = scope.journal.clone() else {
+        assert_eq!(bt_platform::host_platform(), HostPlatform::OtherUnix);
+        assert_eq!(super::trial_folder(label, &scope).fate, Fate::Absent);
+        fs::remove_dir_all(root).unwrap();
+        return;
+    };
+    fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let txn = crate::update_job::mint_txn();
+    let known = Journal {
+        txn,
+        rescue: "rescue/folio.exe — 救援".to_owned(),
+        body: Body {
+            phase: Phase::Trial {
+                nonce: Nonce::new([7; 32]),
+                process: TrialProcess { pid: 1, started: 1 },
+                began_ms: 0,
+            },
+            layout: Layout::Members(Inventories {
+                old_shipped: Vec::new(),
+                old_present: Vec::new(),
+                new: Vec::new(),
+            }),
+            adapter: Adapter::Ours,
+            marker: None,
+        },
+    }
+    .encode();
+    let folder = scope.temp.join(crate::update_trial::temp_folder_name(txn));
+    let stage = |folder: &Path| {
+        let script = folder.join("shell-integration").join("folio.ps1");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(script, "# 集成脚本 script").unwrap();
+    };
+
+    stage(&folder);
+    fs::write(&journal, &known).unwrap();
+    let report = execute(&scope, false, system_absent);
+    assert!(!folder.exists(), "the trial's folder is left behind");
+    assert!(
+        report.stdout().contains(&format!(
+            "{label}: {}: removed",
+            resolved(&scope.temp)
+                .join(crate::update_trial::temp_folder_name(txn))
+                .display()
+        )),
+        "{}",
+        report.stdout()
+    );
+    assert_eq!(
+        journal.exists(),
+        scope.update_home.is_none(),
+        "the row reads the journal and writes nothing; on macOS the update home's row, after it, removes the home and the journal with it"
+    );
+    fs::create_dir_all(journal.parent().unwrap()).unwrap();
+
+    for (what, bytes) in beyond_inputs(&known) {
+        stage(&folder);
+        fs::write(&journal, &bytes).unwrap();
+        let entry = super::trial_folder(label, &scope);
+        if what == "bytes that are no journal" {
+            assert_eq!(
+                entry.fate,
+                Fate::Kept(Text::UpdateFailedUnreadable),
+                "{what}: {}",
+                entry.line(Lang::English)
+            );
+            assert!(
+                folder.exists(),
+                "{what}: no transaction is named, nothing goes"
+            );
+            assert!(
+                entry.mark.contains(&journal.display().to_string()),
+                "{what}"
+            );
+        } else {
+            assert_eq!(
+                entry.fate,
+                Fate::Removed,
+                "{what}: {}",
+                entry.line(Lang::English)
+            );
+            assert!(!folder.exists(), "{what}: its header names the folder");
+        }
+    }
+    let _ = crate::update_txn::a_journal_that_cannot_be_read(&journal);
+    let entry = super::trial_folder(label, &scope);
+    assert_eq!(entry.fate, Fate::Kept(Text::UpdateFailedUnreadable));
+    assert!(
+        folder.exists(),
+        "a journal that cannot be read names nothing"
+    );
+    fs::remove_dir_all(&journal).unwrap();
+    assert_eq!(
+        super::trial_folder(label, &scope).fate,
+        Fate::Absent,
+        "no journal: no transaction, nothing to remove"
+    );
+    fs::remove_dir_all(root).unwrap();
 }

@@ -320,8 +320,6 @@ crates/bt-platform/src/msix.rs	tests::every_deployment_this_module_makes_announc
 crates/bt-platform/src/webview.rs	third_door_shape_tests::DOOR	include_str!	macos_webview.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::SOURCE	include_str!	lib.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::input_dump_off_write_path_has_only_the_option_gate	include_str!	lib.rs	P14	no
-crates/bt-term/tests/shell_integration_cmd.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
-crates/bt-term/tests/shell_integration_wsl.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
 scripts/check-adapter-boundary.ps1	the file list at the head of the script	script: named file list	crates/bt-term/src/adapter.rs;crates/bt-term/src/cell_capture.rs	P17	no
 scripts/check-doc-words.ps1	the $files list	script: named file list	the nine reader-facing documents; the rule's Rust twin is i18n.rs	P17	no
 scripts/check-screenshots.ps1	the manifest and page reads	script: named file read	docs/screenshots/README.md and the pages that embed a shot	P17	no

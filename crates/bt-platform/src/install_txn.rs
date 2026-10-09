@@ -1359,11 +1359,7 @@ mod tests {
         if crate::host_platform() == crate::HostPlatform::OtherUnix {
             return;
         }
-        let root = std::env::temp_dir().join(format!(
-            "bt-install-txn-mkdir-{}-{}",
-            std::process::id(),
-            crate::attention_pipe::unguessable_bits()
-        ));
+        let root = bt_testpath::temp_path("bt-install-txn-mkdir");
         std::fs::create_dir_all(&root).unwrap();
         let made = root.join("made");
         durable_create_dir(&made).unwrap();
@@ -1451,11 +1447,7 @@ mod tests {
         if crate::host_platform() == crate::HostPlatform::OtherUnix {
             return;
         }
-        let root = std::env::temp_dir().join(format!(
-            "bt-install-txn-copy-{}-{}",
-            std::process::id(),
-            crate::attention_pipe::unguessable_bits()
-        ));
+        let root = bt_testpath::temp_path("bt-install-txn-copy");
         std::fs::create_dir_all(&root).unwrap();
         let made = root.join("copied.bin");
         assert_eq!(
@@ -1649,8 +1641,7 @@ mod tests {
 
     #[cfg(any(windows, target_os = "macos"))]
     fn scratch(tag: &str) -> PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("bt-install-txn-{tag}-{}", std::process::id()));
+        let directory = bt_testpath::temp_path(&format!("bt-install-txn-{tag}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         directory
@@ -2009,8 +2000,8 @@ mod tests {
     fn a_durable_registry_flush_opens_its_key_and_names_a_missing_one() {
         flush_current_user_key("Software").unwrap();
         let missing = format!(
-            "Software\\bt-install-txn-no-such-key-{}",
-            std::process::id()
+            "Software\\{}",
+            bt_testpath::unique_name("bt-install-txn-no-such-key")
         );
         let failure = flush_current_user_key(&missing).unwrap_err();
         assert_eq!(failure.stage, Stage::OpenKey);
