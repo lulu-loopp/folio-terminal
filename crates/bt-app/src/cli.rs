@@ -358,6 +358,19 @@ impl CarriedEnvironment {
     pub fn pairs(&self) -> &[(OsString, OsString)] {
         &self.0
     }
+
+    /// **The one line that says this environment could not be carried** — on the wire
+    /// (`crate::launch_wire`) or into a shell (`crate::pty_door`): what it could not be given to,
+    /// why, and what happened instead. It names the variable count and, in `why`, at most a
+    /// variable's name and sizes; never a value.
+    #[must_use]
+    pub fn refusal_line(&self, given_to: &str, why: &str, instead: &str) -> String {
+        format!(
+            "Folio: {WITH_ENVIRONMENT_FLAG} — the environment of this launch ({} variables) cannot \
+             be {given_to}: {why}; {instead}",
+            self.0.len()
+        )
+    }
 }
 
 impl std::fmt::Debug for CarriedEnvironment {

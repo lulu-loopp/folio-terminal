@@ -9610,8 +9610,8 @@ fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> Leaf
         card_skip: 0,
         // A restart is a new shell in the same place; nothing is owed to its prompt.
         prefill: None,
-        // A restart is a new shell and takes the account's environment: what a launch carried
-        // was for the shell it was carried to (owner ruling 2026-10-05).
+        // Not the seed's to say: a Restart shell is born in its tab, and `born_in_tab` gives it
+        // the tab's carried environment (coordinator's ruling 2026-10-09).
         carried_environment: None,
     }
 }
@@ -36728,9 +36728,9 @@ struct LeafSeed {
     /// **The environment a launch carried into this pane** (`--with-environment`, owner ruling
     /// 2026-10-05), laid over the account's as the birth's `launch_overrides`.
     ///
-    /// `None` everywhere but the pane a launch asked for — the first launch's command-line tab
-    /// ([`cli_leaf_seed`]) and a handed-over launch's tab (`launch_wire::LaunchRequest`). Never
-    /// saved: a revived, split, duplicated or restarted pane is a new shell and takes the
+    /// The tab's ([`TabSeed::carried_environment`]) for every shell born in a tab a launch carried
+    /// one into — its first pane, a split, a duplicate, a Restart shell — put here by
+    /// [`born_in_tab`]; `None` in every other tab. Never saved, so a revived pane takes the
     /// account's environment.
     carried_environment: Option<cli::CarriedEnvironment>,
 }

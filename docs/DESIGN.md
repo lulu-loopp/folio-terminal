@@ -14620,3 +14620,11 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** The environment lives in memory with the tab and is never saved: a revived tab (`revive_plan`), a reopened closed tab and a pane torn into a tab of its own hold none. The rescue build's `carried()` road still sends none (accepted).
 
 **Pinned by** `app_tabs_tests::a_tabs_carried_environment_is_the_tabs_and_every_shell_born_in_it_takes_it` (the tab holds it; a split's and a restart's seed born in it carry it; a tab with none gives none) and `app_tabs_tests::every_shell_born_in_a_tab_is_born_with_the_tabs_carried_environment` (the four verbs' bodies, read through `bt_source` as `every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder` reads them: they spawn a ConPTY and cannot run here).
+
+### 2026-10-09 — A carried variable Windows cannot hold refuses the shell, and a carried name holds no control character (F-SWEEP-2-048, round 3)
+
+**What is built.** Kimi's review: the 256 KiB launch frame can carry a variable Windows will not hold. Windows documents 32,767 characters for one environment variable and no limit for the whole block, so the guard is per variable: `pty_door::carried_environment_refusal` refuses the birth when a carried `name=value` is longer than `WINDOWS_VARIABLE_UNITS` (UTF-16 units), before the spawn. The line is `CarriedEnvironment::refusal_line`, the one the wire's refusal now shares; it goes to `diagnostics.log` and onto the window's "Shell not started" card through the failed-birth road. The variable is never cut. On the wire, `LaunchRequest::decode` refuses a carried name with any control character, as the text fields are refused; a value may still hold one, as a prompt does.
+
+**The rule.** RULES §33 now says that Folio's conditional declarations (`FORCE_HYPERLINK` and kin), made only where the environment has no value of its own, are overlaid by a carried value as well. That is intended.
+
+**Pinned by** `pty_door::tests::birth_refuses_a_carried_variable_windows_cannot_hold` (a planted 40 KB variable; RED with no guard) and the `NA\u0001ME` / `NA\nME` / ESC rows of `launch_wire::tests::a_launch_wire_frame_carries_the_environment_and_refuses_one_that_is_not_one` (RED when control characters are accepted).

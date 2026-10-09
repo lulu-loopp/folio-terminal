@@ -54,6 +54,53 @@ fn launch_overrides(carried: Option<&crate::cli::CarriedEnvironment>) -> Vec<(Os
     carried.map_or_else(Vec::new, |carried| carried.pairs().to_vec())
 }
 
+/// **The most UTF-16 units one Windows environment variable may hold**, its `name=value` entry:
+/// the limit Windows documents for one variable. A whole environment block has none, so this is
+/// the one an environment carried over the 256 KiB launch wire can break.
+const WINDOWS_VARIABLE_UNITS: usize = 32_767;
+
+/// **Why a carried environment cannot be given to a shell on `platform`**, or `None` when it can
+/// (F-SWEEP-2-048 round 3): on Windows, a carried variable longer than [`WINDOWS_VARIABLE_UNITS`].
+/// The birth is refused with the line rather than the variable cut — a shell given half a `PATH`
+/// is quietly wrong. Names the variable and its size, never its value.
+fn carried_environment_refusal(
+    carried: Option<&crate::cli::CarriedEnvironment>,
+    platform: bt_platform::HostPlatform,
+) -> Option<String> {
+    let carried = carried?;
+    if platform != bt_platform::HostPlatform::Windows {
+        return None;
+    }
+    let (name, units) = carried
+        .pairs()
+        .iter()
+        .map(|(name, value)| {
+            let units = name.encode_wide_len() + 1 + value.encode_wide_len();
+            (name, units)
+        })
+        .find(|(_, units)| *units > WINDOWS_VARIABLE_UNITS)?;
+    Some(carried.refusal_line(
+        "given to the shell",
+        &format!(
+            "{} is {units} characters, more than the {WINDOWS_VARIABLE_UNITS} Windows takes for one \
+             variable",
+            name.to_string_lossy()
+        ),
+        "the shell was not started",
+    ))
+}
+
+/// The length an `OsStr` has as UTF-16, which is how Windows counts an environment variable.
+trait EncodeWideLen {
+    fn encode_wide_len(&self) -> usize;
+}
+
+impl EncodeWideLen for std::ffi::OsStr {
+    fn encode_wide_len(&self) -> usize {
+        self.to_string_lossy().encode_utf16().count()
+    }
+}
+
 /// **The environment a pane's derived declarations read** — the account's with the launch layer
 /// over it, or, where there is no account environment to read, this process's with the same layer
 /// over it.
@@ -154,6 +201,17 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
     );
     let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    // **A carried environment this system cannot give a shell refuses the birth** (F-SWEEP-2-048
+    // round 3): said in the diagnostics and on the window's "Shell not started" card, never cut.
+    if let Some(line) =
+        carried_environment_refusal(carried_environment.as_ref(), bt_platform::host_platform())
+    {
+        eprintln!("{line}");
+        return Born {
+            session: Err(PtyError::Backend(line)),
+            folder_gone,
+        };
+    }
     let launch_overrides = launch_overrides(carried_environment.as_ref());
     let refresh = environment_refresh(
         || {
@@ -409,6 +467,52 @@ mod tests {
             &profile,
         );
         bt_pty::spawn_environment(&before_folio, &[], &folio, &profile)
+    }
+
+    /// RED (F-SWEEP-2-048 round 3) — **a carried variable Windows cannot hold refuses the birth
+    /// with the line, and is never cut.**
+    ///
+    /// The launch wire carries up to 256 KiB; one Windows variable holds 32,767 characters. A
+    /// planted 40 KB variable is refused on Windows by name and size; one that fits, and the same
+    /// one on a Mac, are not. Names only: the value is never in the line.
+    ///
+    /// MUTATION: no guard (`carried_environment_refusal` answering `None`) and the 40 KB variable
+    /// reaches the spawn.
+    #[test]
+    fn birth_refuses_a_carried_variable_windows_cannot_hold() {
+        let oversized = crate::cli::CarriedEnvironment::from_pairs(vec![
+            ("PATH".into(), "C:\\Windows".into()),
+            ("FSWEEP2_BIG_环境".into(), "路".repeat(40_000).into()),
+        ]);
+        let line =
+            carried_environment_refusal(Some(&oversized), bt_platform::HostPlatform::Windows)
+                .expect("a 40 KB variable is refused on Windows");
+        assert!(
+            line.contains(crate::cli::WITH_ENVIRONMENT_FLAG)
+                && line.contains("FSWEEP2_BIG_环境")
+                && line.contains("40015")
+                && line.contains("32767")
+                && line.contains("2 variables")
+                && line.contains("the shell was not started"),
+            "{line}"
+        );
+        assert!(!line.contains('路'), "the line names no value");
+        let fits = crate::cli::CarriedEnvironment::from_pairs(vec![(
+            "FSWEEP2_FITS".into(),
+            "路".repeat(32_767 - "FSWEEP2_FITS=".len()).into(),
+        )]);
+        assert_eq!(
+            carried_environment_refusal(Some(&fits), bt_platform::HostPlatform::Windows),
+            None
+        );
+        assert_eq!(
+            carried_environment_refusal(Some(&oversized), bt_platform::HostPlatform::MacOs),
+            None
+        );
+        assert_eq!(
+            carried_environment_refusal(None, bt_platform::HostPlatform::Windows),
+            None
+        );
     }
 
     /// RED (F-SWEEP-2-048, owner ruling 2026-10-05) — **`launch_overrides` carry the launcher's

@@ -594,7 +594,9 @@ impl LaunchRequest {
             },
             // **Optional, and every pair a variable a process could hold** when present: a name
             // that is not empty and holds no `=` past its first character (Windows keeps its
-            // per-drive folders as `=C:`), and no NUL in a name or a value. Bounded by the frame
+            // per-drive folders as `=C:`), no control character in a name — the rule the text
+            // fields above keep — and no NUL in a value (a value may hold a newline or an escape:
+            // a shell's prompt does). Bounded by the frame
             // (`bt_platform::launch_pipe::MAX_FRAME_BYTES`), which is the field that can be long.
             carried_environment: match object.get(ENVIRONMENT_KEY) {
                 None => None,
@@ -609,7 +611,7 @@ impl LaunchRequest {
                             let (name, value) = (name.as_str()?, value.as_str()?);
                             let well_formed = !name.is_empty()
                                 && !name.chars().skip(1).any(|character| character == '=')
-                                && !name.contains('\0')
+                                && !name.chars().any(char::is_control)
                                 && !value.contains('\0');
                             well_formed.then(|| (name.into(), value.into()))
                         })
@@ -644,12 +646,7 @@ impl LaunchRequest {
         } else {
             return None;
         };
-        Some(format!(
-            "Folio: {} — the environment of this launch ({} variables) cannot be handed to the \
-             running Folio: {why}; nothing was opened",
-            cli::WITH_ENVIRONMENT_FLAG,
-            environment.pairs().len()
-        ))
+        Some(environment.refusal_line("handed to the running Folio", &why, "nothing was opened"))
     }
 }
 
@@ -1705,6 +1702,9 @@ mod tests {
             r#"[["A=B", "x"]]"#,
             r#"[["NAME", "a\u0000b"]]"#,
             r#"[["NA\u0000ME", "x"]]"#,
+            r#"[["NA\u0001ME", "x"]]"#,
+            r#"[["NA\nME", "x"]]"#,
+            r#"[["NAME\u001b[31m", "x"]]"#,
             r#"[["NAME"]]"#,
             r#"[["NAME", "x", "y"]]"#,
             r#"[["NAME", 1]]"#,
