@@ -1000,6 +1000,11 @@ impl Runtime<'_> {
             return Ok(());
         }
         state.view = view;
+        // A Git page opening asks where git is again, so one installed while Folio runs is found
+        // (T-PROGRAMS-REFRESH); the page's questions wait on the git worker for that answer.
+        if view == seats::FilesView::Git {
+            self.ask_the_program_walk(crate::programs_lane::Trigger::GitPage);
+        }
         // The page is durable (R1), so turning it is a change to the session —
         // and the save is debounced exactly as every other layout change is.
         self.mark_session_dirty(Instant::now());
@@ -2842,6 +2847,24 @@ impl Runtime<'_> {
             .filter(|state| files::root_is_addressable(&state.root))
             .map(|state| PathBuf::from(&state.root))
             .collect()
+    }
+
+    /// **The palette opened: every root it lists is walked again** (T-FRESH-FACTS;
+    /// [`palette_index::FileIndexes::reopened`]). An open that a walk already out answers is said
+    /// once in `diagnostics.log`.
+    pub(in crate::runtime) fn ask_for_file_indexes_on_open(&mut self) {
+        for root in self.palette_files_roots() {
+            match self.app.file_indexes.reopened(&root) {
+                palette_index::Reopened::Asked(request) => {
+                    let _ = self.app.file_index_worker.request(request);
+                }
+                palette_index::Reopened::Merged(epoch) => crate::diagnostics::note(&format!(
+                    "palette file index: the palette opened while walk {epoch} of {} was out; \
+                     that walk answers this opening",
+                    root.display()
+                )),
+            }
+        }
     }
 
     /// Ask for any index the `Files` section needs and does not have.

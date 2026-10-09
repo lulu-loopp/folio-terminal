@@ -7,8 +7,8 @@ use super::*;
 use crate::test_support::{
     CARDS_AT_200, PtyPresentationHarness, TARGET, a_local_file, a_local_folder, a_shell, at,
     calls_of, cards_column, centre, every_wheel_situation, flush_test_wheel, found, hand_leaves,
-    hyperlink_hit, in_product, method_body, no_directories, peek_open, reader_names, source,
-    squeezed_body, wheel_pane_at_top,
+    host_file_uri, hyperlink_hit, in_product, method_body, no_directories, on_this_host, peek_open,
+    reader_names, source, squeezed_body, wheel_pane_at_top,
 };
 use bt_source::{Needle, Pattern, View};
 use std::time::Duration;
@@ -877,16 +877,22 @@ fn hyperlink_hover_delay_and_departure_are_event_driven() {
         bt_transcript::paths::PathNamer::ThisWindow,
         &no_directories
     ));
+    // A `file:` URI with no drive names nothing on Windows, so `Ctrl` has
+    // nowhere to send it; off Windows it is the path `/actual-target`, which
+    // `⌘` hands to the system, and the line says so.
     assert_eq!(
         hover.status_text(80).as_deref(),
-        Some("file:///actual-target")
+        Some(on_this_host(
+            "file:///actual-target",
+            "file:///actual-target · ⌘+click opens in default app"
+        ))
     );
     assert!(hover.observe(None, start + Duration::from_millis(301)));
     assert!(hover.active.is_none());
     assert!(hover.underline_target().is_none());
     assert!(hover.show_at.is_none());
 
-    hover.show_blocked(link);
+    hover.show_refused(link, LinkRefusal::Door);
     assert_eq!(
         hover.status_text(80).as_deref(),
         Some("file:///actual-target · blocked")
@@ -939,40 +945,101 @@ fn the_hover_line_says_where_control_would_send_a_local_path() {
         hover
     }
 
-    assert_eq!(
-        settled("file:///C:/notes/readme.md", false)
-            .status_text(120)
-            .as_deref(),
-        Some("file:///C:/notes/readme.md · Ctrl+click opens in default app")
+    let readme = host_file_uri(r"C:\notes\readme.md");
+    let notes = host_file_uri(r"C:\notes");
+    let opens = on_this_host(
+        " · Ctrl+click opens in default app",
+        " · ⌘+click opens in default app",
     );
     assert_eq!(
-        settled("file:///C:/notes", true)
-            .status_text(120)
-            .as_deref(),
-        Some("file:///C:/notes · Ctrl+click shows it in Explorer"),
-        "a folder is shown in Explorer and the line says the verb that runs"
+        settled(&readme, false).status_text(120),
+        Some(format!("{readme}{opens}"))
     );
     assert_eq!(
-        settled("https://example.test/page", false)
-            .status_text(120)
-            .as_deref(),
-        Some("https://example.test/page · Ctrl+click opens in default app"),
-        "a web address already lights its own finger under Ctrl"
+        settled(&notes, true).status_text(120),
+        Some(format!(
+            "{notes}{}",
+            on_this_host(
+                " · Ctrl+click shows it in Explorer",
+                " · ⌘+click shows it in Finder"
+            )
+        )),
+        "a folder is shown in the file manager and the line says the verb that runs"
     );
     assert_eq!(
-        settled("file:///C:/notes/readme.md", false)
-            .status_text(30)
-            .as_deref(),
-        Some("file:///C:/notes/readme.md"),
+        settled("https://example.test/page", false).status_text(120),
+        Some(format!("https://example.test/page{opens}")),
+        "a web address already lights its own finger under the hand-over chord"
+    );
+    assert_eq!(
+        settled(&readme, false).status_text(30).as_deref(),
+        Some(readme.as_str()),
         "an address cut short to make room for an aside is the wrong trade"
     );
     // And a refusal is an answer to the very press the aside was offering,
     // so the two are never printed together.
-    let mut refused = settled("file:///C:/notes/readme.md", false);
-    refused.show_blocked(hyperlink_hit("file:///C:/notes/readme.md"));
+    let mut refused = settled(&readme, false);
+    refused.show_refused(hyperlink_hit(&readme), LinkRefusal::Door);
     assert_eq!(
-        refused.status_text(120).as_deref(),
-        Some("file:///C:/notes/readme.md · blocked")
+        refused.status_text(120),
+        Some(format!("{readme} · blocked"))
+    );
+}
+
+/// RED (F-SWEEP-2-048, owner ruling 2026-10-06) — **a refused link's suffix says what is true**:
+/// "address invalid" for text that is not an address, "blocked" for an address the door will not
+/// go to, "no program to open it" for one the system had nothing for — never 「已拦截」 for all
+/// three.
+///
+/// Each row is pressed through the table (`Ctrl`, so the request is made) and the refusal it
+/// answers is put on the hover line, as `activate_hyperlink` does; the page's own foot reads the
+/// same door.
+///
+/// MUTATION: one suffix for all (`LinkRefusal::suffix` answering `HyperlinkBlockedSuffix` for
+/// every arm) and the invalid rows say "blocked".
+#[test]
+fn a_refused_links_suffix_says_why_it_was_refused() {
+    let no_disk = |_: &Path| -> Option<bt_term::PathVerdict> { None };
+    for (uri, suffix) in [
+        ("http://www.glancepc.com：", " · address invalid"),
+        ("https://例子.测试：8080/文档", " · address invalid"),
+        ("http://", " · address invalid"),
+        ("https://user:pass@例子.测试/", " · blocked"),
+    ] {
+        let HyperlinkActivation::Blocked(refusal) = hyperlink_activation(
+            true,
+            true,
+            uri,
+            bt_transcript::paths::PathNamer::ThisWindow,
+            &no_disk,
+        ) else {
+            panic!("{uri:?} is refused under the hand-over chord");
+        };
+        let mut hover = HyperlinkHover::default();
+        hover.show_refused(hyperlink_hit(uri), refusal);
+        assert_eq!(
+            hover.status_text_in(120, i18n::Lang::English),
+            Some(format!("{uri}{suffix}")),
+            "{uri:?}"
+        );
+    }
+    // The system's refusal of a hand-off it took: the third sentence.
+    let mut hover = HyperlinkHover::default();
+    hover.show_refused(hyperlink_hit("vscode://文档"), LinkRefusal::NoProgram);
+    assert_eq!(
+        hover.status_text_in(120, i18n::Lang::English).as_deref(),
+        Some("vscode://文档 · no program to open it")
+    );
+    // A page's foot: a scheme the door refuses is blocked, a host that does not parse is not an
+    // address.
+    let page = "https://example.com/";
+    assert!(
+        page_foot_lead(page, "mailto:someone@例子.测试")
+            .ends_with(i18n::Text::HyperlinkBlockedSuffix.text())
+    );
+    assert!(
+        page_foot_lead(page, "http://www.glancepc.com：")
+            .ends_with(i18n::Text::HyperlinkInvalidSuffix.text())
     );
 }
 
@@ -1013,11 +1080,18 @@ fn the_hover_line_spends_grid_cells_and_not_characters() {
     // ① The reported hover, in the language it was reported in. A grid wide
     // enough for the address and the aside prints both, and the whole line
     // fits the grid it was measured against.
-    let folder = settled("file:///D:/Demo", true);
+    let demo = host_file_uri(r"D:\Demo");
+    let folder = settled(&demo, true);
     let wide = folder
         .status_text_in(60, i18n::Lang::Chinese)
         .expect("a settled hover has a line");
-    assert_eq!(wide, "file:///D:/Demo · Ctrl+点击在资源管理器中显示");
+    assert_eq!(
+        wide,
+        format!(
+            "{demo}{}",
+            on_this_host(" · Ctrl+点击在资源管理器中显示", " · ⌘+点击在访达中显示")
+        )
+    );
     assert!(
         cells(&wide) <= 60,
         "{} cells on a 60-column grid",
@@ -1025,47 +1099,58 @@ fn the_hover_line_spends_grid_cells_and_not_characters() {
     );
 
     // ② One column short of that, the aside goes whole rather than eating
-    // the head of the address. The nineteen *characters* of the same aside
-    // would have fit, which is the whole of the reported defect.
-    assert_eq!(cells(&wide), 45);
-    assert_eq!(wide.chars().count(), 34);
+    // the head of the address. The *characters* of the same aside would have
+    // fit, which is the whole of the reported defect.
+    let (wide_cells, wide_characters) = on_this_host((45, 34), (33, 25));
+    assert_eq!(cells(&wide), wide_cells);
+    assert_eq!(wide.chars().count(), wide_characters);
     assert_eq!(
-        folder.status_text_in(44, i18n::Lang::Chinese).as_deref(),
-        Some("file:///D:/Demo"),
+        folder.status_text_in(wide_cells - 1, i18n::Lang::Chinese),
+        Some(demo.clone()),
         "an address cut short to make room for an aside is the wrong trade"
     );
     // The English column of the same table is its own width, measured the
     // same way.
+    let english_cells = on_this_host(49, 41);
     assert_eq!(
-        folder.status_text_in(49, i18n::Lang::English).as_deref(),
-        Some("file:///D:/Demo · Ctrl+click shows it in Explorer")
+        folder.status_text_in(english_cells, i18n::Lang::English),
+        Some(format!(
+            "{demo}{}",
+            on_this_host(
+                " · Ctrl+click shows it in Explorer",
+                " · ⌘+click shows it in Finder"
+            )
+        ))
     );
     assert_eq!(
-        folder.status_text_in(48, i18n::Lang::English).as_deref(),
-        Some("file:///D:/Demo")
+        folder.status_text_in(english_cells - 1, i18n::Lang::English),
+        Some(demo.clone())
     );
 
     // ③ An address of ideographs is cut to cells and at a cluster boundary,
     // ellipsis included.
-    let deep = settled("file:///D:/文档/项目/笔记/读我.md", false);
+    let deep = settled(&host_file_uri(r"D:\文档\项目\笔记\读我.md"), false);
     let cut = deep
         .status_text_in(20, i18n::Lang::Chinese)
         .expect("a settled hover has a line");
     assert!(cells(&cut) <= 20, "{cut:?} is {} cells wide", cells(&cut));
-    assert_eq!(cut, "file:///D:/文档/项…");
+    assert_eq!(
+        cut,
+        on_this_host("file:///D:/文档/项…", "file:///文档/项目/…")
+    );
 
     // ④ The verdict is still printed on a grid too narrow for anything else,
     // and it too is measured in cells.
-    let mut refused = settled("file:///D:/Demo", true);
-    refused.show_blocked(hyperlink_hit("file:///D:/Demo"));
+    let mut refused = settled(&demo, true);
+    refused.show_refused(hyperlink_hit(&demo), LinkRefusal::Door);
     assert_eq!(
         refused.status_text_in(3, i18n::Lang::Chinese).as_deref(),
         Some("已"),
         "three cells hold one and a half ideographs, so they hold one"
     );
     assert_eq!(
-        refused.status_text_in(60, i18n::Lang::Chinese).as_deref(),
-        Some("file:///D:/Demo · 已拦截")
+        refused.status_text_in(60, i18n::Lang::Chinese),
+        Some(format!("{demo} · 已拦截"))
     );
 }
 
@@ -1662,8 +1747,9 @@ fn expanded_presented_row_map_drives_forwarded_mouse_row_and_column() {
         1
     );
     let mut task = session.take_live_worker_task().unwrap();
-    let raster = render_live_detection_task(&MathEngine::new(), &mut task, foreground_rgb())
-        .expect("test formula rasterizes through the production live worker entry");
+    let raster =
+        bt_compose::render_live_detection_task(&MathEngine::new(), &mut task, foreground_rgb())
+            .expect("test formula rasterizes through the production live worker entry");
     let ink_height_px = raster.height_px;
     assert!(session.complete_live_worker_result(task, Ok(raster)));
 
@@ -2178,6 +2264,68 @@ fn pane_menu_reset_terminal_modes_stops_mouse_motion_and_restores_legacy_keys() 
         },
     );
     assert_eq!(encoded, Some(vec![b'\r']), "Shift+Enter is legacy again");
+}
+
+/// RED (T-RESET-MODES, ruling 2026-10-08 (1); ledger #19) — **a program killed with the kitty
+/// protocol and modifyOtherKeys on no longer leaves `Ctrl+C` typing `[99;5u` at the prompt**: the
+/// shell's command end gives the key encoder its legacy bytes back, and pointer motion is Folio's
+/// again.
+///
+/// MUTATION: drop the `retire_dead_program_modes` call from the session's `D` arm — Ctrl+C
+/// encodes as `CSI 99;5u` and the motion is still forwarded.
+#[test]
+fn a_shells_command_end_gives_ctrl_c_back_to_the_prompt() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(4).unwrap());
+    session
+        .feed(
+            "\x1b]133;A\x07主屏 $ \x1b]133;B\x07agent\x1b]133;C\x07\r\n\
+             \x1b[?1003h\x1b[?1006h\x1b[>1u\x1b[>4;2m"
+                .as_bytes(),
+        )
+        .unwrap();
+    let ctrl_c = |session: &DualPlaneSession| {
+        let c = Key::Character("c".into());
+        input::keyboard_bytes(
+            &c,
+            &c,
+            winit::keyboard::KeyLocation::Standard,
+            ModifiersState::CONTROL,
+            session.application_cursor_mode(),
+            session.terminal_modes().keyboard,
+            input::KeyOrigin {
+                platform: bt_platform::HostPlatform::OtherUnix,
+                physical_key: winit::keyboard::PhysicalKey::Unidentified(
+                    winit::keyboard::NativeKeyCode::Unidentified,
+                ),
+                text_with_all_modifiers: None,
+                virtual_key_of_scan_code: |_| None,
+                virtual_key_is_dead: |_| false,
+                conpty: bt_pty::ConPtyKind::NotConPty,
+                shifted_character: input::ShiftedCharacter::Known(None),
+            },
+        )
+    };
+    assert_eq!(
+        ctrl_c(&session),
+        Some(b"\x1b[99;5u".to_vec()),
+        "the program's encoding, while it lives"
+    );
+
+    // Killed; the shell ends the command and draws its prompt.
+    session
+        .feed("\x1b]133;D;130\x07\x1b]133;A\x07主屏 $ \x1b]133;B\x07".as_bytes())
+        .unwrap();
+    assert_eq!(
+        ctrl_c(&session),
+        Some(vec![0x03]),
+        "Ctrl+C interrupts again"
+    );
+    assert_eq!(
+        route_forwarded_mouse_motion(None, session.terminal_modes(), ModifiersState::empty()),
+        None,
+        "pointer motion is Folio's again"
+    );
 }
 
 /// PIN (user ruling, 2026-08-20 — the repeal §7.1.5f wrote its own warrant

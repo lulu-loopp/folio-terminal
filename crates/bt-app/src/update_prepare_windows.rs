@@ -439,7 +439,7 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
         .map_err(|_| Stop::Journal)?
         .ok_or(Stop::Busy)?;
     if std::fs::symlink_metadata(home.journal()).is_ok() {
-        return Err(Stop::Busy);
+        return Err(crate::update_prepare::journal_there(&home));
     }
     let allocated = Journal::allocate(txn, rescue_text, layout.allocated(&running)).naming(adapter);
     install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;

@@ -8,7 +8,7 @@ use crate::test_support::{
     PtyPresentationHarness, TAB_ONE, a_held_raster, a_page_that_wants_a_sharper_picture,
     assert_close, buffer_saying, calls_of, card_text, cell_ink, cross_metrics, cross_move,
     cross_solve, document_key, engines_settling_to, found_in, free_calls_of, free_fn_body,
-    in_product, inside, item_body, leaf_saying, ledger_gate, markdown_body, method_body,
+    host_path, in_product, inside, item_body, leaf_saying, ledger_gate, markdown_body, method_body,
     mono_caret_block, no_directories, one_picture, pictures_drawn, prose, prose_caret_block,
     reader_names, rested_bars, scale_task, seat_of, source, source_block, squeezed_body,
     tab_with_a_picture, tab_with_a_preview, text_buffer,
@@ -292,7 +292,7 @@ fn the_spin_steps_the_same_angle_through_the_wrap() {
 /// which is the shape of the debt exactly.
 #[test]
 fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
-    let document = Path::new(r"D:\repo\docs\DESIGN.md");
+    let document = &host_path(r"D:\repo\docs\DESIGN.md");
     for uri in [
         "https://claude.ai/code/artifact/04c0a133-319b-4c8e-b988-7965fe063626",
         "https://github.com/openai/codex/releases/latest",
@@ -410,7 +410,7 @@ fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
     );
     assert_eq!(
         preview_link_activation(true, "http://", document),
-        HyperlinkActivation::Blocked
+        HyperlinkActivation::Blocked(LinkRefusal::Invalid)
     );
     assert!(!preview_link_answers_a_press(false, "http://", document));
     assert!(preview_link_answers_a_press(true, "http://", document));
@@ -3368,7 +3368,8 @@ fn ten_keystrokes_ask_for_no_picture_the_page_is_already_drawing() {
 #[test]
 fn a_decode_that_lands_for_a_picture_the_page_holds_owes_it_no_reflow() {
     let blocks = preview::parse_markdown("![a shot](shots/one.png)\n");
-    let document = Path::new(r"D:\proj\README.md");
+    let document = host_path(r"D:\proj\README.md");
+    let document = document.as_path();
     let waiting = resolve_document_pictures(
         &blocks,
         Some(document),
@@ -3667,7 +3668,12 @@ fn a_watched_file_moving_clears_the_glance_cards_standing_answer() {
 /// The local sibling in the same document is the control: nothing about an ordinary page
 /// changes, and the refused source draws what a picture this window cannot read draws.
 ///
+/// Windows only: `\\server\share\…` is Windows' spelling of another machine. On a
+/// filesystem with one root it is a relative file name in the document's folder, and
+/// no spelling of a source names another machine there.
+///
 /// MUTATION: drop the gate from `resolved_link` and the share is asked for again.
+#[cfg(windows)]
 #[test]
 fn a_share_named_by_a_document_is_never_asked_for() {
     let blocks = preview::parse_markdown(
@@ -3725,10 +3731,11 @@ fn a_share_named_by_a_document_is_never_asked_for() {
 #[test]
 fn a_markdown_image_is_drawn_from_the_documents_own_directory() {
     let blocks = preview::parse_markdown("![a shot](docs/screenshots/one.png)\n");
+    let folder = host_path(r"D:\proj");
     let mut asked: Vec<PathBuf> = Vec::new();
     let pictures = resolve_document_pictures(
         &blocks,
-        Some(Path::new(r"D:\proj\README.md")),
+        Some(&folder.join("README.md")),
         bt_render::Theme::Dark,
         PictureReach::from_the_top(),
         &DocumentPictures::default(),
@@ -3739,12 +3746,12 @@ fn a_markdown_image_is_drawn_from_the_documents_own_directory() {
     );
     assert_eq!(
         asked,
-        vec![PathBuf::from(r"D:\proj\docs/screenshots/one.png")],
+        vec![folder.join("docs/screenshots/one.png")],
         "the source is relative to the document, not to this process",
     );
     assert_eq!(
         pictures.files,
-        [PathBuf::from(r"D:\proj\docs/screenshots/one.png")]
+        [folder.join("docs/screenshots/one.png")]
             .into_iter()
             .collect::<BTreeSet<_>>(),
         "and that file is what the watch is told to follow",
@@ -3877,10 +3884,11 @@ fn a_page_asks_only_for_the_pictures_near_its_viewport() {
         "the ten on screen, and the margin past the last of them",
     );
 
+    let folder = host_path(r"D:\proj");
     let mut asked: Vec<PathBuf> = Vec::new();
     let pictures = resolve_document_pictures(
         &blocks,
-        Some(Path::new(r"D:\proj\README.md")),
+        Some(&folder.join("README.md")),
         bt_render::Theme::Dark,
         reach,
         &DocumentPictures::default(),
@@ -3896,7 +3904,7 @@ fn a_page_asks_only_for_the_pictures_near_its_viewport() {
         asked.len(),
         10 + MARKDOWN_PICTURE_MARGIN,
     );
-    assert_eq!(asked.first(), Some(&PathBuf::from(r"D:\proj\shots/0.png")));
+    assert_eq!(asked.first(), Some(&folder.join("shots/0.png")));
     assert_eq!(
         pictures.files.len(),
         asked.len(),
@@ -7107,8 +7115,11 @@ fn a_seat_that_changes_content_drops_its_video() {
     use bt_platform::video::engine::engines_outstanding;
     let _ledger = ledger_gate();
     let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/assets");
-    let recording = assets.join("folio-video-test.wmv");
-    let another = assets.join("folio-video-test.mp4");
+    // The recording that plays is the one every host's engine decodes — H.264
+    // in MP4; AVFoundation has no source for WMV, so a `.wmv` seat opens no
+    // engine on a Mac and ③'s counter would have nothing to come back from.
+    let recording = assets.join("folio-video-test.mp4");
+    let another = assets.join("folio-video-test.wmv");
     let document = assets.join("md-image-check.md");
     let picture = assets.join("folio-anim-test.gif");
 

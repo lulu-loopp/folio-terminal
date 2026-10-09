@@ -322,10 +322,10 @@ fn cancel_keeps_the_buffer_and_save_and_discard_replay_the_accepted_request() {
         .find("self.window.dirty_gate.take()")
         .expect("the answer takes its request");
     for rerun in [
-        "self.quit_save()",
+        "self.answer_exit(self.window_id(),answer)",
         "self.close_pane(seat)",
         "self.close_tab(index)",
-        "self.window.window_close_requested=true",
+        "self.answer_exit(closing,answer)",
         "self.issue_git_write(",
         "self.checkout_at(",
         "self.clear_pane_scrollback(seat)",
@@ -655,4 +655,716 @@ fn esc_under_the_restore_card_closes_it_unanswered_and_reaches_nothing_beneath()
             .contains("self.app.pending_restore_answer=Some("),
         "the answer is recorded somewhere other than the button's road"
     );
+}
+
+// ── T-SUMMON-DIRTY-PREVIEW: the run's end asks the summoned terminal ───────
+
+/// The ordinary window whose close ends the run, as the summoned terminal's
+/// question carries it.
+fn the_last_ordinary_window() -> WindowId {
+    WindowId::from(7_u64)
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **the last ordinary window closing asks the
+/// summoned terminal about its unsaved preview edit, and nothing is lost.**
+///
+/// Before this ticket `FolioApp::close` closed the summoned terminal with the
+/// run (`retire_the_summon_with_the_run`, `close_window(true)`) without asking
+/// its gate, and the edit went with the window. Now an ending close first puts
+/// `ShutWithTheRun` to the summoned terminal's gate over its own tabs; raised,
+/// the close stops and the question is the existing unsaved-changes card — the
+/// shut's title, buttons and lines (no new string).
+///
+/// The decision runs for real (`raise_dirty_gate_over` on a real tab over a
+/// file typed into); `FolioApp` cannot be built without an
+/// event loop, so its wiring is read through `bt_source`.
+///
+/// MUTATION: in `FolioApp::close`, drop the `the_summon_lets_the_run_end` line
+/// (close the summoned window directly, the pre-ticket behaviour) — the wiring
+/// assertion goes red; in `dirty_gate_names`, answer `ShutWithTheRun` with an
+/// empty list — the first assertion goes red.
+#[test]
+fn the_last_ordinary_window_closing_asks_the_summoned_terminal_about_its_unsaved_edit() {
+    let (path, buffer) = a_file_being_edited("summon-asks");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let request = restore::GateRequest::ShutWithTheRun(the_last_ordinary_window());
+
+    let raised = raise_dirty_gate_over(&mut gate, &summoned, 0, request.clone());
+    assert_eq!(
+        raised,
+        restore::GateRaise::Raised,
+        "the run's end asks the summoned terminal about its unsaved edit"
+    );
+    assert!(
+        !raised.proceeds(),
+        "so the last ordinary window does not close"
+    );
+    assert_eq!(gate.request(), Some(&request));
+    assert!(
+        still_holds_the_edit(&summoned[0], &path),
+        "the summoned terminal still holds what was typed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the file back"),
+        "one\n",
+        "and nothing was written behind the reader's back"
+    );
+
+    // The existing card: the shut's question, its three buttons, its lines.
+    let shut = restore::GateRequest::Shut;
+    assert_eq!(request.title(), shut.title());
+    assert_eq!(request.answer_text(), shut.answer_text());
+    assert!(request.offers_save(), "an exit offers Save all");
+    let names = dirty_gate_names(&summoned, 0, &request);
+    assert_eq!(names, dirty_gate_names(&summoned, 0, &shut));
+    assert_eq!(request.lines(&names), shut.lines(&names));
+
+    let close = squeezed(method_body("FolioApp", "close"));
+    let asked = close
+        .find("ifending&&!self.the_summon_lets_the_run_end(id)?{returnOk(());}")
+        .unwrap_or_else(|| panic!("an ending close does not ask the summoned terminal:\n{close}"));
+    let told = close
+        .find("runtime.close_window(ending)")
+        .expect("the close tells the window");
+    assert!(
+        asked < told,
+        "the question comes before the window is told:\n{close}"
+    );
+    let summon = squeezed(method_body("FolioApp", "the_summon_lets_the_run_end"));
+    assert!(
+        summon.contains(
+            "runtime.raise_dirty_gate(restore::GateRequest::ShutWithTheRun(closing))?;ifraised.proceeds(){returnOk(true);}self.summon_quake()?;Ok(false)"
+        ),
+        "the summoned terminal's own gate decides, and a held close brings it up:\n{summon}"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **Cancel keeps the edit and the run: the
+/// last ordinary window stays open.**
+///
+/// The summoned terminal never stands alone (§7.54e ①: the run ends with the
+/// last ordinary window, and the summoned terminal's `×` hides it), so the
+/// close Cancel refuses is the ordinary window's: no close is re-requested, the
+/// window and with it the run stay, and the next close asks again.
+///
+/// MUTATION: in `answer_an_exit_over`, let Cancel close (`Cancel =>
+/// Some(closes)`) — the first assertion goes red.
+#[test]
+fn cancel_on_the_summoned_terminals_question_keeps_the_edit_and_the_run() {
+    let (path, buffer) = a_file_being_edited("summon-cancel");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let closing = the_last_ordinary_window();
+    let _ = raise_dirty_gate_over(
+        &mut gate,
+        &summoned,
+        0,
+        restore::GateRequest::ShutWithTheRun(closing),
+    );
+    assert_eq!(
+        gate.take(),
+        Some(restore::GateRequest::ShutWithTheRun(closing)),
+        "the answer takes the one question it was"
+    );
+
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Cancel, false),
+        None,
+        "Cancel re-requests no close: the last ordinary window, and the run, stay"
+    );
+    assert!(
+        still_holds_the_edit(&summoned[0], &path),
+        "the summoned terminal still holds what was typed"
+    );
+    assert_eq!(
+        raise_dirty_gate_over(
+            &mut gate,
+            &summoned,
+            0,
+            restore::GateRequest::ShutWithTheRun(closing)
+        ),
+        restore::GateRaise::Raised,
+        "and the next close of that window asks again"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **Save all and Discard close the last
+/// ordinary window, and the run ends as before.**
+///
+/// The confirmed answer is spent in the summoned terminal, but the close it
+/// re-runs is the ordinary window's (`WindowRuntime::window_close_requested`, spent by
+/// the event loop through `FolioApp::close`); that close asks the summoned
+/// terminal again, finds nothing, and ends the run, retiring the summoned
+/// terminal with it. Discard drops the dirty buffer and only that; Save all
+/// writes it (the pool's `save_dirty`, `quit_save`'s door) and closes only when
+/// every write landed.
+///
+/// MUTATION: in `answer_an_exit_over`, answer Discard with `None` — the Discard
+/// block's first assertion goes red; answer Save with `Some(closes)` whatever
+/// `saved_all` says — the half-saved assertion goes red; spend the requested
+/// close on the asking window (`self.close(window_id)` for every request) — the
+/// wiring assertion goes red.
+#[test]
+fn save_and_discard_on_the_summoned_terminals_question_close_the_last_ordinary_window() {
+    let closing = the_last_ordinary_window();
+
+    // Discard.
+    let (path, buffer) = a_file_being_edited("summon-discard");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let request = restore::GateRequest::ShutWithTheRun(closing);
+    let _ = raise_dirty_gate_over(&mut gate, &summoned, 0, request.clone());
+    let accepted = gate.take().expect("the answer takes its request");
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Discard, false),
+        Some(closing),
+        "Discard re-runs the close of the last ordinary window"
+    );
+    assert!(!still_holds_the_edit(&summoned[0], &path));
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &summoned, 0, accepted),
+        restore::GateRaise::NothingToAsk,
+        "the re-run close finds nothing to ask, so the run ends"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the file back"),
+        "one\n",
+        "and the file is as it was"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+
+    // Save all.
+    let (path, buffer) = a_file_being_edited("summon-save");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let _ = raise_dirty_gate_over(&mut gate, &summoned, 0, request.clone());
+    let accepted = gate.take().expect("the answer takes its request");
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Save, false),
+        None,
+        "a save that did not all land closes nothing"
+    );
+    assert_eq!(
+        summoned[0].preview_pool.save_dirty(),
+        vec![("notes.md".to_owned(), preview::SaveOutcome::Saved)],
+        "every dirty buffer written back"
+    );
+    assert_eq!(
+        answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Save, true),
+        Some(closing),
+        "Save all re-runs the close of the last ordinary window"
+    );
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &summoned, 0, accepted),
+        restore::GateRaise::NothingToAsk,
+        "the re-run close finds nothing to ask, so the run ends"
+    );
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("read the file back")
+            .contains("typed by hand"),
+        "and what was typed is on the disk"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+
+    // The re-run close is the ordinary window's, spent at the loop's one door.
+    let event = window_event_squeezed();
+    assert!(
+        event.contains(
+            "letrequested=std::mem::take(&mutruntime.window.window_close_requested);shutting|=requested==Some(window_id);"
+        ) && event.contains(
+            "matchrequested.filter(|closing|*closing!=window_id){Some(closing)=>result.and(hang_watch::during(hang_watch::Station::EventShut,||{self.close(closing)})),"
+        ),
+        "the answer's close is spent on the window it names:\n{event}"
+    );
+}
+
+/// RED (T-SUMMON-DIRTY-PREVIEW) — **a summoned terminal with no unsaved edit
+/// lets the run end at once, with no card.**
+///
+/// The regression half: a summoned terminal whose buffers are all clean — a
+/// file opened and read, not typed into — is nothing to ask, so the last
+/// ordinary window's close goes on and the summoned terminal goes with it as it
+/// always did.
+///
+/// MUTATION: in `DirtyGate::verdict`, answer an empty list with `Raised`'s
+/// branch (`Busy`) — the first assertion goes red.
+#[test]
+fn a_summoned_terminal_with_nothing_unsaved_lets_the_run_end_without_a_card() {
+    let dir = disk_scratch("summon-clean");
+    let path = dir.join("说明.md");
+    std::fs::write(&path, "one\n").expect("write the file");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer_read_from(&path)]);
+    let summoned = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+
+    let answer = raise_dirty_gate_over(
+        &mut gate,
+        &summoned,
+        0,
+        restore::GateRequest::ShutWithTheRun(the_last_ordinary_window()),
+    );
+    assert_eq!(answer, restore::GateRaise::NothingToAsk);
+    assert!(answer.proceeds(), "the run ends on the first close");
+    assert!(!gate.is_open(), "without a card ever going up");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── D-4, 0.4.8 G7: a stop that cannot ask keeps what it would lose ──────────
+
+/// RED (D-4, 0.4.8 G7; ledger #28) — **a dirty preview buffer and a controlled failure: the file
+/// carries the edit.** The failure road keeps each window's unsaved edits through
+/// `keep_unsaved_edits_over` before it closes the window, and a file that can still be written
+/// takes the edit through the quit's own judged write — `PreviewBuffer::save`, the conflict check
+/// and the atomic write — so it is no longer dirty, and the diagnostics line names the file.
+/// A second tab's buffer is kept as well: every tab, not the active one.
+///
+/// MUTATION: in `PreviewPool::keep_dirty`, skip the write (`let outcome =
+/// SaveOutcome::Failed(String::new());` in place of `buffer.save()`) — the file still says
+/// `one`.
+#[test]
+fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
+    let (path, buffer) = a_file_being_edited("g7-saved");
+    let (second, other) = a_file_being_edited("g7-saved-第二");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let (other_tab, _) = tab_with_a_preview(2, vec![other]);
+    let mut tabs = vec![tab, other_tab];
+    let recovery = disk_scratch("g7-recovered-unused").join(preview::RECOVERED_FOLDER);
+
+    let kept = keep_unsaved_edits_over(&mut tabs, &recovery, SystemTime::now());
+
+    for (at, file) in [&path, &second].into_iter().enumerate() {
+        assert!(
+            std::fs::read_to_string(file)
+                .expect("read the file back")
+                .contains("typed by hand"),
+            "the file carries the edit"
+        );
+        assert_eq!(
+            kept[at],
+            preview::Kept::Saved {
+                name: "notes.md".to_owned(),
+                file: Some(file.clone()),
+            }
+        );
+        assert!(
+            kept[at].line().contains(&file.display().to_string()),
+            "{}",
+            kept[at].line()
+        );
+        assert!(!still_holds_the_edit(&tabs[at], file), "and it is clean");
+    }
+    assert!(!recovery.exists(), "nothing needed a copy");
+    for file in [path, second] {
+        let _ = std::fs::remove_dir_all(file.parent().expect("the scratch folder"));
+    }
+}
+
+/// RED (D-4, 0.4.8 G7; ledger #28) — **an unwritable target: the edit is copied into the
+/// recovery folder, never over the file, and the line says where.** The file refuses the write
+/// (read-only on Windows; on Unix its folder is), so the quit would keep the buffer and stay; a
+/// stopping process cannot, and copies the body — in the file's own encoding — into the
+/// recovery folder, under the instant and the file's name. A file that changed on disk since it
+/// was read (the conflict) is the same: the copy is made and the other writer's bytes stay.
+///
+/// MUTATION: in `PreviewPool::keep_dirty`, drop the copy (answer `Kept::Lost` without calling
+/// `recovery_copy`) — no copy, and the line says the edits are lost.
+#[test]
+fn an_unwritable_target_keeps_the_edit_in_a_recovery_copy_and_says_where() {
+    let (path, buffer) = a_file_being_edited("g7-refused");
+    let (moved, other) = a_file_being_edited("g7-conflict-改");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let (other_tab, _) = tab_with_a_preview(2, vec![other]);
+    let mut tabs = vec![tab, other_tab];
+    let recovery = disk_scratch("g7-recovered-数据").join(preview::RECOVERED_FOLDER);
+    // The file read-only refuses the write on Windows; its folder read-only refuses it on Unix,
+    // where a rename replaces a read-only file. Both are set everywhere, and each is put back.
+    let folder = path.parent().expect("the scratch folder").to_path_buf();
+    let kept_file = std::fs::metadata(&path).expect("the file").permissions();
+    let kept_folder = std::fs::metadata(&folder)
+        .expect("the folder")
+        .permissions();
+    let refuse = |refused: bool| {
+        for (place, kept) in [(&path, &kept_file), (&folder, &kept_folder)] {
+            let mut permissions = kept.clone();
+            if refused {
+                permissions.set_readonly(true);
+            }
+            std::fs::set_permissions(place, permissions).expect("set the permissions");
+        }
+    };
+    refuse(true);
+    std::fs::write(&moved, "another writer — 别人\n").expect("the other writer");
+    crate::test_support::move_the_disk_forward(&moved);
+
+    let kept = keep_unsaved_edits_over(&mut tabs, &recovery, SystemTime::UNIX_EPOCH);
+    refuse(false);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the file back"),
+        "one\n",
+        "the refused file is as it was"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&moved).expect("read the file back"),
+        "another writer — 别人\n",
+        "and the other writer's bytes are not written over"
+    );
+    let mut copies = Vec::new();
+    for (at, file) in [&path, &moved].into_iter().enumerate() {
+        let preview::Kept::Copied {
+            name,
+            file: Some(from),
+            copy,
+            ..
+        } = &kept[at]
+        else {
+            panic!("{:?}", kept[at]);
+        };
+        assert_eq!((name.as_str(), from), ("notes.md", file));
+        assert_eq!(copy.parent(), Some(recovery.as_path()));
+        assert!(
+            std::fs::read_to_string(copy)
+                .expect("the copy")
+                .contains("typed by hand"),
+            "the copy holds the edit"
+        );
+        let line = kept[at].line();
+        assert!(
+            line.contains(&file.display().to_string())
+                && line.contains(&copy.display().to_string()),
+            "{line}"
+        );
+        copies.push(copy.clone());
+    }
+    assert_eq!(
+        copies
+            .iter()
+            .map(|copy| copy
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned())
+            .collect::<Vec<_>>(),
+        [
+            "1970-01-01T000000Z notes.md",
+            "1970-01-01T000000Z (1) notes.md"
+        ],
+        "two copies of one name from one instant are two files"
+    );
+    for file in [path, moved] {
+        let _ = std::fs::remove_dir_all(file.parent().expect("the scratch folder"));
+    }
+    let _ = std::fs::remove_dir_all(recovery.parent().expect("the scratch folder"));
+}
+
+/// **The controlled failure road is one road** (D-4, 0.4.8 G7): a structural guard over the
+/// product (source-reading by design: its subject is where the code ends a run).
+///
+/// Three tables, each the whole of what the product does:
+///
+/// * [`FAIL_SITES`] — every call of `FolioApp::fail`, by the item it stands in and how many: the
+///   twelve sites, each a controlled failure;
+/// * [`ROAD`] — every call of `FolioApp::stop_every_window`, the road that keeps every window's
+///   unsaved edits and then closes every window with `ending`: `fail`, and `exiting` (a loop
+///   stopped by something that is not a window closing);
+/// * [`CLOSES`] — every call of `Runtime::close_window` outside the road, with why it does not
+///   need the road. A thirteenth site that closed windows for a stop of its own, past the
+///   preservation, is a call this table does not have.
+///
+/// A call standing in no function (a `const`, a `static`) is refused: it has no row.
+mod failure_road {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use bt_source::{
+        DiskScope, Index, ItemIdentity, ItemQuery, Pattern, Search, TargetId, TargetKind,
+        TargetRoot, Universe, Vendor, View, needle, report,
+    };
+
+    /// One item that calls, how many times, and why.
+    pub(super) struct Row {
+        pub(super) item: &'static str,
+        pub(super) count: usize,
+        pub(super) why: &'static str,
+    }
+
+    const fn row(item: &'static str, count: usize, why: &'static str) -> Row {
+        Row { item, count, why }
+    }
+
+    /// The twelve sites of a controlled failure.
+    pub(super) const FAIL_SITES: &[Row] = &[
+        row(
+            "crate::FolioApp::about_to_wait_inner",
+            6,
+            "the retirement's turn (2), the settle chain, the drag broker, the reap, a window's turn",
+        ),
+        row(
+            "crate::FolioApp::resumed",
+            2,
+            "a window's first duties after its launch, and a launch that failed",
+        ),
+        row(
+            "crate::FolioApp::user_event",
+            1,
+            "an application event's handler",
+        ),
+        row(
+            "crate::FolioApp::window_event",
+            3,
+            "the wheel's flush, the drop's flush, the handler's result",
+        ),
+    ];
+
+    /// Every caller of the road.
+    pub(super) const ROAD: &[Row] = &[
+        row("crate::FolioApp::fail", 1, "a controlled failure"),
+        row(
+            "crate::FolioApp::exiting",
+            1,
+            "a loop stopped by something that is not a window closing",
+        ),
+    ];
+
+    /// Every closing of a window, and why it needs no road of its own.
+    pub(super) const CLOSES: &[Row] = &[
+        row(
+            "crate::FolioApp::stop_every_window",
+            1,
+            "the road itself, after every window kept its unsaved edits",
+        ),
+        row(
+            "crate::FolioApp::close",
+            1,
+            "the ordinary close, behind the window's dirty gate",
+        ),
+        row(
+            "crate::FolioApp::retire_the_summon_with_the_run",
+            1,
+            "the summoned terminal, closed with the run's last ordinary window through DirtyGate",
+        ),
+        row(
+            "crate::FolioApp::transfer_tab",
+            1,
+            "a window emptied by a tab's move, not the process: its last tab went to another",
+        ),
+        row(
+            "crate::FolioApp::settle_tear_out",
+            1,
+            "a torn-out window nothing arrived in, not the process: the tab is still where it was",
+        ),
+    ];
+
+    /// `crate::module::Type::item`, as the tables name it.
+    fn key(identity: &ItemIdentity) -> String {
+        match &identity.type_owner {
+            Some(owner) => format!("{}::{owner}::{}", identity.module_path, identity.name),
+            None => format!("{}::{}", identity.module_path, identity.name),
+        }
+    }
+
+    /// Every product call of `name(`, by the item it stands in, its own declaration (`owner`'s)
+    /// excepted; a call that stands in no function is a failure of its own.
+    fn calls(
+        index: &Index,
+        owner: &str,
+        name: &str,
+        failures: &mut Vec<String>,
+    ) -> BTreeMap<String, usize> {
+        let search = Search::new(needle!(Pattern::call(name)), View::Identifiers)
+            .exempting_declarations_of(ItemQuery::method(owner, name));
+        let found = index
+            .search(&search)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(index);
+        if found.outside_items(index) > 0 {
+            failures.push(format!(
+                "a call of `{name}` stands in no function, so no row can hold it: {}",
+                found.report(index)
+            ));
+        }
+        let mut calls = BTreeMap::new();
+        for (identity, count) in found.owners(index) {
+            *calls.entry(key(&identity)).or_insert(0) += count;
+        }
+        calls
+    }
+
+    /// The differences between `observed` and `table`, each naming `what`.
+    fn compare(
+        what: &str,
+        observed: &BTreeMap<String, usize>,
+        table: &[Row],
+        failures: &mut Vec<String>,
+    ) {
+        for (item, count) in observed {
+            match table.iter().find(|row| row.item == item) {
+                Some(row) if row.count == *count => {}
+                Some(row) => failures.push(format!(
+                    "{item} calls {what} {count} time(s) in the code and {} in its row ({})",
+                    row.count, row.why
+                )),
+                None => failures.push(format!(
+                    "{item} calls {what} {count} time(s) and has no row: a site past the one road"
+                )),
+            }
+        }
+        for row in table {
+            if !observed.contains_key(row.item) {
+                failures.push(format!(
+                    "the row for {} ({}) names a call of {what} the code no longer has",
+                    row.item, row.why
+                ));
+            }
+        }
+    }
+
+    /// **The guard**: every difference between `index` and the three tables.
+    pub(super) fn judge(
+        index: &Index,
+        fail_sites: &[Row],
+        road: &[Row],
+        closes: &[Row],
+    ) -> Vec<String> {
+        let mut failures = Vec::new();
+        let fails: BTreeMap<String, usize> = calls(index, "FolioApp", "fail", &mut failures)
+            .into_iter()
+            .filter(|(item, _)| item.starts_with("crate::FolioApp::"))
+            .collect();
+        compare("`FolioApp::fail`", &fails, fail_sites, &mut failures);
+        let roads = calls(index, "FolioApp", "stop_every_window", &mut failures);
+        compare("the road", &roads, road, &mut failures);
+        let closes_seen = calls(index, "Runtime", "close_window", &mut failures);
+        compare(
+            "`Runtime::close_window`",
+            &closes_seen,
+            closes,
+            &mut failures,
+        );
+        failures
+    }
+
+    /// RED (D-4, 0.4.8 G7) — **the twelve `fail` sites all enter through the one road, and no
+    /// other site closes a window past it.**
+    ///
+    /// MUTATION (planted below, and on the product): add a function to `impl FolioApp` that
+    /// closes every window with `ending` itself — `self.for_each_window(|runtime|
+    /// runtime.close_window(true))` — and the guard names it with no row; call
+    /// `close_window(true)` in `fail` again in place of the road and it names `fail`.
+    #[test]
+    fn every_controlled_failure_enters_through_the_one_road() {
+        let failures = judge(Index::of_package("bt-app"), FAIL_SITES, ROAD, CLOSES);
+        assert!(
+            failures.is_empty(),
+            "the failure road and its tables differ:\n  {}",
+            failures.join("\n  ")
+        );
+        assert_eq!(
+            FAIL_SITES.iter().map(|row| row.count).sum::<usize>(),
+            12,
+            "the twelve sites"
+        );
+    }
+
+    /// A crate with a road, its sites, and a thirteenth site that closes past it.
+    const PLANTED: &str = r#"
+pub struct Runtime;
+impl Runtime {
+    pub fn close_window(&mut self, _ending: bool) {}
+    pub fn keep_unsaved_edits(&mut self) {}
+}
+pub struct FolioApp {
+    runtime: Runtime,
+}
+impl FolioApp {
+    fn fail(&mut self) {
+        self.stop_every_window();
+    }
+    fn stop_every_window(&mut self) {
+        self.runtime.keep_unsaved_edits();
+        self.runtime.close_window(true);
+    }
+    fn turn(&mut self) {
+        self.fail();
+        self.fail();
+    }
+    fn past_the_road(&mut self) {
+        self.runtime.close_window(true);
+    }
+}
+pub struct Archive;
+impl Archive {
+    fn read(&self) {
+        let fail = |_: u8| ();
+        fail(0);
+    }
+}
+"#;
+
+    fn planted_index() -> Index {
+        let directory = bt_testpath::temp_path("g7-failure-road");
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+        let root = directory.join("lib.rs");
+        std::fs::write(&root, PLANTED).expect("the planted crate is written");
+        let universe = Universe::declare(
+            "the planted failure road",
+            vec![TargetRoot {
+                id: TargetId {
+                    package: "planted".to_owned(),
+                    kind: TargetKind::Library,
+                    name: "planted".to_owned(),
+                },
+                file: root,
+            }],
+            vec![DiskScope::under(&directory)],
+            Vendor::Excluded,
+        )
+        .expect("the planted crate is where it was written");
+        let index =
+            Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        let _ = std::fs::remove_dir_all(Path::new(&directory));
+        index
+    }
+
+    /// RED (D-4, 0.4.8 G7) — **the guard names a thirteenth site that closes past the road, and
+    /// a `fail` site the table does not count; and passes the same crate whole.** Another type's
+    /// `fail` is no site.
+    ///
+    /// MUTATION: make `compare` skip items with no row — the planted `past_the_road` passes.
+    #[test]
+    fn the_guard_names_a_site_past_the_road_and_passes_the_crate_whole() {
+        let index = planted_index();
+        let fail_sites = [row("crate::FolioApp::turn", 2, "planted")];
+        let road = [row("crate::FolioApp::fail", 1, "planted")];
+        let whole = [
+            row("crate::FolioApp::stop_every_window", 1, "the road"),
+            row("crate::FolioApp::past_the_road", 1, "planted"),
+        ];
+        assert_eq!(
+            judge(&index, &fail_sites, &road, &whole),
+            Vec::<String>::new()
+        );
+
+        let failures = judge(&index, &fail_sites, &road, &whole[..1]);
+        assert!(
+            failures.len() == 1
+                && failures[0].contains("crate::FolioApp::past_the_road")
+                && failures[0].contains("has no row"),
+            "{failures:#?}"
+        );
+        let counted = [row("crate::FolioApp::turn", 1, "planted")];
+        let failures = judge(&index, &counted, &road, &whole);
+        assert!(
+            failures.len() == 1 && failures[0].contains("2 time(s) in the code and 1"),
+            "{failures:#?}"
+        );
+    }
 }

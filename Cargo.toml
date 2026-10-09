@@ -6,10 +6,12 @@ resolver = "3"
 exclude = ["vendor/arboard", "vendor/wl-clipboard-rs"]
 members = [
     "crates/bt-term",
+    "crates/bt-compose",
     "crates/bt-transcript",
     "crates/bt-doc",
     "crates/bt-viewport",
     "crates/bt-detect",
+    "crates/bt-effects",
     "crates/bt-layout",
     "crates/bt-math",
     "crates/bt-corpus",
@@ -242,6 +244,12 @@ unicode-segmentation = "1"
 unicode-script = "0.5.8"
 unicode-properties = { version = "0.1", default-features = false, features = ["emoji", "general-category"] }
 unicode-width = "0.2"
+# The WHATWG host parser behind `bt_transcript::web_host_parses`, the one check of whether a web
+# address's host is a host (F-SWEEP-2-048). Already in the lock file at this exact version through
+# `hayagriva` and `typst-library`, so naming it here costs no new package and nothing in
+# `THIRD-PARTY-NOTICES.md`; exact so that what a browser would call a host does not change under a
+# build nobody touched.
+url = "=2.5.8"
 # `default-features = false` and `std` named instead, which is the same thing —
 # `vte`'s `default` is exactly `["std"]`. The point is that it is the same thing
 # under *every* package selection. `bt-corpus` is the only workspace member that

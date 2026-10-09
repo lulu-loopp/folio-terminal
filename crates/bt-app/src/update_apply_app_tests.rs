@@ -83,21 +83,8 @@ fn every_owner_door_takes_its_own_token_by_value() {
         FrameTrigger, GpuContext, PresentOutcome, RenderError, SeatFrame, WindowRenderer,
         WindowTarget,
     };
-    use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    let _: fn(
-        WaitToken<'_, doors::PtyBirth>,
-        OsString,
-        &[OsString],
-        bool,
-        shell_integration::EnvironmentDerivation,
-        &[(OsString, OsString)],
-        &[(OsString, OsString)],
-        PtySize,
-        OutputWake,
-        Option<PathBuf>,
-    ) -> Result<PtySession, PtyError> = pty_door::spawn_shell;
     let _: fn(WaitToken<'_, doors::PtyResize>, &mut PtySession, PtySize) -> Result<(), PtyError> =
         pty_door::resize;
     let _: fn(WaitToken<'_, doors::PaneRetirementWait>, Duration) -> usize =
@@ -182,7 +169,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
         directory: &Path,
         argv: &cli::CliRequest,
     ) -> Option<i32> {
-        launch_wire::hand_over(token, admitted, directory, argv, |_| {})
+        launch_wire::hand_over(token, admitted, directory, argv, |_| {}, |_| {})
     }
     let _ = hands_over;
 }

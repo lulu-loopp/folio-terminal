@@ -11,13 +11,13 @@
 #
 # THE SOURCE SET (the test's `SOURCE_SET` is where it is written):
 #   crates/{bt-unicode,bt-transcript,bt-doc,bt-layout,bt-viewport,bt-detect,
-#           bt-math,bt-render,bt-term}/src
+#           bt-effects,bt-math,bt-render,bt-term,bt-compose}/src
 #   vendor/vte/src
 #   vendor/alacritty_terminal/src minus `crate::event_loop` and `crate::tty`
-#   crates/bt-platform/src/admission.rs (the module `crate::admission`) only
 #
-# OUT OF SCOPE, BY NAME: the rest of bt-platform (its `http`, `install_txn` and
-# `instance` modules read std::time today), bt-app, bt-pty, bt-persist,
+# OUT OF SCOPE, BY NAME: bt-platform (its `http`, `install_txn` and `instance`
+# modules read std::time today; its admission vocabulary is bt-effects' since
+# CC-3), bt-app, bt-pty, bt-persist,
 # bt-corpus, bt-winres, bt-workbench, bt-source, bt-lint-probe, vendor/mitex and
 # vendor/mitex-parser. None is in the wasm32 graph; each joins the set in the
 # ticket that brings it into that graph. `gates-can-fail` plants a clock in

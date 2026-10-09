@@ -7,9 +7,9 @@ use super::*;
 use crate::test_support::{
     CARDS_AT_150, CARDS_AT_200, RAIL_FAILED_THEN_PROMPT, ResizeGateHarness, TwoPaneHarness,
     a_local_file, a_local_folder, breathing, calls_of, cards_column, cross_metrics, cross_solve,
-    free_fn_body, glance_fixture, grid_of, leaf_saying, method_body, no_directories, one_turn,
-    rail_test_body, reader_names, ring, ringing_tab, squeezed, squeezed_body,
-    tab_with_a_files_column,
+    free_fn_body, glance_fixture, grid_of, host_file_uri, host_path, host_spelling, leaf_saying,
+    method_body, no_directories, on_this_host, one_turn, rail_test_body, reader_names, ring,
+    ringing_tab, squeezed, squeezed_body, tab_with_a_files_column,
 };
 use std::time::Duration;
 
@@ -323,9 +323,9 @@ fn hyperlink_activation_requires_a_click_without_drag() {
     // a door that opened out of a drag would be the one nobody tested.
     for uri in [
         "https://example.test",
-        "file:///C:/notes.md",
-        "file:///C:/page.html",
-        "file:///C:/some/folder",
+        host_file_uri(r"C:\notes.md").as_str(),
+        host_file_uri(r"C:\page.html").as_str(),
+        host_file_uri(r"C:\some\folder").as_str(),
         "mailto:person@example.test",
     ] {
         for control in [false, true] {
@@ -369,7 +369,7 @@ fn hyperlink_activation_requires_a_click_without_drag() {
                 uri,
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| {
-                    Some(if path == Path::new(r"C:\some\folder") {
+                    Some(if path == host_path(r"C:\some\folder").as_path() {
                         a_local_folder()
                     } else {
                         a_local_file()
@@ -384,17 +384,17 @@ fn hyperlink_activation_requires_a_click_without_drag() {
         hyperlink_activation(
             false,
             true,
-            "file:///C:/page.html",
+            &host_file_uri(r"C:\page.html"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &|path| {
-                Some(if path == Path::new(r"C:\some\folder") {
+                Some(if path == host_path(r"C:\some\folder").as_path() {
                     a_local_folder()
                 } else {
                     a_local_file()
                 })
             }
         ),
-        HyperlinkActivation::Preview(PathBuf::from(r"C:\page.html"), None),
+        HyperlinkActivation::Preview(host_path(r"C:\page.html"), None),
         "and a page is a destination inside this window now, so it is not on \
              that list"
     );
@@ -402,17 +402,17 @@ fn hyperlink_activation_requires_a_click_without_drag() {
         hyperlink_activation(
             false,
             true,
-            "file:///C:/some/folder",
+            &host_file_uri(r"C:\some\folder"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &|path| {
-                Some(if path == Path::new(r"C:\some\folder") {
+                Some(if path == host_path(r"C:\some\folder").as_path() {
                     a_local_folder()
                 } else {
                     a_local_file()
                 })
             }
         ),
-        HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\some\folder")),
+        HyperlinkActivation::FilesColumn(host_path(r"C:\some\folder")),
         "and the folder that left it starts no program either — it opens a column"
     );
     assert_eq!(
@@ -596,7 +596,7 @@ fn a_web_address_printed_in_the_terminal_opens_in_this_window() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Blocked
+        HyperlinkActivation::Blocked(LinkRefusal::Invalid)
     );
 }
 
@@ -627,7 +627,7 @@ fn the_browser_door_refuses_the_userinfo_shape_the_address_field_refuses() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories,
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Door),
             "{uri} is the shape the address field already refuses"
         );
         // The plain half is the seat's, and the seat's own door says the
@@ -726,12 +726,12 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         hyperlink_activation(
             false,
             true,
-            "file:///C:/Users/me/phd-application-timeline.html",
+            &host_file_uri(r"C:\Users\me\phd-application-timeline.html"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
         HyperlinkActivation::Preview(
-            PathBuf::from(r"C:\Users\me\phd-application-timeline.html"),
+            host_path(r"C:\Users\me\phd-application-timeline.html"),
             None
         ),
         "a plain click on a page opens the page, on the seat that renders \
@@ -743,92 +743,100 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         hyperlink_activation(
             true,
             true,
-            "file:///C:/Users/me/phd-application-timeline.html",
+            &host_file_uri(r"C:\Users\me\phd-application-timeline.html"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\Users\me\phd-application-timeline.html")),
+        HyperlinkActivation::External(host_path(r"C:\Users\me\phd-application-timeline.html")),
         "and Ctrl sends the page to whatever this machine opens pages with"
     );
     assert_eq!(
         hyperlink_activation(
             false,
             true,
-            "file:///C:/Users/me/notes.md",
+            &host_file_uri(r"C:\Users\me\notes.md"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Preview(PathBuf::from(r"C:\Users\me\notes.md"), None),
+        HyperlinkActivation::Preview(host_path(r"C:\Users\me\notes.md"), None),
         "every other local file goes down the files column's own road"
     );
     assert_eq!(
         hyperlink_activation(
             true,
             true,
-            "file:///C:/Users/me/notes.md",
+            &host_file_uri(r"C:\Users\me\notes.md"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\Users\me\notes.md")),
+        HyperlinkActivation::External(host_path(r"C:\Users\me\notes.md")),
         "and Ctrl hands that same file to the system instead"
     );
     assert_eq!(
         hyperlink_activation(
             false,
             true,
-            "file:///D:/%E4%B8%AD%E6%96%87/note.md",
+            &host_file_uri(r"D:\%E4%B8%AD%E6%96%87\note.md"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Preview(PathBuf::from(r"D:\中文\note.md"), None),
+        HyperlinkActivation::Preview(host_path(r"D:\中文\note.md"), None),
         "and it is the decoded path that travels, not the URI"
     );
     assert_eq!(
         hyperlink_activation(
             true,
             true,
-            "file:///C:/repo/docs",
+            &host_file_uri(r"C:\repo\docs"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &|path| {
-                Some(if path == Path::new(r"C:\repo\docs") {
+                Some(if path == host_path(r"C:\repo\docs").as_path() {
                     a_local_folder()
                 } else {
                     a_local_file()
                 })
             }
         ),
-        HyperlinkActivation::Reveal(PathBuf::from(r"C:\repo\docs")),
+        HyperlinkActivation::Reveal(host_path(r"C:\repo\docs")),
         "a folder is Explorer's"
     );
     assert_eq!(
         hyperlink_activation(
             false,
             true,
-            "file:///C:/repo/docs",
+            &host_file_uri(r"C:\repo\docs"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &|path| {
-                Some(if path == Path::new(r"C:\repo\docs") {
+                Some(if path == host_path(r"C:\repo\docs").as_path() {
                     a_local_folder()
                 } else {
                     a_local_file()
                 })
             }
         ),
-        HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\repo\docs")),
+        HyperlinkActivation::FilesColumn(host_path(r"C:\repo\docs")),
         "and a plain click opens no Explorer window: it points this window's own column at it"
     );
     // **A share: the card plainly, the system under `Ctrl`** (ticket 14, owner ruling
     // 2026-09-21). Neither half probes it — the ledger closure panics if asked.
-    for (control, expected) in [
-        (
-            false,
-            HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md"), None),
-        ),
-        (
-            true,
-            HyperlinkActivation::Share(PathBuf::from(r"\\server\share\notes.md")),
-        ),
-    ] {
+    // Off Windows a URI naming another host names no path on this machine: the plain half
+    // says nothing and `Ctrl` is refused, and neither asks either.
+    for (control, expected) in on_this_host(
+        [
+            (
+                false,
+                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md"), None),
+            ),
+            (
+                true,
+                HyperlinkActivation::Share(PathBuf::from(r"\\server\share\notes.md")),
+            ),
+        ],
+        [
+            (false, HyperlinkActivation::None),
+            (true, HyperlinkActivation::Blocked(LinkRefusal::Invalid)),
+        ],
+    ) {
         assert_eq!(
             hyperlink_activation(
                 control,
@@ -845,32 +853,36 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
     // filesystem is running on this machine and reaching it crosses no network, so the row it
     // takes is the row every other local file takes — and the URI it takes it by is the one
     // `local_path_to_file_uri` writes for exactly that path, which is what makes the printed
-    // `/etc/hosts` in a WSL pane and this table one road rather than two.
-    let hosts = PathBuf::from(r"\\wsl.localhost\Ubuntu\etc\hosts");
-    let hosts_uri = bt_transcript::paths::local_path_to_file_uri(&hosts);
-    assert_eq!(hosts_uri, "file://wsl.localhost/Ubuntu/etc/hosts");
-    assert_eq!(
-        hyperlink_activation(
-            false,
-            true,
-            &hosts_uri,
-            bt_transcript::paths::PathNamer::ThisWindow,
-            &no_directories
-        ),
-        HyperlinkActivation::Preview(hosts.clone(), None),
-        "a distribution-internal path opens in this window, through the share Windows serves it at"
-    );
-    assert_eq!(
-        hyperlink_activation(
-            true,
-            true,
-            &hosts_uri,
-            bt_transcript::paths::PathNamer::ThisWindow,
-            &no_directories
-        ),
-        HyperlinkActivation::External(hosts),
-        "and `Ctrl` hands it over exactly as it hands over a drive-rooted file"
-    );
+    // `/etc/hosts` in a WSL pane and this table one road rather than two. A distribution's
+    // share is Windows path grammar, so these rows are Windows-only.
+    #[cfg(windows)]
+    {
+        let hosts = PathBuf::from(r"\\wsl.localhost\Ubuntu\etc\hosts");
+        let hosts_uri = bt_transcript::paths::local_path_to_file_uri(&hosts);
+        assert_eq!(hosts_uri, "file://wsl.localhost/Ubuntu/etc/hosts");
+        assert_eq!(
+            hyperlink_activation(
+                false,
+                true,
+                &hosts_uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
+            HyperlinkActivation::Preview(hosts.clone(), None),
+            "a distribution-internal path opens in this window, through the share Windows serves it at"
+        );
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                &hosts_uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
+            HyperlinkActivation::External(hosts),
+            "and `Ctrl` hands it over exactly as it hands over a drive-rooted file"
+        );
+    }
     for uri in [
         "mailto:person@example.test",
         "javascript:alert(1)",
@@ -915,6 +927,11 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
 ///
 /// MUTATION: delete the `ClickIntent::System if is_a_share_on_another_machine(..)` arm of
 /// `reference_activation` and the `Ctrl` row comes back `Preview`.
+///
+/// Windows only: a share is Windows path grammar. Off Windows a `file:` URI naming another
+/// host names no path at all, which
+/// `a_click_routes_web_files_pages_folders_shares_and_unknown_schemes` pins.
+#[cfg(windows)]
 #[test]
 fn ctrl_on_a_share_hands_it_to_the_system_and_a_plain_click_keeps_the_card() {
     let share = PathBuf::from(r"\\server\share\a.md");
@@ -1004,7 +1021,7 @@ fn ctrl_on_any_scheme_hands_the_uri_to_the_system() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Invalid),
             "{not_a_scheme:?} is not a URI"
         );
     }
@@ -1019,6 +1036,10 @@ fn ctrl_on_any_scheme_hands_the_uri_to_the_system() {
 ///
 /// MUTATION: route every `ReferenceRow::Unasked` path to `Share` under `Ctrl` (drop the
 /// `is_a_share_on_another_machine` guard) and the distribution row goes red.
+///
+/// Windows only: device, verbatim and WSL share spellings are Windows path grammar, and a POSIX
+/// path has none of them.
+#[cfg(windows)]
 #[test]
 fn device_and_verbatim_spellings_stay_refused_under_ctrl() {
     for uri in [
@@ -1035,7 +1056,7 @@ fn device_and_verbatim_spellings_stay_refused_under_ctrl() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|_| panic!("a device or verbatim spelling is never asked about")
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Invalid),
             "{uri:?} stays refused under Ctrl"
         );
     }
@@ -1079,6 +1100,9 @@ fn device_and_verbatim_spellings_stay_refused_under_ctrl() {
 ///
 /// MUTATION: ignore the namer in `may_read_unasked` and the first two assertions go red — one
 /// pane's link is every pane's again.
+///
+/// Windows only: a WSL distribution's share exists only where Windows serves one.
+#[cfg(windows)]
 #[test]
 fn a_distribution_share_is_named_only_by_the_pane_standing_in_it() {
     let hosts = PathBuf::from(r"\\wsl.localhost\Ubuntu\etc\hosts");
@@ -1148,37 +1172,37 @@ fn a_distribution_share_is_named_only_by_the_pane_standing_in_it() {
 fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does() {
     for (uri, path) in [
         (
-            "file:///C:/Users/me/timeline.html",
-            r"C:\Users\me\timeline.html",
+            host_file_uri(r"C:\Users\me\timeline.html"),
+            host_spelling(r"C:\Users\me\timeline.html"),
         ),
         (
-            "file:///C:/Users/me/TIMELINE.HTM",
-            r"C:\Users\me\TIMELINE.HTM",
+            host_file_uri(r"C:\Users\me\TIMELINE.HTM"),
+            host_spelling(r"C:\Users\me\TIMELINE.HTM"),
         ),
         (
-            "file:///C:/Program%20Files/report.html",
-            r"C:\Program Files\report.html",
+            host_file_uri(r"C:\Program%20Files\report.html"),
+            host_spelling(r"C:\Program Files\report.html"),
         ),
         (
-            "file:///D:/%E4%B8%AD%E6%96%87/%E9%A1%B5.html",
-            r"D:\中文\页.html",
+            host_file_uri(r"D:\%E4%B8%AD%E6%96%87\%E9%A1%B5.html"),
+            host_spelling(r"D:\中文\页.html"),
         ),
     ] {
         assert_eq!(
             hyperlink_activation(
                 false,
                 true,
-                uri,
+                &uri,
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Preview(PathBuf::from(path), None),
+            HyperlinkActivation::Preview(PathBuf::from(&path), None),
             "a plain click opens the page in this window: {uri:?}"
         );
         // And what it opens it *as* is the engine's lane, never the document
         // pool — which is the half of this test's name that did not move.
         assert_eq!(
-            preview_open_lane(Path::new(path)),
+            preview_open_lane(Path::new(&path)),
             PreviewOpenLane::Page,
             "and the seat draws the page rather than its source: {uri:?}"
         );
@@ -1187,7 +1211,7 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
                 hyperlink_activation(
                     true,
                     true,
-                    uri,
+                    &uri,
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &no_directories
                 ),
@@ -1200,40 +1224,46 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
         hyperlink_activation(
             true,
             true,
-            "file:///C:/Program%20Files/report.html",
+            &host_file_uri(r"C:\Program%20Files\report.html"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::External(PathBuf::from(r"C:\Program Files\report.html")),
+        HyperlinkActivation::External(host_path(r"C:\Program Files\report.html")),
         "and it is the decoded path that travels, not the URI"
     );
     // The real extension, never a substring of the name: one of these is a
     // template dialect and the other is a text file that happens to spell
     // `.html` in the middle of its name.
     for (uri, path) in [
-        ("file:///C:/site/index.htmlx", r"C:\site\index.htmlx"),
         (
-            "file:///C:/site/report.html.txt",
-            r"C:\site\report.html.txt",
+            host_file_uri(r"C:\site\index.htmlx"),
+            host_spelling(r"C:\site\index.htmlx"),
         ),
-        ("file:///C:/site/html", r"C:\site\html"),
+        (
+            host_file_uri(r"C:\site\report.html.txt"),
+            host_spelling(r"C:\site\report.html.txt"),
+        ),
+        (
+            host_file_uri(r"C:\site\html"),
+            host_spelling(r"C:\site\html"),
+        ),
     ] {
         assert_eq!(
             hyperlink_activation(
                 false,
                 true,
-                uri,
+                &uri,
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Preview(PathBuf::from(path), None),
+            HyperlinkActivation::Preview(PathBuf::from(&path), None),
             "not a page, so a plain click is still the preview seat's: {uri:?}"
         );
         // Both halves of the table reach the seat now, so this is where the
         // difference between them is: a template dialect and a text file go
         // through the pool and are read, not rendered.
         assert_eq!(
-            preview_open_lane(Path::new(path)),
+            preview_open_lane(Path::new(&path)),
             PreviewOpenLane::Document,
             "and it is read as a document: {uri:?}"
         );
@@ -1242,31 +1272,39 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
         hyperlink_activation(
             true,
             true,
-            "file:///C:/sites/archive.html",
+            &host_file_uri(r"C:\sites\archive.html"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &|path| {
-                Some(if path == Path::new(r"C:\sites\archive.html") {
+                Some(if path == host_path(r"C:\sites\archive.html").as_path() {
                     a_local_folder()
                 } else {
                     a_local_file()
                 })
             }
         ),
-        HyperlinkActivation::Reveal(PathBuf::from(r"C:\sites\archive.html")),
+        HyperlinkActivation::Reveal(host_path(r"C:\sites\archive.html")),
         "a folder is Explorer's however it is named"
     );
     // A plain click on a page on a share meets the network card it always met, and `Ctrl`
     // hands it to the system (ticket 14) — neither with a round trip.
-    for (control, expected) in [
-        (
-            false,
-            HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html"), None),
-        ),
-        (
-            true,
-            HyperlinkActivation::Share(PathBuf::from(r"\\server\share\index.html")),
-        ),
-    ] {
+    // Off Windows a URI naming another host names no path on this machine: the plain half
+    // says nothing and `Ctrl` is refused, and neither asks either.
+    for (control, expected) in on_this_host(
+        [
+            (
+                false,
+                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html"), None),
+            ),
+            (
+                true,
+                HyperlinkActivation::Share(PathBuf::from(r"\\server\share\index.html")),
+            ),
+        ],
+        [
+            (false, HyperlinkActivation::None),
+            (true, HyperlinkActivation::Blocked(LinkRefusal::Invalid)),
+        ],
+    ) {
         assert_eq!(
             hyperlink_activation(
                 control,
@@ -1310,8 +1348,9 @@ fn only_a_well_formed_web_address_is_ever_handed_to_the_shell() {
         "https:example.test",
         "not-a-uri",
         // A `file:` URI naming nothing on this machine does not fall through
-        // to the shell, which would parse it a second way.
-        "file:///etc/passwd",
+        // to the shell, which would parse it a second way: on Windows one with
+        // no drive, elsewhere one naming another host.
+        on_this_host("file:///etc/passwd", "file://elsewhere/etc/passwd"),
         "file:///C:/100%/x.md",
     ] {
         assert_eq!(
@@ -1322,7 +1361,7 @@ fn only_a_well_formed_web_address_is_ever_handed_to_the_shell() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Invalid),
             "{uri:?}"
         );
     }
@@ -1372,7 +1411,7 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
     session.absorb_printed_path_probes(&mut projection);
     while let Some(task) = session.take_decoration_worker_task() {
         if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
-            let verdict = bt_term::verify_path(&path);
+            let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
             session.complete_path_verification(path, verdict);
         }
     }
@@ -1383,7 +1422,12 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
     let readable_column = 0u32;
     let page_column = readable.to_string_lossy().chars().count() as u32 + 1;
     let directory_column = page_column + page.to_string_lossy().chars().count() as u32 + 1;
-    let is_directory = |path: &Path| Some(bt_term::verify_path(path));
+    let is_directory = |path: &Path| {
+        Some(bt_term::verify_path(
+            path,
+            &bt_platform::resolved_for_a_door,
+        ))
+    };
     for (column, named, plain, control) in [
         (
             readable_column,
@@ -1489,7 +1533,7 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
     session.absorb_printed_path_probes(&mut projection);
     while let Some(task) = session.take_decoration_worker_task() {
         if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
-            let verdict = bt_term::verify_path(&path);
+            let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
             session.complete_path_verification(path, verdict);
         }
     }
@@ -1515,7 +1559,12 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
         "the target is the file, and the line rides in its fragment"
     );
 
-    let is_directory = |path: &Path| Some(bt_term::verify_path(path));
+    let is_directory = |path: &Path| {
+        Some(bt_term::verify_path(
+            path,
+            &bt_platform::resolved_for_a_door,
+        ))
+    };
     assert_eq!(
         hyperlink_activation(
             false,
@@ -1568,12 +1617,16 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
 /// hit's `uri` and the second half opens something else.
 #[test]
 fn a_wrapped_link_activates_the_same_target_from_either_segment() {
+    let target = host_file_uri(r"C:\notes\phd%20application.md");
     let mut session =
         DualPlaneSession::new(NonZeroU32::new(16).unwrap(), NonZeroU32::new(4).unwrap());
     session
         .feed(
-            b"\x1b]8;;file:///C:/notes/phd%20application.md\x1b\\\
-                  phd-application-timeline-and-everything-else\x1b]8;;\x1b\\",
+            format!(
+                "\x1b]8;;{target}\x1b\\\
+                 phd-application-timeline-and-everything-else\x1b]8;;\x1b\\"
+            )
+            .as_bytes(),
         )
         .unwrap();
     let mut projection = session.new_projection(session.layout_key());
@@ -1586,9 +1639,9 @@ fn a_wrapped_link_activates_the_same_target_from_either_segment() {
         .hyperlink_at(2, 1)
         .expect("the label wrapped, and its continuation is the same link");
     assert_eq!(head, tail, "two segments of one run are one hit");
-    assert_eq!(head.uri, "file:///C:/notes/phd%20application.md");
+    assert_eq!(head.uri, target);
 
-    let opened = HyperlinkActivation::Preview(PathBuf::from(r"C:\notes\phd application.md"), None);
+    let opened = HyperlinkActivation::Preview(host_path(r"C:\notes\phd application.md"), None);
     for hit in [&head, &tail] {
         assert_eq!(
             hyperlink_activation(
@@ -1602,6 +1655,63 @@ fn a_wrapped_link_activates_the_same_target_from_either_segment() {
             "either segment opens the one file the run names"
         );
     }
+}
+
+/// RED (F-SWEEP-2-048, owner ruling 2026-10-06) — **a declared web target whose host does not
+/// parse is no declaration, and this window's own recogniser reads the text.**
+///
+/// The owner's line, as an agent printed it: an autolinker that trims only ASCII punctuation
+/// declared `http://www.glancepc.com：` with OSC 8. From bytes, because what is under test is the
+/// whole road — the vendor's cells, the capture, the recogniser — and only the terminal makes
+/// it.
+///
+/// MUTATION: trust every declaration (drop the `web_host_parses` arm in
+/// `CapturedRow::trim_program_url_hyperlink_spans`) and the hit is the declared target, colon and
+/// all, with the program's id on it.
+#[test]
+fn a_declared_link_whose_host_does_not_parse_is_read_by_the_recogniser() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(60).unwrap(), NonZeroU32::new(4).unwrap());
+    session
+        .feed(
+            "官网 \x1b]8;;http://www.glancepc.com：\x1b\\http://www.glancepc.com：\x1b]8;;\x1b\\见上"
+                .as_bytes(),
+        )
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    // `官网 ` is five cells, so the address starts at column 5.
+    let hit = frame
+        .hyperlink_at(0, 8)
+        .expect("the visible address is a link");
+    assert_eq!(
+        hit.uri, "http://www.glancepc.com",
+        "the recogniser's link, not the declared one"
+    );
+    assert_eq!(hit.id, None, "an inferred link, not a program's");
+    // The full-width colon (columns 28 and 29) is prose again.
+    assert_eq!(frame.hyperlink_at(0, 28), None);
+}
+
+/// RED (F-SWEEP-2-048) — **a declared web target with a host still wins**, label and all: the
+/// regression half of the row above.
+///
+/// MUTATION: refuse every non-ASCII host in `bt_transcript::web_host_parses` and the program's
+/// label `官网`, declaring an internationalised host, is no link at all.
+#[test]
+fn a_declared_link_whose_host_parses_is_the_programs_link() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(60).unwrap(), NonZeroU32::new(4).unwrap());
+    session
+        .feed("见 \x1b]8;;https://例子.测试/文档\x1b\\官网\x1b]8;;\x1b\\。".as_bytes())
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let hit = frame
+        .hyperlink_at(0, 3)
+        .expect("the program's label is its link");
+    assert_eq!(hit.uri, "https://例子.测试/文档");
+    assert!(hit.id.is_some(), "the program's own declaration");
 }
 
 /// **And P0 is not bought back.** With every pane beside the keyboard
@@ -1818,7 +1928,7 @@ fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
     // ruling 2026-10-05; the review's unpinned clause). Its leaf half is pinned by
     // `a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profile_says`.
     // MUTATION, observed red: read `LeafSession::seed_place_for_a_new_shell` here instead.
-    let beside = method_body("Runtime", "new_tab_with_profile");
+    let beside = method_body("Runtime", "new_tab_with_profile_carrying");
     assert!(
         beside.contains("LeafSession::place_for_a_new_tab_beside")
             && !beside.contains("seed_place_for_a_new_shell"),

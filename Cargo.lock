@@ -341,6 +341,7 @@ version = "0.4.7"
 dependencies = [
  "anyhow",
  "base64",
+ "bt-compose",
  "bt-detect",
  "bt-doc",
  "bt-layout",
@@ -376,10 +377,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-compose"
+version = "0.4.7"
+dependencies = [
+ "bt-detect",
+ "bt-doc",
+ "bt-math",
+ "bt-render",
+ "bt-term",
+ "bt-testpath",
+ "bt-transcript",
+ "bt-viewport",
+ "unicode-width",
+ "web-time",
+]
+
+[[package]]
 name = "bt-corpus"
 version = "0.4.7"
 dependencies = [
  "anyhow",
+ "bt-compose",
+ "bt-detect",
+ "bt-math",
+ "bt-platform",
  "bt-pty",
  "bt-render",
  "bt-term",
@@ -390,6 +411,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "vte",
+ "web-time",
 ]
 
 [[package]]
@@ -407,6 +429,13 @@ version = "0.4.7"
 dependencies = [
  "bt-transcript",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "bt-effects"
+version = "0.4.7"
+dependencies = [
+ "web-time",
 ]
 
 [[package]]
@@ -435,15 +464,15 @@ name = "bt-math"
 version = "0.4.7"
 dependencies = [
  "bt-doc",
- "bt-platform",
+ "bt-effects",
  "bt-testpath",
+ "fontconfig-parser",
  "mitex",
  "mitex-lexer",
  "mitex-spec-gen",
  "resvg",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "typst-as-lib",
  "typst-layout",
  "typst-library",
@@ -469,12 +498,12 @@ version = "0.4.7"
 dependencies = [
  "arboard",
  "block2 0.6.2",
+ "bt-effects",
  "bt-pty",
  "bt-testpath",
  "bt-transcript",
  "bt-unicode",
  "bt-winres",
- "fontconfig-parser",
  "fontdb",
  "futures-util",
  "libc",
@@ -494,7 +523,6 @@ dependencies = [
  "objc2-web-kit",
  "tokio",
  "ttf-parser",
- "web-time",
  "webview2-com",
  "windows",
  "windows-core",
@@ -511,9 +539,11 @@ version = "0.4.7"
 dependencies = [
  "bt-platform",
  "bt-pty",
+ "bt-source",
  "bt-term",
  "bt-testpath",
  "bt-transcript",
+ "bt-viewport",
  "bt-winres",
  "miniz_oxide",
  "nix",
@@ -527,8 +557,8 @@ version = "0.4.7"
 dependencies = [
  "bt-detect",
  "bt-doc",
+ "bt-effects",
  "bt-math",
- "bt-platform",
  "bt-source",
  "bt-term",
  "bt-testpath",
@@ -562,11 +592,10 @@ version = "0.4.7"
 dependencies = [
  "alacritty_terminal",
  "base64",
+ "bt-compose",
  "bt-detect",
  "bt-doc",
- "bt-math",
- "bt-platform",
- "bt-pty",
+ "bt-effects",
  "bt-testpath",
  "bt-transcript",
  "bt-unicode",
@@ -592,6 +621,7 @@ dependencies = [
  "regex",
  "unicode-properties",
  "unicode-segmentation",
+ "url",
 ]
 
 [[package]]

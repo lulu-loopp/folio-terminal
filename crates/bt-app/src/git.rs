@@ -56,7 +56,7 @@ use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -4014,6 +4014,82 @@ fn now_unix() -> i64 {
     }
 }
 
+/// **Where git is, as the last program walk answered** (T-PROGRAMS-REFRESH).
+///
+/// Until this slot the git worker located git once, when it started, and kept the answer —
+/// "nowhere" included — for the life of the process, so a git installed while Folio ran stayed
+/// "not found" until a restart. Git is now located by the program walk (`crate::programs_lane`),
+/// asked again when a Git page opens, when Windows says the environment moved and at every other
+/// trigger of that walk; the window thread adopts the answer here ([`Self::adopt`]), and the
+/// worker reads it at every question. Until the first walk has answered, the worker's question
+/// waits for it on the worker — never on the window thread — because "not found" is not an answer
+/// a question that has not been asked can give.
+pub struct GitLocation {
+    answer: Mutex<Option<Option<PathBuf>>>,
+    answered: Condvar,
+}
+
+impl GitLocation {
+    /// Nothing answered yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            answer: Mutex::new(None),
+            answered: Condvar::new(),
+        }
+    }
+
+    /// **Take a walk's answer**, on the window thread. Answers whether it moved — whether the
+    /// pages that were answered about the old one have to ask again.
+    pub fn adopt(&self, location: Option<PathBuf>) -> bool {
+        let mut answer = self
+            .answer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let moved = answer.as_ref() != Some(&location);
+        let first = answer.is_none();
+        *answer = Some(location);
+        self.answered.notify_all();
+        moved && !first
+    }
+
+    /// What is held, without waiting: `None` until a walk has answered.
+    #[cfg(test)]
+    fn peek(&self) -> Option<Option<PathBuf>> {
+        self.answer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Where git is, for one question — on the git worker, waiting until a walk has answered.
+    fn located(&self, worker: &bt_platform::admission::WorkerCtx) -> Option<PathBuf> {
+        let _ = worker;
+        let mut answer = self
+            .answer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let Some(location) = answer.as_ref() {
+                return location.clone();
+            }
+            answer = self
+                .answered
+                .wait(answer)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+impl Default for GitLocation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The product's slot, written by the application's adoption of a program walk.
+pub static GIT_LOCATION: GitLocation = GitLocation::new();
+
 /// The thread, and the two ends of the conversation with it.
 pub struct GitWorker {
     requests: mpsc::Sender<GitRequest>,
@@ -4021,24 +4097,17 @@ pub struct GitWorker {
 }
 
 impl GitWorker {
-    /// Start the thread. **Where git is, is decided here, once.**
-    ///
-    /// On the worker rather than at startup because it is a `PATH` walk and a
-    /// handful of `is_file` probes, and the main thread has a window to open. Once
-    /// rather than per question, and never retried, for the reason `WslProbe`
-    /// gives about `wsl.exe`: a machine does not grow a git while a window is
-    /// open, and asking again on every question would spend a `PATH` walk to
-    /// re-learn the same "no".
+    /// Start the thread. **Where git is, is read at every question** from
+    /// [`GIT_LOCATION`], which the program walk keeps current.
     pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<GitRequest>();
         let (response_tx, response_rx) = mpsc::channel::<GitResponse>();
         bt_platform::spawn_at_priority(
             "bt-git-worker",
             bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                let program = crate::profiles::find_git(&bt_pty::SystemShellEnvironment);
+            move |ctx| {
                 run_git_worker(request_rx, |request| {
-                    let answer = match program.as_deref() {
+                    let answer = match GIT_LOCATION.located(ctx).as_deref() {
                         Some(program) => {
                             answer(program, &request.question, GIT_COMMAND_TIMEOUT, now_unix())
                         }
@@ -4100,6 +4169,7 @@ pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::host_path;
 
     /// RED mutation: classify `checkout` as contained; the hook-capable set no
     /// longer matches the reviewed command inventory.
@@ -4776,13 +4846,14 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
 
     /// PIN — a `git` that never finishes costs one answer, not the worker.
     ///
-    /// Stood in for by `ping -t`, which is on every Windows and, unlike the
-    /// `ping -n 10` this used to use, **never stops on its own**. That is the
-    /// whole of the shape: the assertion is that the call *came back*, and the
-    /// only road back is through the kill — [`run_git_with_input`] waits for the
-    /// process it killed before it reports, and a wait on a `ping -t` nobody
-    /// killed does not end. So the kill, the reaping and the report are all one
-    /// fact now, and there is no clock in any of them.
+    /// Stood in for by `ping -t` on Windows and `tail -f /dev/null` elsewhere,
+    /// each on every installation of its platform and, unlike the `ping -n 10`
+    /// this used to use, **never stopping on its own**. That is the whole of the
+    /// shape: the assertion is that the call *came back*, and the only road back
+    /// is through the kill — [`run_git_with_input`] waits for the process it
+    /// killed before it reports, and a wait on a child nobody killed does not
+    /// end. So the kill, the reaping and the report are all one fact now, and
+    /// there is no clock in any of them.
     ///
     /// It used to be `ping -n 10` and `waited < 5s`. The five seconds were
     /// standing in for "less than the nine the child would have taken", which
@@ -4797,16 +4868,26 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     /// budget**: the call is given a hundred and fifty milliseconds and no load
     /// turns that into sixty seconds. It is the difference between "returned"
     /// and "never returns", which is the only difference this test is about — and
-    /// on the day it is spent, the stray `ping` left behind is the defect itself.
+    /// on the day it is spent, the stray child left behind is the defect itself.
     #[test]
     fn a_child_that_will_not_finish_is_killed_and_reported() {
         /// Long enough that only a guard which never returns can reach it.
         const NEVER: Duration = Duration::from_secs(60);
 
-        let mut command = bt_platform::quiet_command(
-            bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
-        );
-        command.args(["-t", "127.0.0.1"]);
+        // A program every installation of this platform has that never ends on its own:
+        // Windows' `ping`, found where its own search finds it, and POSIX's `tail`, which a
+        // Unix process start finds on `PATH` by itself.
+        let (program, arguments) = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => (
+                bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
+                ["-t", "127.0.0.1"],
+            ),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+                (PathBuf::from("tail"), ["-f", "/dev/null"])
+            }
+        };
+        let mut command = bt_platform::quiet_command(program);
+        command.args(arguments);
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let _ = tx.send(run_git(command, Duration::from_millis(150)).err());
@@ -5640,27 +5721,28 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     /// only ever appears on somebody else's disk.
     #[test]
     fn a_command_re_reads_only_the_repository_it_was_run_inside() {
-        let root = Path::new(r"C:\a\b");
+        let root = &host_path(r"C:\a\b");
 
         assert!(
-            should_reread(root, Some(Path::new(r"C:\a\b")), true),
+            should_reread(root, Some(&host_path(r"C:\a\b")), true),
             "the root itself is inside the root"
         );
         assert!(
-            should_reread(root, Some(Path::new(r"C:\a\b\c\d")), true),
+            should_reread(root, Some(&host_path(r"C:\a\b\c\d")), true),
             "and so is anywhere under it, however deep"
         );
         assert!(
-            !should_reread(root, Some(Path::new(r"C:\a\bc")), true),
+            !should_reread(root, Some(&host_path(r"C:\a\bc")), true),
             "but not the folder next door whose name merely starts the same way"
         );
         assert!(
-            !should_reread(root, Some(Path::new(r"C:\a")), true),
+            !should_reread(root, Some(&host_path(r"C:\a")), true),
             "and not the folder above it: a parent is not inside its child"
         );
         assert!(
             !should_reread(root, Some(Path::new(r"D:\a\b")), true),
-            "nor the same path on another drive"
+            "nor the same path on another drive (off Windows a name with a colon in \
+             it, which is not inside the root either)"
         );
 
         // Windows is case-insensitive about all of it, which is the same rule
@@ -5674,7 +5756,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
 
         // And the two conditions that are not about the path at all.
         assert!(
-            !should_reread(root, Some(Path::new(r"C:\a\b")), false),
+            !should_reread(root, Some(&host_path(r"C:\a\b")), false),
             "a page nobody is looking at is never read, whatever happened in any \
              shell — R31's gate, kept a second time"
         );
@@ -7311,5 +7393,29 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             "a remote-tracking ref is not a local branch, whatever it is called"
         );
         assert!(!cache.has_local_branch("v1.0"), "and neither is a tag");
+    }
+    /// RED (T-PROGRAMS-REFRESH) — **where git is follows the walk**: before any walk has
+    /// answered, git's place is unknown — not "not found" — and a later walk that finds git
+    /// elsewhere, or finds one where there was none, is a move the pages answered about the old
+    /// place must hear.
+    ///
+    /// MUTATION (observed red): `GitLocation::new` holding `Some(None)` (the old "decided once,
+    /// never retried" read) — git reads "not found" before anything was asked.
+    #[test]
+    fn where_git_follows_the_walk_and_is_unknown_until_a_walk_answers() {
+        let location = GitLocation::new();
+        assert_eq!(location.peek(), None, "unknown, not not-found");
+        assert!(!location.adopt(None), "the first answer is no move");
+        assert_eq!(location.peek(), Some(None));
+        let installed = PathBuf::from(r"C:\工具\Git\cmd\git.exe");
+        assert!(
+            location.adopt(Some(installed.clone())),
+            "installed while Folio runs"
+        );
+        assert_eq!(location.peek(), Some(Some(installed.clone())));
+        assert!(
+            !location.adopt(Some(installed)),
+            "the same answer again is no move"
+        );
     }
 }

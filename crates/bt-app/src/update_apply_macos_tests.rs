@@ -31,7 +31,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos, run, sign, version_of};
+use crate::update_prepare_macos::tests::fixture::{
+    HOMEBREW_MARKER, Scratch, fake_brew, homebrew_install, on_macos, run, sign, version_of,
+};
 use crate::update_txn::{
     Body, Cdhash, Class, Header, HeaderOutcome, Outcome, STUCK_ATTEMPT_LIMIT, StartAction,
     TrialSight,
@@ -238,6 +240,12 @@ struct Fake {
     refuse_relaunch: bool,
     /// The failure windows shown in this process (U-34, round 2).
     shown: Vec<String>,
+    /// **The person's starts the recovery door carried to the window**
+    /// (0.4.8 E3): whom it waited for, and the request it handed over.
+    carried: Vec<(
+        crate::update_apply::Ahead,
+        crate::launch_wire::LaunchRequest,
+    )>,
 }
 
 impl Default for Fake {
@@ -256,6 +264,7 @@ impl Default for Fake {
             on_say: None,
             starts_die: false,
             refuse_relaunch: false,
+            carried: Vec::new(),
             shown: Vec::new(),
         }
     }
@@ -354,6 +363,8 @@ struct Install {
     new: BundleIdentity,
     data: PathBuf,
     agents: PathBuf,
+    /// What the journal records was carried (a Homebrew copy's marks, D1), or nothing.
+    carried: Option<Carried>,
 }
 
 impl Install {
@@ -395,6 +406,7 @@ impl Install {
             new,
             data,
             agents,
+            carried: None,
         };
         install.write(Phase::Handoff {
             applier: install.applier,
@@ -418,7 +430,12 @@ impl Install {
                 .display()
                 .to_string(),
             body: Body {
-                adapter: crate::update_txn::Adapter::Ours,
+                adapter: if self.carried.is_some() {
+                    crate::update_txn::Adapter::Homebrew
+                } else {
+                    crate::update_txn::Adapter::Ours
+                },
+                marker: self.carried.clone(),
                 phase,
                 layout: Layout::Bundle {
                     old: self.old.clone(),
@@ -564,6 +581,7 @@ fn shape_install(tag: &str) -> Install {
         },
         data,
         agents,
+        carried: None,
     };
     install.write(Phase::Handoff {
         applier: install.applier,
@@ -1342,7 +1360,8 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     assert!(!install.plist().exists());
@@ -1434,7 +1453,8 @@ fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     assert!(!install.plist().exists());
@@ -1535,6 +1555,18 @@ impl crate::update_recover::World for Fake {
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         self.relaunched.push((program.to_path_buf(), args.to_vec()));
         Ok(())
+    }
+
+    fn carry(
+        &mut self,
+        _worker: &WorkerCtx,
+        _data: &Path,
+        ahead: &crate::update_apply::Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        _within: Duration,
+    ) -> crate::update_apply::Carried {
+        self.carried.push((ahead.clone(), request.clone()));
+        crate::update_apply::Carried::Taken
     }
 }
 
@@ -2000,6 +2032,7 @@ fn rolled_back_is_retired_at_the_next_start() {
             argv: &argv,
             trial: None,
             failed: Some(&journal),
+            journal_held: None,
         },
         &mut world,
     );
@@ -2131,7 +2164,8 @@ fn a_plain_relaunch_after_abandoned_and_after_a_revert() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
 }
@@ -2275,6 +2309,7 @@ fn start_then_recover(install: &Install, argv: &[&str], hands: Fake, limits: Lim
             argv: &argv,
             trial: None,
             failed: None,
+            journal_held: None,
         },
         &mut starting,
     );
@@ -2834,8 +2869,9 @@ fn a_receipt_found_by_recovery_commits_forward() {
 /// RED (U-29b) — **a recovery that fails still opens Folio, and the start it
 /// makes says *Update incomplete.* and names the folder**: a transaction
 /// lock that cannot be opened (the old build live: it is started with
-/// `--update-failed`), and a journal body it cannot read (a trial, with the
-/// same card); the journal is kept.
+/// `--update-failed`), and a journal body it cannot read (a trial; since E1
+/// the holder stands aside from it and the card is the one of an update this
+/// build cannot read whole, `Failure::Newer`); the journal is kept.
 ///
 /// The coordinator's ruling 2: "If recovery itself fails (any error road),
 /// the bundle that is live is started under that same rule with
@@ -2865,6 +2901,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
                 argv: words,
                 trial: request.update_trial.as_ref(),
                 failed: request.update_failed.as_deref(),
+                journal_held: None,
             },
             &mut starting,
         );
@@ -2873,8 +2910,18 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
         };
         (failed, trial)
     };
+    // The heading follows the journal: no trial begun reads *The update
+    // stopped before the new version started.* (0.4.8 E4).
     let incomplete = |install: &Install| crate::update_job::Failure::Incomplete {
         folder: Some(install.home.root().to_path_buf()),
+        held: false,
+        untried: !crate::update_txn::Journal::parse(
+            &std::fs::read(install.home.journal()).unwrap(),
+        )
+        .unwrap()
+        .body
+        .phase
+        .trial_begun(),
     };
 
     // A folder where the transaction lock should be: the lock cannot be
@@ -2911,7 +2958,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
             .hands
             .said
             .iter()
-            .any(|line| line.contains("Refused")),
+            .any(|line| line.contains("StoodAside")),
         "{:?}",
         opened.hands.said
     );
@@ -2922,7 +2969,14 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
         unread.as_bytes()
     );
     let (card, trial) = card_of(&install, words);
-    assert_eq!(card, Some(incomplete(&install)));
+    assert_eq!(
+        card,
+        Some(crate::update_job::Failure::Newer {
+            folder: Some(install.home.root().to_path_buf()),
+            version: None,
+            held: false,
+        })
+    );
     assert_eq!(trial.map(|(txn, _)| txn), Some(install.txn), "held back");
 }
 
@@ -4260,6 +4314,7 @@ fn shape_activate_refusal_with_old_live_follows_the_layout() {
         install.on_disk().map(|journal| journal.body.phase),
         Some(Phase::Prepared {
             deferred_launches: 0,
+            restart_missed: true,
         })
     );
     assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Moving)]);
@@ -4341,6 +4396,7 @@ fn shape_reentry_at_moving_follows_the_layout() {
         install.on_disk().map(|journal| journal.body.phase),
         Some(Phase::Prepared {
             deferred_launches: 0,
+            restart_missed: true,
         })
     );
     assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Moving)]);
@@ -4518,6 +4574,7 @@ fn a_recovery_that_waited_for_a_live_holder_takes_its_decision_as_it_stands() {
             "decided-prepared",
             Phase::Prepared {
                 deferred_launches: 0,
+                restart_missed: false,
             },
         ),
     ] {
@@ -4549,6 +4606,103 @@ fn a_recovery_that_waited_for_a_live_holder_takes_its_decision_as_it_stands() {
         );
         assert!(!install.plist().exists(), "{tag}");
     }
+}
+
+/// RED (0.4.8 E3, #12) — **the macOS recovery that leaves a `Handoff` to an
+/// applier's election in flight carries the person's start it was handed to
+/// the window that election's road opens; the run at login carries nothing**:
+/// `Recovered::deferred_to` names the election (its lock, then the mark it
+/// leaves), so the door hands the start over once a Folio holds the data
+/// directory. This shape case runs on every host; the test holds the election
+/// lock through both runs, an election stalled past `ELECTION_WITHIN`.
+///
+/// MUTATION: in `update_apply_macos::recover`, answer `deferred_to: None`
+/// (the deferred start dropped, as before E3).
+#[test]
+fn the_macos_recovery_carries_a_start_it_defers_to_an_election_in_flight() {
+    let install = shape_install("e3-carry-选举");
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    let in_flight = install_txn::try_hold(
+        &crate::update_apply::owner_lock_path(&install.home, install.txn),
+        Hold::Exclusive,
+    )
+    .unwrap()
+    .expect("the election lock is free");
+    let handed: Vec<OsString> = vec![OsString::from("--cwd"), OsString::from("/工作/文件夹")];
+    for start in [Some(handed), None] {
+        let recorder = Recorder::of(&install);
+        let road = Road {
+            nonce: None,
+            ..recorded_road(&install, &recorder, limits(5_000, 0))
+        };
+        let person = start.is_some();
+        let recovered = on_a_worker(move |worker| {
+            let mut hands = Fake::default();
+            recover(worker, &road, &mut hands, start.as_deref())
+        });
+        assert_eq!(
+            recovered.ended,
+            Ended::Deferred(Deferral::WindowDuty),
+            "the transaction is left to the election in flight"
+        );
+        assert_eq!(
+            recovered.deferred_to,
+            person.then(|| crate::update_apply::Ahead::Election {
+                home: install.home.clone(),
+                txn: install.txn,
+                me: crate::update_apply::this_process(),
+            }),
+            "a person's start: {person}"
+        );
+        assert_eq!(std::fs::read(install.home.journal()).unwrap(), journal);
+    }
+    drop(in_flight);
+}
+
+/// RED (0.4.8 E3, #12, review round 2) — **the macOS recovery door carries
+/// the person's start it defers**: `update_recover::run` over a bundle home
+/// at `Handoff`, its applier's election in flight, starts nothing and hands
+/// the `--then-launch` line's request to the world's carry (the product's
+/// `update_apply::carry_the_start`), waiting on that election; taken, the door
+/// leaves `Left::Carried` with exit 0. This shape case runs on every host.
+///
+/// MUTATION: in `update_recover::run`, drop the `carry_on` block (the door
+/// leaves the start behind, as before E3).
+#[test]
+fn the_macos_recovery_door_hands_a_deferred_start_to_the_window() {
+    let install = shape_install("e3-door-入口");
+    let in_flight = install_txn::try_hold(
+        &crate::update_apply::owner_lock_path(&install.home, install.txn),
+        Hold::Exclusive,
+    )
+    .unwrap()
+    .expect("the election lock is free");
+    let handed: Vec<OsString> = vec![
+        OsString::from("--from-explorer"),
+        OsString::from("--cwd"),
+        OsString::from("/工作/文件夹"),
+    ];
+    let (code, hands) = recover_door(&install, handed.clone(), Fake::default());
+    drop(in_flight);
+    assert_eq!(code, 0, "{:?}", hands.said);
+    let here = std::env::current_dir().ok();
+    assert_eq!(
+        hands.carried,
+        vec![(
+            crate::update_apply::Ahead::Election {
+                home: install.home.clone(),
+                txn: install.txn,
+                me: crate::update_apply::this_process(),
+            },
+            crate::launch_wire::carried(&handed, here.as_deref()).expect("a folder crosses"),
+        )],
+        "{:?}",
+        hands.said
+    );
+    assert!(
+        hands.relaunched.is_empty(),
+        "nothing is started beside the window"
+    );
 }
 
 /// RED (U-41a1, managed-update §1.1 R1–R2) — **the macOS road calls the
@@ -4634,18 +4788,18 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
     );
     assert_eq!(version_of(&install.installed), "1.0");
 
-    let install = Install::new("points-homebrew");
+    let install = Install::new("points-scoop");
     let named = install
         .journal_at(Phase::Handoff {
             applier: install.applier,
         })
-        .naming(crate::update_txn::Adapter::Homebrew);
+        .naming(crate::update_txn::Adapter::Scoop);
     install_txn::durable_write(&install.home.journal(), &named.encode()).unwrap();
     let recorder = Recorder::of(&install);
     let road = recorded_road(&install, &recorder, limits(2_000, 2_000));
     let (ended, world) = applied(road, Fake::default());
     assert!(
-        matches!(&ended, Ended::Refused(why) if why.contains("Homebrew")),
+        matches!(&ended, Ended::Refused(why) if why.contains("Scoop")),
         "{ended:?} {:?}",
         world.said
     );
@@ -4691,7 +4845,8 @@ fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
     assert_eq!(
         install.on_disk().map(|journal| journal.body.phase),
         Some(Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         })
     );
     assert!(!install.plist().exists(), "the entrance is removed");
@@ -4704,4 +4859,651 @@ fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
             (Point::Locate, PhaseKind::Moving),
         ]
     );
+}
+
+// ── the escape hatch (0.4.8 E1) ─────────────────────────────────────────────
+
+/// RED (E1; role #11, the macOS exit guard, sites H5 and J8
+/// `opens_now_with`) — **over a journal this build cannot read whole, the
+/// exit opens what an unknown live set opens and never the installed build
+/// plainly**: a held-writes trial of the transaction for an unknown header
+/// word (the envelope's) and for an unknown body word under a `destructive`
+/// header; and when nothing reads, so no transaction can be named for a
+/// trial, the installed build with `--update-failed`, which continues past
+/// it with the card. The journal is byte for byte as it was. Runs on every
+/// host: the bundle is shaped of ordinary files, and no layout is asked.
+///
+/// MUTATION: in `opens_now_with`, answer `Opens::Installed { failed: false }`
+/// for a journal of which nothing reads (the pre-E1 answer).
+#[test]
+fn the_macos_exit_never_opens_the_installed_build_plainly_over_what_it_cannot_read() {
+    let install = shape_install("beyond-exit");
+    install.write(Phase::Moving);
+    let known = std::fs::read(install.home.journal()).unwrap();
+    for (index, (what, bytes)) in crate::update_txn::beyond_inputs(&known)
+        .into_iter()
+        .enumerate()
+    {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        let home = install.home.clone();
+        let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+        let expected = if index < 2 {
+            Opens::Trial { txn: install.txn }
+        } else {
+            Opens::Installed { failed: true }
+        };
+        assert_eq!(opens, expected, "{what}");
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+}
+
+/// RED (E1; role #12, the macOS lock holder, site J9 `Txn::hold`; and the
+/// recovery door's bundle branch, role #14) — **the macOS lock holder stands
+/// aside from a journal this build cannot read whole** — the rescue clone,
+/// or the installed build as R when the clone is missing: it ends
+/// `Ended::StoodAside`, recording, removing and exchanging nothing, and lets
+/// the lock go; handed a person's start it owes a window, at logon none.
+/// Through the recovery door, the start it leaves with is a held-writes trial
+/// of the envelope's transaction (or, when nothing reads, the installed
+/// build with `--update-failed`), never the installed build plainly.
+///
+/// MUTATION: in `Txn::hold`, answer the pre-E1 `Ended::Refused` for a
+/// journal this build cannot read whole.
+#[test]
+fn the_macos_lock_holder_stands_aside_from_what_it_cannot_read_whole() {
+    let install = shape_install("beyond-holder");
+    install.write(Phase::Moving);
+    let known = std::fs::read(install.home.journal()).unwrap();
+    let handed: Vec<OsString> = vec![OsString::from("--tab")];
+    for (index, (what, bytes)) in crate::update_txn::beyond_inputs(&known)
+        .into_iter()
+        .enumerate()
+    {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        for start in [Some(handed.clone()), None] {
+            let road = install.recovery(limits(500, 5_000));
+            let waits = start.is_some();
+            let recovered = on_a_worker(move |worker| {
+                let mut hands = Fake::default();
+                recover(worker, &road, &mut hands, start.as_deref())
+            });
+            assert!(
+                matches!(recovered.ended, Ended::StoodAside(_)),
+                "{what}: {:?}",
+                recovered.ended
+            );
+            assert_eq!(recovered.waiting, waits, "{what}");
+            assert_eq!(std::fs::read(install.home.journal()).unwrap(), bytes);
+        }
+        assert!(
+            install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+                .unwrap()
+                .is_some(),
+            "{what}: the lock is let go"
+        );
+
+        let (_, hands) = recover_door(&install, handed.clone(), Fake::default());
+        assert_eq!(hands.relaunched.len(), 1, "{what}: {:?}", hands.relaunched);
+        let (program, words) = &hands.relaunched[0];
+        assert_eq!(program, &install.installed.join(EXE), "{what}");
+        let failed = crate::update_apply::failed_words(&install.home).to_vec();
+        if index < 2 {
+            assert_eq!(words[0], OsString::from(cli::UPDATE_TRIAL_FLAG), "{what}");
+            assert_eq!(words[1], OsString::from(install.txn.to_string()), "{what}");
+            assert_eq!(words[3..5], failed[..], "{what}");
+        } else {
+            let mut expected = failed;
+            expected.extend(handed.iter().cloned());
+            assert_eq!(words, &expected, "{what}");
+        }
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+}
+
+/// RED (E1; role #13, the macOS lock holder's receipt watch, site R2
+/// `read_receipt`) — **a receipt this build cannot read is never
+/// accepted**: a later receipt version, a v1 receipt with a word this build
+/// does not read, and bytes that are no receipt each read as a refusal; the
+/// bytes are left as they are.
+///
+/// MUTATION: drop the version check from the receipt's read (`versioned` in
+/// `Receipt::parse`): a later receipt version is accepted.
+#[test]
+fn the_macos_receipt_watch_never_accepts_what_it_cannot_read() {
+    let install = shape_install("beyond-receipt");
+    let nonce = Nonce::new([0x2d; 32]);
+    let receipt = Receipt {
+        txn: install.txn,
+        nonce,
+        pid: 4242,
+        version: crate::update_txn::LATER_BUILD.to_owned(),
+        started: Some(7),
+    };
+    let path = install.home.receipt_path(install.txn, &nonce);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for (what, bytes) in crate::update_txn::receipt_beyond_inputs(&receipt) {
+        std::fs::write(&path, &bytes).unwrap();
+        let read = read_receipt(&path);
+        assert!(matches!(read, Some(Err(_))), "{what}: {read:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{what}");
+    }
+}
+
+/// RED (E1 round 2; role #11, the macOS exit guard, `opens_now_with`) — **a
+/// journal file the exit cannot read at all is no absent journal**: no
+/// transaction can be named for a trial, so the installed build opens with
+/// `--update-failed` and the card that says the record cannot be read —
+/// never plainly; only a journal that is not there opens it plainly.
+///
+/// MUTATION: in `opens_now_with`, map a read that failed other than "no such
+/// file" back to no journal (`Opens::Installed { failed: false }`).
+#[test]
+fn the_macos_exit_never_opens_the_installed_build_plainly_over_a_journal_it_cannot_read() {
+    let install = shape_install("unread-exit");
+    let kind = crate::update_txn::a_journal_that_cannot_be_read(&install.home.journal());
+    let home = install.home.clone();
+    let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+    assert_eq!(opens, Opens::Installed { failed: true }, "{kind:?}");
+    std::fs::remove_dir(install.home.journal()).unwrap();
+    let home = install.home.clone();
+    let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
+    assert_eq!(
+        opens,
+        Opens::Installed { failed: false },
+        "no journal at all"
+    );
+}
+
+/// RED (E1 round 3; role #8 on macOS, the applier's window election) — **a
+/// macOS applier that finds a journal this build cannot read whole ends
+/// `Ended::StoodAside`, as the Windows applier does**: no mark, nothing
+/// recorded, the window duty left to the build that armed it (nothing is
+/// started here), the journal byte for byte as it was, and the exit code of
+/// every end that is neither a commit nor a refusal of its line (1).
+///
+/// MUTATION: remove the `Window::StoodAside` arm of `apply` (it falls into
+/// the catch-all and ends `Ended::Refused`, exit code 2).
+#[test]
+fn the_macos_applier_stands_aside_from_what_it_cannot_read_whole() {
+    let install = shape_install("beyond-applier");
+    let known = std::fs::read(install.home.journal()).unwrap();
+    for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        let (ended, world) = applied(install.road(limits(500, 5_000)), Fake::default());
+        assert!(matches!(ended, Ended::StoodAside(_)), "{what}: {ended:?}");
+        assert_eq!(ended.code(), 1, "{what}");
+        assert!(
+            world.relaunched.is_empty(),
+            "{what}: {:?}",
+            world.relaunched
+        );
+        assert!(
+            world.said.iter().any(|line| line.contains("stands aside")),
+            "{what}: {:?}",
+            world.said
+        );
+        assert_eq!(
+            std::fs::read(install.home.journal()).unwrap(),
+            bytes,
+            "{what}"
+        );
+    }
+}
+
+// ── the window duty on macOS (0.4.8 E2) ──────────────────────────────────────
+
+/// **O's spawner in these tests**: it records every start and starts nothing;
+/// every start is acknowledged.
+#[derive(Default)]
+struct OldStarts {
+    calls: Vec<(PathBuf, Vec<OsString>)>,
+}
+
+impl crate::update_handoff::Spawner for OldStarts {
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+        self.calls.push((program.to_path_buf(), args.to_vec()));
+        Ok(Running { pid: 0, started: 0 })
+    }
+
+    fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+        true
+    }
+}
+
+/// RED (0.4.8 E2, ruling 3; Kimi round 4's R4-2) — **the macOS applier owns
+/// the window through the mark it landed, and opens it itself when its road
+/// never held the transaction lock**: O, holding `H\lock` (this test stands
+/// for it) past the applier's deadline, had read that mark and stood down.
+/// Drives the product `apply`'s `owns_window` call site. Runs on every host
+/// (a bundle-shaped home of ordinary files; the road stops at the lock).
+///
+/// MUTATION: in `apply_electing`, drop the duty instead of
+/// `guard.owns_window(duty)` (the contender guard then opens nothing).
+#[test]
+fn the_macos_applier_whose_mark_landed_opens_the_one_window() {
+    let install = shape_install("e2-mark-landed 已落");
+    let o_lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let (ended, world) = applied(install.road(limits(300, 0)), Fake::default());
+    drop(o_lock);
+    assert_eq!(ended, Ended::LockHeld, "{:?}", world.said);
+    assert_eq!(
+        crate::update_apply::window_owner(&install.home, install.txn),
+        Some(crate::update_apply::this_process())
+    );
+    assert_eq!(
+        world
+            .relaunched
+            .iter()
+            .map(|(bundle, _)| bundle.clone())
+            .collect::<Vec<_>>(),
+        vec![install.installed.clone()],
+        "the applier opens the one window: {:?}",
+        world.said
+    );
+    assert!(world.shown.is_empty(), "{:?}", world.shown);
+}
+
+/// RED (0.4.8 E2, rulings 1 and 3) — **a macOS applier whose mark does not
+/// land stands aside — no road, nothing opened, the cell named — and O,
+/// finding no mark of it, opens the one window**, whether or not O then
+/// lingers holding `H\lock`. Drives the product `apply`'s stand-aside arm
+/// through the real election with a mark writer that refuses before the
+/// rename. Runs on every host.
+///
+/// MUTATION: in `Applier::unrecorded`, answer `Mine` through the held lock
+/// (the applier opens a window beside O's).
+#[test]
+fn the_macos_applier_whose_mark_does_not_land_leaves_the_one_window_to_o() {
+    let install = shape_install("e2-mark-refused 写不进");
+    let o_lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let road = install.road(limits(300, 0));
+    let (home, txn) = (install.home.clone(), install.txn);
+    let (ended, world) = on_a_worker(move |worker| {
+        let mut world = Fake::default();
+        let ended = apply_electing(worker, &road, &mut world, |_worker, until| {
+            crate::update_apply::take_the_window_within_writes_at(
+                &home,
+                txn,
+                crate::update_apply::this_process(),
+                until.saturating_duration_since(Instant::now()),
+                crate::update_apply::Applier,
+                |_mark, _bytes| {
+                    Err(
+                        crate::update_apply::MarkWriteFailure::before_rename_for_test(
+                            "the volume refused the write 卷拒绝写入",
+                            false,
+                        ),
+                    )
+                },
+            )
+        });
+        (ended, world)
+    });
+    assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+    assert!(
+        said(&world, "stands aside and the outgoing build keeps the duty"),
+        "{:?}",
+        world.said
+    );
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+    assert_eq!(world.exchanges, 0);
+
+    let program = install.home.installed_program().unwrap();
+    let mut starts = OldStarts::default();
+    let left = crate::update_handoff::Leaving::over(&install.home, install.txn, &install.data)
+        .leave(Running { pid: 2, started: 2 }, &program, &mut starts, None);
+    drop(o_lock);
+    assert_eq!(left, crate::update_apply::Left::Started(program.clone()));
+    assert_eq!(
+        starts.calls,
+        vec![(
+            program,
+            crate::update_apply::failed_words(&install.home).to_vec()
+        )],
+        "O opens the one window"
+    );
+}
+
+/// RED (0.4.8 E2 round 2, rulings 1 and 3) — **on macOS too, the outgoing
+/// build's own road — its wait for the applier's mark, its election, its
+/// start — opens the one window when the applier's mark did not land, and
+/// O then lingers holding `H\lock`.** The applier (the product
+/// `apply_electing`, its mark refused before the rename) stands aside; O's
+/// `Leaving` runs on a worker with the applier recorded as still running, so
+/// its wait runs to its bound with no mark; the transaction lock this test
+/// holds for O stays held after O's leave. Runs on every host.
+///
+/// MUTATION: in `update_handoff::Leaving::leave`, drop the outgoing fallback —
+/// stand down (`guard.not_mine(None)`) instead of `guard.owns_window(duty)`.
+#[test]
+fn the_macos_outgoing_build_that_lingers_still_opens_the_one_window() {
+    let install = shape_install("e2-lingering 逗留");
+    let o_lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let road = install.road(limits(300, 0));
+    let (home, txn) = (install.home.clone(), install.txn);
+    let (ended, world) = on_a_worker(move |worker| {
+        let mut world = Fake::default();
+        let ended = apply_electing(worker, &road, &mut world, |_worker, until| {
+            crate::update_apply::take_the_window_within_writes_at(
+                &home,
+                txn,
+                crate::update_apply::this_process(),
+                until.saturating_duration_since(Instant::now()),
+                crate::update_apply::Applier,
+                |_mark, _bytes| {
+                    Err(
+                        crate::update_apply::MarkWriteFailure::before_rename_for_test(
+                            "the volume refused the write 卷拒绝写入",
+                            false,
+                        ),
+                    )
+                },
+            )
+        });
+        (ended, world)
+    });
+    assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+
+    let program = install.home.installed_program().unwrap();
+    let leaving = crate::update_handoff::Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(
+            crate::update_apply::this_process(),
+            Duration::from_millis(300),
+        );
+    let (left, calls) = {
+        let program = program.clone();
+        on_a_worker(move |worker| {
+            let mut starts = OldStarts::default();
+            let left = leaving.leave(
+                Running { pid: 2, started: 2 },
+                &program,
+                &mut starts,
+                Some(worker),
+            );
+            (left, starts.calls)
+        })
+    };
+    assert!(
+        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+            .unwrap()
+            .is_none(),
+        "O lingers: the transaction lock is still held after its leave"
+    );
+    drop(o_lock);
+    assert_eq!(left, crate::update_apply::Left::Started(program.clone()));
+    assert_eq!(
+        calls,
+        vec![(
+            program,
+            crate::update_apply::failed_words(&install.home).to_vec()
+        )],
+        "O opens the one window"
+    );
+}
+
+// ── Homebrew's layout: the M rows with the marks (0.4.8 D1, U-41b) ──────────
+
+impl Install {
+    /// **One Homebrew installation** (D1): [`Install::new`]'s, with the
+    /// installed bundle the app a Caskroom records under a prefix of its own
+    /// (`brew install --cask` as `fixture::homebrew_install` leaves it, with a
+    /// stand-in `brew` there), the cask's marks carried onto the staged
+    /// bundle through the Prepare's own door, and the journal naming the
+    /// Homebrew adapter and the marks it recorded. Answers the installation
+    /// and the stand-in `brew`'s record of calls.
+    fn homebrew(tag: &str) -> (Self, PathBuf) {
+        let mut install = Self::new(tag);
+        let prefix = install._scratch.root.join("homebrew 前缀");
+        let caskroom = homebrew_install(&prefix, "1.0", &install.installed);
+        let calls = fake_brew(&prefix);
+        let carried = Carried {
+            install: HOMEBREW_MARKER.as_bytes().to_vec(),
+            caskroom: Some(caskroom.to_str().unwrap().as_bytes().to_vec()),
+        };
+        bt_platform::macos_update::carry_attributes(
+            &install.stage(),
+            &[
+                (
+                    crate::install_channel::MARKER_ATTRIBUTE,
+                    carried.install.as_slice(),
+                ),
+                (
+                    crate::install_channel::CASKROOM_ATTRIBUTE,
+                    carried.caskroom.as_deref().unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+        install.carried = Some(carried);
+        install.write(Phase::Handoff {
+            applier: install.applier,
+        });
+        (install, calls)
+    }
+
+    /// The marks on the bundle at `bundle`, as the journal records them.
+    fn marks_on(&self, bundle: &Path) -> Option<Carried> {
+        crate::install_channel::homebrew_marks(bundle)
+            .ok()
+            .map(|marks| Carried {
+                install: marks.marker,
+                caskroom: Some(marks.caskroom),
+            })
+    }
+
+    /// How a start of the installed executable reads its channel now.
+    fn channel_now(&self) -> crate::install_channel::Channel {
+        crate::install_channel::channel_of(&self.installed.join(EXE))
+    }
+}
+
+/// The channel the cask's marker gives a copy.
+const HOMEBREW: crate::install_channel::Channel = crate::install_channel::Channel::Managed {
+    manager: crate::install_channel::Manager::Homebrew,
+    uninstall_hook: false,
+};
+
+/// RED (D1, managed-update §2.2, M1, M3, M5, §6's M row "marker carried on
+/// commit") — **a Homebrew copy's road commits with the new bundle live
+/// carrying the recorded marks byte for byte, and the copy is still
+/// Homebrew's in every sense the next start and the next update read: its
+/// channel is managed by Homebrew, its uninstall row names `brew uninstall
+/// --zap folio`, and the Caskroom's record still names it (the next update
+/// takes the same road) — and Homebrew is never run.**
+///
+/// MUTATION: `own_layouts` without `.with_homebrew(..)` — the journal's
+/// adapter has no layout and the road is refused.
+#[test]
+fn a_homebrew_copy_commits_with_its_marks_and_stays_homebrews() {
+    if !on_macos() {
+        return;
+    }
+    let (install, calls) = Install::homebrew("hb-commit");
+    let children = Children::default();
+    let world = launching(a_healthy_trial(&install, &children, None));
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(version_of(&install.installed), "2.0");
+    assert_eq!(install.marks_on(&install.installed), install.carried, "M1");
+    assert_eq!(install.channel_now(), HOMEBREW, "M3: the next start");
+    assert_eq!(
+        crate::uninstall::manager_uninstall(crate::install_channel::Manager::Homebrew, false),
+        "brew uninstall --zap folio",
+        "M5: the uninstall row"
+    );
+    assert!(
+        crate::install_channel::homebrew_record(&install.installed).is_ok(),
+        "the next update is eligible"
+    );
+    assert!(!calls.exists(), "Homebrew is never run");
+}
+
+/// RED (D1, managed-update M1, §6's M row "marker checked on the live
+/// side") — **a new bundle that went live without the recorded marks is
+/// rolled back at once, untried: the old bundle is live again with its own
+/// marks, and the copy is still Homebrew's.**
+///
+/// The staged bundle here lost its marks after the Prepare carried them;
+/// left live, the next start would read the copy as Folio's own and the
+/// uninstall row would stop naming Homebrew.
+///
+/// MUTATION: in `Homebrew::activate`, drop the last `Self::carries(places,
+/// places.installed)` — the road commits a bundle with no marks.
+#[test]
+fn a_new_bundle_without_the_recorded_marks_is_never_left_live() {
+    if !on_macos() {
+        return;
+    }
+    let (install, _calls) = Install::homebrew("hb-unmarked");
+    let stage = install.stage();
+    let first = AtomicBool::new(true);
+    // Between `Activate`'s look at the staged bundle and its exchange.
+    let world = Fake {
+        on_exchange: Some(Box::new(move |_, _| {
+            if !first.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            for name in [
+                crate::install_channel::MARKER_ATTRIBUTE,
+                crate::install_channel::CASKROOM_ATTRIBUTE,
+            ] {
+                run(
+                    "/usr/bin/xattr",
+                    &[OsStr::new("-d"), OsStr::new(name), stage.as_os_str()],
+                );
+            }
+        })),
+        ..Fake::default()
+    };
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(world.launched.lock().unwrap().is_empty(), "no trial");
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(install.marks_on(&install.installed), install.carried);
+    assert_eq!(install.channel_now(), HOMEBREW);
+}
+
+/// RED (D1, managed-update M4, §6's M row "marker restored on rollback") —
+/// **a Homebrew copy whose trial dies is rolled back with the old bundle
+/// live carrying its own marks unchanged, and the copy is still Homebrew's
+/// and still the app its Caskroom records.**
+///
+/// The attributes belong to the bundle directory, and the swap back moves
+/// the directory: nothing is rewritten on the way back.
+///
+/// MUTATION: in `Homebrew::activate_back`, after the exchange, remove the
+/// marker from the live bundle (a rollback that rebuilds the old bundle
+/// instead of moving it back) — the old bundle comes back without it.
+#[test]
+fn rollback_restores_the_old_marks_unchanged() {
+    if !on_macos() {
+        return;
+    }
+    let (install, calls) = Install::homebrew("hb-rollback");
+    let before = install.marks_on(&install.installed);
+    assert_eq!(before, install.carried);
+    let children = Children::default();
+    let started = children.clone();
+    let world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
+        Ok(())
+    }));
+    let applier = start(install.road(limits(5_000, 20_000)), world);
+    journal_reaches(&install, &applier, |journal| {
+        journal.body.phase.kind() == PhaseKind::Trial
+    });
+    for pid in children.started.lock().unwrap().clone() {
+        children.end(pid);
+    }
+    let (ended, world) = match applier.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(install.marks_on(&install.installed), before, "M4");
+    assert_eq!(install.channel_now(), HOMEBREW);
+    assert!(crate::install_channel::homebrew_record(&install.installed).is_ok());
+    assert!(!calls.exists(), "Homebrew is never run");
+}
+
+/// RED (D1, managed-update M2, §3.2 F12) — **marks on the live bundle that
+/// are no longer the ones the journal recorded refuse `Activate` before the
+/// exchange: nothing is exchanged, the transaction is reverted to
+/// `Prepared`, and the old build is relaunched plainly.**
+///
+/// Something rewrote the marker after `Allocated` (here, by hand); the road
+/// would otherwise carry bytes the manager no longer stands behind onto the
+/// copy it leaves live.
+///
+/// MUTATION: in `Homebrew::activate`, drop the two `Self::carries` checks
+/// before `Ours.activate` — the bundles are exchanged and the road goes on.
+#[test]
+fn marks_changed_since_allocation_refuse_the_exchange() {
+    if !on_macos() {
+        return;
+    }
+    let (install, _calls) = Install::homebrew("hb-changed");
+    let other = HOMEBREW_MARKER.replace("false", "true");
+    run(
+        "/usr/bin/xattr",
+        &[
+            OsStr::new("-w"),
+            OsStr::new(crate::install_channel::MARKER_ATTRIBUTE),
+            OsStr::new(&other),
+            install.installed.as_os_str(),
+        ],
+    );
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Ended::Reverted, "{:?}", world.said);
+    assert_eq!(world.exchanges, 0, "nothing is exchanged");
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert!(matches!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Prepared { .. }
+    ));
+    assert!(world.launched.lock().unwrap().is_empty(), "no trial");
+}
+
+/// RED (D1, managed-update M3) — **every start at every Homebrew row reads
+/// the same managed channel**: before the exchange (the old bundle live),
+/// after it (the new bundle live, the old one in `stage/`), and after the
+/// swap back — whichever executable can start there.
+///
+/// MUTATION: in `bt_platform::macos_update::carry_attributes`, write only
+/// the last attribute (`attributes.last()`) — the new bundle has no marker,
+/// and a start after the exchange reads the copy as Folio's own.
+#[test]
+fn every_start_at_every_homebrew_row_reads_the_same_managed_channel() {
+    if !on_macos() {
+        return;
+    }
+    let (install, _calls) = Install::homebrew("hb-rows");
+    assert_eq!(install.channel_now(), HOMEBREW, "before the exchange");
+    install.exchanged();
+    assert_eq!(version_of(&install.installed), "2.0");
+    assert_eq!(install.channel_now(), HOMEBREW, "the new bundle live");
+    assert_eq!(
+        crate::install_channel::channel_of(&install.stage().join(EXE)),
+        HOMEBREW,
+        "the old bundle in stage/"
+    );
+    install.exchanged();
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(install.channel_now(), HOMEBREW, "after the swap back");
 }

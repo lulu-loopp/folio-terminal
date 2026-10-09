@@ -10,7 +10,8 @@
 //! - **What the card says** — [`paint`]: one line per state, C9's verbs, and
 //!   for the download a bar (determinate with `12 / 41 MB` beside it, or the
 //!   indeterminate bar alone when the length is unknown). `None` in every
-//!   state C9 draws no card for.
+//!   state C9 draws no card for. A job's card is [`paint_of`]: the state's,
+//!   and the Ready card of a restart that did not happen says so first.
 //! - **What a press on it asks** — [`CardVerb::asks`] (Escape and the close
 //!   box are Later; a failed card's Close is Later too; Restart asks the
 //!   application's quit, not the job alone) and [`spend`], which
@@ -34,7 +35,9 @@
 use std::path::PathBuf;
 
 use crate::i18n::{self, Lang, Text};
-use crate::update_job::{Bytes, Effect, Failure, Job, NotEligible, Offer, State, Stop, Verb};
+use crate::update_job::{
+    Bytes, Effect, Failure, Job, NotEligible, Offer, State, Stop, TrialChanges, Verb,
+};
 
 // ── the verbs ──────────────────────────────────────────────────────────────
 
@@ -235,8 +238,18 @@ pub(crate) enum Outcome {
     Restored,
     /// `Update incomplete.` and the journal's folder — the rollback did not
     /// finish (`Failure::Incomplete`, U-29). No folder when a report handed
-    /// over named none this side accepts (U-36 round 2).
-    Incomplete { folder: Option<PathBuf> },
+    /// over named none this side accepts (U-36 round 2). `held`: and this
+    /// session's changes are not kept (0.4.8 E1).
+    Incomplete { folder: Option<PathBuf>, held: bool },
+    /// An update this build cannot read whole is not finished, and the
+    /// build that wrote it finishes it — at the next sign-in, or when the
+    /// later `version` it names is started (`Failure::Newer`, 0.4.8 E1).
+    /// `held` as for [`Outcome::Incomplete`].
+    Newer {
+        folder: Option<PathBuf>,
+        version: Option<String>,
+        held: bool,
+    },
     /// The unfinished update's new build is running as its recorded trial
     /// because neither recovery launch could be made (U-35).
     Trial { folder: PathBuf },
@@ -311,12 +324,36 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
         // The trial over `Stuck` committed forward after its card said the
         // update was incomplete (U-32): the version this build is, and one
         // word.
-        State::Updated(version) => Some(Paint {
+        // Committed after its trial ended (0.4.8 E4, R3): the same card, and
+        // the sentence that says the trial's changes were not kept.
+        State::Updated(version, changes) => Some(Paint {
             heading: Some(format!("Folio {version}")),
-            detail: Some(Text::UpdateCardUpdated.text().to_owned()),
+            detail: Some(match changes {
+                TrialChanges::Kept => Text::UpdateCardUpdated.text().to_owned(),
+                TrialChanges::NotKept => {
+                    i18n::update_card_trial_not_kept(Text::UpdateCardUpdated.text())
+                }
+            }),
             ..bare(vec![CardVerb::Close])
         }),
     }
+}
+
+/// **What the card of `job` says** — [`paint`] of its state, except the Ready
+/// card of a staged set whose restart did not happen (0.4.8 E3,
+/// `Job::restart_missed`): its heading is *The restart did not happen.*, the
+/// Ready line follows as its detail, and the same Restart · Later are offered.
+#[must_use]
+pub(crate) fn paint_of<W: Copy + Eq>(job: &Job<W>) -> Option<Paint> {
+    let paint = paint(job.state())?;
+    if !job.restart_missed() {
+        return Some(paint);
+    }
+    Some(Paint {
+        heading: Some(Text::UpdateCardRestartMissed.text().to_owned()),
+        detail: paint.heading,
+        ..paint
+    })
 }
 
 /// **A failed card**: the reason, then what the failure did (C9's three
@@ -325,22 +362,38 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
 #[must_use]
 pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
     let (detail, folder, first) = match outcome {
-        Outcome::NothingChanged => (Text::UpdateCardNothingChanged, None, CardVerb::Releases),
-        Outcome::Restored => (Text::UpdateCardRestored, None, CardVerb::Releases),
-        // Show folder only with a folder to show: a report handed over without
-        // one offers the releases page, as the other failures do (U-36 round 2).
-        Outcome::Incomplete {
-            folder: Some(folder),
-        } => (
-            Text::UpdateCardIncomplete,
-            Some(folder.clone()),
-            CardVerb::ShowFolder,
+        Outcome::NothingChanged => (
+            Text::UpdateCardNothingChanged.text().to_owned(),
+            None,
+            CardVerb::Releases,
         ),
-        Outcome::Incomplete { folder: None } => {
-            (Text::UpdateCardIncomplete, None, CardVerb::Releases)
-        }
+        Outcome::Restored => (
+            Text::UpdateCardRestored.text().to_owned(),
+            None,
+            CardVerb::Releases,
+        ),
+        Outcome::Incomplete { folder, held } => (
+            not_kept(Text::UpdateCardIncomplete.text().to_owned(), *held),
+            folder.clone(),
+            folder_verb(folder.as_ref()),
+        ),
+        Outcome::Newer {
+            folder,
+            version,
+            held,
+        } => (
+            not_kept(
+                match version {
+                    Some(version) => i18n::update_card_newer(version),
+                    None => Text::UpdateCardNewerUnnamed.text().to_owned(),
+                },
+                *held,
+            ),
+            folder.clone(),
+            folder_verb(folder.as_ref()),
+        ),
         Outcome::Trial { folder } => (
-            Text::UpdateCardTrial,
+            Text::UpdateCardTrial.text().to_owned(),
             Some(folder.clone()),
             CardVerb::ShowFolder,
         ),
@@ -348,9 +401,29 @@ pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
     Paint {
         heading: Some(reason.to_owned()),
         bar: None,
-        detail: Some(detail.text().to_owned()),
+        detail: Some(detail),
         folder,
         verbs: vec![first, CardVerb::Close],
+    }
+}
+
+/// Show folder only with a folder to show: a report handed over without one
+/// offers the releases page, as the other failures do (U-36 round 2).
+fn folder_verb(folder: Option<&PathBuf>) -> CardVerb {
+    if folder.is_some() {
+        CardVerb::ShowFolder
+    } else {
+        CardVerb::Releases
+    }
+}
+
+/// `detail`, and when this session's writes are held (0.4.8 E1) the
+/// sentence that says its changes are not kept.
+fn not_kept(detail: String, held: bool) -> String {
+    if held {
+        i18n::update_card_not_kept(&detail)
+    } else {
+        detail
     }
 }
 
@@ -362,6 +435,7 @@ fn reason(failure: &Failure) -> String {
             Text::UpdateFailedUnsupported
         }
         Failure::Stopped(Stop::Busy) => Text::UpdateFailedBusy,
+        Failure::Stopped(Stop::Newer) => Text::UpdateFailedNewer,
         Failure::Stopped(Stop::Journal) => Text::UpdateFailedJournal,
         Failure::Stopped(Stop::Download | Stop::Cancelled) => Text::UpdateFailedStopped,
         Failure::Stopped(Stop::Sums) => Text::UpdateFailedSums,
@@ -370,9 +444,19 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
         Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
-        Failure::RolledBack | Failure::Incomplete { .. } => Text::UpdateFailedTrial,
-        Failure::TrialIncomplete { .. } => Text::UpdateFailedTrialRunning,
+        Failure::RolledBack | Failure::Incomplete { untried: false, .. } => Text::UpdateFailedTrial,
+        Failure::Incomplete { untried: true, .. } => Text::UpdateFailedUntried,
+        Failure::JournalHeld { error, .. } => return i18n::update_failed_journal_held(error),
+        // Never a failed card: the job raises it as `State::Updated`.
+        Failure::ChangesNotKept { version } => return format!("Folio {version}"),
+        Failure::TrialIncomplete { .. } | Failure::BesideTheTrial { .. } => {
+            Text::UpdateFailedTrialRunning
+        }
         Failure::Interrupted => Text::UpdateFailedInterrupted,
+        Failure::Newer {
+            version: Some(_), ..
+        } => Text::UpdateFailedNewer,
+        Failure::Newer { version: None, .. } => Text::UpdateFailedUnreadable,
         Failure::Stopped(Stop::Space { short_by }) => {
             return i18n::update_failed_space(&needed_megabytes(*short_by));
         }
@@ -392,13 +476,38 @@ fn needed_megabytes(bytes: u64) -> String {
 /// the previous version back, or did not finish (U-29).
 fn outcome(failure: &Failure) -> Outcome {
     match failure {
+        // Another Folio's update holds the installation: it finishes it.
+        Failure::Stopped(Stop::Newer) => Outcome::Newer {
+            folder: None,
+            version: None,
+            held: false,
+        },
         Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
         Failure::RolledBack | Failure::Interrupted => Outcome::Restored,
-        Failure::Incomplete { folder } => Outcome::Incomplete {
+        Failure::Incomplete { folder, held, .. } => Outcome::Incomplete {
             folder: folder.clone(),
+            held: *held,
+        },
+        Failure::JournalHeld { then, .. } => outcome(then),
+        // Never a failed card ([`reason`]); the update was committed.
+        Failure::ChangesNotKept { .. } => Outcome::NothingChanged,
+        Failure::Newer {
+            folder,
+            version,
+            held,
+        } => Outcome::Newer {
+            folder: folder.clone(),
+            version: version.clone(),
+            held: *held,
         },
         Failure::TrialIncomplete { folder } => Outcome::Trial {
             folder: folder.clone(),
+        },
+        // The update's reserved trial runs in another process; this session's
+        // writes are held for its life (0.4.8 E3).
+        Failure::BesideTheTrial { folder } => Outcome::Incomplete {
+            folder: Some(folder.clone()),
+            held: true,
         },
     }
 }
@@ -834,7 +943,9 @@ pub(crate) fn version_failed_in(lang: Lang, outcome: &Outcome, version: &str) ->
     match outcome {
         Outcome::NothingChanged => Text::VersionFailed,
         Outcome::Restored => Text::VersionFailedRestored,
-        Outcome::Incomplete { .. } | Outcome::Trial { .. } => Text::VersionFailedIncomplete,
+        Outcome::Incomplete { .. } | Outcome::Newer { .. } | Outcome::Trial { .. } => {
+            Text::VersionFailedIncomplete
+        }
     }
     .in_lang(lang)
     .replace("{version}", version)
@@ -1010,6 +1121,7 @@ mod tests {
             channel: Some(channel),
             running: RUNNING,
             capable: true,
+            recorded: false,
             trial: false,
             platform: HostPlatform::Windows,
         }
@@ -1217,6 +1329,8 @@ mod tests {
         let mut updated =
             considered(RUNNING, Channel::Ours).after_rollback(Some(Failure::Incomplete {
                 folder: Some(PathBuf::from("journal")),
+                held: false,
+                untried: false,
             }));
         assert!(
             updated.after_commit(RUNNING),
@@ -1325,6 +1439,8 @@ mod tests {
                 "failed, incomplete",
                 after(Failure::Incomplete {
                     folder: Some(PathBuf::from("journal")),
+                    held: false,
+                    untried: false,
                 }),
                 CheckView::default(),
                 Some("v0.4.7"),
@@ -1409,6 +1525,8 @@ mod tests {
                 "incomplete",
                 after(Failure::Incomplete {
                     folder: Some(PathBuf::from("journal")),
+                    held: false,
+                    untried: false,
                 }),
                 format!("{banner} · The update to v0.4.7 is incomplete."),
                 false,
@@ -1516,6 +1634,7 @@ mod tests {
                 "not an updater build",
                 Gathered {
                     capable: false,
+                    recorded: false,
                     ..gathered("v0.4.7", Channel::Ours)
                 },
                 true,
@@ -2011,12 +2130,82 @@ mod tests {
             "The previous version could not be put back.",
             &Outcome::Incomplete {
                 folder: Some(folder.clone()),
+                held: false,
             },
         );
         assert_eq!(drawn.detail.as_deref(), Some("Update incomplete."));
         assert_eq!(drawn.folder, Some(folder));
         assert_eq!(drawn.verbs, vec![CardVerb::ShowFolder, CardVerb::Close]);
         assert_eq!(drawn.primary(), Some(CardVerb::ShowFolder));
+    }
+
+    /// RED (E1) — **the card of an update this build cannot read whole, and
+    /// of a session whose writes are held**: a newer Folio's unfinished
+    /// update names that Folio's version and when it finishes; one whose
+    /// record names no later build says the record cannot be read; a start
+    /// that continues with its writes held adds that this session's changes
+    /// are not kept, to the newer card and to *Update incomplete.* alike. The
+    /// buttons are the incomplete card's: Show folder with a folder, the
+    /// releases page without one, and Close.
+    ///
+    /// MUTATION: in `not_kept`, answer `detail` whatever `held` says (the held
+    /// sentence is never drawn).
+    #[test]
+    fn an_unfinished_update_by_another_folio_and_a_held_session_say_so() {
+        let folder = PathBuf::from(r"D:\工具\Folio 终端\.folio-update");
+        let drawn = |failure: Failure| {
+            paint(&State::Failed(None, failure)).expect("a failed job has a card")
+        };
+        for (failure, heading, detail) in [
+            (
+                Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: Some("0.4.9".to_owned()),
+                    held: false,
+                },
+                "An update by a newer Folio is not finished.",
+                "It finishes when you next sign in, or when you start Folio 0.4.9.",
+            ),
+            (
+                Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: None,
+                    held: false,
+                },
+                "The update record cannot be read.",
+                "It finishes when you next sign in.",
+            ),
+            (
+                Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: Some("0.4.9".to_owned()),
+                    held: true,
+                },
+                "An update by a newer Folio is not finished.",
+                "It finishes when you next sign in, or when you start Folio 0.4.9. Changes made in this session are not kept.",
+            ),
+            (
+                Failure::Incomplete {
+                    folder: Some(folder.clone()),
+                    held: true,
+                    untried: false,
+                },
+                "The new version did not start.",
+                "Update incomplete. Changes made in this session are not kept.",
+            ),
+        ] {
+            let card = drawn(failure.clone());
+            assert_eq!(card.heading.as_deref(), Some(heading), "{failure:?}");
+            assert_eq!(card.detail.as_deref(), Some(detail), "{failure:?}");
+            assert_eq!(card.folder.as_ref(), Some(&folder), "{failure:?}");
+            assert_eq!(card.verbs, vec![CardVerb::ShowFolder, CardVerb::Close]);
+        }
+        let unnamed = drawn(Failure::Newer {
+            folder: None,
+            version: None,
+            held: false,
+        });
+        assert_eq!(unnamed.verbs, vec![CardVerb::Releases, CardVerb::Close]);
     }
 
     /// RED (U-35 round 2) — **the fallback trial's card says what happened,
@@ -2075,6 +2264,8 @@ mod tests {
             None,
             Failure::Incomplete {
                 folder: Some(folder.clone()),
+                held: false,
+                untried: false,
             },
         ))
         .expect("a failed job has a card");
@@ -2252,40 +2443,78 @@ mod tests {
         }
     }
 
-    /// PIN (U-41a1, managed-update §1.5) — **a Homebrew copy on macOS and a
-    /// scoop copy on Windows, whose adapters are not built yet, keep their
-    /// manager's command with Copy and no card, on the platform whose road
-    /// their adapter would take.**
+    /// A job that considered `latest` for a copy installed as `channel` on
+    /// `platform`, whose manager's record names it or not (`recorded`).
+    fn considered_recorded(
+        latest: &str,
+        channel: Channel,
+        platform: HostPlatform,
+        recorded: bool,
+    ) -> Job<u32> {
+        let mut job = Job::with_offers(true);
+        job.consider(
+            Gathered {
+                platform,
+                recorded,
+                ..gathered(latest, channel)
+            },
+            &windows(),
+            || TxnId::new([7; 16]),
+        );
+        job
+    }
+
+    /// PIN (U-41a1, managed-update §1.5; D1) — **a scoop copy on Windows,
+    /// whose adapter is not built yet, and a Homebrew copy whose own record
+    /// does not name it (R-H2) or that runs where Homebrew's road is not
+    /// built, keep their manager's command with Copy and no card.**
     ///
     /// The journal can name `Homebrew` and `Scoop` (`update_txn::Adapter`),
-    /// and eligibility now asks the adapter whether its road is built
-    /// (`update_adapter::built_on`) instead of refusing every managed copy;
-    /// until U-41b and U-41c build them, the answer must stay the row it was.
+    /// and eligibility asks the adapter whether its road is built
+    /// (`update_adapter::built_on`) and whether its precondition holds
+    /// instead of refusing every managed copy; until U-41c builds scoop's,
+    /// and wherever Homebrew's precondition fails, the answer must stay the
+    /// row it was.
     ///
-    /// MUTATION: `HOMEBREW_ROAD = true` or `SCOOP_ROAD = true` — that copy
-    /// is offered the card on its platform.
+    /// MUTATION: `SCOOP_ROAD = true` — the scoop copy is offered the card;
+    /// drop `|| (manager == Manager::Homebrew && !self.recorded)` from
+    /// `Evidence::eligibility` — the Homebrew copy the record does not name
+    /// is offered it.
     #[test]
-    fn a_managed_copy_whose_adapter_is_not_built_keeps_the_copy_row() {
-        for (manager, platform, command) in [
+    fn a_managed_copy_whose_road_is_not_built_or_not_its_records_keeps_the_copy_row() {
+        for (manager, platform, command, recorded) in [
             (
                 Manager::Homebrew,
                 HostPlatform::MacOs,
                 "brew upgrade --cask folio",
+                false,
             ),
-            (Manager::Scoop, HostPlatform::Windows, "scoop update folio"),
+            (
+                Manager::Homebrew,
+                HostPlatform::Windows,
+                "brew upgrade --cask folio",
+                true,
+            ),
+            (
+                Manager::Scoop,
+                HostPlatform::Windows,
+                "scoop update folio",
+                true,
+            ),
         ] {
             let adapter = crate::update_adapter::of_manager(manager);
             assert!(
-                !crate::update_adapter::built_on(adapter, platform),
-                "{manager:?}: this proof is for an unbuilt manager road"
+                !crate::update_adapter::built_on(adapter, platform) || !recorded,
+                "{manager:?}: this proof is for a road not built or not recorded"
             );
-            let job = considered_on(
+            let job = considered_recorded(
                 "v0.4.7",
                 Channel::Managed {
                     manager,
                     uninstall_hook: true,
                 },
                 platform,
+                recorded,
             );
             assert_eq!(job.card_window(), None, "{manager:?}: no card");
             assert_eq!(row_foot(&job), RowFoot::Copy { command }, "{manager:?}");
@@ -2312,6 +2541,49 @@ mod tests {
             let job = considered_on("v0.4.7", Channel::Ours, platform);
             assert!(job.card_window().is_some(), "{platform:?}: ours is offered");
         }
+    }
+
+    /// RED (D1, managed-update §1.5, §2.2 R-H2, §5.2) — **a Homebrew copy on
+    /// macOS whose own record names it is offered the card, with no manager
+    /// word on it: the card and the About row are ours.**
+    ///
+    /// The owner's ruling of 2026-09-27: a managed copy presses one *Restart
+    /// to update* and the update completes. The card is C9's, the row's
+    /// control is Folio's updater, and nothing names Homebrew or its command.
+    ///
+    /// MUTATION: `HOMEBREW_ROAD = false` — the copy keeps the row with
+    /// `brew upgrade --cask folio` and Copy.
+    #[test]
+    fn a_homebrew_copy_at_its_recorded_target_is_offered_the_card() {
+        let homebrew = Channel::Managed {
+            manager: Manager::Homebrew,
+            uninstall_hook: false,
+        };
+        let job = considered_recorded("v0.4.7", homebrew, HostPlatform::MacOs, true);
+        let ours = considered_on("v0.4.7", Channel::Ours, HostPlatform::MacOs);
+        assert!(job.card_window().is_some(), "the card is offered");
+        assert_eq!(job.answer(), ours.answer());
+        assert_eq!(job.state(), ours.state());
+        let row = |job: &Job<u32>| {
+            version_row(
+                job,
+                crate::update::CheckView::default(),
+                Some("v0.4.7"),
+                0,
+                Lang::English,
+            )
+        };
+        assert_eq!(row(&job), row(&ours), "the About row is ours");
+        assert_eq!(
+            row(&job).control.kind(),
+            VersionControlKind::UpdateAndRestart
+        );
+        assert_ne!(
+            row_foot(&job),
+            RowFoot::Copy {
+                command: "brew upgrade --cask folio"
+            }
+        );
     }
 
     /// RED (U-4) — **a copy winget's own record names is offered no card, and

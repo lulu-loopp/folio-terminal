@@ -4,7 +4,7 @@
 //! from [`crate::test_support`].
 
 use super::*;
-use crate::test_support::{PtyPresentationHarness, method_body, row_box};
+use crate::test_support::{PtyPresentationHarness, host_path, host_spelling, method_body, row_box};
 use std::time::Duration;
 
 #[test]
@@ -48,9 +48,12 @@ fn a_late_zoom_reprint_keeps_the_last_formula_frame_until_exact_source_reanchors
         1
     );
     let mut initial_task = harness.session.take_live_worker_task().unwrap();
-    let initial_raster =
-        render_live_detection_task(&MathEngine::new(), &mut initial_task, foreground_rgb())
-            .expect("initial formula rasterizes");
+    let initial_raster = bt_compose::render_live_detection_task(
+        &MathEngine::new(),
+        &mut initial_task,
+        foreground_rgb(),
+    )
+    .expect("initial formula rasterizes");
     assert!(
         harness
             .session
@@ -726,9 +729,18 @@ fn a_composition_in_the_preview_opens_a_space_in_the_line_it_lands_in() {
 /// wording for both rows; turn the fold's tip round.
 #[test]
 fn the_breadcrumb_rows_controls_each_say_what_they_are() {
-    let path = PathBuf::from(r"D:\Developer\folio-terminal\test-assets\huge.txt");
+    let path = host_path(r"D:\Developer\folio-terminal\test-assets\huge.txt");
     let segments = crumb_segments(&path);
-    let folded = [1, 2, 3];
+    // Where each folder stands in the row is the host's row shape (a drive
+    // crumb first on Windows, none off it); the three folded are the folders
+    // between the top and the file, wherever that puts them.
+    let at = |name: &str| {
+        segments
+            .iter()
+            .position(|(segment, _)| segment == name)
+            .expect("every folder of the path is a segment")
+    };
+    let folded = [at("Developer"), at("folio-terminal"), at("test-assets")];
     let tip = |tip, kind, to_source| {
         preview_rail_tip_text(
             tip,
@@ -741,11 +753,11 @@ fn the_breadcrumb_rows_controls_each_say_what_they_are() {
     };
     assert_eq!(
         tip(
-            seats::PreviewRailTip::Crumb(2),
+            seats::PreviewRailTip::Crumb(at("folio-terminal")),
             seats::PreviewRailKind::Crumbs,
             false
         ),
-        r"D:\Developer\folio-terminal",
+        host_spelling(r"D:\Developer\folio-terminal"),
         "a segment names the whole place, not the word drawn in it"
     );
     assert_eq!(
@@ -954,5 +966,34 @@ fn one_video_texture_is_one_file_at_one_version_at_one_size() {
     assert!(base.starts_with("video-frame:"));
     assert!(
         peek_page_texture_key(Path::new(r"D:\shots\clip.mp4"), Some(now), 0, 1920, 1080) != base
+    );
+}
+
+/// GUARD — **the lane typesets a terminal formula through `bt_compose::typeset` and nowhere
+/// else** (design T-COMPOSE-CRATE §3.4 D-15, composition owns math execution; §6.2 planted
+/// violation "math execution owner", the call-site half — the half inside the crate is
+/// `bt_compose`'s own typesetting tests).
+///
+/// A guard: the lane is a worker thread's loop and its arms cannot be told apart by what they
+/// return. In `run_decoration_worker` the terminal formula's arm is the one `typeset` call, and the
+/// engine's own `render` is named once, by the preview formula's arm (a document formula, which
+/// is not this crate's terminal typesetting).
+///
+/// MUTATION: answer the `MathWorkerRequest::Math` arm with `engine.render(..)` instead of
+/// `bt_compose::typeset` — both assertions go red.
+#[test]
+fn the_lane_typesets_a_terminal_formula_through_the_composition_crate() {
+    use crate::test_support::{free_fn_body, squeezed};
+    let lane = squeezed(free_fn_body("run_decoration_worker"));
+    assert_eq!(
+        lane.matches("bt_compose::typeset(&engine,&muttask,foreground_rgb)")
+            .count(),
+        1,
+        "the terminal formula's arm typesets through the composition crate:\n{lane}"
+    );
+    assert_eq!(
+        lane.matches("engine.render(").count(),
+        1,
+        "the only formula the lane renders itself is a preview's:\n{lane}"
     );
 }

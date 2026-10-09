@@ -257,6 +257,10 @@ pub(crate) struct Gathered {
     pub(crate) running: &'static str,
     /// Whether this build was made with the updater flag ([`crate::update::eligible`]).
     pub(crate) capable: bool,
+    /// **Whether the manager's own record names this copy** (managed-update
+    /// §1.5: Homebrew's R-H2, [`crate::install_channel::at_recorded_target`]);
+    /// `false` for a copy no record was asked of.
+    pub(crate) recorded: bool,
     /// Whether this process is an update's trial ([`crate::update_startup::trial`]).
     pub(crate) trial: bool,
     /// Which platform's release files an offer would name.
@@ -273,6 +277,7 @@ impl Gathered {
             channel: crate::install_channel::channel(),
             running: crate::version::VERSION,
             capable: crate::update::eligible(),
+            recorded: crate::install_channel::at_recorded_target(),
             trial: crate::update_startup::trial().is_some(),
             platform: bt_platform::host_platform(),
         }
@@ -289,6 +294,7 @@ impl Gathered {
                 running: self.running,
                 channel,
                 capable: self.capable,
+                recorded: self.recorded,
                 trial: self.trial,
                 platform: self.platform,
             }),
@@ -310,6 +316,8 @@ pub(crate) struct Evidence {
     pub(crate) channel: Channel,
     /// Whether this build was made with the updater flag.
     pub(crate) capable: bool,
+    /// Whether the manager's own record names this copy ([`Gathered::recorded`]).
+    pub(crate) recorded: bool,
     /// Whether this process is an update's trial.
     pub(crate) trial: bool,
     /// Which platform's release files an offer would name.
@@ -436,13 +444,14 @@ impl Evidence {
         match self.channel {
             Channel::Ours => {}
             // A managed copy takes its manager's adapter only where that
-            // road is built (managed-update §1.5); everywhere else, its row
-            // keeps the manager's command.
+            // road is built and its precondition holds (managed-update §1.5:
+            // Homebrew's is its own record naming this copy, §2.2 R-H2);
+            // everywhere else, its row keeps the manager's command.
             Channel::Managed { manager, .. } => {
-                if !crate::update_adapter::built_on(
-                    crate::update_adapter::of_manager(manager),
-                    self.platform,
-                ) {
+                let adapter = crate::update_adapter::of_manager(manager);
+                if !crate::update_adapter::built_on(adapter, self.platform)
+                    || (manager == Manager::Homebrew && !self.recorded)
+                {
                     return Err(NotEligible::Managed {
                         manager,
                         command: manager_command(manager),
@@ -499,13 +508,65 @@ pub(crate) enum Failure {
     /// journal is, which the card names and Show folder opens. `None` only for
     /// a report handed over from another start whose folder is not a local
     /// path (`launch_wire::accept`, U-36 round 2): the card then names no
-    /// folder.
-    Incomplete { folder: Option<PathBuf> },
-    /// **Recovery could not be launched, so this already-running new build is
-    /// the recorded trial** (0.4.7 U-35). The update is still incomplete and
-    /// `folder` is where its journal is; unlike [`Failure::Incomplete`], the
-    /// card also tells the reader that this session is the trial.
+    /// folder. `held`: this start continues with its writes held, because
+    /// the rescue build could not be started (0.4.8 E1), and the card says
+    /// that this session's changes are not kept. `untried`: the journal
+    /// records no trial of the new build ever begun
+    /// (`update_txn::Phase::trial_begun`, 0.4.8 E4) — the update stopped
+    /// before the new version started, and the card says that rather than
+    /// that it did not start.
+    Incomplete {
+        folder: Option<PathBuf>,
+        held: bool,
+        untried: bool,
+    },
+    /// **An update this build cannot read whole is not finished** (0.4.8
+    /// E1): the start continued past a journal another Folio wrote —
+    /// `version`, when the journal names a later build, and otherwise one
+    /// whose record cannot be read. `folder` is where the journal is; `held`
+    /// as for [`Failure::Incomplete`].
+    Newer {
+        folder: Option<PathBuf>,
+        version: Option<String>,
+        held: bool,
+    },
+    /// **This start is the unfinished transaction's trial: the new version
+    /// runs here** — U-35's reserved trial, started because recovery could not
+    /// be launched (0.4.7), or the trial an exit guard starts with a fresh
+    /// nonce over a transaction whose new set is live (0.4.8 E4: W14long, a
+    /// `Stuck` one's retrial). The update is still incomplete and `folder` is
+    /// where its journal is; unlike [`Failure::Incomplete`], the card tells the
+    /// reader that this session is the trial — never that the new version did
+    /// not start.
     TrialIncomplete { folder: PathBuf },
+    /// **Another program held the update's journal open past the applier's
+    /// window for a refused write** (0.4.8 E4): `error` is the operating
+    /// system's last refusal, `then` the failure the journal itself shows. The
+    /// card names the hold and its error and says what `then` did; it never
+    /// says that the new version did not start.
+    JournalHeld { error: String, then: Box<Failure> },
+    /// **The update was committed after its trial ended, and what the person
+    /// changed in the trial was not kept** (0.4.8 E4, R3): the trial's writes
+    /// were held until a commit it never saw, and the trial left its mark in
+    /// the transaction's folder (`update_trial`). `version` is this build's.
+    ChangesNotKept { version: String },
+    /// **This start stood in for U-35's reserved trial and found that trial
+    /// already running** (0.4.8 E3, `update_startup::stand_down`): the trial
+    /// did not take its launch within the claim's wait, so this session opens
+    /// a window of its own, not as the trial, its writes held for its life.
+    /// The update is not finished; `folder` is where its journal is.
+    BesideTheTrial { folder: PathBuf },
+}
+
+impl Failure {
+    /// **The failure beneath a held journal's** — the one the journal itself
+    /// shows ([`Failure::JournalHeld`]'s `then`), or this failure.
+    pub(crate) fn beneath(&self) -> &Failure {
+        match self {
+            Failure::JournalHeld { then, .. } => then.beneath(),
+            other => other,
+        }
+    }
 }
 
 /// **Why a driver stopped** (U-18 decision 11, grown by the macOS Prepare,
@@ -524,6 +585,10 @@ pub(crate) enum Stop {
     /// Another transaction holds this installation: its lock is taken, or its
     /// journal is still there. Nothing was written.
     Busy,
+    /// **The journal still there is one this build cannot read whole**
+    /// (0.4.8 E1): another Folio's update is not finished, and the build that
+    /// wrote it finishes it. Nothing was written.
+    Newer,
     /// The installation home, the transaction's folders or its journal could
     /// not be written.
     Journal,
@@ -562,6 +627,7 @@ impl Stop {
             Self::NotWritable => "this copy's folder cannot be written",
             Self::NotOurs => "this copy is not updated by Folio",
             Self::Busy => "another update holds this installation",
+            Self::Newer => "another Folio's unfinished update holds this installation",
             Self::Journal => "the update's folder or journal could not be written",
             Self::Download => "a file did not download",
             Self::Sums => "the image does not match its checksum",
@@ -606,8 +672,22 @@ pub(crate) enum State {
     /// and the trial's watch then read `Committed` — the receipt committed it
     /// forward. The card follows the
     /// journal's final phase, not the phase at launch; the version is this
-    /// build's own.
-    Updated(String),
+    /// build's own. Also **an update committed after its trial ended** (0.4.8
+    /// E4, R3), raised at the next start: the changes made in that trial were
+    /// not kept, and the card says so ([`TrialChanges::NotKept`]).
+    Updated(String, TrialChanges),
+}
+
+/// **What a completed update kept of what was changed in its trial** (0.4.8
+/// E4, R3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrialChanges {
+    /// The trial saw its commit and wrote what it had held (U-32's road), or
+    /// held nothing a person changed.
+    Kept,
+    /// The trial ended before its commit holding a person's change: it never
+    /// reached the disk.
+    NotKept,
 }
 
 /// A state's name, for the table.
@@ -655,7 +735,7 @@ impl State {
             Self::Quitting(_) => Kind::Quitting,
             Self::Committing(_) => Kind::Committing,
             Self::Failed(..) => Kind::Failed,
-            Self::Updated(_) => Kind::Updated,
+            Self::Updated(..) => Kind::Updated,
         }
     }
 
@@ -663,7 +743,7 @@ impl State {
     #[must_use]
     pub(crate) const fn offer(&self) -> Option<&Offer> {
         match self {
-            Self::Pending(_) | Self::Idle | Self::Updated(_) => None,
+            Self::Pending(_) | Self::Idle | Self::Updated(..) => None,
             Self::Available(offer)
             | Self::Downloading(offer, _)
             | Self::Staged(offer)
@@ -1092,8 +1172,13 @@ pub(crate) enum Landed {
     /// **A staged set passed revalidation**: the offer minted again from the
     /// set's own version under the transaction's identity, and the staged
     /// transaction, lock held — the verified card, as if its download had just
-    /// finished.
-    Resumed(Offer, Box<Staged>),
+    /// finished; `restart_missed` when Restart was pressed for it and the
+    /// restart did not happen (0.4.8 E3), which that card says.
+    Resumed {
+        offer: Offer,
+        staged: Box<Staged>,
+        restart_missed: bool,
+    },
 }
 
 /// Where this launch's job-owner pass is.
@@ -1105,6 +1190,9 @@ enum Launch {
     /// to it, as a press does).
     Due {
         home: Home,
+        /// How the run before this launch ended (0.4.8 E3): what makes this
+        /// launch a counted deferral or not.
+        previous: crate::update_txn::PreviousRun,
         resume: Resumer,
         check: Box<dyn FnOnce() + Send>,
     },
@@ -1372,6 +1460,10 @@ pub(crate) struct Job<W> {
     /// a failure, a cancel, another offer — lets it go
     /// ([`Self::keep_the_asked_restart_in_its_transaction`]).
     restart_asked: Option<TxnId>,
+    /// **The staged set this launch resumed is one whose restart did not
+    /// happen** (0.4.8 E3, [`Landed::Resumed`]'s `restart_missed`): its Ready
+    /// card says so ([`Self::restart_missed`]) until Restart is pressed again.
+    restart_missed: bool,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
@@ -1431,6 +1523,7 @@ impl<W: Copy + Eq> Job<W> {
             launch: Launch::Done,
             said_incomplete: false,
             restart_asked: None,
+            restart_missed: false,
         }
     }
 
@@ -1474,9 +1567,19 @@ impl<W: Copy + Eq> Job<W> {
     /// is incomplete is kept until a commit says otherwise
     /// ([`Self::after_commit`]); a later report does not take it back.
     fn told(&mut self, failure: Failure) {
+        // Not a failure of the update: it completed, and the card says what
+        // its trial did not keep (0.4.8 E4, R3). Nothing to name in About.
+        if let Failure::ChangesNotKept { version } = failure {
+            self.state = State::Updated(version, TrialChanges::NotKept);
+            self.offered_this_launch = true;
+            return;
+        }
         self.said_incomplete |= matches!(
-            failure,
-            Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
+            failure.beneath(),
+            Failure::Incomplete { .. }
+                | Failure::TrialIncomplete { .. }
+                | Failure::Newer { .. }
+                | Failure::BesideTheTrial { .. }
         );
         self.last_failure = Some((None, failure.clone()));
         self.state = State::Failed(None, failure);
@@ -1533,19 +1636,23 @@ impl<W: Copy + Eq> Job<W> {
     /// it). Every other launch is unchanged: a trial that was never told
     /// anything is not told this either. Answers whether the card changed.
     pub(crate) fn after_commit(&mut self, version: &str) -> bool {
-        let standing = matches!(
-            self.state,
-            State::Failed(
-                None,
-                Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
-            ) | State::Idle
-        );
+        let standing = match &self.state {
+            State::Failed(None, failure) => matches!(
+                failure.beneath(),
+                Failure::Incomplete { .. }
+                    | Failure::TrialIncomplete { .. }
+                    | Failure::BesideTheTrial { .. }
+                    | Failure::Newer { .. }
+            ),
+            State::Idle => true,
+            _ => false,
+        };
         if !(self.said_incomplete && standing) {
             return false;
         }
         self.said_incomplete = false;
         self.last_failure = None;
-        self.state = State::Updated(version.to_owned());
+        self.state = State::Updated(version.to_owned(), TrialChanges::Kept);
         true
     }
 
@@ -1575,10 +1682,16 @@ impl<W: Copy + Eq> Job<W> {
     /// (a check that is not due asks nothing, `update::due`). A kernel that
     /// will not give the pass a thread leaves the transaction for the next
     /// launch and makes this one ordinary.
+    ///
+    /// `previous` is how the run before this launch ended (the product's is
+    /// `persist::previous_run_ended_orderly`, 0.4.8 E3): only a launch after a
+    /// run that ended orderly counts as a deferral of a staged set
+    /// (`update_txn::launch_event`).
     #[must_use]
     pub(crate) fn after_start(
         mut self,
         waiting: Option<Home>,
+        previous: crate::update_txn::PreviousRun,
         resume: Resumer,
         check: impl FnOnce() + Send + 'static,
     ) -> Self {
@@ -1587,6 +1700,7 @@ impl<W: Copy + Eq> Job<W> {
             Some(home) => {
                 self.launch = Launch::Due {
                     home,
+                    previous,
                     resume,
                     check: Box::new(check),
                 };
@@ -1602,12 +1716,14 @@ impl<W: Copy + Eq> Job<W> {
             Launch::Done => return Pass::Ordinary,
             Launch::Due {
                 home,
+                previous,
                 resume,
                 check,
             } => {
                 let Some(channel) = gathered.channel else {
                     self.launch = Launch::Due {
                         home,
+                        previous,
                         resume,
                         check,
                     };
@@ -1628,6 +1744,7 @@ impl<W: Copy + Eq> Job<W> {
                             resume,
                             Some(channel),
                             platform,
+                            previous,
                         );
                         *slot
                             .lock()
@@ -1672,7 +1789,11 @@ impl<W: Copy + Eq> Job<W> {
                     format!("Folio: update job — no offer: {}", Stop::Busy.why())
                 }))
             }
-            Landed::Resumed(offer, staged) => {
+            Landed::Resumed {
+                offer,
+                staged,
+                restart_missed,
+            } => {
                 let line = format!(
                     "Folio: update job — {} was prepared at an earlier launch and is verified again",
                     offer.tag()
@@ -1684,6 +1805,7 @@ impl<W: Copy + Eq> Job<W> {
                 );
                 self.staged = Some(*staged);
                 self.state = State::Verified(offer);
+                self.restart_missed = restart_missed;
                 self.put_away = false;
                 self.offered_this_launch = true;
                 Pass::Decided((!self.said).then(|| {
@@ -1701,6 +1823,14 @@ impl<W: Copy + Eq> Job<W> {
         let mut job = Self::with_offers(true);
         job.state = State::Verified(offer);
         job
+    }
+
+    /// **Whether the Ready card says the restart did not happen** (0.4.8 E3):
+    /// this launch resumed a staged set whose Restart was pressed and whose
+    /// restart did not happen, and Restart has not been pressed since.
+    #[must_use]
+    pub(crate) const fn restart_missed(&self) -> bool {
+        self.restart_missed && matches!(self.state, State::Verified(_))
     }
 
     /// **Why the last quit gave the update up**, while the job is back at
@@ -1728,6 +1858,7 @@ impl<W: Copy + Eq> Job<W> {
         // Restart's row never reaches a driver, so the one there is serves.
         let unfetched: SharedTransport = Arc::new(NoDownloadDoor);
         self.answer_verb(Verb::Restart, &Unsupported, &unfetched)?;
+        self.restart_missed = false;
         let txn = self
             .state
             .offer()
@@ -1780,7 +1911,7 @@ impl<W: Copy + Eq> Job<W> {
                 | State::Staged(_)
                 | State::Verified(_)
                 | State::Failed(..)
-                | State::Updated(_)
+                | State::Updated(..)
         );
         self.presenter.filter(|_| drawn && !self.put_away)
     }
@@ -1921,7 +2052,7 @@ impl<W: Copy + Eq> Job<W> {
     /// presenter changed.
     pub(crate) fn hand_over(&mut self, presenters: &Presenters<'_, W>) -> bool {
         let has_a_card = self.state.offer().is_some()
-            || matches!(self.state, State::Failed(..) | State::Updated(_));
+            || matches!(self.state, State::Failed(..) | State::Updated(..));
         if !has_a_card
             || self
                 .presenter
@@ -2147,7 +2278,7 @@ impl<W: Copy + Eq> Job<W> {
             )
             | (state @ State::Verified(_), Verb::Skip | Verb::Press | Verb::Cancel)
             | (
-                state @ (State::Failed(..) | State::Updated(_)),
+                state @ (State::Failed(..) | State::Updated(..)),
                 Verb::Skip | Verb::Press | Verb::Cancel | Verb::Restart,
             ) => (state, Err(Refusal::NotOnThisCard)),
             (State::Downloading(..) | State::Staged(_), Verb::Cancel) => {
@@ -2168,7 +2299,9 @@ impl<W: Copy + Eq> Job<W> {
             (State::Verified(offer), Verb::Restart) => (State::Quitting(offer), Ok(Effect::None)),
             (state @ State::Quitting(_), _) => (state, Err(Refusal::TheQuitAnswers)),
             (state @ State::Committing(_), _) => (state, Err(Refusal::Exiting)),
-            (State::Failed(..) | State::Updated(_), Verb::Later) => (State::Idle, Ok(Effect::None)),
+            (State::Failed(..) | State::Updated(..), Verb::Later) => {
+                (State::Idle, Ok(Effect::None))
+            }
         };
         if matches!(next, State::Idle) {
             self.presenter = None;
@@ -2237,6 +2370,7 @@ mod tests {
             channel,
             running: RUNNING,
             capable: true,
+            recorded: false,
             trial: false,
             platform: HostPlatform::Windows,
         }
@@ -2597,7 +2731,9 @@ mod tests {
             Kind::Quitting => State::Quitting(offer),
             Kind::Committing => State::Committing(offer),
             Kind::Failed => State::Failed(Some(offer), Failure::Unsupported),
-            Kind::Updated => State::Updated("0.4.7".to_owned()),
+            Kind::Updated => {
+                State::Updated("0.4.7".to_owned(), crate::update_job::TrialChanges::Kept)
+            }
         };
         job
     }
@@ -2865,6 +3001,7 @@ mod tests {
             running: RUNNING,
             channel,
             capable,
+            recorded: false,
             trial: false,
             platform,
         }
@@ -3214,6 +3351,7 @@ mod tests {
                     channel: Some(channel),
                     running: crate::version::VERSION,
                     capable: true,
+                    recorded: false,
                     trial: false,
                     platform: HostPlatform::Windows,
                 },
@@ -3360,6 +3498,7 @@ mod tests {
                 channel: Some(channel),
                 running: crate::version::VERSION,
                 capable: true,
+                recorded: false,
                 trial: false,
                 platform: HostPlatform::Windows,
             };
@@ -3602,13 +3741,17 @@ mod tests {
         let folder = PathBuf::from("/Applications/.Folio.app.folio-update");
         let mut job = job().after_rollback(Some(Failure::Incomplete {
             folder: Some(folder.clone()),
+            held: false,
+            untried: false,
         }));
         assert_eq!(
             job.state(),
             &State::Failed(
                 None,
                 Failure::Incomplete {
-                    folder: Some(folder)
+                    folder: Some(folder),
+                    held: false,
+                    untried: false,
                 }
             )
         );
@@ -3649,13 +3792,18 @@ mod tests {
             folder: PathBuf::from("update-journal"),
         }));
         assert!(job.after_commit("0.4.7"));
-        assert_eq!(job.state(), &State::Updated("0.4.7".to_owned()));
+        assert_eq!(
+            job.state(),
+            &State::Updated("0.4.7".to_owned(), crate::update_job::TrialChanges::Kept)
+        );
     }
 
     /// An unfinished rollback's report, its folder not ASCII.
     fn incomplete() -> Failure {
         Failure::Incomplete {
             folder: Some(PathBuf::from(r"D:\工具\Folio 终端\.folio-update")),
+            held: false,
+            untried: false,
         }
     }
 
@@ -3773,13 +3921,96 @@ mod tests {
 
         // The launch pass settling an earlier launch's transaction.
         let home = crate::update_txn::Home::at(PathBuf::from(r"D:\工具\.folio-update"));
-        let mut settling =
-            self::job().after_start(Some(home), super::resumer_for_this_copy(), || {});
+        let mut settling = self::job().after_start(
+            Some(home),
+            crate::update_txn::PreviousRun::Orderly,
+            super::resumer_for_this_copy(),
+            || {},
+        );
         assert!(!settling.told_by_a_launch(incomplete(), Some(4)));
         assert_eq!(settling.card_window(), None);
         assert_eq!(
             settling.last_failure().map(|(_, failure)| failure),
             Some(&incomplete())
         );
+    }
+
+    /// RED (0.4.8 E3, #13) — **the launch that resumes a staged update whose
+    /// restart did not happen says so, and offers the same Restart**: its
+    /// Ready card's heading is *The restart did not happen.*, the Ready line
+    /// under it, with Restart · Later; a resumed set whose restart was never
+    /// pressed shows the Ready card as ever; pressing Restart spends the
+    /// sentence.
+    ///
+    /// MUTATION: `update_card::paint_of` answers `paint(job.state())` alone.
+    #[test]
+    fn a_missed_restart_is_offered_again_by_a_card_that_says_so() {
+        use crate::update_card::{CardVerb, paint_of};
+        let root = bt_testpath::temp_path("bt-update-job-重启");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = crate::update_txn::Home::at(root.join("更新"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let tx = txn(0x4d);
+        for restart_missed in [true, false] {
+            let lock = bt_platform::install_txn::try_hold(
+                &home.lock(),
+                bt_platform::install_txn::Hold::Exclusive,
+            )
+            .unwrap()
+            .expect("the lock is free");
+            let staged = crate::update_handoff::Staged {
+                home: home.clone(),
+                journal: crate::update_txn::Journal::allocate(
+                    tx,
+                    "rescue".to_owned(),
+                    crate::update_txn::Layout::Members(crate::update_txn::Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                ),
+                lock,
+            };
+            let mut job = job();
+            job.launch = super::Launch::Running {
+                landed: Arc::new(Mutex::new(Some(super::Landed::Resumed {
+                    offer: Offer::mint(tx, "v0.4.9", HostPlatform::Windows).expect("a release"),
+                    staged: Box::new(staged),
+                    restart_missed,
+                }))),
+                check: Box::new(|| {}),
+            };
+            let _ = job.consider(
+                gathered("v0.4.9", None, Some(Channel::Ours)),
+                &one_window(),
+                || tx,
+            );
+            assert!(
+                matches!(job.state(), State::Verified(_)),
+                "{:?}",
+                job.state()
+            );
+            let paint = paint_of(&job).expect("the Ready card");
+            assert_eq!(paint.verbs, vec![CardVerb::Restart, CardVerb::Later]);
+            if restart_missed {
+                assert_eq!(
+                    paint.heading.as_deref(),
+                    Some("The restart did not happen.")
+                );
+                assert_eq!(
+                    paint.detail.as_deref(),
+                    Some("Ready. Running programs will close.")
+                );
+                job.restart().expect("Restart");
+                assert!(!job.restart_missed(), "Restart spends it");
+            } else {
+                assert_eq!(
+                    paint.heading.as_deref(),
+                    Some("Ready. Running programs will close.")
+                );
+                assert_eq!(paint.detail, None);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

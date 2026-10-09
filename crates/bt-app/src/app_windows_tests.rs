@@ -581,6 +581,27 @@ const CHOSEN_BOUNDS: WindowBoundsV1 = WindowBoundsV1 {
     height: 720,
 };
 
+/// An unavailable native posture keeps both previously saved placement facts.
+#[test]
+fn unknown_native_posture_preserves_the_saved_window_placement() {
+    assert_eq!(choose_window_posture(None, None), WindowPosture::Unknown);
+    assert_eq!(
+        choose_window_posture(Some(false), None),
+        WindowPosture::Unknown
+    );
+    for saved_maximized in [false, true] {
+        assert_eq!(
+            recorded_window_placement(
+                WindowPosture::Unknown,
+                Some(ICONIC_BOUNDS),
+                CHOSEN_BOUNDS,
+                saved_maximized,
+            ),
+            (CHOSEN_BOUNDS, saved_maximized),
+        );
+    }
+}
+
 /// The bug this pins, end to end: minimize, quit while minimized, start
 /// again. The snapshot recorded the *icon's* rectangle, and the next start
 /// could not seat three panes in a 157x25 window, so it exited with
@@ -2027,4 +2048,27 @@ fn every_pane_the_present_painted_is_square_with_its_shell() {
         StatusClaim::Silent,
         "a tab every pane of which reached the glass owes nothing when you leave it"
     );
+}
+
+/// RED (T-FRESH-FACTS) — **each thing a window's settings ear hears wakes the loop for its own
+/// fact**: a display change re-reads the display's rate in every window, a layout change the
+/// summon's key, and a preference what it always did.
+///
+/// MUTATION (observed red): `AppEvent::of_system_news` answering `SystemPreferencesChanged` for a
+/// display change — no window re-reads its rate, and the motion preference, the canvas, the
+/// taskbar and the program walk are asked instead.
+#[test]
+fn each_system_news_wakes_the_loop_for_its_own_fact() {
+    assert!(matches!(
+        AppEvent::of_system_news(bt_platform::SystemNews::Preferences),
+        AppEvent::SystemPreferencesChanged
+    ));
+    assert!(matches!(
+        AppEvent::of_system_news(bt_platform::SystemNews::Display),
+        AppEvent::DisplayChanged
+    ));
+    assert!(matches!(
+        AppEvent::of_system_news(bt_platform::SystemNews::InputLanguage),
+        AppEvent::InputLanguageChanged
+    ));
 }

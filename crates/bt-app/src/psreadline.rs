@@ -49,7 +49,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
 
 use crate::i18n::{self, Text};
 
@@ -323,105 +323,284 @@ impl Probe {
     }
 }
 
-#[derive(Default)]
-struct ProbeState {
-    answer: Option<Probe>,
-    in_flight: bool,
+/// **Why the probe was asked** — said in the diagnostics line, and nothing decides on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeTrigger {
+    /// A Windows PowerShell pane is being born.
+    Birth,
+    /// The Terminal page — the page the answer is printed on — opened.
+    TerminalPage,
 }
 
-struct ProbeSlot(Mutex<ProbeState>);
+impl ProbeTrigger {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Birth => "a Windows PowerShell pane",
+            Self::TerminalPage => "Terminal page opened",
+        }
+    }
+}
 
-impl ProbeSlot {
-    const fn new() -> Self {
-        Self(Mutex::new(ProbeState {
-            answer: None,
-            in_flight: false,
-        }))
+/// **One answer**: the request it answers, and what the probe found — `None` when PowerShell
+/// could not be asked or its answer could not be read, which is *unknown*, never "no module".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProbeAnswer {
+    generation: u64,
+    probe: Option<Probe>,
+}
+
+/// The requests, the probe out, and the newest answer.
+#[derive(Default)]
+struct ProbeState {
+    /// The number of the newest request; counted from `1`.
+    requested: u64,
+    /// The newest request not yet started: its number and why.
+    waiting: Option<(u64, ProbeTrigger)>,
+    /// The probe out now: its number, why, and how many requests were made while it was out.
+    out: Option<(u64, ProbeTrigger, u64)>,
+    /// A worker is running (started by a request, gone when nothing waits).
+    worker: bool,
+    /// The newest answer published — **a failure included, and it is not a verdict**: the next
+    /// trigger asks again.
+    answer: Option<ProbeAnswer>,
+    /// `BT_PSREADLINE_PROBE` named the answer ([`install_probe_override`]): the machine is not
+    /// asked.
+    seeded: bool,
+}
+
+/// What a probe runs: ask the machine, on the probe's worker, which PSReadLine it has.
+type ProbeRun = dyn Fn(&bt_platform::admission::WorkerCtx) -> Option<Probe> + Send + Sync;
+
+/// **The PSReadLine question, asked again whenever it matters** (T-PROBE-NO-CACHED-FAILURE; the
+/// copilot probe's shape, `attention_copilot::CopilotProbe`).
+///
+/// Until this ticket an answer was kept for the process — a module installed or updated while
+/// Folio ran was never seen — and a failure left the row saying it was still checking. Now a
+/// request numbers itself; one probe is out at a time; the requests made while it is out are
+/// answered by one more probe after it (said once in `diagnostics.log`); an answer older than the
+/// one held is refused; a failure is the newest answer and reads as *unknown*. No timer: the
+/// Terminal page's open edge asks every time, and a Windows PowerShell birth asks while nothing
+/// usable is held.
+///
+/// A type rather than statics so a test runs a probe of its own with a machine it writes.
+pub(crate) struct PsReadLineProbe {
+    state: Mutex<ProbeState>,
+    run: Box<ProbeRun>,
+    wake: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    note: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl PsReadLineProbe {
+    /// A probe that asks `run`, saying its diagnostics lines through `note`.
+    pub(crate) fn new(
+        run: impl Fn(&bt_platform::admission::WorkerCtx) -> Option<Probe> + Send + Sync + 'static,
+        note: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            state: Mutex::new(ProbeState::default()),
+            run: Box::new(run),
+            wake: OnceLock::new(),
+            note: Box::new(note),
+        }
     }
 
-    fn state(&self) -> MutexGuard<'_, ProbeState> {
-        self.0
+    /// Teach the worker how to bring the event loop round. Once; a second call is ignored.
+    fn install_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
+        let _ = self.wake.set(Box::new(wake));
+    }
+
+    /// **Ask unless a usable answer is held or one is on its way**: a birth's call. After a
+    /// failure it asks again — a failure is not an answer.
+    pub(crate) fn ask_unless_answered(&'static self, trigger: ProbeTrigger) {
+        let asked = {
+            let state = self.lock();
+            state.seeded
+                || state.out.is_some()
+                || state.waiting.is_some()
+                || state.answer.is_some_and(|answer| answer.probe.is_some())
+        };
+        if !asked {
+            self.ask(trigger);
+        }
+    }
+
+    /// **Number a request and see that a probe answers it.** Never waits for one: a lock, and —
+    /// when no worker is running — a thread start. A request made while a probe is out replaces
+    /// any request still waiting; the probe after the one out answers them all. A seeded answer
+    /// is not asked about.
+    pub(crate) fn ask(&'static self, trigger: ProbeTrigger) {
+        let mut state = self.lock();
+        if state.seeded {
+            return;
+        }
+        state.requested += 1;
+        let generation = state.requested;
+        let replaced = state.waiting.replace((generation, trigger));
+        if let Some((_, _, joined)) = state.out.as_mut() {
+            *joined += 1;
+        }
+        let start_a_worker = !state.worker;
+        state.worker = true;
+        drop(state);
+        // Said after the lock is let go: the line is a file write.
+        if let Some((older, older_trigger)) = replaced {
+            (self.note)(&format!(
+                "PSReadLine probe request {older} ({}) was replaced before it started by request \
+                 {generation} ({}), which answers both",
+                older_trigger.name(),
+                trigger.name()
+            ));
+        }
+        if !start_a_worker {
+            return;
+        }
+        // In the workers' band: this starts a PowerShell to ask a question about a module, and
+        // it must never be the reason a frame was late.
+        let started = bt_platform::spawn_at_priority(
+            "psreadline-probe",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |ctx| self.serve(ctx),
+        );
+        if let Err(error) = started {
+            // The request stays standing and the next one tries the thread again.
+            self.lock().worker = false;
+            (self.note)(&format!(
+                "PSReadLine probe: its worker would not start ({error}); request {generation} is \
+                 answered when the next request starts one"
+            ));
+        }
+    }
+
+    /// **The answer named by `BT_PSREADLINE_PROBE`**: held for the process, and no request asks
+    /// the machine after it.
+    fn seed(&self, probe: Probe) {
+        let mut state = self.lock();
+        state.seeded = true;
+        state.answer = Some(ProbeAnswer {
+            generation: state.requested,
+            probe: Some(probe),
+        });
+    }
+
+    /// The newest answer: `None` while no probe has answered, and `None` when the newest failed.
+    pub(crate) fn answer(&self) -> Option<Probe> {
+        self.lock().answer.and_then(|answer| answer.probe)
+    }
+
+    /// Whether the newest probe failed — the row's *unknown*, not its *checking*.
+    pub(crate) fn failed(&self) -> bool {
+        self.lock()
+            .answer
+            .is_some_and(|answer| answer.probe.is_none())
+    }
+
+    /// **The worker's whole body**: take the newest request, probe, publish, and go when nothing
+    /// is waiting.
+    fn serve(&self, ctx: &bt_platform::admission::WorkerCtx) {
+        loop {
+            let (generation, trigger) = {
+                let mut state = self.lock();
+                let Some((generation, trigger)) = state.waiting.take() else {
+                    state.worker = false;
+                    return;
+                };
+                state.out = Some((generation, trigger, 0));
+                (generation, trigger)
+            };
+            // A probe that unwinds leaves the probe askable: the worker is marked gone, so the
+            // next request starts another.
+            let guard = ProbeOut { probe: self };
+            let probe = (self.run)(ctx);
+            std::mem::forget(guard);
+            let joined = {
+                let mut state = self.lock();
+                let joined = state.out.take().map_or(0, |(_, _, joined)| joined);
+                publish(&mut state, ProbeAnswer { generation, probe });
+                joined
+            };
+            if probe.is_none() {
+                (self.note)(&format!(
+                    "PSReadLine probe {generation} ({}): PowerShell gave no answer; the row says \
+                     the check failed and the next trigger asks again",
+                    trigger.name()
+                ));
+            }
+            if joined > 0 {
+                (self.note)(&format!(
+                    "PSReadLine probe {generation} ({}): {joined} request(s) made while it was \
+                     out were not probed on their own and are answered by the next probe",
+                    trigger.name()
+                ));
+            }
+            // After the answer is published, never before: a wake that raced the publication
+            // would send the loop to read a row that is still `Probing`, and there is no second
+            // wake coming.
+            if let Some(wake) = self.wake.get() {
+                wake();
+            }
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ProbeState> {
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-
-    fn claim(&self) -> bool {
-        let mut state = self.state();
-        if state.answer.is_some() || state.in_flight {
-            return false;
-        }
-        state.in_flight = true;
-        true
-    }
-
-    fn settle(&self, answer: Option<Probe>) {
-        let mut state = self.state();
-        if state.answer.is_none() {
-            state.answer = answer;
-        }
-        state.in_flight = false;
-    }
-
-    fn install(&self, answer: Probe) {
-        let mut state = self.state();
-        if state.answer.is_none() {
-            state.answer = Some(answer);
-        }
-        state.in_flight = false;
-    }
-
-    fn answer(&self) -> Option<Probe> {
-        self.state().answer
-    }
 }
 
-static PROBE: ProbeSlot = ProbeSlot::new();
-
-/// Start the probe, once per successful answer, on a thread of its own.
-///
-/// **Two triggers, and both are "somebody is in a position to ask"**: the first
-/// `Windows PowerShell` pane opening, and — since §7.1.6c-5 — the settings
-/// dialog showing the page the answer is written on. A user who only ever opens
-/// WSL still pays nothing; a user who never opens a 5.1 pane used to read
-/// [`Text::PsReadLineProbing`] forever, because the row was drawn by a probe
-/// that had never been started. Calling it again is free.
-///
-/// The window is woken through [`install_wake`] when the answer lands, and the
-/// wake belongs to the *process* rather than to whichever trigger happened to
-/// fire first. That is the whole reason it is not an argument here: the answer
-/// is a one-shot, so only the call that actually spawns the thread could carry
-/// a callback — and the caller that spawns it is the pane, while the caller that
-/// needs the repaint is the dialog, which may open minutes later while the probe
-/// is still running. A failed query remains unknown and releases the claim so a
-/// later reader edge can try again.
-pub fn begin_probe() {
-    if !PROBE.claim() {
-        return;
-    }
-    // In the workers' band: this starts a PowerShell to ask a question about a
-    // module, and it must never be the reason a frame was late.
-    if bt_platform::spawn_at_priority(
-        "psreadline-probe",
-        bt_platform::ThreadPriority::BelowNormal,
-        |_ctx| {
-            PROBE.settle(run_probe());
-            // After the answer is published, never before: a wake that raced the
-            // `set` would send the loop to read a row that is still `Probing`,
-            // and there is no second wake coming.
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
-        },
-    )
-    .is_err()
+/// **File an answer unless a newer one is held** — the one rule that keeps a slow probe from
+/// putting back what a later one replaced.
+fn publish(state: &mut ProbeState, answer: ProbeAnswer) {
+    if state
+        .answer
+        .is_none_or(|held| held.generation < answer.generation)
     {
-        PROBE.settle(None);
+        state.answer = Some(answer);
     }
 }
 
-/// Every answer this module publishes out of band is published on a thread with
-/// no window, so the window has to be told to come and read it.
-static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+/// **A probe on its way**: dropped only by an unwind (a finished probe forgets it), when it marks
+/// the worker gone so the next request starts another.
+struct ProbeOut<'a> {
+    probe: &'a PsReadLineProbe,
+}
+
+impl Drop for ProbeOut<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self.probe.lock();
+            state.worker = false;
+            state.out = None;
+        }
+        (self.probe.note)(
+            "PSReadLine probe ended before its answer; the answer held stays, and the next \
+             request asks again",
+        );
+    }
+}
+
+/// The product's probe, asking this machine and writing its lines to `diagnostics.log`.
+static PROBE: LazyLock<PsReadLineProbe> =
+    LazyLock::new(|| PsReadLineProbe::new(run_probe, crate::diagnostics::note));
+
+/// **Ask** ([`PsReadLineProbe::ask`] or [`PsReadLineProbe::ask_unless_answered`] on the product's
+/// probe, by trigger).
+///
+/// **Two triggers, and both are "somebody is in a position to ask"**: a `Windows PowerShell` pane
+/// being born, and — since §7.1.6c-5 — the settings dialog showing the page the answer is written
+/// on. A user who only ever opens WSL pays nothing. The page asks at every visit, so a module
+/// installed or updated while Folio runs is seen there; a birth asks only while nothing usable is
+/// held, so opening panes does not start a PowerShell each.
+///
+/// The window is woken through [`install_wake`] when the answer lands, and the wake belongs to
+/// the *process* rather than to whichever trigger happened to fire first: the caller that starts
+/// the probe may be the pane, while the caller that needs the repaint is the dialog.
+pub fn begin_probe(trigger: ProbeTrigger) {
+    match trigger {
+        ProbeTrigger::TerminalPage => PROBE.ask(trigger),
+        ProbeTrigger::Birth => PROBE.ask_unless_answered(trigger),
+    }
+}
 
 /// Teach the probe how to bring the event loop round when its answer lands
 /// (§7.1.6c-5).
@@ -431,16 +610,21 @@ static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// "Checking this machine's PSReadLine", and nothing else in this window is
 /// going to produce a frame on its own to replace it — a modal is up, so there
 /// is no shell output, no hover and no keystroke coming.
-///
-/// A second call is ignored, which is what a process-lifetime answer means.
 pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
-    let _ = WAKE.set(Box::new(wake));
+    PROBE.install_wake(wake);
 }
 
-/// What the probe found, or `None` while it is still running.
+/// What the newest probe found: `None` while none has answered, and `None` when the newest
+/// failed ([`probe_failed`] tells the two apart).
 #[must_use]
 pub fn probe() -> Option<Probe> {
     PROBE.answer()
+}
+
+/// Whether the newest probe failed: the row says the check failed, not that it is checking.
+#[must_use]
+pub fn probe_failed() -> bool {
+    PROBE.failed()
 }
 
 /// Seed the probe's answer directly.
@@ -471,7 +655,7 @@ pub fn probe_override_from_env() -> Option<Probe> {
 /// Install the override, if one was asked for, before anything reads the probe.
 pub fn install_probe_override() {
     if let Some(probe) = probe_override_from_env() {
-        PROBE.install(probe);
+        PROBE.seed(probe);
     }
 }
 
@@ -490,19 +674,33 @@ $m = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Se
 if ($m) { $m.Version.ToString() } else { '' }; \
 (Get-ExecutionPolicy).ToString()";
 
+/// **The probe, in the environment a Windows PowerShell pane is born with** (the current logon
+/// block, [`crate::shell_integration::ProbeEnvironment`]): `powershell.exe` is looked up over its
+/// `PATH`, and the module path is the account's own, so the answer is the PSReadLine a pane of
+/// that edition loads — a module installed since Folio started included, and never the module
+/// path of a PowerShell 7 Folio happened to be started from.
 #[cfg(windows)]
-fn run_probe() -> Option<Probe> {
-    run_probe_with(|program, command, deadline| {
-        crate::shell_integration::run_powershell_probe(program, command, None, deadline)
+fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Probe> {
+    let environment = crate::shell_integration::ProbeEnvironment::current(ctx, "PSReadLine probe");
+    run_probe_with(&environment, |program, command, patience, environment| {
+        crate::shell_integration::run_powershell_probe(
+            program,
+            command,
+            None,
+            patience,
+            environment,
+        )
     })
 }
 
 #[cfg(windows)]
 fn run_probe_with(
+    environment: &crate::shell_integration::ProbeEnvironment,
     ask: impl FnOnce(
         &Path,
         &str,
-        std::time::Duration,
+        bt_platform::ProbePatience,
+        &crate::shell_integration::ProbeEnvironment,
     ) -> Result<
         crate::shell_integration::ProbeOutput,
         crate::shell_integration::ParseProbeFailure,
@@ -511,7 +709,8 @@ fn run_probe_with(
     let output = ask(
         Path::new("powershell.exe"),
         PROBE_COMMAND,
-        crate::shell_integration::POWERSHELL_PROBE_DEADLINE,
+        crate::shell_integration::POWERSHELL_PROBE_PATIENCE,
+        environment,
     )
     .ok()?;
     let answer = parse_probe_output(&String::from_utf8_lossy(&output.stdout));
@@ -519,7 +718,8 @@ fn run_probe_with(
 }
 
 #[cfg(not(windows))]
-fn run_probe() -> Option<Probe> {
+fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Probe> {
+    let _ = ctx;
     None
 }
 
@@ -567,6 +767,10 @@ pub enum RowState {
     /// The probe has not answered yet.
     #[default]
     Probing,
+    /// **The newest probe failed** — PowerShell could not be started, did not answer in time,
+    /// or gave an answer that could not be read (T-PROBE-NO-CACHED-FAILURE). Unknown, never "no
+    /// module": nothing is offered from it, and the page asks again when it opens.
+    Unknown,
     /// Older than the patched module, and Folio did not put it there.
     Outdated,
     /// Folio wrote the module and it is still on disk.
@@ -672,21 +876,33 @@ pub fn row_state(
     }
 }
 
+/// **The row's state once the newest probe is known to have failed**: a row that would read as
+/// still checking says the check failed instead ([`RowState::Unknown`]); every other state is a
+/// fact about the disk or the stored state and stands.
+#[must_use]
+pub fn after_the_newest_check(state: RowState, failed: bool) -> RowState {
+    if failed && state == RowState::Probing {
+        RowState::Unknown
+    } else {
+        state
+    }
+}
+
 /// The row's description line.
 ///
 /// `&'static str` because [`crate::settings::SettingsRow::description`] is, and
 /// that signature is the i18n ruling's own constraint. The versions inside these
-/// sentences are runtime values, so each state's sentence is built once into a
-/// `OnceLock` — which is sound because the probe is itself a one-shot: a state's
-/// text cannot change once that state has been reached.
+/// sentences are runtime values: a sentence that names what the probe found is
+/// built once per answer ([`line_for`]), because the probe is asked again; the
+/// two that name only this build's own versions are built once into a
+/// `OnceLock`.
 ///
 /// **One slot per language, not one slot** (§7.1.6c-3c). The language can move
 /// while the window is up, and this is the only cache in the app that would have
 /// survived the move with the old words in it: a reader who switched to Chinese
 /// with the Terminal page open would have watched every line on it change except
-/// this one. The probe's one-shot argument still holds — what a *state* says
-/// cannot change — so nothing here is ever invalidated; a second language simply
-/// fills a second slot the first time it is asked.
+/// this one. Nothing here is ever invalidated: a second language, or a second
+/// answer, simply fills a slot of its own the first time it is asked.
 #[must_use]
 pub fn row_description(state: RowState) -> &'static str {
     row_description_in(state, i18n::current())
@@ -700,13 +916,12 @@ pub fn row_description(state: RowState) -> &'static str {
 /// than a third column quietly sharing the second's slot.
 #[must_use]
 pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
-    static OUTDATED: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
     static INSTALLED: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
-    static CURRENT: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
     static UPDATE: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
     let slot = lang.index();
     match state {
         RowState::Probing => Text::PsReadLineProbing.in_lang(lang),
+        RowState::Unknown => Text::PsReadLineCheckFailed.in_lang(lang),
         RowState::RemovedElsewhere => Text::PsReadLineRowGone.in_lang(lang),
         // **Not `AlreadyCurrent`'s sentence, though the directory is a 2.4.6
         // leaf.** That line names what the *probe* found, and the machines this
@@ -721,19 +936,21 @@ pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
         // execution policy will not take the replacement. The second reader's
         // question is not "what have I got" but "why is the switch dark", and
         // until 2026-08-29 the only surface that answered it was the invitation
-        // — which is gone the moment it is answered. The `OnceLock` is as sound
-        // for this as for the others: the probe is a one-shot, so the policy
-        // cannot move under the cache.
-        RowState::Outdated => OUTDATED[slot]
-            .get_or_init(|| outdated_line(lang, probe().unwrap_or_default()))
-            .as_str(),
+        // — which is gone the moment it is answered. Built per answer: a policy
+        // changed since the last probe is a different sentence.
+        RowState::Outdated => {
+            let probe = probe().unwrap_or_default();
+            line_for(lang, RowState::Outdated, probe, || {
+                outdated_line(lang, probe)
+            })
+        }
         RowState::InstalledByFolio => INSTALLED[slot]
             .get_or_init(|| i18n::psreadline_row_installed_in(lang, PATCHED_VERSION))
             .as_str(),
         // **The one sentence in this row that names two builds**, because the
         // reader's question here is not "what have I got" but "what would
-        // pressing On change". The `OnceLock` is sound for the reason the three
-        // above it are: the installed build is read once per state, and reaching
+        // pressing On change". The `OnceLock` is sound: the installed build is
+        // read once per state, and reaching
         // this state at all means the directory held that build when the row was
         // last refreshed.
         RowState::UpdateAvailable => UPDATE[slot]
@@ -745,12 +962,38 @@ pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
                 )
             })
             .as_str(),
-        RowState::AlreadyCurrent => CURRENT[slot]
-            .get_or_init(|| {
-                i18n::psreadline_row_current_in(lang, &probe().unwrap_or_default().found_text())
+        RowState::AlreadyCurrent => {
+            let probe = probe().unwrap_or_default();
+            line_for(lang, RowState::AlreadyCurrent, probe, || {
+                i18n::psreadline_row_current_in(lang, &probe.found_text())
             })
-            .as_str(),
+        }
     }
+}
+
+/// **The sentence a probe-dependent state says for `probe`, built once per language, state and
+/// answer.** The probe is asked again (T-PROBE-NO-CACHED-FAILURE), so a sentence is no longer
+/// fixed for the process; each distinct answer's sentence is built once and kept (`&'static str`
+/// is the row's signature), which bounds what is kept by the answers this process has heard.
+fn line_for(
+    lang: i18n::Lang,
+    state: RowState,
+    probe: Probe,
+    make: impl FnOnce() -> String,
+) -> &'static str {
+    type Lines = Vec<(usize, RowState, Probe, &'static str)>;
+    static LINES: Mutex<Lines> = Mutex::new(Vec::new());
+    let mut lines = LINES.lock().unwrap_or_else(|error| error.into_inner());
+    let key = (lang.index(), state, probe);
+    if let Some((_, _, _, line)) = lines
+        .iter()
+        .find(|(index, held, answer, _)| (*index, *held, *answer) == key)
+    {
+        return line;
+    }
+    let line: &'static str = Box::leak(make().into_boxed_str());
+    lines.push((key.0, state, probe, line));
+    line
 }
 
 /// What [`RowState::Outdated`] says, which is two sentences and not one
@@ -1914,10 +2157,11 @@ fn apply_with(
         // The drawing's answer for this one is a dark `On`; this is the press's,
         // and the writer refuses it a third time on the disk it reads itself.
         RowState::NotOurs => return Outcome::Refused(Refusal::Occupied { path }),
-        // `Probing` cannot be reached with a probe in hand — `row_state` answers
-        // it only when there is none — and the other three are the states this
-        // verb exists for.
+        // `Probing` and `Unknown` cannot be reached with a probe in hand —
+        // `row_state` answers them only when there is none — and the other three
+        // are the states this verb exists for.
         RowState::Probing
+        | RowState::Unknown
         | RowState::Outdated
         | RowState::RemovedElsewhere
         | RowState::UpdateAvailable => {}
@@ -1943,31 +2187,299 @@ pub(crate) mod tests {
     use super::*;
     use bt_persist::PsReadLineInviteV1 as State;
 
-    /// A failed machine question is not an answer. Its claim is released so the next pane or
-    /// Terminal-page open can ask again; a successful answer remains final for this process.
+    /// **A PowerShell a test writes**: what each probe answers, in order (the last answer
+    /// repeats), and a gate that holds a probe inside its run until the test lets it go.
+    #[derive(Clone, Default)]
+    struct FakeMachine {
+        answers: std::sync::Arc<Mutex<Vec<Option<Probe>>>>,
+        runs: std::sync::Arc<Mutex<u64>>,
+        gate: std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl FakeMachine {
+        fn answering(answers: &[Option<Probe>]) -> Self {
+            let machine = Self::default();
+            machine.answers.lock().unwrap().extend_from_slice(answers);
+            machine
+        }
+
+        fn run(&self) -> Option<Probe> {
+            let (held, released) = &*self.gate;
+            let mut held = held.lock().unwrap();
+            while *held {
+                held = released.wait(held).unwrap();
+            }
+            drop(held);
+            *self.runs.lock().unwrap() += 1;
+            let mut answers = self.answers.lock().unwrap();
+            if answers.len() > 1 {
+                answers.remove(0)
+            } else {
+                answers[0]
+            }
+        }
+
+        fn runs(&self) -> u64 {
+            *self.runs.lock().unwrap()
+        }
+
+        fn hold(&self) {
+            *self.gate.0.lock().unwrap() = true;
+        }
+
+        fn release(&self) {
+            *self.gate.0.lock().unwrap() = false;
+            self.gate.1.notify_all();
+        }
+    }
+
+    /// A probe of the test's own over `machine`, leaked for the `'static` its worker needs; its
+    /// wakes and its diagnostics lines come back on channels.
+    fn probe_over(
+        machine: &FakeMachine,
+    ) -> (
+        &'static PsReadLineProbe,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Receiver<String>,
+    ) {
+        let (noted, notes) = std::sync::mpsc::channel();
+        let noted = Mutex::new(noted);
+        let asked = machine.clone();
+        let probe: &'static PsReadLineProbe = Box::leak(Box::new(PsReadLineProbe::new(
+            move |_ctx| asked.run(),
+            move |line: &str| {
+                let _ = noted.lock().unwrap().send(line.to_owned());
+            },
+        )));
+        let (woke, wakes) = std::sync::mpsc::channel();
+        let woke = Mutex::new(woke);
+        probe.install_wake(move || {
+            let _ = woke.lock().unwrap().send(());
+        });
+        (probe, wakes, notes)
+    }
+
+    /// Wait, within the lane suite's patience, for the probe's next wake.
+    fn next_answer(wakes: &std::sync::mpsc::Receiver<()>, awaited: &str) {
+        wakes
+            .recv_timeout(crate::lane::PATIENCE)
+            .unwrap_or_else(|_| panic!("no wake within the lane suite's patience: {awaited}"));
+    }
+
+    fn answered(version: &str) -> Option<Probe> {
+        Some(Probe {
+            version: Version::parse(version),
+            policy: ExecutionPolicy::RemoteSigned,
+        })
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **a probe that failed is asked again by the next
+    /// trigger, and the page sees a module installed since.** The answer used to be kept for the
+    /// process once there was one, and a failure read as "still checking".
     ///
-    /// RED (mutation `keep_failed_claim`: leave `in_flight` set when `settle(None)` runs).
+    /// MUTATIONS (observed red): ① `ask_unless_answered` treating a failure as an answer
+    /// (`answer.is_some()`: the cached failure) — the second birth never asks, no wake comes;
+    /// ② `ask` returning without a probe once a usable answer is held (the old process-lifetime
+    /// answer) — the page's ask never comes back with 2.4.6.
     #[test]
-    fn an_unknown_probe_is_asked_again_on_the_next_edge() {
-        let slot = ProbeSlot::new();
-        assert!(slot.claim(), "the first reader edge asks");
-        assert!(
-            !slot.claim(),
-            "a concurrent reader does not start a second child"
+    fn a_probe_that_failed_is_asked_again_and_the_page_sees_a_module_installed_since() {
+        let machine = FakeMachine::answering(&[None, answered("2.0.0"), answered("2.4.6")]);
+        let (probe, wakes, notes) = probe_over(&machine);
+        probe.ask_unless_answered(ProbeTrigger::Birth);
+        next_answer(&wakes, "the first birth's probe");
+        assert_eq!(probe.answer(), None, "a failure is no answer");
+        assert!(probe.failed(), "and it is known to have failed");
+        assert_eq!(
+            after_the_newest_check(
+                row_state(probe.answer(), State::NotAsked, InstalledCopy::None),
+                probe.failed()
+            ),
+            RowState::Unknown,
+            "the row says the check failed, not that it is checking"
         );
-        slot.settle(None);
-        assert!(slot.answer().is_none(), "failure remains unknown");
-        assert!(slot.claim(), "the next reader edge retries");
-        let answer = Probe {
+        assert!(
+            notes
+                .try_iter()
+                .any(|line| line.contains("PowerShell gave no answer")),
+            "the failure is said in diagnostics"
+        );
+
+        probe.ask_unless_answered(ProbeTrigger::Birth);
+        next_answer(&wakes, "the next birth asks again after a failure");
+        assert_eq!(probe.answer(), answered("2.0.0"));
+        assert!(!probe.failed());
+        probe.ask_unless_answered(ProbeTrigger::Birth);
+        assert_eq!(
+            machine.runs(),
+            2,
+            "a birth does not ask over a usable answer"
+        );
+
+        probe.ask(ProbeTrigger::TerminalPage);
+        next_answer(&wakes, "the page's open asks every time");
+        assert_eq!(
+            probe.answer(),
+            answered("2.4.6"),
+            "a module installed while Folio runs is seen at the next visit"
+        );
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **one probe out at a time: requests made while one is
+    /// out are answered by one more probe, and that is said once in diagnostics.**
+    ///
+    /// MUTATION (observed red): `serve` going after its first probe without looking for a request
+    /// that arrived meanwhile — the requests are never answered.
+    #[test]
+    fn requests_made_while_a_psreadline_probe_is_out_are_answered_by_one_more_probe() {
+        let machine = FakeMachine::answering(&[answered("2.0.0")]);
+        let (probe, wakes, notes) = probe_over(&machine);
+        machine.hold();
+        probe.ask(ProbeTrigger::TerminalPage);
+        while probe.lock().out.is_none() {
+            std::thread::yield_now();
+        }
+        probe.ask(ProbeTrigger::Birth);
+        probe.ask(ProbeTrigger::TerminalPage);
+        probe.ask(ProbeTrigger::TerminalPage);
+        let newest = probe.lock().requested;
+        machine.release();
+        next_answer(&wakes, "the held probe");
+        next_answer(&wakes, "the probe that answers the three");
+        assert_eq!(
+            machine.runs(),
+            2,
+            "three requests while one probe was out are one more probe"
+        );
+        assert_eq!(
+            probe.lock().answer.map(|answer| answer.generation),
+            Some(newest)
+        );
+        let lines: Vec<String> = notes.try_iter().collect();
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("was replaced before it started"))
+                .count(),
+            2,
+            "each request replaced while it waited is said: {lines:?}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("3 request(s) made while it was out"))
+                .count(),
+            1,
+            "and the merge is said once: {lines:?}"
+        );
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE) — **an older probe's answer never overwrites a newer
+    /// one**, a failure included.
+    ///
+    /// MUTATION (observed red): `publish` filing every answer — probe 3's failure replaces probe
+    /// 5's answer.
+    #[test]
+    fn an_older_psreadline_answer_never_overwrites_a_newer_one() {
+        let mut state = ProbeState::default();
+        publish(
+            &mut state,
+            ProbeAnswer {
+                generation: 5,
+                probe: answered("2.4.6"),
+            },
+        );
+        publish(
+            &mut state,
+            ProbeAnswer {
+                generation: 3,
+                probe: None,
+            },
+        );
+        assert_eq!(
+            state.answer,
+            Some(ProbeAnswer {
+                generation: 5,
+                probe: answered("2.4.6"),
+            })
+        );
+    }
+
+    /// **`BT_PSREADLINE_PROBE` replaces what the machine is read as, for the process**: no trigger
+    /// asks the machine after it.
+    ///
+    /// RED (mutation: `ask` without the `seeded` check — the page's ask runs the machine).
+    #[test]
+    fn a_seeded_psreadline_answer_is_not_asked_about() {
+        let machine = FakeMachine::answering(&[answered("2.4.6")]);
+        let (probe, _wakes, _notes) = probe_over(&machine);
+        probe.seed(answered("2.0.0").unwrap());
+        probe.ask(ProbeTrigger::TerminalPage);
+        probe.ask_unless_answered(ProbeTrigger::Birth);
+        assert_eq!(probe.answer(), answered("2.0.0"));
+        assert!(!probe.lock().worker, "no worker was started");
+        assert_eq!(machine.runs(), 0);
+    }
+
+    /// **A failed check reads as unknown, never as "checking" and never as a state that offers
+    /// anything**, in both languages; every other state stands.
+    ///
+    /// RED (mutation: `after_the_newest_check` answering `state` — the row says it is checking).
+    #[test]
+    fn a_failed_psreadline_check_is_unknown_and_offers_nothing() {
+        assert_eq!(
+            after_the_newest_check(RowState::Probing, true),
+            RowState::Unknown
+        );
+        assert_eq!(
+            after_the_newest_check(RowState::Probing, false),
+            RowState::Probing
+        );
+        for state in [
+            RowState::InstalledByFolio,
+            RowState::RemovedElsewhere,
+            RowState::NotOurs,
+            RowState::UpdateAvailable,
+        ] {
+            assert_eq!(after_the_newest_check(state, true), state);
+        }
+        assert!(!install_available(None, RowState::Unknown));
+        for lang in [i18n::Lang::English, i18n::Lang::Chinese] {
+            assert_eq!(
+                row_description_in(RowState::Unknown, lang),
+                Text::PsReadLineCheckFailed.in_lang(lang)
+            );
+            assert_ne!(
+                row_description_in(RowState::Unknown, lang),
+                row_description_in(RowState::Probing, lang)
+            );
+        }
+    }
+
+    /// **A sentence that names the probe's answer follows the answer** — the probe is asked
+    /// again, so the row's line is no longer fixed for the process. Mixed-script sample: the
+    /// policy line is checked in the Chinese column too.
+    ///
+    /// RED (mutation: `line_for` keyed without the probe — the second answer reads the first's
+    /// sentence).
+    #[test]
+    fn a_new_answer_is_a_new_sentence() {
+        let old = Probe {
             version: Version::parse("2.0.0"),
             policy: ExecutionPolicy::RemoteSigned,
         };
-        slot.settle(Some(answer));
-        assert_eq!(slot.answer(), Some(answer));
-        assert!(
-            !slot.claim(),
-            "a successful answer is process-lifetime state"
-        );
+        let blocked = Probe {
+            version: Version::parse("2.0.0"),
+            policy: ExecutionPolicy::AllSigned,
+        };
+        for lang in [i18n::Lang::English, i18n::Lang::Chinese] {
+            let first = line_for(lang, RowState::Outdated, old, || outdated_line(lang, old));
+            let second = line_for(lang, RowState::Outdated, blocked, || {
+                outdated_line(lang, blocked)
+            });
+            assert_eq!(first, outdated_line(lang, old));
+            assert_eq!(second, outdated_line(lang, blocked));
+            assert_ne!(first, second);
+        }
     }
 
     /// The deadline is an input to the contained child door, not a sleep in this test. A
@@ -1978,14 +2490,17 @@ pub(crate) mod tests {
     #[cfg(windows)]
     #[test]
     fn the_psreadline_probe_uses_the_contained_powershell_deadline() {
-        let answer = run_probe_with(|program, command, deadline| {
+        let environment = crate::shell_integration::ProbeEnvironment::Inherited;
+        let answer = run_probe_with(&environment, |program, command, patience, _| {
             assert_eq!(program, Path::new("powershell.exe"));
             assert_eq!(command, PROBE_COMMAND);
             assert_eq!(
-                deadline,
-                crate::shell_integration::POWERSHELL_PROBE_DEADLINE
+                patience,
+                crate::shell_integration::POWERSHELL_PROBE_PATIENCE
             );
-            Err(crate::shell_integration::ParseProbeFailure::Deadline {
+            Err(crate::shell_integration::ParseProbeFailure::Overdue {
+                overdue: bt_platform::ProbeOverdue::Silent,
+                patience: crate::shell_integration::POWERSHELL_PROBE_PATIENCE,
                 stdout: "[]".to_owned(),
                 stderr: "[]".to_owned(),
             })
@@ -1993,8 +2508,10 @@ pub(crate) mod tests {
         assert_eq!(answer, None);
     }
 
-    /// A Windows PowerShell probe started from a PowerShell 7-shaped environment removes the
-    /// launcher's module path before the real child starts. That lets 5.1 resolve both PSReadLine
+    /// A Windows PowerShell probe in the inherited environment (a logon block that could not be
+    /// read) started from a PowerShell 7-shaped one removes the launcher's module path before the
+    /// real child starts; in the logon block that path is never there
+    /// (`shell_integration`'s `a_probe_child_is_given_the_current_logon_block_not_folios_environment`). That lets 5.1 resolve both PSReadLine
     /// and `Get-ExecutionPolicy`, and the returned policy is therefore not the unsafe `Unknown`.
     ///
     /// The two real shells are created through `bt_pty::test_shell`: no profile, history, or
@@ -2026,32 +2543,36 @@ pub(crate) mod tests {
             "PowerShell 7 supplies the inherited module path under test"
         );
 
-        let answer = run_probe_with(|program, script, deadline| {
-            assert_eq!(
-                deadline,
-                crate::shell_integration::POWERSHELL_PROBE_DEADLINE
-            );
-            let product = crate::shell_integration::powershell_probe_command(program)?;
-            let mut command = hygiene.command(program, |_| product);
-            command
-                .env("PSModulePath", &launcher_module_path)
-                .env_remove("PSModulePath")
-                .args(["-NonInteractive", "-Command", script]);
-            let output = command.output().map_err(|error| {
-                crate::shell_integration::ParseProbeFailure::Spawn(error.to_string())
-            })?;
-            if !output.status.success() {
-                return Err(crate::shell_integration::ParseProbeFailure::Exit {
-                    code: output.status.code(),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                });
-            }
-            Ok(crate::shell_integration::ProbeOutput {
-                stdout: output.stdout,
-                stderr: output.stderr,
-            })
-        })
+        let answer = run_probe_with(
+            &crate::shell_integration::ProbeEnvironment::Inherited,
+            |program, script, deadline, environment| {
+                assert_eq!(
+                    deadline,
+                    crate::shell_integration::POWERSHELL_PROBE_PATIENCE
+                );
+                let product =
+                    crate::shell_integration::powershell_probe_command(program, environment)?;
+                let mut command = hygiene.command(program, |_| product);
+                command
+                    .env("PSModulePath", &launcher_module_path)
+                    .env_remove("PSModulePath")
+                    .args(["-NonInteractive", "-Command", script]);
+                let output = command.output().map_err(|error| {
+                    crate::shell_integration::ParseProbeFailure::Spawn(error.to_string())
+                })?;
+                if !output.status.success() {
+                    return Err(crate::shell_integration::ParseProbeFailure::Exit {
+                        code: output.status.code(),
+                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    });
+                }
+                Ok(crate::shell_integration::ProbeOutput {
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                })
+            },
+        )
         .expect("Windows PowerShell resolves its inbox module and policy command");
         assert!(
             answer.version.is_some(),
@@ -3438,6 +3959,11 @@ pub(crate) mod tests {
     /// MUTATION: make `apply` return anything without a sentence on a failed
     /// write — an early `return`, a swallowed `Err`, an `Outcome::Installed`
     /// on a path nothing was written to — and this fails.
+    ///
+    /// Windows only: the module path is Windows PowerShell's
+    /// (`WindowsPowerShell\Modules\PSReadLine`), whose `\` is a separator only
+    /// there.
+    #[cfg(windows)]
     #[test]
     fn a_refused_install_says_why_instead_of_staying_off() {
         let documents = temp_dir("refused-write");
@@ -3484,6 +4010,9 @@ pub(crate) mod tests {
     ///
     /// MUTATION: `create_dir` in place of `create_dir_all` and this fails on
     /// the first file.
+    ///
+    /// Windows only, for the same module path's reason.
+    #[cfg(windows)]
     #[test]
     fn the_module_directory_is_created_level_by_level() {
         let parent = temp_dir("levels");

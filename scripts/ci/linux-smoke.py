@@ -239,6 +239,7 @@ def smoke_app(backend, executable, root, env):
     env.update(
         SHELL=str(shell),
         BT_STARTUP_TRACE="1",
+        BT_PERF_TRACE="1",
         BT_PTY_DUMP=str(root / "pty.dump"),
     )
     log = root / "startup.log"
@@ -270,8 +271,15 @@ def smoke_app(backend, executable, root, env):
                 "BT_STARTUP first_text_present=" in trace
                 and size
                 and all(int(dimension) > 0 for dimension in size.groups())
+                and "BT_HANG_PROBE dispatched=" in trace
             ):
-                print(f"PASS {backend}: PTY output presented; artifacts: {root}", flush=True)
+                if "Folio's window thread has not answered" in trace:
+                    raise RuntimeError(f"Hang reported on a responsive window:\n{trace}")
+                print(
+                    f"PASS {backend}: PTY output presented and hang probe dispatched; "
+                    f"artifacts: {root}",
+                    flush=True,
+                )
                 return
             if process.poll() is not None:
                 raise RuntimeError(f"Folio exited with {process.returncode}:\n{trace}")

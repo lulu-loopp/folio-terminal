@@ -178,6 +178,14 @@ fn fresh_module_path() -> Option<Option<OsString>> {
         .clone()
 }
 
+/// **A test process names its ConPTY sidecar folder as the program does** (G-SWEEP-048): the
+/// folder of its own resolved image (`bt_platform::running_image`), where the build puts the
+/// packaged pair beside every test executable. Asked before each first use of the loader; only the
+/// first naming is kept.
+pub(crate) fn name_the_sidecars() {
+    crate::use_sidecars_in(bt_platform::own_files_folder());
+}
+
 /// The variable a PowerShell keeps its module analysis cache under — a file path.
 const MODULE_ANALYSIS_CACHE: &str = "PSModuleAnalysisCachePath";
 
@@ -1387,6 +1395,15 @@ impl TestShell {
         &mut self.session
     }
 
+    /// **The session itself, given away** — for a test whose subject takes a [`PtySession`] by
+    /// value and keeps it (`bt-app`'s pane birth), under the same condition as [`Self::write`]:
+    /// a PowerShell's history refusal is established first. The [`Hygiene`] comes with it and must
+    /// be dropped after the session, so the child is ended before its directory is removed.
+    pub fn into_session(mut self) -> (PtySession, Hygiene) {
+        self.establish();
+        (self.session, self.hygiene)
+    }
+
     fn establish(&mut self) {
         let Gate::PowerShell {
             proof,
@@ -1654,10 +1671,14 @@ mod tests {
             .as_ref()
             .expect("a test shell starts from a cleaned block");
         for list in [&refresh.fresh, &refresh.launch_overrides] {
-            assert!(
-                list.iter().all(|(key, _)| !is_pane_announcement(key)),
-                "{list:?}"
-            );
+            // The block is this process's environment: a failure names the announcements it
+            // kept, never a value.
+            let kept: Vec<&OsStr> = list
+                .iter()
+                .map(|(key, _)| key.as_os_str())
+                .filter(|key| is_pane_announcement(key))
+                .collect();
+            assert!(kept.is_empty(), "announcements kept: {kept:?}");
         }
         assert_eq!(
             value(&prepared, "TERM_PROGRAM").as_deref(),

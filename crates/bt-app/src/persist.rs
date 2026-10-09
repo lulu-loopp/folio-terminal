@@ -831,6 +831,32 @@ impl SessionWriter {
     }
 }
 
+/// **The crash sentinel's name** beside `session.json` (§5.5): present while a
+/// writer of record runs, dropped on its clean-exit path.
+const SENTINEL_FILE_NAME: &str = "session.lock";
+
+/// **Whether the run before this one over the data directory reached its
+/// clean-exit path** — the session sentinel's answer, the fact diagnostics
+/// says as "previous session did not reach its clean-exit path": `false` after
+/// a crash, a power cut or an end from outside; `true` after an orderly quit
+/// and after the system's end of the session (B-ENDSESSION drops it too).
+/// Read once per process, before this run arms its own sentinel, whichever
+/// asks first — [`SessionStore::open`] or the update job's launch pass
+/// (`update_txn::launch_event`, 0.4.8 E3, which counts a deferral only after a
+/// run that ended orderly).
+pub(crate) fn previous_run_ended_orderly() -> bool {
+    previous_exit(&storage_dir().join(SENTINEL_FILE_NAME)) == ExitState::Normal
+}
+
+/// The one probe of the sentinel at `sentinel`, kept for the process: the first
+/// answer stands whatever path a later call names, so a test that seeds a
+/// sentinel of its own asks in a process of its own (`update_trial`'s
+/// `run_in_a_process_of_its_own` harness), never in the shared test process.
+fn previous_exit(sentinel: &Path) -> ExitState {
+    static PREVIOUS: OnceLock<ExitState> = OnceLock::new();
+    *PREVIOUS.get_or_init(|| probe_sentinel(sentinel).unwrap_or(ExitState::Normal))
+}
+
 /// The session file, its sentinel, the debounce that stands between a change and the disk, and
 /// the thread that actually touches it.
 pub struct SessionStore {
@@ -870,7 +896,7 @@ impl SessionStore {
     pub fn open() -> Self {
         let dir = storage_dir();
         let session_path = dir.join(SESSION_FILE_NAME);
-        let sentinel_path = dir.join("session.lock");
+        let sentinel_path = dir.join(SENTINEL_FILE_NAME);
         let writable = make_data_folder(&dir);
         // **Asked before the sentinel and before the read** (review row R4-5),
         // because both of those are things only the writer of record may do: a
@@ -879,8 +905,9 @@ impl SessionStore {
         // this store's two files are in — see `is_writer_of`.
         let writer_of_record = is_writer_of(&dir);
         // Probe *before* creating: creating first would make every probe after
-        // the first report a crash.
-        let previous_exit = probe_sentinel(&sentinel_path).unwrap_or(ExitState::Normal);
+        // the first report a crash. Read once for the process
+        // ([`previous_run_ended_orderly`] answers the same probe).
+        let previous_exit = previous_exit(&sentinel_path);
         let (session, report, degradation) =
             read_session_keeping(&session_path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &session_path, |path| {

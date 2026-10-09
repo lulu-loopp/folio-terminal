@@ -80,8 +80,8 @@
 //!
 //! # The peer is checked for its user and **not** for its executable
 //!
-//! [`crate::launch_pipe`]'s server refuses a peer whose executable is not the
-//! same file as its own, and that is right *there*: the only thing that ever
+//! [`crate::launch_pipe`]'s server refuses a peer whose executable is not a
+//! Folio (its file name), and that is right *there*: the only thing that ever
 //! speaks the launch wire is a second Folio. **Nothing of the sort is true
 //! here, and the check is deliberately absent rather than forgotten.** The
 //! programs on the other end of this socket are other people's — `claude`,

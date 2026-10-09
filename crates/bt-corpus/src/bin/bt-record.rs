@@ -53,6 +53,8 @@ impl TerminalQueries {
 }
 
 fn main() -> Result<()> {
+    // The ConPTY pair is looked for where this program's own file is (G-SWEEP-048).
+    bt_pty::use_sidecars_in(bt_platform::own_files_folder());
     let mut args = env::args().skip(1);
     let output = args.next().context("usage: bt-record OUTPUT.btcr [--size COLSxROWS] [--resize MS:COLSxROWS] [--stdin FILE] [--input-plan FILE] -- COMMAND [ARG...]")?;
     let mut cols = 80;

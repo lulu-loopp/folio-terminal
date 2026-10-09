@@ -112,7 +112,14 @@ creating the file and its folders, and the one copy it takes of a file that was
 there before its first write; Undo, the Settings remover, `--remove-shell-integration`
 and both uninstall verbs remove the managed line, then the copy, then — only when
 Folio created it and nothing but whitespace is left — the file and each empty
-folder it created. A removal takes no copy. A PowerShell that does not say where
+folder it created. A removal takes no copy. **A one-click edit is made against one
+revision** (0.4.8 G7): Enable against the profile's bytes as the check its row is drawn
+from read them, its Undo against the bytes that Enable wrote; the writer reads the file
+again under the marks lock immediately before the edit and, when the bytes differ,
+writes nothing and refuses with "changed elsewhere, reload". Undo puts the file back to
+the bytes it held before that Enable — Folio's line and the separator it added, byte for
+byte — so it never takes out a line the person wrote or edited; an Enable that finds a
+line in a form Folio owns already there writes nothing and offers no Undo. A PowerShell that does not say where
 its `$PROFILE` is, and that the record does not locate, is reported with what is
 left there and refuses nothing. The Settings remover is offered only for a line in
 a form Folio owns. The PowerShell script returns outside `TERM_PROGRAM=Folio`, so
@@ -132,7 +139,8 @@ prompt string; `B` is still refused where there is no `C`.
 patch); §7.57 *`cmd.exe` finally has a scale on its command rail*; superseded
 §7.1.6j (the old opt-in `$PROFILE` offer and backup; only its shell-owned
 profile-path discovery remains); `docs/shell-integration.md`, which states it is the authority for the
-protocol; trailing entry 2026-09-21 *Folio's own writers wait their turn for the
+protocol; trailing entry 2026-10-09 *Enable and Undo of the `$PROFILE` line are made against one
+revision of the file*; trailing entry 2026-09-21 *Folio's own writers wait their turn for the
 marks record*; trailing entry 2026-09-21 *a removal that found nothing says
 nothing in the window*; trailing entry 2026-09-23 *a writer of Folio's waits
 behind another of Folio's writers for as long as that one takes; the two-second
@@ -229,7 +237,13 @@ protected prefix ends where the declared target itself stops being
 address-shaped, at its first Unicode punctuation or whitespace character, so
 an IRI target's ideographs stay linked while a target that runs on into
 Chinese is cut there like its label. A program-chosen label and a non-HTTP(S)
-target stay whole, and the target is unchanged. The scope is one captured row: a soft-wrapped continuation fragment
+target stay whole, and the target is unchanged. **A declared HTTP(S) target whose host does
+not parse is no declaration** (owner ruling 2026-10-06): the span is plain text and the bare
+address recogniser reads it, so `http://www.glancepc.com：` declared by an autolinker becomes a link
+to `http://www.glancepc.com` and the full-width colon stays prose. The host check is one function,
+`bt_transcript::web_host_parses` (the WHATWG host parser, IDNA included), and it is the check the
+address door refuses with (`webnav::Refusal::InvalidHost`), so a link Folio draws is never one its
+own door would refuse as malformed. The scope is one captured row: a soft-wrapped continuation fragment
 that does not begin with the target stays linked (T-71B;
 `bt-transcript::CapturedRow`, invoked by `bt-term::cell_capture` before
 transcript or viewport clipping; trailing DESIGN entry 2026-09-30). An `OSC 8`
@@ -244,8 +258,12 @@ the network card for a share, nothing for `mailto:` or any other scheme);
 `Ctrl`/`⌘`+click = the system's — the browser for `http`/`https`, the registered
 handler for a file, Explorer for a folder, **the system for a share on another
 machine, and whatever the machine has registered for any other scheme**
-(`mailto:`, `vscode:`, `ssh:` …), with no list of schemes; what the machine
-refuses is said on the hover line as a refused address. A single letter before a
+(`mailto:`, `vscode:`, `ssh:` …), with no list of schemes. A refused press is said on
+the hover line with why, and only what is true (owner ruling 2026-10-06): `address invalid`
+for text that is not an address (a host that does not parse, no host, a control character, a
+target that names nothing this machine can name), `blocked` for an address the door will not go
+to (a scheme, userinfo), `no program to open it` for one the system took and had nothing for; a
+page's foot and a refused link in a document use the same three. A single letter before a
 colon is a drive, not a scheme, and a path never leaves as a URI. **A link in a
 previewed document follows this row**, both halves. **An `[Image #k]`
 placeholder in an agent's input area is the same object again**: a pane learns
@@ -273,7 +291,8 @@ input line, `[Image #N]` is a link to the picture the pane saw that agent link t
 same label to*, and the owner's ruling of 2026-09-29 that a number not yet
 linked is inferred beside the newest learned picture, bounded by the disk;
 trailing entry 2026-10-08 *every pasted picture's `[Image #N]` on an agent's
-input line can be opened, not only the last one*.
+input line can be opened, not only the last one*; trailing entry 2026-10-09 *a declared link
+whose host does not parse is read by the recogniser, and a refused link says why*.
 **Overrides.** §7.1.5g's original "plain click does nothing, Ctrl hands it over"
 was reversed by the 2026-08-20 ruling *plain click stays in the window, Ctrl+click
 hands it over*, aligning hyperlinks with image references. The owner's rulings of
@@ -470,6 +489,11 @@ the dirty gate (`restore::DirtyGate`), which answers raised, nothing to ask, or
 busy — and **a busy gate never authorises the operation that found it busy**
 (2026-09-25, ticket 58): only nothing to ask lets the verb go on; a request that
 finds another question up is dropped, and that question keeps its own request.
+**The last ordinary window's close is the summoned terminal's shut too**
+(2026-10-09, T-SUMMON-DIRTY-PREVIEW): before the run ends, the summoned terminal's
+gate is put the run's end (`GateRequest::ShutWithTheRun`) and, when it asks, the
+summoned terminal is brought up holding the card; Save all or Discard re-runs that
+window's close, and Cancel leaves it open — the summoned terminal never stands alone.
 **From.** §7.1.3; §7.1.3q; §7.1.3s *undo lives on the buffer, and the dirty dot is
 a position in it*; §7.1.3v *a buffer knows which disk state it is holding, and a
 read is answered against the body it was issued for* (`T-EDIT-DISK`); §7.1.3w;
@@ -480,7 +504,9 @@ where it stands, and the seat holds until the gesture ends*; the 2026-09-23 entr
 sweeps stays rendered, and a caret crossing into another block is measured*; the
 2026-09-23 entry *every block a selection touches is drawn as source, a table it
 only sweeps stays rendered, and the span is held until the gesture ends*; the
-2026-09-25 entry *a busy dirty gate is never read as "nothing to ask"*.
+2026-09-25 entry *a busy dirty gate is never read as "nothing to ask"*; the 2026-10-09
+entry *closing the last ordinary window asks the summoned terminal about its unsaved
+preview edits first*.
 **Overrides.** §7.1.3v overrides §7.1.3p: a read now carries the base it was
 issued for, and a late answer about a body the buffer has moved past is refused
 — it raises a disk-changed notice and keeps body, undo, caret and selection —
@@ -938,6 +964,19 @@ account's home only for a pane that has neither. A launcher's home mark (`~`) is
 on this side and is skipped. One reader: `DualPlaneSession::standing_folder`. An unreadable
 report forgets the reported folder (`docs/shell-integration.md`, OSC 7), which returns the pane to the folder it
 was opened in, never to the home folder.
+**The program list follows the machine** (T-PROGRAMS-REFRESH, 2026-10-08): which program each
+profile row starts here is asked again — on its own worker, never on the window thread — when a menu
+that lists programs opens (the new-tab menu, a pane's and a terminal's menu), when the Profiles, Agents
+or a Git page opens, when Windows says a setting moved (`WM_SETTINGCHANGE`), on a table edit and when a
+pane's birth needs an unanswered row; never on a timer. A row is known or unknown, and **nothing is
+decided from unknown**: no fallback, banner, saved-pane rewrite, default, hidden agent or "git not
+found"; a pane whose program depends on an unanswered row waits for the answer, keeping what is typed
+into it, and the window opens without waiting. One owner, `bt-app::programs_lane`. **A menu that
+lists programs always updates when a new answer arrives** (owner ruling 2026-10-04) — pointer inside
+or outside, keyboard highlight or not: a highlight the keyboard put on a row follows its item by
+identity and is cleared when the item is gone; a highlight the pointer lit is the row under the
+pointer (coordinator's decision with the ruling); an activation acts on the item the pressed row
+showed. One helper, `profiles::relit`.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration
@@ -959,10 +998,33 @@ each pane birth reads the current account block and then applies only launcher
 overrides a caller identified explicitly, followed by Folio's declarations and
 the profile's. A difference from Folio's inherited environment is never itself
 an override: the parent may be a terminal, Explorer, a resident hotkey process,
-or the old build handing off an update. No current product start road identifies
-an override. If the account read fails, that birth alone uses ordinary process
-inheritance and the next birth asks again. On non-Windows hosts the platform has
-no fresh-account block and pane birth retains ordinary inheritance.
+or the old build handing off an update (owner ruling 2026-10-05, choice A). **The
+one road that identifies overrides is the explicit entry** (F-SWEEP-2-048):
+`folio --with-environment` carries the starting process's whole environment as the
+overrides of the one tab that launch opens — on a first launch, and across the
+launch wire (key `env`, inside the endpoint's 256 KiB frame) to a Folio already
+running; an environment that does not fit the frame, or that the wire cannot write
+as itself, refuses the launch with one line on its console and in
+`diagnostics.log`, and is never cut. The overrides are an overlay: a carried
+variable wins over the account's, an account variable the launcher lacks stays,
+and Folio's pane variables and the profile's are laid over both — except Folio's
+conditional declarations (`shell_integration::derive_environment_for_birth`:
+`FORCE_HYPERLINK`, the locale, `ZDOTDIR`'s carry and kin), which Folio makes only where the
+environment has no value of its own, so a carried value wins over them too: the person
+asked to carry their environment. On Windows a carried variable longer than the 32,767
+characters Windows holds for one variable refuses that shell's birth with the same kind of
+line, in `diagnostics.log` and on the window's "Shell not started" card, never cut. Names
+carried over the wire hold no control character. **They belong to
+the tab** (coordinator's ruling 2026-10-09): every shell born in that tab — a split,
+`Duplicate pane`, `Split with`, `Restart shell` — is born with them, and `Duplicate
+tab` carries them to the new tab. They are held in memory only and never saved, so a
+revived tab takes the account's environment; a pane torn into a tab of its own leaves
+them behind. Folio's own process environment —
+its `BT_*` configuration — is not changed by any of this. If the account read
+fails, that birth alone uses ordinary process inheritance, with the carried
+overrides over it, and the next birth asks again. On non-Windows hosts the
+platform has no fresh-account block and pane birth retains ordinary inheritance,
+with the carried overrides over it.
 **The contrast that matters**: `profiles.json` and the pins are watched live
 through the storage watch on the data directory, re-read behind the shared quiet
 window and compared field by field, with an unparseable mid-run file leaving the
@@ -1092,7 +1154,16 @@ in, never the summoned terminal. An offer put away with Later, or a failed card
 that was closed, comes back only when asked — About → Version's **Update and
 restart** or **Retry** raises the same `Available` offer from `Idle`
 (`Job::offer_again`), in the window pressed, for the decision the job keeps
-current after its one unasked offer; never unasked. A launch a finished rollback
+current after its one unasked offer; never unasked. **A staged update is given
+up only after two deliberate deferrals** (0.4.8 E3): a launch that finds one
+counts against it only when the run before it ended on its clean-exit path
+without pressing Restart — never after a crash or a power cut, which the
+session sentinel says (`persist::previous_run_ended_orderly`) — and the second
+such launch discards it; a restart that did not happen (a power cut before
+anything moved, an admission refused: the road put back to `Prepared`) is
+recorded in the journal (`restart_missed`), and the next launch's Ready card
+says *The restart did not happen.* and offers the same Restart · Later,
+counting nothing. A launch a finished rollback
 sent (`--update-failed`) likewise raises nothing by itself, and its asked verbs
 work once the check lands; while an update this launch was told is incomplete
 may still be committed forward, nothing can be asked. **A launch a rollback sent
@@ -1163,13 +1234,64 @@ signer; the ordinary quit hands the installation to the applier only on a
 receipt for its own session document; the entrance at logon is one `Run` value
 `FolioUpdate-<txn8>`, armed before any move and removed when the transaction
 ends (`--uninstall-cleanup` removes one left behind for this copy); the new
-build runs as a trial and is `Committed` only on its receipt; a failed trial is
+build runs as a trial and is `Committed` only on its receipt; a journal write
+refused because another program holds the journal open is asked again for ten
+seconds, each refused round said in the log with the system's refusal and the
+time held, and a hold that outlasts them is named, with that refusal, on the
+card of the build that opens next — never as a new version that did not start
+(E4); a failed trial is
 rolled back by digest, and a rollback that fails is `Stuck` with everything kept,
 retried at the next logon or start three times at most; whatever phase a dead
 applier leaves, a start opens exactly one Folio, and the new build before
-`Committed` only as a trial (on Windows, a start whose rescue build the
-operating system will not start continues plainly over a destructive phase
-other than `TrialStarting` — an open hole, U-35 round 2). **Every road process — the outgoing build once
+`Committed` only as a trial. **The card of an unfinished update names its
+cause from the journal's facts, never from timing** (E4): the update stopped
+before the new version started when no trial was ever begun; the update did
+not finish when the start is itself the transaction's trial (the new version
+runs there); the new version did not start only when a trial was begun. A
+person's change a trial held — the settings, the shortcuts, the profiles, the
+pins — is marked in the transaction's folder until the trial reads its
+commit; a commit made after the trial ended (its applier dead, a recovery
+committing from its receipt) cannot carry what the trial held, and the start
+that retires it says that the changes made before Folio confirmed the update
+were not kept. **On Windows, a start whose rescue build cannot
+be started — its folder gone, its file held, the operating system refusing it —
+continues with its writes held** (E1, the owner's ruling E5 of 2026-10-08),
+over every destructive phase but `TrialStarting`, which keeps U-35's road
+below: the trial's write gate is shut for the life of that process, with no
+trial, no receipt, no watch and no release, so nothing it changes is written
+and nothing is recorded in the journal; its card says the update is not
+finished and that the changes made in this session are not kept. The rollback a
+later logon or start makes may put back what the new build wrote; nothing of
+the held session is lost to it unannounced. **A journal a build cannot read
+whole** (E1) — a journal file that cannot be read at all included; only one
+that is not there is no journal — is preserved byte for byte, and only the
+rescue build its envelope names settles it: every build reads the header's `txn`, `rescue` and
+`written_by` whatever its `v`, `class` or `outcome` say, and a header it cannot
+read is a `destructive` transaction with nothing decided. A start hands it to
+that rescue build, continues past it with the card when sent with
+`--update-failed` (or when its rescue cannot be started, held as above on
+Windows), and continues with the card when not even the envelope reads; the
+frozen class actions stay the exceptions — a `terminal` header is retired, a
+`preparing` or `deferred` one continued past or discarded when the install was
+replaced by hand. A lock holder stands aside: it records, removes and ends
+nothing and lets the lock go. An exit answers what an unknown live set opens —
+the rescue copy on Windows, a held-writes trial on macOS (the installed build
+with `--update-failed` when no transaction can be named) — and never the
+installed build plainly. A receipt it cannot read is never accepted or written
+over. The job owner leaves it, the offer still shows, and the press answers
+that a newer Folio's update is not finished. The card names the later build
+the header's `written_by` names — attribution only, which words the card and
+never changes what is done — and otherwise says the update's record cannot be
+read. **What a build may write** (E1): the header's `class` and `outcome`
+vocabularies are closed — no build adds a class, an outcome, a header version
+or a change to the envelope; a trial writes only words its rescue build reads,
+unless it reads that build's version first and writes the old form below it; a
+body or receipt word an older rescue build would misread raises the release
+manifest's `min_updater` to the word's first version; an optional field is
+additive only when losing it costs a card's wording and nothing else. Every
+product read of a journal or a receipt is made by one reader role and is
+listed with it; a read that is not listed fails the build's tests (E1-a2).
+**Every road process — the outgoing build once
 its hand-over is over, the applier, the recovery build — leaves through one
 exit guard**, armed when Restart to update is pressed: one mark
 (`H\<txn>\owner`) says which one process has the duty to open a window —
@@ -1181,7 +1303,15 @@ process with no application can raise (`bt_platform::standalone_alert`:
 Core Foundation's on macOS, the ownerless one on Windows). So a window
 follows Restart to update whatever the road met — a refused write, a
 hand-over past its 15 s, a refusal, a panic; the one exception is the
-recovery at logon that attempted nothing. **Since U-35 (Windows only), when
+recovery at logon that attempted nothing. **The applier takes the duty
+only by a mark that lands** (E2, the coordinator's ruling of 2026-10-08):
+one whose mark cannot be written stands aside — it runs no road and starts
+nothing — and the outgoing build, which finds no mark of it at the end of
+its wait (or the election still held by it), opens the window, the
+installed build with `--update-failed`, whether it then leaves at once or
+lingers holding the transaction lock; an applier that ends before it has
+the duty, a panic included, starts nothing either, and the outgoing build
+opens the window. **Since U-35 (Windows only), when
 at `Moving` the new live image's start and the previous build's rescue start
 are both refused by the operating system, the holder durably records
 `TrialStarting` with one nonce, then asks the same installed new image to
@@ -1192,9 +1322,15 @@ unchanged. At `TrialStarting` the reserved trial is the only one the
 transaction runs: an exit guard names its nonce, a start admits only that
 nonce (with or without `--update-failed`), and a start whose rescue build
 cannot be started continues as that trial — beside a reserved trial that
-already runs, it waits for the data directory's claim (30 s), as every trial
-does, and leaves without handing its command line over; the running trial
-stays the window. It holds its writes as every trial
+already runs, which holds the data directory's claim, that start offers its
+launch to it over the launch wire while it waits for the claim (30 s), as
+every trial waits, and leaves once the trial takes it; one the trial has not
+taken by the end of the wait stands down and opens a window of its own — no
+trial, its writes held for its life, its card saying the update did not finish
+and that this session's changes are not kept — with one line in
+`diagnostics.log`, never leaving with nothing shown (0.4.8 E3). A trial a
+holder launched never offers its launch, and does not start when the claim is
+not had. The reserved trial holds its writes as every trial
 does; once ready it takes the transaction lock and records `Committed` itself
 on its own receipt, which must name it exactly (pid and start instant) — the
 one road to `Committed` that needs no rescue process. A receipt is written
@@ -1217,7 +1353,7 @@ process of the new build, a held or unaskable data claim, a process list it
 cannot read, or a transaction folder whose receipts it cannot list, while a
 person's start
 keeps its delivery; a trial whose transaction is still undecided hands it back
-to the recovery build at 102, 204, 408 and 816 s, one recovery at a time, and
+to the recovery build at 110, 220, 440 and 880 s, one recovery at a time, and
 never ends itself — the recovery ends one that never became ready; on macOS the
 trial's launch (`open -n -W`) is watched, so one that ends before it is seen
 ends the applier's wait at once. **A start of Folio during the unsettled
@@ -1233,6 +1369,20 @@ stands (a retired or prepared transaction is left to the next ordinary
 start); and the macOS process check before the exchange waits within its
 window for a process of the installed executable to leave, as the Windows
 road waits for a held file, reverting only for one still there at its end.
+**A person's start a recovery defers is carried to the window, never dropped**
+(0.4.8 E3): where the recovery build it was handed to starts nothing because
+another process opens the window — the applier the mark names, an election in
+flight (and the outgoing build behind it), a holder that kept the transaction
+lock through the recovery's wait, a trial that runs, a Folio that holds the
+data directory — it waits while that party is on its way, no longer than its
+road's own bound (the old build's wait and the trial's deadline), and hands
+that start's request — its folder, profile, switches and who started it, and
+no report — over the launch wire to the Folio that holds the data directory
+once one does, as a second launch beside a running Folio would; a Folio that
+does not take it within 20 s is the window as it stands, and with no Folio
+holding the data directory 20 s after the party is done the recovery starts
+what the disk names with that start's command line. A command line the wire
+cannot carry (a document) is not carried.
 An applier killed from outside after
 it has taken the window duty, and a live holder the recovery build deferred to
 that is then killed from outside, are outside the guarantee and are recovered
@@ -1372,7 +1522,13 @@ multi-line paste question's rules) are not this row's and are not folded here.
 Entries: §7.59 *a second launch is no longer a second process: it hands its one
 sentence to the copy already running, then exits*; §7.59a *a second launch opens a
 window, unless you say otherwise* (owner's ruling 2026-09-11); §7.59b *a launch
-needs one thing that sees it from end to end*. The Unix stale-claim sweep and
+needs one thing that sees it from end to end*; the 2026-10-09 entry *a second
+installed copy that shares the data directory hands its launch to the one running*
+(D3): the copy already running is any Folio of this user holding the data directory,
+whichever installed copy it was started from. The endpoint's frame is its own
+256 KiB (`launch_pipe::MAX_FRAME_BYTES`), not the doorbell's 4 KiB, so a launch
+carrying its environment (`--with-environment`, row 33) crosses; a frame past it is
+refused whole on both ends. The Unix stale-claim sweep and
 its `sweep.guard` protocol are one unreleased change; no released build may
 sweep without participating in that guard.
 
@@ -1388,16 +1544,30 @@ system registrations (the Explorer verb, the sparse package, the toast identity)
 and its own data roots — and **every one of them must be inert and silent when
 `folio.exe` is missing, and must have a non-interactive undo owned by the module
 that wrote it**, all reachable through one door, `folio --uninstall-cleanup`
-(`--purge` for user data, never by default). Cleanup removes only marks belonging
+(`--purge` for user data, never by default). **An update's trial folder is this
+copy's** (0.4.8 G7): `folio-trial-<txn>` in the system's temporary directory, where a
+trial or a start holding its writes stages the integration script, is removed by both
+verbs, its transaction the one this copy's journal names — read as every journal reader
+reads it (`update_txn::Role::Uninstall`), so a journal it cannot read whole names its
+transaction by its header, and one of which nothing reads names none and the row says
+the record cannot be read. Cleanup removes only marks belonging
 to **this copy**, compared by executable path, and a mark naming a vanished path
 is nobody's and is removed; per-account marks (the `$PROFILE` line, the module)
 are removed and reported. **How Folio was installed is read from a written
-channel marker, never inferred from a path.** The marker is written by the
-package manager, never by Folio: on Windows the file `folio-install.json`
+channel marker, never inferred from a path.** **The marker is composed by the
+package manager; Folio may carry those exact bytes across an update it
+performs** (managed-update §4, M1–M5: read before the transaction is
+allocated, recorded in its journal, written only onto the staged new set and
+read back equal, found again on the live side, and back unchanged with the old
+set on a rollback; 0.4.8 D1): on Windows the file `folio-install.json`
 beside `folio.exe`, on macOS the extended attribute
 `io.github.lulu-loopp.folio.install` on the `.app` bundle, both holding
 `{"v":1,"manager":"scoop"|"homebrew"|"winget","uninstall_hook":true|false}`
 (exactly those keys; a byte-order mark and surrounding whitespace allowed).
+The cask writes a second attribute beside it,
+`io.github.lulu-loopp.folio.caskroom`, holding its Caskroom folder; Folio
+carries it the same way, and updates a Homebrew copy in place only where that
+Caskroom's own record names this very bundle as the app it installed.
 scoop's own receipt in the version folder (`install.json` with `manifest.json`)
 also says scoop. **The one exception to "a marker written by a hook" is winget**,
 which runs no hook and so writes no marker: its own uninstall record stands in —
@@ -1501,10 +1671,19 @@ leave**); ④ retirement, with windows hidden and the loop still pumping only th
 browser-exit clock to its deadline. **The spare web controller shares the run's one
 bounded retirement** (ticket 60): `App::run_retiring_until` is set once, when the last
 window closes or ④ begins, the spare retires in that same branch, and the run ends only
-when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the system's quit — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③
-entirely.** `FolioApp::fail` — twelve call sites — asks the device-loss latch
-first, then prints its stopped line, closes **every** window with the ending flag
-through `Runtime::close_window` so that no shell outlives its window, **abandons the
+when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the system's quit — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③**;
+the controlled one keeps the edits ① would have asked about by a write of its own.
+`FolioApp::fail` — twelve call sites — asks the
+device-loss latch first, then prints its stopped line and leaves by the one road a
+stop that is not a quit leaves by, `FolioApp::stop_every_window`, which `exiting`
+(a loop stopped by something that is not a window closing) takes as well (0.4.8 G7):
+**every dirty preview buffer of every window is kept first** — written back through
+the quit's judged write (`PreviewBuffer::save`, its conflict check included), and
+where the file refuses or has changed on disk, copied into the data directory's
+`recovered` folder under the instant and the file's name, never over the file — each
+said in `diagnostics.log` with where its edit is; no card, no question, and the
+writes are done before the road goes on. It then closes **every** window with the
+ending flag through `Runtime::close_window` so that no shell outlives its window, **abandons the
 spare web controller without waiting (its controller closed, its parent left to process
 exit; `exiting` does the same)**, finishes the application and exits the loop. `install_panic_log_hook` / `install_panic_log_hook_at`
 ends the announcing panic by hiding every window of this process through a system
@@ -1516,13 +1695,12 @@ leave first, and a process that has hosted a web view may not walk out through
 `main`*; §7.43 item ④ *a panic leaves by the road a shutdown leaves by*.
 **Overrides.** §7.35 supersedes the immediate window removal on ordinary close.
 §7.17's button order was overturned by §7.17 item ② on 2026-08-25.
-**The fact, recorded because no entry records it.** Whether losing unsaved
-preview edits on the two failure roads is an accepted trade-off is
-**`nowhere written`**. The dirty gate is structurally unreachable from both
-roads; the session snapshot carries paths, names and source kinds and no edited
-content. **0.4.4 owns this** — either the preservation transaction in
-`docs/ARCHITECTURE.md` §11, or a written ruling with quantified impact under
-`CONVENTIONS` §十 rule 7.
+**The fact.** The controlled road keeps unsaved preview edits (0.4.8 G7, above;
+trailing entry 2026-10-09 *A controlled failure keeps every unsaved preview edit*).
+The emergency road — the panic hook — still loses them, and that is not an accepted
+trade-off: it is `docs/plans/structural-debt.md` D-56 (0.5), the journal and a
+defined recoverable revision of `docs/ARCHITECTURE.md` §11. The session snapshot
+carries paths, names and source kinds and no edited content.
 
 ### 44. Git status — `not yet folded`
 Entries: §7.1.3g; the git backend adjudication document under `docs/plans/`; the
@@ -1589,6 +1767,13 @@ again on every theme or setting change; nothing else about a page is changed.
 (0.4.5 ticket 60; owner's ruling 2026-09-25, option A): only for a profile whose receipt
 says a page has committed there, one spare per process, never replenished, handed over by
 `WebSeat::rehost`; the controller stays on the window thread (§5.2, ruling 2026-09-24).
+2026-10-09 *a page that answers with an error shows that page* (T-WEB-404-SAYS-UNKNOWN,
+coordinator's ruling 2026-10-09): a navigation a server answered — an HTTP status is present
+(`WebEvent::NavigationCompleted::http_status`: WebView2's `HttpStatusCode`, the main-frame
+`NSHTTPURLResponse` of that navigation on macOS) — is a page: no card, the address committed for
+the row, as every browser shows a 404 or a 500. The "Cannot open" / did-not-load card is only for
+a load that reached nothing (a name that did not resolve, a connection refused or cut before a
+response).
 
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,
@@ -1678,7 +1863,11 @@ the machine probes and the hang watchdog. **The exceptions, which stay at
 role does not decide its band): the playback engines (`folio-video-engine`, both
 platforms), first-frame extraction (`folio-video-frame`), launch and attention
 ingress (`folio-launch-endpoint`, `folio-attention-endpoint`), clipboard saves
-(`clipboard-picture`) and the three standalone-process workers. The observation
+(`clipboard-picture`) and the three standalone-process workers; and **one walk of one
+worker**: the `program-walk` worker serves a walk a pane waits on at `Normal` — the
+launch's, a birth's, any walk asked or still out while a pane is in birth — and every
+other walk below normal, the band set by the worker from its request (2026-10-08,
+T-PROGRAMS-REFRESH rounds 3–4; measured in DESIGN). The observation
 and probe threads that start at `Normal` today — `bt-dir-watch`,
 `folio-video-prewarm`, `folio-video-canplay`, `folio-web-thumb`, the Explorer
 probe and deployment — move to the workers' band in a 0.4.7 ticket. Off Windows a

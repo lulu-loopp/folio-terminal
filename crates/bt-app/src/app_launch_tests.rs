@@ -4,7 +4,9 @@
 //! from [`crate::test_support`].
 
 use super::*;
-use crate::test_support::{leaf_saying, method_body, saved_tab, strip_with_cli_tab};
+use crate::test_support::{
+    host_path, host_uri_path, leaf_saying, method_body, saved_tab, strip_with_cli_tab,
+};
 
 /// PIN — mock-up 7426-7431: "Launch asks about exactly one thing, and it is
 /// not the pinned tabs. **Pinning IS the answer**."
@@ -383,11 +385,14 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     let reported = LeafSession {
         spawn_place: Some(PathBuf::from(r"D:\项目\clicked")),
         born_named: true,
-        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/elsewhere\u{7}")
+        ..leaf_saying(&format!(
+            "\u{1b}]7;file://localhost{}\u{7}",
+            host_uri_path(r"D:\Developer\elsewhere")
+        ))
     };
     assert_eq!(
         reported.place_for_a_new_tab_beside(),
-        Some(profiles::SeedPlace::Carried(PathBuf::from(
+        Some(profiles::SeedPlace::Carried(host_path(
             r"D:\Developer\elsewhere"
         ))),
         "a new tab beside a pane born in a named folder carries its folder"
@@ -410,11 +415,14 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
 
     let reported = LeafSession {
         spawn_place: Some(born_in.clone()),
-        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/folio-terminal\u{7}")
+        ..leaf_saying(&format!(
+            "\u{1b}]7;file://localhost{}\u{7}",
+            host_uri_path(r"D:\Developer\folio-terminal")
+        ))
     };
     assert_eq!(
         reported.place_for_a_new_shell(),
-        Some(PathBuf::from(r"D:\Developer\folio-terminal")),
+        Some(host_path(r"D:\Developer\folio-terminal")),
         "a report is the first rung and beats where the shell was born"
     );
 
@@ -425,4 +433,50 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
         ..leaf_saying("no report from this shell either")
     };
     assert_eq!(at_home.place_for_a_new_shell(), Some(PathBuf::from("~")));
+}
+
+/// RED (F-SWEEP-2-048, owner ruling 2026-10-05) — **`folio --with-environment .` opens its pane
+/// carrying the launcher's environment, and `folio .` does not.**
+///
+/// The first launch's road from the command line to the pane's seed: `cli::parse`,
+/// `cli::resolve`, the environment `main` reads into the plan when the flag is there, and
+/// [`cli_leaf_seed`]; the seed's environment is the birth's `launch_overrides`
+/// (`pty_door::tests::launch_overrides_carry_the_launchers_environment_only_when_asked`). Names
+/// are asserted, never values.
+///
+/// MUTATION: `cli_leaf_seed` writing `carried_environment: None` and the asked pane carries nothing.
+#[test]
+fn with_environment_seeds_the_first_launchs_pane_with_the_launchers_environment() {
+    let launcher =
+        cli::CarriedEnvironment::from_pairs(vec![("FSWEEP2_LAUNCHER_环境".into(), "1".into())]);
+    let seed_of = |line: &[&str]| {
+        let request =
+            cli::parse(line.iter().map(std::ffi::OsString::from)).expect("the line parses");
+        let mut plan = cli::resolve(&request, Some(0), |_| cli::PathKind::Directory);
+        // `main`'s own line: the process environment, read when the flag asked for it.
+        plan.carried_environment = request.with_environment.then(|| launcher.clone());
+        (plan.wants_pane, cli_leaf_seed(&plan))
+    };
+    let names = |seed: &LeafSeed| {
+        seed.carried_environment.as_ref().map(|environment| {
+            environment
+                .pairs()
+                .iter()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+    };
+    let (wants_pane, asked) = seed_of(&["--with-environment", "."]);
+    assert!(wants_pane);
+    assert_eq!(
+        names(&asked),
+        Some(vec!["FSWEEP2_LAUNCHER_环境".to_owned()])
+    );
+    let (wants_pane, plain) = seed_of(&["."]);
+    assert!(wants_pane);
+    assert_eq!(
+        names(&plain),
+        None,
+        "without the flag the pane takes the account's environment"
+    );
 }

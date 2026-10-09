@@ -260,27 +260,36 @@ fn a_document_link_answers_the_same_row_as_a_terminal_reference() {
     let notes = directory.join("notes.md");
     std::fs::write(&document, b"# x").expect("a document");
     std::fs::write(&notes, b"x").expect("a file it links to");
-    let verdict = bt_term::verify_path(&notes);
+    let verdict = bt_term::verify_path(&notes, &bt_platform::resolved_for_a_door);
     assert!(verdict.exists && !verdict.directory);
     let ledger = |path: &Path| (path == notes.as_path()).then(|| verdict.clone());
 
     let notes_uri = bt_transcript::paths::local_path_to_file_uri(&notes);
-    for (document_target, terminal_uri) in [
-        ("mailto:x@example.com", "mailto:x@example.com".to_owned()),
-        (
-            r"\\server\share\a.md",
-            "file://server/share/a.md".to_owned(),
-        ),
-        (
-            "file://server/share/a.md",
-            "file://server/share/a.md".to_owned(),
-        ),
-        (
-            "https://example.test/a",
-            "https://example.test/a".to_owned(),
-        ),
-        ("./notes.md", notes_uri),
-    ] {
+    // A share's own spelling in a document is Windows' grammar; on a filesystem
+    // where `\` is an ordinary character it is a relative file name, and the
+    // `file://server/…` row below is the share on every platform.
+    #[cfg(windows)]
+    let share_spelling = Some((
+        r"\\server\share\a.md",
+        "file://server/share/a.md".to_owned(),
+    ));
+    #[cfg(not(windows))]
+    let share_spelling: Option<(&str, String)> = None;
+    let pairs = [("mailto:x@example.com", "mailto:x@example.com".to_owned())]
+        .into_iter()
+        .chain(share_spelling)
+        .chain([
+            (
+                "file://server/share/a.md",
+                "file://server/share/a.md".to_owned(),
+            ),
+            (
+                "https://example.test/a",
+                "https://example.test/a".to_owned(),
+            ),
+            ("./notes.md", notes_uri),
+        ]);
+    for (document_target, terminal_uri) in pairs {
         for control in [false, true] {
             assert_eq!(
                 preview_link_activation(control, document_target, &document),

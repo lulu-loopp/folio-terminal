@@ -80,10 +80,10 @@ fn a_video_is_one_seat_on_three_surfaces() {
         seats.get(surfaces[0]).is_some(),
         "and leaves the others alone"
     );
-    assert_eq!(engines_outstanding(), before + 2);
+    assert_eq!(engines_settling_to(before + 2), before + 2);
     seats.shutdown_all();
     assert_eq!(
-        engines_outstanding(),
+        engines_settling_to(before),
         before,
         "and no engine outlives the surfaces it was opened for"
     );

@@ -7,14 +7,24 @@ use super::*;
 use crate::test_support::{
     A, NO_MODIFIERS, PtyPresentationHarness, SHOT_PATH, TAB_ONE, at, breathing, buffer_saying,
     calls_of, cross_metrics, cross_move, cross_seats, cross_solve, cross_tab, dir_entry,
-    document_on, edited_buffer, item_body, item_declaration, leaf_saying, leaf_says, listed,
-    method_body, pictures_drawn, press, reader_names, saved_files_and_terminal, seat_of, settled,
-    squeezed, strip_with_cli_tab, tab_texts, tab_with_a_files_column, tab_with_a_picture,
+    document_on, edited_buffer, free_fn_body, item_body, item_declaration, leaf_saying, leaf_says,
+    listed, method_body, pictures_drawn, press, reader_names, saved_files_and_terminal, seat_of,
+    settled, squeezed, strip_with_cli_tab, tab_texts, tab_with_a_files_column, tab_with_a_picture,
     tab_with_a_preview,
 };
 use bt_source::ItemQuery;
 use std::time::Duration;
 use winit::keyboard::{Key, NamedKey};
+
+/// **This host's command modifier** — Control, or Command on a Mac — read off
+/// [`input::is_command_chord`], which is the modifier `rename_key` opens its
+/// verbs on. The pins below that say `Ctrl` press this.
+fn command_modifier() -> ModifiersState {
+    [ModifiersState::CONTROL, ModifiersState::SUPER]
+        .into_iter()
+        .find(|modifiers| input::is_command_chord(*modifiers))
+        .expect("one of the two is the host's command modifier")
+}
 
 /// The braces one type's members are written in, and what is between them.
 fn type_body(name: &str) -> &'static str {
@@ -661,9 +671,9 @@ fn the_open_editor_owns_the_keyboard_and_gives_back_only_two_keys() {
 /// assertion finds an empty string on the clipboard instead of nothing.
 #[test]
 fn the_name_editor_carries_a_selection_word_verbs_and_a_clipboard() {
-    let ctrl = ModifiersState::CONTROL;
+    let ctrl = command_modifier();
     let shift = ModifiersState::SHIFT;
-    let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let ctrl_shift = command_modifier() | ModifiersState::SHIFT;
     let left = Key::Named(NamedKey::ArrowLeft);
     let right = Key::Named(NamedKey::ArrowRight);
 
@@ -779,7 +789,7 @@ const LEAF_ONE: LeafId = LeafId {
 /// the count is in the hundreds for a draft this field will hold at all.
 #[test]
 fn a_long_pasted_name_costs_one_shaping_pass() {
-    let ctrl = ModifiersState::CONTROL;
+    let ctrl = command_modifier();
     let mut editor = TabRename::open_files_new(LEAF_ONE, "", false, true);
     press_with_clipboard(
         &mut editor,
@@ -839,7 +849,7 @@ fn a_long_pasted_name_costs_one_shaping_pass() {
 /// and the first assertion reads 200 000.
 #[test]
 fn a_name_field_accepts_no_more_than_a_name() {
-    let ctrl = ModifiersState::CONTROL;
+    let ctrl = command_modifier();
     let huge = "j".repeat(200_000);
 
     let mut name = TabRename::open_files_new(LEAF_ONE, "", false, true);
@@ -1721,9 +1731,18 @@ fn every_producer_of_the_dirty_gate_goes_on_only_when_there_was_nothing_to_ask()
             "close_pane",
             "close_tab",
             "run_term_menu_row",
+            "the_summon_lets_the_run_end",
             "window_event",
         ],
         "a new producer of the gate: pin it above once it goes on only on `proceeds()`"
+    );
+    // **The run's end, asked in the summoned terminal** (T-SUMMON-DIRTY-PREVIEW):
+    // the ending close goes on only on `proceeds()`.
+    let summon = squeezed(method_body("FolioApp", "the_summon_lets_the_run_end"));
+    assert!(
+        summon.contains("ifraised.proceeds(){returnOk(true);}"),
+        "`FolioApp::the_summon_lets_the_run_end` lets the run end for a reason other than \
+         nothing to ask:\n{summon}"
     );
 }
 
@@ -3606,5 +3625,114 @@ fn a_refused_address_is_a_field_that_can_still_be_left() {
         blur < takes,
         "a press inside a page takes the keyboard without settling the field \
              standing over it, which leaves an editor nothing can reach:\n{press}"
+    );
+}
+
+/// The names of a carried environment — what these tests assert and print, never a value.
+fn carried_names(environment: Option<&cli::CarriedEnvironment>) -> Option<Vec<String>> {
+    environment.map(|environment| {
+        environment
+            .pairs()
+            .iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect()
+    })
+}
+
+/// RED (F-SWEEP-2-048, coordinator's ruling 2026-10-09) — **the environment `--with-environment`
+/// carried belongs to the tab**: the tab holds it, and every shell born in the tab is born with
+/// it, whatever its own seed said; a revived tab holds none, because it was never saved.
+///
+/// MUTATIONS: `born_in_tab` keeping the seed's own environment and a split of a tab carrying one
+/// is born without it; `assemble_tab_state` dropping `TabSeed::carried_environment` and the tab holds
+/// nothing to give.
+#[test]
+fn a_tabs_carried_environment_is_the_tabs_and_every_shell_born_in_it_takes_it() {
+    let carried =
+        cli::CarriedEnvironment::from_pairs(vec![("FSWEEP2_TAB_环境".into(), "1".into())]);
+    let seats = cross_seats(1);
+    let focused = seats.identity();
+    let (layout, overflow) = cross_solve(&seats);
+    let tab = assemble_tab_state(
+        TabId(1),
+        BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+        BTreeMap::new(),
+        preview::PreviewPool::default(),
+        PreviewPanes::default(),
+        BTreeMap::new(),
+        focused,
+        TabSeed {
+            carried_environment: Some(carried.clone()),
+            ..TabSeed::default()
+        },
+        seats,
+        layout,
+        overflow,
+    );
+    assert_eq!(
+        carried_names(tab.carried_environment.as_ref()),
+        Some(vec!["FSWEEP2_TAB_环境".to_owned()]),
+        "the tab holds what was carried into it"
+    );
+    // A split, a duplicate and a restart are each a seed born in the tab.
+    let split = SplitSeed::Inherit.applied("pwsh", None);
+    assert_eq!(
+        split.carried_environment, None,
+        "a split's own seed carries nothing"
+    );
+    for (verb, seed) in [
+        ("split", split),
+        ("Restart shell", restart_seed("pwsh", None)),
+    ] {
+        assert_eq!(
+            carried_names(
+                born_in_tab(seed, tab.carried_environment.as_ref())
+                    .carried_environment
+                    .as_ref()
+            ),
+            Some(vec!["FSWEEP2_TAB_环境".to_owned()]),
+            "{verb} in the tab is born with the tab's environment"
+        );
+    }
+    // A tab no launch carried one into gives its shells the account's environment.
+    let launched = LeafSeed {
+        carried_environment: Some(carried),
+        ..restart_seed("pwsh", None)
+    };
+    assert_eq!(born_in_tab(launched, None).carried_environment, None);
+}
+
+/// RED (F-SWEEP-2-048, coordinator's ruling 2026-10-09) — **every verb that starts a shell inside
+/// a tab hands it the tab's carried environment**: the tab's own panes at its creation, a split
+/// (also `Duplicate pane` and `Split with`), `Restart shell`, and `Duplicate tab`, which carries it
+/// to the new tab.
+///
+/// Those verbs spawn a ConPTY and cannot run here, so this reads their bodies, as
+/// `every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder` does for the folder.
+///
+/// MUTATIONS, each red: drop it on a split (`split_seat` without `born_in_tab`), on a restart
+/// (`restart_shell` without it), on a duplicate (`duplicate_tab` passing `None`), or at the tab's
+/// birth (`create_tab_state` without it).
+#[test]
+fn every_shell_born_in_a_tab_is_born_with_the_tabs_carried_environment() {
+    for door in ["restart_shell", "split_seat"] {
+        let body = method_body("Runtime", door);
+        let joined = body.split_whitespace().collect::<String>();
+        assert!(
+            joined.contains("born_in_tab(") && joined.contains(".carried_environment.as_ref()"),
+            "`{door}` is born in its tab:\n{body}"
+        );
+    }
+    let duplicate = method_body("Runtime", "duplicate_tab");
+    assert!(
+        duplicate.contains("state.carried_environment.clone()"),
+        "`Duplicate tab` carries the tab's environment to the new tab:\n{duplicate}"
+    );
+    let birth = free_fn_body("create_tab_state")
+        .split_whitespace()
+        .collect::<String>();
+    assert!(
+        birth.contains("born_in_tab(") && birth.contains("seed.carried_environment.as_ref()"),
+        "a tab's own panes are born with its environment:\n{birth}"
     );
 }

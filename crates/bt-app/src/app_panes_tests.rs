@@ -71,12 +71,17 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             last_command: String::new(),
         })))
     };
+    // Two different shells this build ships.
+    let (first, second) = match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => ("pwsh", "cmd"),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => ("bash", "sh"),
+    };
     let here = std::env::current_dir().expect("a test runs somewhere");
     let (seats, _, leaves, _files, _preview) = revive_plan(&TabV1 {
         root: LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
             dir: bt_persist::SplitDirV1::Row,
             ratio: 500_000,
-            children: [leaf("pwsh", &here.to_string_lossy()), leaf("cmd", "")],
+            children: [leaf(first, &here.to_string_lossy()), leaf(second, "")],
         }),
         pinned: false,
         focused_leaf: "leaf-0".to_owned(),
@@ -88,21 +93,23 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
     assert_eq!(
         leaves[&left],
         LeafSeed {
-            profile: "pwsh".to_owned(),
+            profile: first.to_owned(),
             cwd: Some(profiles::SeedPlace::Carried(here)),
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
+            carried_environment: None,
         }
     );
     assert_eq!(
         leaves[&right],
         LeafSeed {
-            profile: "cmd".to_owned(),
+            profile: second.to_owned(),
             cwd: None,
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
+            carried_environment: None,
         }
     );
     assert_ne!(
