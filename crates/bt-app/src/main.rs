@@ -50896,11 +50896,7 @@ impl Runtime<'_> {
             // Per leaf: a synchronized update is a property of one screen, and
             // two shells in one tab time out independently.
             for (seat, leaf) in tab.leaves_mut() {
-                let due = leaf
-                    .session
-                    .synchronized_update_deadline()
-                    .is_some_and(|deadline| deadline <= now);
-                if !due {
+                if !bt_compose::deadlines(&leaf.session).synchronized_update_due(now) {
                     continue;
                 }
                 let name_before = leaf.name_evidence();
@@ -57426,7 +57422,7 @@ mod formula_tool_seat_tests {
             .find("self.carry_live_journeys(Instant::now());")
             .expect("every compose carries the journeys that are running");
         let projected = compose
-            .find("leaf.session.refresh_projection(&mut leaf.projection);")
+            .find("bt_compose::project(bt_compose::Pane {")
             .expect("and the projection is what reads the band's height");
         assert!(
             carried < projected,
@@ -61409,6 +61405,10 @@ mod pty_drain_budget_tests {
             due.contains("leaves_mut()"),
             "and when it wakes, every pane of the tab on screen settles"
         );
+        assert!(
+            due.contains("bt_compose::advance_live_stability("),
+            "each through the crate's advance, the step a live row settles at"
+        );
         for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
             assert!(
                 !deadline.contains(focused_only) && !due.contains(focused_only),
@@ -61418,7 +61418,7 @@ mod pty_drain_budget_tests {
         }
         let redraw = method_body("Runtime", "redraw");
         assert!(
-            redraw.contains("schedule_visible_artifacts("),
+            redraw.contains("bt_compose::schedule("),
             "and the pass that projects the panes nobody is typing in is the pass that schedules \
              the artifacts it just found in them"
         );

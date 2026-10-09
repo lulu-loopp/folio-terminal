@@ -18,7 +18,7 @@
 # `bt-platform` left it with CC-4: no crate on the list depends on it (the host
 # installs what `bt-term` used to ask it, D-14 repaid). `bt-math` and
 # `bt-render` name the admission vocabulary and the file-read ledger through
-# `bt-effects` (CC-3).
+# `bt-effects` (CC-3). `bt-compose` joined with CC-6a, the ticket that created it.
 #
 # The target must be installed for the toolchain `rust-toolchain.toml` pins
 # (`rustup target add wasm32-unknown-unknown`); CI's toolchain action installs it
@@ -26,7 +26,7 @@
 
 $Packages = @(
     "bt-unicode", "bt-transcript", "bt-doc", "bt-layout", "bt-viewport",
-    "bt-detect", "bt-effects", "bt-math", "bt-render", "bt-term"
+    "bt-detect", "bt-effects", "bt-math", "bt-render", "bt-term", "bt-compose"
 )
 
 $ErrorActionPreference = "Stop"

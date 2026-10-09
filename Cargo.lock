@@ -263,6 +263,7 @@ version = "0.4.7"
 dependencies = [
  "anyhow",
  "base64",
+ "bt-compose",
  "bt-detect",
  "bt-doc",
  "bt-layout",
@@ -295,6 +296,21 @@ dependencies = [
  "two-face",
  "unicode-properties",
  "winit",
+]
+
+[[package]]
+name = "bt-compose"
+version = "0.4.7"
+dependencies = [
+ "bt-detect",
+ "bt-doc",
+ "bt-effects",
+ "bt-render",
+ "bt-term",
+ "bt-viewport",
+ "pollster",
+ "web-time",
+ "wgpu",
 ]
 
 [[package]]

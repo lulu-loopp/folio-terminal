@@ -5,6 +5,7 @@
 resolver = "3"
 members = [
     "crates/bt-term",
+    "crates/bt-compose",
     "crates/bt-transcript",
     "crates/bt-doc",
     "crates/bt-viewport",
