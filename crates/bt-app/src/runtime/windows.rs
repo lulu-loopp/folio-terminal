@@ -1605,13 +1605,13 @@ impl Runtime<'_> {
     /// which is the whole of this but the write.
     ///
     /// The close is the one verb this does not own: it is the event loop's, and
-    /// it is re-requested ([`crate::WindowRuntime::close_requested`]) rather than
+    /// it is re-requested ([`crate::WindowRuntime::window_close_requested`]) rather than
     /// performed here so that everything else a close does still happens in the
     /// order it always did — and, for the run's end, so that `Cancel` leaves the
     /// ordinary window open and the summoned terminal never stands alone.
     fn answer_exit(&mut self, closes: WindowId, answer: restore::GateAnswer) -> Result<()> {
         let saved_all = answer == restore::GateAnswer::Save && self.quit_save()?.is_complete();
-        self.window.close_requested =
+        self.window.window_close_requested =
             crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, saved_all);
         Ok(())
     }

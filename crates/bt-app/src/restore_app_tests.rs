@@ -797,7 +797,7 @@ fn cancel_on_the_summoned_terminals_question_keeps_the_edit_and_the_run() {
 /// ordinary window, and the run ends as before.**
 ///
 /// The confirmed answer is spent in the summoned terminal, but the close it
-/// re-runs is the ordinary window's (`WindowRuntime::close_requested`, spent by
+/// re-runs is the ordinary window's (`WindowRuntime::window_close_requested`, spent by
 /// the event loop through `FolioApp::close`); that close asks the summoned
 /// terminal again, finds nothing, and ends the run, retiring the summoned
 /// terminal with it. Discard drops the dirty buffer and only that; Save all
@@ -878,7 +878,7 @@ fn save_and_discard_on_the_summoned_terminals_question_close_the_last_ordinary_w
     let event = window_event_squeezed();
     assert!(
         event.contains(
-            "letrequested=std::mem::take(&mutruntime.window.close_requested);shutting|=requested==Some(window_id);"
+            "letrequested=std::mem::take(&mutruntime.window.window_close_requested);shutting|=requested==Some(window_id);"
         ) && event.contains(
             "matchrequested.filter(|closing|*closing!=window_id){Some(closing)=>result.and(hang_watch::during(hang_watch::Station::EventShut,||{self.close(closing)})),"
         ),

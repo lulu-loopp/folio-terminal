@@ -12981,7 +12981,7 @@ struct App {
     /// Opening one needs the `ActiveEventLoop`, which only the handler callbacks
     /// hold, and the chord is dispatched several frames down inside a `Runtime`
     /// that holds no such thing. Recorded here and spent by [`FolioApp`] at the
-    /// door, exactly as [`WindowRuntime::close_requested`] is — the same
+    /// door, exactly as [`WindowRuntime::window_close_requested`] is — the same
     /// shape for the same reason, and for closing that shape is what keeps the
     /// shut going through the one door it always went through.
     ///
@@ -15107,7 +15107,7 @@ struct WindowRuntime {
     /// A request rather than a call, because the close belongs to the event
     /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
     /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
-    close_requested: Option<WindowId>,
+    window_close_requested: Option<WindowId>,
     /// Which preview pane has its filename switcher up (P130-P137).
     ///
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
@@ -43184,7 +43184,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
-        close_requested: None,
+        window_close_requested: None,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
@@ -63368,7 +63368,7 @@ impl FolioApp {
     /// the summoned terminal is brought up by its own door
     /// ([`Self::summon_quake`]) so that the question is on the screen. Its
     /// confirmed answer re-runs the close of `closing`
-    /// ([`WindowRuntime::close_requested`]); `Cancel` leaves `closing` open, so
+    /// ([`WindowRuntime::window_close_requested`]); `Cancel` leaves `closing` open, so
     /// the summoned terminal never stands alone (§7.54e ①).
     ///
     /// No summoned window, or one already leaving, has nothing to ask.
@@ -67453,7 +67453,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // shut belongs to the event loop, and re-requesting it means closing goes
             // through the one door it always went through instead of a second one
             // opened for the gate.
-            let requested = std::mem::take(&mut runtime.window.close_requested);
+            let requested = std::mem::take(&mut runtime.window.window_close_requested);
             shutting |= requested == Some(window_id);
             let result = if shutting {
                 result.and(hang_watch::during(hang_watch::Station::EventShut, || {
