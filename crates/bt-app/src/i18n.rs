@@ -2242,8 +2242,6 @@ text_entries! {
     /// The refused address's fact line when the scheme is not why it was refused, or there is
     /// no scheme to name. The spelling that *does* name one is `web_fail_blocked_scheme` below.
     WebFailBlockedSay,
-    /// Its one verb — the address is on the card, so the verb is to take it.
-    WebFailBlockedVerb,
     /// What a page's address field says when the path typed into it names no
     /// file on this machine (M-SWEEP-048) — said in the field, at its end, in
     /// the field's refused ink.
@@ -5347,7 +5345,6 @@ impl Text {
                 "This address does not open in a preview.",
                 "这个地址不在预览中打开。",
             ),
-            Self::WebFailBlockedVerb => pick(lang, "Copy address", "复制地址"),
             Self::WebAddressNoSuchFile => pick(
                 lang,
                 "No such file",
