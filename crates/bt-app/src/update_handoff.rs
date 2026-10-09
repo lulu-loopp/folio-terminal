@@ -2400,6 +2400,56 @@ mod tests {
         );
     }
 
+    /// RED (0.4.8 E2 round 2) — **recovery at `Handoff` waits for an
+    /// election in flight to end and then reads the mark it left**, rather
+    /// than deferring to whoever holds the election lock at the instant it
+    /// asks: an applier's held election may still stand aside, and owns
+    /// nothing until its mark lands. The test holds the election lock (an
+    /// applier's election in flight); the step between recovery's first ask
+    /// and its wait lands that applier's mark — this live process — and ends
+    /// the election; recovery then names that process.
+    ///
+    /// MUTATION: in `update_apply::window_holder_using`, answer an election
+    /// found in flight at once, without the wait (`Ok(None)` for
+    /// `hold_within`): recovery says `Unmarked` and defers to an election
+    /// that has already ended.
+    #[test]
+    fn recovery_waits_for_an_election_in_flight_and_reads_its_mark() {
+        let folder = Folder::new("recovery-waits 等待选举");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let applier = crate::update_apply::this_process();
+        let mut in_flight = Some(
+            install_txn::try_hold(
+                &crate::update_apply::owner_lock_path(&staged.home, txn),
+                Hold::Exclusive,
+            )
+            .unwrap()
+            .expect("the election lock is free"),
+        );
+        let mark = crate::update_apply::owner_path(&staged.home, txn);
+        let mut stepped = false;
+        let holder = crate::update_apply::window_holder_at(
+            &staged.home,
+            txn,
+            Running { pid: 1, started: 1 },
+            || {
+                stepped = true;
+                install_txn::durable_write(
+                    &mark,
+                    format!("{}:{}", applier.pid, applier.started).as_bytes(),
+                )
+                .unwrap();
+                drop(in_flight.take());
+            },
+        );
+        assert!(stepped, "recovery found the election in flight");
+        assert_eq!(
+            holder,
+            Ok(Some(crate::update_apply::WindowHolder::Marked(applier)))
+        );
+    }
+
     /// RED (U-34) — **the hand-over's budget is a program's first start, not a
     /// session write**: at least twice W9's measured 5.9 s, and no more than a
     /// quarter of the applier's own wait for O's lock, so an applier that

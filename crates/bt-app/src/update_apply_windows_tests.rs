@@ -2359,6 +2359,49 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
     }
 }
 
+/// RED (0.4.8 E2 round 2) — **a recovery at `Handoff` that finds an
+/// applier's election still in flight after its wait leaves the handed-off
+/// transaction to it**: `WindowHolder::Unmarked` is `Deferral::WindowDuty` —
+/// nothing written, nothing started, and the line says why. The test holds
+/// the election lock through the whole recovery (an applier's election
+/// stalled past `ELECTION_WITHIN`).
+///
+/// MUTATION: in `recover`, settle the transaction on `WindowHolder::Unmarked`
+/// as on `Ok(None)` (the recovery reverts a transaction an applier is still
+/// deciding).
+#[test]
+fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
+    let Some(install) = Install::new("e2-election-in-flight") else {
+        return;
+    };
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    let in_flight = install_txn::try_hold(
+        &crate::update_apply::owner_lock_path(&install.home, install.txn),
+        Hold::Exclusive,
+    )
+    .unwrap()
+    .expect("the election lock is free");
+    let road = install.road(limits(20_000, 20_000));
+    let mut world = install.world(Trial::Silent);
+    let (_code, world) = on_a_worker(move |worker| {
+        let code = crate::update_recover::run_windows(worker, &road, Some(&handed()), &mut world);
+        (code, world)
+    });
+    drop(in_flight);
+    assert!(
+        said_at(&world, "an applier's window election is still in flight").is_some(),
+        "{:?}",
+        world.said
+    );
+    assert_eq!(
+        std::fs::read(install.home.journal()).unwrap(),
+        journal,
+        "the transaction is left to the election in flight"
+    );
+    assert!(world.opened.is_empty(), "{:?}", world.opened);
+    nothing_moved(&install);
+}
+
 /// RED (U-24, the coordinator's ruling 3; U-34) — **one rule for a live
 /// applier at `Handoff`, on both platforms: the recovery leaves the handed-off
 /// transaction to the live process the window's mark names — nothing

@@ -5029,3 +5029,83 @@ fn the_macos_applier_whose_mark_does_not_land_leaves_the_one_window_to_o() {
         "O opens the one window"
     );
 }
+
+/// RED (0.4.8 E2 round 2, rulings 1 and 3) — **on macOS too, the outgoing
+/// build's own road — its wait for the applier's mark, its election, its
+/// start — opens the one window when the applier's mark did not land, and
+/// O then lingers holding `H\lock`.** The applier (the product
+/// `apply_electing`, its mark refused before the rename) stands aside; O's
+/// `Leaving` runs on a worker with the applier recorded as still running, so
+/// its wait runs to its bound with no mark; the transaction lock this test
+/// holds for O stays held after O's leave. Runs on every host.
+///
+/// MUTATION: in `update_handoff::Leaving::leave`, drop the outgoing fallback —
+/// stand down (`guard.not_mine(None)`) instead of `guard.owns_window(duty)`.
+#[test]
+fn the_macos_outgoing_build_that_lingers_still_opens_the_one_window() {
+    let install = shape_install("e2-lingering 逗留");
+    let o_lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let road = install.road(limits(300, 0));
+    let (home, txn) = (install.home.clone(), install.txn);
+    let (ended, world) = on_a_worker(move |worker| {
+        let mut world = Fake::default();
+        let ended = apply_electing(worker, &road, &mut world, |_worker, until| {
+            crate::update_apply::take_the_window_within_writes_at(
+                &home,
+                txn,
+                crate::update_apply::this_process(),
+                until.saturating_duration_since(Instant::now()),
+                crate::update_apply::Applier,
+                |_mark, _bytes| {
+                    Err(
+                        crate::update_apply::MarkWriteFailure::before_rename_for_test(
+                            "the volume refused the write 卷拒绝写入",
+                            false,
+                        ),
+                    )
+                },
+            )
+        });
+        (ended, world)
+    });
+    assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+
+    let program = install.home.installed_program().unwrap();
+    let leaving = crate::update_handoff::Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(
+            crate::update_apply::this_process(),
+            Duration::from_millis(300),
+        );
+    let (left, calls) = {
+        let program = program.clone();
+        on_a_worker(move |worker| {
+            let mut starts = OldStarts::default();
+            let left = leaving.leave(
+                Running { pid: 2, started: 2 },
+                &program,
+                &mut starts,
+                Some(worker),
+            );
+            (left, starts.calls)
+        })
+    };
+    assert!(
+        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+            .unwrap()
+            .is_none(),
+        "O lingers: the transaction lock is still held after its leave"
+    );
+    drop(o_lock);
+    assert_eq!(left, crate::update_apply::Left::Started(program.clone()));
+    assert_eq!(
+        calls,
+        vec![(
+            program,
+            crate::update_apply::failed_words(&install.home).to_vec()
+        )],
+        "O opens the one window"
+    );
+}

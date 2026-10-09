@@ -1998,11 +1998,26 @@ pub(crate) fn window_holder(
     txn: TxnId,
     me: Running,
 ) -> Result<Option<WindowHolder>, String> {
-    match install_txn::hold_within(
-        &owner_lock_path(home, txn),
-        Hold::Exclusive,
-        ELECTION_WITHIN,
-    ) {
+    window_holder_using(home, txn, me, || {})
+}
+
+/// [`window_holder`], with `in_flight` run once when the first ask finds an
+/// election in flight, before the wait for it.
+fn window_holder_using(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    in_flight: impl FnOnce(),
+) -> Result<Option<WindowHolder>, String> {
+    let lock = owner_lock_path(home, txn);
+    let held = match install_txn::try_hold(&lock, Hold::Exclusive) {
+        Ok(None) => {
+            in_flight();
+            install_txn::hold_within(&lock, Hold::Exclusive, ELECTION_WITHIN)
+        }
+        asked => asked,
+    };
+    match held {
         Ok(None) => Ok(Some(WindowHolder::Unmarked)),
         Ok(Some(_held)) => Ok(window_owner(home, txn)
             .filter(|owner| *owner != me && install_flip::still_running(*owner))
@@ -2011,6 +2026,19 @@ pub(crate) fn window_holder(
             .filter(|owner| *owner != me && install_flip::still_running(*owner))
             .map(WindowHolder::Marked)),
     }
+}
+
+/// [`window_holder`] with a test step between finding the election in flight
+/// and waiting for it, so a test can end that election at that exact state
+/// without the clock.
+#[cfg(test)]
+pub(crate) fn window_holder_at(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    in_flight: impl FnOnce(),
+) -> Result<Option<WindowHolder>, String> {
+    window_holder_using(home, txn, me, in_flight)
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**
