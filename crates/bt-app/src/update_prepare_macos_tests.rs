@@ -688,7 +688,8 @@ fn renamed_bundle_updates_only_itself() {
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(journal.header().outcome, HeaderOutcome::None);
@@ -1083,15 +1084,18 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
 
     let first = on_a_worker({
         let home = home.clone();
-        move |worker| match at_launch(worker, &home).unwrap() {
-            AtLaunch::Counted(staged) => staged.journal.body.phase,
+        move |worker| match at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly)
+            .unwrap()
+        {
+            AtLaunch::Kept(staged) => staged.journal.body.phase,
             _ => panic!("the first launch counts"),
         }
     });
     assert_eq!(
         first,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         }
     );
     assert_eq!(journal_on_disk(&home).body.phase, first);
@@ -1100,7 +1104,12 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
     attach(&blank, &home.mount_point(txn).unwrap());
     let second = on_a_worker({
         let home = home.clone();
-        move |worker| matches!(at_launch(worker, &home).unwrap(), AtLaunch::Discarded)
+        move |worker| {
+            matches!(
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap(),
+                AtLaunch::Discarded
+            )
+        }
     });
     assert!(second, "the second launch discards");
     assert!(mounted(home.root()).is_empty(), "the image is detached");
@@ -1127,7 +1136,12 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
     attach(&blank, &home.mount_point(dead).unwrap());
     let swept = on_a_worker({
         let home = home.clone();
-        move |worker| matches!(at_launch(worker, &home).unwrap(), AtLaunch::Swept)
+        move |worker| {
+            matches!(
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap(),
+                AtLaunch::Swept
+            )
+        }
     });
     assert!(swept);
     assert!(mounted(home.root()).is_empty());
@@ -1218,6 +1232,7 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
     let resumer_tools = Arc::clone(&tools);
     let mut job: Job<u32> = Job::with_offers(true).after_start(
         waiting.map(|home| *home),
+        crate::update_txn::PreviousRun::Orderly,
         Box::new(move |worker, staged, channel| {
             resume(worker, staged, &bundle, &*resumer_tools, channel)
         }),
@@ -1281,7 +1296,8 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
     assert_eq!(
         journal_on_disk(&home).body.phase,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         },
         "the launch is counted"
     );
@@ -1332,7 +1348,9 @@ fn revalidation_before_resume_refuses_a_changed_image() {
     let answers = on_a_worker({
         let (home, tools) = (home.clone(), Arc::clone(&tools));
         move |worker| {
-            let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() else {
+            let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            else {
                 panic!("the launch counts the prepared transaction");
             };
             let unchanged = revalidate(
@@ -1463,7 +1481,8 @@ fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_aba
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(journal.body.adapter, crate::update_txn::Adapter::Ours);

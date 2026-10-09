@@ -43577,6 +43577,13 @@ impl Runtime<'_> {
             .after_rollback(update_startup::failed())
             .after_start(
                 update_startup::waiting(),
+                // How the run before this one ended (0.4.8 E3): the session sentinel this
+                // process's store already probed above.
+                if persist::previous_run_ended_orderly() {
+                    update_txn::PreviousRun::Orderly
+                } else {
+                    update_txn::PreviousRun::Unfinished
+                },
                 update_job::resumer_for_this_copy(),
                 update::begin,
             );
@@ -74126,26 +74133,36 @@ fn main() -> Result<()> {
     // would answer that search first — turning a pin on where the run's last
     // line is written into a pin on a branch that never writes one.
     let storage = persist::storage_dir();
-    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
-    // asks for it until the old build has let go, and adopts it into the claim
-    // table before anything below asks who writes here. One that is not handed
-    // the claim does not start and does not hand itself over — its applier
-    // sees the trial gone without a receipt and rolls back. Nothing at all in
-    // any other start.
-    if let Err(line) = update_trial::take_the_claim(&storage) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        bt_platform::leave_process(1);
-    }
     //
     // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
     // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+    let hand_over = || {
+        bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+            launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
+        })
+        .ok()
+        .flatten()
+    };
+    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
+    // asks for it until the old build has let go, and adopts it into the claim
+    // table before anything below asks who writes here. One a holder launched
+    // that is not handed the claim does not start and does not hand itself
+    // over — its applier sees the trial gone without a receipt and rolls
+    // back. A person's start standing in for U-35's reserved trial offers its
+    // launch to the trial that holds the claim, and when that trial does not
+    // take it within the wait, opens its own window, its writes held (0.4.8
+    // E3). Nothing at all in any other start.
+    let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
+        update_trial::Claimed::Ours => None,
+        update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
+        update_trial::Claimed::StoodDown(line) => Some(line),
+        update_trial::Claimed::NotHad(line) => {
+            bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            bt_platform::leave_process(1);
+        }
+    };
     if !persist::is_writer_of(&storage)
-        && let Some(handed) =
-            bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-                launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
-            })
-            .ok()
-            .flatten()
+        && let Some(handed) = hand_over()
     {
         bt_platform::leave_process(handed);
     }
@@ -74164,6 +74181,11 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // A stand-in that stood down beside the reserved trial says so where this
+    // run's diagnostics go (0.4.8 E3).
+    if let Some(line) = stood_down {
+        diagnostics::note(&line);
+    }
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and

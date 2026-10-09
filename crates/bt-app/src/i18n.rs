@@ -2966,6 +2966,9 @@ text_entries! {
     /// After the detail, when this session's writes are held (0.4.8 E1); `{detail}` is the
     /// detail it follows.
     UpdateCardNotKept,
+    /// The Ready card's heading when Restart was pressed for this update and the restart did not
+    /// happen — a power cut, a refused admission (0.4.8 E3); the Ready line follows as its detail.
+    UpdateCardRestartMissed,
     /// The title of the error toast for a pane whose shell could not be started
     /// (T-BIRTH-OFF-WINDOW); its body is the reason.
     ShellDidNotStart,
@@ -5909,6 +5912,11 @@ impl Text {
                 "{detail} Changes made in this session are not kept.",
                 "{detail} Changes made in this session are not kept.", // zh: pending E1
             ),
+            Self::UpdateCardRestartMissed => pick(
+                lang,
+                "The restart did not happen.",
+                "The restart did not happen.", // zh: pending T-UPDATE-HANDOFF-DEBT
+            ),
             Self::ShellDidNotStart => pick(
                 lang,
                 "Shell not started",
@@ -6094,6 +6102,9 @@ impl Text {
         (Self::UpdateCardNewerUnnamed, HostPlatform::MacOs),
         (Self::UpdateCardNotKept, HostPlatform::Windows),
         (Self::UpdateCardNotKept, HostPlatform::MacOs),
+        // 0.4.8 E3: the Ready card after a restart that did not happen.
+        (Self::UpdateCardRestartMissed, HostPlatform::Windows),
+        (Self::UpdateCardRestartMissed, HostPlatform::MacOs),
         // 0.4.8 B4: a PSReadLine check that failed, and a PowerShell in Constrained Language Mode.
         (Self::PsReadLineCheckFailed, HostPlatform::Windows),
         (Self::PsReadLineCheckFailed, HostPlatform::MacOs),

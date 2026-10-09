@@ -78,9 +78,15 @@ pub(crate) const RECEIPT_VERSION: u64 = 1;
 /// by another process (R) measures the same deadline P did.
 pub(crate) const TRIAL_DEADLINE_MS: u64 = 90_000;
 
-/// **A prepared transaction is discarded at its second launch without a
-/// resume** — (b).1 F-17's "increments `deferred_launches` at each launch that
-/// does not resume, discards at 2".
+/// **A prepared transaction is discarded at the second launch after a run
+/// that deliberately left it unresumed** — (b).1 F-17's "increments
+/// `deferred_launches` at each launch that does not resume, discards at 2", as
+/// T-UPDATE-HANDOFF-DEBT (0.4.8 E3) narrows it: a launch counts only when the
+/// run before it ended on its clean-exit path (the session sentinel,
+/// `persist::previous_run_ended_orderly`) and did not press Restart for it —
+/// a crash or a power cut is never a deliberate *Later*, and a restart that
+/// did not happen ([`Phase::Prepared`]'s `restart_missed`) is a *Restart*
+/// ([`launch_event`]).
 pub(crate) const DEFERRED_LAUNCH_LIMIT: u8 = 2;
 
 /// **How many rollbacks a `Stuck` transaction gets** — the coordinator's
@@ -715,6 +721,16 @@ pub(crate) enum Phase {
     Allocated,
     Prepared {
         deferred_launches: u8,
+        /// **Restart was pressed for this staged set and the restart did not
+        /// happen** (0.4.8 E3): the road was put back here by
+        /// [`Event::Reverted`] — a power cut before anything moved, an
+        /// admission refused, an entrance found. The next launch says so on
+        /// its card and does not count itself a deferral
+        /// ([`Event::MissedRestartOffered`] spends it). Absent when false, so
+        /// every journal written before it reads as before; a reader that does
+        /// not know it loses the card's sentence and counts that one launch.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        restart_missed: bool,
     },
     Handoff {
         applier: Nonce,
@@ -1536,8 +1552,14 @@ pub(crate) enum Event {
     Prepared,
     /// O's preparation failed: nothing installed was touched.
     PrepareFailed,
-    /// The job owner started while `Prepared` and has not resumed.
+    /// The job owner started while `Prepared`, after a run that ended on its
+    /// clean-exit path without pressing Restart for it: one deliberate
+    /// deferral ([`launch_event`]).
     LaunchedWithoutResume,
+    /// **The job owner started after a restart that did not happen** (0.4.8
+    /// E3): the `Prepared` journal says `restart_missed`; this launch offers
+    /// the same Restart again with the card that says so, and counts nothing.
+    MissedRestartOffered,
     /// The job owner discards the prepared successor: the reader's choice, a
     /// failed revalidation, or an install replaced by hand.
     Discarded,
@@ -1625,6 +1647,7 @@ pub(crate) enum EventKind {
     Prepared,
     PrepareFailed,
     LaunchedWithoutResume,
+    MissedRestartOffered,
     Discarded,
     HandedOff,
     ApplierNotStarted,
@@ -1646,10 +1669,11 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
-    pub(crate) const ALL: [EventKind; 21] = [
+    pub(crate) const ALL: [EventKind; 22] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
         EventKind::LaunchedWithoutResume,
+        EventKind::MissedRestartOffered,
         EventKind::Discarded,
         EventKind::HandedOff,
         EventKind::ApplierNotStarted,
@@ -1676,6 +1700,7 @@ impl EventKind {
             EventKind::Prepared
             | EventKind::PrepareFailed
             | EventKind::LaunchedWithoutResume
+            | EventKind::MissedRestartOffered
             | EventKind::Discarded
             | EventKind::HandedOff
             | EventKind::ApplierNotStarted => &[Actor::Old],
@@ -1707,6 +1732,7 @@ impl Event {
             Event::Prepared => EventKind::Prepared,
             Event::PrepareFailed => EventKind::PrepareFailed,
             Event::LaunchedWithoutResume => EventKind::LaunchedWithoutResume,
+            Event::MissedRestartOffered => EventKind::MissedRestartOffered,
             Event::Discarded => EventKind::Discarded,
             Event::HandedOff { .. } => EventKind::HandedOff,
             Event::ApplierNotStarted => EventKind::ApplierNotStarted,
@@ -1771,6 +1797,11 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
         PhaseKind::Prepared,
         EventKind::LaunchedWithoutResume,
         PhaseKind::Abandoned,
+    ),
+    (
+        PhaseKind::Prepared,
+        EventKind::MissedRestartOffered,
+        PhaseKind::Prepared,
     ),
     (
         PhaseKind::Prepared,
@@ -1893,18 +1924,34 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
     match (phase, event) {
         (Phase::Allocated, Event::Prepared) => Ok(Phase::Prepared {
             deferred_launches: 0,
+            restart_missed: false,
         }),
         (Phase::Allocated, Event::PrepareFailed) => Ok(Phase::Abandoned),
-        (Phase::Prepared { deferred_launches }, Event::LaunchedWithoutResume) => {
+        (
+            Phase::Prepared {
+                deferred_launches, ..
+            },
+            Event::LaunchedWithoutResume,
+        ) => {
             let launches = deferred_launches.saturating_add(1);
             Ok(if launches >= DEFERRED_LAUNCH_LIMIT {
                 Phase::Abandoned
             } else {
                 Phase::Prepared {
                     deferred_launches: launches,
+                    restart_missed: false,
                 }
             })
         }
+        (
+            Phase::Prepared {
+                deferred_launches, ..
+            },
+            Event::MissedRestartOffered,
+        ) => Ok(Phase::Prepared {
+            deferred_launches: *deferred_launches,
+            restart_missed: false,
+        }),
         (Phase::Prepared { .. }, Event::Discarded) => Ok(Phase::Abandoned),
         (Phase::Prepared { .. }, Event::HandedOff { applier }) => {
             Ok(Phase::Handoff { applier: *applier })
@@ -1923,6 +1970,7 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
         (Phase::Handoff { .. } | Phase::Armed | Phase::Moving, Event::Reverted) => {
             Ok(Phase::Prepared {
                 deferred_launches: 0,
+                restart_missed: true,
             })
         }
         (Phase::Armed, Event::Admitted) => Ok(Phase::Moving),
@@ -2490,8 +2538,10 @@ pub(crate) enum Action {
     Leave,
     /// W1, M1: detach any mount under `H`, delete `H\<txn>`, then the journal.
     Sweep,
-    /// W2, M2: record [`Event::LaunchedWithoutResume`]; the in-app job may
-    /// still resume (revalidating) in this launch.
+    /// W2, M2: record what this launch is to the staged set
+    /// ([`launch_event`]: a deliberate deferral counted, a missed restart
+    /// offered again, or after a run that did not end orderly nothing); the
+    /// in-app job may still resume (revalidating) in this launch.
     CountDeferredLaunch,
     /// W3, M3: write the entrance, flush and read it back, then record
     /// [`Event::Armed`] (or [`Event::EntranceFailed`]).
@@ -2550,6 +2600,42 @@ pub(crate) enum Action {
     /// delete `H\<txn>`, and delete the journal only once `H\<txn>` is gone (a
     /// running rescue cannot delete itself, so the next start finishes it).
     Retire { remove_entrance: bool },
+}
+
+/// **How the run before this launch ended** (0.4.8 E3), as the job owner's
+/// pass reads it: on its clean-exit path, or not — a crash, a power cut, an
+/// end from outside. The fact is the session sentinel's
+/// (`persist::previous_run_ended_orderly`, the one diagnostics names "did not
+/// reach its clean-exit path"), never a new record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreviousRun {
+    /// The run before reached its clean-exit path (the system's end of
+    /// session included).
+    Orderly,
+    /// The run before did not: a crash, a power cut, an end from outside.
+    Unfinished,
+}
+
+/// **What the job owner records over a `Prepared` journal at a launch**
+/// ([`Action::CountDeferredLaunch`]; 0.4.8 E3): only a deliberate *Later* is a
+/// deferral. A restart that did not happen ([`Phase::Prepared`]'s
+/// `restart_missed`) → [`Event::MissedRestartOffered`]: the card says so, the
+/// same Restart is offered, nothing is counted. Otherwise a run before that
+/// ended orderly — it was offered the update and quit without pressing
+/// Restart — → [`Event::LaunchedWithoutResume`], counted towards
+/// [`DEFERRED_LAUNCH_LIMIT`]; a run that did not end orderly records nothing,
+/// and the staged set is offered as it stands. `None` for any other phase.
+pub(crate) fn launch_event(phase: &Phase, previous: PreviousRun) -> Option<Event> {
+    match phase {
+        Phase::Prepared {
+            restart_missed: true,
+            ..
+        } => Some(Event::MissedRestartOffered),
+        Phase::Prepared { .. } if previous == PreviousRun::Orderly => {
+            Some(Event::LaunchedWithoutResume)
+        }
+        _ => None,
+    }
 }
 
 /// How the old install comes back.
@@ -3682,6 +3768,7 @@ mod tests {
             (
                 Phase::Prepared {
                     deferred_launches: 1,
+                    restart_missed: false,
                 },
                 bundle_layout(),
             ),
@@ -3760,6 +3847,7 @@ mod tests {
             let named = journal(
                 Phase::Prepared {
                     deferred_launches: 0,
+                    restart_missed: false,
                 },
                 bundle_layout(),
             )
@@ -3770,7 +3858,8 @@ mod tests {
                 body,
                 Body046 {
                     phase: Phase::Prepared {
-                        deferred_launches: 0
+                        deferred_launches: 0,
+                        restart_missed: false
                     },
                     layout: bundle_layout(),
                 },
@@ -3966,9 +4055,15 @@ mod tests {
             Phase::Allocated,
             Phase::Prepared {
                 deferred_launches: 0,
+                restart_missed: false,
             },
             Phase::Prepared {
                 deferred_launches: 1,
+                restart_missed: false,
+            },
+            Phase::Prepared {
+                deferred_launches: 0,
+                restart_missed: true,
             },
             Phase::Handoff {
                 applier: nonce(0x44),
@@ -4098,6 +4193,7 @@ mod tests {
             Event::Prepared,
             Event::PrepareFailed,
             Event::LaunchedWithoutResume,
+            Event::MissedRestartOffered,
             Event::Discarded,
             Event::HandedOff {
                 applier: nonce(0x44),
@@ -4870,6 +4966,7 @@ mod tests {
         let first = journal(
             Phase::Prepared {
                 deferred_launches: 0,
+                restart_missed: false,
             },
             members_layout(),
         );
@@ -4888,13 +4985,101 @@ mod tests {
         assert_eq!(
             second.body.phase,
             Phase::Prepared {
-                deferred_launches: 1
+                deferred_launches: 1,
+                restart_missed: false
             }
         );
         let third = second
             .advance(&Event::LaunchedWithoutResume)
             .expect("counted");
         assert_eq!(third.body.phase, Phase::Abandoned);
+    }
+
+    /// RED (0.4.8 E3, #13) — **`DEFERRED_LAUNCH_LIMIT` counts only a
+    /// deliberate deferral: a launch after a run that ended orderly without
+    /// pressing Restart; never one after a crash or a power cut, and never the
+    /// launch after a restart that did not happen**, which says so and offers
+    /// the same Restart. A road put back to `Prepared` records that its
+    /// restart did not happen; offering it spends the mark and counts
+    /// nothing; the mark is absent from the bytes when false, and a reader
+    /// that does not know it (0.4.7's `Prepared`) reads the journal as before.
+    ///
+    /// MUTATION: in `launch_event`, count every `Prepared` launch whatever
+    /// the run before was (`Phase::Prepared { .. } =>
+    /// Some(Event::LaunchedWithoutResume)` without the `Orderly` guard).
+    #[test]
+    fn a_launch_counts_a_deliberate_deferral_and_never_a_crash_or_a_missed_restart() {
+        let staged = |deferred_launches, restart_missed| Phase::Prepared {
+            deferred_launches,
+            restart_missed,
+        };
+        assert_eq!(
+            launch_event(&staged(1, false), PreviousRun::Unfinished),
+            None,
+            "a crash or a power cut is no deferral: nothing is recorded"
+        );
+        assert_eq!(
+            launch_event(&staged(1, false), PreviousRun::Orderly),
+            Some(Event::LaunchedWithoutResume),
+            "a run that quit without Restart deferred it"
+        );
+        for previous in [PreviousRun::Orderly, PreviousRun::Unfinished] {
+            assert_eq!(
+                launch_event(&staged(1, true), previous),
+                Some(Event::MissedRestartOffered),
+                "{previous:?}: the restart that did not happen is offered again"
+            );
+        }
+        assert_eq!(launch_event(&Phase::Allocated, PreviousRun::Orderly), None);
+        for from in [
+            Phase::Handoff {
+                applier: nonce(0x45),
+            },
+            Phase::Armed,
+            Phase::Moving,
+        ] {
+            assert_eq!(
+                next(&txn(), &from, &Event::Reverted),
+                Ok(staged(0, true)),
+                "{from:?}: put back, and it says the restart did not happen"
+            );
+        }
+        assert_eq!(
+            next(&txn(), &staged(1, true), &Event::MissedRestartOffered),
+            Ok(staged(1, false)),
+            "offered again: the mark is spent and nothing is counted"
+        );
+        assert_eq!(
+            next(&txn(), &staged(1, true), &Event::LaunchedWithoutResume),
+            Ok(Phase::Abandoned),
+            "a deliberate deferral spends it too"
+        );
+
+        let unmarked =
+            String::from_utf8(journal(staged(0, false), members_layout()).encode()).expect("JSON");
+        assert!(!unmarked.contains("restart_missed"), "{unmarked}");
+        let marked = journal(staged(0, true), members_layout()).encode();
+        /// `Prepared` as 0.4.6 and 0.4.7 read it.
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(tag = "phase")]
+        enum Prepared047 {
+            Prepared { deferred_launches: u8 },
+        }
+        #[derive(Deserialize)]
+        struct Read047 {
+            body: Body047,
+        }
+        #[derive(Deserialize)]
+        struct Body047 {
+            phase: Prepared047,
+        }
+        let read: Read047 = serde_json::from_slice(&marked).expect("an earlier reader reads it");
+        assert_eq!(
+            read.body.phase,
+            Prepared047::Prepared {
+                deferred_launches: 0
+            }
+        );
     }
 
     /// RED (U-10) — **W3: a handoff is applied by the first lock holder, and a
@@ -4916,7 +5101,8 @@ mod tests {
         assert_eq!(
             journal.advance(&Event::Reverted).map(|j| j.body.phase),
             Ok(Phase::Prepared {
-                deferred_launches: 0
+                deferred_launches: 0,
+                restart_missed: true
             })
         );
     }
@@ -5065,7 +5251,8 @@ mod tests {
         assert_eq!(
             journal.advance(&Event::Reverted).map(|j| j.body.phase),
             Ok(Phase::Prepared {
-                deferred_launches: 0
+                deferred_launches: 0,
+                restart_missed: true
             })
         );
     }
@@ -5583,6 +5770,7 @@ mod tests {
         let journal = journal(
             Phase::Prepared {
                 deferred_launches: 1,
+                restart_missed: false,
             },
             bundle_layout(),
         );
@@ -5644,7 +5832,8 @@ mod tests {
         assert_eq!(
             journal.advance(&Event::Reverted).map(|j| j.body.phase),
             Ok(Phase::Prepared {
-                deferred_launches: 0
+                deferred_launches: 0,
+                restart_missed: true
             })
         );
     }
@@ -5733,7 +5922,8 @@ mod tests {
             assert_eq!(
                 journal.advance(&Event::Reverted).map(|j| j.body.phase),
                 Ok(Phase::Prepared {
-                    deferred_launches: 0
+                    deferred_launches: 0,
+                    restart_missed: true
                 })
             );
         }
@@ -6043,6 +6233,7 @@ mod tests {
             },
             Phase::Prepared {
                 deferred_launches: 0,
+                restart_missed: false,
             },
         ] {
             assert_eq!(after_rollback(&header(phase)), None);
@@ -6141,6 +6332,7 @@ mod tests {
             Phase::Allocated,
             Phase::Prepared {
                 deferred_launches: 0,
+                restart_missed: false,
             },
         ] {
             let mut view = start_on(phase);

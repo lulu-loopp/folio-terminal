@@ -2123,6 +2123,138 @@ pub(crate) fn claimed_within(worker: Option<&WorkerCtx>, data: &Path, within: Du
     }
 }
 
+/// **Whom a recovery handed a person's start waits for before it carries that
+/// start on** (0.4.8 E3): the party it deferred to, which opens the window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Ahead {
+    /// A process, by pid and start instant: the applier the window's mark
+    /// names, or a trial the journal records or no receipt names yet.
+    Process(Running),
+    /// Whoever holds this lock: the transaction lock another holder kept
+    /// through the recovery's wait.
+    Lock(PathBuf),
+    /// **An election in flight** for `txn`'s window (`owner.lock`): while its
+    /// lock is held, and then while the mark it left names a live process that
+    /// is not `me`.
+    Election { home: Home, txn: TxnId, me: Running },
+    /// Nobody: a Folio already holds the data directory.
+    DataHolder,
+}
+
+impl Ahead {
+    /// **Whether the party ahead is still on its way to the window.**
+    fn runs(&self) -> bool {
+        match self {
+            Ahead::Process(process) => install_flip::still_running(*process),
+            Ahead::Lock(lock) => is_held_by_another(lock),
+            Ahead::Election { home, txn, me } => {
+                is_held_by_another(&owner_lock_path(home, *txn))
+                    || window_owner(home, *txn)
+                        .is_some_and(|owner| owner != *me && install_flip::still_running(owner))
+            }
+            Ahead::DataHolder => false,
+        }
+    }
+}
+
+/// Whether another process holds `lock` now: one attempt, let go at once.
+fn is_held_by_another(lock: &Path) -> bool {
+    matches!(install_txn::try_hold(lock, Hold::Exclusive), Ok(None))
+}
+
+/// **What became of a person's start a recovery carried** ([`carry_the_start`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Carried {
+    /// The Folio holding the data directory took it: its folder opens there.
+    Taken,
+    /// That Folio refused it: its folder is not a directory that exists.
+    FolderGone,
+    /// A Folio holds the data directory and did not take it within
+    /// [`ACKNOWLEDGED_WITHIN`] of asking.
+    NotTaken,
+    /// No Folio held the data directory within [`ACKNOWLEDGED_WITHIN`] after
+    /// the party ahead stopped running: the window it was to open never came.
+    NoFolio,
+}
+
+/// How often a carried start looks again ([`carry_the_start`]).
+const CARRY_POLL: Duration = Duration::from_millis(250);
+
+/// **A recovery that deferred carries the person's start it was handed to the
+/// window** (0.4.8 E3, the owner's ruling for #12): while the party it
+/// deferred to (`ahead`) is still on its way, and once a Folio holds the data
+/// directory `data`, `request` is offered to that Folio over the launch wire
+/// (`launch_wire::hand_over_carried`) — the request a second launch beside a
+/// running Folio sends, its folder, profile, switches and origin, with no
+/// report — and asked again while that Folio does not yet serve launches.
+/// Gives up [`ACKNOWLEDGED_WITHIN`] after first asking ([`Carried::NotTaken`]),
+/// or [`ACKNOWLEDGED_WITHIN`] after the party ahead stopped running — or ran
+/// past `within`, the longest its road takes to open a window (the old
+/// build's wait and the trial's deadline: a party still running past it opens
+/// none) — with no Folio holding the data directory ([`Carried::NoFolio`]).
+/// Every pause sleeps through `worker`'s wait door.
+pub(crate) fn carry_the_start(
+    worker: &WorkerCtx,
+    data: &Path,
+    ahead: &Ahead,
+    request: &crate::launch_wire::LaunchRequest,
+    within: Duration,
+) -> Carried {
+    carry_the_start_with(
+        within,
+        || ahead.runs(),
+        || {
+            matches!(
+                crate::persist::try_claim(data),
+                Err(bt_platform::instance::ClaimRefusal::Held)
+            )
+        },
+        || crate::launch_wire::hand_over_carried(data, request),
+        (Instant::now, |pause| {
+            bt_platform::wait::sleep_within(worker, pause);
+        }),
+    )
+}
+
+/// [`carry_the_start`] with its four questions handed in — whether the party
+/// ahead runs, whether a Folio holds the data directory (a claim this process
+/// could take is let go at once), the offer, and the clock with its pause —
+/// so a test drives every cell without the clock or a pipe.
+pub(crate) fn carry_the_start_with(
+    within: Duration,
+    mut ahead_runs: impl FnMut() -> bool,
+    mut held: impl FnMut() -> bool,
+    mut offer: impl FnMut() -> Option<crate::launch_wire::Reply>,
+    (mut now, mut pause): (impl FnMut() -> Instant, impl FnMut(Duration)),
+) -> Carried {
+    use crate::launch_wire::{Refusal, Reply};
+    let began = now();
+    let mut asked_since: Option<Instant> = None;
+    let mut gone_since: Option<Instant> = None;
+    loop {
+        let at = now();
+        if held() {
+            match offer() {
+                Some(Reply::Taken) => return Carried::Taken,
+                Some(Reply::Refused(Refusal::NoSuchFolder)) => return Carried::FolderGone,
+                Some(Reply::Refused(Refusal::NotServing)) | None => {}
+            }
+            let since = *asked_since.get_or_insert(at);
+            if at.saturating_duration_since(since) >= ACKNOWLEDGED_WITHIN {
+                return Carried::NotTaken;
+            }
+        } else if at.saturating_duration_since(began) < within && ahead_runs() {
+            gone_since = None;
+        } else {
+            let since = *gone_since.get_or_insert(at);
+            if at.saturating_duration_since(since) >= ACKNOWLEDGED_WITHIN {
+                return Carried::NoFolio;
+            }
+        }
+        pause(CARRY_POLL);
+    }
+}
+
 /// **The failure window's words** (round 2): the update card's *Update
 /// incomplete.* and the installation home's folder, as `--update-failed`'s
 /// card says them.
@@ -2154,6 +2286,10 @@ pub(crate) enum Left {
     /// This program was started, and acknowledged: a Folio holds the data
     /// directory.
     Started(PathBuf),
+    /// **The person's start this recovery was handed was taken by the Folio
+    /// that opened the window** (0.4.8 E3, [`carry_the_start`]): nothing was
+    /// started here.
+    Carried,
     /// No start was delivered — nothing could be named, the operating system
     /// refused each program, or each started and never took the data
     /// directory — and this process showed the failure window itself; why.
@@ -2176,6 +2312,9 @@ impl Left {
                 "a Folio holds the data directory and opens Folio; nothing was started",
             ),
             Left::Started(program) => format!("started {}", program.display()),
+            Left::Carried => String::from(
+                "the start handed here was taken by the Folio that holds the data directory; nothing was started",
+            ),
             Left::ShownHere(why) => {
                 format!("no start was delivered ({why}); the failure window was shown here")
             }
@@ -2300,6 +2439,22 @@ impl<L: Leave> ExitGuard<L> {
     /// it, and it is the window a start would only hand itself to.
     pub(crate) fn window_elsewhere(&mut self) {
         self.elsewhere = true;
+    }
+
+    /// **The start this recovery was handed reached the window** (0.4.8 E3):
+    /// the Folio holding the data directory took it ([`Carried::Taken`]), and
+    /// this guard starts nothing.
+    pub(crate) fn carried(&mut self) {
+        self.left = Some(Left::Carried);
+    }
+
+    /// **The window this recovery deferred to never came** (0.4.8 E3,
+    /// [`Carried::NoFolio`]): the successor and the data directory's holder
+    /// are forgotten, and leaving starts what the disk names, with the start
+    /// it was handed.
+    pub(crate) fn owed_a_start(&mut self) {
+        self.successor = None;
+        self.elsewhere = false;
     }
 
     /// **Hand the duty on** to a guard constructed inside this one's scope,
@@ -2877,5 +3032,118 @@ mod exit_guard_tests {
                 }
             }
         }
+    }
+}
+
+/// **A person's start a recovery carries to the window** (0.4.8 E3, #12):
+/// every cell of [`carry_the_start_with`], on a clock that moves only when the
+/// carry pauses — no wall clock, no pipe.
+#[cfg(test)]
+mod carry_tests {
+    use super::*;
+    use crate::launch_wire::{Refusal, Reply};
+    use std::cell::{Cell, RefCell};
+
+    /// What one carry did: its answer, how many times it offered, and how long
+    /// it waited on its own clock.
+    #[derive(Debug, PartialEq)]
+    struct Run {
+        carried: Carried,
+        offers: usize,
+        waited: Duration,
+    }
+
+    /// One carry within `within`: at each look (counted from 0), `looks` says
+    /// whether the party ahead runs and whether a Folio holds the data
+    /// directory; the offers are answered in turn from `answers`, then by its
+    /// last for ever. A carry that pauses ten thousand times never ends.
+    fn carry(
+        within: Duration,
+        looks: impl Fn(usize) -> (bool, bool),
+        answers: &[Option<Reply>],
+    ) -> Run {
+        let start = Instant::now();
+        let now = Cell::new(start);
+        let look = Cell::new(0usize);
+        let offers = RefCell::new(0usize);
+        let carried = carry_the_start_with(
+            within,
+            || looks(look.get()).0,
+            || looks(look.get()).1,
+            || {
+                let asked = *offers.borrow();
+                *offers.borrow_mut() += 1;
+                answers[asked.min(answers.len() - 1)]
+            },
+            (
+                || now.get(),
+                |pause| {
+                    look.set(look.get() + 1);
+                    assert!(look.get() < 10_000, "the carry never ended");
+                    now.set(now.get() + pause);
+                },
+            ),
+        );
+        Run {
+            carried,
+            offers: offers.into_inner(),
+            waited: now.get() - start,
+        }
+    }
+
+    const BUSY: Option<Reply> = Some(Reply::Refused(Refusal::NotServing));
+
+    /// RED (0.4.8 E3, #12) — **the carry waits while the party it deferred to
+    /// runs, offers the start once a Folio holds the data directory, asks
+    /// again while that Folio does not yet serve launches, and ends taken;
+    /// a folder that is gone ends it at once; a Folio that never takes it,
+    /// or no Folio at all after the party is done or past its road's bound,
+    /// ends it [`ACKNOWLEDGED_WITHIN`] later.**
+    ///
+    /// MUTATIONS: in `carry_the_start_with`, answer `Carried::NoFolio` at
+    /// once (the deferred start dropped); or drop the `within` bound (a party
+    /// that never opens a window holds the carry for ever).
+    #[test]
+    fn a_deferred_start_is_offered_to_the_folio_that_opens_the_window() {
+        let road = Duration::from_secs(150);
+        // The applier's road: 40 looks with nobody holding the data directory,
+        // then its trial does; no endpoint yet, then busy, then taken.
+        let taken = carry(
+            road,
+            |look| (true, look >= 40),
+            &[None, BUSY, Some(Reply::Taken)],
+        );
+        assert_eq!(taken.carried, Carried::Taken, "{taken:?}");
+        assert_eq!(taken.offers, 3);
+        assert_eq!(taken.waited, CARRY_POLL * 42);
+
+        let gone = carry(
+            road,
+            |_| (false, true),
+            &[Some(Reply::Refused(Refusal::NoSuchFolder))],
+        );
+        assert_eq!(
+            (gone.carried, gone.offers),
+            (Carried::FolderGone, 1),
+            "{gone:?}"
+        );
+
+        let never = carry(road, |_| (true, true), &[BUSY]);
+        assert_eq!(never.carried, Carried::NotTaken, "{never:?}");
+        assert_eq!(never.waited, ACKNOWLEDGED_WITHIN);
+
+        let nobody = carry(road, |_| (false, false), &[Some(Reply::Taken)]);
+        assert_eq!(
+            (nobody.carried, nobody.offers, nobody.waited),
+            (Carried::NoFolio, 0, ACKNOWLEDGED_WITHIN),
+            "{nobody:?}"
+        );
+
+        let stuck = carry(road, |_| (true, false), &[Some(Reply::Taken)]);
+        assert_eq!(
+            (stuck.carried, stuck.waited),
+            (Carried::NoFolio, road + ACKNOWLEDGED_WITHIN),
+            "a party still running past its road's bound opens no window"
+        );
     }
 }

@@ -130,7 +130,13 @@ impl Report {
                     folder: folder.clone(),
                 })
             }
-            Failure::TrialIncomplete { .. } | Failure::Unsupported | Failure::Stopped(_) => None,
+            // A stand-in that stood down beside the reserved trial reports
+            // nothing either: its card is about this session, and the Folio it
+            // would cross to is that very trial (0.4.8 E3).
+            Failure::TrialIncomplete { .. }
+            | Failure::BesideTheTrial { .. }
+            | Failure::Unsupported
+            | Failure::Stopped(_) => None,
         }
     }
 
@@ -831,6 +837,33 @@ pub(crate) fn hand_over(
     if !request.is_sayable() {
         return None;
     }
+    let answer = converse(directory, &request);
+    after_reply(request, answer?, say)
+}
+
+/// **The command line a person's start handed a rescue build, as the request it crosses in**
+/// (0.4.8 E3): `handed` (`--then-launch`'s words) parsed as that start parsed them, its folder
+/// resolved against `here` — the start's working directory, which the rescue build it started
+/// inherits — and nothing to report, since the road decided no failure for it. `None` for a line
+/// this wire cannot carry, as [`LaunchRequest::from_cli`] says (a document), or one that does not
+/// parse.
+#[must_use]
+pub(crate) fn carried(handed: &[std::ffi::OsString], here: Option<&Path>) -> Option<LaunchRequest> {
+    let line = cli::parse(handed.iter().cloned()).ok()?;
+    LaunchRequest::from_cli(&line, cli::machine_path_kind, here).filter(LaunchRequest::is_sayable)
+}
+
+/// **A person's start a recovery carried, handed to the Folio that holds `directory`** (0.4.8
+/// E3, `update_apply::carry_the_start`): one conversation on the launch endpoint, the one
+/// [`hand_over`] has — from a road process's worker, which has no console to say a refusal on, so
+/// the answer itself is returned. `None` when nobody answered.
+pub(crate) fn hand_over_carried(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
+    converse(directory, request)
+}
+
+/// **One conversation with the Folio that holds `directory`**: `request` sent, and its answer —
+/// `None` for no endpoint, nobody listening, or an answer this build cannot read.
+fn converse(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
     let endpoint = bt_platform::launch_pipe::endpoint_for(directory)?;
     let mut answer = None;
     bt_platform::launch_pipe::hand_over(&endpoint, &request.encode(), |server, line| {
@@ -852,7 +885,7 @@ pub(crate) fn hand_over(
         }
     })
     .ok()?;
-    after_reply(request, answer?, say)
+    answer
 }
 
 /// **What the start does with the running Folio's answer** — `Some(code)` to leave, `None` to carry
@@ -2035,5 +2068,79 @@ mod tests {
                 "the frozen reader reads its own build's frames: {frame}"
             );
         }
+    }
+
+    /// **RED (0.4.8 E3, #12) — a person's start a recovery deferred reaches the Folio that opens
+    /// the window: its folder, over the real launch endpoint.**
+    ///
+    /// A recovery handed `--then-launch --cwd <folder>` that started nothing, because another
+    /// process opens the window, carries that start ([`carried`], `update_apply::carry_the_start`):
+    /// once a Folio holds the data directory, the request crosses the endpoint that Folio listens
+    /// on, folder and origin intact, and no report rides with it. The far end here is a listener
+    /// of the test's own on a private directory whose claim the test holds.
+    ///
+    /// MUTATION: in [`hand_over_carried`], converse with `&LaunchRequest::default()` (the folder
+    /// dropped on the way to the window).
+    #[test]
+    fn a_carried_start_reaches_the_folio_that_holds_the_data_directory() {
+        let directory = bt_testpath::temp_path("launch-wire-carried-数据");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let folder = bt_testpath::temp_path("工作 文件夹 carried");
+        std::fs::create_dir_all(&folder).unwrap();
+        if bt_platform::launch_pipe::endpoint_for(&directory).is_none() {
+            return;
+        }
+        let _holder = crate::persist::try_claim(&directory).expect("the window's Folio holds it");
+        let (sender, landed) = std::sync::mpsc::channel();
+        let Ok(_endpoint) = bt_platform::launch_pipe::LaunchPipe::start(
+            &directory,
+            |line: &str| {
+                let request = LaunchRequest::decode(line)?;
+                Some(bt_platform::launch_pipe::Decision {
+                    reply: Reply::Taken.encode(),
+                    admitted: Some(request),
+                })
+            },
+            move |request: LaunchRequest| {
+                let _ = sender.send(request);
+            },
+        ) else {
+            return;
+        };
+        let handed: Vec<std::ffi::OsString> = ["--from-explorer", "--cwd"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .chain([folder.clone().into_os_string()])
+            .collect();
+        let request = carried(&handed, None).expect("a folder crosses");
+        assert_eq!(request.cwd.as_deref(), Some(folder.as_path()));
+        assert_eq!(request.origin, cli::LaunchOrigin::Explorer);
+        assert_eq!(request.report, None, "a carried start reports nothing");
+        let sent = request.clone();
+        let carried = bt_platform::spawn_at_priority(
+            "bt-launch-wire-carry-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                crate::update_apply::carry_the_start(
+                    worker,
+                    &directory,
+                    &crate::update_apply::Ahead::DataHolder,
+                    &sent,
+                    std::time::Duration::from_secs(1),
+                )
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(carried, crate::update_apply::Carried::Taken);
+        assert_eq!(
+            landed
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the window's Folio was handed the start"),
+            request
+        );
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

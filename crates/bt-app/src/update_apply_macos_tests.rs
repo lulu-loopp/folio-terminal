@@ -238,6 +238,12 @@ struct Fake {
     refuse_relaunch: bool,
     /// The failure windows shown in this process (U-34, round 2).
     shown: Vec<String>,
+    /// **The person's starts the recovery door carried to the window**
+    /// (0.4.8 E3): whom it waited for, and the request it handed over.
+    carried: Vec<(
+        crate::update_apply::Ahead,
+        crate::launch_wire::LaunchRequest,
+    )>,
 }
 
 impl Default for Fake {
@@ -256,6 +262,7 @@ impl Default for Fake {
             on_say: None,
             starts_die: false,
             refuse_relaunch: false,
+            carried: Vec::new(),
             shown: Vec::new(),
         }
     }
@@ -1342,7 +1349,8 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert!(!install.plist().exists());
@@ -1434,7 +1442,8 @@ fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert!(!install.plist().exists());
@@ -1535,6 +1544,18 @@ impl crate::update_recover::World for Fake {
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         self.relaunched.push((program.to_path_buf(), args.to_vec()));
         Ok(())
+    }
+
+    fn carry(
+        &mut self,
+        _worker: &WorkerCtx,
+        _data: &Path,
+        ahead: &crate::update_apply::Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        _within: Duration,
+    ) -> crate::update_apply::Carried {
+        self.carried.push((ahead.clone(), request.clone()));
+        crate::update_apply::Carried::Taken
     }
 }
 
@@ -2131,7 +2152,8 @@ fn a_plain_relaunch_after_abandoned_and_after_a_revert() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
 }
@@ -4269,6 +4291,7 @@ fn shape_activate_refusal_with_old_live_follows_the_layout() {
         install.on_disk().map(|journal| journal.body.phase),
         Some(Phase::Prepared {
             deferred_launches: 0,
+            restart_missed: true,
         })
     );
     assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Moving)]);
@@ -4350,6 +4373,7 @@ fn shape_reentry_at_moving_follows_the_layout() {
         install.on_disk().map(|journal| journal.body.phase),
         Some(Phase::Prepared {
             deferred_launches: 0,
+            restart_missed: true,
         })
     );
     assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Moving)]);
@@ -4527,6 +4551,7 @@ fn a_recovery_that_waited_for_a_live_holder_takes_its_decision_as_it_stands() {
             "decided-prepared",
             Phase::Prepared {
                 deferred_launches: 0,
+                restart_missed: false,
             },
         ),
     ] {
@@ -4558,6 +4583,57 @@ fn a_recovery_that_waited_for_a_live_holder_takes_its_decision_as_it_stands() {
         );
         assert!(!install.plist().exists(), "{tag}");
     }
+}
+
+/// RED (0.4.8 E3, #12) — **the macOS recovery that leaves a `Handoff` to an
+/// applier's election in flight carries the person's start it was handed to
+/// the window that election's road opens; the run at login carries nothing**:
+/// `Recovered::deferred_to` names the election (its lock, then the mark it
+/// leaves), so the door hands the start over once a Folio holds the data
+/// directory. This shape case runs on every host; the test holds the election
+/// lock through both runs, an election stalled past `ELECTION_WITHIN`.
+///
+/// MUTATION: in `update_apply_macos::recover`, answer `deferred_to: None`
+/// (the deferred start dropped, as before E3).
+#[test]
+fn the_macos_recovery_carries_a_start_it_defers_to_an_election_in_flight() {
+    let install = shape_install("e3-carry-选举");
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    let in_flight = install_txn::try_hold(
+        &crate::update_apply::owner_lock_path(&install.home, install.txn),
+        Hold::Exclusive,
+    )
+    .unwrap()
+    .expect("the election lock is free");
+    let handed: Vec<OsString> = vec![OsString::from("--cwd"), OsString::from("/工作/文件夹")];
+    for start in [Some(handed), None] {
+        let recorder = Recorder::of(&install);
+        let road = Road {
+            nonce: None,
+            ..recorded_road(&install, &recorder, limits(5_000, 0))
+        };
+        let person = start.is_some();
+        let recovered = on_a_worker(move |worker| {
+            let mut hands = Fake::default();
+            recover(worker, &road, &mut hands, start.as_deref())
+        });
+        assert_eq!(
+            recovered.ended,
+            Ended::Deferred(Deferral::WindowDuty),
+            "the transaction is left to the election in flight"
+        );
+        assert_eq!(
+            recovered.deferred_to,
+            person.then(|| crate::update_apply::Ahead::Election {
+                home: install.home.clone(),
+                txn: install.txn,
+                me: crate::update_apply::this_process(),
+            }),
+            "a person's start: {person}"
+        );
+        assert_eq!(std::fs::read(install.home.journal()).unwrap(), journal);
+    }
+    drop(in_flight);
 }
 
 /// RED (U-41a1, managed-update §1.1 R1–R2) — **the macOS road calls the
@@ -4700,7 +4776,8 @@ fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
     assert_eq!(
         install.on_disk().map(|journal| journal.body.phase),
         Some(Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         })
     );
     assert!(!install.plist().exists(), "the entrance is removed");
