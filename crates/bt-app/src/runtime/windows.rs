@@ -926,6 +926,8 @@ impl Runtime<'_> {
                 // asked for it now, which is not the same as promising to bring
                 // it back every time.
                 pinned: false,
+                // A new tab owns no launch's environment.
+                environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),

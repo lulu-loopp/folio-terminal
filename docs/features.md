@@ -371,9 +371,10 @@ starts from your account's environment as it is now, not from the shell you type
 the command in, so an activated Python virtual environment, a conda environment or
 a Visual Studio developer prompt does not follow it. **`folio --with-environment .`**
 opens a tab that keeps the environment of the terminal you started it from — every
-variable, laid over your account's — also when Folio is already running. Only that
-tab gets it: a pane split from it, a restarted shell and a session restored later
-start from your account's environment again.
+variable, laid over your account's — also when Folio is already running. The
+environment belongs to that tab: a pane split in it, a restarted shell and a duplicate
+of the tab keep it. It is never saved, so a session restored later starts from your
+account's environment again.
 
 ## Settings in one file
 

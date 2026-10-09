@@ -1000,9 +1000,12 @@ running; an environment that does not fit the frame, or that the wire cannot wri
 as itself, refuses the launch with one line on its console and in
 `diagnostics.log`, and is never cut. The overrides are an overlay: a carried
 variable wins over the account's, an account variable the launcher lacks stays,
-and Folio's pane variables and the profile's are laid over both. They are held in
-memory for that one birth: never saved, and a revived, split, duplicated or
-restarted pane takes the account's environment. Folio's own process environment —
+and Folio's pane variables and the profile's are laid over both. **They belong to
+the tab** (coordinator's ruling 2026-10-09): every shell born in that tab — a split,
+`Duplicate pane`, `Split with`, `Restart shell` — is born with them, and `Duplicate
+tab` carries them to the new tab. They are held in memory only and never saved, so a
+revived tab takes the account's environment; a pane torn into a tab of its own leaves
+them behind. Folio's own process environment —
 its `BT_*` configuration — is not changed by any of this. If the account read
 fails, that birth alone uses ordinary process inheritance, with the carried
 overrides over it, and the next birth asks again. On non-Windows hosts the

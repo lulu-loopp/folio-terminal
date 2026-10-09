@@ -2,7 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due,
+    BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
     conpty_source_of, decided_birth, deliver_held_input, diagnostics, i18n, land_shell_birth,
     land_successor, landed_source, resolved_birth_seed, toast,
 };
@@ -1610,6 +1610,14 @@ impl Runtime<'_> {
             // whose profile is now the empty id — which names no row and would
             // reach the spawn as a degradation nobody caused.
             .unwrap_or_else(|| seed.applied(profiles::fallback_profile_id(), None));
+        // **And it is born in this tab** (coordinator's ruling 2026-10-09): a split — which is also
+        // `Duplicate pane` and `Split with` — takes what a launch carried into the tab.
+        let inherited = born_in_tab(
+            inherited,
+            self.window.tabs[self.window.active_tab]
+                .environment
+                .as_ref(),
+        );
         let wake = &self.window.pty_wake;
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);

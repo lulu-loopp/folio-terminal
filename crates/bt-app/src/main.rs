@@ -12146,6 +12146,9 @@ struct TabState {
     /// sets it and every tab reads through to what the program or the shell
     /// said.
     manual_name: Option<String>,
+    /// **The environment a launch carried into this tab** ([`TabSeed::environment`]), the source
+    /// for every shell born in it ([`born_in_tab`]). Held in memory and never saved.
+    environment: Option<cli::CarriedEnvironment>,
     pending_keyboard_at: Option<Instant>,
     /// **A resize present is owed to this tab's focused pane** (ticket 47).
     ///
@@ -35789,6 +35792,8 @@ fn revive_plan(
     let seed = TabSeed {
         manual_name: saved.first().and_then(|leaf| leaf.manual_name.clone()),
         pinned: tab.pinned,
+        // Never saved, so never revived.
+        environment: None,
     };
     // **Each pane comes back as its own shell in its own folder.** The two facts
     // are read out of the same saved leaf in the same pass, which is what makes
@@ -36642,6 +36647,22 @@ struct TabSeed {
     /// a profile is something each shell in it *is*.
     manual_name: Option<String>,
     pinned: bool,
+    /// **The environment `--with-environment` carried into this tab** (owner ruling 2026-10-05;
+    /// coordinator's ruling 2026-10-09: it belongs to the tab). Every shell born in the tab —
+    /// its first pane, a split, a duplicate pane or tab, a Restart shell — is born with it
+    /// ([`born_in_tab`]). `None` for every tab no launch carried one into, and for every tab
+    /// revived from disk: it is never saved.
+    environment: Option<cli::CarriedEnvironment>,
+}
+
+/// **A shell born in a tab is born with the tab's carried environment** — the one rule for every
+/// birth inside a tab (the tab's own panes at its creation, a split, a duplicate, a Restart shell;
+/// coordinator's ruling 2026-10-09). The tab is the source, so the seed's own is replaced.
+fn born_in_tab(seed: LeafSeed, tab_environment: Option<&cli::CarriedEnvironment>) -> LeafSeed {
+    LeafSeed {
+        environment: tab_environment.cloned(),
+        ..seed
+    }
 }
 
 /// What one Terminal leaf is started from: which profile, and where.
@@ -40878,14 +40899,17 @@ fn create_tab_state(
             LeafId { tab: id, seat },
             wake,
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
-            &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
-                profile: default_profile.to_owned(),
-                cwd: None,
-                unknown_profile_id: None,
-                card_skip: 0,
-                prefill: None,
-                environment: None,
-            }),
+            &born_in_tab(
+                leaves.get(&seat).cloned().unwrap_or(LeafSeed {
+                    profile: default_profile.to_owned(),
+                    cwd: None,
+                    unknown_profile_id: None,
+                    card_skip: 0,
+                    prefill: None,
+                    environment: None,
+                }),
+                seed.environment.as_ref(),
+            ),
             programs,
             stored_default,
             formulas,
@@ -41059,6 +41083,7 @@ fn assemble_tab_state(
         focused_leaf,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
+        environment: seed.environment,
         pending_keyboard_at: None,
         // A tab that arrives pinned wears its pin from the first frame; it
         // is a fact about the tab, not an offer that has to be hovered out.
@@ -41288,6 +41313,8 @@ fn pane_into_new_tab(
             // The name belonged to the tab, not to the pane. A tear-out that
             // carried "build" across would name a room after the house.
             manual_name: None,
+            // A pane torn into a tab of its own takes the account's environment from here on.
+            environment: None,
             pinned,
         },
         seats,
@@ -44329,7 +44356,11 @@ impl Runtime<'_> {
                 .collect();
             (
                 seats,
-                TabSeed::default(),
+                TabSeed {
+                    // The command-line tab owns what `--with-environment` carried.
+                    environment: cli_plan.environment.clone(),
+                    ..TabSeed::default()
+                },
                 leaves,
                 BTreeMap::new(),
                 PreviewRestore::default(),

@@ -13,7 +13,7 @@ use crate::{
     restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
     strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
 };
-use crate::{LeafSeed, LeafView, TextScale};
+use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -82,16 +82,12 @@ impl Runtime<'_> {
         let seats = seats::Seats::lone_terminal();
         let leaves = BTreeMap::from([(
             seats.identity(),
-            LeafSeed {
-                // What a launch carried, for the tab it opens; nothing for any other new tab.
-                environment,
-                ..new_tab_leaf_seed(
-                    profile,
-                    place.as_deref(),
-                    source_profile,
-                    source_cwd.as_ref(),
-                )
-            },
+            new_tab_leaf_seed(
+                profile,
+                place.as_deref(),
+                source_profile,
+                source_cwd.as_ref(),
+            ),
         )]);
         let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
         let (tab, _) = create_tab_state(
@@ -107,7 +103,12 @@ impl Runtime<'_> {
             // root, so nothing to say about one, and no preview pane either.
             &BTreeMap::new(),
             &PreviewRestore::default(),
-            TabSeed::default(),
+            // What a launch carried, or a duplicated tab had, belongs to the new tab; nothing
+            // for any other new tab.
+            TabSeed {
+                environment,
+                ..TabSeed::default()
+            },
             &self.app.profile_programs,
             &self.default_profile_id(),
             &self.app.settings_store.loaded().default_profile,
@@ -1295,8 +1296,10 @@ impl Runtime<'_> {
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the
         // same place — said in the one function that knows how to say it.
-        // A duplicate is a new shell: the account's environment, never a launch's.
-        self.new_tab_seeded_from(&profile, None, &profile, cwd, None)
+        // A duplicate of a tab a launch carried an environment into carries it too: it is the
+        // tab's (coordinator's ruling 2026-10-09).
+        let environment = state.environment.clone();
+        self.new_tab_seeded_from(&profile, None, &profile, cwd, environment)
     }
 
     /// **`Move tab to new window`** — the row 丙2 exists for.
@@ -2801,6 +2804,8 @@ impl Runtime<'_> {
                 // gesture is not a tab the user has promised to bring back every
                 // time.
                 pinned: false,
+                // A new tab owns no launch's environment.
+                environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),
