@@ -415,8 +415,9 @@ surfaces are answered from outside. The read ledger is `bt-effects`' (CC-3,
   build profile, release included ("host names read before the host installed
   them").
 - **What a resample-pool thread runs first** (`bt_term::install_pool_thread_start`)
-  — a process-wide hook, installed once; a host that installs none (a browser)
-  gets a pool whose threads run no hook.
+  — a process-wide hook, installed once; a host that installs no hook (a browser)
+  gets a pool whose threads run none. This answer alone is optional: every host,
+  a browser included, installs the names and the codec below.
 - **The SVG codec** (`bt_term::install_svg_rasterizer`, a
   `bt_term::SvgRasterizer` — `fn(&[u8]) -> Result<SvgRaster, SvgRasterError>`,
   the two types `bt_doc::svg`'s) — what an inline picture whose bytes no raster

@@ -20,8 +20,8 @@
 //! share, which is the defect the installed fact exists to close (B-AUDIT-046 TRM-3). A read of
 //! the codec before an installation panics the same way: a decoder that quietly had none would
 //! call every SVG an unsupported format, and the host that forgot the install would never be told.
-//! The thread-start hook is optional: a host that installs none (a browser) gets a pool with no
-//! hook.
+//! The thread-start hook alone is optional: a host that installs none (a browser) gets a pool with
+//! no hook. The names and the codec are not: every host, a browser included, installs both.
 //!
 //! The fourth answer a host gives this crate — the finished name a hand-off door would open — is
 //! not installed: it is handed to [`crate::verify_path`] by the worker that calls it.
