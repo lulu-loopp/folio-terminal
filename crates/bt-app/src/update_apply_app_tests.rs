@@ -169,7 +169,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
         directory: &Path,
         argv: &cli::CliRequest,
     ) -> Option<i32> {
-        launch_wire::hand_over(token, admitted, directory, argv, |_| {})
+        launch_wire::hand_over(token, admitted, directory, argv, |_| {}, |_| {})
     }
     let _ = hands_over;
 }

@@ -907,6 +907,13 @@ pub(crate) fn take() -> Vec<LaunchRequest> {
 /// Folio had before this channel existed, and it is one branch rather than five so that a new way
 /// of failing cannot arrive with a new way of doing nothing.
 ///
+/// **But the reason is not dropped** (0.4.8 D3): when a conversation was had, or tried, and did not
+/// end in this process leaving, `gave_up` is handed the one line that says why — the OS error,
+/// the running Folio's answer, or an answer this build cannot read ([`gave_up_line`]). The front
+/// door has no log, so the caller keeps the line for `diagnostics.log`, beside the line that says
+/// the window it opens saves nothing. A command line this wire has no field for is not a
+/// hand-over that gave up, and says nothing.
+///
 /// **Only after the update pass** (`crate::update_startup`, 0.4.6 U-12): the
 /// [`crate::update_startup::Admitted`] it asks for is made by that pass alone,
 /// so this launch holds its installation's admission before it can be handed
@@ -920,21 +927,63 @@ pub(crate) fn hand_over(
     directory: &Path,
     argv: &cli::CliRequest,
     say: impl Fn(&str),
+    gave_up: impl FnOnce(String),
 ) -> Option<i32> {
     let _ = token;
     // **What the pass sent this start to report crosses with it** (U-36): the
     // [`crate::update_startup::Admitted`] is the pass's own word for it.
-    let request = LaunchRequest::of_start(
+    offer_start(
+        directory,
         argv,
         admitted.failed().as_ref(),
-        cli::machine_path_kind,
         std::env::current_dir().ok().as_deref(),
-    )?;
+        say,
+        gave_up,
+    )
+}
+
+/// [`hand_over`] past its door and its pass: this start's request — `argv`, what the pass sent it
+/// to report (`failed`), its folder resolved against `here` — offered to the Folio that holds
+/// `directory`, with [`hand_over`]'s answer and its give-up line.
+fn offer_start(
+    directory: &Path,
+    argv: &cli::CliRequest,
+    failed: Option<&Failure>,
+    here: Option<&Path>,
+    say: impl Fn(&str),
+    gave_up: impl FnOnce(String),
+) -> Option<i32> {
+    let request = LaunchRequest::of_start(argv, failed, cli::machine_path_kind, here)?;
     if !request.is_sayable() {
         return None;
     }
-    let answer = converse(directory, &request);
-    after_reply(request, answer?, say)
+    let answer = match converse(directory, &request) {
+        Ok(answer) => answer,
+        Err(why) => {
+            gave_up(gave_up_line(directory, &why));
+            return None;
+        }
+    };
+    let left = after_reply(request, answer, say);
+    if left.is_none() {
+        gave_up(gave_up_line(
+            directory,
+            &format!("it answered {}", answer.encode()),
+        ));
+    }
+    left
+}
+
+/// **The one line a start whose hand-over gave up leaves in `diagnostics.log`** (0.4.8 D3):
+/// which data directory's Folio it asked, and `why` — the OS error, the answer, or the reason no
+/// conversation could be had.
+#[must_use]
+pub(crate) fn gave_up_line(directory: &Path, why: &str) -> String {
+    format!(
+        "Folio: launch hand-over — the Folio that holds {} did not take this launch ({why}); this \
+         start opens a window of its own",
+        directory.display()
+    )
 }
 
 /// **The command line a person's start handed a rescue build, as the request it crosses in**
@@ -954,13 +1003,15 @@ pub(crate) fn carried(handed: &[std::ffi::OsString], here: Option<&Path>) -> Opt
 /// [`hand_over`] has — from a road process's worker, which has no console to say a refusal on, so
 /// the answer itself is returned. `None` when nobody answered.
 pub(crate) fn hand_over_carried(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
-    converse(directory, request)
+    converse(directory, request).ok()
 }
 
 /// **One conversation with the Folio that holds `directory`**: `request` sent, and its answer —
-/// `None` for no endpoint, nobody listening, or an answer this build cannot read.
-fn converse(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
-    let endpoint = bt_platform::launch_pipe::endpoint_for(directory)?;
+/// or why there is none: no endpoint can be named, the wire's own error (nobody listening, the
+/// budget spent, a peer that is not a Folio), or an answer this build cannot read.
+fn converse(directory: &Path, request: &LaunchRequest) -> Result<Reply, String> {
+    let endpoint = bt_platform::launch_pipe::endpoint_for(directory)
+        .ok_or_else(|| "no launch endpoint can be named for it here".to_owned())?;
     let mut answer = None;
     bt_platform::launch_pipe::hand_over(&endpoint, &request.encode(), |server, line| {
         answer = Reply::decode(line);
@@ -980,8 +1031,8 @@ fn converse(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
             let _ = bt_platform::hotkey::allow_foreground_for(server);
         }
     })
-    .ok()?;
-    answer
+    .map_err(|error| format!("{:?}: {error}", error.kind()))?;
+    answer.ok_or_else(|| "it answered in words this build cannot read".to_owned())
 }
 
 /// **What the start does with the running Folio's answer** — `Some(code)` to leave, `None` to carry
@@ -1807,24 +1858,32 @@ mod tests {
 
     /// **RED (U-36) — the start's hand-over builds its request with its pass's report.**
     ///
-    /// The one line no in-process test can run — `hand_over` speaks to a kernel object — read
-    /// from the source: the request goes through [`LaunchRequest::of_start`] with what the
-    /// pass's witness says, and is answered through [`after_reply`].
+    /// The one line no in-process test can run — `hand_over` holds an owner-thread door's token
+    /// and the pass's witness — read from the source: it hands what the pass's witness says to
+    /// [`offer_start`], whose request goes through [`LaunchRequest::of_start`] and is answered
+    /// through [`after_reply`] (0.4.8 D3: [`offer_start`] itself runs in the two-copy tests).
     ///
-    /// MUTATION: build the request with `LaunchRequest::from_cli` in `hand_over`, or pass `None`
-    /// for the report.
+    /// MUTATION: build the request with `LaunchRequest::from_cli` in `offer_start`, or pass
+    /// `None` for the report in `hand_over`.
     #[test]
     fn the_hand_over_sends_what_the_pass_sent_it_to_report() {
-        let body = bt_source::Index::of_package("bt-app")
-            .body_of(&bt_source::ItemQuery::function("hand_over").in_module("crate::launch_wire"))
-            .unwrap_or_else(|failure| panic!("{failure}"));
+        let body_of = |name: &str| {
+            bt_source::Index::of_package("bt-app")
+                .body_of(&bt_source::ItemQuery::function(name).in_module("crate::launch_wire"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+        };
+        let door = body_of("hand_over");
         assert!(
-            body.contains("LaunchRequest::of_start(")
-                && body.contains("admitted.failed().as_ref()"),
+            door.contains("offer_start(") && door.contains("admitted.failed().as_ref()"),
+            "the hand-over no longer offers the pass's report:\n{door}"
+        );
+        let body = body_of("offer_start");
+        assert!(
+            body.contains("LaunchRequest::of_start(argv, failed,"),
             "the hand-over's request no longer carries the pass's report:\n{body}"
         );
         assert!(
-            body.contains("after_reply(request, answer?, say)"),
+            body.contains("after_reply(request, answer, say)"),
             "the answer is read somewhere other than the tested function:\n{body}"
         );
     }
@@ -2355,5 +2414,387 @@ mod tests {
             request
         );
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    // -----------------------------------------------------------------------
+    // Two installed copies of Folio sharing one data directory (0.4.8 D3)
+    // -----------------------------------------------------------------------
+
+    /// The test and the half of it a copy of this binary runs ([`two_copies`]): `<test> serve`
+    /// or `<test> start`.
+    const COPY_CHILD: &str = "BT_LAUNCH_WIRE_COPY_CHILD";
+
+    /// The private folder of that run: the data directory, the folder handed over, and the
+    /// second start's command line.
+    const COPY_ROOT: &str = "BT_LAUNCH_WIRE_COPY_ROOT";
+
+    /// The data directory both copies share, inside a run's folder.
+    fn shared_data(root: &Path) -> PathBuf {
+        root.join("数据 data")
+    }
+
+    /// The second start's command line, one word a line, inside a run's folder.
+    fn start_words(root: &Path) -> PathBuf {
+        root.join("start.argv")
+    }
+
+    /// Present when the second start was sent by a rollback (it reports
+    /// [`Failure::RolledBack`], the pass's verdict for `--update-failed`).
+    fn start_report(root: &Path) -> PathBuf {
+        root.join("start.report")
+    }
+
+    /// **This process's half of a [`two_copies`] run of `selector`**, when it is one: `true`
+    /// once the half is done.
+    ///
+    /// * `serve` — the first copy: it holds the data directory's claim, listens on its launch
+    ///   endpoint with this module's own [`decide`] and [`park`] (a window thread that can
+    ///   serve), says `D3 SERVING`, and when its standard input closes stops listening — which
+    ///   finishes a conversation in flight — and says `D3 LANDED <line>` for every launch it
+    ///   was handed.
+    /// * `start` — the second copy: a start whose claim is refused, offering its command line
+    ///   exactly as `main`'s hand-over does ([`offer_start`]); it says `D3 LEFT <code>` when it
+    ///   leaves, or `D3 OPENS <line>` with the give-up line when it opens a window of its own.
+    fn copy_half(selector: &str) -> bool {
+        use std::io::Write;
+        let Ok(role) = std::env::var(COPY_CHILD) else {
+            return false;
+        };
+        let Some(role) = role.strip_prefix(selector).map(str::trim) else {
+            return false;
+        };
+        let root = PathBuf::from(std::env::var_os(COPY_ROOT).expect("the run's folder"));
+        let data = shared_data(&root);
+        let mut out = std::io::stdout();
+        match role {
+            "serve" => {
+                let _claim = crate::persist::try_claim(&data).expect("the first copy holds it");
+                let endpoint = LaunchPipe::start(&data, |line| decide(line, || true), park)
+                    .expect("the first copy listens on the data directory's endpoint");
+                writeln!(out, "D3 SERVING").unwrap();
+                out.flush().unwrap();
+                let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
+                drop(endpoint);
+                for request in take() {
+                    writeln!(out, "D3 LANDED {}", request.encode()).unwrap();
+                }
+            }
+            "start" => {
+                assert!(
+                    crate::persist::try_claim(&data).is_err(),
+                    "the second copy finds the data directory held"
+                );
+                let words = std::fs::read_to_string(start_words(&root)).unwrap();
+                let words: Vec<&str> = words.lines().collect();
+                let failed = start_report(&root).exists().then_some(Failure::RolledBack);
+                let mut why = None;
+                let left = offer_start(
+                    &data,
+                    &argv(&words),
+                    failed.as_ref(),
+                    None,
+                    |said| println!("D3 SAID {said}"),
+                    |line| why = Some(line),
+                );
+                match left {
+                    Some(code) => writeln!(out, "D3 LEFT {code}").unwrap(),
+                    None => writeln!(out, "D3 OPENS {}", why.unwrap_or_default()).unwrap(),
+                }
+            }
+            other => panic!("no half of the run is called {other}"),
+        }
+        out.flush().unwrap();
+        true
+    }
+
+    /// **A half's own words in one line of its output**, from its `D3 ` on: the harness writes
+    /// `test <name> ... ` before the test's first line, on the same line.
+    fn marked(line: &str) -> Option<&str> {
+        line.find("D3 ").map(|at| &line[at..])
+    }
+
+    /// What one [`two_copies`] run came to: the second start's own words (`D3 LEFT 0`, or
+    /// `D3 OPENS <why>`) and every launch the first copy was handed.
+    struct TwoCopies {
+        second: String,
+        landed: Vec<LaunchRequest>,
+    }
+
+    /// **Two copies of this program, at two paths, sharing one data directory**: `first` holds
+    /// it and listens, `second` starts with `words` (a rollback's start when `report`), and the
+    /// run's folder is removed after. Each is a real process; nothing opens a window. `None`
+    /// where this platform's wire cannot name the data directory's endpoint.
+    fn two_copies(
+        selector: &str,
+        first: &Path,
+        second: &Path,
+        words: &[String],
+        report: bool,
+    ) -> Option<TwoCopies> {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let root = bt_testpath::temp_path("launch-wire-two-copies");
+        std::fs::create_dir_all(shared_data(&root)).unwrap();
+        if bt_platform::launch_pipe::endpoint_for(&shared_data(&root)).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return None;
+        }
+        std::fs::write(start_words(&root), words.join("\n")).unwrap();
+        if report {
+            std::fs::write(start_report(&root), b"rolled back").unwrap();
+        }
+        let half = |program: &Path, role: &str| {
+            let mut command = bt_platform::quiet_command(program);
+            command
+                .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+                .env(COPY_CHILD, format!("{selector} {role}"))
+                .env(COPY_ROOT, &root)
+                .env("APPDATA", root.join("roaming"))
+                .env("LOCALAPPDATA", root.join("local"))
+                .env("HOME", root.join("home"))
+                .env("XDG_DATA_HOME", root.join("xdg"))
+                .stderr(Stdio::inherit());
+            command
+        };
+        let mut serving = half(first, "serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start the first copy");
+        let mut said = std::io::BufReader::new(serving.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("D3 SERVING") {
+            line.clear();
+            assert!(
+                said.read_line(&mut line).unwrap() > 0,
+                "the first copy ended before it listened"
+            );
+        }
+        let second = half(second, "start")
+            .output()
+            .expect("start the second copy");
+        assert!(second.status.success(), "the second copy's half failed");
+        drop(serving.stdin.take());
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut said, &mut rest).unwrap();
+        assert!(
+            serving.wait().unwrap().success(),
+            "the first copy's half failed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let said_by_second = String::from_utf8_lossy(&second.stdout).into_owned();
+        let second = said_by_second
+            .lines()
+            .filter_map(marked)
+            .find(|line| line.starts_with("D3 LEFT") || line.starts_with("D3 OPENS"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the second copy says how its start ended:
+{said_by_second}"
+                )
+            })
+            .to_owned();
+        let landed = rest
+            .lines()
+            .filter_map(marked)
+            .filter_map(|line| line.strip_prefix("D3 LANDED "))
+            .map(|line| LaunchRequest::decode(line).expect("a landed launch is a request"))
+            .collect();
+        Some(TwoCopies { second, landed })
+    }
+
+    /// **A copy of this binary at `place` under `copies`, named as this one is** — another
+    /// installation of the same program: another file, the same name. Beside this binary's own
+    /// folder, so the copy stands on the volume the build does.
+    fn another_copy(copies: &Path, place: &str) -> PathBuf {
+        let this = std::env::current_exe().unwrap();
+        let folder = copies
+            .join(place)
+            .join("Folio.app")
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&folder).unwrap();
+        let copy = folder.join(this.file_name().unwrap());
+        std::fs::copy(&this, &copy).expect("copy this program to another installation");
+        copy
+    }
+
+    /// **The folder the copies of one test stand in**, beside this binary's own, emptied first.
+    ///
+    /// One name per test and not a unique one: on Windows a copy that has just been run can
+    /// still be held for a moment after its process has been waited for, so the removal at the
+    /// end of a run may not land; the next run of the same test clears what it left, and a
+    /// build folder holds at most one copy per test.
+    fn copies_folder(tag: &str) -> PathBuf {
+        let this = std::env::current_exe().unwrap();
+        let folder = this.parent().unwrap().join(format!("launch-wire-{tag}"));
+        let _ = std::fs::remove_dir_all(&folder);
+        folder
+    }
+
+    /// The folder a launch hands over, named in two scripts, made for one test.
+    fn handed_folder() -> PathBuf {
+        let folder = bt_testpath::temp_path("工作 文件夹 copy");
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// **RED (0.4.8 D3) — a start of a second installed copy, which finds the first copy holding
+    /// the data directory, hands its launch over and leaves: its folder lands in the first.**
+    ///
+    /// The macOS rehearsal's twin (2026-10-07): two copies at two paths, one data directory,
+    /// two real processes. The second copy's start is refused the claim, offers its command line
+    /// as `main`'s hand-over does, the first copy's own [`decide`] and [`park`] take it, and the
+    /// second leaves with 0 — no window of its own. On Windows the same pair is
+    /// `…\folio-0.4.6\folio.exe` beside `…\folio-0.4.7\folio.exe`.
+    ///
+    /// MUTATION (refuse foreign copies): `bt_platform`'s Unix `vet_executable` compares device
+    /// and inode again (this bundle, not a Folio); on Windows `vetted_server` compares the whole
+    /// image path. The second copy opens its own window: `D3 OPENS … PermissionDenied …`.
+    #[test]
+    fn a_second_installed_copy_hands_its_launch_to_the_copy_that_holds_the_data_directory() {
+        const SELECTOR: &str = "launch_wire::tests::a_second_installed_copy_hands_its_launch_to_the_copy_that_holds_the_data_directory";
+        if copy_half(SELECTOR) {
+            return;
+        }
+        let copies = copies_folder("second-copy");
+        let second = another_copy(&copies, "other copy");
+        let folder = handed_folder();
+        let words = vec!["--cwd".to_owned(), folder.to_string_lossy().into_owned()];
+        let run = two_copies(
+            SELECTOR,
+            &std::env::current_exe().unwrap(),
+            &second,
+            &words,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(&copies);
+        let _ = std::fs::remove_dir_all(&folder);
+        let Some(run) = run else {
+            return;
+        };
+        assert_eq!(
+            run.second, "D3 LEFT 0",
+            "the second copy handed its launch over"
+        );
+        let expected = LaunchRequest::from_cli(
+            &argv(&["--cwd", &folder.to_string_lossy()]),
+            cli::machine_path_kind,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            run.landed,
+            vec![expected],
+            "its folder landed in the first copy"
+        );
+    }
+
+    /// **RED (0.4.8 D3) — the restored version's start after a failed update, from a second
+    /// copy, hands its launch and its report to the copy that kept running.**
+    ///
+    /// The rehearsal's other half: the start a rollback sent (`--update-failed <journal>`, the
+    /// pass's verdict `RolledBack`) is the same road with a report in the request (U-36), so it
+    /// crosses the same way — folder and report — and leaves with 0, and the running copy's
+    /// update card is told where the launch lands (`LaunchRequest::told`, U-36's own test).
+    ///
+    /// MUTATION (refuse foreign copies), as above: `D3 OPENS … PermissionDenied …`, nothing
+    /// landed.
+    #[test]
+    fn a_second_copys_restored_start_after_a_failed_update_hands_over_with_its_report() {
+        const SELECTOR: &str = "launch_wire::tests::a_second_copys_restored_start_after_a_failed_update_hands_over_with_its_report";
+        if copy_half(SELECTOR) {
+            return;
+        }
+        let copies = copies_folder("restored-copy");
+        let second = another_copy(&copies, "restored copy");
+        let folder = handed_folder();
+        let journal = copies.join(".folio-update").join("journal.json");
+        let words = vec![
+            cli::UPDATE_FAILED_FLAG.to_owned(),
+            journal.to_string_lossy().into_owned(),
+            "--cwd".to_owned(),
+            folder.to_string_lossy().into_owned(),
+        ];
+        let run = two_copies(
+            SELECTOR,
+            &std::env::current_exe().unwrap(),
+            &second,
+            &words,
+            true,
+        );
+        let _ = std::fs::remove_dir_all(&copies);
+        let _ = std::fs::remove_dir_all(&folder);
+        let Some(run) = run else {
+            return;
+        };
+        assert_eq!(
+            run.second, "D3 LEFT 0",
+            "the restored start handed its launch over"
+        );
+        let line: Vec<&str> = words.iter().map(String::as_str).collect();
+        let expected = LaunchRequest::of_start(
+            &argv(&line),
+            Some(&Failure::RolledBack),
+            cli::machine_path_kind,
+            None,
+        )
+        .unwrap();
+        assert_eq!(expected.report, Some(Report::RolledBack));
+        assert_eq!(
+            run.landed,
+            vec![expected],
+            "its folder and its report landed in the copy that kept running"
+        );
+    }
+
+    /// **RED (0.4.8 D3) — a launch endpoint held by a program that is not a Folio is a true
+    /// refusal: nothing is written to it, the start opens its own window, and the log line says
+    /// why.**
+    ///
+    /// The other side of the narrowed identity: a Folio is this program's name, and a program
+    /// of another name holding the door — here this binary under another name, listening as a
+    /// Folio would — is not handed the folder. The start carries on to its own window (whose
+    /// card is the second-instance notice, unchanged) and its give-up line names the OS's
+    /// refusal.
+    ///
+    /// MUTATION (accept any peer): `bt_platform`'s Unix `vet_executable` answers `Ok` whatever
+    /// the peer, or Windows' `vetted_server` its pid whatever the image — the start leaves with
+    /// 0 and the folder lands in the impostor.
+    #[test]
+    fn a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why() {
+        const SELECTOR: &str = "launch_wire::tests::a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why";
+        if copy_half(SELECTOR) {
+            return;
+        }
+        let this = std::env::current_exe().unwrap();
+        let copies = copies_folder("not-a-folio");
+        let folder_of_it = copies.join("another program");
+        std::fs::create_dir_all(&folder_of_it).unwrap();
+        let impostor =
+            folder_of_it.join(format!("another-program{}", std::env::consts::EXE_SUFFIX));
+        std::fs::hard_link(&this, &impostor).expect("stand this program there under another name");
+        let folder = handed_folder();
+        let words = vec!["--cwd".to_owned(), folder.to_string_lossy().into_owned()];
+        let run = two_copies(SELECTOR, &impostor, &this, &words, false);
+        let _ = std::fs::remove_dir_all(&copies);
+        let _ = std::fs::remove_dir_all(&folder);
+        let Some(run) = run else {
+            return;
+        };
+        assert!(
+            run.second
+                .starts_with("D3 OPENS Folio: launch hand-over — the Folio that holds ")
+                && run
+                    .second
+                    .contains("did not take this launch (PermissionDenied: "),
+            "the start opens its own window and its log line names the refusal: {}",
+            run.second
+        );
+        assert_eq!(
+            run.landed,
+            Vec::new(),
+            "nothing was handed to a program that is not a Folio"
+        );
     }
 }
