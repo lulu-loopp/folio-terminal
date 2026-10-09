@@ -10,7 +10,7 @@
 
 use super::tests::{complete_detected_live_tasks, nz, synthetic_raster};
 use super::*;
-use bt_math::MathEngine;
+use bt_compose::MathEngine;
 
 /// An alternate-screen repaint of these rows, each addressed and cleared to its end.
 fn repaint(rows: &[String]) -> Vec<u8> {

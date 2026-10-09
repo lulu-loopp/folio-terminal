@@ -12,7 +12,6 @@ base64.workspace = true
 bt-transcript = { path = "../bt-transcript" }
 bt-doc = { path = "../bt-doc" }
 bt-detect = { path = "../bt-detect" }
-bt-math = { path = "../bt-math" }
 # The file-read ledger (`file_reads::open`, `Lane`) of the inline-image decoder.
 bt-effects = { path = "../bt-effects" }
 bt-viewport = { path = "../bt-viewport" }

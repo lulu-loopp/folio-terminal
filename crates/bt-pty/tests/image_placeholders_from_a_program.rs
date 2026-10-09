@@ -60,6 +60,9 @@ fn frame_after_path_verification(
 /// through `verify_path` with the desktop build's own door-ready transform, exactly as the app's
 /// workers do.
 fn drain_image_decodes(session: &mut DualPlaneSession) {
+    // A payload no raster container claims is handed to the host's SVG codec; this process has
+    // no host, so it installs the test codec before the first decode can read one.
+    bt_term::install_test_svg_rasterizer();
     let mut decoder = InlineImageDecoder::default();
     while let Some(task) = session.take_decoration_worker_task() {
         match task {

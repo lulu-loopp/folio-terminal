@@ -8,19 +8,27 @@
 //! * [`install_host_names`] — the names this machine answers to, which a `file://<host>/` report
 //!   is compared against ([`local_host_names`]);
 //! * [`install_pool_thread_start`] — what every thread of the image resample pool runs first
-//!   (Folio's desktop build puts the thread in the band below normal).
+//!   (Folio's desktop build puts the thread in the band below normal);
+//! * [`install_svg_rasterizer`] — the codec an inline image whose bytes no raster container claims
+//!   is handed to (Folio's desktop build installs `bt_math::rasterize_svg_document`; this crate
+//!   names no rasterizer).
 //!
-//! **Each is one answer per process.** Installing the same host names again is a no-op; installing
-//! different ones is a panic, and so is a second thread-start hook. A read of the host names before
-//! anything was installed panics in every build profile: a session that quietly read "no names"
-//! would take every `file://<host>/` report from this machine for a remote share, which is the
-//! defect the installed fact exists to close (B-AUDIT-046 TRM-3). The thread-start hook is
-//! optional: a host that installs none (a browser) gets a pool with no hook.
+//! **Each is one answer per process.** Installing the same host names or the same codec again is
+//! a no-op; installing different ones is a panic, and so is a second thread-start hook. A read of
+//! the host names before anything was installed panics in every build profile: a session that
+//! quietly read "no names" would take every `file://<host>/` report from this machine for a remote
+//! share, which is the defect the installed fact exists to close (B-AUDIT-046 TRM-3). A read of
+//! the codec before an installation panics the same way: a decoder that quietly had none would
+//! call every SVG an unsupported format, and the host that forgot the install would never be told.
+//! The thread-start hook alone is optional: a host that installs none (a browser) gets a pool with
+//! no hook. The names and the codec are not: every host, a browser included, installs both.
 //!
-//! The third answer a host gives this crate — the finished name a hand-off door would open — is
+//! The fourth answer a host gives this crate — the finished name a hand-off door would open — is
 //! not installed: it is handed to [`crate::verify_path`] by the worker that calls it.
 
 use std::sync::OnceLock;
+
+use bt_doc::svg::{SvgRaster, SvgRasterError};
 
 /// The panic a read of the host names makes when no host has installed them.
 pub const HOST_NAMES_READ_BEFORE_INSTALL: &str = "host names read before the host installed them";
@@ -101,4 +109,85 @@ pub fn install_pool_thread_start(hook: fn()) {
 /// The installed thread-start hook, if any. Reading it settles the answer for the process.
 pub(crate) fn pool_thread_start() -> Option<fn()> {
     *POOL_THREAD_START.get_or_init(|| None)
+}
+
+/// **The SVG codec**: rasterize a standalone SVG document at its intrinsic size, in straight
+/// (unpremultiplied) sRGB RGBA. `Parse` is bytes that are not an SVG document (the decoder answers
+/// [`crate::InlineImageDecodeError::UnsupportedFormat`]); `Dimensions` is a document whose
+/// intrinsic size the codec refuses ([`crate::InlineImageDecodeError::InvalidDimensions`]).
+pub type SvgRasterizer = fn(&[u8]) -> Result<SvgRaster, SvgRasterError>;
+
+/// The panic a read of the SVG codec makes when no host has installed one.
+pub const SVG_RASTERIZER_READ_BEFORE_INSTALL: &str =
+    "the SVG rasterizer read before the host installed it";
+
+/// The one document [`test_svg_rasterizer`] answers with a raster: three by two user units, one
+/// half-transparent fill.
+pub const TEST_SVG_DOCUMENT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="3" height="2"><rect width="3" height="2" fill="#12a4e6" fill-opacity="0.5"/></svg>"##;
+
+/// Every pixel of the raster [`test_svg_rasterizer`] answers [`TEST_SVG_DOCUMENT`] with, in
+/// straight alpha.
+pub const TEST_SVG_PIXEL: [u8; 4] = [0x12, 0xa4, 0xe6, 0x80];
+
+static SVG_RASTERIZER: OnceLock<SvgRasterizer> = OnceLock::new();
+
+/// **Install the SVG codec** every inline-image decode of this process hands an SVG payload to.
+/// Called by the host before its first session.
+///
+/// # Panics
+///
+/// When a different codec was installed before: the process has one answer.
+pub fn install_svg_rasterizer(codec: SvgRasterizer) {
+    let Err(offered) = SVG_RASTERIZER.set(codec) else {
+        return;
+    };
+    let installed = *SVG_RASTERIZER
+        .get()
+        .expect("a codec that could not be set is the one installed before");
+    assert!(
+        std::ptr::fn_addr_eq(installed, offered),
+        "the SVG rasterizer installed twice with different codecs"
+    );
+}
+
+/// The installed SVG codec.
+///
+/// This crate's own unit tests install [`test_svg_rasterizer`] here, in the one place every read
+/// passes, so no test of the crate can read before an installation.
+///
+/// # Panics
+///
+/// With [`SVG_RASTERIZER_READ_BEFORE_INSTALL`] when nothing was installed, in every build profile.
+pub(crate) fn svg_rasterizer() -> SvgRasterizer {
+    #[cfg(test)]
+    install_test_svg_rasterizer();
+    *SVG_RASTERIZER
+        .get()
+        .expect(SVG_RASTERIZER_READ_BEFORE_INSTALL)
+}
+
+/// The codec a test process installs in place of the host's: [`TEST_SVG_DOCUMENT`] is a three by
+/// two raster of [`TEST_SVG_PIXEL`], and every other payload is not an SVG document. It parses
+/// nothing, so a test that reads that raster back can only have been handed it by this codec.
+///
+/// # Errors
+///
+/// [`SvgRasterError::Parse`] for every payload but [`TEST_SVG_DOCUMENT`].
+pub fn test_svg_rasterizer(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
+    if bytes != TEST_SVG_DOCUMENT {
+        return Err(SvgRasterError::Parse(
+            "not the test codec's one document".to_owned(),
+        ));
+    }
+    Ok(SvgRaster {
+        rgba: TEST_SVG_PIXEL.repeat(3 * 2),
+        width_px: 3,
+        height_px: 2,
+    })
+}
+
+/// [`test_svg_rasterizer`], installed: what a test process calls in place of the host's codec.
+/// The same codec installs as nothing the second time, so every test of a process may call it.
+pub fn install_test_svg_rasterizer() {
+    install_svg_rasterizer(test_svg_rasterizer);
 }
