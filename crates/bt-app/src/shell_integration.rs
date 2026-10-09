@@ -3489,7 +3489,9 @@ impl ProbeEnvironment {
     /// **The program a name starts in this environment**: an absolute name as it stands; a bare
     /// one looked up over this environment's `PATH` × `PATHEXT` (absolute entries only — an empty
     /// or relative entry means the working directory to Windows), never in a working directory
-    /// (R1-17). [`Self::Inherited`] asks the platform's own lookup over this process's.
+    /// (R1-17). [`Self::Inherited`] asks the platform's own lookup over this process's on
+    /// Windows; elsewhere the name goes to the child as it stands, as a pane's program does (the
+    /// system's own search over the inherited `PATH`).
     pub(crate) fn program(&self, name: &Path) -> Option<PathBuf> {
         match self {
             Self::Logon(_) => {
@@ -3508,7 +3510,8 @@ impl ProbeEnvironment {
                     candidate.is_file()
                 })
             }
-            Self::Inherited => bt_platform::program_on_path(name),
+            Self::Inherited if cfg!(windows) => bt_platform::program_on_path(name),
+            Self::Inherited => Some(name.to_path_buf()),
         }
     }
 
