@@ -60,6 +60,6 @@ pub use session::{
     LIVE_MIN_VISIBLE_TEXT_ROWS, MathLayoutOptions, MathToggleFaces, MathTogglePresentation,
     NotificationSource, PathVerdict, ProgressState, ResizeTraceEvent, ResizeTraceKind,
     ResizeTraceRowOrigin, SPIKE_CELL_HEIGHT_SUBPIXELS, SessionDecorationTask, SessionError,
-    SessionMathTask, SessionStatus, TerminalNotification, decoration_state_label, path_exists,
-    render_detection_task, render_live_detection_task, verify_path,
+    SessionMathTask, SessionStatus, TerminalNotification, decoration_state_label,
+    extend_live_task_band, live_snapshot_logical_line_text, path_exists, verify_path,
 };

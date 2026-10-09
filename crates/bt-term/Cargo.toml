@@ -27,6 +27,10 @@ bt-testpath = { path = "../bt-testpath" }
 # The grapheme-cluster ceiling this crate's captures are measured against lives there.
 bt-unicode = { path = "../bt-unicode" }
 proptest = "1"
+# The session tests whose rasters must be real typeset through the composition crate, which
+# owns math execution (CC-6b). A dev-dependency only: its functions take `bt-detect`/`bt-doc`
+# types, which this crate's tests and that crate's `bt-term` share.
+bt-compose = { path = "../bt-compose" }
 
 [lints]
 workspace = true

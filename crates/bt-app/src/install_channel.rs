@@ -57,11 +57,30 @@
 //! * neither, and the folder is this account's → [`Channel::Ours`];
 //! * neither, and it is another account's → [`Channel::NotOurs`].
 //!
-//! Two readers today: the one `diagnostics.log` line at start, and the
-//! first-run card, whose Explorer row arrives on exactly where the fact is
-//! `Managed { uninstall_hook: true, .. }` (U-3, ruling 2026-09-20). The card
-//! reads it through [`channel`] and hears it land through [`install_wake`].
-//! The updater's eligibility is a later ticket.
+//! Readers: the one `diagnostics.log` line at start, the first-run card,
+//! whose Explorer row arrives on exactly where the fact is
+//! `Managed { uninstall_hook: true, .. }` (U-3, ruling 2026-09-20), and the
+//! update job's eligibility. The card reads it through [`channel`] and hears
+//! it land through [`install_wake`].
+//!
+//! # Homebrew's record of the copy (managed-update §2.2 R-H2; 0.4.8 D1)
+//!
+//! A Homebrew copy is updated by Folio's own road only at the app target
+//! Homebrew recorded: the marker says who installed a bundle, and it travels
+//! with a copy made by hand; the record says that *this path* is Homebrew's
+//! live artifact. The cask writes, beside the marker, the attribute
+//! [`CASKROOM_ATTRIBUTE`] holding its Caskroom folder (`{{caskroom_path}}`,
+//! `<prefix>/Caskroom/folio`) — the one place Folio could not otherwise find
+//! without running `brew`. [`homebrew_record`] reads both attributes and asks
+//! the Caskroom what Homebrew itself asks there (Homebrew 7.0.6–7.0.8,
+//! `Caskroom.cask_installed_caskfile` and `Artifact::Moved`): the installed
+//! version is the parent of the greatest `.metadata/*/*` that holds
+//! `Casks/folio.json` (or `.rb`), and `<version>/Folio.app` is the link
+//! `post_move` left to the app target, which `brew uninstall` and `brew
+//! upgrade` check before they touch it. The road runs only when that link
+//! names this very bundle (its canonical path equal to the bundle's path as
+//! the road acts on it). The start derives the answer with the channel
+//! ([`at_recorded_target`]); the Prepare asks again before `Allocated`.
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -76,6 +95,13 @@ pub const MARKER_FILE_NAME: &str = "folio-install.json";
 /// The macOS marker: an extended attribute on the bundle directory, whose value
 /// is the same JSON as the Windows file.
 pub const MARKER_ATTRIBUTE: &str = "io.github.lulu-loopp.folio.install";
+/// **Where Homebrew keeps its record of a copy**: an extended attribute the
+/// cask writes on the bundle directory beside the marker, holding the cask's
+/// Caskroom folder (`packaging/homebrew/folio.rb`, `{{caskroom_path}}`).
+pub const CASKROOM_ATTRIBUTE: &str = "io.github.lulu-loopp.folio.caskroom";
+/// The app the cask installs (`app "Folio.app"`, no `target:`), and so the
+/// link's name in the Caskroom's version folder.
+pub(crate) const CASK_APP: &str = "Folio.app";
 /// The marker format this build reads, and the only one.
 pub const MARKER_VERSION: u64 = 1;
 /// A marker longer than this is not a marker.
@@ -539,6 +565,9 @@ fn capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, io::ErrorKind> {
 pub struct Fact {
     pub evidence: Result<Evidence, io::ErrorKind>,
     pub channel: Channel,
+    /// **Whether Homebrew's record names this bundle** ([`homebrew_record`]):
+    /// asked of a macOS copy managed by Homebrew, `None` for every other.
+    pub homebrew: Option<Result<(), &'static str>>,
 }
 
 /// The derivation the product runs: the executable's install folder, and
@@ -549,18 +578,133 @@ fn derive_fact(
     me: io::Result<Account>,
     records: impl FnOnce() -> io::Result<Vec<UninstallRecord>>,
 ) -> Fact {
-    let evidence = exe.map_err(|error| error.kind()).and_then(|exe| {
+    let root = exe.map_err(|error| error.kind()).and_then(|exe| {
         let root = install_root(&exe, platform).ok_or(io::ErrorKind::NotFound)?;
-        let winget = winget(&exe, platform, records);
-        Ok(read(
-            &root,
-            platform,
-            me.as_ref().map_err(io::Error::kind),
-            winget,
-        ))
+        Ok((exe, root))
+    });
+    let evidence = root.as_ref().map_err(|kind| *kind).map(|(exe, root)| {
+        let winget = winget(exe, platform, records);
+        read(root, platform, me.as_ref().map_err(io::Error::kind), winget)
     });
     let channel = evidence.as_ref().map_or(Channel::Unknown, classify);
-    Fact { evidence, channel }
+    let homebrew = match (channel, platform, &root) {
+        (
+            Channel::Managed {
+                manager: Manager::Homebrew,
+                ..
+            },
+            HostPlatform::MacOs,
+            Ok((_, bundle)),
+        ) => Some(homebrew_record(bundle).map(drop)),
+        _ => None,
+    };
+    Fact {
+        evidence,
+        channel,
+        homebrew,
+    }
+}
+
+/// **The bytes a Homebrew copy carries across an update** (managed-update
+/// M1): the marker and the Caskroom attribute, exactly as the cask wrote
+/// them on the bundle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HomebrewMarks {
+    pub(crate) marker: Vec<u8>,
+    pub(crate) caskroom: Vec<u8>,
+}
+
+/// **The two attributes on the bundle at `bundle`**, both required.
+///
+/// # Errors
+/// Why not, in words with no path: an attribute missing or unreadable.
+pub(crate) fn homebrew_marks(bundle: &Path) -> Result<HomebrewMarks, &'static str> {
+    let attribute_of = |name| match install_evidence::attribute(bundle, name) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err("an attribute the cask writes is missing"),
+        Err(_) => Err("an attribute the cask writes cannot be read"),
+    };
+    Ok(HomebrewMarks {
+        marker: attribute_of(MARKER_ATTRIBUTE)?,
+        caskroom: attribute_of(CASKROOM_ATTRIBUTE)?,
+    })
+}
+
+/// **Homebrew's record of the bundle at `bundle`, and what it carries** (R-H2,
+/// the module header): the marker names Homebrew, and the Caskroom the cask
+/// named records this very path as its app. The bundle's marks, for the
+/// journal, when it does.
+///
+/// # Errors
+/// Why not, in words with no path: the road keeps the row with the manager's
+/// command.
+pub(crate) fn homebrew_record(bundle: &Path) -> Result<HomebrewMarks, &'static str> {
+    let marks = homebrew_marks(bundle)?;
+    match Marker::parse(&marks.marker) {
+        Ok(Marker {
+            manager: Manager::Homebrew,
+            ..
+        }) => {}
+        _ => return Err("the marker is not Homebrew's"),
+    }
+    recorded_target(bundle, &marks.caskroom)?;
+    Ok(marks)
+}
+
+/// **Whether the Caskroom named by `caskroom` records `bundle` as its app**:
+/// the link `<caskroom>/<installed version>/Folio.app` names it.
+fn recorded_target(bundle: &Path, caskroom: &[u8]) -> Result<(), &'static str> {
+    let caskroom = std::str::from_utf8(caskroom)
+        .map(PathBuf::from)
+        .map_err(|_| "the Caskroom attribute is not a path")?;
+    if !caskroom.is_absolute() {
+        return Err("the Caskroom attribute is not an absolute path");
+    }
+    let version = installed_version(&caskroom)?;
+    let link = caskroom.join(&version).join(CASK_APP);
+    let target = std::fs::read_link(&link).map_err(|_| "the Caskroom records no app")?;
+    // `Moved#move_back` joins a relative link to its folder, as here.
+    let target = caskroom.join(&version).join(target);
+    if bt_platform::instance::canonical_path(&target) == bundle {
+        Ok(())
+    } else {
+        Err("the Caskroom records another app")
+    }
+}
+
+/// **The version Homebrew counts as installed** in `caskroom`
+/// (`Caskroom.cask_installed_caskfile`): the folder of the greatest name
+/// among `.metadata/*/*` — names that do not start with a dot, as Ruby's
+/// glob reads them — which must hold the installed caskfile; the version is
+/// that folder's parent's name.
+fn installed_version(caskroom: &Path) -> Result<String, &'static str> {
+    let unreadable = "the Caskroom's record cannot be read";
+    let listed = |folder: &Path| match crate::files::read_directory(folder) {
+        crate::files::DirOutcome::Listed(listing) => Ok(listing
+            .entries
+            .into_iter()
+            .filter(|entry| !entry.name.starts_with('.'))),
+        crate::files::DirOutcome::Failed(_) => Err(unreadable),
+    };
+    let metadata = caskroom.join(".metadata");
+    let mut latest: Option<(String, String)> = None;
+    for version in listed(&metadata)?.filter(|entry| entry.is_dir) {
+        for stamp in listed(&metadata.join(&version.name))? {
+            if latest.as_ref().is_none_or(|(name, _)| stamp.name > *name) {
+                latest = Some((stamp.name, version.name.clone()));
+            }
+        }
+    }
+    let (stamp, version) = latest.ok_or("the Caskroom records no installed version")?;
+    let casks = metadata.join(&version).join(stamp).join("Casks");
+    let installed = ["folio.json", "folio.rb"]
+        .iter()
+        .any(|name| std::fs::symlink_metadata(casks.join(name)).is_ok());
+    if installed {
+        Ok(version)
+    } else {
+        Err("the Caskroom records no installed version")
+    }
 }
 
 impl Fact {
@@ -621,7 +765,12 @@ impl Fact {
                 )
             }
         };
-        format!("Folio: install channel {channel} — {evidence}")
+        let homebrew = match self.homebrew {
+            None => String::new(),
+            Some(Ok(())) => " · homebrew record: this app".to_owned(),
+            Some(Err(why)) => format!(" · homebrew record: {why}"),
+        };
+        format!("Folio: install channel {channel} — {evidence}{homebrew}")
     }
 }
 
@@ -638,6 +787,15 @@ static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 #[must_use]
 pub fn channel() -> Option<Channel> {
     FACT.get().map(|fact| fact.channel)
+}
+
+/// **Whether Homebrew's record names this copy** (R-H2, the module header),
+/// as the start read it with [`channel`]: `false` for every copy it was not
+/// asked of, and while the worker is still out.
+#[must_use]
+pub fn at_recorded_target() -> bool {
+    FACT.get()
+        .is_some_and(|fact| matches!(fact.homebrew, Some(Ok(()))))
 }
 
 /// **How the copy whose executable is `exe` was installed**, derived now on

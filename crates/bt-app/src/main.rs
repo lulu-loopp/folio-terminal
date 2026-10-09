@@ -260,8 +260,7 @@ use bt_render::{
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
     SessionDecorationTask, SessionMathTask, SessionStatus, TerminalCanvas, TerminalModes,
-    TerminalPalette, normalized_local_image_path_key, render_detection_task,
-    render_live_detection_task,
+    TerminalPalette, normalized_local_image_path_key,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -2348,27 +2347,12 @@ fn run_decoration_worker(
         let completion = match work {
             MathWorkerRequest::Math {
                 leaf,
-                task,
+                mut task,
                 foreground_rgb,
-            } => (
-                leaf,
-                match *task {
-                    SessionMathTask::Frozen(mut task) => {
-                        let result = render_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Frozen(task)),
-                            result,
-                        }
-                    }
-                    SessionMathTask::Live(mut task) => {
-                        let result = render_live_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Live(task)),
-                            result,
-                        }
-                    }
-                },
-            ),
+            } => {
+                let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                (leaf, DecorationWorkerCompletion::Math { task, result })
+            }
             MathWorkerRequest::InlineImage { leaf, task } => {
                 let result = image_decoder.decode(task.clone());
                 (
@@ -43788,6 +43772,13 @@ impl Runtime<'_> {
             .after_rollback(update_startup::failed())
             .after_start(
                 update_startup::waiting(),
+                // How the run before this one ended (0.4.8 E3): the session sentinel this
+                // process's store already probed above.
+                if persist::previous_run_ended_orderly() {
+                    update_txn::PreviousRun::Orderly
+                } else {
+                    update_txn::PreviousRun::Unfinished
+                },
                 update_job::resumer_for_this_copy(),
                 update::begin,
             );
@@ -74342,26 +74333,36 @@ fn main() -> Result<()> {
     // would answer that search first — turning a pin on where the run's last
     // line is written into a pin on a branch that never writes one.
     let storage = persist::storage_dir();
-    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
-    // asks for it until the old build has let go, and adopts it into the claim
-    // table before anything below asks who writes here. One that is not handed
-    // the claim does not start and does not hand itself over — its applier
-    // sees the trial gone without a receipt and rolls back. Nothing at all in
-    // any other start.
-    if let Err(line) = update_trial::take_the_claim(&storage) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        bt_platform::leave_process(1);
-    }
     //
     // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
     // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+    let hand_over = || {
+        bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+            launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
+        })
+        .ok()
+        .flatten()
+    };
+    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
+    // asks for it until the old build has let go, and adopts it into the claim
+    // table before anything below asks who writes here. One a holder launched
+    // that is not handed the claim does not start and does not hand itself
+    // over — its applier sees the trial gone without a receipt and rolls
+    // back. A person's start standing in for U-35's reserved trial offers its
+    // launch to the trial that holds the claim, and when that trial does not
+    // take it within the wait, opens its own window, its writes held (0.4.8
+    // E3). Nothing at all in any other start.
+    let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
+        update_trial::Claimed::Ours => None,
+        update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
+        update_trial::Claimed::StoodDown(line) => Some(line),
+        update_trial::Claimed::NotHad(line) => {
+            bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            bt_platform::leave_process(1);
+        }
+    };
     if !persist::is_writer_of(&storage)
-        && let Some(handed) =
-            bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-                launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
-            })
-            .ok()
-            .flatten()
+        && let Some(handed) = hand_over()
     {
         bt_platform::leave_process(handed);
     }
@@ -74380,6 +74381,11 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // A stand-in that stood down beside the reserved trial says so where this
+    // run's diagnostics go (0.4.8 E3).
+    if let Some(line) = stood_down {
+        diagnostics::note(&line);
+    }
     // **Where this program's own files are, said once and named before any pane** (G-SWEEP-048,
     // T-EXE-SYMLINK-SIDECARS): the loaded image with its links followed, so a start through
     // winget's alias finds its ConPTY pair beside the real file and says which file that is.

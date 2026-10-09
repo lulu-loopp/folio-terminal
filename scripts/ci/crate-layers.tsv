@@ -19,8 +19,9 @@
 #    bt-term what the platform layer answers (section 3.2; structural-debt D-14, repaid)
 # 5  bt-render and bt-math (over bt-effects, not the platform), persistence and the PTY transport;
 #    bt-term's dependency on bt-math goes upward and is recorded debt (section 3.2, structural-debt D-15)
-# 6  bt-compose, the composition order over bt-term, bt-viewport and bt-render (layers 3-5): above
-#    every crate it orders and below the one host that lends it sessions and views
+# 6  bt-compose, the composition order and the math execution over bt-term, bt-viewport, bt-render
+#    and bt-math (layers 3-5): above every crate it orders and below the one host that lends it
+#    sessions and views
 # 7  bt-app; bt-corpus and bt-lint-probe, tools nothing depends on; bt-source, which only tests read
 crate	layer
 bt-unicode	0
