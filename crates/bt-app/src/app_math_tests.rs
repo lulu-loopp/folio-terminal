@@ -4,7 +4,7 @@
 //! from [`crate::test_support`].
 
 use super::*;
-use crate::test_support::{PtyPresentationHarness, method_body, row_box};
+use crate::test_support::{PtyPresentationHarness, host_path, host_spelling, method_body, row_box};
 use std::time::Duration;
 
 #[test]
@@ -729,9 +729,18 @@ fn a_composition_in_the_preview_opens_a_space_in_the_line_it_lands_in() {
 /// wording for both rows; turn the fold's tip round.
 #[test]
 fn the_breadcrumb_rows_controls_each_say_what_they_are() {
-    let path = PathBuf::from(r"D:\Developer\folio-terminal\test-assets\huge.txt");
+    let path = host_path(r"D:\Developer\folio-terminal\test-assets\huge.txt");
     let segments = crumb_segments(&path);
-    let folded = [1, 2, 3];
+    // Where each folder stands in the row is the host's row shape (a drive
+    // crumb first on Windows, none off it); the three folded are the folders
+    // between the top and the file, wherever that puts them.
+    let at = |name: &str| {
+        segments
+            .iter()
+            .position(|(segment, _)| segment == name)
+            .expect("every folder of the path is a segment")
+    };
+    let folded = [at("Developer"), at("folio-terminal"), at("test-assets")];
     let tip = |tip, kind, to_source| {
         preview_rail_tip_text(
             tip,
@@ -744,11 +753,11 @@ fn the_breadcrumb_rows_controls_each_say_what_they_are() {
     };
     assert_eq!(
         tip(
-            seats::PreviewRailTip::Crumb(2),
+            seats::PreviewRailTip::Crumb(at("folio-terminal")),
             seats::PreviewRailKind::Crumbs,
             false
         ),
-        r"D:\Developer\folio-terminal",
+        host_spelling(r"D:\Developer\folio-terminal"),
         "a segment names the whole place, not the word drawn in it"
     );
     assert_eq!(

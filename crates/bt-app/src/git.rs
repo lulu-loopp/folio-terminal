@@ -4169,6 +4169,7 @@ pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::host_path;
 
     /// RED mutation: classify `checkout` as contained; the hook-capable set no
     /// longer matches the reviewed command inventory.
@@ -4845,13 +4846,14 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
 
     /// PIN — a `git` that never finishes costs one answer, not the worker.
     ///
-    /// Stood in for by `ping -t`, which is on every Windows and, unlike the
-    /// `ping -n 10` this used to use, **never stops on its own**. That is the
-    /// whole of the shape: the assertion is that the call *came back*, and the
-    /// only road back is through the kill — [`run_git_with_input`] waits for the
-    /// process it killed before it reports, and a wait on a `ping -t` nobody
-    /// killed does not end. So the kill, the reaping and the report are all one
-    /// fact now, and there is no clock in any of them.
+    /// Stood in for by `ping -t` on Windows and `tail -f /dev/null` elsewhere,
+    /// each on every installation of its platform and, unlike the `ping -n 10`
+    /// this used to use, **never stopping on its own**. That is the whole of the
+    /// shape: the assertion is that the call *came back*, and the only road back
+    /// is through the kill — [`run_git_with_input`] waits for the process it
+    /// killed before it reports, and a wait on a child nobody killed does not
+    /// end. So the kill, the reaping and the report are all one fact now, and
+    /// there is no clock in any of them.
     ///
     /// It used to be `ping -n 10` and `waited < 5s`. The five seconds were
     /// standing in for "less than the nine the child would have taken", which
@@ -4866,16 +4868,26 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     /// budget**: the call is given a hundred and fifty milliseconds and no load
     /// turns that into sixty seconds. It is the difference between "returned"
     /// and "never returns", which is the only difference this test is about — and
-    /// on the day it is spent, the stray `ping` left behind is the defect itself.
+    /// on the day it is spent, the stray child left behind is the defect itself.
     #[test]
     fn a_child_that_will_not_finish_is_killed_and_reported() {
         /// Long enough that only a guard which never returns can reach it.
         const NEVER: Duration = Duration::from_secs(60);
 
-        let mut command = bt_platform::quiet_command(
-            bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
-        );
-        command.args(["-t", "127.0.0.1"]);
+        // A program every installation of this platform has that never ends on its own:
+        // Windows' `ping`, found where its own search finds it, and POSIX's `tail`, which a
+        // Unix process start finds on `PATH` by itself.
+        let (program, arguments) = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => (
+                bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
+                ["-t", "127.0.0.1"],
+            ),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+                (PathBuf::from("tail"), ["-f", "/dev/null"])
+            }
+        };
+        let mut command = bt_platform::quiet_command(program);
+        command.args(arguments);
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let _ = tx.send(run_git(command, Duration::from_millis(150)).err());
@@ -5709,27 +5721,28 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     /// only ever appears on somebody else's disk.
     #[test]
     fn a_command_re_reads_only_the_repository_it_was_run_inside() {
-        let root = Path::new(r"C:\a\b");
+        let root = &host_path(r"C:\a\b");
 
         assert!(
-            should_reread(root, Some(Path::new(r"C:\a\b")), true),
+            should_reread(root, Some(&host_path(r"C:\a\b")), true),
             "the root itself is inside the root"
         );
         assert!(
-            should_reread(root, Some(Path::new(r"C:\a\b\c\d")), true),
+            should_reread(root, Some(&host_path(r"C:\a\b\c\d")), true),
             "and so is anywhere under it, however deep"
         );
         assert!(
-            !should_reread(root, Some(Path::new(r"C:\a\bc")), true),
+            !should_reread(root, Some(&host_path(r"C:\a\bc")), true),
             "but not the folder next door whose name merely starts the same way"
         );
         assert!(
-            !should_reread(root, Some(Path::new(r"C:\a")), true),
+            !should_reread(root, Some(&host_path(r"C:\a")), true),
             "and not the folder above it: a parent is not inside its child"
         );
         assert!(
             !should_reread(root, Some(Path::new(r"D:\a\b")), true),
-            "nor the same path on another drive"
+            "nor the same path on another drive (off Windows a name with a colon in \
+             it, which is not inside the root either)"
         );
 
         // Windows is case-insensitive about all of it, which is the same rule
@@ -5743,7 +5756,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
 
         // And the two conditions that are not about the path at all.
         assert!(
-            !should_reread(root, Some(Path::new(r"C:\a\b")), false),
+            !should_reread(root, Some(&host_path(r"C:\a\b")), false),
             "a page nobody is looking at is never read, whatever happened in any \
              shell — R31's gate, kept a second time"
         );

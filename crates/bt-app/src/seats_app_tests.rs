@@ -4106,11 +4106,18 @@ fn a_stage_that_will_not_take_the_pane_refuses_it_at_every_dividing_aim() {
 /// whatever row happens to sit where `cmd` sat.
 #[test]
 fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
+    // Two rows this build ships, the right one not the fallback, and a third the reader names.
+    let (left_id, right_id, named_id) = match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => ("cmd", "gitbash", "wsl"),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+            ("sh", "bash", "bash")
+        }
+    };
     let mut tab = cross_tab(1, &["ALPHA", "BETA"]);
     let [left, right] = tab.seats.terminals()[..] else {
         panic!("the fixture is a row of two terminals");
     };
-    for (seat, id) in [(left, "cmd"), (right, "gitbash")] {
+    for (seat, id) in [(left, left_id), (right, right_id)] {
         tab.sessions
             .get_mut(&seat)
             .expect("the fixture files a session under every terminal")
@@ -4118,29 +4125,29 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
     }
 
     // What the chrome, the seeds and the save all read is the same string.
-    assert_eq!(tab.leaf_profile(left), "cmd");
-    assert_eq!(tab.leaf_profile(right), "gitbash");
+    assert_eq!(tab.leaf_profile(left), left_id);
+    assert_eq!(tab.leaf_profile(right), right_id);
     let seed = restart_seed(&tab.leaf_profile(left), None);
-    assert_eq!(seed.profile, "cmd", "a restart is the seat's own shell");
+    assert_eq!(seed.profile, left_id, "a restart is the seat's own shell");
     assert_eq!(
         SplitSeed::Inherit
             .applied(&tab.leaf_profile(right), None)
             .profile,
-        "gitbash",
+        right_id,
         "and so is `another one of these`"
     );
     assert_eq!(
-        SplitSeed::Profile("wsl".to_owned())
+        SplitSeed::Profile(named_id.to_owned())
             .applied(&tab.leaf_profile(left), None)
             .profile,
-        "wsl",
+        named_id,
         "a row the reader named is that row and not its place in the list"
     );
 
     // And the save writes each pane's own id rather than resolving a
     // position against the table as it stands at save time.
-    assert_eq!(tab.term_leaf(left, false).profile_id, "cmd");
-    assert_eq!(tab.term_leaf(right, false).profile_id, "gitbash");
+    assert_eq!(tab.term_leaf(left, false).profile_id, left_id);
+    assert_eq!(tab.term_leaf(right, false).profile_id, right_id);
 
     // **A row that is really gone**, which is the case a position could not
     // even express. The pane goes on running the shell it started, the save
@@ -4176,7 +4183,7 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
         "and never the pane, nor the sentence that says what it was"
     );
     assert_eq!(
-        leaves[&revived_right].profile, "gitbash",
+        leaves[&revived_right].profile, right_id,
         "the pane beside it is untouched by any of that"
     );
     assert_eq!(leaves[&revived_right].unknown_profile_id, None);

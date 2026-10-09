@@ -490,6 +490,7 @@ fn rendered(document: &DocumentMut, existing: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{host_path, host_spelling};
 
     #[test]
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
@@ -580,13 +581,16 @@ mod tests {
     fn the_only_file_this_writes_is_the_one_the_environment_names() {
         let named = |text: &str| Some(OsString::from(text));
         assert_eq!(
-            config_dir_from(named(r"D:\scratch\codex-home"), named(r"C:\Users\someone")),
-            Some(PathBuf::from(r"D:\scratch\codex-home"))
+            config_dir_from(
+                named(&host_spelling(r"D:\scratch\codex-home")),
+                named(&host_spelling(r"C:\Users\someone"))
+            ),
+            Some(host_path(r"D:\scratch\codex-home"))
         );
         // Set-but-empty is not set.
         assert_eq!(
-            config_dir_from(named(""), named(r"C:\Users\someone")),
-            Some(PathBuf::from(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
+            config_dir_from(named(""), named(&host_spelling(r"C:\Users\someone"))),
+            Some(host_path(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
         );
         assert_eq!(config_dir_from(None, None), None);
         assert_eq!(config_dir_from(None, named("")), None);
@@ -602,7 +606,7 @@ mod tests {
             );
         }
         assert!(
-            config_dir_from(named(r"D:\scratch\codex-home"), None)
+            config_dir_from(named(&host_spelling(r"D:\scratch\codex-home")), None)
                 .is_some_and(|path| path.is_absolute())
         );
     }

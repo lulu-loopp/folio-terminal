@@ -187,6 +187,16 @@ run that read no file. Five canaries: a qualified clock in `bt-doc` and in
 测试，这道扫描看不见，由审查负责发现。去掉一行的办法是换成受控时钟、受控
 sleeper、完成信号或接收事件，不是改大数字。
 
+**Wait on the signal, not the clock** (T-VIDEO-SEAT-SETTLING-FLAKE). A test, or a helper it
+calls, that waits for something another thread does — an engine counted on the ledger, an answer
+published, a lane woken — waits on that thing's own signal: the condition variable the movement is
+announced on, the lane's wake. The only number beside it is the suite's patience for something
+that must happen (`crate::lane::PATIENCE` in `bt-app`), and running out of it is a red, never a
+pass. Polling a value until a fixed number of seconds has gone by is a wall clock whatever the
+loop around it looks like: under load the movement arrives later and the test is called wrong.
+The shapes are `bt_platform::video::engine::engines_outstanding_reaching` (the engine ledger's
+`Condvar`) and `crate::lane::{wake_channel, wait_for_a_wake}`.
+
 ### 【事故】A/B 必须在同一段时间里交替，先跑完一组再跑另一组等于把负载当结论
 
 同上一条的同一天。"带 `export` 跑全量会挂、单独不带 `export` 重跑就绿"这句观察里，`export` 与"全量 vs 单跑"两个变量是**捆在一起**的，而后者意味着 1856 个测试用 24 条线程一起抢机器。交替 A/B（两臂在同一窗口内轮流、每 rep 互换先后手）当场判 `export` 无罪：闲时两臂各 16 次 0 失败、时长不可分辨；加载后**两臂一起塌**。
@@ -267,6 +277,35 @@ theme sort of `docs/plans/bt-app-split-inventory-2026-09-15.md` §0.3, and `<mod
 when its first assertion is about another module. A fixture two of those files use is in
 `test_support.rs`, `pub(crate)`. `tests.rs` holds only the tests something outside their body
 names as `tests::<name>`; a new test does not go there.
+
+### A test that is not limited to one platform asserts a fact of every platform (H1)
+
+Every test runs on Windows and on macOS (CI's `core-macos` runs `bt-term`, `bt-pty` and the portable
+crates). A test whose fixture is spelled the Windows way — a drive letter, a `\`, a shipped `pwsh` row,
+`Ctrl` as the command modifier — is red on the Mac for a reason that is not a defect, and a suite with
+reds nobody reads hides the one that is. Each test is exactly one of three things:
+
+1. **Platform-neutral.** The fact holds everywhere once the fixture is spelled through the platform's
+   own paths, shells and modifiers. Either the product's door takes the platform as a value
+   (`…_on(platform)`, `defaults_for(platform)`, `shipped_for(SeedPlatform::Windows, …)`) and the test
+   names the platform whose table it pins, or the fixture is built the host's way (`std::path` joins
+   on a host-rooted base, `bt_testpath::temp_path`, the host seed's rows by role, the host's command
+   modifier) and the expected value is computed from the same fixture. A platform branch may choose
+   an expected value; it never chooses the assertion's structure.
+2. **Windows-only by nature.** The fact exists only on Windows (ConPTY, `cmd`, PowerShell 5.1, the
+   MSIX, `%APPDATA%`, WebView2, the Explorer verb, WSL and MSYS namespaces, drive letters as a
+   grammar). The test carries `#[cfg(windows)]`, and when the feature has a macOS arm a macOS twin
+   test pins that arm — a Windows-only test of a cross-platform feature without its twin is a miss.
+3. **A real macOS defect.** The test is right and the product is wrong: the product is fixed by its
+   own ticket, never by changing the test, and the ledger names the test, the expected and actual
+   values and the ticket. The ignored-tests gate (`scripts/ci/check-ignored-tests.ps1`) asks the
+   harness on Windows only, so a `#[cfg_attr(target_os = "macos", ignore = "T-<NAME>: …")]` cannot
+   stand on its list today; until the gate learns a platform column such a test stays red on
+   macOS, which is why `bt-app`'s suite is not yet a `core-macos` step.
+
+A test whose subject refuses links among a path's ancestors (the uninstall door, the profile writer)
+stands under `bt_testpath::link_free_temp_dir()`: on macOS the temporary directory itself is reached
+through `/var`, a link.
 
 ### 【预防】产品代码不留占位符
 

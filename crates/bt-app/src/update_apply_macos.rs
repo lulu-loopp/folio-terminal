@@ -162,8 +162,8 @@ use bt_platform::{HostPlatform, launch_agent};
 use crate::cli;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    BeforeDeciding, Deferral, ExitGuard, Leave, Recording, Watch, Watched, Window, stop_trial,
-    trial_runs,
+    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, Recording, Watch, Watched, Window,
+    stop_trial, trial_runs,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -520,6 +520,9 @@ pub(crate) struct Recovered {
     /// Whether anybody waits for a window: a person's start always; the run
     /// at login only after a revert or a rollback it finished.
     pub(crate) waiting: bool,
+    /// **Whom a person's start was deferred to** (0.4.8 E3), as
+    /// `update_apply_windows::Recovered::deferred_to` says it.
+    pub(crate) deferred_to: Option<Ahead>,
 }
 
 /// **How the macOS applier leaves** (`update_apply::ExitGuard`, U-34): the
@@ -807,7 +810,7 @@ pub(crate) fn recover(
         Opener::Login
     };
     let handed = start.unwrap_or(&[]);
-    let (ended, successor) = match Txn::hold(
+    let (ended, successor, deferred_to) = match Txn::hold(
         road,
         worker,
         Asker::Rescue,
@@ -851,9 +854,23 @@ pub(crate) fn recover(
                 "BT_UPDATE_RECOVER transaction {} wrote {:?}",
                 road.txn, txn.written
             ));
-            (ended, txn.successor)
+            let deferred_to = match (&ended, txn.successor) {
+                (_, Some(_)) if txn.successor_has_the_start => None,
+                (_, Some(successor)) => Some(Ahead::Process(successor)),
+                (Ended::Deferred(Deferral::WindowDuty), None) => Some(Ahead::Election {
+                    home: road.home.clone(),
+                    txn: road.txn,
+                    me: crate::update_apply::this_process(),
+                }),
+                (Ended::Deferred(Deferral::Held), None) => Some(Ahead::DataHolder),
+                _ => None,
+            };
+            (ended, txn.successor, deferred_to)
         }
-        Err(ended) => (ended, None),
+        // Another holder kept the transaction lock through the wait: it opens
+        // the window.
+        Err(Ended::LockHeld) => (Ended::LockHeld, None, Some(Ahead::Lock(road.home.lock()))),
+        Err(ended) => (ended, None, None),
     };
     // At login, every end that attempted the transaction owes a window; only
     // the no-op ends do not (U-34, round 2, blocker 4 — as
@@ -874,6 +891,7 @@ pub(crate) fn recover(
         ended,
         successor,
         waiting,
+        deferred_to: deferred_to.filter(|_| opener == Opener::Start),
     }
 }
 
@@ -1029,6 +1047,10 @@ struct Txn<'a> {
     /// nothing (U-34; U-29b's ruling 2's "exactly one"); a trial a rollback
     /// stopped no longer runs.
     successor: Option<Running>,
+    /// **A trial this holder started was handed the person's start** with its
+    /// words ([`Txn::begin_trial`]): that start is delivered with it and
+    /// nothing is carried (0.4.8 E3).
+    successor_has_the_start: bool,
 }
 
 impl<'a> Txn<'a> {
@@ -1099,6 +1121,7 @@ impl<'a> Txn<'a> {
             written: Vec::new(),
             layout,
             successor: None,
+            successor_has_the_start: false,
         };
         Ok((
             txn,
@@ -1376,7 +1399,10 @@ impl<'a> Txn<'a> {
         }
         args.extend_from_slice(handed);
         let mut launch = match hands.launch_trial(places.installed, &args) {
-            Ok(launch) => launch,
+            Ok(launch) => {
+                self.successor_has_the_start = true;
+                launch
+            }
             Err(error) => {
                 hands.say(&format!("BT_UPDATE_APPLY {OPEN} did not start: {error}"));
                 return if over_stuck {

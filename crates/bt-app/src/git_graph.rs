@@ -5120,6 +5120,7 @@ fn alpha(thousandths: i32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::host_path;
 
     /// RED (25) — **Git spacing, corners, captions, badges and marks follow their UI rules.**
     ///
@@ -5370,7 +5371,15 @@ mod tests {
 
     /// A state holding exactly this history, as if git had answered with it.
     fn state_of(commits: Vec<GitCommit>, has_more: bool) -> GraphState {
-        let root = std::path::PathBuf::from(r"D:\repo");
+        state_of_at(std::path::PathBuf::from(r"D:\repo"), commits, has_more)
+    }
+
+    /// [`state_of`], for the repository at `root`.
+    fn state_of_at(
+        root: std::path::PathBuf,
+        commits: Vec<GitCommit>,
+        has_more: bool,
+    ) -> GraphState {
         let mut state = GraphState::new(root.clone());
         state.cache.accept(crate::git::GitAnswer::Log {
             root,
@@ -5390,8 +5399,16 @@ mod tests {
     /// `porcelain` is a recording of `status --porcelain=v1 -z --branch`, so what
     /// this hands the state is the same bytes the worker would have.
     fn state_with_status(commits: Vec<GitCommit>, porcelain: &[u8]) -> GraphState {
-        let root = std::path::PathBuf::from(r"D:\repo");
-        let mut state = state_of(commits, false);
+        state_with_status_at(std::path::PathBuf::from(r"D:\repo"), commits, porcelain)
+    }
+
+    /// [`state_with_status`], for the repository at `root`.
+    fn state_with_status_at(
+        root: std::path::PathBuf,
+        commits: Vec<GitCommit>,
+        porcelain: &[u8],
+    ) -> GraphState {
+        let mut state = state_of_at(root.clone(), commits, false);
         state.cache.accept(crate::git::GitAnswer::Status {
             root,
             outcome: Ok(crate::git::parse_status(porcelain)),
@@ -7936,7 +7953,7 @@ mod tests {
     /// both inside the toolbar's strip and neither above it.
     #[test]
     fn the_repository_and_the_branch_share_one_strip() {
-        let state = state_with_status(straight(3), CLEAN);
+        let state = state_with_status_at(host_path(r"D:\repo"), straight(3), CLEAN);
         let content = frame(&state, None, WIDE);
         let toolbar = content.toolbar.clone().expect("a toolbar");
         assert_eq!(toolbar.repo, "repo", "the root's own last component");
@@ -7993,7 +8010,7 @@ mod tests {
     /// nothing else on the strip had seen.
     #[test]
     fn a_narrow_head_yields_in_one_order_and_never_overlaps_the_tools() {
-        let state = state_with_status(straight(3), CLEAN);
+        let state = state_with_status_at(host_path(r"D:\repo"), straight(3), CLEAN);
         let content = frame(&state, None, WIDE);
         let head = content.head.clone().expect("a head");
         let mut toolbar = content.toolbar.clone().expect("a toolbar");
@@ -8122,7 +8139,7 @@ mod tests {
     /// did: the yielding order is a narrow-width ruling and nothing else.
     #[test]
     fn a_wide_head_is_laid_out_where_it_always_was() {
-        let state = state_with_status(straight(3), CLEAN);
+        let state = state_with_status_at(host_path(r"D:\repo"), straight(3), CLEAN);
         let content = frame(&state, None, WIDE);
         let head = content.head.clone().expect("a head");
         let toolbar = content.toolbar.clone().expect("a toolbar");

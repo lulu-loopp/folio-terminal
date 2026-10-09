@@ -156,6 +156,9 @@ use windows::Win32::System::Com::{
 };
 use windows::core::{BSTR, Interface, implement};
 
+use crate::engine_ledger;
+use crate::engine_ledger::LedgerEntry;
+
 /// **How often the engine thread asks whether a new picture has arrived, while
 /// one is expected.**
 ///
@@ -713,16 +716,17 @@ enum Command {
 /// How many media engines this process has created, and how many it has shut
 /// down. Equal at every moment no engine is alive, which is what the structural
 /// gate reads: an [`Engine`] that is dropped, forgotten, or unwound past by a
-/// panic goes through the same [`Engine::shutdown`].
+/// panic goes through the same [`Engine::shutdown`]. The counts are
+/// `crate::engine_ledger`'s, the one ledger both platform arms move.
 #[must_use]
 pub fn engines_started() -> u64 {
-    ENGINES_STARTED.load(Ordering::Relaxed)
+    engine_ledger::started()
 }
 
 /// The other half of [`engines_started`].
 #[must_use]
 pub fn engines_shut_down() -> u64 {
-    ENGINES_SHUT_DOWN.load(Ordering::Relaxed)
+    engine_ledger::shut_down()
 }
 
 /// How many engines are alive right now. **Zero is the only value this may have
@@ -730,45 +734,23 @@ pub fn engines_shut_down() -> u64 {
 /// asserts on a debug build.
 #[must_use]
 pub fn engines_outstanding() -> u64 {
-    engines_started().saturating_sub(engines_shut_down())
+    engine_ledger::outstanding()
 }
 
-static ENGINES_STARTED: AtomicU64 = AtomicU64::new(0);
-static ENGINES_SHUT_DOWN: AtomicU64 = AtomicU64::new(0);
-
-/// **One engine's place on the process ledger, opened where the engine comes
-/// into being and closed by whoever ends up owning it** (review row R2-19).
+/// **Wait until [`engines_outstanding`] is `target`, woken by the engine
+/// threads' own movements of the ledger**, and answer the count the wait
+/// ended on — `target`, or what stood when `patience` ran out.
 ///
-/// The ledger's whole promise is that [`engines_outstanding`] is zero at every
-/// moment no engine is alive, and a bare `fetch_add` cannot keep it: everything
-/// between the `CreateInstance` that makes an engine and the `Machinery` that
-/// will one day stop it is fallible, and a failure there added a count nothing
-/// would ever take off. So the entry is a value. [`Self::kept`] hands it to the
-/// machinery — from there `Machinery::stop` closes it, as it always did — and
-/// dropping it any other way closes it here, including on an unwind.
-struct LedgerEntry {
-    kept: bool,
-}
-
-impl LedgerEntry {
-    /// An engine exists. Counted from here.
-    fn opened() -> Self {
-        ENGINES_STARTED.fetch_add(1, Ordering::Relaxed);
-        Self { kept: false }
-    }
-
-    /// The engine reached a [`Machinery`], which is what will shut it down.
-    fn kept(mut self) {
-        self.kept = true;
-    }
-}
-
-impl Drop for LedgerEntry {
-    fn drop(&mut self) {
-        if !self.kept {
-            ENGINES_SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+/// An engine is counted on its own thread after [`Engine::open`] has returned,
+/// and taken off on that thread after [`Engine::shutdown`] may have returned,
+/// so a test that concludes something from the count waits for the movement
+/// rather than for a clock. Tests only (this crate's, and a crate's that names
+/// the `trust-harness` feature on its dev-dependency).
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+#[must_use]
+pub fn engines_outstanding_reaching(target: u64, patience: Duration) -> u64 {
+    engine_ledger::outstanding_reaching(target, patience)
 }
 
 /// **Turn on the immediate context's own critical section**, which is what makes
@@ -869,7 +851,7 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
                     })
                     .collect::<Vec<_>>();
                 machinery.stop();
-                ENGINES_SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+                engine_ledger::note_engine_shut_down();
                 answers
             })
             .unwrap_or_default();
@@ -929,7 +911,7 @@ fn run(
             shared.built.store(true, Ordering::Release);
             machinery.pump(shared, inbox);
             machinery.stop();
-            ENGINES_SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+            engine_ledger::note_engine_shut_down();
         }
         Err(error) => publish_failure(shared, error),
     }
@@ -1568,7 +1550,7 @@ mod tests {
         );
         // What `Machinery::stop` does, and the only thing that may close this
         // entry now.
-        ENGINES_SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+        engine_ledger::note_engine_shut_down();
         assert_eq!(engines_outstanding(), before);
     }
 
@@ -1601,9 +1583,17 @@ mod tests {
     fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
         static GATE: Mutex<()> = Mutex::new(());
         let gate = GATE.lock().unwrap_or_else(|held| held.into_inner());
-        engines_settling_to(0);
+        // The raw door, not `engines_settling_to`: a quiet that never comes is
+        // the caller's baseline, not this gate's red.
+        let _ = engines_outstanding_reaching(0, PATIENCE);
         gate
     }
+
+    /// How long a test here waits for something that must happen — an engine
+    /// counted, an engine taken off. A wait that ends on the ledger's own signal
+    /// costs nothing when the machine is quick; this only bounds a wait for a
+    /// movement that is never coming, which is a red.
+    const PATIENCE: Duration = Duration::from_secs(10);
 
     /// **Wait for the ledger to reach `target`**, and answer where it actually
     /// got to.
@@ -1611,28 +1601,30 @@ mod tests {
     /// Since [`Engine::open`] stopped waiting for the engine to be built, "an
     /// engine exists" is a thing that becomes true shortly *after* the open
     /// returns rather than before it. A test that reads the counter on the next
-    /// instruction is reading a race, so it reads a short wait instead — the
-    /// property being pinned is that the number comes up and goes back down, not
-    /// that it does so before the caller's next line.
+    /// instruction is reading a race, so it waits for the engine thread's own
+    /// movement of the ledger ([`engines_outstanding_reaching`]) — the property
+    /// being pinned is that the number comes up and goes back down, not that it
+    /// does so before the caller's next line, nor within any number of seconds
+    /// a loaded machine might take.
     ///
     /// **Both edges, for the same reason.** "An engine is gone" also becomes
     /// true on the engine's own thread, and an [`Engine::shutdown`] that ran out
     /// of [`SHUTDOWN_BUDGET`] returns with the count still standing — which is
-    /// the truth it is meant to tell, and which cost this module a red on
-    /// GitHub's Windows machine on 2026-09-16.
+    /// the truth it is meant to tell; the count comes off when that thread
+    /// gets there, and the ledger says so.
     ///
-    /// Under the [`ledger_gate`] — including from the gate itself, which is
-    /// where the previous test's engine is waited out — so nothing else is
-    /// moving this number.
+    /// **Running out of [`PATIENCE`] is a red here, by this helper**, naming
+    /// the patience and the count that stood, so no caller can pass by the
+    /// wait running out; the gate, which wants the count, asks
+    /// [`engines_outstanding_reaching`] itself. Under the [`ledger_gate`], so
+    /// nothing else is moving this number.
     fn engines_settling_to(target: u64) -> u64 {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let now = engines_outstanding();
-            if now == target || Instant::now() >= deadline {
-                return now;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        let reached = engines_outstanding_reaching(target, PATIENCE);
+        assert_eq!(
+            reached, target,
+            "the engine ledger did not reach {target} within this module's patience              ({PATIENCE:?}); {reached} engines stood"
+        );
+        reached
     }
 
     /// RED — **opening a video never blocks the thread that asked** (the freeze

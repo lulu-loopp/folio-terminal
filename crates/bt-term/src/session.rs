@@ -26497,7 +26497,7 @@ mod tests {
     /// grid; before the fix its band measured 10x4 against the unwrapped line's 340x114.
     #[test]
     fn a_wrapped_history_reference_gets_the_display_box_of_its_own_screen_column() {
-        let path = r"C:\a\b.png";
+        let path = rooted("a/b.png");
         let (unwrapped_offset, unwrapped) =
             frozen_reference_band(40, &format!("yyyyy {path}"), (1200, 400));
         let (wrapped_offset, wrapped) =
@@ -26538,7 +26538,7 @@ mod tests {
     /// its cells gives 37. Only the projection's own arithmetic gives 35.
     #[test]
     fn a_wrapped_reference_behind_wide_characters_measures_cells_not_graphemes() {
-        let path = r"C:\a\b.png";
+        let path = rooted("a/b.png");
         let (unwrapped_offset, unwrapped) =
             frozen_reference_band(40, &format!("中中 {path}"), (1200, 400));
         let (wrapped_offset, wrapped) =
@@ -27488,15 +27488,7 @@ mod tests {
         // whatever directory the runner calls `%TEMP%`.
         let mut session = DualPlaneSession::new(nz(120), nz(6));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         session.feed(b"see sub/notes.md. \r\n").unwrap();
         let mut projection = session.new_projection(session.layout_key());
         let frame = frame_after_path_verification(&mut session, &mut projection);
@@ -27602,7 +27594,10 @@ mod tests {
         let (other, other_spare) = temporary_ordinary_file();
         let only_short = other.join("a");
         std::fs::write(&only_short, b"a\n").unwrap();
-        let reversed = format!("see {}\\a b\\c d.md for details", other.to_string_lossy());
+        let reversed = format!(
+            "see {} for details",
+            other.join("a b").join("c d.md").to_string_lossy()
+        );
         let mut session = DualPlaneSession::new(nz(240), nz(6));
         enable_path_detection(&mut session);
         session.feed(format!("{reversed}\r\n").as_bytes()).unwrap();
@@ -27699,15 +27694,7 @@ mod tests {
         ];
         let mut session = DualPlaneSession::new(nz(75), nz(8));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         for line in printed {
             assert!(
                 bt_unicode::text_width(line) < 75,
@@ -27783,19 +27770,29 @@ mod tests {
     /// MUTATION: drop `!character.is_ascii() ||` from `prose_seam_ends` and the row goes dark.
     #[test]
     fn a_printed_path_behind_a_full_width_stop_and_a_digit_is_a_link() {
-        /// The reference's text and its target, read off one frame row.
-        fn linked_on(frame: &ViewportFrame, row: u32) -> Option<(String, String)> {
+        /// Every reference on one frame row, in order: each one's text and its target. A run of
+        /// linked cells with one target is one reference.
+        fn links_on(frame: &ViewportFrame, row: u32) -> Vec<(String, String)> {
             let columns = frame.columns.get() as usize;
             let start = row as usize * columns;
-            let mut text = String::new();
-            let mut uri = None;
+            let mut links: Vec<(String, String)> = Vec::new();
+            let mut previous_linked = false;
             for cell in &frame.cells[start..start + columns] {
-                if let Some(link) = &cell.hyperlink {
-                    uri.get_or_insert_with(|| link.uri.to_string());
-                    text.push_str(&cell.text);
+                match &cell.hyperlink {
+                    Some(link) => {
+                        let uri = link.uri.to_string();
+                        match links.last_mut() {
+                            Some((text, last)) if previous_linked && *last == uri => {
+                                text.push_str(&cell.text);
+                            }
+                            _ => links.push((cell.text.to_string(), uri)),
+                        }
+                        previous_linked = true;
+                    }
+                    None => previous_linked = false,
                 }
             }
-            uri.map(|uri| (text, uri))
+            links
         }
 
         let (directory, spare) = temporary_ordinary_file();
@@ -27805,15 +27802,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(8));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         // Byte for byte as Claude Code emits it: the code span's truecolour around the name, the
         // default foreground back, and the prose glued on behind.
         let prose = "。18 条,每条三段:规则 /";
@@ -27828,12 +27817,21 @@ mod tests {
         let frame = frame_after_path_verification(&mut session, &mut projection);
 
         assert!(session.path_is_verified(&draft));
+        let mut expected = vec![(
+            name.clone(),
+            bt_transcript::paths::local_path_to_file_uri(&draft),
+        )];
+        // The prose ends in ` /`: no name on Windows, and this machine's own root everywhere
+        // else, which is on the disk and so is a second reference of its own.
+        if !cfg!(windows) {
+            expected.push((
+                "/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(Path::new("/")),
+            ));
+        }
         assert_eq!(
-            linked_on(&frame, 0),
-            Some((
-                name.clone(),
-                bt_transcript::paths::local_path_to_file_uri(&draft)
-            )),
+            links_on(&frame, 0),
+            expected,
             "the link is the name without the full-width stop, and it opens the file"
         );
 
@@ -28114,6 +28112,7 @@ mod tests {
 
     /// One Windows path said the two ways the shells on this machine that are not Windows
     /// processes say it: `C:\a\b.md` as a Git Bash prints it, and as a WSL bash does.
+    #[cfg(windows)]
     fn foreign_spellings(path: &Path) -> (String, String) {
         let text = path.to_string_lossy().replace('\\', "/");
         let (drive, tail) = text.split_at(2);
@@ -28132,6 +28131,10 @@ mod tests {
     /// MUTATION: drop `detect_foreign_path_candidates` from `PrintedPathLinks::candidates_in` and
     /// the first two go red — the file is on the disk, the pane knows which shell it is, and the
     /// name on the screen is still dark.
+    ///
+    /// Windows only: the MSYS and WSL spellings name a Windows drive, and only a Windows build
+    /// translates a foreign spelling back to a local file.
+    #[cfg(windows)]
     #[test]
     fn a_pane_reads_the_absolute_spelling_its_own_shell_prints() {
         let (directory, path) = temporary_ordinary_file();
@@ -28188,6 +28191,7 @@ mod tests {
 
     /// Every name this session put in front of a worker for one line of text, answered "no" so the
     /// ledger does not carry it into the next line — the app's own rhythm, run by hand.
+    #[cfg(windows)]
     fn names_asked_about(session: &mut DualPlaneSession, printed: &str) -> Vec<PathBuf> {
         session.feed(printed.as_bytes()).unwrap();
         let mut projection = session.new_projection(session.layout_key());
@@ -28215,6 +28219,9 @@ mod tests {
     /// MUTATIONS: fill the home from *every* report and a `cd /etc` makes `~/notes.md` name
     /// `\\wsl.localhost\Ubuntu\etc\notes.md`; drop the `spawn_at_shell_home` gate and a pane that
     /// inherited `/mnt/d/Demo` calls that folder its home.
+    ///
+    /// Windows only: a WSL pane and its `\\wsl.localhost` share exist on Windows alone.
+    #[cfg(windows)]
     #[test]
     fn a_wsl_panes_tilde_is_the_home_its_own_shell_reported() {
         /// One WSL pane, told what its spawn would have told it, with `reports` already fed.
@@ -28383,11 +28390,8 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        let cwd = format!(
-            "\x1b]7;file:///{}\x07",
-            directory.to_string_lossy().replace('\\', "/")
-        );
-        session.feed(cwd.as_bytes()).unwrap();
+        let cwd = osc7_report(&directory);
+        session.feed(&cwd).unwrap();
         let mut projection = session.new_projection(session.layout_key());
 
         // Fifty-eight rows of path-shaped words that name nothing, then the one file that is real.
@@ -28589,11 +28593,8 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        let cwd = format!(
-            "\x1b]7;file:///{}\x07",
-            directory.to_string_lossy().replace('\\', "/")
-        );
-        session.feed(cwd.as_bytes()).unwrap();
+        let cwd = osc7_report(&directory);
+        session.feed(&cwd).unwrap();
         let mut projection = session.new_projection(session.layout_key());
 
         let noise = (0..58u32)
@@ -28686,15 +28687,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         let mut projection = session.new_projection(session.layout_key());
 
         // A command that prints where it is about to write, and has not finished.
@@ -28751,15 +28744,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         let mut projection = session.new_projection(session.layout_key());
         session
             .feed(format!("{} {}\r\n", real.display(), absent.display()).as_bytes())
@@ -28818,15 +28803,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         let mut projection = session.new_projection(session.layout_key());
         session
             .feed(format!("writing {}\r\n", built.display()).as_bytes())
@@ -29911,7 +29888,11 @@ mod tests {
     /// detector blind to a path it had already proven.
     fn application_overlay_line(line: &str) -> String {
         const OVERLAY: &str = "Localized overlay status!";
-        let overlay_start = line.find('"').expect("path line is quoted") + 3;
+        let path_start = line.find('"').expect("path line is quoted") + 1;
+        let overlay_start = path_start
+            + line[path_start..]
+                .find(['\\', '/'])
+                .expect("an absolute path has a root separator");
         let overlay_end = overlay_start + OVERLAY.len();
         assert!(
             overlay_end < line.len(),
@@ -30180,16 +30161,19 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(60), nz(4));
         enable_path_detection(&mut session);
         let started = Instant::now();
+        let printed = rooted("pictures/wallpaper.png");
         session
-            .feed_at(br"type C:\pictures\wallpaper.png here", started)
+            .feed_at(format!("type {printed} here").as_bytes(), started)
             .unwrap();
         let frame = current_frame(&mut session);
-        let wallpaper = PathBuf::from(r"C:\pictures\wallpaper.png");
+        let wallpaper = PathBuf::from(&printed);
+        // The reference spans the columns from 5 to `last`; the space after it is not in it.
+        let last = 5 + printed.len() as u32 - 1;
         assert_eq!(peek_at(&session, &frame, 0, 5), Some(wallpaper.clone()));
         assert_eq!(peek_at(&session, &frame, 0, 10), Some(wallpaper.clone()));
-        assert_eq!(peek_at(&session, &frame, 0, 28), Some(wallpaper));
+        assert_eq!(peek_at(&session, &frame, 0, last - 1), Some(wallpaper));
         assert_eq!(peek_at(&session, &frame, 0, 2), None);
-        assert_eq!(peek_at(&session, &frame, 0, 30), None);
+        assert_eq!(peek_at(&session, &frame, 0, last + 1), None);
         assert!(
             session.inline_images.is_empty(),
             "reading a frame registers nothing",
@@ -30208,11 +30192,11 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(20), nz(4));
         enable_path_detection(&mut session);
         let started = Instant::now();
-        session
-            .feed_at(br"C:\a\b\c\verylongname.png", started)
-            .unwrap();
+        let printed = rooted("a/b/c/verylongname.png");
+        session.feed_at(printed.as_bytes(), started).unwrap();
         let frame = current_frame(&mut session);
-        let expected = PathBuf::from(r"C:\a\b\c\verylongname.png");
+        let expected = PathBuf::from(&printed);
+        // Twenty columns, so the continuation row holds the last three characters or more.
         assert_eq!(peek_at(&session, &frame, 0, 0), Some(expected.clone()));
         assert_eq!(
             peek_at(&session, &frame, 1, 2),
@@ -30231,8 +30215,12 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(60), nz(3));
         enable_path_detection(&mut session);
         let started = Instant::now();
+        let printed = rooted("img/shot.png");
         session
-            .feed_at(b"C:\\img\\shot.png done\r\nb\r\nc\r\nd\r\ne\r\nf", started)
+            .feed_at(
+                format!("{printed} done\r\nb\r\nc\r\nd\r\ne\r\nf").as_bytes(),
+                started,
+            )
             .unwrap();
         let (id, _) = session
             .document
@@ -30256,9 +30244,13 @@ mod tests {
             .expect("scrolling to the top must put the frozen line on screen");
         assert_eq!(
             peek_at(&session, &frame, row, 3),
-            Some(PathBuf::from(r"C:\img\shot.png")),
+            Some(PathBuf::from(&printed))
         );
-        assert_eq!(peek_at(&session, &frame, row, 17), None);
+        // Inside the word after it.
+        assert_eq!(
+            peek_at(&session, &frame, row, printed.len() as u32 + 2),
+            None
+        );
     }
 
     #[test]
@@ -31348,7 +31340,7 @@ mod tests {
     fn underline_coverage_equals_peek_coverage_for_every_reference_shape() {
         // The user's own file name: no space, so the unquoted native shape is the one they saw.
         let (directory, path) = temporary_path_image_named("layout-preview.png");
-        let uri = format!("file:///{}", path.display().to_string().replace('\\', "/"));
+        let uri = bt_transcript::paths::local_path_to_file_uri(&path);
         let text_uri = uri.replace("layout-preview.png", "notes.txt");
         let mut session = DualPlaneSession::new(nz(240), nz(8));
         enable_path_detection(&mut session);
@@ -31442,6 +31434,17 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// `below` (written with `/`) as this platform spells an absolute path: under the drive `C:`
+    /// with `\` on Windows, under `/` elsewhere — for a reference whose fact is about where it
+    /// stands on a line, not about which file it names.
+    fn rooted(below: &str) -> String {
+        if cfg!(windows) {
+            format!(r"C:\{}", below.replace('/', r"\"))
+        } else {
+            format!("/{below}")
+        }
+    }
+
     /// A temporary tree whose root name carries both a space and CJK — the OSC 7 report must
     /// percent-encode them and this terminal must decode them back — holding one 1x1 PNG beside a
     /// working directory that reaches it through `../`.
@@ -31465,8 +31468,14 @@ mod tests {
     /// the same shape, written where a unit test can reach it.
     fn osc7_report(directory: &Path) -> Vec<u8> {
         const SAFE: &str = "-._~!$&'()*+,;=:@/";
-        let mut uri = String::from("file:///");
-        for byte in directory.to_string_lossy().replace('\\', "/").bytes() {
+        // The URI's path opens with `/`: before a drive letter it is the one the URI adds, and a
+        // POSIX path already begins with its own.
+        let path = directory.to_string_lossy().replace('\\', "/");
+        let mut uri = String::from("file://");
+        if !path.starts_with('/') {
+            uri.push('/');
+        }
+        for byte in path.bytes() {
             if byte.is_ascii_alphanumeric() || SAFE.contains(char::from(byte)) {
                 uri.push(char::from(byte));
             } else {
@@ -31710,21 +31719,15 @@ mod tests {
 
         // A report this terminal cannot resolve leaves it in the same state, and retracts a
         // directory it had already been given rather than letting a stale one answer.
-        session
-            .feed_at(b"\x1b]7;file:///D:/somewhere\x07", started)
-            .unwrap();
-        assert_eq!(
-            session.working_directory(),
-            Some(Path::new(r"D:\somewhere"))
-        );
+        let somewhere = root.join("somewhere");
+        session.feed_at(&osc7_report(&somewhere), started).unwrap();
+        assert_eq!(session.working_directory(), Some(somewhere.as_path()));
         for retraction in [
             "\u{1b}]7;\u{7}",
             "\u{1b}]7;file://server/share\u{7}",
             "\u{1b}]7;not a uri\u{7}",
         ] {
-            session
-                .feed_at(b"\x1b]7;file:///D:/somewhere\x07", started)
-                .unwrap();
+            session.feed_at(&osc7_report(&somewhere), started).unwrap();
             session.feed_at(retraction.as_bytes(), started).unwrap();
             assert_eq!(
                 session.working_directory(),
@@ -32002,10 +32005,19 @@ mod tests {
     }
 
     const OSC133_ACCEPT2_PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
-    const OSC133_ACCEPT2_IMAGE: &str =
-        "[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]";
-    const OSC133_ACCEPT2_COMMAND: &str =
-        "echo \"[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]\"";
+
+    /// The recorded output line, its picture spelled the way this platform roots one.
+    fn osc133_accept2_image() -> String {
+        format!(
+            "[Image: source: {}]",
+            rooted("Windows/Web/Wallpaper/Windows/img0.jpg")
+        )
+    }
+
+    /// The recorded command, which echoes the output line.
+    fn osc133_accept2_command() -> String {
+        format!("echo \"{}\"", osc133_accept2_image())
+    }
 
     #[derive(Clone, Copy, Debug)]
     enum Osc133ZoomStage {
@@ -32032,10 +32044,10 @@ mod tests {
 
         at += Duration::from_millis(10);
         session
-            .feed_at(OSC133_ACCEPT2_COMMAND.as_bytes(), at)
+            .feed_at(osc133_accept2_command().as_bytes(), at)
             .unwrap();
         // PSReadLine's repaint leaves the cursor at the next physical row when the command fills
-        // the 104th cell. Force that real recorded shape while keeping the row empty.
+        // the last cell. Force that real recorded shape while keeping the row empty.
         session.feed_at(b" \r\x1b[K", at).unwrap();
         if matches!(zoom_stage, Some(Osc133ZoomStage::WrappedCommand)) {
             resize_osc133_fixture(session, at);
@@ -32048,7 +32060,7 @@ mod tests {
 
         at += Duration::from_millis(10);
         session
-            .feed_at(OSC133_ACCEPT2_IMAGE.as_bytes(), at)
+            .feed_at(osc133_accept2_image().as_bytes(), at)
             .unwrap();
 
         at += Duration::from_millis(10);
@@ -32067,7 +32079,7 @@ mod tests {
             session
                 .semantic_input_regions
                 .values()
-                .all(|region| region.witness.trim_end_matches('\n') == OSC133_ACCEPT2_COMMAND),
+                .all(|region| region.witness.trim_end_matches('\n') == osc133_accept2_command()),
             "every B..C region must retain the recorded logical command witness: {:?}",
             session
                 .semantic_input_regions
@@ -32099,13 +32111,16 @@ mod tests {
 
     #[test]
     fn osc133_accept2_wrapped_command_regions_survive_zoom_without_decorating_input() {
+        // The recorded prompt plus command lands exactly on the wrap boundary: 104 columns as
+        // recorded on Windows, two fewer where the picture's root is `/` rather than `C:\`.
+        let columns = (OSC133_ACCEPT2_PROMPT.len() + osc133_accept2_command().len()) as u32;
         assert_eq!(
-            OSC133_ACCEPT2_PROMPT.len() + OSC133_ACCEPT2_COMMAND.len(),
-            104,
-            "the recorded prompt plus command lands exactly on the 104-column wrap boundary"
+            columns,
+            if cfg!(windows) { 104 } else { 102 },
+            "the recorded prompt plus command lands exactly on the recorded wrap boundary"
         );
         let started = Instant::now();
-        let mut session = DualPlaneSession::new(nz(104), nz(26));
+        let mut session = DualPlaneSession::new(nz(columns), nz(26));
         enable_path_detection(&mut session);
         session.restore_retired_image_bands();
         let mut at = started;

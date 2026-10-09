@@ -2398,6 +2398,46 @@ mod tests {
     // 1x1 opaque red PNG.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
+    /// Whether this platform's absolute paths are drive-rooted with `\` between names (Windows)
+    /// rather than rooted at `/` — which spelling the fixtures below are written in, and the
+    /// expected answer of the few rows whose fact is the grammar itself.
+    const DRIVE_ROOTED: bool = cfg!(windows);
+
+    /// `below` (written with `/`) as this platform spells an absolute path: under the drive `D:`
+    /// with `\` on Windows, under `/` elsewhere. Every absolute fixture of this module is built
+    /// here, so a fact about detection is asserted in the spelling a shell on this platform prints.
+    fn rooted(below: &str) -> String {
+        if DRIVE_ROOTED {
+            format!(r"D:\{}", below.replace('/', r"\"))
+        } else {
+            format!("/{below}")
+        }
+    }
+
+    /// [`rooted`] with `/` between the names — the spelling `C:/tmp/a.png` a Windows program may
+    /// also print, and the only spelling there is elsewhere.
+    fn rooted_with_slashes(below: &str) -> String {
+        if DRIVE_ROOTED {
+            format!("D:/{below}")
+        } else {
+            format!("/{below}")
+        }
+    }
+
+    /// The `file:` URI naming [`rooted`]`(below)`; `below` is written already percent-encoded.
+    fn rooted_uri(below: &str) -> String {
+        format!("file://{}", rooted_uri_path(below))
+    }
+
+    /// The path part of [`rooted_uri`], authority excluded: `/D:/below` or `/below`.
+    fn rooted_uri_path(below: &str) -> String {
+        if DRIVE_ROOTED {
+            format!("/D:/{below}")
+        } else {
+            format!("/{below}")
+        }
+    }
+
     /// PIN — **the image lane reads the one lexicon, so what the boundary rules learn, it learns**
     /// (§7.1.5j ⑧, checked after the 2026-08-21 slice moved two of them).
     ///
@@ -2415,8 +2455,9 @@ mod tests {
                 .map(|candidate| candidate.path)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(spans("见 D:\\shots\\a.png。"), ["D:\\shots\\a.png"]);
-        assert_eq!(spans("D:\\shots\\a.png:12"), ["D:\\shots\\a.png"]);
+        let shot = rooted("shots/a.png");
+        assert_eq!(spans(&format!("见 {shot}。")), std::slice::from_ref(&shot));
+        assert_eq!(spans(&format!("{shot}:12")), std::slice::from_ref(&shot));
         // The **sentence's** full stop, learned here the same way and on the same day it was ruled
         // on (2026-09-05, boundary table rows 57–61; row 16 overturned). A stop at the end of a
         // token is a seam, so the token offers `a.png` behind `a.png.` — and the extension question
@@ -2424,7 +2465,7 @@ mod tests {
         // exactly as the one at the end of a Chinese sentence became one above. The whole string
         // still goes first and still fails the extension list, which is why only one span comes
         // back.
-        assert_eq!(spans("D:\\shots\\a.png."), ["D:\\shots\\a.png"]);
+        assert_eq!(spans(&format!("{shot}.")), [shot]);
     }
 
     #[test]
@@ -2643,40 +2684,44 @@ mod tests {
 
     #[test]
     fn local_path_candidate_boundaries_are_conservative_and_cc_exact() {
+        let picture = rooted("Users/alice/Pictures/1.png");
         assert_eq!(
-            detect_local_image_path_candidates(r#"[Image: source: C:\Users\alice\Pictures\1.png]"#),
+            detect_local_image_path_candidates(&format!("[Image: source: {picture}]")),
             vec![LocalImagePathCandidate {
-                path: r"C:\Users\alice\Pictures\1.png".to_owned(),
+                path: picture.clone(),
                 byte_start: 16,
-                byte_end: 45,
+                byte_end: 16 + picture.len(),
                 shape: ImageReferenceShape::Native,
             }]
         );
+        let spaced = rooted("Users/alice/My Pictures/one two.WEBP");
         assert_eq!(
-            detect_local_image_path_candidates(
-                r#"[Image: source: "C:\Users\alice\My Pictures\one two.WEBP"]"#
-            )[0]
-            .path,
-            r"C:\Users\alice\My Pictures\one two.WEBP"
+            detect_local_image_path_candidates(&format!(r#"[Image: source: "{spaced}"]"#))[0].path,
+            spaced
         );
+        let slashed = rooted_with_slashes("tmp/picture.jpeg");
         assert_eq!(
-            detect_local_image_path_candidates(r"source=C:/tmp/picture.jpeg]ignored.png")[0].path,
-            "C:/tmp/picture.jpeg"
+            detect_local_image_path_candidates(&format!("source={slashed}]ignored.png"))[0].path,
+            slashed
         );
+        let svg = rooted("tmp/image.svg");
         assert_eq!(
-            detect_local_image_path_candidates(r"[Image: source: C:\tmp\image.svg]")[0].path,
-            r"C:\tmp\image.svg",
+            detect_local_image_path_candidates(&format!("[Image: source: {svg}]"))[0].path,
+            svg,
             "svg joined the admissible extensions with the 2026-08-02 static-raster slice"
         );
         for rejected in [
-            r"[Image: source: relative\image.png]",
-            r"[Image: source: \\server\share\image.png]",
-            r"[Image: source: C:\tmp\image.bmp]",
-            r#"[Image: source: "C:\tmp\unterminated image.png]"#,
-            r"prefixXC:\tmp\image.png",
+            r"[Image: source: relative\image.png]".to_owned(),
+            r"[Image: source: \\server\share\image.png]".to_owned(),
+            format!("[Image: source: {}]", rooted("tmp/image.bmp")),
+            format!(
+                r#"[Image: source: "{}]"#,
+                rooted("tmp/unterminated image.png")
+            ),
+            format!("prefixX{}", rooted("tmp/image.png")),
         ] {
             assert!(
-                detect_local_image_path_candidates(rejected).is_empty(),
+                detect_local_image_path_candidates(&rejected).is_empty(),
                 "unexpected candidate in {rejected:?}"
             );
         }
@@ -2689,25 +2734,28 @@ mod tests {
     /// continuation byte and the byte after `.png` was another one.
     #[test]
     fn path_candidates_open_after_any_non_token_character_and_close_at_any_closing_delimiter() {
-        for accepted in [
-            "（D:\\Developer\\folio-terminal\\layout-preview.png）",
-            "见图（D:\\Developer\\folio-terminal\\layout-preview.png）",
-            "「D:\\Developer\\folio-terminal\\layout-preview.png」",
-            "【D:\\Developer\\folio-terminal\\layout-preview.png】",
-            "路径：D:\\Developer\\folio-terminal\\layout-preview.png",
-            "(D:\\Developer\\folio-terminal\\layout-preview.png)",
-            "<D:\\Developer\\folio-terminal\\layout-preview.png>",
-            "《D:\\Developer\\folio-terminal\\layout-preview.png》",
-            "“D:\\Developer\\folio-terminal\\layout-preview.png”",
-            "图\u{3000}D:\\Developer\\folio-terminal\\layout-preview.png",
+        let preview = rooted("Developer/folio-terminal/layout-preview.png");
+        for (open, close) in [
+            ("（", "）"),
+            ("见图（", "）"),
+            ("「", "」"),
+            ("【", "】"),
+            ("路径：", ""),
+            ("(", ")"),
+            ("<", ">"),
+            ("《", "》"),
+            ("“", "”"),
+            ("图\u{3000}", ""),
         ] {
+            let accepted = format!("{open}{preview}{close}");
+            let accepted = accepted.as_str();
             let candidates = detect_local_image_path_candidates(accepted);
             assert_eq!(
                 candidates
                     .iter()
                     .map(|candidate| candidate.path.as_str())
                     .collect::<Vec<_>>(),
-                vec![r"D:\Developer\folio-terminal\layout-preview.png"],
+                vec![preview.as_str()],
                 "a path in {accepted:?} must be seen whole"
             );
             assert_eq!(
@@ -2716,26 +2764,28 @@ mod tests {
                 "the span must address the path text exactly in {accepted:?}"
             );
         }
+        let nested = rooted("a/b.png");
         for rejected in [
-            // A drive prefix that continues a token is a suffix of that token, never a path. The
-            // `/` case is load-bearing: it is what keeps a `file://` URI out of the native scan.
-            "file:///D:/Developer/folio-terminal/layout-preview.png",
-            "见D:\\a\\b.png",
-            "v1.D:\\a\\b.png",
-            "x-D:\\a\\b.png",
-            "x_D:\\a\\b.png",
-            "sub\\D:\\a\\b.png",
+            // A root that continues a token is a suffix of that token, never a path. The `/` case
+            // is load-bearing: it is what keeps a `file://` URI out of the native scan.
+            rooted_uri("Developer/folio-terminal/layout-preview.png"),
+            format!("见{nested}"),
+            format!("v1.{nested}"),
+            format!("x-{nested}"),
+            format!("x_{nested}"),
+            format!(r"sub\{nested}"),
         ] {
             assert!(
-                detect_local_image_path_candidates(rejected).is_empty(),
+                detect_local_image_path_candidates(&rejected).is_empty(),
                 "unexpected native candidate in {rejected:?}"
             );
         }
         // A quoted path keeps every delimiter it contains; quoting is how a filename that really
         // ends in `）` is spelled.
         assert_eq!(
-            detect_local_image_path_candidates("（\"D:\\a\\b（1）.png\"）")[0].path,
-            "D:\\a\\b（1）.png"
+            detect_local_image_path_candidates(&format!("（\"{}\"）", rooted("a/b（1）.png")))[0]
+                .path,
+            rooted("a/b（1）.png")
         );
     }
 
@@ -2747,22 +2797,46 @@ mod tests {
     fn file_uris_resolve_to_local_image_paths_under_the_same_admission_gates() {
         for (uri, expected) in [
             (
-                "file:///D:/Developer/folio-terminal/layout-preview.png",
-                r"D:\Developer\folio-terminal\layout-preview.png",
+                rooted_uri("Developer/folio-terminal/layout-preview.png"),
+                rooted("Developer/folio-terminal/layout-preview.png"),
             ),
-            ("file:///D:/x%20y.png", r"D:\x y.png"),
-            ("file:///D:/%E5%9B%BE%E7%89%87.PNG", r"D:\图片.PNG"),
-            ("FILE:///D:/a.png", r"D:\a.png"),
-            ("file://localhost/D:/a.png", r"D:\a.png"),
-            ("file:///D:/a.png#anchor", r"D:\a.png"),
-            ("file:///D:/a.png?v=2", r"D:\a.png"),
+            (rooted_uri("x%20y.png"), rooted("x y.png")),
+            (rooted_uri("%E5%9B%BE%E7%89%87.PNG"), rooted("图片.PNG")),
+            (
+                format!("FILE://{}", rooted_uri_path("a.png")),
+                rooted("a.png"),
+            ),
+            (
+                format!("file://localhost{}", rooted_uri_path("a.png")),
+                rooted("a.png"),
+            ),
+            (rooted_uri("a.png#anchor"), rooted("a.png")),
+            (rooted_uri("a.png?v=2"), rooted("a.png")),
         ] {
             assert_eq!(
-                file_uri_to_local_image_path(uri),
+                file_uri_to_local_image_path(&uri),
                 Some(PathBuf::from(expected)),
                 "{uri:?}"
             );
         }
+        // A URI rooted at `/` is a drive-less name on Windows, which no reference there may be,
+        // and an ordinary absolute path everywhere else.
+        for (posix_rooted, elsewhere) in [
+            ("file:///etc/a.png", "/etc/a.png"),
+            ("file:///a.png", "/a.png"),
+        ] {
+            assert_eq!(
+                file_uri_to_local_image_path(posix_rooted),
+                (!DRIVE_ROOTED).then(|| PathBuf::from(elsewhere)),
+                "{posix_rooted:?}"
+            );
+        }
+        // `%5C` decodes to `\`, a separator on Windows — where it is refused like `%2F` below —
+        // and an ordinary character of a name everywhere else.
+        assert_eq!(
+            file_uri_to_local_image_path(&rooted_uri("a%5Cb.png")),
+            (!DRIVE_ROOTED).then(|| PathBuf::from(r"/a\b.png"))
+        );
         for rejected in [
             // **An escaped separator is refused** (R3-1). This row used to read the other
             // way, on the reasoning that `%2F` is a literal slash inside one name and that
@@ -2772,27 +2846,28 @@ mod tests {
             // file from the one the URI named. The same escape in the OSC 7 decoder rebuilt
             // a share out of two `%5C`s. An escape that decodes to a separator moves a
             // boundary the URI did not have, so the URI names nothing.
-            "file:///D:/a%2Fb.png",
-            "file:///D:/a%5Cb.png",
+            rooted_uri("a%2Fb.png"),
             // A remote share is not the local image peek's business.
-            "file://host/share/a.png",
-            "file://192.168.0.2/pics/a.png",
-            // The same allowlist and drive-root gate printed paths meet.
-            "file:///D:/notes.txt",
-            "file:///D:/a.bmp",
-            "file:///etc/a.png",
-            "file:///a.png",
+            "file://host/share/a.png".to_owned(),
+            "file://192.168.0.2/pics/a.png".to_owned(),
+            // The same allowlist printed paths meet.
+            rooted_uri("notes.txt"),
+            rooted_uri("a.bmp"),
             // Not a file URI, or not a URI at all.
-            "https://example.test/a.png",
-            "file://",
-            "file://host",
+            "https://example.test/a.png".to_owned(),
+            "file://".to_owned(),
+            "file://host".to_owned(),
             // Malformed escapes and names no filesystem may hold.
-            "file:///D:/a%zz.png",
-            "file:///D:/a%2.png",
-            "file:///D:/a%00.png",
-            "file:///D://a.png",
+            rooted_uri("a%zz.png"),
+            rooted_uri("a%2.png"),
+            rooted_uri("a%00.png"),
+            rooted_uri("/a.png"),
         ] {
-            assert_eq!(file_uri_to_local_image_path(rejected), None, "{rejected:?}");
+            assert_eq!(
+                file_uri_to_local_image_path(&rejected),
+                None,
+                "{rejected:?}"
+            );
         }
     }
 
@@ -2800,8 +2875,14 @@ mod tests {
     /// text is, and reports the resolved path under the span of the URI that must be hovered.
     #[test]
     fn file_uri_candidates_are_found_in_prose_and_carry_the_resolved_path() {
-        let text = "see file:///D:/a/layout-preview.png, and （file:///D:/b.png）, not \
-                    file:///D:/notes.txt or xfile:///D:/c.png";
+        let text = format!(
+            "see {}, and （{}）, not {} or x{}",
+            rooted_uri("a/layout-preview.png"),
+            rooted_uri("b.png"),
+            rooted_uri("notes.txt"),
+            rooted_uri("c.png")
+        );
+        let text = text.as_str();
         let candidates = detect_local_image_uri_candidates(text);
         assert_eq!(
             candidates
@@ -2813,13 +2894,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (
-                    r"D:\a\layout-preview.png",
-                    "file:///D:/a/layout-preview.png"
+                    rooted("a/layout-preview.png").as_str(),
+                    rooted_uri("a/layout-preview.png").as_str()
                 ),
-                (r"D:\b.png", "file:///D:/b.png"),
+                (rooted("b.png").as_str(), rooted_uri("b.png").as_str()),
             ]
         );
-        // The two shapes never claim the same text: the `D:/…` inside a URI is not a native path.
+        // The two shapes never claim the same text: the path inside a URI is not a native path.
         assert!(detect_local_image_path_candidates(text).is_empty());
         assert_eq!(
             detect_peek_image_candidates(text, None).len(),
@@ -2893,37 +2974,41 @@ mod tests {
     fn working_directory_uris_decode_without_the_image_extension_gate() {
         for (uri, expected) in [
             (
-                "file:///D:/Developer/folio-terminal",
-                r"D:\Developer\folio-terminal",
+                rooted_uri("Developer/folio-terminal"),
+                rooted("Developer/folio-terminal"),
             ),
             // A trailing slash is how a URI names a directory, not an empty final segment.
-            ("file:///D:/Developer/", r"D:\Developer"),
-            ("file:///D:/", r"D:\"),
-            ("file:///D:/My%20Pictures", r"D:\My Pictures"),
-            ("file:///D:/%E5%9B%BE%20%E7%89%87", r"D:\图 片"),
-            ("file://localhost/D:/src", r"D:\src"),
-            ("FILE:///D:/src", r"D:\src"),
+            (rooted_uri("Developer/"), rooted("Developer")),
+            (rooted_uri(""), rooted("")),
+            (rooted_uri("My%20Pictures"), rooted("My Pictures")),
+            (rooted_uri("%E5%9B%BE%20%E7%89%87"), rooted("图 片")),
+            (
+                format!("file://localhost{}", rooted_uri_path("src")),
+                rooted("src"),
+            ),
+            (format!("FILE://{}", rooted_uri_path("src")), rooted("src")),
         ] {
             assert_eq!(
-                file_uri_to_local_path(uri, &[]),
+                file_uri_to_local_path(&uri, &[]),
                 Some(PathBuf::from(expected)),
                 "{uri:?}"
             );
         }
         // This machine's own name is the third spelling of "this host"; any other authority is a
         // remote share and names no directory this terminal may resolve against.
+        let on_this_machine = format!("file://MACHINE{}", rooted_uri_path("src"));
         assert_eq!(
-            file_uri_to_local_path("file://MACHINE/D:/src", &["machine".to_owned()]),
-            Some(PathBuf::from(r"D:\src"))
+            file_uri_to_local_path(&on_this_machine, &["machine".to_owned()]),
+            Some(PathBuf::from(rooted("src")))
         );
         for rejected in [
-            "file://server/share/src",
-            "file://MACHINE/D:/src",
-            "file:///D://src",
-            "",
-            "not a uri",
+            "file://server/share/src".to_owned(),
+            on_this_machine.clone(),
+            rooted_uri("/src"),
+            String::new(),
+            "not a uri".to_owned(),
         ] {
-            assert_eq!(file_uri_to_local_path(rejected, &[]), None, "{rejected:?}");
+            assert_eq!(file_uri_to_local_path(&rejected, &[]), None, "{rejected:?}");
         }
         // Two of these used to be on that list and are answers now, not refusals.
         // `%zz` opens no escape, so the payload was never percent-encoded and the
@@ -2932,8 +3017,8 @@ mod tests {
         // the root of a POSIX namespace, which is a place a shell really stands
         // in (review row R3-11).
         assert_eq!(
-            file_uri_to_local_path("file:///D:/a%zz", &[]),
-            Some(PathBuf::from(r"D:\a%zz"))
+            file_uri_to_local_path(&rooted_uri("a%zz"), &[]),
+            Some(PathBuf::from(rooted("a%zz")))
         );
         assert_eq!(
             file_uri_to_local_path("file:///", &[]),
@@ -2942,10 +3027,10 @@ mod tests {
         // The image peek keeps its own stricter reading: no hostname authority, and a trailing
         // slash names a directory, which is never an image.
         assert_eq!(
-            file_uri_to_local_image_path("file://MACHINE/D:/a.png"),
+            file_uri_to_local_image_path(&format!("file://MACHINE{}", rooted_uri_path("a.png"))),
             None
         );
-        assert_eq!(file_uri_to_local_image_path("file:///D:/a.png/"), None);
+        assert_eq!(file_uri_to_local_image_path(&rooted_uri("a.png/")), None);
     }
 
     /// A Windows shell may spell its directory the only way it can spell it.
@@ -2972,6 +3057,10 @@ mod tests {
     /// (`Rooting::DriveOrPosixRoot`, pinned below), which is WSL's and is a different question.
     /// `cmd.exe` cannot reach that door in any case: `$P` is always drive-rooted, because `cmd`
     /// refuses to stand in a UNC directory at all.
+    ///
+    /// Windows only: a drive letter and a `\` are this spelling, and no shell elsewhere has
+    /// either; the POSIX spelling is the next test's.
+    #[cfg(windows)]
     #[test]
     fn a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it() {
         for (uri, expected) in [
@@ -3050,10 +3139,14 @@ mod tests {
             file_uri_to_local_path("file:///home/%zz", &[]),
             Some(PathBuf::from("/home/%zz"))
         );
-        // **The image peek does not widen with it.** A reference is something this terminal opens,
-        // and it opens through Windows; `/mnt/d/a.png` is a path only the shell that printed it can
-        // resolve, so it is not a candidate here however plausible it looks.
-        assert_eq!(file_uri_to_local_image_path("file:///mnt/d/a.png"), None);
+        // **On Windows the image peek does not widen with it.** A reference is something this
+        // terminal opens, and there it opens through Windows; `/mnt/d/a.png` is a path only the
+        // shell that printed it can resolve, so it is not a candidate however plausible it looks.
+        // Everywhere else `/` is this machine's own root and the same URI is an ordinary picture.
+        assert_eq!(
+            file_uri_to_local_image_path("file:///mnt/d/a.png"),
+            (!DRIVE_ROOTED).then(|| PathBuf::from("/mnt/d/a.png"))
+        );
     }
 
     /// PIN (relative path ruling, 2026-08-03, as widened the same day): the relative scan reads
@@ -3064,12 +3157,17 @@ mod tests {
     fn relative_candidates_are_anchored_or_bare_with_a_separator_and_report_their_printed_text() {
         let text = r#"see ./a.png and ..\b\c.svg and "./my pic.webp" and dir/d.png"#;
         let candidates = detect_relative_image_path_candidates(text);
+        // `..\b\c.svg` is a reference where `\` separates names (Windows) and one name elsewhere.
+        let separated = ["./a.png", r"..\b\c.svg", "./my pic.webp", "dir/d.png"];
         assert_eq!(
             candidates
                 .iter()
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["./a.png", r"..\b\c.svg", "./my pic.webp", "dir/d.png"]
+            separated
+                .into_iter()
+                .filter(|reference| DRIVE_ROOTED || !reference.contains('\\'))
+                .collect::<Vec<_>>()
         );
         for candidate in candidates
             .iter()
@@ -3106,8 +3204,8 @@ mod tests {
             "dir/notes.txt",
             // A dot that continues a token opens nothing, which is what keeps the `./` inside a
             // URI and the `\.\` inside a native path out of this scan.
-            "file:///D:/./a.png",
-            r"D:\a\.\b.png",
+            rooted_uri("./a.png").as_str(),
+            rooted("a/./b.png").as_str(),
             // A quoted candidate must close its quote (the unquoted re-read that follows stops at
             // the space, exactly as it does for an unterminated quoted absolute path).
             r#""./unterminated image.png"#,
@@ -3273,10 +3371,16 @@ mod tests {
     /// scan's URIs without touching either.
     #[test]
     fn overlapping_scans_never_claim_the_same_text_twice() {
-        let cwd = PathBuf::from(r"D:\work");
-        let text = "D:\\abs.png file:///D:/uri.png local-images/sunset.svg ./a.png \
-                    https://a.b/x.png";
+        let cwd = PathBuf::from(rooted("work"));
+        let (absolute, uri) = (rooted("abs.png"), rooted_uri("uri.png"));
+        let text = format!(
+            "{absolute} {uri} local-images/sunset.svg ./a.png \
+             https://a.b/x.png"
+        );
+        let text = text.as_str();
         let candidates = detect_peek_image_candidates(text, Some(&cwd));
+        let (sunset, near) = (rooted("work/local-images/sunset.svg"), rooted("work/a.png"));
+        let (uri_path, absolute_path) = (rooted("uri.png"), absolute.clone());
         assert_eq!(
             candidates
                 .iter()
@@ -3286,13 +3390,10 @@ mod tests {
                 ))
                 .collect::<std::collections::BTreeSet<_>>(),
             [
-                (r"D:\abs.png", r"D:\abs.png"),
-                ("file:///D:/uri.png", r"D:\uri.png"),
-                (
-                    "local-images/sunset.svg",
-                    r"D:\work\local-images\sunset.svg"
-                ),
-                ("./a.png", r"D:\work\a.png"),
+                (absolute.as_str(), absolute_path.as_str()),
+                (uri.as_str(), uri_path.as_str()),
+                ("local-images/sunset.svg", sunset.as_str()),
+                ("./a.png", near.as_str()),
             ]
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>()
@@ -3314,14 +3415,13 @@ mod tests {
     /// shape meets. A climb past the drive root names nothing.
     #[test]
     fn relative_candidates_resolve_lexically_against_a_working_directory() {
-        let cwd = PathBuf::from(r"D:\a\b");
+        let cwd = PathBuf::from(rooted("a/b"));
         for (relative, expected) in [
-            ("./x.png", r"D:\a\b\x.png"),
-            (r".\x.png", r"D:\a\b\x.png"),
-            ("./sub/x.png", r"D:\a\b\sub\x.png"),
-            ("../y.svg", r"D:\a\y.svg"),
-            ("../../z.PNG", r"D:\z.PNG"),
-            ("../b/./x.png", r"D:\a\b\x.png"),
+            ("./x.png", rooted("a/b/x.png")),
+            ("./sub/x.png", rooted("a/b/sub/x.png")),
+            ("../y.svg", rooted("a/y.svg")),
+            ("../../z.PNG", rooted("z.PNG")),
+            ("../b/./x.png", rooted("a/b/x.png")),
         ] {
             assert_eq!(
                 resolve_relative_image_path(&cwd, relative),
@@ -3329,9 +3429,19 @@ mod tests {
                 "{relative:?}"
             );
         }
+        // `.\x.png` is anchored where `\` separates names (Windows); elsewhere it is one name, the
+        // file `.\x.png` in the working directory itself.
         assert_eq!(
-            resolve_relative_image_path(Path::new(r"D:\"), "./x.png"),
-            Some(PathBuf::from(r"D:\x.png"))
+            resolve_relative_image_path(&cwd, r".\x.png"),
+            Some(PathBuf::from(if DRIVE_ROOTED {
+                rooted("a/b/x.png")
+            } else {
+                rooted(r"a/b/.\x.png")
+            }))
+        );
+        assert_eq!(
+            resolve_relative_image_path(Path::new(&rooted("")), "./x.png"),
+            Some(PathBuf::from(rooted("x.png")))
         );
         for rejected in [
             // Above the drive root there is no path to name.
@@ -3357,14 +3467,19 @@ mod tests {
     /// directory yields the resolved absolute path under the span of the relative text.
     #[test]
     fn relative_text_is_no_candidate_at_all_without_a_working_directory() {
-        let text = "see ./a.png and D:\\abs.png and file:///D:/uri.png";
+        let text = format!(
+            "see ./a.png and {} and {}",
+            rooted("abs.png"),
+            rooted_uri("uri.png")
+        );
+        let text = text.as_str();
         let without = detect_peek_image_candidates(text, None);
         assert_eq!(
             without
                 .iter()
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![r"D:\abs.png", r"D:\uri.png"],
+            vec![rooted("abs.png"), rooted("uri.png")],
             "no directory, no relative candidate — and every other shape is untouched"
         );
         assert!(
@@ -3373,18 +3488,18 @@ mod tests {
                 .all(|candidate| candidate.path != "./a.png")
         );
 
-        let cwd = PathBuf::from(r"D:\work");
+        let cwd = PathBuf::from(rooted("work"));
         let with = detect_inline_image_candidates(text, Some(&cwd));
         assert_eq!(
             with.iter()
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![r"D:\abs.png", r"D:\work\a.png"],
+            vec![rooted("abs.png"), rooted("work/a.png")],
             "inline admission reads the native path and the resolved relative one"
         );
         let relative = with
             .iter()
-            .find(|candidate| candidate.path == r"D:\work\a.png")
+            .find(|candidate| candidate.path == rooted("work/a.png"))
             .unwrap();
         assert_eq!(
             &text[relative.byte_start..relative.byte_end],

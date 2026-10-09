@@ -997,7 +997,7 @@ jobs:
   #    point: a `#[cfg(test)]` module and an example are where a platform
   #    assumption hides most cheaply, and the three targets M1-10 fixed were
   #    exactly those;
-  # ③ sixteen suites run, `bt-platform`'s and `bt-pty`'s among them — the second
+  # ③ the portable suites run, `bt-platform`'s and `bt-pty`'s among them — the second
   #    starts real Unix children over a real pty, which is a thing no Windows job
   #    in this file can do — and, since ticket 72, `bt-render`'s against the
   #    runner's own Metal device and `bt-corpus`'s (D-63);
@@ -1011,15 +1011,17 @@ jobs:
   #    `gates-can-fail` mechanism run on this platform (the Windows job cannot
   #    plant it — Windows never compiles the item).
   #
-  # What is still checked and not tested, and why, as measured on the owner's
-  # Mac mini on 2026-09-26 (ticket 72): **`bt-term`** — 43 of its tests assert a
-  # Windows fact (drive-letter working directories, `cmd`/Git Bash/WSL
-  # integration scripts) and are red here by design; they are spread over
-  # `inline_image::tests`, `session::tests` and five integration binaries next to
-  # hundreds of green neighbours, so no name filter excludes exactly them (D-83).
-  # **`bt-app`** — 282 of its 4,600 tests fail here (Windows path fixtures,
-  # Ctrl-for-Cmd chords, Windows-only rows), so its suite is not portable yet
-  # and a longer command would only be a red one; that is D-83.
+  # **`bt-term`'s suite runs here since H1 (D-83).** Its tests that asserted a
+  # Windows fact on every platform now spell their fixtures the way this
+  # platform roots a path, and the three whose fact exists only on Windows are
+  # `#[cfg(windows)]` (docs/CONVENTIONS.md, "A test that is not limited to one
+  # platform asserts a fact of every platform"). Measured on the owner's Mac mini
+  # on 2026-10-08: the whole `cargo test -p bt-term` is about 40 s once its
+  # dependencies are built, which the steps above have already built.
+  # **`bt-app`'s whole suite is still not a step here.** H1 took it from 288
+  # reds to the few that are real macOS defects (ledger, "H1"), and the
+  # ignored-tests gate cannot yet hold a macOS-only ignore for them; a longer
+  # command would only be a red one until those tickets land.
   core-macos:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
@@ -1141,7 +1143,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-platform -p bt-pty -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p alacritty_terminal
-          -p bt-render -p bt-corpus
+          -p bt-render -p bt-corpus -p bt-term
 
       # **The lint line, held on the second platform** — `logic`'s own clippy
       # line, word for word (ticket 72, D-63). M1-10 started it on `bt-platform`
@@ -1300,9 +1302,8 @@ jobs:
       # `bt-math` for one of the same shape. `bt-render` is still checked and not
       # tested: it asks for a real adapter, and a runner without one is a
       # different failure wearing the same red. `bt-term` and `bt-corpus` stay
-      # off for the reason the mac job gives — nobody has measured their suites
-      # on a second platform, and a list of what we have measured is worth more
-      # than a list of what we hope.
+      # off: nobody has measured their suites on Linux, and a list of what we
+      # have measured is worth more than a list of what we hope.
       #
       # **`bt-math` asks the machine for fonts, and this one has none worth the
       # name.** Three of its tests are deliberately about real installed faces

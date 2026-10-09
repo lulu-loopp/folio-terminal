@@ -754,44 +754,106 @@ pub(crate) fn watch(
 
 // ───────────────────────────── the claim and the receipt ─────────────────────────────
 
+/// **What a start's ask for the data directory's claim came to**
+/// ([`take_the_claim`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Claimed {
+    /// Not a trial, or a trial whose claim is adopted: the start goes on.
+    Ours,
+    /// **A stand-in for U-35's reserved trial handed its launch to the Folio
+    /// holding the claim** (0.4.8 E3) — that trial took it: the start leaves
+    /// with this code.
+    HandedOver(i32),
+    /// **A stand-in that neither had the claim nor was taken by its holder
+    /// within the wait** (0.4.8 E3): it stood down — no trial, its writes
+    /// held — and opens its own window; the line is for `diagnostics.log`.
+    StoodDown(String),
+    /// A trial a holder launched that did not have the claim within the wait
+    /// (§C.7): it does not start; the line to say.
+    NotHad(String),
+}
+
 /// **A trial takes the data directory's claim before anything asks who writes
 /// there** (§C.7): `persist::try_claim` every [`CLAIM_RETRY`] for up to
 /// [`CLAIM_WAIT`] — the old build is letting go of it — then
 /// `persist::adopt_claim`, so `is_writer_of` answers "this process" from the
-/// first time it is asked. `Ok(())` at once outside a trial.
+/// first time it is asked. [`Claimed::Ours`] at once outside a trial.
 ///
-/// # Errors
-/// The one line to say when the claim was not had inside the wait. §C.7: such
-/// a trial does not start anyway and does not hand itself to the holder — the
-/// caller leaves with a failure, and the applier, which sees its trial gone
-/// without a receipt, rolls back.
-pub(crate) fn take_the_claim(storage: &Path) -> Result<(), String> {
-    if !is_trial() {
-        return Ok(());
-    }
-    take_the_claim_within(&GATE, storage, CLAIM_WAIT)
+/// **A trial a holder launched** that does not have it within the wait does
+/// not start and does not hand itself to the holder ([`Claimed::NotHad`]) —
+/// §C.7: the caller leaves with a failure, and the applier, which sees its
+/// trial gone without a receipt, rolls back.
+///
+/// **A person's start that stands in for U-35's reserved trial**
+/// (`update_startup::stands_in`, 0.4.8 E3) is a second start when the claim is
+/// held: the reserved trial already runs. Each time the claim is refused as
+/// held, its launch is offered to that holder (`offer`: the launch wire's
+/// hand-over, `launch_wire::hand_over`) — taken, the start leaves
+/// ([`Claimed::HandedOver`]); still not taken at the wait's end, it stands
+/// down (`update_startup::stand_down`) and opens its own window, not as the
+/// trial, its writes held ([`Claimed::StoodDown`]). It never leaves with
+/// nothing shown.
+pub(crate) fn take_the_claim(storage: &Path, offer: impl FnMut() -> Option<i32>) -> Claimed {
+    take_the_claim_for(storage, CLAIM_WAIT, offer)
 }
 
+/// [`take_the_claim`] for this process with the wait handed in — the
+/// product's is [`CLAIM_WAIT`]; a test's own process waits for nothing.
+pub(crate) fn take_the_claim_for(
+    storage: &Path,
+    wait: Duration,
+    offer: impl FnMut() -> Option<i32>,
+) -> Claimed {
+    if !is_trial() {
+        return Claimed::Ours;
+    }
+    let stand_in = update_startup::stands_in();
+    let claimed = take_the_claim_within(&GATE, storage, wait, stand_in, offer);
+    if let Claimed::StoodDown(_) = &claimed {
+        update_startup::stand_down();
+    }
+    claimed
+}
+
+/// [`take_the_claim`]'s rule over `gate`, `storage` and `wait`, for a start
+/// that is (`stand_in`) or is not a stand-in for the reserved trial. Every
+/// effect but the claim and the offer is the caller's: it does not stand the
+/// process down.
 pub(crate) fn take_the_claim_within(
     gate: &Gate,
     storage: &Path,
     wait: Duration,
-) -> Result<(), String> {
+    stand_in: bool,
+    mut offer: impl FnMut() -> Option<i32>,
+) -> Claimed {
     let deadline = Instant::now() + wait;
     loop {
         match persist::try_claim(storage) {
             Ok(claim) => {
                 persist::adopt_claim(storage, claim);
                 gate.adopt_claim();
-                return Ok(());
+                return Claimed::Ours;
             }
             Err(refusal) => {
+                if stand_in
+                    && matches!(refusal, bt_platform::instance::ClaimRefusal::Held)
+                    && let Some(code) = offer()
+                {
+                    return Claimed::HandedOver(code);
+                }
                 if Instant::now() >= deadline {
-                    return Err(format!(
-                        "BT_UPDATE_TRIAL {} was not free within {} s ({refusal:?}); this trial does not start",
+                    let not_had = format!(
+                        "BT_UPDATE_TRIAL {} was not free within {} s ({refusal:?})",
                         storage.display(),
                         wait.as_secs()
-                    ));
+                    );
+                    return if stand_in {
+                        Claimed::StoodDown(format!(
+                            "{not_had}; the update's reserved trial holds it and did not take this launch, so Folio opens a window of its own, not as the trial, its writes held"
+                        ))
+                    } else {
+                        Claimed::NotHad(format!("{not_had}; this trial does not start"))
+                    };
                 }
                 std::thread::sleep(CLAIM_RETRY);
             }
@@ -2084,8 +2146,8 @@ mod tests {
         std::fs::create_dir_all(&held).unwrap();
         let gate = Gate::new();
         assert_eq!(
-            take_the_claim_within(&gate, &free, Duration::from_secs(2)),
-            Ok(())
+            take_the_claim_within(&gate, &free, Duration::from_secs(2), false, || None),
+            Claimed::Ours
         );
         assert!(
             persist::try_claim(&free).is_err(),
@@ -2096,11 +2158,132 @@ mod tests {
 
         let holder = persist::try_claim(&held).expect("the test holds this one");
         let gate = Gate::new();
-        let refused = take_the_claim_within(&gate, &held, Duration::from_millis(300))
-            .expect_err("held elsewhere for the whole wait");
+        let Claimed::NotHad(refused) =
+            take_the_claim_within(&gate, &held, Duration::from_millis(300), false, || {
+                panic!("a trial a holder launched never offers its launch")
+            })
+        else {
+            panic!("held elsewhere for the whole wait");
+        };
         assert!(refused.contains("does not start"), "{refused}");
         assert!(!gate.hand_receipt(), "no claim, no receipt");
         drop(holder);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.8 E3, #17) — **a person's start standing in for U-35's
+    /// reserved trial, beside that trial already running, hands its launch
+    /// over to it or opens its own window — never leaves with nothing
+    /// shown**: while the claim is held, each refusal offers the launch to its
+    /// holder — taken, the start leaves with the hand-over's code; never taken
+    /// by the wait's end, it stands down and opens its own window, the line
+    /// saying why. A trial a holder launched offers nothing and does not start
+    /// (§C.7).
+    ///
+    /// MUTATION: in `take_the_claim_within`, answer a stand-in's end of the wait
+    /// as a launched trial's (`Claimed::NotHad`, the silent 30 s exit before
+    /// E3), or never ask `offer`.
+    #[test]
+    fn a_start_beside_the_reserved_trial_hands_its_launch_over_or_opens_its_own_window() {
+        let root = scratch("beside-the-reserve-预留");
+        let held = root.join("held");
+        std::fs::create_dir_all(&held).unwrap();
+        let holder = persist::try_claim(&held).expect("the reserved trial holds it");
+
+        let mut asked = 0;
+        let taken =
+            take_the_claim_within(&Gate::new(), &held, Duration::from_secs(600), true, || {
+                asked += 1;
+                (asked == 2).then_some(0)
+            });
+        assert_eq!(
+            taken,
+            Claimed::HandedOver(0),
+            "the trial answered the second ask"
+        );
+        assert_eq!(asked, 2);
+
+        let gate = Gate::new();
+        let Claimed::StoodDown(line) =
+            take_the_claim_within(&gate, &held, Duration::ZERO, true, || None)
+        else {
+            panic!("a stand-in the trial never answers opens its own window");
+        };
+        assert!(line.contains("opens a window of its own"), "{line}");
+        assert!(!gate.hand_receipt(), "no claim, no receipt");
+
+        assert!(matches!(
+            take_the_claim_within(&Gate::new(), &held, Duration::ZERO, false, || {
+                panic!("a trial a holder launched never offers its launch")
+            }),
+            Claimed::NotHad(_)
+        ));
+        drop(holder);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.8 E3, #17) — **a stand-in that stood down is no trial, holds
+    /// every write for its life, and its card says the update did not finish
+    /// and that this session's changes are not kept**: through the product's
+    /// claim step over a claim another holder keeps, in a process of its own —
+    /// the same writers over the same folder as a held start's, through each
+    /// one's product entry, write nothing.
+    ///
+    /// MUTATION: in `update_startup::is_held`, ask `HELD` alone (the stood-down
+    /// start writes the new build's data over as a non-trial).
+    #[test]
+    fn a_start_that_stood_down_beside_the_reserved_trial_writes_nothing_durable() {
+        const SELECTOR: &str = "update_trial::tests::a_start_that_stood_down_beside_the_reserved_trial_writes_nothing_durable";
+        if let Some(root) = child_root(SELECTOR) {
+            let home = Home::at(root.join("更新 home"));
+            assert!(update_startup::become_stand_in(TXN, nonce(), home.clone()));
+            let held = root.join("held by the reserved trial");
+            std::fs::create_dir_all(&held).unwrap();
+            let _holder = persist::try_claim(&held).expect("the reserved trial holds it");
+            assert!(matches!(
+                take_the_claim_for(&held, Duration::ZERO, || None),
+                Claimed::StoodDown(_)
+            ));
+            assert_eq!(update_startup::trial(), None, "no trial");
+            assert!(!update_startup::is_last_trial());
+            assert_eq!(update_startup::held(), Some(TXN));
+            assert!(
+                !run_the_start_writers(&root),
+                "the marks' migration started (ProfileMigration)"
+            );
+            assert!(writes_are_deferred());
+            assert_eq!(receipt_due(), None, "no receipt");
+            assert!(take_released().is_empty(), "nothing is released");
+            let failure = update_startup::failed().expect("a card");
+            assert_eq!(
+                failure,
+                crate::update_job::Failure::BesideTheTrial {
+                    folder: home.root().to_path_buf()
+                }
+            );
+            let paint = crate::update_card::paint(&crate::update_job::State::Failed(None, failure))
+                .expect("a failed card");
+            assert_eq!(paint.heading.as_deref(), Some("The update did not finish."));
+            assert_eq!(
+                paint.detail.as_deref(),
+                Some("Update incomplete. Changes made in this session are not kept.")
+            );
+            return;
+        }
+        let root = scratch("stood-down");
+        seed_what_the_old_build_left(&root);
+        let before = every_file(&root);
+        run_in_a_process_of_its_own(SELECTOR, &root);
+        let changed: Vec<String> = changes(&before, &every_file(&root))
+            .into_iter()
+            .filter(|line| !line.contains(crate::diagnostics::LOG_FILENAME))
+            .filter(|line| !line.contains("held by the reserved trial"))
+            .collect();
+        assert!(
+            changed.is_empty(),
+            "the start that stood down wrote:\n{}",
+            changed.join("\n")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

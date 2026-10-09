@@ -1329,10 +1329,16 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
         defers.contains("||self.restore_card_is_up()"),
         "the restore card is not on the list of surfaces above the clipboard rung:\n{defers}"
     );
-    // The chord is the clipboard rung's own.
-    assert!(input::is_paste_shortcut(
+    // The chord is the clipboard rung's own: `Ctrl+V` on Windows, `Cmd+V` on a Mac.
+    assert!(input::is_paste_shortcut_on(
         &Key::Character("v".into()),
-        winit::keyboard::ModifiersState::CONTROL
+        winit::keyboard::ModifiersState::CONTROL,
+        bt_platform::HostPlatform::Windows
+    ));
+    assert!(input::is_paste_shortcut_on(
+        &Key::Character("v".into()),
+        winit::keyboard::ModifiersState::SUPER,
+        bt_platform::HostPlatform::MacOs
     ));
     let ladder = squeezed_body("Runtime", "keyboard_input");
     let rung = ladder

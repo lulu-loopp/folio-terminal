@@ -6920,6 +6920,10 @@ mod dead_key_answer_tests {
 
 pub mod hotkey;
 
+/// How many playback engines this process has made and given back, on every
+/// platform — the one owner both `video` arms read and move.
+mod engine_ledger;
+
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
 /// not the set that could be played.
@@ -24244,10 +24248,12 @@ mod macos_player_signature_tests {
         }
     }
 
-    /// RED — **the three ledger doors are the same three on every machine.**
+    /// RED — **the three ledger doors are the same three on every machine, and
+    /// so is the wait on them.**
     ///
     /// `main.rs`'s own tests read all three to say that a closed pane leaves no
-    /// engine behind, and they read them with no `cfg`.
+    /// engine behind, and wait on the fourth for an engine thread to move the
+    /// count; they name all four with no `cfg`.
     ///
     /// MUTATION: rename one in either arm and this names it.
     #[test]
@@ -24263,6 +24269,14 @@ mod macos_player_signature_tests {
                     "the {arm} arm no longer answers `{door}`"
                 );
             }
+        }
+        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+            assert!(
+                source.contains(
+                    "pub fn engines_outstanding_reaching(target: u64, patience: Duration) -> u64 {"
+                ),
+                "the {arm} arm no longer waits on the ledger the same way"
+            );
         }
     }
 

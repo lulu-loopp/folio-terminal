@@ -39066,8 +39066,18 @@ mod shell_birth_tests {
     fn a_shell() -> Result<(PtySession, Hygiene), PtyError> {
         #[cfg(windows)]
         let command = bt_pty::PtyCommand::new("cmd.exe").arg("/D");
+        // A pane's shell is told the system's locale when the environment names none
+        // (`shell_integration::locale_declaration`); this one is told it the same way, or a
+        // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
+        // locale and its line editor reads the CJK typed below as meta keys.
         #[cfg(not(windows))]
-        let command = bt_pty::PtyCommand::new("/bin/sh");
+        let command = bt_platform::system_locale_declaration()
+            .into_iter()
+            .flat_map(bt_platform::LocaleDeclaration::variables)
+            .fold(
+                bt_pty::PtyCommand::new("/bin/sh"),
+                |command, (name, value)| command.env(*name, value),
+            );
         let size = PtySize::cells(grid().columns, grid().rows);
         TestShell::spawn(command, size).map(TestShell::into_session)
     }
@@ -43561,6 +43571,13 @@ impl Runtime<'_> {
             .after_rollback(update_startup::failed())
             .after_start(
                 update_startup::waiting(),
+                // How the run before this one ended (0.4.8 E3): the session sentinel this
+                // process's store already probed above.
+                if persist::previous_run_ended_orderly() {
+                    update_txn::PreviousRun::Orderly
+                } else {
+                    update_txn::PreviousRun::Unfinished
+                },
                 update_job::resumer_for_this_copy(),
                 update::begin,
             );
@@ -74113,26 +74130,36 @@ fn main() -> Result<()> {
     // would answer that search first — turning a pin on where the run's last
     // line is written into a pin on a branch that never writes one.
     let storage = persist::storage_dir();
-    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
-    // asks for it until the old build has let go, and adopts it into the claim
-    // table before anything below asks who writes here. One that is not handed
-    // the claim does not start and does not hand itself over — its applier
-    // sees the trial gone without a receipt and rolls back. Nothing at all in
-    // any other start.
-    if let Err(line) = update_trial::take_the_claim(&storage) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        bt_platform::leave_process(1);
-    }
     //
     // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
     // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+    let hand_over = || {
+        bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+            launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
+        })
+        .ok()
+        .flatten()
+    };
+    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
+    // asks for it until the old build has let go, and adopts it into the claim
+    // table before anything below asks who writes here. One a holder launched
+    // that is not handed the claim does not start and does not hand itself
+    // over — its applier sees the trial gone without a receipt and rolls
+    // back. A person's start standing in for U-35's reserved trial offers its
+    // launch to the trial that holds the claim, and when that trial does not
+    // take it within the wait, opens its own window, its writes held (0.4.8
+    // E3). Nothing at all in any other start.
+    let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
+        update_trial::Claimed::Ours => None,
+        update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
+        update_trial::Claimed::StoodDown(line) => Some(line),
+        update_trial::Claimed::NotHad(line) => {
+            bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            bt_platform::leave_process(1);
+        }
+    };
     if !persist::is_writer_of(&storage)
-        && let Some(handed) =
-            bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-                launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
-            })
-            .ok()
-            .flatten()
+        && let Some(handed) = hand_over()
     {
         bt_platform::leave_process(handed);
     }
@@ -74151,6 +74178,11 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // A stand-in that stood down beside the reserved trial says so where this
+    // run's diagnostics go (0.4.8 E3).
+    if let Some(line) = stood_down {
+        diagnostics::note(&line);
+    }
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and
@@ -74664,7 +74696,14 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 17] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 26] = [
+        // Windows-only test fixtures: a share named by a document (`\\server\share`).
+        "app_preview_tests.rs",
+        // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
+        // verbatim spellings of a printed link.
+        "app_terminal_tests.rs",
+        // Windows-only test fixtures: a breadcrumb row's drive segment.
+        "app_unclassified_tests.rs",
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -74686,9 +74725,15 @@ mod platform_gate_tests {
         "main.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
+        // Windows-only test fixtures: the drive, share, verbatim and WSL spellings of
+        // the read-unasked gate, beside its one-root twin.
+        "preview.rs",
         // Test fixtures compose Windows-only namespace translation with profile
         // overrides; production profile policy uses the portable platform interface.
         "profiles.rs",
+        // Windows-only test fixtures: a WSL tab, split and fallback crossing into WSL's
+        // spelling, each beside its twin for a build without WSL.
+        "profiles_app_tests.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
         // Which shells can be integrated with here.
@@ -74696,12 +74741,20 @@ mod platform_gate_tests {
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
+        // Windows-only test fixtures: a share handed over under `Ctrl`.
+        "tests.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
         "update_handoff.rs",
+        // Windows-only test fixtures: the UNC spelling of a share in a document.
+        "web_trace_app_tests.rs",
+        // Windows-only test fixtures: WebView2's favicon fetch, beside the macOS twin.
+        "webhost_favicon_tests.rs",
+        // Windows-only test fixtures: WebView2's Win32 accelerator keys.
+        "webhost_keyboard_tests.rs",
         // WSL.
         "wsl.rs",
     ];
@@ -80293,6 +80346,7 @@ mod printed_path_provenance_tests {
         ClickIntent, HyperlinkActivation, Runtime, TerminalReference, answered_once,
         hyperlink_activation, verified_target_of,
     };
+    use crate::test_support::{host_file_uri, host_path};
     use bt_layout::SeatId;
     use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
     use std::{cell::RefCell, path::Path};
@@ -80400,14 +80454,14 @@ mod printed_path_provenance_tests {
     /// window promising to open a file nobody has told it is there.
     #[test]
     fn a_name_nobody_has_answered_for_is_not_a_link_and_touches_nothing() {
-        let target = Path::new(r"C:\work\notes.md");
+        let target = &host_path(r"C:\work\notes.md");
         for control in [false, true] {
             let ledger = Ledger::new(target, None);
             assert_eq!(
                 hyperlink_activation(
                     control,
                     true,
-                    "file:///C:/work/notes.md",
+                    &host_file_uri(r"C:\work\notes.md"),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -80429,13 +80483,13 @@ mod printed_path_provenance_tests {
     /// of the answer: the same URI, the same table, one field different.
     #[test]
     fn a_ledgers_local_name_is_a_link_with_no_filesystem_call() {
-        let target = Path::new(r"C:\work\notes.md");
+        let target = &host_path(r"C:\work\notes.md");
         let ledger = Ledger::new(target, Some(local_file()));
         assert_eq!(
             hyperlink_activation(
                 false,
                 true,
-                "file:///C:/work/notes.md",
+                &host_file_uri(r"C:\work\notes.md"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| ledger.read(path),
             ),
@@ -80446,7 +80500,7 @@ mod printed_path_provenance_tests {
             hyperlink_activation(
                 false,
                 true,
-                "file:///C:/work/notes.md",
+                &host_file_uri(r"C:\work\notes.md"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| folder.read(path),
             ),
@@ -80475,13 +80529,13 @@ mod printed_path_provenance_tests {
             "shot.png",
             "page.html",
         ] {
-            let target = std::path::PathBuf::from(format!(r"C:\work\{name}"));
+            let target = host_path(&format!(r"C:\work\{name}"));
             let ledger = Ledger::new(&target, Some(local_file()));
             assert_eq!(
                 hyperlink_activation(
                     true,
                     true,
-                    &format!("file:///C:/work/{name}"),
+                    &host_file_uri(&format!(r"C:\work\{name}")),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -80490,13 +80544,13 @@ mod printed_path_provenance_tests {
             );
         }
         // A folder keeps Explorer's arm, which is what it has always had.
-        let folder = std::path::PathBuf::from(r"C:\work\src");
+        let folder = host_path(r"C:\work\src");
         let ledger = Ledger::new(&folder, Some(local_folder()));
         assert_eq!(
             hyperlink_activation(
                 true,
                 true,
-                "file:///C:/work/src",
+                &host_file_uri(r"C:\work\src"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| ledger.read(path),
             ),
@@ -80509,13 +80563,13 @@ mod printed_path_provenance_tests {
     #[test]
     fn a_plain_click_on_a_printed_path_still_previews_it() {
         for name in ["notes.md", "shot.png", "page.html", "notes.py"] {
-            let target = std::path::PathBuf::from(format!(r"C:\work\{name}"));
+            let target = host_path(&format!(r"C:\work\{name}"));
             let ledger = Ledger::new(&target, Some(local_file()));
             assert_eq!(
                 hyperlink_activation(
                     false,
                     true,
-                    &format!("file:///C:/work/{name}"),
+                    &host_file_uri(&format!(r"C:\work\{name}")),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -80548,8 +80602,8 @@ mod printed_path_provenance_tests {
     /// below is zero, which is the dead click exactly.
     #[test]
     fn a_link_under_a_resting_pointer_is_asked_about_by_the_press() {
-        let uri = "file:///C:/work/notes.md";
-        let target = std::path::PathBuf::from(r"C:\work\notes.md");
+        let uri = &host_file_uri(r"C:\work\notes.md");
+        let target = host_path(r"C:\work\notes.md");
         let mut session = bt_term::DualPlaneSession::new(
             std::num::NonZeroU32::new(40).unwrap(),
             std::num::NonZeroU32::new(2).unwrap(),
@@ -80557,7 +80611,7 @@ mod printed_path_provenance_tests {
         // The link arrives the way a scroll or a fresh line delivers one: printed, with no pointer
         // event anywhere.
         session
-            .feed(b"\x1b]8;;file:///C:/work/notes.md\x1b\\notes.txt\x1b]8;;\x1b\\")
+            .feed(format!("\x1b]8;;{uri}\x1b\\notes.txt\x1b]8;;\x1b\\").as_bytes())
             .unwrap();
         assert_eq!(
             session.path_verdict(&target),
@@ -80697,14 +80751,14 @@ mod printed_path_provenance_tests {
     /// a file manager opening on a folder nobody named.
     #[test]
     fn a_name_the_ledger_says_is_gone_is_never_revealed() {
-        let target = Path::new(r"C:\work\gone.md");
+        let target = &host_path(r"C:\work\gone.md");
         for control in [false, true] {
             let ledger = Ledger::new(target, Some(bt_term::PathVerdict::absent()));
             assert_eq!(
                 hyperlink_activation(
                     control,
                     true,
-                    "file:///C:/work/gone.md",
+                    &host_file_uri(r"C:\work\gone.md"),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -80722,7 +80776,7 @@ mod printed_path_provenance_tests {
             hyperlink_activation(
                 true,
                 true,
-                "file:///C:/work/gone.md",
+                &host_file_uri(r"C:\work\gone.md"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| ledger.read(path),
             ),
@@ -80743,8 +80797,8 @@ mod printed_path_provenance_tests {
     /// the held yes stands and the stale reveal is back.
     #[test]
     fn a_press_re_asks_a_held_yes_and_the_answer_stops_the_reveal() {
-        let uri = "file:///C:/work/notes.md";
-        let target = std::path::PathBuf::from(r"C:\work\notes.md");
+        let uri = &host_file_uri(r"C:\work\notes.md");
+        let target = host_path(r"C:\work\notes.md");
         let mut session = bt_term::DualPlaneSession::new(
             std::num::NonZeroU32::new(40).unwrap(),
             std::num::NonZeroU32::new(2).unwrap(),
@@ -80837,6 +80891,10 @@ mod printed_path_provenance_tests {
     ///
     /// MUTATION: take `strip_verbatim_prefix` out of `bt_platform::resolved_for_a_door` and this
     /// goes red on Windows with the prefix back in the argument.
+    ///
+    /// Windows only: `reveal_argument_form` is Explorer's command line. The macOS twin is
+    /// `a_printed_path_reaches_finders_door_resolved_and_unchanged`.
+    #[cfg(windows)]
     #[test]
     fn a_real_file_reaches_a_door_as_the_argument_main_would_have_built() {
         let directory = scratch("file");
@@ -80880,6 +80938,10 @@ mod printed_path_provenance_tests {
     /// `reveal_argument_form` refuses a `..` outright — it is a text question Explorer answers its
     /// own way — and `main` never met one because it canonicalised first. A program printing
     /// `…\repo\src\..\docs` is ordinary.
+    ///
+    /// Windows only: `reveal_argument_form` is Explorer's command line. The macOS twin is
+    /// `a_printed_path_reaches_finders_door_resolved_and_unchanged`.
+    #[cfg(windows)]
     #[test]
     fn a_printed_folder_spelled_with_a_parent_step_folds_before_the_door() {
         let directory = scratch("dots");
@@ -80918,6 +80980,10 @@ mod printed_path_provenance_tests {
     /// Two things a path carries that a command line is where they go wrong: a space, which is why
     /// the argument is quoted at all, and a name outside ASCII, which is where a second encoder
     /// would show up. Neither may change between the file on disk and the argument.
+    ///
+    /// Windows only: `reveal_argument_form` is Explorer's command line. The macOS twin is
+    /// `a_printed_path_reaches_finders_door_resolved_and_unchanged`.
+    #[cfg(windows)]
     #[test]
     fn a_name_with_a_space_and_a_han_character_reaches_the_door_unchanged() {
         let directory = scratch("names");
@@ -80946,6 +81012,54 @@ mod printed_path_provenance_tests {
             argument.matches('"').count() == 2,
             "and the space is inside one quoted run: {argument}"
         );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The macOS twin of the three Explorer-argument tests above (the hand-over door off Windows is
+    /// Finder's, which takes the resolved name itself rather than a command line): **a printed
+    /// path reaches Finder's door resolved, absolute, folded and with its name unchanged.**
+    ///
+    /// The same road, driven end to end with no fixture in it: a real file or folder on disk →
+    /// [`bt_term::verify_path`] → [`verified_target_of`]. Finder's door refuses a name that is not
+    /// absolute, and hands the resolved name to `NSWorkspace` as it is.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_printed_path_reaches_finders_door_resolved_and_unchanged() {
+        let directory = scratch("finder");
+        let name = "project notes 中文.md";
+        let file = directory.join(name);
+        std::fs::write(&file, b"x").expect("a file this test owns");
+        std::fs::create_dir_all(directory.join("src")).expect("a subfolder");
+        std::fs::create_dir_all(directory.join("docs")).expect("another");
+
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
+        assert!(verdict.exists && !verdict.directory);
+        let target = verified_target_of(Some(&verdict));
+        let resolved = target
+            .resolved
+            .clone()
+            .expect("the worker resolved a name that is really there");
+        assert!(resolved.is_absolute(), "{}", resolved.display());
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some(name),
+            "the name came back as it was written"
+        );
+
+        let printed = directory.join("src").join("..").join("docs");
+        let verdict = bt_term::verify_path(&printed, &bt_platform::resolved_for_a_door);
+        assert!(verdict.exists && verdict.directory);
+        let target = verified_target_of(Some(&verdict));
+        assert!(target.is_directory);
+        let resolved = target.resolved.clone().expect("a folder that is there");
+        assert!(resolved.is_absolute(), "{}", resolved.display());
+        assert!(
+            !resolved.components().any(|part| part.as_os_str() == ".."),
+            "the resolved name has no parent step left: {}",
+            resolved.display()
+        );
+        assert!(resolved.ends_with("docs"), "{}", resolved.display());
 
         let _ = std::fs::remove_dir_all(&directory);
     }
