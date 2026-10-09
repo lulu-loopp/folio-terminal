@@ -3079,6 +3079,11 @@ text_entries! {
     /// After *Updated.*, when the update was committed after its trial ended holding a person's
     /// change (`update_job::TrialChanges::NotKept`; 0.4.8 E4); `{detail}` is the detail it follows.
     UpdateCardTrialNotKept,
+    /// The heading after a rollback over a Folio whose changes it did not keep
+    /// (`update_job::Failure::Undone`; 0.4.8 E5).
+    UpdateFailedUndone,
+    /// Its detail; `{version}` is the version whose changes were not kept (0.4.8 E5).
+    UpdateCardUndone,
 }
 
 impl Text {
@@ -5984,6 +5989,16 @@ impl Text {
                 "{detail} Changes made before Folio confirmed the update were not kept.",
                 "{detail}更新确认前所做的更改没有保留。",
             ),
+            Self::UpdateFailedUndone => pick(
+                lang,
+                "The update was undone.",
+                "The update was undone.", // zh: pending E5
+            ),
+            Self::UpdateCardUndone => pick(
+                lang,
+                "Changes made in Folio {version} were not kept.",
+                "Changes made in Folio {version} were not kept.", // zh: pending E5
+            ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
@@ -6163,6 +6178,11 @@ impl Text {
         (Self::RecoveredEditKept, HostPlatform::MacOs),
         (Self::RecoveredEditsKept, HostPlatform::Windows),
         (Self::RecoveredEditsKept, HostPlatform::MacOs),
+        // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
+        (Self::UpdateFailedUndone, HostPlatform::Windows),
+        (Self::UpdateFailedUndone, HostPlatform::MacOs),
+        (Self::UpdateCardUndone, HostPlatform::Windows),
+        (Self::UpdateCardUndone, HostPlatform::MacOs),
     ];
 }
 
@@ -6529,6 +6549,14 @@ pub fn update_failed_journal_held(error: &str) -> String {
     Text::UpdateFailedJournalHeld
         .text()
         .replace("{error}", error)
+}
+
+/// **The line of a rollback that did not keep what a Folio ran over it
+/// changed** — `Changes made in Folio 0.4.9 were not kept.` (0.4.8 E5),
+/// filled from [`Text::UpdateCardUndone`].
+#[must_use]
+pub fn update_card_undone(version: &str) -> String {
+    Text::UpdateCardUndone.text().replace("{version}", version)
 }
 
 /// **A completed update's line when its trial's changes were not kept**

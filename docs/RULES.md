@@ -1262,7 +1262,16 @@ trial, no receipt, no watch and no release, so nothing it changes is written
 and nothing is recorded in the journal; its card says the update is not
 finished and that the changes made in this session are not kept. The rollback a
 later logon or start makes may put back what the new build wrote; nothing of
-the held session is lost to it unannounced. **A journal a build cannot read
+the held session is lost to it unannounced. **A rollback over a Folio whose
+changes it did not keep says so on the restored build** (E5, the owner's ruling
+of 2026-10-08: the overwrite is accepted, with a card): such a start, a trial
+that held a person's change, and a macOS start that could start neither the
+rescue clone nor its own program while it is the transaction's new bundle (it
+writes as always) mark the transaction's folder with their version; the lock
+holder that retires the rollback notes that version in the journal before the
+folder can go, and the restored build's first start says *The update was
+undone.* / *Changes made in Folio {version} were not kept.*, once — a rollback
+whose journal notes nothing keeps its own card. **A journal a build cannot read
 whole** (E1) — a journal file that cannot be read at all included; only one
 that is not there is no journal — is preserved byte for byte, and only the
 rescue build its envelope names settles it: every build reads the header's `txn`, `rescue` and

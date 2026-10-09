@@ -532,6 +532,7 @@ mod tests {
                 }),
                 adapter: Adapter::Ours,
                 marker: None,
+                unkept: None,
             },
         }
         .encode();
@@ -620,6 +621,7 @@ mod tests {
                     }),
                     adapter: Adapter::Ours,
                     marker: None,
+                    unkept: None,
                 },
             }
             .encode();

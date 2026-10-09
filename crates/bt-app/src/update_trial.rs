@@ -694,8 +694,9 @@ enum Read {
 /// no holder can adopt — every holder runs the rescue copy the operating
 /// system refused — so without it a healthy trial would keep nothing. **And
 /// the mark** (0.4.8 E4): after step 1, while a person's change is held and
-/// the transaction undecided, `unkept` is written once (asked again each
-/// turn while the write fails); a commit read takes it back.
+/// the transaction undecided, `unkept` is written once, naming this build's
+/// version (0.4.8 E5: what a rollback's card names), asked again each turn
+/// while the write fails; a commit read takes it back.
 pub(crate) fn watch(
     gate: &Gate,
     (journal, unkept): (&Path, &Path),
@@ -754,7 +755,10 @@ pub(crate) fn watch(
             }
             // The mark that a person's change is held until the commit.
             if gate.owes_unkept_mark() {
-                match bt_platform::install_txn::durable_write(unkept, b"") {
+                match bt_platform::install_txn::durable_write(
+                    unkept,
+                    crate::version::VERSION.as_bytes(),
+                ) {
                     Ok(()) => {
                         gate.unkept_marked();
                         eprintln!(
@@ -1295,6 +1299,7 @@ mod tests {
             body: Body {
                 adapter: crate::update_txn::Adapter::Ours,
                 marker: None,
+                unkept: None,
                 phase,
                 layout: Layout::Members(Inventories {
                     old_shipped: Vec::new(),
@@ -1502,7 +1507,8 @@ mod tests {
     ///
     /// MUTATIONS: `Gate::owes_unkept_mark` answers `false`; the watch never
     /// writes the mark — the ended trial leaves no mark (the clean VM's
-    /// silent loss).
+    /// silent loss); the watch writes an empty mark — it names no version, and
+    /// a rollback's card has none to say (0.4.8 E5).
     #[test]
     fn a_persons_change_held_by_a_trial_is_marked_until_its_commit() {
         assert!(
@@ -1558,6 +1564,14 @@ mod tests {
             assert!(gate.has_marked_unkept(), "{phase:?}: marked while held");
             assert!(!gate.owes_unkept_mark(), "{phase:?}: once");
             assert_eq!(mark.exists(), kept_mark, "{phase:?}");
+            if kept_mark {
+                // The writer's version: what a rollback's card names (0.4.8 E5).
+                assert_eq!(
+                    std::fs::read(&mark).unwrap(),
+                    crate::version::VERSION.as_bytes(),
+                    "{phase:?}"
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(&root);
     }

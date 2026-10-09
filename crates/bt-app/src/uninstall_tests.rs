@@ -3226,6 +3226,7 @@ fn uninstall_removes_the_folder_of_the_trial_its_journal_names() {
             }),
             adapter: Adapter::Ours,
             marker: None,
+            unkept: None,
         },
     }
     .encode();
