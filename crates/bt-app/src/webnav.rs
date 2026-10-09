@@ -1047,18 +1047,81 @@ pub fn scheme_of(input: &str) -> Option<String> {
     split_scheme(input.trim()).map(|(scheme, _)| scheme)
 }
 
-/// The host of an address, for the card that has to say **which name did not
-/// answer** (§7.7 ④'s 「加载失败」 row). `None` when the text carries no
-/// authority at all.
+/// **An address the way the address row may fold it** (T-WEB-PANE-ADDRESS, owner's ruling
+/// 2026-10-09): what goes first when the row is too narrow, cut where the address itself is cut.
 ///
-/// Here and not beside the card, for the reason `scheme_of` is here: this file
-/// already splits an address four ways and a second splitter would be a second
-/// answer about the same string. The port is dropped — a connection failure is
-/// about the name, and the port is on the head in full.
-pub fn host_of(input: &str) -> Option<String> {
-    let (_, rest) = split_scheme(input.trim())?;
-    let (host, _) = split_host_port(authority(rest));
-    (!host.is_empty()).then_some(host)
+/// `scheme` is the text up to and including `//` (`https://`), empty for a local path; `host` is
+/// the authority as written (port kept: it is part of which server) or a local path's root (`C:`,
+/// or empty for `/`); `segments` are the path's parts between `separator`s, the last one carrying
+/// the query and the fragment, because `builder.rs#L1240` is one place in one file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressParts<'a> {
+    pub scheme: &'a str,
+    pub host: &'a str,
+    pub separator: char,
+    pub segments: Vec<&'a str>,
+}
+
+/// [`AddressParts`] of an address as the row prints it — a URL with an authority, or the local
+/// path [`local_path_form`] prints for a page on this disk. `None` for anything else (an
+/// `about:` or `mailto:` address has no host to keep and no path to fold), which the row cuts at
+/// its end.
+///
+/// Read with this file's own [`split_scheme`], so the row and the door agree about where the
+/// scheme of a string ends.
+#[must_use]
+pub fn address_parts(shown: &str) -> Option<AddressParts<'_>> {
+    if let Some((_, rest)) = split_scheme(shown)
+        && let Some(after) = rest.strip_prefix("//")
+    {
+        let scheme = &shown[..shown.len() - after.len()];
+        let host_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        let host = &after[..host_end];
+        let path = after[host_end..]
+            .strip_prefix('/')
+            .unwrap_or(&after[host_end..]);
+        return Some(AddressParts {
+            scheme,
+            host,
+            separator: '/',
+            segments: segments_of(path, '/'),
+        });
+    }
+    let bytes = shown.as_bytes();
+    let (host_end, separator) = if shown.starts_with('/') {
+        (0, '/')
+    } else if bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\'
+    {
+        (2, '\\')
+    } else {
+        return None;
+    };
+    Some(AddressParts {
+        scheme: "",
+        host: &shown[..host_end],
+        separator,
+        segments: segments_of(&shown[host_end + 1..], separator),
+    })
+}
+
+/// A path's parts between `separator`s, the query and fragment riding on the last one.
+fn segments_of(path: &str, separator: char) -> Vec<&str> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let path_end = path.find(['?', '#']).unwrap_or(path.len());
+    let last_start = path[..path_end]
+        .rfind(separator)
+        .map_or(0, |at| at + separator.len_utf8());
+    // Everything before the last segment, split: the empty piece after its final separator is
+    // where the last segment begins, and that one is taken whole, tail and all.
+    let mut segments: Vec<&str> = path[..last_start].split(separator).collect();
+    segments.pop();
+    segments.push(&path[last_start..]);
+    segments
 }
 
 /// The schemes this door has an opinion about **by name**, and what that
