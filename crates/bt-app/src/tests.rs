@@ -199,6 +199,11 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
 /// MUTATION: build the share's request as an address in `unverified_reference_handoff`
 /// (`Handoff::Address`, `shell_execute` — the door without the list) and the request below is not
 /// `Open`.
+///
+/// Windows only: a share on another machine is a spelling only Windows' grammar has
+/// (`bt_transcript::paths::is_a_share_on_another_machine`). On macOS a share is a mount point with
+/// a local name, so it leaves through the local file's arm and meets the program list there.
+#[cfg(windows)]
 #[test]
 fn a_share_handed_over_meets_the_same_program_list() {
     let HyperlinkActivation::Share(path) = hyperlink_activation(

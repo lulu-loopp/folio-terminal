@@ -4670,6 +4670,7 @@ mod keyboard_tests {
     /// Bare `Alt`. Named here and not beside the table above because no code
     /// path in this window reaches it — the point of the row below is precisely
     /// that this key is the page's.
+    #[cfg(windows)]
     const VK_MENU: u16 = 0x12;
 
     /// Every chord the shipped table carries, spelled the way a person presses
@@ -4810,6 +4811,10 @@ mod keyboard_tests {
     /// MUTATION: pass `Shortcuts::defaults()` to `WebSeat::set_claims` instead
     /// of the runtime's table — this goes red on both halves at once, and on the
     /// real window `Ctrl+Shift+Y` would open a tab everywhere except over a page.
+    ///
+    /// Windows only, like every claim test below that names a key by its Win32
+    /// number: see `every_shipped_chord_resolves_to_a_virtual_key_on_this_layout`.
+    #[cfg(windows)]
     #[test]
     fn the_claims_follow_a_rebound_chord_rather_than_the_one_this_build_ships() {
         let mut table = Shortcuts::defaults();
@@ -4853,10 +4858,19 @@ mod keyboard_tests {
     /// Five since ticket 37: the three text-size rows are [`Scope::Terminal`]'s, and a page
     /// holding the keyboard is not a terminal holding it, so a page keeps `Ctrl+=`, `Ctrl+-`
     /// and `Ctrl+0` for its own zoom.
+    #[cfg(windows)]
     const KEPT_BY_A_PAGE: usize = 5;
 
     /// RED — and every one of them reaches a virtual key, because
     /// `AcceleratorKeyPressed` speaks Win32 and nothing else.
+    ///
+    /// Windows only: a character's virtual key is the installed Windows layout's
+    /// answer (`VkKeyScanW`), and the claim list is WebView2's vocabulary. A
+    /// `WKWebView` has no accelerator callback — the window's own key handling
+    /// sees a Command chord before the page does, and the macOS host keeps the
+    /// list without reading it (`bt_platform::macos_webview`'s `Shared::chords`);
+    /// that order is what `bt-platform/tests/macos_menu_bar.rs` drives.
+    #[cfg(windows)]
     #[test]
     fn every_shipped_chord_resolves_to_a_virtual_key_on_this_layout() {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
@@ -4898,6 +4912,9 @@ mod keyboard_tests {
 
     /// RED — the other half of the matrix (`w0p-evidence.md` §2.2): the keys the
     /// page needs are the keys this window does not claim.
+    ///
+    /// Windows only, for the reason above.
+    #[cfg(windows)]
     #[test]
     fn the_page_keeps_every_key_the_window_does_not_claim() {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
@@ -4970,6 +4987,9 @@ mod keyboard_tests {
     ///
     /// MUTATION: put `open-search` back on `Scope::TerminalPrimary` and this
     /// goes red, which is the second host losing its capsule.
+    ///
+    /// Windows only: the claim is spelled in Win32 virtual keys, as above.
+    #[cfg(windows)]
     #[test]
     fn the_page_gives_the_search_chord_back_to_the_window() {
         let on_a_page = Focus {
@@ -4995,6 +5015,9 @@ mod keyboard_tests {
 
     /// RED — a row out of scope is not claimed, because a key the window will
     /// not act on must not be taken away from the page.
+    ///
+    /// Windows only: the claim is spelled in Win32 virtual keys, as above.
+    #[cfg(windows)]
     #[test]
     fn a_row_out_of_scope_is_left_to_the_page() {
         let nothing_focused = Focus::default();
@@ -5132,17 +5155,17 @@ mod keyboard_tests {
 #[cfg(test)]
 mod folder_tests {
     use super::*;
-    use std::path::Path;
 
     /// RED — `%LOCALAPPDATA%`, never `%APPDATA%`: the folder holds a cache, a
     /// cookie jar and a crash-dump directory, none of which may roam
     /// (`plan.md` §0).
     #[test]
     fn the_user_data_folder_is_the_products_own_under_local_appdata() {
-        let folder = user_data_folder_in(Path::new(r"C:\Users\x\AppData\Local"));
+        let host_path = crate::test_support::host_path;
+        let folder = user_data_folder_in(&host_path(r"C:\Users\x\AppData\Local"));
         assert_eq!(
             folder,
-            Path::new(r"C:\Users\x\AppData\Local\Folio\WebView2")
+            host_path(r"C:\Users\x\AppData\Local\Folio\WebView2")
         );
     }
 
@@ -5159,23 +5182,33 @@ mod folder_tests {
     #[test]
     fn each_machine_names_the_folder_its_own_engine_is_given() {
         use bt_platform::HostPlatform;
-        let env = |pairs: Vec<(&'static str, &'static str)>| {
+        let env = |pairs: Vec<(&'static str, String)>| {
             move |name: &str| {
                 pairs
                     .iter()
                     .find(|(key, _)| *key == name)
-                    .map(|(_, value)| std::ffi::OsString::from(*value))
+                    .map(|(_, value)| std::ffi::OsString::from(value))
             }
         };
+        // The Windows row's folder is joined the way this machine joins one, so
+        // its `LOCALAPPDATA` is spelled the way this machine spells a folder.
+        let host_path = crate::test_support::host_path;
+        let local_appdata = host_path(r"C:\Users\x\AppData\Local");
         assert_eq!(
             web_engine_folder(
                 HostPlatform::Windows,
-                env(vec![("LOCALAPPDATA", r"C:\Users\x\AppData\Local")]),
+                env(vec![(
+                    "LOCALAPPDATA",
+                    local_appdata.to_string_lossy().into_owned()
+                )]),
             ),
-            Some(PathBuf::from(r"C:\Users\x\AppData\Local\Folio\WebView2"))
+            Some(host_path(r"C:\Users\x\AppData\Local\Folio\WebView2"))
         );
         assert_eq!(
-            web_engine_folder(HostPlatform::MacOs, env(vec![("HOME", "/Users/x")])),
+            web_engine_folder(
+                HostPlatform::MacOs,
+                env(vec![("HOME", "/Users/x".to_owned())])
+            ),
             Some(PathBuf::from(
                 "/Users/x/Library/Application Support/Folio/WebKit"
             ))
@@ -5183,14 +5216,17 @@ mod folder_tests {
         // No engine, so no folder — and the seat's refusal then names the
         // platform rather than a variable somebody could go and set.
         assert_eq!(
-            web_engine_folder(HostPlatform::OtherUnix, env(vec![("HOME", "/home/x")])),
+            web_engine_folder(
+                HostPlatform::OtherUnix,
+                env(vec![("HOME", "/home/x".to_owned())])
+            ),
             None
         );
         // An unset or empty variable is the same answer on both machines that
         // have an engine: there is nowhere to put it.
         assert_eq!(web_engine_folder(HostPlatform::Windows, env(vec![])), None);
         assert_eq!(
-            web_engine_folder(HostPlatform::MacOs, env(vec![("HOME", "")])),
+            web_engine_folder(HostPlatform::MacOs, env(vec![("HOME", String::new())])),
             None
         );
     }
@@ -5389,9 +5425,19 @@ mod rehost_address_tests {
             "and says so on a card of its own: {:?}",
             seat.fault
         );
+        // Each engine's gates by their own names: WebView2's three events, and
+        // the WebKit delegate methods and content rule list that stand for them.
+        let gates = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => {
+                "ScriptDialogOpening, FrameNavigationStarting, WebResourceRequested"
+            }
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+                "WKUIDelegate runJavaScript…Panel, decidePolicyForNavigationAction:, WKContentRuleList"
+            }
+        };
         assert_eq!(
             seat.fault.as_ref().and_then(WebFault::detail),
-            Some("ScriptDialogOpening, FrameNavigationStarting, WebResourceRequested"),
+            Some(gates),
             "naming the gates, because that is the fact a reader can act on"
         );
 
@@ -6485,12 +6531,20 @@ mod search_tests {
     #[test]
     fn the_path_this_window_seeds_is_not_red_while_it_is_being_typed() {
         let engine = SearchEngineV1::DuckDuckGo;
+        // The draft is this machine's own spelling of the page's path.
+        let seeded = crate::test_support::host_spelling;
         assert!(WebSeat::would_go_to(
-            r"D:\Developer\folio-pdf-test.pdf",
+            &seeded(r"D:\Developer\folio-pdf-test.pdf"),
             engine
         ));
-        assert!(WebSeat::would_go_to(r"C:\Users\me\report.html", engine));
-        assert!(WebSeat::would_go_to(r"D:\a folder\notes#1.html", engine));
+        assert!(WebSeat::would_go_to(
+            &seeded(r"C:\Users\me\report.html"),
+            engine
+        ));
+        assert!(WebSeat::would_go_to(
+            &seeded(r"D:\a folder\notes#1.html"),
+            engine
+        ));
         // And nothing was loosened: rubbish is still rubbish, and a `file:`
         // *string* is still somebody else's string.
         assert!(!WebSeat::would_go_to("javascript:alert(1)", engine));
@@ -6514,11 +6568,15 @@ mod search_tests {
     fn the_field_and_the_commit_read_one_judgement() {
         let engine = SearchEngineV1::DuckDuckGo;
         let judged = |input: &str| judge_address(input, engine);
+        // A path typed into the field, in this machine's own spelling.
+        let host_path = crate::test_support::host_path;
+        let report = host_path(r"D:\Developer\report.html");
+        let notes = host_path(r"D:\Developer\notes.md");
 
         assert_eq!(judged("  "), AddressVerdict::Draft);
         assert_eq!(
-            judged(r"D:\Developer\report.html"),
-            AddressVerdict::LocalPage(PathBuf::from(r"D:\Developer\report.html"))
+            judged(&report.to_string_lossy()),
+            AddressVerdict::LocalPage(report.clone())
         );
         assert_eq!(
             judged("https://example.com/x?y=1"),
@@ -6533,7 +6591,7 @@ mod search_tests {
         // engine lane is `path_names_a_page`'s answer everywhere else in this
         // window, and a second answer here would be a `.md` that opens as a page
         // from the address row and as text from every other door.
-        assert_eq!(judged(r"D:\Developer\notes.md"), AddressVerdict::Refuse);
+        assert_eq!(judged(&notes.to_string_lossy()), AddressVerdict::Refuse);
         // A network path never becomes a local page: it is refused at the mint,
         // which is where this product has always refused one.
         assert!(
@@ -7449,6 +7507,12 @@ mod favicon_tests {
     /// MUTATION: file the answer under `webnav::site_key(&self.page.url)` read at
     /// delivery instead of the recorded site, and the last assertion says
     /// `https://second.test` — one server's drawing under another's name.
+    ///
+    /// Windows only, like the next one: the ask is WebView2's `GetFavicon`. A
+    /// `WKWebView` names no icon to its host, so on macOS the ask is refused
+    /// and nothing is in flight —
+    /// `an_engine_that_names_no_icon_leaves_nothing_in_flight`.
+    #[cfg(windows)]
     #[test]
     fn an_answer_is_filed_under_the_site_that_was_asked_about() {
         let mut web = seat_on("https://first.test/a");
@@ -7520,6 +7584,10 @@ mod favicon_tests {
     /// announcement overwrites the first flight's site, so the first answer is
     /// filed under the wrong name. MUTATION: drop `favicon_changed_again` and
     /// the placeholder stays up for good.
+    ///
+    /// Windows only: a flight is a `GetFavicon` in progress, which only WebView2
+    /// makes.
+    #[cfg(windows)]
     #[test]
     fn a_second_announcement_during_a_flight_is_one_more_ask_and_not_two() {
         let mut web = seat_on("https://first.test/a");
@@ -7557,6 +7625,37 @@ mod favicon_tests {
             !web.favicon_changed_again,
             "and it is owed once, however many times it was announced"
         );
+    }
+
+    /// **Red gate: an engine that names no icon leaves nothing in flight, and
+    /// says nothing.**
+    ///
+    /// The macOS twin of the two above. A `WKWebView` does not tell its host what
+    /// icon a page wears, so the host refuses the ask — and a refused ask is
+    /// rule ④'s: silent, and recorded nowhere, so the site goes on wearing the
+    /// globe and no later announcement waits behind a flight that never left.
+    ///
+    /// MUTATION: record the site before asking in `ask_for_the_favicon` and
+    /// `fetching_favicon` is `Some` for ever, with every later announcement
+    /// queued behind it.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_engine_that_names_no_icon_leaves_nothing_in_flight() {
+        let mut web = seat_on("https://first.test/a");
+        for uri in ["https://first.test/one.png", "https://first.test/two.png"] {
+            assert!(
+                digest(
+                    &mut web,
+                    bt_platform::WebEvent::FaviconChanged {
+                        uri: uri.to_owned(),
+                    },
+                )
+                .is_empty(),
+                "a refused ask is not reported"
+            );
+            assert_eq!(web.fetching_favicon, None, "and nothing is in flight");
+            assert!(!web.favicon_changed_again, "so nothing is owed either");
+        }
     }
 
     /// **Red gate: a seat that cannot name its own site asks for nothing.**

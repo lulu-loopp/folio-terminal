@@ -4,6 +4,7 @@
 //! from [`crate::test_support`].
 
 use super::*;
+use crate::test_support::host_path;
 use winit::keyboard::{Key, NamedKey};
 
 /// V14 — the graph's six keys, and only those six.
@@ -316,9 +317,9 @@ fn a_composition_is_drawn_at_the_caret_in_a_prose_block() {
 fn a_command_and_a_focus_re_read_only_the_repositories_on_screen() {
     let page = SeatId(1);
     let tree = SeatId(2);
-    let repo = PathBuf::from(r"D:\repo");
-    let other = PathBuf::from(r"D:\other");
-    let graph = PathBuf::from(r"D:\repo");
+    let repo = host_path(r"D:\repo");
+    let other = host_path(r"D:\other");
+    let graph = host_path(r"D:\repo");
     let surfaces = vec![
         (GitOrigin::Column(page), repo.clone(), true),
         // Same tab, same window, on its Files page: available, not showing.
@@ -344,7 +345,7 @@ fn a_command_and_a_focus_re_read_only_the_repositories_on_screen() {
         git_surfaces_wanting_reread(
             true,
             &surfaces,
-            Some(&[PathBuf::from(r"D:\repo\crates\bt-app")])
+            Some(&[host_path(r"D:\repo\crates\bt-app")])
         ),
         vec![GitOrigin::Column(page), GitOrigin::Graph(graph)],
         "a subdirectory of the root is inside the root"
@@ -357,7 +358,7 @@ fn a_command_and_a_focus_re_read_only_the_repositories_on_screen() {
              another repository"
     );
     assert_eq!(
-        git_surfaces_wanting_reread(true, &surfaces, Some(&[PathBuf::from(r"D:\repository")])),
+        git_surfaces_wanting_reread(true, &surfaces, Some(&[host_path(r"D:\repository")])),
         Vec::new(),
         "and the folder next door whose name merely starts the same way is \
              not inside it"

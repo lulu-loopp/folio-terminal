@@ -6,9 +6,9 @@
 use super::*;
 use crate::test_support::{
     A, TAB_ONE, buffer_read_from, calls_of, cross_seats, cross_solve, dir_entry, disk_scratch,
-    files_column, found, in_product, leaf_saying, listed, method_body, move_the_disk_forward,
-    pane_rects_of, saved_files_and_terminal, saved_row_of_two, seat_of, tab_with_a_files_column,
-    tab_with_a_preview,
+    files_column, found, host_path, host_spelling, in_product, leaf_saying, listed, method_body,
+    move_the_disk_forward, pane_rects_of, saved_files_and_terminal, saved_row_of_two, seat_of,
+    tab_with_a_files_column, tab_with_a_preview,
 };
 use bt_source::{Pattern, View, needle};
 use std::time::Duration;
@@ -123,29 +123,26 @@ fn the_ring_never_outlives_its_column_and_a_key_that_arrives_brings_one() {
 /// matching the ones `child_key` mints.
 #[test]
 fn a_directory_under_a_column_resolves_to_the_key_the_tree_walks_by() {
-    let root = r"C:\work";
+    let root = &host_spelling(r"C:\work");
     assert_eq!(
-        files_key_under(root, std::path::Path::new(r"C:\work")),
+        files_key_under(root, host_path(r"C:\work").as_path()),
         Some(String::new()),
         "the root itself is the empty key"
     );
     assert_eq!(
-        files_key_under(root, std::path::Path::new(r"C:\work\src\ui")),
+        files_key_under(root, host_path(r"C:\work\src\ui").as_path()),
         Some("/src/ui".to_owned())
     );
     assert_eq!(
-        files_key_under(root, std::path::Path::new(r"C:\elsewhere\src")),
+        files_key_under(root, host_path(r"C:\elsewhere\src").as_path()),
         None,
         "a column rooted somewhere else is not showing this folder"
     );
     // And the key it mints resolves back to the path it came from, which is
     // the round trip the refresh actually needs.
-    let key = files_key_under(root, std::path::Path::new(r"C:\work\src\ui"))
+    let key = files_key_under(root, host_path(r"C:\work\src\ui").as_path())
         .expect("the folder is under the root");
-    assert_eq!(
-        files::full_path(root, &key),
-        std::path::PathBuf::from(r"C:\work\src\ui")
-    );
+    assert_eq!(files::full_path(root, &key), host_path(r"C:\work\src\ui"));
 }
 
 /// PIN (D4 of the 2026-09-11 adversarial review) — **a press that ends a
@@ -776,29 +773,29 @@ fn every_file_opens_in_the_preview_and_a_rootless_column_opens_nothing() {
 /// away.
 #[test]
 fn a_folder_is_inside_a_tree_by_whole_components_and_the_root_is_inside_itself() {
-    let root = r"D:\dev";
+    let root = &host_spelling(r"D:\dev");
     assert_eq!(
-        files_key_within(root, Path::new(r"D:\dev")),
+        files_key_within(root, host_path(r"D:\dev").as_path()),
         Some(String::new())
     );
     assert_eq!(
-        files_key_within(root, Path::new(r"D:\dev\crates\bt-app")),
+        files_key_within(root, host_path(r"D:\dev\crates\bt-app").as_path()),
         Some("/crates/bt-app".to_owned()),
         "and the id is the one `files::full_path` would spend to get back"
     );
     assert_eq!(
         files::full_path(root, "/crates/bt-app"),
-        PathBuf::from(r"D:\dev\crates\bt-app"),
+        host_path(r"D:\dev\crates\bt-app"),
         "which is the round trip that makes the id worth minting"
     );
     assert_eq!(
-        files_key_within(root, Path::new(r"D:\development\crates")),
+        files_key_within(root, host_path(r"D:\development\crates").as_path()),
         None,
         "a sibling whose name begins with the root's is not inside it"
     );
-    assert_eq!(files_key_within(root, Path::new(r"D:\")), None);
+    assert_eq!(files_key_within(root, host_path(r"D:\").as_path()), None);
     assert_eq!(
-        files_key_within("", Path::new(r"D:\dev")),
+        files_key_within("", host_path(r"D:\dev").as_path()),
         None,
         "a column with no root contains nothing"
     );
@@ -1102,52 +1099,37 @@ fn two_presses_on_one_file_row_are_an_opening_and_a_folder_press_is_never_half_o
 /// row's own second press is untouched beside it.
 #[test]
 fn a_second_press_on_a_folder_row_is_the_way_in_and_a_file_row_moves_no_root() {
+    let root = &host_spelling(r"D:\work");
+    let ui = host_spelling(r"D:\work\src\ui");
     // A folder row names the place it would stand the column at, which is
     // the folder itself and not its parent.
     assert_eq!(
-        files_row_entry(
-            r"D:\work",
-            "/src/ui",
-            files::RowKind::Directory { open: false }
-        )
-        .as_deref(),
-        Some(r"D:\work\src\ui")
+        files_row_entry(root, "/src/ui", files::RowKind::Directory { open: false }).as_deref(),
+        Some(ui.as_str())
     );
     // Already unfolded is the same folder: which way its triangle points is
     // not a fact about where it is.
     assert_eq!(
-        files_row_entry(
-            r"D:\work",
-            "/src/ui",
-            files::RowKind::Directory { open: true }
-        )
-        .as_deref(),
-        Some(r"D:\work\src\ui")
+        files_row_entry(root, "/src/ui", files::RowKind::Directory { open: true }).as_deref(),
+        Some(ui.as_str())
     );
 
     // A file row goes nowhere near the root — its second press is K156's
     // opening and stays that.
     assert_eq!(
-        files_row_entry(r"D:\work", "/notes.md", files::RowKind::File),
+        files_row_entry(root, "/notes.md", files::RowKind::File),
         None
     );
     assert!(matches!(
-        files_row_activation(r"D:\work", "/notes.md"),
+        files_row_activation(root, "/notes.md"),
         RowActivation::Preview(_)
     ));
 
     // A folder that resolves to one of its own ancestors is not a way in:
     // entering it is standing where you already stand.
+    assert_eq!(files_row_entry(root, "/link", files::RowKind::Cycle), None);
     assert_eq!(
-        files_row_entry(r"D:\work", "/link", files::RowKind::Cycle),
-        None
-    );
-    assert_eq!(
-        files_row_entry(
-            r"D:\work",
-            "",
-            files::RowKind::Notice(files::RowNotice::Empty)
-        ),
+        files_row_entry(root, "", files::RowKind::Notice(files::RowNotice::Empty)),
         None
     );
 
@@ -1160,7 +1142,7 @@ fn a_second_press_on_a_folder_row_is_the_way_in_and_a_file_row_moves_no_root() {
 
     // And the way in lands: the door it is handed to is the root menu's.
     let mut state = seats::FilesLeafState {
-        root: r"D:\work".to_owned(),
+        root: root.clone(),
         ..seats::FilesLeafState::default()
     };
     state.open.insert("/src".to_owned());
@@ -1171,7 +1153,7 @@ fn a_second_press_on_a_folder_row_is_the_way_in_and_a_file_row_moves_no_root() {
     )
     .expect("a folder row is a way in");
     assert!(reroot_files_state(&mut state, &entered));
-    assert_eq!(state.root, r"D:\work\src\ui");
+    assert_eq!(state.root, ui);
 }
 
 /// PIN — E56. Re-rooting keeps the width and drops everything that was

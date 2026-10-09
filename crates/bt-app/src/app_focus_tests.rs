@@ -6,8 +6,8 @@
 use super::*;
 use crate::test_support::{
     THREE_LINES, a_local_file, a_local_folder, card_restore_first, card_restore_fixture,
-    card_restore_resize, card_restore_settle, card_restore_widen, paste_leaf, paste_tab,
-    paste_text_into, squeezed_body,
+    card_restore_resize, card_restore_settle, card_restore_widen, host_file_uri, host_path,
+    paste_leaf, paste_tab, paste_text_into, squeezed_body,
 };
 use std::time::Duration;
 use winit::keyboard::{Key, NamedKey};
@@ -50,17 +50,17 @@ fn a_reference_in_the_output_raises_the_card_the_files_column_raises() {
     // three by construction.
     assert_eq!(
         reference_card(
-            "file:///C:/Developer/notes.md",
+            &host_file_uri(r"C:\Developer\notes.md"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &file
         ),
-        Some(ReferenceCard::File(PathBuf::from(r"C:\Developer\notes.md")))
+        Some(ReferenceCard::File(host_path(r"C:\Developer\notes.md")))
     );
     // And every class the card has a body for arrives down that same arm —
     // which is the point: the lane is chosen from the *path*, by the one
     // reader ([`peek_body_kind`]) both hosts go through, and never here.
     for name in ["report.pdf", "page.html", "shot.png", "clip.mp4", "a.bin"] {
-        let uri = format!("file:///C:/Developer/{name}");
+        let uri = host_file_uri(&format!(r"C:\Developer\{name}"));
         assert!(
             matches!(
                 reference_card(&uri, bt_transcript::paths::PathNamer::ThisWindow, &file),
@@ -74,15 +74,15 @@ fn a_reference_in_the_output_raises_the_card_the_files_column_raises() {
     // question is asked before the page question and was settled first.
     assert_eq!(
         reference_card(
-            "file:///C:/Developer/src",
+            &host_file_uri(r"C:\Developer\src"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &folder
         ),
-        Some(ReferenceCard::Folder(PathBuf::from(r"C:\Developer\src")))
+        Some(ReferenceCard::Folder(host_path(r"C:\Developer\src")))
     );
     assert!(matches!(
         reference_card(
-            "file:///C:/Developer/site.html",
+            &host_file_uri(r"C:\Developer\site.html"),
             bt_transcript::paths::PathNamer::ThisWindow,
             &folder
         ),
@@ -92,16 +92,23 @@ fn a_reference_in_the_output_raises_the_card_the_files_column_raises() {
     // A share is a file to this door, and the card it raises prints §7.1.3's
     // refusal — the preview's judgement borrowed, exactly as the files
     // column borrows it. The disk is never asked: `is_directory` would stall
-    // the loop on a cold server, and the arm above it returns first.
+    // the loop on a cold server, and the arm above it returns first. Off
+    // Windows a `file:` URI naming another host names no path on this
+    // machine, so it raises no card — and asks the disk no more than the
+    // share does.
+    let share_card = match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => Some(ReferenceCard::File(PathBuf::from(
+            r"\\server\share\notes.md",
+        ))),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => None,
+    };
     assert_eq!(
         reference_card(
             "file://server/share/notes.md",
             bt_transcript::paths::PathNamer::ThisWindow,
             &|_| { panic!("a share is answered without touching the network") }
         ),
-        Some(ReferenceCard::File(PathBuf::from(
-            r"\\server\share\notes.md"
-        )))
+        share_card
     );
 
     // **And nothing at all for what this window has no card of.** A remote

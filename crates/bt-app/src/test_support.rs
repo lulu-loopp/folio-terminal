@@ -41,6 +41,74 @@ use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, n
 use std::time::Duration;
 use winit::keyboard::Key;
 
+// ── a fixture's path, in the spelling of the platform the test runs on (H1)
+//
+// A test that is not limited to one platform asserts a fact of every platform
+// (`docs/CONVENTIONS.md`). Its absolute fixtures are written once, in their
+// Windows spelling, and these spell them the way this platform does; an
+// expected value is built through the same helper from the same fixture.
+
+/// **A Windows-spelled absolute fixture, spelled the way this platform spells
+/// one.**
+///
+/// On Windows the fixture is the path, byte for byte. Everywhere else a drive
+/// letter is no root and `\` is no separator — `D:\proj\README.md` is one
+/// relative file name there — so the same names stand under `/`:
+/// `/proj/README.md`, and `D:\` is `/`.
+pub(crate) fn host_spelling(windows: &str) -> String {
+    match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => windows.to_owned(),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+            let bytes = windows.as_bytes();
+            let below_drive =
+                if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                    &windows[2..]
+                } else {
+                    windows
+                };
+            below_drive.replace('\\', "/")
+        }
+    }
+}
+
+/// [`host_spelling`] as a path.
+pub(crate) fn host_path(windows: &str) -> PathBuf {
+    PathBuf::from(host_spelling(windows))
+}
+
+/// The `file:` URI a shell on this platform prints for [`host_spelling`]'s
+/// path, names written as they are (no escaping) with `/` between them:
+/// `file:///D:/proj/README.md` on Windows, `file:///proj/README.md` elsewhere.
+pub(crate) fn host_file_uri(windows: &str) -> String {
+    let path = host_spelling(windows).replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+/// The path part of [`host_file_uri`]'s URI, the scheme and its `//` left out:
+/// `/D:/proj/README.md` on Windows, `/proj/README.md` elsewhere.
+pub(crate) fn host_uri_path(windows: &str) -> String {
+    let path = host_spelling(windows).replace('\\', "/");
+    if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    }
+}
+
+/// The value a test expects on this platform, for the few facts whose answer is
+/// the platform's own: `windows` on Windows, `elsewhere` on a Mac and on any
+/// other Unix. It chooses an expected value, never an assertion.
+pub(crate) fn on_this_host<T>(windows: T, elsewhere: T) -> T {
+    match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => windows,
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => elsewhere,
+    }
+}
+
 /// **This crate, indexed once per process** — the workspace read, this
 /// package's own `src/` declared as the universe and lowered, on the first ask
 /// of the process, behind one call.
@@ -1740,7 +1808,7 @@ pub(crate) fn resolve_sharpening_page(
     let blocks = preview::parse_markdown(SHARPEN_SOURCE);
     resolve_document_pictures(
         &blocks,
-        Some(Path::new(SHARPEN_DOCUMENT)),
+        Some(&host_path(SHARPEN_DOCUMENT)),
         bt_render::Theme::Dark,
         PictureReach::from_the_top(),
         standing,
@@ -1779,7 +1847,7 @@ pub(crate) struct Sharpening {
 }
 
 pub(crate) fn a_page_that_wants_a_sharper_picture() -> Sharpening {
-    let file = PathBuf::from(r"D:\proj\shots/one.png");
+    let file = host_path(r"D:\proj\shots/one.png");
     let mut standing = DocumentPictures::default();
     standing.by_source.insert(
         "shots/one.png".to_owned(),
