@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -55,13 +55,52 @@ pub(crate) struct ShellSpec {
     pub(crate) profile_environment: Vec<(OsString, OsString)>,
     pub(crate) size: PtySize,
     pub(crate) working_directory: Option<PathBuf>,
+    /// The carried folder this birth asks the disk about first, and the command line and working
+    /// directory it starts with instead when that folder is not a directory now (G-SWEEP-048,
+    /// #29; `profiles::BirthPlace`).
+    pub(crate) unless_gone: Option<GoneSpec>,
 }
 
-/// **The shell's pseudoconsole and process, made on the `bt-pty-birth` worker**: the PowerShell
-/// load composed (naming the script prepares it), the current account's environment read and the
-/// declarations derived from it, then `bt-pty`'s spawn — the folder's existence check, the
-/// pseudoconsole, the process, and the one-shot retry to the last-resort shell.
-fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Result<PtySession, PtyError> {
+/// [`ShellSpec::unless_gone`].
+pub(crate) struct GoneSpec {
+    pub(crate) folder: PathBuf,
+    pub(crate) arguments: Vec<OsString>,
+    pub(crate) working_directory: Option<PathBuf>,
+}
+
+/// **What a shell's birth answers**: the session, or why there is none, and whether the folder
+/// the pane carried was found gone — the pane then stands where no folder would have put it.
+pub(crate) struct Born {
+    pub(crate) session: Result<PtySession, PtyError>,
+    pub(crate) folder_gone: bool,
+}
+
+impl From<Result<PtySession, PtyError>> for Born {
+    fn from(session: Result<PtySession, PtyError>) -> Self {
+        Self {
+            session,
+            folder_gone: false,
+        }
+    }
+}
+
+/// **Whether the carried folder still stands, asked here, on the birth worker** (G-SWEEP-048,
+/// #29): `None` when it does (or nothing needs asking), the place to start in instead when
+/// `is_dir` says it is not a directory. On an offline network share `is_dir` waits out the
+/// redirector's timeout; this worker waits it, and the pane waits in birth.
+pub(crate) fn gone_place(
+    unless_gone: Option<GoneSpec>,
+    is_dir: &dyn Fn(&Path) -> bool,
+) -> Option<GoneSpec> {
+    unless_gone.filter(|gone| !is_dir(&gone.folder))
+}
+
+/// **The shell's pseudoconsole and process, made on the `bt-pty-birth` worker**: the carried
+/// folder asked about ([`gone_place`]), the PowerShell load composed (naming the script prepares
+/// it), the current account's environment read and the declarations derived from it, then
+/// `bt-pty`'s spawn — the folder's existence check, the pseudoconsole, the process, and the
+/// one-shot retry to the last-resort shell.
+fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Born {
     let ShellSpec {
         program,
         arguments,
@@ -71,7 +110,14 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Result<PtySession
         profile_environment,
         size,
         working_directory,
+        unless_gone,
     } = spec;
+    let gone = gone_place(unless_gone, &Path::is_dir);
+    let folder_gone = gone.is_some();
+    let (arguments, working_directory) = match gone {
+        Some(gone) => (gone.arguments, gone.working_directory),
+        None => (arguments, working_directory),
+    };
     let args = shell_integration::compose_powershell_birth(
         std::path::Path::new(&program),
         &arguments,
@@ -96,7 +142,7 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Result<PtySession
         &mut folio_environment,
         &profile_environment,
     );
-    match refresh {
+    let session = match refresh {
         Some(refresh) => PtySession::spawn_refreshed(
             program,
             &args,
@@ -120,6 +166,10 @@ fn bear(ctx: &WorkerCtx, spec: ShellSpec, wake: OutputWake) -> Result<PtySession
             wake,
             working_directory,
         ),
+    };
+    Born {
+        session,
+        folder_gone,
     }
 }
 
@@ -138,7 +188,7 @@ pub(crate) fn request_shell(spec: ShellSpec, wake: OutputWake) -> Result<ShellBi
 /// across a birth.
 struct Births {
     last: u64,
-    answers: BTreeMap<u64, Result<PtySession, PtyError>>,
+    answers: BTreeMap<u64, Born>,
     abandoned: BTreeSet<u64>,
 }
 
@@ -170,15 +220,15 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 }
 
 /// A session nobody will take, taken apart on a thread of its own (`bt_pty::retire_session`).
-fn retire(answer: Result<PtySession, PtyError>) {
-    if let Ok(session) = answer {
+fn retire(answer: Born) {
+    if let Ok(session) = answer.session {
         bt_pty::retire_session(session);
     }
 }
 
 /// [`request_shell`] with the birth handed in — the seam a test holds a birth at a gate through.
-pub(crate) fn request(
-    birth: impl FnOnce(&WorkerCtx) -> Result<PtySession, PtyError> + Send + 'static,
+pub(crate) fn request<A: Into<Born>>(
+    birth: impl FnOnce(&WorkerCtx) -> A + Send + 'static,
     wake: OutputWake,
 ) -> Result<ShellBirth, PtyError> {
     let generation = {
@@ -196,13 +246,14 @@ pub(crate) fn request(
         move |ctx| {
             // **A birth that panics is a birth that failed** (round 2): an unwinding worker would
             // publish nothing and wake nobody, and its pane would wait in birth for ever.
-            let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| birth(ctx)))
-                .unwrap_or_else(|panic| {
-                    Err(PtyError::Backend(format!(
-                        "the PTY birth worker panicked: {}",
-                        panic_message(panic.as_ref())
-                    )))
-                });
+            let answer =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| birth(ctx).into()))
+                    .unwrap_or_else(|panic| {
+                        Born::from(Err(PtyError::Backend(format!(
+                            "the PTY birth worker panicked: {}",
+                            panic_message(panic.as_ref())
+                        ))))
+                    });
             let stale = {
                 let mut births = births();
                 if births.abandoned.remove(&generation) {
@@ -244,7 +295,7 @@ impl ShellBirth {
     }
 
     /// The answer, once [`Self::answered`]; `None` before, and after it was taken.
-    pub(crate) fn take(&mut self) -> Option<Result<PtySession, PtyError>> {
+    pub(crate) fn take(&mut self) -> Option<Born> {
         if self.settled {
             return None;
         }

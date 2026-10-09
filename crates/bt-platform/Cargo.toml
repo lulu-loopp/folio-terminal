@@ -924,6 +924,14 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 
 [dev-dependencies]
 bt-testpath = { path = "../bt-testpath" }
+# **A real shell for a test** (T-PROBE-CHILD): the Unix probe tests stand a
+# `/bin/sh -c` child and grandchild in for a probed tool, and the Windows
+# running-image test makes its directory junction with `cmd /C mklink /J`
+# (G-SWEEP-048); every test shell in the workspace starts through
+# `bt_pty::test_shell` (T-TEST-SHELL-HYGIENE). A path crate already in the
+# workspace, so it adds no package, and being a *dev*-dependency it is not in
+# the shipped graph.
+bt-pty = { path = "../bt-pty", features = ["test-shell"] }
 
 # **A dev-dependency that is a test venue
 # rather than a dependency** (M3-1; `tests/macos_dock_menu.rs` is the second
@@ -938,14 +946,6 @@ bt-testpath = { path = "../bt-testpath" }
 # untouched.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 winit.workspace = true
-
-# **A real shell for a test** (T-PROBE-CHILD): the Unix probe tests stand a
-# `/bin/sh -c` child and grandchild in for a probed tool, and every test shell
-# in the workspace starts through `bt_pty::test_shell` (T-TEST-SHELL-HYGIENE).
-# A path crate already in the workspace, so it adds no package, and being a
-# *dev*-dependency it is not in the shipped graph.
-[target.'cfg(unix)'.dev-dependencies]
-bt-pty = { path = "../bt-pty", features = ["test-shell"] }
 
 [target.'cfg(windows)'.dependencies]
 # The web preview's engine (`src/webview.rs`). It is a thin, generated binding
@@ -1119,6 +1119,10 @@ windows = { version = "0.62.2", features = [
     # manifest, and `folio.exe` has none; this decides whether the machine has a
     # first-page context menu at all (`src/msix.rs`).
     "Wdk_System_SystemServices",
+    # `NtQueryInformationThread(ThreadSuspendCount)`: whether a probe that showed no life is held
+    # suspended by another program (`ProbeChild::suspended`, G-SWEEP-048). A feature, not a
+    # package — `docs/DESIGN.md` §8's bar.
+    "Wdk_System_Threading",
     # `NtCreateFile` with a `RootDirectory` and `OBJECT_ATTRIBUTES`: the update
     # archive's members created **under the staging directory's handle**, never
     # through a path that could be re-pointed between the check and the write

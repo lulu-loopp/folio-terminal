@@ -11915,6 +11915,31 @@ struct BirthDecision {
     at_shell_home: bool,
     named: bool,
     program: Option<PathBuf>,
+    /// The folder the birth asks the disk about, and where the pane stands when it is gone
+    /// (G-SWEEP-048, #29).
+    unless_gone: Option<Box<profiles::GoneFolder>>,
+}
+
+impl BirthDecision {
+    /// **The decision for a pane whose folder the birth found gone**: standing where no folder
+    /// would have put it, and a `diagnostics.log` line that says which folder and where instead.
+    fn with_folder_gone(mut self, note: &mut dyn FnMut(&str)) -> Self {
+        if let Some(gone) = self.unless_gone.take().map(|gone| *gone) {
+            note(&format!(
+                "{} is not a folder this machine can open now (removed, or on a share that is not \
+                 answering); the shell started in {} instead",
+                gone.folder.display(),
+                gone.place.directory.as_deref().map_or_else(
+                    || "this process's folder".to_owned(),
+                    |directory| directory.display().to_string()
+                )
+            ));
+            self.spawn_place = gone.place.directory;
+            self.at_shell_home = gone.place.at_shell_home;
+            self.named = gone.place.named;
+        }
+        self
+    }
 }
 
 impl PaneBirth {
@@ -35692,10 +35717,11 @@ fn revive_plan(
     //
     // An empty `cwd` is a shell that never reported one, not a path to the root
     // of the drive — hand over nothing and let the new shell start where a fresh
-    // one would. Whether the folder still exists is a filesystem question, and
-    // the answer to a missing one is the same as the answer to none: HOME. Both
-    // are expressed as `None` rather than as an empty path, so
-    // `create_leaf_session` has one shape to read instead of two.
+    // one would, expressed as `None` rather than as an empty path, so
+    // `create_leaf_session` has one shape to read instead of two. Whether the
+    // folder still exists is a filesystem question the pane's birth asks
+    // (`profiles::BirthPlace`), never this thread, and the answer to a missing
+    // one is the same as the answer to none.
     //
     // An unknown `profile_id` falls to the default profile and keeps the pane —
     // §5.4 逐叶降级, and `index_of_id`'s own rule: a profile that was removed, or
@@ -35719,11 +35745,7 @@ fn revive_plan(
                     unknown_profile_id,
                     cwd: Some(leaf.cwd.as_str())
                         .filter(|cwd| !cwd.is_empty())
-                        .map(Path::new)
-                        .and_then(|cwd| {
-                            profiles::revived_cwd(profiles::index_of_id(&leaf.profile_id), cwd)
-                        })
-                        .map(profiles::SeedPlace::Carried),
+                        .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
                     // The third fact read out of the same saved leaf in the same
                     // pass, for the reason the two above it are: a pane revived
                     // with somebody else's aim is a card pointed at the wrong
@@ -39044,6 +39066,7 @@ mod shell_birth_tests {
             at_shell_home: false,
             named: false,
             program: Some(PathBuf::from("外壳")),
+            unless_gone: None,
         }
     }
 
@@ -39177,6 +39200,156 @@ mod shell_birth_tests {
         }
     }
 
+    /// A folder resolver that says it was asked, then waits for the test to answer for the disk —
+    /// a network share that has stopped answering, until the test lets it.
+    fn share_that_waits(
+        asked: mpsc::Sender<PathBuf>,
+        answer: mpsc::Receiver<bool>,
+    ) -> impl Fn(&Path) -> bool {
+        move |folder| {
+            let _ = asked.send(folder.to_path_buf());
+            answer.recv_timeout(crate::lane::PATIENCE).unwrap_or(true)
+        }
+    }
+
+    /// The folder a birth worker asked the disk about.
+    fn asked_about(asked: &mpsc::Receiver<PathBuf>) -> PathBuf {
+        asked
+            .recv_timeout(crate::lane::PATIENCE)
+            .expect("the birth worker asks about the folder within the lane suite's patience")
+    }
+
+    /// RED — **a pane whose folder is on a share that stopped answering is made without the
+    /// window waiting, and its shell lands where no folder would have put it** (G-SWEEP-048, #29).
+    /// The window decides the place without the disk: the folder kept, and where the pane goes
+    /// if the folder is gone. The birth worker asks — here a resolver that blocks until the test
+    /// answers for the share — while the pane already draws and holds what is typed; the share
+    /// then answers "no folder", and the shell starts and lands in the profile's own place, with
+    /// one `diagnostics.log` line naming the folder.
+    ///
+    /// MUTATION (observed red): check on the window thread — `spawn_place` keeping a carried
+    /// folder only when it is a directory now, as `revived_cwd` did — the window answers the
+    /// share itself and leaves the birth nothing to ask.
+    #[test]
+    fn a_folder_that_does_not_answer_is_asked_by_the_birth_and_the_shell_lands_where_no_folder_would()
+     {
+        let share = PathBuf::from(if cfg!(windows) {
+            r"\\共享-offline.invalid\项目\folio"
+        } else {
+            "/Volumes/共享-offline/项目/folio"
+        });
+        let profile = profiles::fallback_profile_id();
+        let decided = profiles::spawn_place(
+            profiles::index_of_id(profile),
+            Some(profiles::SeedPlace::Carried(share.clone())),
+            &bt_pty::SystemShellEnvironment,
+        );
+        assert_eq!(
+            decided.place.directory.as_ref(),
+            Some(&share),
+            "the window puts the pane in its folder, asking nobody"
+        );
+        let gone = decided
+            .unless_gone
+            .clone()
+            .expect("and leaves the folder for the birth to ask about");
+        let decision = BirthDecision {
+            started: Started::AsAsked,
+            spawn_profile: profile.to_owned(),
+            spawn_place: decided.place.directory.clone(),
+            at_shell_home: decided.place.at_shell_home,
+            named: decided.place.named,
+            program: Some(PathBuf::from("外壳")),
+            unless_gone: decided.unless_gone.clone().map(Box::new),
+        };
+        let seed = LeafSeed {
+            cwd: Some(profiles::SeedPlace::Carried(share.clone())),
+            ..seed_of(profile)
+        };
+        let mut leaf = bare(&decision, &seed);
+        let (asked_by, asked) = mpsc::channel();
+        let (answer, share_answers) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let spec = pty_door::GoneSpec {
+            folder: gone.folder.clone(),
+            arguments: Vec::new(),
+            working_directory: gone.place.working_directory.clone(),
+        };
+        let shell = pty_door::request(
+            move |_| {
+                let resolver = share_that_waits(asked_by, share_answers);
+                let folder_gone = pty_door::gone_place(Some(spec), &resolver).is_some();
+                pty_door::Born {
+                    session: a_shell().map(|(session, hygiene)| {
+                        let _ = kept.send(hygiene);
+                        session
+                    }),
+                    folder_gone,
+                }
+            },
+            wake,
+        )
+        .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+
+        assert_eq!(asked_about(&asked), share, "the birth asks the disk");
+        assert!(!leaf.shell_answered(), "and waits on it, not the window");
+        assert_eq!(leaf.spawn_place.as_ref(), Some(&share));
+        let frame = leaf
+            .session
+            .viewport_frame(&mut leaf.projection)
+            .expect("the pane draws while its folder is asked about");
+        assert!(frame_matches_grid(&frame, leaf.grid));
+        assert_eq!(
+            offer_pty_input(leaf.input_target(), "echo 共享\r".as_bytes(), "typed").expect("held"),
+            PtyInput::HeldForBirth
+        );
+
+        answer.send(false).expect("the worker waits on the share");
+        woken_by_a_shell(&heard);
+        let mut notes = Vec::new();
+        let refusal =
+            land_shell_birth(&mut leaf, |line| notes.push(line.to_owned())).expect("the landing");
+        assert!(refusal.is_none(), "{refusal:?}");
+        assert!(leaf.pty.is_some(), "the shell started");
+        assert_eq!(
+            leaf.spawn_place, gone.place.directory,
+            "where no folder would have put it"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains(&share.display().to_string()) && notes[0].contains("not a folder"),
+            "{notes:?}"
+        );
+        drop(leaf);
+        drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// PIN (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS) — **both roads that make a pseudoconsole name the
+    /// folder of the program's own file before the first one**: the elevated host before it
+    /// serves, and the resident run after its diagnostics are in the log (the line that says which
+    /// file was resolved goes there) and before the event loop that makes the first pane. A road
+    /// that names nothing runs every pane on the inbox ConPTY (`bt_pty::use_sidecars_in`).
+    ///
+    /// MUTATION (observed red): drop the resident run's `use_sidecars_in`.
+    #[test]
+    fn the_program_names_its_sidecar_folder_before_any_pane() {
+        use bt_source::{Index, ItemQuery};
+        let main = Index::of_package("bt-app")
+            .body_of(&ItemQuery::function("main"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let naming = "bt_pty::use_sidecars_in(bt_platform::own_files_folder())";
+        let named: Vec<usize> = main.match_indices(naming).map(|(at, _)| at).collect();
+        assert_eq!(named.len(), 2, "the host and the resident run each name it");
+        let at = |needle: &str| {
+            main.find(needle)
+                .unwrap_or_else(|| panic!("`main` no longer does `{needle}`"))
+        };
+        assert!(named[0] < at("elevated_host::serve("));
+        assert!(at("diagnostics::enter_resident_run(") < named[1]);
+        assert!(named[1] < at("EventLoop::<AppEvent>::with_user_event()"));
+    }
     /// RED — **the pane is there before its shell is, and what was typed meanwhile reaches the
     /// shell first, in order.** The shell is not even started until the test opens the gate; the
     /// pane already has a frame of its own grid, holds two typed lines (one Chinese), and, once
@@ -39442,7 +39615,8 @@ mod shell_birth_tests {
         let seed = seed_of(profiles::fallback_profile_id());
         let mut leaf = bare(&decision, &seed);
         let (wake, heard) = waking();
-        let shell = pty_door::request(|_| panic!("举手-planted"), wake).expect("a birth worker");
+        let shell = pty_door::request(|_| -> pty_door::Born { panic!("举手-planted") }, wake)
+            .expect("a birth worker");
         await_shell(&mut leaf, shell, decision, &seed);
         woken(&heard);
         let said = format!(
@@ -39701,7 +39875,11 @@ fn create_leaf_session(
     // Hoisted out of the spawn branch because `LeafSession::spawn_place` is the
     // second rung of §7.1.4's ladder and a leaf is asked where it stands whether
     // or not a process was started behind it.
-    let place = profiles::spawn_place(
+    //
+    // **And without asking the disk** (G-SWEEP-048, #29): whether a carried folder still stands is
+    // the birth worker's question ([`profiles::BirthPlace`]), so a folder on a share that stopped
+    // answering holds this pane in birth and never this thread.
+    let profiles::BirthPlace { place, unless_gone } = profiles::spawn_place(
         profiles::index_of_id(spawn_profile),
         seed.cwd.clone(),
         &bt_pty::SystemShellEnvironment,
@@ -39755,6 +39933,19 @@ fn create_leaf_session(
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
         );
+        // The same row composed for the place the pane opens in when its folder is gone: the
+        // birth worker takes this command line and working directory instead, having asked.
+        let gone_spec = unless_gone.as_ref().map(|gone| pty_door::GoneSpec {
+            folder: gone.folder.clone(),
+            arguments: shell_integration::shell_command(
+                row,
+                &gone.place.arguments,
+                shell_integration::Scripts::installed(),
+                &bt_pty::SystemShellEnvironment,
+            )
+            .arguments,
+            working_directory: gone.place.working_directory.clone(),
+        });
         // **The PowerShell load is finished on the birth worker**, not here: naming `folio.ps1`
         // means preparing it, which is disk work. The switch is read here, once, and travels with
         // the birth, which composes both this argv and the last-resort retry's with it.
@@ -39799,6 +39990,7 @@ fn create_leaf_session(
                     profile_environment: command.profile_environment,
                     size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     working_directory: place.working_directory,
+                    unless_gone: gone_spec,
                 },
                 wake.output(),
             )
@@ -39819,6 +40011,7 @@ fn create_leaf_session(
         at_shell_home: place.at_shell_home,
         named: place.named,
         program: resolved_program,
+        unless_gone: unless_gone.map(Box::new),
     };
     let mut leaf = bare_leaf(
         LeafView {
@@ -40188,18 +40381,26 @@ fn place_leaf(
 /// the shell has not answered.
 fn land_shell_birth(
     leaf: &mut LeafSession,
-    note: impl FnMut(&str),
+    mut note: impl FnMut(&str),
 ) -> Result<Option<anyhow::Error>> {
     let Some(BirthWait::Shell(landing)) = leaf.birth.as_mut().map(|birth| &mut birth.waiting)
     else {
         return Ok(None);
     };
-    let Some(answer) = landing.shell.take() else {
+    let Some(pty_door::Born {
+        session: answer,
+        folder_gone,
+    }) = landing.shell.take()
+    else {
         return Ok(None);
     };
     // Read while the birth is still on the pane; it leaves the pane only below, into the delivery
     // of what it holds, so nothing a birth carries can be dropped on the way.
-    let decision = landing.decision.clone();
+    let decision = if folder_gone {
+        landing.decision.clone().with_folder_gone(&mut note)
+    } else {
+        landing.decision.clone()
+    };
     let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
     let (pty, refusal) = match answer {
         Ok(pty) => (Some(pty), None),
@@ -73864,6 +74065,8 @@ fn main() -> Result<()> {
     // host is a headless process that authenticates its pipe and is otherwise nothing.
     if let Some(line) = bt_platform::elevated_protocol::HostLine::parse(std::env::args_os().skip(1))
     {
+        // The host makes the elevated pane's pseudoconsole: its sidecars are named first.
+        bt_pty::use_sidecars_in(bt_platform::own_files_folder());
         std::process::exit(match line {
             Ok(line) => elevated_host::serve(&line),
             Err(_) => elevated_host::USAGE,
@@ -74116,6 +74319,16 @@ fn main() -> Result<()> {
     if let Some(line) = stood_down {
         diagnostics::note(&line);
     }
+    // **Where this program's own files are, said once and named before any pane** (G-SWEEP-048,
+    // T-EXE-SYMLINK-SIDECARS): the loaded image with its links followed, so a start through
+    // winget's alias finds its ConPTY pair beside the real file and says which file that is.
+    if let Some(note) = bt_platform::running_image()
+        .ok()
+        .and_then(bt_platform::RunningImage::note)
+    {
+        diagnostics::note(&note);
+    }
+    bt_pty::use_sidecars_in(bt_platform::own_files_folder());
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and
