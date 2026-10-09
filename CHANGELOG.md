@@ -8,6 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Alt+Backspace (Option+Backspace with "Option key sends Alt" on) deletes a word and Ctrl+Space reaches the program, as in other terminals, in panes that do not carry key records — every pane on macOS, and Windows panes on the system's own console host. <!-- zh: pending F-SWEEP-048 -->
 - After Restart to update, Folio always comes back, also when the update cannot write to its own folder and the closing Folio takes a long time to go away — before, nothing reopened until you started Folio again. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - If the updater stops on an internal error before it starts working, one Folio opens afterwards, not two. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - A second window's Git page now follows changes on disk as the first window's does.
