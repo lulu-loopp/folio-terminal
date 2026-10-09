@@ -1928,7 +1928,7 @@ fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
     // ruling 2026-10-05; the review's unpinned clause). Its leaf half is pinned by
     // `a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profile_says`.
     // MUTATION, observed red: read `LeafSession::seed_place_for_a_new_shell` here instead.
-    let beside = method_body("Runtime", "new_tab_with_profile");
+    let beside = method_body("Runtime", "new_tab_with_profile_carrying");
     assert!(
         beside.contains("LeafSession::place_for_a_new_tab_beside")
             && !beside.contains("seed_place_for_a_new_shell"),
