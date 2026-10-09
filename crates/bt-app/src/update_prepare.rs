@@ -20,13 +20,18 @@
 //!   detached first, which only macOS can have);
 //! * **the job owner's pass at a later launch** ([`at_launch`]): an
 //!   `Allocated` transaction a dead Prepare left is swept (W1, M1), a
-//!   `Prepared` one is counted (`LaunchedWithoutResume`) and discarded at its
-//!   second launch (W2, M2). It reads the phase alone, so it is one function
-//!   for both layouts. What *revalidating* a staged transaction means differs
-//!   (a bundle's identity, a member set's digests), and each driver has its
-//!   own ([`Resumer`]). The whole pass as the update job runs it at a launch
-//!   — the phase's answer, then the resume of a counted set with the offer
-//!   rebuilt from its own version — is [`settle_at_launch`] (U-33).
+//!   `Prepared` one is kept and offered again — counted
+//!   (`LaunchedWithoutResume`) only when the run before ended orderly without
+//!   pressing Restart for it, and discarded at the second such launch (W2,
+//!   M2); after a restart that did not happen it is offered with the card that
+//!   says so and counted not at all (`MissedRestartOffered`; 0.4.8 E3,
+//!   `update_txn::launch_event`). It reads the phase and how the run before
+//!   ended, so it is one function for both layouts. What *revalidating* a
+//!   staged transaction means differs (a bundle's identity, a member set's
+//!   digests), and each driver has its own ([`Resumer`]). The whole pass as the
+//!   update job runs it at a launch — the phase's answer, then the resume of a
+//!   kept set with the offer rebuilt from its own version — is
+//!   [`settle_at_launch`] (U-33).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -42,8 +47,8 @@ use crate::install_channel::Channel;
 use crate::update_handoff::Staged;
 use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
 use crate::update_txn::{
-    Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, TxnId, decide,
-    may,
+    Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, PreviousRun,
+    Role, TxnId, decide, launch_event, may,
 };
 
 /// The worker a Prepare runs on — one per press, one job per process (R.3).
@@ -257,22 +262,52 @@ pub(crate) enum AtLaunch {
     Busy,
     /// A dead Prepare's `Allocated` transaction was swept (W1, M1).
     Swept,
-    /// A `Prepared` transaction counted this launch and is kept, lock held:
-    /// it may still be resumed (revalidating) in this launch.
-    Counted(Box<Staged>),
-    /// A `Prepared` transaction reached its second launch and was discarded.
+    /// A `Prepared` transaction is kept, lock held — this launch counted
+    /// against it when the run before ended orderly, and nothing was written
+    /// when it did not: it may still be resumed (revalidating) in this launch.
+    Kept(Box<Staged>),
+    /// **A `Prepared` transaction whose restart did not happen** (0.4.8 E3):
+    /// the mark spent (`MissedRestartOffered`), nothing counted, the lock
+    /// held; resumed, its card says the restart did not happen.
+    RestartMissed(Box<Staged>),
+    /// A `Prepared` transaction reached its second counted launch and was
+    /// discarded.
     Discarded,
     /// Nothing here is the job owner's to do: a journal it cannot read, or
     /// one in a phase that belongs to the applier or recovery.
     Left,
 }
 
+/// **Why a press finds a journal already there** (both Prepares, step 2): the
+/// installation is another transaction's ([`Stop::Busy`]), or that journal is
+/// one this build cannot read whole — another Folio's update is not finished,
+/// and the build that wrote it finishes it ([`Stop::Newer`], 0.4.8 E1,
+/// `update_txn::Role::JobOwner`) — a journal file that could not be read
+/// included (E1 round 2). One gone since the press looked is [`Stop::Busy`]:
+/// another holder had it.
+pub(crate) fn journal_there(home: &Home) -> Stop {
+    match Role::JobOwner.sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal())) {
+        Some(crate::update_txn::Sight::Known(_)) | None => Stop::Busy,
+        Some(
+            crate::update_txn::Sight::Header { .. }
+            | crate::update_txn::Sight::Envelope { .. }
+            | crate::update_txn::Sight::Unreadable(_),
+        ) => Stop::Newer,
+    }
+}
+
 /// **The job owner's pass at a launch** ((b).2's W1–W2 and M1–M2): the lock,
-/// one read of the journal, and `update_txn::decide` as the job owner.
+/// one read of the journal, and `update_txn::decide` as the job owner; over a
+/// `Prepared` journal, what `previous` — how the run before this launch ended
+/// — makes of this launch (`update_txn::launch_event`, 0.4.8 E3).
 ///
 /// # Errors
 /// A step that failed, as a sentence; whatever it left is the next launch's.
-pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, String> {
+pub(crate) fn at_launch(
+    worker: &WorkerCtx,
+    home: &Home,
+    previous: PreviousRun,
+) -> Result<AtLaunch, String> {
     if std::fs::symlink_metadata(home.journal()).is_err() {
         return Ok(AtLaunch::Nothing);
     }
@@ -281,14 +316,20 @@ pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, Str
     else {
         return Ok(AtLaunch::Busy);
     };
-    let bytes = match file_reads::read(Lane::UpdateJournal, home.journal()) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(AtLaunch::Nothing),
-        Err(error) => return Err(error.to_string()),
-    };
-    let Ok(journal) = Journal::parse(&bytes) else {
-        return Ok(AtLaunch::Left);
-    };
+    // A journal this build cannot read whole — or whose file could not be
+    // read (E1 round 2) — is left to the build that wrote it (E1,
+    // `update_txn::Role::JobOwner`): the offer still shows, and the press
+    // says so (`update_job::Stop::Newer`).
+    let journal =
+        match Role::JobOwner.sight_of_read(file_reads::read(Lane::UpdateJournal, home.journal())) {
+            None => return Ok(AtLaunch::Nothing),
+            Some(crate::update_txn::Sight::Known(journal)) => journal,
+            Some(
+                crate::update_txn::Sight::Header { .. }
+                | crate::update_txn::Sight::Envelope { .. }
+                | crate::update_txn::Sight::Unreadable(_),
+            ) => return Ok(AtLaunch::Left),
+        };
     // A job owner's answer is read from the phase alone (`decide`'s first
     // arm); the rest of the description is what an owner of no destructive
     // phase sees: no entrance, no receipt, no trial.
@@ -307,22 +348,35 @@ pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, Str
             Ok(AtLaunch::Swept)
         }
         Action::CountDeferredLaunch => {
+            let Some(event) = launch_event(&journal.body.phase, previous) else {
+                // The run before did not end orderly: no deferral to count,
+                // and nothing is written.
+                return Ok(AtLaunch::Kept(Box::new(Staged {
+                    home: home.clone(),
+                    journal,
+                    lock,
+                })));
+            };
             let counted = journal
-                .advance(&Event::LaunchedWithoutResume)
+                .advance(&event)
                 .map_err(|refusal| format!("{refusal:?}"))?;
             install_txn::durable_write(&home.journal(), &counted.encode())
                 .map_err(|failure| failure.to_string())?;
             if counted.body.phase.kind() == PhaseKind::Abandoned {
                 clear(worker, home, counted.txn, PhaseKind::Abandoned)?;
                 drop(lock);
-                Ok(AtLaunch::Discarded)
-            } else {
-                Ok(AtLaunch::Counted(Box::new(Staged {
-                    home: home.clone(),
-                    journal: counted,
-                    lock,
-                })))
+                return Ok(AtLaunch::Discarded);
             }
+            let staged = Box::new(Staged {
+                home: home.clone(),
+                journal: counted,
+                lock,
+            });
+            Ok(if event == Event::MissedRestartOffered {
+                AtLaunch::RestartMissed(staged)
+            } else {
+                AtLaunch::Kept(staged)
+            })
         }
         _ => Ok(AtLaunch::Left),
     }
@@ -351,20 +405,23 @@ pub(crate) fn no_resume() -> Resumer {
 }
 
 /// **This launch's job-owner pass, whole** (U-33; (b).2's W1–W2 and M1–M2),
-/// on the job's worker: [`at_launch`], then —
+/// on the job's worker: [`at_launch`] with `previous`, how the run before this
+/// launch ended (the product's is `persist::previous_run_ended_orderly`, 0.4.8
+/// E3), then —
 ///
 /// * `Swept`, `Discarded`, `Nothing`, `Left`, or a step that failed →
 ///   [`Landed::Ordinary`]: the launch offers as usual;
 /// * `Busy` → [`Landed::Busy`]: another holder has the transaction, and this
 ///   launch offers nothing;
-/// * `Counted` with `offers` off → the count is recorded and the lock let go
-///   ([`Landed::Ordinary`]): a build whose job never offers shows no card, and
-///   the second launch discards;
-/// * `Counted` with `offers` on → `resume` revalidates the staged set for
-///   `channel` and answers its version; the offer is minted again from that
-///   version under the transaction's own identity, for `platform`'s files —
-///   [`Landed::Resumed`], the verified card of this launch. A revalidation
-///   that fails has discarded the set ([`Landed::Ordinary`]).
+/// * `Kept` or `RestartMissed` with `offers` off → whatever was recorded stays
+///   and the lock is let go ([`Landed::Ordinary`]): a build whose job never
+///   offers shows no card, and the second counted launch discards;
+/// * `Kept` or `RestartMissed` with `offers` on → `resume` revalidates the
+///   staged set for `channel` and answers its version; the offer is minted
+///   again from that version under the transaction's own identity, for
+///   `platform`'s files — [`Landed::Resumed`], the verified card of this
+///   launch, which after a restart that did not happen says so. A
+///   revalidation that fails has discarded the set ([`Landed::Ordinary`]).
 ///
 /// What it did is said in one `diagnostics.log` line, with no path.
 pub(crate) fn settle_at_launch(
@@ -374,51 +431,281 @@ pub(crate) fn settle_at_launch(
     resume: Resumer,
     channel: Option<Channel>,
     platform: HostPlatform,
+    previous: PreviousRun,
 ) -> Landed {
     let say = |line: &str| crate::diagnostics::note(&format!("Folio: update job — {line}"));
-    match at_launch(worker, home) {
-        Ok(AtLaunch::Counted(staged)) if !offers => {
-            drop(staged);
-            say("a verified update is kept for a later launch; offers are off in this build");
-            Landed::Ordinary
-        }
-        Ok(AtLaunch::Counted(staged)) => {
-            let txn = staged.journal.txn;
-            match resume(worker, *staged, channel) {
-                Ok((staged, version)) => match Offer::mint(txn, &format!("v{version}"), platform) {
-                    Some(offer) => Landed::Resumed(offer, Box::new(staged)),
-                    None => {
-                        let _ = discard(worker, staged, &Event::Discarded);
-                        say(&format!(
-                            "the update prepared at an earlier launch names no release ({version}) and is discarded"
-                        ));
-                        Landed::Ordinary
-                    }
-                },
-                Err(stop) => {
-                    say(&format!(
-                        "the update prepared at an earlier launch is discarded: {}",
-                        stop.why()
-                    ));
-                    Landed::Ordinary
-                }
-            }
-        }
-        Ok(AtLaunch::Busy) => Landed::Busy,
+    let (staged, restart_missed) = match at_launch(worker, home, previous) {
+        Ok(AtLaunch::Kept(staged)) => (staged, false),
+        Ok(AtLaunch::RestartMissed(staged)) => (staged, true),
+        Ok(AtLaunch::Busy) => return Landed::Busy,
         Ok(AtLaunch::Swept) => {
             say("an unfinished download of an earlier launch is cleared");
-            Landed::Ordinary
+            return Landed::Ordinary;
         }
         Ok(AtLaunch::Discarded) => {
             say("the update prepared at an earlier launch is discarded at its second launch");
-            Landed::Ordinary
+            return Landed::Ordinary;
         }
-        Ok(AtLaunch::Nothing | AtLaunch::Left) => Landed::Ordinary,
+        Ok(AtLaunch::Nothing | AtLaunch::Left) => return Landed::Ordinary,
         Err(failure) => {
             say(&format!(
                 "an earlier launch's update is kept for the next launch: {failure}"
             ));
+            return Landed::Ordinary;
+        }
+    };
+    if restart_missed {
+        say(
+            "the restart of the update prepared at an earlier launch did not happen; it is offered again",
+        );
+    } else if previous == PreviousRun::Unfinished {
+        say(
+            "the run before did not reach its clean exit; the update prepared at an earlier launch is kept and not counted",
+        );
+    }
+    if !offers {
+        drop(staged);
+        say("a verified update is kept for a later launch; offers are off in this build");
+        return Landed::Ordinary;
+    }
+    let txn = staged.journal.txn;
+    match resume(worker, *staged, channel) {
+        Ok((staged, version)) => match Offer::mint(txn, &format!("v{version}"), platform) {
+            Some(offer) => Landed::Resumed {
+                offer,
+                staged: Box::new(staged),
+                restart_missed,
+            },
+            None => {
+                let _ = discard(worker, staged, &Event::Discarded);
+                say(&format!(
+                    "the update prepared at an earlier launch names no release ({version}) and is discarded"
+                ));
+                Landed::Ordinary
+            }
+        },
+        Err(stop) => {
+            say(&format!(
+                "the update prepared at an earlier launch is discarded: {}",
+                stop.why()
+            ));
             Landed::Ordinary
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::update_txn::{Adapter, Body, Inventories, Layout, Phase, beyond_inputs};
+
+    /// RED (E1; role #16, the job owner, site J11 `at_launch`, and the press,
+    /// both Prepares' `journal_there`) — **the job owner leaves a journal this
+    /// build cannot read whole to the build that wrote it, and the press says
+    /// so**: at a launch it is `AtLaunch::Left` (the offer still shows) and
+    /// the journal is byte for byte as it was, the lock let go; pressing
+    /// Update then answers `Stop::Newer`, whose card says that a newer
+    /// Folio's update is not finished — not *Another update is in
+    /// progress.*, which a journal this build reads still answers.
+    ///
+    /// MUTATION: in `journal_there`, answer `Stop::Busy` whatever the
+    /// journal is (the pre-E1 press).
+    #[test]
+    fn the_job_owner_leaves_what_it_cannot_read_whole_and_the_press_says_why() {
+        let root = bt_testpath::temp_path("bt-update-prepare-beyond");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::at(root.join("home"));
+        let txn = TxnId::new([0x4b; 16]);
+        std::fs::create_dir_all(home.transaction(txn)).unwrap();
+        let known = crate::update_txn::Journal {
+            txn,
+            rescue: "rescue".to_owned(),
+            body: Body {
+                phase: Phase::Prepared {
+                    deferred_launches: 0,
+                    restart_missed: false,
+                },
+                layout: Layout::Members(Inventories {
+                    old_shipped: vec!["folio.exe".to_owned()],
+                    old_present: Vec::new(),
+                    new: Vec::new(),
+                }),
+                adapter: Adapter::Ours,
+                marker: None,
+            },
+        }
+        .encode();
+        for (what, bytes) in beyond_inputs(&known) {
+            install_txn::durable_write(&home.journal(), &bytes).unwrap();
+            let at = home.clone();
+            let landed = bt_platform::spawn_at_priority(
+                "bt-update-prepare-test",
+                bt_platform::ThreadPriority::BelowNormal,
+                move |worker| {
+                    matches!(
+                        at_launch(worker, &at, crate::update_txn::PreviousRun::Orderly),
+                        Ok(AtLaunch::Left)
+                    )
+                },
+            )
+            .unwrap()
+            .join()
+            .unwrap();
+            assert!(landed, "{what}: left to the build that wrote it");
+            assert_eq!(std::fs::read(home.journal()).unwrap(), bytes, "{what}");
+            assert!(
+                install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                    .unwrap()
+                    .is_some(),
+                "{what}: the lock is let go"
+            );
+            assert_eq!(journal_there(&home), Stop::Newer, "{what}");
+        }
+        let paint = crate::update_card::paint(&crate::update_job::State::Failed(
+            None,
+            crate::update_job::Failure::Stopped(Stop::Newer),
+        ))
+        .expect("a failed job has a card");
+        assert_eq!(
+            paint.heading.as_deref(),
+            Some("An update by a newer Folio is not finished.")
+        );
+        assert_eq!(
+            paint.detail.as_deref(),
+            Some("It finishes when you next sign in.")
+        );
+
+        install_txn::durable_write(&home.journal(), &known).unwrap();
+        assert_eq!(
+            journal_there(&home),
+            Stop::Busy,
+            "a journal this build reads"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.8 E3, #13) — **a staged update survives a power cut and a
+    /// plain relaunch; the launch after a restart that did not happen offers
+    /// it again and says so; only a deliberate deferral counts**: over a set
+    /// one deliberate *Later* has already counted, a launch after a run that
+    /// did not end orderly keeps it, writing nothing; a launch after an
+    /// orderly quit counts and discards it, as ever; a set the road put back
+    /// (`restart_missed`) is kept, its mark spent and nothing counted, and
+    /// [`settle_at_launch`] resumes it as the card that says the restart did
+    /// not happen.
+    ///
+    /// MUTATION: in `at_launch`, record `LaunchedWithoutResume` for every
+    /// `Prepared` launch (the pre-E3 count: the power cut's relaunch discards
+    /// the staged update).
+    #[test]
+    fn a_power_cut_relaunch_keeps_the_staged_update_and_a_missed_restart_says_so() {
+        let root = bt_testpath::temp_path("bt-update-prepare-停电");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::at(root.join("更新 home"));
+        let txn = TxnId::new([0x4c; 16]);
+        let staged = |deferred_launches, restart_missed| {
+            std::fs::create_dir_all(home.transaction(txn)).unwrap();
+            let bytes = crate::update_txn::Journal {
+                txn,
+                rescue: "rescue".to_owned(),
+                body: Body {
+                    phase: Phase::Prepared {
+                        deferred_launches,
+                        restart_missed,
+                    },
+                    layout: Layout::Members(Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                    adapter: Adapter::Ours,
+                    marker: None,
+                },
+            }
+            .encode();
+            install_txn::durable_write(&home.journal(), &bytes).unwrap();
+            bytes
+        };
+        let launch = |previous: PreviousRun| {
+            let at = home.clone();
+            bt_platform::spawn_at_priority(
+                "bt-update-prepare-test",
+                bt_platform::ThreadPriority::BelowNormal,
+                move |worker| match at_launch(worker, &at, previous) {
+                    Ok(AtLaunch::Kept(staged)) => format!("kept {:?}", staged.journal.body.phase),
+                    Ok(AtLaunch::RestartMissed(staged)) => {
+                        format!("missed {:?}", staged.journal.body.phase)
+                    }
+                    Ok(AtLaunch::Discarded) => "discarded".to_owned(),
+                    Ok(_) => "something else".to_owned(),
+                    Err(failure) => failure,
+                },
+            )
+            .unwrap()
+            .join()
+            .unwrap()
+        };
+
+        let once = staged(1, false);
+        assert_eq!(
+            launch(PreviousRun::Unfinished),
+            "kept Prepared { deferred_launches: 1, restart_missed: false }",
+            "a power cut's relaunch keeps the staged update"
+        );
+        assert_eq!(
+            std::fs::read(home.journal()).unwrap(),
+            once,
+            "nothing is written"
+        );
+        assert_eq!(
+            launch(PreviousRun::Orderly),
+            "discarded",
+            "a second deliberate deferral discards, as ever"
+        );
+        assert!(!home.journal().exists());
+
+        staged(1, true);
+        assert_eq!(
+            launch(PreviousRun::Orderly),
+            "missed Prepared { deferred_launches: 1, restart_missed: false }",
+            "offered again, nothing counted"
+        );
+        assert_eq!(
+            crate::update_txn::Journal::parse(&std::fs::read(home.journal()).unwrap())
+                .map(|journal| journal.body.phase),
+            Ok(Phase::Prepared {
+                deferred_launches: 1,
+                restart_missed: false
+            }),
+            "the mark is spent"
+        );
+
+        staged(0, true);
+        let at = home.clone();
+        let landed = bt_platform::spawn_at_priority(
+            "bt-update-prepare-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| match settle_at_launch(
+                worker,
+                &at,
+                true,
+                Box::new(|_, staged, _| Ok((staged, "0.4.9".to_owned()))),
+                Some(Channel::Ours),
+                HostPlatform::Windows,
+                PreviousRun::Unfinished,
+            ) {
+                Landed::Resumed {
+                    offer,
+                    restart_missed,
+                    ..
+                } => Some((offer.tag().to_owned(), restart_missed)),
+                _ => None,
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(landed, Some(("v0.4.9".to_owned(), true)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

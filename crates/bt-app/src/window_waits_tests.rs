@@ -278,9 +278,10 @@ fn the_architecture_table_is_the_registry() {
 // (`Occurrence::in_the_product`), so test modules are out by their declaration. The reading is
 // `cfg`-blind, so every platform's arm is read on every host.
 
-/// The first-party packages that are not in `folio.exe`: development tools. Every other
-/// workspace member outside `vendor/` must be one `bt-app` depends on.
-const NOT_THE_PRODUCT: [&str; 3] = ["bt-corpus", "bt-lint-probe", "bt-source"];
+/// The first-party packages that are not in `folio.exe`: development tools, and `bt-testpath`,
+/// which only tests and the test-support features name. Every other workspace member outside
+/// `vendor/` must be one `bt-app` depends on.
+const NOT_THE_PRODUCT: [&str; 4] = ["bt-corpus", "bt-lint-probe", "bt-source", "bt-testpath"];
 
 /// **The product as a build of `folio.exe` sees it**: the first-party packages in it, each with
 /// the first-party packages its product code can name (its *product* dependency edges), and the
@@ -1151,7 +1152,7 @@ fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
 fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
     const OPTIONAL: &str = "bt-platform = { path = \"../bt-platform\", optional = true }";
-    const FEATURE: &str = "test-shell = [\"dep:bt-platform\"]";
+    const FEATURE: &str = "test-shell = [\"dep:bt-platform\", \"dep:bt-testpath\"]";
     let real = product_candidate_manifests();
     let with_pty = |manifest: String| {
         let mut manifests = real.clone();
@@ -1494,6 +1495,28 @@ impl Src {
     }
 }
 
+/// The packages among `dependencies` that `src` re-exports to its own dependents: a product
+/// `pub use dependency::…` (`pub use bt_effects::admission::*;`, `pub use bt_effects::file_reads;`),
+/// the dependency named by its crate name. A `pub(crate) use` or a private `use` lends a dependent
+/// nothing, and neither does a `use` in test code.
+fn re_exported_by(src: &Src, dependencies: &BTreeSet<usize>, srcs: &[Src]) -> BTreeSet<usize> {
+    dependencies
+        .iter()
+        .copied()
+        .filter(|&dependency| {
+            let crate_name = srcs[dependency].package.replace('-', "_");
+            src.named(&crate_name).into_iter().any(|at| {
+                let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+                let before = src.lex(at.saturating_sub(32).max(file_start), at);
+                before.len() >= 2
+                    && src.is(before.get(before.len() - 2), "pub")
+                    && src.is(before.last(), "use")
+                    && src.in_product(at)
+            })
+        })
+        .collect()
+}
+
 /// `crate::x::Type::name`, by the item's first module path, without its arm.
 fn name_of(record: &ItemRecord) -> String {
     let module = record.module_paths()[0];
@@ -1675,8 +1698,10 @@ struct Callable {
 
 struct World {
     srcs: Vec<Src>,
-    /// What each package's product code can name: itself and its direct first-party product
-    /// dependencies ([`Product::packages`]); a dev-dependency or a test-only optional one is not one.
+    /// What each package's product code can name: itself, its direct first-party product
+    /// dependencies ([`Product::packages`]) — a dev-dependency or a test-only optional one is not
+    /// one — and every package one of those re-exports ([`re_exported_by`]): `bt-app` names
+    /// `bt-effects`' admission through `bt_platform::admission`.
     reach: Vec<BTreeSet<usize>>,
     callables: HashMap<String, Vec<Callable>>,
     fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
@@ -1711,20 +1736,41 @@ impl World {
                 }
             })
             .collect();
-        let reach = packages
+        let direct: Vec<BTreeSet<usize>> = packages
             .iter()
-            .enumerate()
-            .map(|(at, (_, dependencies))| {
-                let mut reach: BTreeSet<usize> = dependencies
+            .map(|(_, dependencies)| {
+                dependencies
                     .iter()
                     .map(|name| {
                         srcs.iter()
                             .position(|src| src.package == name)
                             .expect("a product package's dependency is a product package")
                     })
-                    .collect();
+                    .collect()
+            })
+            .collect();
+        let re_exports: Vec<BTreeSet<usize>> = srcs
+            .iter()
+            .enumerate()
+            .map(|(at, src)| re_exported_by(src, &direct[at], &srcs))
+            .collect();
+        let reach = (0..srcs.len())
+            .map(|at| {
+                let mut reach = direct[at].clone();
                 reach.insert(at);
-                reach
+                // A re-export of a re-export is a name too: grow to a fixed point.
+                loop {
+                    let more: BTreeSet<usize> = reach
+                        .iter()
+                        .filter(|&&other| other != at)
+                        .flat_map(|&other| re_exports[other].iter().copied())
+                        .filter(|package| !reach.contains(package))
+                        .collect();
+                    if more.is_empty() {
+                        break reach;
+                    }
+                    reach.extend(more);
+                }
             })
             .collect();
         let mut callables: HashMap<String, Vec<Callable>> = HashMap::new();
@@ -2638,7 +2684,9 @@ fn fabrication_region(src: &Src, at: usize) -> (usize, usize) {
 /// **No capability is named where the compiler checks nothing**: `WaitToken`, `WorkerCtx` and
 /// `admission::doors` never inside an `unsafe` block, `unsafe fn`, `unsafe impl` or `unsafe
 /// extern`, nor inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, anywhere in
-/// the product; and `admission` keeps `#![forbid(unsafe_code)]` and writes no `unsafe`.
+/// the product; and `admission` keeps `#![forbid(unsafe_code)]` and writes no `unsafe` — both of
+/// its halves: `bt-effects`' module, which builds the capabilities, and `bt-platform`'s, the thread
+/// door that lends the worker's.
 ///
 /// What stays outside, as revision (b)2 names it: an inference-typed `transmute` inside
 /// `bt-platform`'s own `unsafe`, whose type is fixed at the door's parameter rather than written.
@@ -2679,9 +2727,40 @@ fn no_capability_is_named_where_the_compiler_checks_nothing(world: &World) -> Ve
     if regions == 0 {
         failures.push("no `unsafe` stretch was found in the product: this reads nothing".into());
     }
-    let platform = world.src("bt-platform");
-    let admission = platform
-        .index
+    for package in ["bt-effects", "bt-platform"] {
+        let src = world.src(package);
+        let Some(admission) = admission_module(src) else {
+            failures.push(format!("{package} has no module `crate::admission`"));
+            continue;
+        };
+        let forbids = attributes(src).into_iter().any(|attribute| {
+            attribute.inner
+                && admission.holds(attribute.start)
+                && path_of(src, &attribute.body).0 == "forbid"
+                && attribute.body.iter().any(|t| src.text(*t) == "unsafe_code")
+        });
+        if !forbids {
+            failures.push(format!(
+                "{package}'s `crate::admission` does not say `#![forbid(unsafe_code)]`: the module \
+                 that builds or lends the capabilities is one the compiler must keep free of \
+                 `unsafe` (§2.4)"
+            ));
+        }
+        for at in src.named("unsafe") {
+            if admission.holds(at) {
+                failures.push(format!(
+                    "`unsafe` is written in {package}'s `crate::admission` at {}",
+                    src.location(at)
+                ));
+            }
+        }
+    }
+    failures
+}
+
+/// The span of a package's module `crate::admission`.
+fn admission_module(src: &Src) -> Option<bt_source::Span> {
+    src.index
         .modules()
         .iter()
         .find(|module| {
@@ -2690,36 +2769,7 @@ fn no_capability_is_named_where_the_compiler_checks_nothing(world: &World) -> Ve
                 .iter()
                 .any(|p| p == "crate::admission")
         })
-        .map(bt_source::ModuleRecord::span);
-    let Some(admission) = admission else {
-        failures.push("bt-platform has no module `crate::admission`".into());
-        return failures;
-    };
-    let forbids = attributes(platform).into_iter().any(|attribute| {
-        attribute.inner
-            && admission.holds(attribute.start)
-            && path_of(platform, &attribute.body).0 == "forbid"
-            && attribute
-                .body
-                .iter()
-                .any(|t| platform.text(*t) == "unsafe_code")
-    });
-    if !forbids {
-        failures.push(
-            "`crate::admission` does not say `#![forbid(unsafe_code)]`: the module that builds the \
-             capabilities is the one the compiler must keep free of `unsafe` (§2.4)"
-                .into(),
-        );
-    }
-    for at in platform.named("unsafe") {
-        if admission.holds(at) {
-            failures.push(format!(
-                "`unsafe` is written in `crate::admission` at {}",
-                platform.location(at)
-            ));
-        }
-    }
-    failures
+        .map(bt_source::ModuleRecord::span)
 }
 
 // ── assertion 2: one constructor (§2.4) ─────────────────────────────────────────────────────
@@ -2770,9 +2820,11 @@ fn literals_of(src: &Src, name: &str) -> Vec<usize> {
 /// `admission::admitted` calls it (twice: the unmetered and the metered road); `lend_worker` is
 /// named exactly by its two owners. Every **reference** is counted — a name handed on as a
 /// function value (`.map(WaitToken::fresh)`, `run(lend_worker)`) is one — by the identifier view,
-/// never by the spelling `name(`. `fresh`, `lend_worker` and every field of both capabilities are
-/// private: that pinned visibility is what keeps every reference inside `crate::admission`, where
-/// this counts them.
+/// never by the spelling `name(`. `fresh` and every field of both capabilities are private: that
+/// pinned visibility is what keeps every reference to them inside `bt-effects`' `crate::admission`,
+/// where this counts them. `lend_worker` is the one public mint, for the thread door, which is
+/// `bt-platform`'s because it sets the platform's scheduling band (CC-3): its references are counted
+/// in every package of the product, so a third caller anywhere is a failure here.
 ///
 /// What stays outside, as revision (b)2 names it and (j)11.1 restates: an inference-typed
 /// fabrication inside `bt-platform`'s own `unsafe` (a `transmute` whose target type is fixed at a
@@ -2788,7 +2840,7 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
                 .map(|at| src.owner_of(at))
         })
         .collect();
-    if literals != ["bt-platform crate::admission::lend_worker"] {
+    if literals != ["bt-effects crate::admission::lend_worker"] {
         failures.push(format!(
             "`WorkerCtx` is built by a struct literal in one place, `admission::lend_worker`; \
              found {literals:?}"
@@ -2803,24 +2855,13 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
                 .map(|at| src.owner_of(at))
         })
         .collect();
-    if token_literals != ["bt-platform crate::admission::WaitToken::fresh"] {
+    if token_literals != ["bt-effects crate::admission::WaitToken::fresh"] {
         failures.push(format!(
             "`WaitToken` is built by a struct literal in one place, `WaitToken::fresh`; found \
              {token_literals:?}"
         ));
     }
-    let admission = world
-        .src("bt-platform")
-        .index
-        .modules()
-        .iter()
-        .find(|module| {
-            module
-                .module_paths()
-                .iter()
-                .any(|p| p == "crate::admission")
-        })
-        .map(bt_source::ModuleRecord::span);
+    let admission = admission_module(world.src("bt-effects"));
     // Every reference in the product, its declaration excluded: a call, a value, a path to it.
     let references = |name: &str, within: Option<bt_source::Span>| {
         let mut found = BTreeMap::new();
@@ -2829,7 +2870,7 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
                 let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
                 let before = src.lex(at.saturating_sub(8).max(file_start), at);
                 let outside =
-                    within.is_some_and(|span| src.package != "bt-platform" || !span.holds(at));
+                    within.is_some_and(|span| src.package != "bt-effects" || !span.holds(at));
                 if src.is(before.last(), "fn") || outside || !src.in_product(at) {
                     continue;
                 }
@@ -2839,7 +2880,7 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
         found
     };
     let fresh = references("fresh", admission);
-    let wanted_fresh = BTreeMap::from([("bt-platform crate::admission::admitted".to_owned(), 2)]);
+    let wanted_fresh = BTreeMap::from([("bt-effects crate::admission::admitted".to_owned(), 2)]);
     if fresh != wanted_fresh {
         failures.push(format!(
             "`WaitToken::fresh` is named only by `admission::admitted`, twice — a call or a value \
@@ -2850,7 +2891,7 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
     let callers = references("lend_worker", None);
     let wanted = BTreeMap::from([
         (
-            "bt-platform crate::admission::enter_standalone_main".to_owned(),
+            "bt-effects crate::admission::enter_standalone_main".to_owned(),
             1,
         ),
         (
@@ -2864,15 +2905,11 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
              each (a call or a value is a reference); found {callers:?}"
         ));
     }
-    let platform = world.src("bt-platform");
+    let effects = world.src("bt-effects");
     for (query, what) in [
         (
             ItemQuery::method("WaitToken", "fresh"),
             "`WaitToken::fresh`",
-        ),
-        (
-            ItemQuery::function("lend_worker"),
-            "`admission::lend_worker`",
         ),
         (
             ItemQuery::field("WaitToken", "_scope"),
@@ -2895,16 +2932,16 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
             "`WorkerCtx`'s `_local`",
         ),
     ] {
-        match platform.index.find(&query.in_module("crate::admission")) {
+        match effects.index.find(&query.in_module("crate::admission")) {
             Ok(records) => {
                 for record in records {
                     let declaration =
-                        platform.lex(record.declaration().start(), record.declaration().end());
-                    if declaration.iter().any(|t| platform.text(*t) == "pub") {
+                        effects.lex(record.declaration().start(), record.declaration().end());
+                    if declaration.iter().any(|t| effects.text(*t) == "pub") {
                         failures.push(format!(
                             "{what} is visible outside `crate::admission` at {}: a mint, and a \
                              field a literal elsewhere could fill, stay private",
-                            platform.location(record.whole().start())
+                            effects.location(record.whole().start())
                         ));
                     }
                 }
@@ -2935,19 +2972,19 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
                  `Copy`, `From`, `Send` or `Sync` road to another; found {blocks:?}"
             ));
         }
-        match platform
+        match effects
             .index
             .find(&ItemQuery::type_item(type_name).in_module("crate::admission"))
         {
             Ok(records) => {
                 for record in records {
                     let declaration =
-                        platform.lex(record.declaration().start(), record.declaration().end());
-                    if declaration.iter().any(|t| platform.text(*t) == "derive") {
+                        effects.lex(record.declaration().start(), record.declaration().end());
+                    if declaration.iter().any(|t| effects.text(*t) == "derive") {
                         failures.push(format!(
                             "`{type_name}` derives a trait at {}: a derived `Clone`, `Copy` or \
                              `Default` is a second constructor",
-                            platform.location(record.whole().start())
+                            effects.location(record.whole().start())
                         ));
                     }
                 }
@@ -2983,14 +3020,15 @@ const LANDMARKS: [(&str, &[&str]); 4] = [
 /// in `fn main` after the parse (and so before the hand-over); `loop_running` on
 /// `StartCause::Init`; `exiting` at the head of `App::finish`, in `settle_quit`'s `Write` arm, in
 /// `main`'s build-error arm and after `run_app`; `quit_abandoned` in the `Abandon` arm; and the
-/// eight standalone entries, in list order: the console-membership helper; the attention-payload
-/// door; Explorer-menu removal; the two uninstall entries (the public cleanup/uninstall door and
-/// the copied remover, T-UNINSTALL-UX); the macOS applier (U-28); the Windows applier (U-23); and
+/// nine standalone entries, in list order: the console-membership helper; the elevated host's
+/// door (T-ADMIN-2); the attention-payload door; Explorer-menu removal; the two uninstall
+/// entries (the public cleanup/uninstall door and the copied remover, T-UNINSTALL-UX); the macOS
+/// applier (U-28); the Windows applier (U-23); and
 /// the recovery door, which rolls a macOS bundle back on a worker since U-29 and recovers a
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 17] = [
+const PINS: [Pin; 18] = [
     Pin {
         writer: "enter_standalone_main",
         owner: "bt-app crate::main",
@@ -3039,6 +3077,11 @@ const PINS: [Pin; 17] = [
     Pin {
         writer: "quit_abandoned",
         owner: "bt-app crate::session_end::settle",
+        after: None,
+    },
+    Pin {
+        writer: "enter_standalone_main",
+        owner: "bt-app crate::elevated_host::serve",
         after: None,
     },
     Pin {
@@ -3308,10 +3351,7 @@ const EXCLUDED_ROOT_FORM: &str = "allow(clippy::disallowed_methods)";
 
 /// The binaries of the product's packages that are not in the product, by package and name
 /// (revision (j)2: listed, or they are product — no third state).
-const DEVELOPMENT_BINARIES: [(&str, &str); 2] = [
-    ("bt-term", "bt-repaint-oracle"),
-    ("bt-winres", "render-info-plist"),
-];
+const DEVELOPMENT_BINARIES: [(&str, &str); 1] = [("bt-winres", "render-info-plist")];
 
 /// An attribute's body as one string with no spaces: `allow(clippy::disallowed_methods)`.
 fn spelled(src: &Src, toks: &[Tok]) -> String {
@@ -3900,13 +3940,13 @@ const DIRWATCH_MACOS: &str =
 const STOPPER_SIGNAL: &str =
     "bt-platform crate::macos_watch::Stopper::signal [target_os = \"macos\"]";
 const SHUTDOWN: &str = "bt-app crate::trace_sink::<Shutdown as Drop>::drop";
-const ADMITTED: &str = "bt-platform crate::admission::admitted";
-const ROLE: &str = "bt-platform crate::admission::role";
-const CONTAINS: &str = "bt-platform crate::admission::Phases::contains";
-const BIT: &str = "bt-platform crate::admission::Phases::bit";
-const COUNT: &str = "bt-platform crate::admission::count";
-const METER: &str = "bt-platform crate::admission::meter";
-const FRESH: &str = "bt-platform crate::admission::WaitToken::fresh";
+const ADMITTED: &str = "bt-effects crate::admission::admitted";
+const ROLE: &str = "bt-effects crate::admission::role";
+const CONTAINS: &str = "bt-effects crate::admission::Phases::contains";
+const BIT: &str = "bt-effects crate::admission::Phases::bit";
+const COUNT: &str = "bt-effects crate::admission::count";
+const METER: &str = "bt-effects crate::admission::meter";
+const FRESH: &str = "bt-effects crate::admission::WaitToken::fresh";
 const FLUSH: &str = "bt-app crate::trace_sink::flush";
 const FLUSH_SINK: &str = "bt-app crate::trace_sink::flush_sink";
 const QUEUE_CLOSE: &str = "bt-app crate::trace_sink::Queue::close";
@@ -4049,7 +4089,7 @@ const PINNED: [Pinned; 43] = [
         body: ADMITTED,
         edges: &[&[ROLE], &[CONTAINS], &[COUNT], &[METER], &[FRESH], &[FRESH]],
         effects: &[],
-        leaves: &["refused"],
+        leaves: &[],
     },
     Pinned {
         body: ROLE,
@@ -4079,7 +4119,7 @@ const PINNED: [Pinned; 43] = [
         body: METER,
         edges: &[],
         effects: &[],
-        leaves: &["get"],
+        leaves: &[],
     },
     Pinned {
         body: FRESH,
@@ -4519,12 +4559,20 @@ fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
 /// `std::thread::spawn`, `std::thread::Builder` and `std::thread::scope` in exactly one place, the
 /// door's own `admission::spawn_at_priority_with_stack` (A1c; ARCHITECTURE §5.1 and §6).
 /// `bt-pty`'s four threads and `bt-term`'s resample pool stay outside by design (revision (c)6).
+/// `bt-effects`, the vocabulary the door lends from, and `bt-compose`, the composition order, are
+/// read the same way and name none at all (CC-3, CC-6a; their other effects are
+/// [`bt_effects_starts_waits_reads_and_names_no_platform`]'s and
+/// [`bt_compose_has_no_direct_effects`]').
+///
+/// MUTATION: add `pub fn probe() { std::thread::spawn(|| ()); }` to `crates/bt-effects/src/lib.rs`
+/// and this names `bt-effects`' `crate::probe`; the same line in `crates/bt-compose/src/lib.rs`
+/// names `bt-compose`'s.
 fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> Vec<String> {
     use bt_source::{Pattern, Search, View, needle};
 
     let mut failures = Vec::new();
     let mut door = 0;
-    for package in ["bt-app", "bt-platform"] {
+    for package in ["bt-app", "bt-platform", "bt-effects", "bt-compose"] {
         let index = Index::of_package(package);
         for path in ["thread::spawn", "thread::Builder", "thread::scope"] {
             let found = match index.search(&Search::new(
@@ -4570,6 +4618,111 @@ fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> 
     failures
 }
 
+/// What `bt-effects` may not wait on: a channel's blocking receive, a sleep, a park, a lock.
+const EFFECTS_WAITS: [&str; 10] = [
+    "recv",
+    "recv_timeout",
+    "recv_deadline",
+    "sleep",
+    "park",
+    "park_timeout",
+    "Mutex",
+    "RwLock",
+    "Condvar",
+    "Barrier",
+];
+
+/// The names through which code reaches the file system or the environment.
+const EFFECTS_FILES: [&str; 4] = ["fs", "File", "OpenOptions", "env"];
+
+/// **`bt-effects` starts nothing, waits on nothing, reads only through the ledger and names no
+/// platform** (CC-3; design T-COMPOSE-CRATE §6.2, "the census, for every new crate"). Its threads
+/// are the thread door's assertion above. Here, in its product code: no blocking wait
+/// ([`EFFECTS_WAITS`]); the file system and the environment ([`EFFECTS_FILES`]) named only inside
+/// `crate::file_reads`, the ledger whose opens are the registered file-read door; no clock of the
+/// standard library (`time::Instant`, `time::SystemTime`; gate G3 reads every other spelling); and
+/// no `bt_platform` — the crate is below the platform layer, and a name of it in a macro body,
+/// which the compiler never resolves until it is expanded, is refused like any other.
+///
+/// MUTATION, each alone in `crates/bt-effects/src/lib.rs`, and each names its own line:
+/// `pub fn probe(r: std::sync::mpsc::Receiver<()>) { let _ = r.recv(); }`;
+/// `pub fn probe() -> bool { std::env::var_os("X").is_some() }`;
+/// `pub fn probe() -> std::time::Instant { std::time::Instant::now() }`;
+/// `macro_rules! probe { () => { bt_platform::spawn_at_priority }; }`.
+fn bt_effects_starts_waits_reads_and_names_no_platform(world: &World) -> Vec<String> {
+    names_no_effect(world, "bt-effects", Some("crate::file_reads"))
+}
+
+/// **`bt-compose` has no direct effects** (CC-6a; design T-COMPOSE-CRATE §3.2 "bt-compose has no
+/// direct effects", §6.2 "the census, for every new crate"). The crate orders library calls and
+/// owns nothing across them, so in its product code: no blocking wait ([`EFFECTS_WAITS`]), the
+/// file system and the environment ([`EFFECTS_FILES`]) named nowhere — it has no ledger of its
+/// own — no clock of the standard library, and no `bt_platform`. Its threads are the thread
+/// door's assertion above. The libraries it calls keep the effects their owning tickets have not
+/// yet moved (§2.2); this reads the crate itself.
+///
+/// MUTATION, each alone in `crates/bt-compose/src/lib.rs`, and each names its own line:
+/// `pub fn probe(r: std::sync::mpsc::Receiver<()>) { let _ = r.recv(); }`;
+/// `pub fn probe() -> bool { std::env::var_os("X").is_some() }`;
+/// `pub fn probe() -> std::time::Instant { std::time::Instant::now() }`;
+/// `macro_rules! probe { () => { bt_platform::spawn_at_priority }; }`.
+fn bt_compose_has_no_direct_effects(world: &World) -> Vec<String> {
+    names_no_effect(world, "bt-compose", None)
+}
+
+/// What [`bt_effects_starts_waits_reads_and_names_no_platform`] and
+/// [`bt_compose_has_no_direct_effects`] read in `package`'s product: every name of a blocking
+/// wait, of the file system or the environment (allowed inside `ledger` alone, when the package
+/// has one), of a standard-library clock and of the platform crate. A package with a ledger must
+/// name the ledger's own opens, so a reading that found nothing there read nothing.
+fn names_no_effect(world: &World, package: &str, ledger: Option<&str>) -> Vec<String> {
+    let src = world.src(package);
+    let mut failures = Vec::new();
+    let mut read = 0;
+    for word in EFFECTS_WAITS
+        .iter()
+        .chain(EFFECTS_FILES.iter())
+        .chain(["Instant", "SystemTime", "bt_platform"].iter())
+    {
+        for at in src.named(word) {
+            if !src.in_product(at) {
+                continue;
+            }
+            read += 1;
+            let refused = if EFFECTS_WAITS.contains(word) {
+                Some("a blocking wait")
+            } else if EFFECTS_FILES.contains(word) {
+                let module = src.module_at(at);
+                (Some(module) != ledger)
+                    .then_some("the file system or the environment outside the ledger")
+            } else if *word == "bt_platform" {
+                Some("the platform crate")
+            } else {
+                let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+                let before = src.lex(at.saturating_sub(16).max(file_start), at);
+                (before.len() >= 2
+                    && src.is(before.last(), "::")
+                    && src.is(before.get(before.len() - 2), "time"))
+                .then_some("the standard library's clock")
+            };
+            if let Some(what) = refused {
+                failures.push(format!(
+                    "`{package}` names `{word}` ({what}) at {} ({})",
+                    src.location(at),
+                    src.owner_of(at)
+                ));
+            }
+        }
+    }
+    if read == 0 && ledger.is_some() {
+        failures.push(format!(
+            "no product name of the ledger's own reads was found in `{package}`: this reads \
+             nothing"
+        ));
+    }
+    failures
+}
+
 // ── assertion 9: the typed entrances ((j)5, (j)11.1) ──────────────────────────────────────
 
 const ENTRANCE_COLUMNS: [&str; 2] = ["path", "door"];
@@ -4577,7 +4730,14 @@ const ENTRANCE_COLUMNS: [&str; 2] = ["path", "door"];
 /// A parameter's type as one string, qualifiers before `WaitToken` and `doors` dropped and every
 /// lifetime written `'l`: `WaitToken<'l,doors::PresentFrame>`.
 fn capability_spelling(src: &Src, toks: &[Tok]) -> String {
-    const QUALIFIERS: [&str; 5] = ["crate", "admission", "bt_platform", "self", "super"];
+    const QUALIFIERS: [&str; 6] = [
+        "crate",
+        "admission",
+        "bt_platform",
+        "bt_effects",
+        "self",
+        "super",
+    ];
     let mut out = String::new();
     for (at, tok) in toks.iter().enumerate() {
         let qualifier = tok.kind == Kind::Ident
@@ -4707,7 +4867,7 @@ fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 12] = [
+    let assertions: [(&str, Vec<String>); 14] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -4747,6 +4907,14 @@ fn every_door_is_where_the_registry_says() {
         (
             "every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door",
             every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door(),
+        ),
+        (
+            "bt_effects_starts_waits_reads_and_names_no_platform",
+            bt_effects_starts_waits_reads_and_names_no_platform(&world),
+        ),
+        (
+            "bt_compose_has_no_direct_effects",
+            bt_compose_has_no_direct_effects(&world),
         ),
         (
             "every_entrance_left_the_vocabulary_takes_its_capability",

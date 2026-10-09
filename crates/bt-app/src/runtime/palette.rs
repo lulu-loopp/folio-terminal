@@ -101,6 +101,7 @@ impl Runtime<'_> {
         self.close_popups_except(Popup::Palette);
         let focus = self.shortcut_focus();
         self.window.palette = Some(palette::PaletteState::opening(focus));
+        self.ask_for_file_indexes_on_open();
         self.requery_palette()
     }
 
@@ -152,6 +153,14 @@ impl Runtime<'_> {
         let listing = palette::arrange(&candidates, &query, note);
         if let Some(state) = self.window.palette.as_mut() {
             state.refill(listing, requeried);
+        }
+        // A kept row may have moved, and the list may be shorter than the scroll held: the scroll
+        // follows the row in the layout the new list makes (T-FRESH-FACTS round 2).
+        if !requeried
+            && let Some(layout) = self.palette_layout()
+            && let Some(state) = self.window.palette.as_mut()
+        {
+            state.show_selected(&layout);
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;

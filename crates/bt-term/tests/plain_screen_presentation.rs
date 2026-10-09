@@ -11,7 +11,7 @@
 
 use std::{fmt::Write as _, num::NonZeroU32, time::Duration, time::Instant};
 
-use bt_math::{MathRaster, MathRenderError};
+use bt_doc::math::{MathRaster, MathRenderError};
 use bt_term::{DualPlaneSession, LIVE_MATH_STABLE_INTERVAL, SessionMathTask};
 
 fn nz(value: u32) -> NonZeroU32 {

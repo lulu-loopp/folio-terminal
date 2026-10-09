@@ -4285,6 +4285,7 @@ impl<'worker> Actor<'worker> {
             page.post(ActorNotice::Event {
                 generation,
                 event: WebEvent::NavigationCompleted {
+                    http_status: crate::webview::http_status_of(page.main_status),
                     uri: page.last_url.clone(),
                     success: true,
                     status: page.main_status,

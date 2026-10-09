@@ -249,7 +249,6 @@ pub fn shutdown_media_session() {}
 /// platform modules.
 pub mod engine {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     /// How often a playing pane asks for a new frame.
@@ -458,78 +457,44 @@ pub mod engine {
         }
     }
 
-    /// **The leak ledger**, and it is real on every platform.
-    ///
-    /// Two atomics and nothing else — the Windows arm's own counters are the
-    /// same two — so `main.rs`'s tests that a closed pane leaves no engine
-    /// behind mean the same thing here. On a platform that opens none, zero
-    /// started and zero shut down is a true reading rather than an unwritten
-    /// one.
-    static STARTED: AtomicU64 = AtomicU64::new(0);
-    static SHUT_DOWN: AtomicU64 = AtomicU64::new(0);
-
     /// How many engines this process has started.
+    ///
+    /// **The leak ledger**, and it is real on every platform: the counts are
+    /// `crate::engine_ledger`'s, the same ledger the Windows arm moves, so
+    /// `main.rs`'s tests that a closed pane leaves no engine behind mean the
+    /// same thing here. On a platform that opens none, zero started and zero
+    /// shut down is a true reading rather than an unwritten one.
     #[must_use]
     pub fn engines_started() -> u64 {
-        STARTED.load(Ordering::Relaxed)
+        crate::engine_ledger::started()
     }
 
     /// How many it has shut down.
     #[must_use]
     pub fn engines_shut_down() -> u64 {
-        SHUT_DOWN.load(Ordering::Relaxed)
+        crate::engine_ledger::shut_down()
     }
 
     /// How many are still open. **Zero is the only value this may have when the
     /// process leaves**, which is what the structural gate reads.
     #[must_use]
     pub fn engines_outstanding() -> u64 {
-        engines_started().saturating_sub(engines_shut_down())
+        crate::engine_ledger::outstanding()
     }
 
-    /// One engine has been given back — called by the player's own thread as
-    /// the last thing it does.
+    /// **Wait until [`engines_outstanding`] is `target`, woken by the ledger's
+    /// own movements**, and answer the count the wait ended on — `target`, or
+    /// what stood when `patience` ran out. The Windows arm's door of the same
+    /// name; tests only.
+    #[cfg(any(test, feature = "trust-harness"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn engines_outstanding_reaching(target: u64, patience: Duration) -> u64 {
+        crate::engine_ledger::outstanding_reaching(target, patience)
+    }
+
+    /// One engine has been given back, and its place on the ledger — the
+    /// player's own thread and constructor move the ledger through these.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    pub(crate) fn note_engine_shut_down() {
-        SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// **One engine's place on the process ledger, opened where the engine comes
-    /// into being and closed by whoever ends up owning it.**
-    ///
-    /// The Windows arm's `LedgerEntry`, for the defect that arm's review row
-    /// R2-19 found: the ledger's whole promise is that [`engines_outstanding`]
-    /// is zero at every moment no engine is alive, and a bare `fetch_add` cannot
-    /// keep it, because everything between the constructor that makes a player
-    /// and the machinery that will one day stop it is fallible and a failure
-    /// there adds a count nothing will ever take off. So the entry is a value.
-    /// [`Self::kept`] hands it to the machinery, and dropping it any other way
-    /// closes it here, including on an unwind.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    pub(crate) struct LedgerEntry {
-        kept: bool,
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    impl LedgerEntry {
-        /// A player exists. Counted from here.
-        pub(crate) fn opened() -> Self {
-            STARTED.fetch_add(1, Ordering::Relaxed);
-            Self { kept: false }
-        }
-
-        /// The player reached the machinery, which is what will shut it down.
-        pub(crate) fn kept(mut self) {
-            self.kept = true;
-        }
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    impl Drop for LedgerEntry {
-        fn drop(&mut self) {
-            if !self.kept {
-                SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
+    pub(super) use crate::engine_ledger::{LedgerEntry, note_engine_shut_down};
 }

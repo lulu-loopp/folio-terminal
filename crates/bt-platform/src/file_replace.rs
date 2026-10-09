@@ -490,14 +490,7 @@ mod tests {
     use super::*;
 
     fn temp_root(tag: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "bt-file-replace-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = bt_testpath::temp_path(&format!("bt-file-replace-{tag}"));
         fs::create_dir_all(&root).unwrap();
         root
     }

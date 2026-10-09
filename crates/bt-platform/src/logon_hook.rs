@@ -35,7 +35,7 @@
 //! the key is [`RUN_KEY`] and the values are [`VALUE_PREFIX`] names. The
 //! functions ending in `_in` take the key as a parameter and the registry as a
 //! [`Registry`], so a test works under a key of its own
-//! (`HKCU\Software\Folio-Test\<random>`) or over a recording fake, and never
+//! (`HKCU\Software\Folio-Test\<tag>-<pid>-<ordinal>`) or over a recording fake, and never
 //! writes the real `Run` key; the product calls the three without the suffix,
 //! which name [`RUN_KEY`] and [`CurrentUser`].
 //!
@@ -666,7 +666,7 @@ mod os {
 mod tests {
     //! Every test but two runs over [`Recorder`], a recording fake of
     //! [`Registry`]. The two Windows tests use the real registry under a key of
-    //! their own, `HKCU\Software\Folio-Test\<random>`, which [`TestKey`] deletes
+    //! their own, `HKCU\Software\Folio-Test\<tag>-<pid>-<ordinal>`, which [`TestKey`] deletes
     //! with everything in it; none of them names [`RUN_KEY`].
     use super::*;
     use std::collections::BTreeMap;
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(program_of(OsStr::new("C:\\x.exe --flag")), None);
     }
 
-    /// A key of this test's own: `HKCU\Software\Folio-Test\<random>`, deleted
+    /// A key of this test's own: `HKCU\Software\Folio-Test\<tag>-<pid>-<ordinal>`, deleted
     /// with everything in it when dropped. Never the `Run` key.
     #[cfg(windows)]
     struct TestKey(String);
@@ -899,16 +899,7 @@ mod tests {
     #[cfg(windows)]
     impl TestKey {
         fn new(tag: &str) -> Self {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_nanos());
-            let key = format!(
-                r"Software\Folio-Test\{tag}-{}-{nanos}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            );
+            let key = format!(r"Software\Folio-Test\{}", bt_testpath::unique_name(tag));
             assert!(key.starts_with(r"Software\Folio-Test\") && key != RUN_KEY);
             Self(key)
         }
@@ -979,7 +970,7 @@ mod tests {
     #[test]
     fn the_cleanup_row_removes_only_this_copys_entrances() {
         let key = TestKey::new("cleanup");
-        let root = std::env::temp_dir().join(format!("bt-logon-hook-{}", std::process::id()));
+        let root = bt_testpath::temp_path("bt-logon-hook");
         let _ = std::fs::remove_dir_all(&root);
         let rescue_in = |install: &str| {
             root.join(install)

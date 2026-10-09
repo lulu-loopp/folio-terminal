@@ -2707,6 +2707,22 @@ pub fn panel_key(content: &GitPanelContent, key: GraphKey) -> GraphKeyAction {
     }
 }
 
+/// **The verb a row is, when the whole row is its button** — `Load more commits`.
+///
+/// It has no glyph and no reserved corner — it is a sentence you press — so its box is the row's
+/// own ([`act_boxes`]), and a press anywhere on it, or `Enter` with the keyboard on it
+/// (`Runtime::press_git_row`), is that verb. Saying it once here is what makes the hit test, the
+/// tooltip, the pointer's press and the keyboard's one answer: the row lit under the pointer, said
+/// "Load fifty more commits" and did nothing when the hit test knew no verb for it, and with the
+/// keyboard on it `Enter` did nothing while the press asked for more (F-SWEEP-048).
+#[must_use]
+pub fn row_is_its_act(row: &GitRow) -> Option<GitAct> {
+    match row {
+        GitRow::LoadMore => Some(GitAct::LoadMore),
+        _ => None,
+    }
+}
+
 /// Where a row's verbs are, right to left from its trailing edge — and whether
 /// there are any.
 ///
@@ -2727,6 +2743,12 @@ pub fn act_boxes(
     scale: f32,
     revealed: bool,
 ) -> Vec<(GitAct, [f32; 4])> {
+    // Asked before the reveal, because the reveal is about a *corner* of a row
+    // and a row that is its own button has none: its sentence is drawn whether or
+    // not a hand is near it, so the button it is cannot be hidden either.
+    if let Some(act) = row_is_its_act(row) {
+        return vec![(act, rect)];
+    }
     let acts: Vec<GitAct> = match row {
         // Right to left, so the *destructive* verb is furthest from the trailing
         // edge a pointer travels along: `+` sits at the end, `×` inside it. A
@@ -2738,22 +2760,8 @@ pub fn act_boxes(
         },
         GitRow::Heading { act, .. } => act.iter().copied().collect(),
         GitRow::Masthead(_) => MASTHEAD_ACTS.to_vec(),
-        // **The whole row is the button.** It has no glyph and no reserved
-        // corner — it is a sentence you press — so its box is the row's own, and
-        // saying that here rather than in the press handler is what makes the
-        // hit test, the tooltip and the verb one answer. It was *not* here
-        // first, and the cost was exact: the row lit under the pointer, said
-        // "Load fifty more commits", and did nothing when pressed, because the
-        // hit test could only offer verbs this function knew about.
-        GitRow::LoadMore => vec![GitAct::LoadMore],
         _ => Vec::new(),
     };
-    // Asked before the reveal, because the reveal is about a *corner* of a row
-    // and this verb has none: the row's own sentence is drawn whether or not a
-    // hand is near it, so the button it is cannot be hidden either.
-    if acts == [GitAct::LoadMore] {
-        return vec![(GitAct::LoadMore, rect)];
-    }
     let acts: Vec<GitAct> = acts
         .into_iter()
         .filter(|act| revealed || act.rests_visible())
@@ -5440,6 +5448,53 @@ mod tests {
             GitPress::MoreCommits,
             "and pressing it asks for the next page rather than writing anything"
         );
+    }
+
+    /// RED (F-SWEEP-048, the Settings `Enter` sweep's class) — **`Enter` on the "Load more"
+    /// row asks for more, as a press on it does.**
+    ///
+    /// The keyboard reaches the row (it is not furniture) and `Enter` answers `Toggle`, which
+    /// `Runtime::press_git_row` takes; that press finds no document for this row, so before this
+    /// ticket `Enter` on it did nothing while the pointer's press loaded fifty more commits. The
+    /// row's verb is now one answer, [`row_is_its_act`], which the act box and the keyboard's
+    /// press both read, and it is the verb that asks for the next page. Every other kind of row has
+    /// none: its press is its document, its expansion or its sub-group.
+    ///
+    /// MUTATION: make `row_is_its_act` answer `None` for `LoadMore` (the keyboard's press finds
+    /// no verb, and the whole-row box is gone).
+    #[test]
+    fn enter_on_the_load_more_row_asks_for_more_as_its_press_does() {
+        let cache = answered(b"## main\0", vec![commit("aaaaaaa", "newest", 1)], true);
+        let mut content = rows_of(&cache);
+        let index = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::LoadMore))
+            .expect("there is more to load");
+        content.selected = Some(index);
+        assert_eq!(
+            panel_key(&content, GraphKey::Enter),
+            GraphKeyAction::Toggle(index),
+            "Enter on the row is the row's own press"
+        );
+        let act = row_is_its_act(&content.rows[index]).expect("the row is its own button");
+        assert_eq!(
+            press_outcome(act, false),
+            GitPress::MoreCommits,
+            "and that press asks for the next page"
+        );
+        assert_eq!(
+            act_boxes(&content.rows[index], [0.0, 0.0, 240.0, 27.0], 1.0, false),
+            vec![(act, [0.0, 0.0, 240.0, 27.0])],
+            "the same verb the pointer finds over the whole row"
+        );
+        for row in content
+            .rows
+            .iter()
+            .filter(|row| !matches!(row, GitRow::LoadMore))
+        {
+            assert_eq!(row_is_its_act(row), None, "{row:?} has its own press");
+        }
     }
 
     /// PIN (R14) — **a discard cannot reach git without the gate.**

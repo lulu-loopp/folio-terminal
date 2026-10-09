@@ -125,14 +125,14 @@ Backspace	standard	S	off	kitty	CSI 127;2u
 Backspace	standard	S	off	mok1	\x7f	
 Backspace	standard	S	off	mok2	CSI 27;2;127~	
 Backspace	standard	S	off	records	CSI 8;14;8;1;16;1_CSI 8;14;8;0;16;1_	
-Backspace	standard	A	off	legacy	\x7f	
+Backspace	standard	A	off	legacy	\e\x7f	
 Backspace	standard	A	off	kitty	CSI 127;3u	
-Backspace	standard	A	off	mok1	\x7f	
+Backspace	standard	A	off	mok1	\e\x7f	
 Backspace	standard	A	off	mok2	CSI 27;3;127~	
 Backspace	standard	A	off	records	CSI 8;14;8;1;2;1_CSI 8;14;8;0;2;1_	
-Backspace	standard	SA	off	legacy	\x7f	
+Backspace	standard	SA	off	legacy	\e\x7f	
 Backspace	standard	SA	off	kitty	CSI 127;4u	
-Backspace	standard	SA	off	mok1	\x7f	
+Backspace	standard	SA	off	mok1	\e\x7f	
 Backspace	standard	SA	off	mok2	CSI 27;4;127~	
 Backspace	standard	SA	off	records	CSI 8;14;8;1;18;1_CSI 8;14;8;0;18;1_	
 Backspace	standard	C	off	legacy	\x7f	
@@ -145,14 +145,14 @@ Backspace	standard	SC	off	kitty	CSI 127;6u
 Backspace	standard	SC	off	mok1	\x7f	
 Backspace	standard	SC	off	mok2	CSI 27;6;127~	
 Backspace	standard	SC	off	records	CSI 8;14;0;1;24;1_CSI 8;14;0;0;24;1_	
-Backspace	standard	AC	off	legacy	\x7f	
+Backspace	standard	AC	off	legacy	\e\x7f	
 Backspace	standard	AC	off	kitty	CSI 127;7u	
-Backspace	standard	AC	off	mok1	\x7f	
+Backspace	standard	AC	off	mok1	\e\x7f	
 Backspace	standard	AC	off	mok2	CSI 27;7;127~	
 Backspace	standard	AC	off	records	CSI 8;14;0;1;10;1_CSI 8;14;0;0;10;1_	
-Backspace	standard	SAC	off	legacy	\x7f	
+Backspace	standard	SAC	off	legacy	\e\x7f	
 Backspace	standard	SAC	off	kitty	CSI 127;8u	
-Backspace	standard	SAC	off	mok1	\x7f	
+Backspace	standard	SAC	off	mok1	\e\x7f	
 Backspace	standard	SAC	off	mok2	CSI 27;8;127~	
 Backspace	standard	SAC	off	records	CSI 8;14;0;1;26;1_CSI 8;14;0;0;26;1_	
 Escape	standard	-	off	legacy	\e	
@@ -215,22 +215,22 @@ Space	standard	SA	off	kitty	CSI 32;4u
 Space	standard	SA	off	mok1	CSI 27;4;32~	
 Space	standard	SA	off	mok2	CSI 27;4;32~	
 Space	standard	SA	off	records	CSI 32;57;32;1;18;1_CSI 32;57;32;0;18;1_	
-Space	standard	C	off	legacy	—	
+Space	standard	C	off	legacy	\x00	
 Space	standard	C	off	kitty	CSI 32;5u	
-Space	standard	C	off	mok1	—	
+Space	standard	C	off	mok1	\x00	
 Space	standard	C	off	mok2	CSI 27;5;32~	
 Space	standard	C	off	records	CSI 32;57;32;1;8;1_CSI 32;57;32;0;8;1_	
-Space	standard	SC	off	legacy	—	
+Space	standard	SC	off	legacy	\x00	
 Space	standard	SC	off	kitty	CSI 32;6u	
-Space	standard	SC	off	mok1	—	
+Space	standard	SC	off	mok1	\x00	
 Space	standard	SC	off	mok2	CSI 27;6;32~	
 Space	standard	SC	off	records	CSI 32;57;0;1;24;1_CSI 32;57;0;0;24;1_	
-Space	standard	AC	off	legacy	—	
+Space	standard	AC	off	legacy	\e\x00	
 Space	standard	AC	off	kitty	CSI 32;7u	
 Space	standard	AC	off	mok1	CSI 27;7;32~	
 Space	standard	AC	off	mok2	CSI 27;7;32~	
 Space	standard	AC	off	records	CSI 32;57;0;1;10;1_CSI 32;57;0;0;10;1_	
-Space	standard	SAC	off	legacy	—	
+Space	standard	SAC	off	legacy	\e\x00	
 Space	standard	SAC	off	kitty	CSI 32;8u	
 Space	standard	SAC	off	mok1	CSI 27;8;32~	
 Space	standard	SAC	off	mok2	CSI 27;8;32~	

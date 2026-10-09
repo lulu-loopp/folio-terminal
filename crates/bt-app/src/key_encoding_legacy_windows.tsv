@@ -10,6 +10,9 @@
 ##
 ## A ticket that changes a legacy byte on purpose (T-CTRL-SPACE, T-ALT-BACKSPACE) changes its rows here
 ## and in `key_encoding.tsv` in the same commit, and says so.
+## Changed on purpose since the capture (F-SWEEP-048, design note revision (k)): `Backspace` with Alt
+## (bits 2, 3, 6, 7, 10, 11, 14, 15) is `1b7f` where it was `7f`, and `Space` with Ctrl (bits 4–7, 12–15)
+## is `00`, or `1b00` with Alt, where it was nothing. Every other row is the capture.
 ##
 ## Columns, tab-separated: the key (a named key, or the character a US layout's key produces with no
 ## modifier; with Shift held the chord is built with the shifted character, as winit hands it over on
@@ -314,7 +317,7 @@ z	1	1	5a
 /	1	1	3f
 Enter	2	0	0d
 Tab	2	0	09
-Backspace	2	0	7f
+Backspace	2	0	1b7f
 Escape	2	0	1b
 Space	2	0	1b20
 ArrowUp	2	0	1b5b313b3341
@@ -388,7 +391,7 @@ z	2	0	1b7a
 /	2	0	1b2f
 Enter	2	1	0d
 Tab	2	1	09
-Backspace	2	1	7f
+Backspace	2	1	1b7f
 Escape	2	1	1b
 Space	2	1	1b20
 ArrowUp	2	1	1b5b313b3341
@@ -462,7 +465,7 @@ z	2	1	1b7a
 /	2	1	1b2f
 Enter	3	0	0d
 Tab	3	0	1b5b5a
-Backspace	3	0	7f
+Backspace	3	0	1b7f
 Escape	3	0	1b
 Space	3	0	1b20
 ArrowUp	3	0	1b5b313b3441
@@ -536,7 +539,7 @@ z	3	0	1b5a
 /	3	0	1b3f
 Enter	3	1	0d
 Tab	3	1	1b5b5a
-Backspace	3	1	7f
+Backspace	3	1	1b7f
 Escape	3	1	1b
 Space	3	1	1b20
 ArrowUp	3	1	1b5b313b3441
@@ -612,7 +615,7 @@ Enter	4	0	0d
 Tab	4	0	09
 Backspace	4	0	7f
 Escape	4	0	1b
-Space	4	0	-
+Space	4	0	00
 ArrowUp	4	0	1b5b313b3541
 ArrowDown	4	0	1b5b313b3542
 ArrowLeft	4	0	1b5b313b3544
@@ -686,7 +689,7 @@ Enter	4	1	0d
 Tab	4	1	09
 Backspace	4	1	7f
 Escape	4	1	1b
-Space	4	1	-
+Space	4	1	00
 ArrowUp	4	1	1b5b313b3541
 ArrowDown	4	1	1b5b313b3542
 ArrowLeft	4	1	1b5b313b3544
@@ -760,7 +763,7 @@ Enter	5	0	0d
 Tab	5	0	1b5b5a
 Backspace	5	0	7f
 Escape	5	0	1b
-Space	5	0	-
+Space	5	0	00
 ArrowUp	5	0	1b5b313b3641
 ArrowDown	5	0	1b5b313b3642
 ArrowLeft	5	0	1b5b313b3644
@@ -834,7 +837,7 @@ Enter	5	1	0d
 Tab	5	1	1b5b5a
 Backspace	5	1	7f
 Escape	5	1	1b
-Space	5	1	-
+Space	5	1	00
 ArrowUp	5	1	1b5b313b3641
 ArrowDown	5	1	1b5b313b3642
 ArrowLeft	5	1	1b5b313b3644
@@ -906,9 +909,9 @@ z	5	1	1a
 /	5	1	7f
 Enter	6	0	0d
 Tab	6	0	09
-Backspace	6	0	7f
+Backspace	6	0	1b7f
 Escape	6	0	1b
-Space	6	0	-
+Space	6	0	1b00
 ArrowUp	6	0	1b5b313b3741
 ArrowDown	6	0	1b5b313b3742
 ArrowLeft	6	0	1b5b313b3744
@@ -980,9 +983,9 @@ z	6	0	1b1a
 /	6	0	-
 Enter	6	1	0d
 Tab	6	1	09
-Backspace	6	1	7f
+Backspace	6	1	1b7f
 Escape	6	1	1b
-Space	6	1	-
+Space	6	1	1b00
 ArrowUp	6	1	1b5b313b3741
 ArrowDown	6	1	1b5b313b3742
 ArrowLeft	6	1	1b5b313b3744
@@ -1054,9 +1057,9 @@ z	6	1	1b1a
 /	6	1	-
 Enter	7	0	0d
 Tab	7	0	1b5b5a
-Backspace	7	0	7f
+Backspace	7	0	1b7f
 Escape	7	0	1b
-Space	7	0	-
+Space	7	0	1b00
 ArrowUp	7	0	1b5b313b3841
 ArrowDown	7	0	1b5b313b3842
 ArrowLeft	7	0	1b5b313b3844
@@ -1128,9 +1131,9 @@ z	7	0	1b1a
 /	7	0	1b7f
 Enter	7	1	0d
 Tab	7	1	1b5b5a
-Backspace	7	1	7f
+Backspace	7	1	1b7f
 Escape	7	1	1b
-Space	7	1	-
+Space	7	1	1b00
 ArrowUp	7	1	1b5b313b3841
 ArrowDown	7	1	1b5b313b3842
 ArrowLeft	7	1	1b5b313b3844
@@ -1498,7 +1501,7 @@ z	9	1	-
 /	9	1	-
 Enter	10	0	0d
 Tab	10	0	09
-Backspace	10	0	7f
+Backspace	10	0	1b7f
 Escape	10	0	1b
 Space	10	0	-
 ArrowUp	10	0	1b5b313b3341
@@ -1572,7 +1575,7 @@ z	10	0	-
 /	10	0	-
 Enter	10	1	0d
 Tab	10	1	09
-Backspace	10	1	7f
+Backspace	10	1	1b7f
 Escape	10	1	1b
 Space	10	1	-
 ArrowUp	10	1	1b5b313b3341
@@ -1646,7 +1649,7 @@ z	10	1	-
 /	10	1	-
 Enter	11	0	0d
 Tab	11	0	1b5b5a
-Backspace	11	0	7f
+Backspace	11	0	1b7f
 Escape	11	0	1b
 Space	11	0	-
 ArrowUp	11	0	1b5b313b3441
@@ -1720,7 +1723,7 @@ z	11	0	-
 /	11	0	-
 Enter	11	1	0d
 Tab	11	1	1b5b5a
-Backspace	11	1	7f
+Backspace	11	1	1b7f
 Escape	11	1	1b
 Space	11	1	-
 ArrowUp	11	1	1b5b313b3441
@@ -1796,7 +1799,7 @@ Enter	12	0	0d
 Tab	12	0	09
 Backspace	12	0	7f
 Escape	12	0	1b
-Space	12	0	-
+Space	12	0	00
 ArrowUp	12	0	1b5b313b3541
 ArrowDown	12	0	1b5b313b3542
 ArrowLeft	12	0	1b5b313b3544
@@ -1870,7 +1873,7 @@ Enter	12	1	0d
 Tab	12	1	09
 Backspace	12	1	7f
 Escape	12	1	1b
-Space	12	1	-
+Space	12	1	00
 ArrowUp	12	1	1b5b313b3541
 ArrowDown	12	1	1b5b313b3542
 ArrowLeft	12	1	1b5b313b3544
@@ -1944,7 +1947,7 @@ Enter	13	0	0d
 Tab	13	0	1b5b5a
 Backspace	13	0	7f
 Escape	13	0	1b
-Space	13	0	-
+Space	13	0	00
 ArrowUp	13	0	1b5b313b3641
 ArrowDown	13	0	1b5b313b3642
 ArrowLeft	13	0	1b5b313b3644
@@ -2018,7 +2021,7 @@ Enter	13	1	0d
 Tab	13	1	1b5b5a
 Backspace	13	1	7f
 Escape	13	1	1b
-Space	13	1	-
+Space	13	1	00
 ArrowUp	13	1	1b5b313b3641
 ArrowDown	13	1	1b5b313b3642
 ArrowLeft	13	1	1b5b313b3644
@@ -2090,9 +2093,9 @@ z	13	1	1a
 /	13	1	7f
 Enter	14	0	0d
 Tab	14	0	09
-Backspace	14	0	7f
+Backspace	14	0	1b7f
 Escape	14	0	1b
-Space	14	0	-
+Space	14	0	1b00
 ArrowUp	14	0	1b5b313b3741
 ArrowDown	14	0	1b5b313b3742
 ArrowLeft	14	0	1b5b313b3744
@@ -2164,9 +2167,9 @@ z	14	0	1b1a
 /	14	0	-
 Enter	14	1	0d
 Tab	14	1	09
-Backspace	14	1	7f
+Backspace	14	1	1b7f
 Escape	14	1	1b
-Space	14	1	-
+Space	14	1	1b00
 ArrowUp	14	1	1b5b313b3741
 ArrowDown	14	1	1b5b313b3742
 ArrowLeft	14	1	1b5b313b3744
@@ -2238,9 +2241,9 @@ z	14	1	1b1a
 /	14	1	-
 Enter	15	0	0d
 Tab	15	0	1b5b5a
-Backspace	15	0	7f
+Backspace	15	0	1b7f
 Escape	15	0	1b
-Space	15	0	-
+Space	15	0	1b00
 ArrowUp	15	0	1b5b313b3841
 ArrowDown	15	0	1b5b313b3842
 ArrowLeft	15	0	1b5b313b3844
@@ -2312,9 +2315,9 @@ z	15	0	1b1a
 /	15	0	1b7f
 Enter	15	1	0d
 Tab	15	1	1b5b5a
-Backspace	15	1	7f
+Backspace	15	1	1b7f
 Escape	15	1	1b
-Space	15	1	-
+Space	15	1	1b00
 ArrowUp	15	1	1b5b313b3841
 ArrowDown	15	1	1b5b313b3842
 ArrowLeft	15	1	1b5b313b3844

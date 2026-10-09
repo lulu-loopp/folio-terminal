@@ -330,7 +330,7 @@ mod tests {
         let scope = DiskScope::under(std::env::temp_dir());
         let mut found = BTreeSet::new();
         let mut refused = Vec::new();
-        let missing = std::env::temp_dir().join("folio-bt-source-no-such-directory");
+        let missing = bt_testpath::temp_path("folio-bt-source-no-such-directory");
         scope.walk(&missing, &mut found, &mut refused);
         assert!(found.is_empty());
         assert!(

@@ -16,6 +16,13 @@ inputs:
       that nothing in that job verifies.
     required: false
     default: "true"
+  targets:
+    description: >
+      Extra compilation targets to install beside the host's, space-separated
+      (`wasm32-unknown-unknown` for the jobs that check the library crates for a
+      browser). Empty installs the host target only.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -36,6 +43,8 @@ runs:
     # later `cargo` reads `rust-toolchain.toml` again and asks for the Windows
     # channel a second time.
     - shell: pwsh
+      env:
+        EXTRA_TARGETS: ${{ inputs.targets }}
       run: |
         $channel = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
         if (-not $IsWindows) {
@@ -47,6 +56,8 @@ runs:
         }
         Write-Host "installing $channel"
         rustup toolchain install $channel --component rustfmt --component clippy --no-self-update
+        $targets = @($env:EXTRA_TARGETS -split '\s+' | Where-Object { $_ })
+        if ($targets.Count -gt 0) { rustup target add --toolchain $channel @targets }
 
     # Third-party, so pinned to a commit rather than to a tag its owner can
     # repoint. This action itself is referenced by path, which is this

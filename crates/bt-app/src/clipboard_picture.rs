@@ -706,10 +706,7 @@ mod tests {
 
     /// A folder of this test's own, under the machine's temporary directory.
     fn scratch(tag: &str) -> PathBuf {
-        let folder = std::env::temp_dir().join(format!(
-            "folio-clipboard-picture-test-{tag}-{}",
-            std::process::id()
-        ));
+        let folder = bt_testpath::temp_path(&format!("folio-clipboard-picture-test-{tag}"));
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).expect("a scratch folder");
         folder

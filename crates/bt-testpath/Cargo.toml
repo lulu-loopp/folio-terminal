@@ -1,0 +1,17 @@
+[package]
+name = "bt-testpath"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# **The one owner of a test's scratch name** (`src/lib.rs`). For tests only:
+# every crate names it on its *dev-dependency* list, and the two test-support
+# modules that are compiled behind a feature (`bt-pty`'s `test-shell`,
+# `bt-platform`'s `trust-harness`) name it as an optional dependency of that
+# feature. A build of the shipped program never has it. It adds no package.
+[dependencies]
+
+[lints]
+workspace = true
