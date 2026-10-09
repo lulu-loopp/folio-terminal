@@ -1052,12 +1052,15 @@ pub fn scheme_of(input: &str) -> Option<String> {
 ///
 /// `scheme` is the text up to and including `//` (`https://`), empty for a local path; `host` is
 /// the authority as written (port kept: it is part of which server) or a local path's root (`C:`,
-/// or empty for `/`); `segments` are the path's parts between `separator`s, the last one carrying
-/// the query and the fragment, because `builder.rs#L1240` is one place in one file.
+/// or empty for `/`); `lead` is what stands between the host and the first segment as written —
+/// the separator, or nothing when the address goes straight from its host to a query or a
+/// fragment (`https://host?q=1`); `segments` are the path's parts between `separator`s, the last
+/// one carrying the query and the fragment, because `builder.rs#L1240` is one place in one file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressParts<'a> {
     pub scheme: &'a str,
     pub host: &'a str,
+    pub lead: &'a str,
     pub separator: char,
     pub segments: Vec<&'a str>,
 }
@@ -1077,12 +1080,15 @@ pub fn address_parts(shown: &str) -> Option<AddressParts<'_>> {
         let scheme = &shown[..shown.len() - after.len()];
         let host_end = after.find(['/', '?', '#']).unwrap_or(after.len());
         let host = &after[..host_end];
-        let path = after[host_end..]
-            .strip_prefix('/')
-            .unwrap_or(&after[host_end..]);
+        let rest = &after[host_end..];
+        let (lead, path) = match rest.strip_prefix('/') {
+            Some(path) => ("/", path),
+            None => ("", rest),
+        };
         return Some(AddressParts {
             scheme,
             host,
+            lead,
             separator: '/',
             segments: segments_of(path, '/'),
         });
@@ -1102,6 +1108,7 @@ pub fn address_parts(shown: &str) -> Option<AddressParts<'_>> {
     Some(AddressParts {
         scheme: "",
         host: &shown[..host_end],
+        lead: &shown[host_end..host_end + 1],
         separator,
         segments: segments_of(&shown[host_end + 1..], separator),
     })

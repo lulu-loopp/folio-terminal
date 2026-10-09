@@ -16384,15 +16384,19 @@ pub fn fold_address(address: &str, room: f32, mut measure: impl FnMut(&str) -> f
         return crate::tooltip::ellipsize(address, room, measure);
     };
     let count = parts.segments.len();
+    // The host, then what the address wrote after it: `lead` before the first piece (the
+    // separator, or nothing before a bare `?query`/`#fragment`), the separator between the rest,
+    // and the fold mark where pieces were taken.
     let build = |scheme: &str, kept: &[&str]| {
-        let mut text = format!("{scheme}{}", parts.host);
+        let mut text = format!("{scheme}{}{}", parts.host, parts.lead);
         if kept.len() < count {
-            text.push(parts.separator);
             text.push_str(PREVIEW_CRUMB_FOLD);
-        }
-        for segment in kept {
-            text.push(parts.separator);
-            text.push_str(segment);
+            for segment in kept {
+                text.push(parts.separator);
+                text.push_str(segment);
+            }
+        } else {
+            text.push_str(&kept.join(&parts.separator.to_string()));
         }
         text
     };
@@ -16417,9 +16421,14 @@ pub fn fold_address(address: &str, room: f32, mut measure: impl FnMut(&str) -> f
             return candidate;
         }
     }
-    // And only then the host, at its end.
+    // And only then the host, at its end — or, when there is no host to cut (`https:///x`, a
+    // path rooted at `/`), the address itself: a fold is never an empty line.
+    if parts.host.is_empty() {
+        return crate::tooltip::ellipsize(address, room, measure);
+    }
     crate::tooltip::ellipsize(parts.host, room, measure)
 }
+
 /// `~` — **the first crumb of a path that lies under the reader's own home**,
 /// on the platforms whose paths are rooted at a slash (owner ruling 2026-09-12,
 /// §13.32 ③).
@@ -51937,7 +51946,9 @@ mod tests {",
     ///
     /// MUTATIONS: fold with an end cut (`tooltip::ellipsize` of the whole address) — the 420
     /// row loses the page (`https://github.com/tokio-rs/tokio/blob/mas…`); fold with a start cut
-    /// (`…` + the tail) — the 420 row loses the host.
+    /// (`…` + the tail) — the 420 row loses the host; join a bare query or fragment to the host
+    /// with `/` (the old join) — the `example.com?q=中文` row reads `example.com/?q=中文`; accept an
+    /// empty fold — the `https:///x` row is an empty line.
     #[test]
     fn a_long_address_folds_its_middle_and_keeps_the_host_and_the_page() {
         const LONG: &str =
@@ -51953,7 +51964,7 @@ mod tests {",
             "report.html#ch3",
         ]
         .join("\\");
-        let rows: [(&str, f32, String); 18] = [
+        let rows: [(&str, f32, String); 22] = [
             (LONG, 560.0, LONG.to_owned()),
             (
                 LONG,
@@ -51987,6 +51998,20 @@ mod tests {",
             ),
             (&path, 140.0, ["C:", "…", "report.html#ch3"].join("\\")),
             (&path, 30.0, ["C:", "…"].join("\\")),
+            // A query or fragment straight after the host keeps its own spelling: no `/`.
+            (
+                "https://example.com?q=中文",
+                150.0,
+                "example.com?q=中文".to_owned(),
+            ),
+            (
+                "https://example.com#frag",
+                120.0,
+                "example.com#frag".to_owned(),
+            ),
+            ("https://example.com#frag", 90.0, "example.com…".to_owned()),
+            // An empty host never folds to an empty line.
+            ("https:///x", 13.0, "…".to_owned()),
             // No host and no path: cut at the end.
             (
                 "mailto:someone@example.com",

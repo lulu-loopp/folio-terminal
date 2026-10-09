@@ -2155,7 +2155,8 @@ text_entries! {
     // One contiguous block at the end, per this table's standing rule. Fifteen
     // entries and no more: the three navigation buttons and the stop they turn
     // into, the four rows this slice puts in the shortcut table, and the five
-    // failure cards' sentences and verbs. Everything else the seat says is
+    // failure cards' sentences and their verbs, where a card has one (an
+    // address that does not open has none since 2026-10-09). Everything else the seat says is
     // either a value (a host name, a scheme, an error string — see
     // `web_fail_blocked_scheme` below) or a word this table already owns
     // (`HyperlinkBlockedSuffix` is the foot's `· blocked`, and it is the same

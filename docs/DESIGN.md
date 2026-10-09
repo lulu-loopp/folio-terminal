@@ -4003,9 +4003,9 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 | 卡 | 理由从哪来 | 站位 |
 |---|---|---|
 | Runtime 缺失 | `Environment{error}` **且**加载器自己说没装(`webview2_runtime_version()`)——门 7 量过注册表会撒谎而加载器不会,所以这是两个事实而不是一次模式匹配 | 占座 |
-| 加载失败 | `NavigationCompleted` 的 `WebErrorStatus`,主机名走 `webnav::host_of`(同一份解析) | 占座 |
+| 加载失败 | `NavigationCompleted` 的 `WebErrorStatus`(事实行只写它的名字);卡上写的是**所问的整条地址**,按地址行同一条折叠律折(`seats::fold_address`,经 `webnav::address_parts` 同一份解析)。标题与导航被拦同为 `Cannot open`、无按钮——见 2026-10-09 条目(T-WEB-PANE-ADDRESS) | 占座 |
 | 进程崩溃 | `ProcessFailed` 的 renderer 那一种 | 占座 |
-| 导航被拦 | **导航门自己给出的那一枚 `Refusal`**,由门内的闭包记在座位上;`{scheme}` 取自 `webnav::scheme_of`,不另起第二种解析 | 占座 |
+| 导航被拦 | **导航门自己给出的那一枚 `Refusal`**,由门内的闭包记在座位上;事实行是由它推出的一句话,只有因 scheme 被拒时才点名 `{scheme}`(取自 `webnav::scheme_of`,不另起第二种解析);标题 `Cannot open`、无按钮——见 2026-10-09 条目 | 占座 |
 | 下载无法外交 | `DownloadStarting` 的 URL **过不了地址栏那道门**——「可重放」不是猜的,是那道门的答案:`blob:` 与 `data:` 命名的是页内的内存而不是别人也能发的请求,而它们正是那道门本来就拒的 | **覆页 sheet** |
 
 两条判定被单独拎成纯函数,因为它们各自只做一次区分:`load_fault` 把 `OPERATION_CANCELED` 挡在外面(**一次被拒的导航与一次连不上,`IsSuccess` 都是 false,而它们意思相反**;没有这一条,脚上每一次 `· blocked` 都会同时在座位上竖一张「没有响应」),`download_answer` 把「可重放」交还给地址门。
