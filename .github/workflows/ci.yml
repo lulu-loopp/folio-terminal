@@ -941,6 +941,16 @@ jobs:
       - name: build folio.exe
         run: cargo build -p bt-app --locked
 
+      # `package.ps1` and `smoke.ps1 -ArchiveOnly` against the release manifest,
+      # on a real archive packed from the debug build above with the runner's
+      # Windows SDK `makeappx` (no `-Sign`, nothing started). It is what holds
+      # "package.ps1 packs from archive-members.txt": its
+      # `the_manifest_lists_every_member_but_the_two_signed_ones` packs and
+      # refuses a member the list does not name.
+      - name: package.ps1 against the release manifest
+        shell: pwsh
+        run: ./scripts/release/package-tests.ps1 -Binaries target/debug
+
       - name: install WARP
         shell: pwsh
         run: ./scripts/ci/install-warp.ps1 -TargetDir target/debug
