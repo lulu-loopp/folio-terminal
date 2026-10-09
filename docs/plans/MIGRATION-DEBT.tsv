@@ -103,8 +103,6 @@ crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_r
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_untrusted_executable_and_bad_record_refuse_without_config_changes	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/clipboard_picture.rs	clipboard_picture::tests::every_encoding_is_judged_by_the_one_ceiling	include_str!	png_from;png_from_dib	P14	no
 crates/bt-app/src/context_menu.rs	context_menu::tests::the_classic_registration_is_announced_to_the_shell_as_well	runtime fs read	(the file it reads)	P17	no
-crates/bt-app/src/diagnostics.rs	diagnostics::bt_environment_doc_tests::every_bt_name_in_the_source_is_in_the_document_and_the_reverse	include_str!	../../../docs/BT-ENVIRONMENT.md	P13	no
-crates/bt-app/src/diagnostics.rs	diagnostics::bt_environment_doc_tests::the_document_names_both_directories_the_product_writes_under	include_str!	../../../docs/BT-ENVIRONMENT.md	P13	no
 crates/bt-app/src/diagnostics.rs	diagnostics::tests::a_run_heads_its_log_before_anything_else_can_write_into_it	include_str!	choose_resident_channel;open_run_log	P14	no
 crates/bt-app/src/diagnostics.rs	diagnostics::tests::nothing_branches_on_the_two_console_no_ops	include_str!	choose_resident_channel;main	P14	no
 crates/bt-app/src/file_reads_doors.txt	animation.rs: file_source_in_lane: FileAnimationSource::open	ledger key naming a file	file_source_in_lane (1 site(s), FileAnimationSource::open)	P16	no
@@ -250,7 +248,6 @@ crates/bt-app/src/webhost.rs	webhost::engine_absence_tests::open_answers_a_refus
 crates/bt-app/src/webhost.rs	webhost::fault_tests::a_zoom_notch_reports_the_factor_the_engine_ended_up_at	include_str!	webhost.rs	P14	no
 crates/bt-app/src/webhost.rs	webhost::machine_tests::the_host_asks_its_own_gate_before_it_issues_its_own_navigation	include_str!	webhost.rs	P14	no
 crates/bt-app/src/webhost.rs	webhost::refusal_card_tests::the_engine_is_only_ever_told_what_the_door_answered	include_str!	webhost.rs	P14	no
-crates/bt-app/src/webnav.rs	webnav::file_url_tests::no_file_url_is_compared_as_text	directory walk	(the file it reads)	P13	yes
 crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
 crates/bt-platform/src/app_delegate.rs	tests::PROVIDER	include_str!	macos_services.rs	P14	no
 crates/bt-platform/src/hang.rs	tests::SOURCE	include_str!	hang.rs	P14	no

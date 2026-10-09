@@ -29,10 +29,10 @@
 //! `include_str!("../../../docs/BT-ENVIRONMENT.md")`, whose subject really is a
 //! published document. It is **not** here. The tripwire looks for `.rs`, so an
 //! entry for it would enforce nothing — and it would be keyed to
-//! `crates/bt-app/src/diagnostics.rs`, which also holds a `shipped_sources`
-//! directory walk that is genuine debt (P13). Allowlisting that file would blind
-//! the tripwire to the debt beside the document. The document is safe because
-//! nothing moves it, not because a list says so.
+//! `crates/bt-app/src/diagnostics.rs`, a file whose other readers are source
+//! readers; allowlisting it would blind the tripwire to them. The source half
+//! of that test reads [`crate::universes::shipped_program`], and the document
+//! is safe because nothing moves it, not because a list says so.
 //!
 //! `scripts/check-adapter-boundary.ps1` names `adapter.rs` and `cell_capture.rs`
 //! as the vendor compatibility seam, and it reads as if the concern were those
