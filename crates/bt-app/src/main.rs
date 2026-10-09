@@ -260,8 +260,7 @@ use bt_render::{
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
     SessionDecorationTask, SessionMathTask, SessionStatus, TerminalCanvas, TerminalModes,
-    TerminalPalette, normalized_local_image_path_key, render_detection_task,
-    render_live_detection_task,
+    TerminalPalette, normalized_local_image_path_key,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -2348,27 +2347,12 @@ fn run_decoration_worker(
         let completion = match work {
             MathWorkerRequest::Math {
                 leaf,
-                task,
+                mut task,
                 foreground_rgb,
-            } => (
-                leaf,
-                match *task {
-                    SessionMathTask::Frozen(mut task) => {
-                        let result = render_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Frozen(task)),
-                            result,
-                        }
-                    }
-                    SessionMathTask::Live(mut task) => {
-                        let result = render_live_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Live(task)),
-                            result,
-                        }
-                    }
-                },
-            ),
+            } => {
+                let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                (leaf, DecorationWorkerCompletion::Math { task, result })
+            }
             MathWorkerRequest::InlineImage { leaf, task } => {
                 let result = image_decoder.decode(task.clone());
                 (
