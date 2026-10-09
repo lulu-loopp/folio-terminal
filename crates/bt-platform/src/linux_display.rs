@@ -2000,8 +2000,10 @@ mod stalled_server_tests {
             return;
         }
         let server = StalledX11Server::start();
-        let authority = bt_testpath::temp_path("folio-pr20-xauth");
-        let stderr_path = bt_testpath::temp_path("folio-pr20-x11-stderr");
+        let scratch = bt_testpath::temp_path("folio-pr20-x11");
+        std::fs::create_dir(&scratch).expect("create an isolated X11 client directory");
+        let authority = scratch.join(bt_testpath::unique_name("xauth"));
+        let stderr_path = scratch.join(bt_testpath::unique_name("stderr"));
         std::fs::write(&authority, []).expect("write empty Xauthority data");
         let stderr_file = std::fs::File::create(&stderr_path).expect("capture child diagnostics");
         let mut child = ChildGuard(
@@ -2056,7 +2058,7 @@ mod stalled_server_tests {
         let _ = marker_reader.join();
         let _ = std::fs::remove_file(authority);
         let child_stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-        let _ = std::fs::remove_file(stderr_path);
+        let _ = std::fs::remove_dir_all(scratch);
         assert!(
             returned.is_ok(),
             "the window-thread call must return while the X11 server withholds its InternAtom reply; child stderr: {child_stderr}"
