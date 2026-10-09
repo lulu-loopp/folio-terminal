@@ -10,7 +10,9 @@
 //! after the open that asked for it has returned, and a machine under load
 //! only moves that moment later. See [`outstanding_reaching`].
 
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+#[cfg(any(windows, target_os = "macos", test, feature = "trust-harness"))]
+use std::sync::Condvar;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 #[cfg(any(test, feature = "trust-harness"))]
 use std::time::Duration;
 
@@ -31,6 +33,7 @@ impl Counts {
 /// announced on.
 struct Ledger {
     counts: Mutex<Counts>,
+    #[cfg(any(windows, target_os = "macos", test, feature = "trust-harness"))]
     moved: Condvar,
 }
 
@@ -39,6 +42,7 @@ static LEDGER: Ledger = Ledger {
         started: 0,
         shut_down: 0,
     }),
+    #[cfg(any(windows, target_os = "macos", test, feature = "trust-harness"))]
     moved: Condvar::new(),
 };
 
