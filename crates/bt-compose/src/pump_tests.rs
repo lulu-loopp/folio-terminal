@@ -397,7 +397,7 @@ fn the_declining_executor_holds_no_decoder() {
 /// MUTATIONS: let `pump` take one task more than its budget (`0..=budget.tasks`) — the first
 /// report counts two; report `more_pending: false` unconditionally — the first report says
 /// nothing remains while it does; complete a frozen formula with `Err(HostDeclined)` on `Done`
-/// — the pumped frame carries no picture and differs from the lane's.
+/// — the pumped frame at the top of the history carries no picture.
 #[test]
 fn a_pump_takes_its_budget_and_lands_the_lanes_completion() {
     let names = printed();

@@ -504,6 +504,7 @@ version = "0.4.7"
 dependencies = [
  "alacritty_terminal",
  "base64",
+ "bt-compose",
  "bt-detect",
  "bt-doc",
  "bt-effects",

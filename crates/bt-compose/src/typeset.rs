@@ -446,5 +446,5 @@ fn baseline_box_fits(
 }
 
 #[cfg(test)]
-#[path = "typeset_differential_tests.rs"]
-mod differential;
+#[path = "typeset_tests.rs"]
+mod tests;
