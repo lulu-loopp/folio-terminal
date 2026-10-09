@@ -39082,8 +39082,18 @@ mod shell_birth_tests {
     fn a_shell() -> Result<(PtySession, Hygiene), PtyError> {
         #[cfg(windows)]
         let command = bt_pty::PtyCommand::new("cmd.exe").arg("/D");
+        // A pane's shell is told the system's locale when the environment names none
+        // (`shell_integration::locale_declaration`); this one is told it the same way, or a
+        // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
+        // locale and its line editor reads the CJK typed below as meta keys.
         #[cfg(not(windows))]
-        let command = bt_pty::PtyCommand::new("/bin/sh");
+        let command = bt_platform::system_locale_declaration()
+            .into_iter()
+            .flat_map(bt_platform::LocaleDeclaration::variables)
+            .fold(
+                bt_pty::PtyCommand::new("/bin/sh"),
+                |command, (name, value)| command.env(*name, value),
+            );
         let size = PtySize::cells(grid().columns, grid().rows);
         TestShell::spawn(command, size).map(TestShell::into_session)
     }
