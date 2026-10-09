@@ -1645,19 +1645,31 @@ receipt under a deadline and whose way out hands the transaction to its
 applier. `bt-app::restore::DirtyGate` / `GateRequest` is reachable from
 quit, close-tab, close-pane and git-discard.
 
-**Controlled failure** is `FolioApp::fail` — twelve call sites. It attempts
-device recovery first; otherwise it calls `Runtime::close_window(true)`, clears
-the windows and finishes the application. `close_window` finishes a pending
-rename and marks the session dirty. It **does not save dirty preview buffers**,
-and `DirtyGate` is structurally unreachable from it.
+**Controlled failure** is `FolioApp::fail` — twelve call sites — and a loop
+stopped by something that is not a window closing (`exiting`). It attempts
+device recovery first; otherwise both leave by one road,
+`FolioApp::stop_every_window` (0.4.8 G7): every window keeps what it would lose
+(`Runtime::keep_unsaved_edits` → `preview::PreviewPool::keep_dirty`) — each dirty
+preview buffer written back through `PreviewBuffer::save`, the quit's judged
+write with its conflict check, and where the file refuses or has changed on disk,
+copied into the data directory's `recovered` folder, never over the file — with
+one `diagnostics.log` line each saying where the edit is; then every window is
+closed with `ending` (`Runtime::close_window(true)` finishes a pending rename and
+marks the session dirty), the windows cleared and the application finished. The
+writes are made on the window thread and are done when the call returns, as the
+quit's are. `DirtyGate` is not asked: the process is going, so nobody can answer
+it. The guard `restore_app_tests::failure_road` holds the twelve sites, the road's
+two callers and every other `close_window` call to its tables.
 
 **Emergency termination** is `install_panic_log_hook` / `install_panic_log_hook_at`:
 write a report, exempt contained math panics, hide every window of the process
 through a system enumeration, leave. It has no safe access to a coherent set of
 dirty buffers.
 
-**The fact, stated as a fact.** On both failure roads, unsaved preview edits are
-**LOST today**, and no history entry records that as an accepted trade-off.
+**The fact, stated as a fact.** On the emergency road unsaved preview edits are
+**LOST today** (D-56, 0.5); the controlled road keeps them since 0.4.8 G7, above.
+Before that, both roads lost them, and no history entry recorded that as an
+accepted trade-off.
 Session persistence does not substitute: `TabState::preview_content` emits
 paths, names and source kinds, and `bt-persist::session::PreviewPoolEntryV1`
 contains no edited content — the snapshot looks more protective than it is.

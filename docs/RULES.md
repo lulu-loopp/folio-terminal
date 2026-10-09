@@ -1616,10 +1616,19 @@ leave**); ④ retirement, with windows hidden and the loop still pumping only th
 browser-exit clock to its deadline. **The spare web controller shares the run's one
 bounded retirement** (ticket 60): `App::run_retiring_until` is set once, when the last
 window closes or ④ begins, the spare retires in that same branch, and the run ends only
-when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the system's quit — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③
-entirely.** `FolioApp::fail` — twelve call sites — asks the device-loss latch
-first, then prints its stopped line, closes **every** window with the ending flag
-through `Runtime::close_window` so that no shell outlives its window, **abandons the
+when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the system's quit — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③**;
+the controlled one keeps the edits ① would have asked about by a write of its own.
+`FolioApp::fail` — twelve call sites — asks the
+device-loss latch first, then prints its stopped line and leaves by the one road a
+stop that is not a quit leaves by, `FolioApp::stop_every_window`, which `exiting`
+(a loop stopped by something that is not a window closing) takes as well (0.4.8 G7):
+**every dirty preview buffer of every window is kept first** — written back through
+the quit's judged write (`PreviewBuffer::save`, its conflict check included), and
+where the file refuses or has changed on disk, copied into the data directory's
+`recovered` folder under the instant and the file's name, never over the file — each
+said in `diagnostics.log` with where its edit is; no card, no question, and the
+writes are done before the road goes on. It then closes **every** window with the
+ending flag through `Runtime::close_window` so that no shell outlives its window, **abandons the
 spare web controller without waiting (its controller closed, its parent left to process
 exit; `exiting` does the same)**, finishes the application and exits the loop. `install_panic_log_hook` / `install_panic_log_hook_at`
 ends the announcing panic by hiding every window of this process through a system
@@ -1631,13 +1640,12 @@ leave first, and a process that has hosted a web view may not walk out through
 `main`*; §7.43 item ④ *a panic leaves by the road a shutdown leaves by*.
 **Overrides.** §7.35 supersedes the immediate window removal on ordinary close.
 §7.17's button order was overturned by §7.17 item ② on 2026-08-25.
-**The fact, recorded because no entry records it.** Whether losing unsaved
-preview edits on the two failure roads is an accepted trade-off is
-**`nowhere written`**. The dirty gate is structurally unreachable from both
-roads; the session snapshot carries paths, names and source kinds and no edited
-content. **0.4.4 owns this** — either the preservation transaction in
-`docs/ARCHITECTURE.md` §11, or a written ruling with quantified impact under
-`CONVENTIONS` §十 rule 7.
+**The fact.** The controlled road keeps unsaved preview edits (0.4.8 G7, above;
+trailing entry 2026-10-09 *A controlled failure keeps every unsaved preview edit*).
+The emergency road — the panic hook — still loses them, and that is not an accepted
+trade-off: it is `docs/plans/structural-debt.md` D-56 (0.5), the journal and a
+defined recoverable revision of `docs/ARCHITECTURE.md` §11. The session snapshot
+carries paths, names and source kinds and no edited content.
 
 ### 44. Git status — `not yet folded`
 Entries: §7.1.3g; the git backend adjudication document under `docs/plans/`; the

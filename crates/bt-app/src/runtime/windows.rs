@@ -1693,6 +1693,20 @@ impl Runtime<'_> {
         Ok(report)
     }
 
+    /// **Keep what this window would lose, on a stop that cannot ask** (D-4,
+    /// 0.4.8 G7): every dirty preview buffer of every tab, through the quit's
+    /// judged write and, where that is refused, into `recovery`
+    /// ([`crate::keep_unsaved_edits_over`]), each said in `diagnostics.log` with
+    /// where its edit is. No card and no repaint: the window is about to be
+    /// closed by a process that is stopping.
+    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
+        for kept in
+            crate::keep_unsaved_edits_over(&mut self.window.tabs, recovery, SystemTime::now())
+        {
+            crate::diagnostics::note(&kept.line());
+        }
+    }
+
     /// **Take this window off the screen and let go of everything it holds**
     /// (slice E2 phase ④).
     ///

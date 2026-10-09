@@ -18472,6 +18472,22 @@ fn raise_dirty_gate_over(
     gate.raise(request, &at_risk)
 }
 
+/// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
+/// (D-4, 0.4.8 G7) — the whole of [`Runtime::keep_unsaved_edits`] except its
+/// diagnostics lines. Every tab's pool and not the active tab's, on the quit
+/// gate's own reasoning: a dirty buffer on a tab nobody is looking at is still a
+/// dirty buffer. Each pool keeps its own through
+/// [`preview::PreviewPool::keep_dirty`].
+fn keep_unsaved_edits_over(
+    tabs: &mut [TabState],
+    recovery: &Path,
+    at: SystemTime,
+) -> Vec<preview::Kept> {
+    tabs.iter_mut()
+        .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
+        .collect()
+}
+
 /// **Which of the tabs whose shells have all exited the loop may close on its
 /// own** (ticket 58, coordinator ruling 2026-09-25): those whose close is
 /// nothing to ask, in the order given.
@@ -60231,8 +60247,8 @@ mod quit_transaction_tests {
         );
     }
 
-    /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` is
-    /// unchanged.**
+    /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` leaves by
+    /// the controlled failure road** (`FolioApp::stop_every_window`, 0.4.8 G7).
     ///
     /// The two are different machines for different events and the plan's whole
     /// §E2 rests on keeping them apart: `exiting` runs after the loop has stopped
@@ -60254,8 +60270,8 @@ mod quit_transaction_tests {
         let exiting =
             item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler"));
         assert!(
-            exiting.contains(&[shut.as_str(), "(true)"].concat()),
-            "and the backstop for a loop stopped by something else is untouched"
+            exiting.contains("self.stop_every_window()"),
+            "and the backstop for a loop stopped by something else leaves by the failure road              (held to its tables by `restore_app_tests::failure_road`)"
         );
     }
 
@@ -65701,12 +65717,7 @@ impl FolioApp {
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
             announce_panic(path);
         });
-        // Every window, because the failure is the process's: a shell left
-        // running behind a window nobody can see is the one outcome worse than
-        // stopping. `ending` for every one of them, and that is the point: this
-        // is the process stopping, not somebody closing five windows, so what
-        // was open stays in the file and nothing is filed away as "closed".
-        if let Err(shutdown_error) = self.for_each_window(|runtime| runtime.close_window(true)) {
+        if let Err(shutdown_error) = self.stop_every_window() {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
         // **The spare is abandoned, not waited for** (ticket 60, SW-2): its controller closed now,
@@ -65719,6 +65730,34 @@ impl FolioApp {
             app.finish();
         }
         event_loop.exit();
+    }
+
+    /// **The one road a stop that is not a quit leaves by** (D-4, 0.4.8 G7): a
+    /// controlled failure ([`Self::fail`], twelve sites) and a loop stopped by
+    /// something that is not a window closing (`exiting`).
+    ///
+    /// First every window keeps what it would lose ([`Runtime::keep_unsaved_edits`]):
+    /// each dirty preview buffer written back through the quit's judged write, or,
+    /// where the file refuses or has changed on disk, copied into the data
+    /// directory's [`preview::RECOVERED_FOLDER`] — with one diagnostics line each
+    /// saying where the edit is. The writes are made on this thread and are done
+    /// when the call returns, as the quit's are; nothing waits for anything else.
+    /// Then every window, because the stop is the process's: a shell left running
+    /// behind a window nobody can see is the one outcome worse than stopping.
+    /// `ending` for every one of them, and that is the point: this is the process
+    /// stopping, not somebody closing five windows, so what was open stays in the
+    /// file and nothing is filed away as "closed".
+    ///
+    /// The structural guard `failure_road` holds every closing of a window with
+    /// `ending` to this road or a row of its table, and the twelve `fail` sites to
+    /// theirs.
+    fn stop_every_window(&mut self) -> Result<()> {
+        let recovery = persist::storage_dir().join(preview::RECOVERED_FOLDER);
+        self.for_each_window(|runtime| {
+            runtime.keep_unsaved_edits(&recovery);
+            Ok(())
+        })?;
+        self.for_each_window(|runtime| runtime.close_window(true))
     }
 
     fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
@@ -67333,10 +67372,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if self.windows.is_empty() {
             return;
         }
-        // `ending` for the reason `fail` gives: the loop stopping is the process
+        // `fail`'s road, for its reason: the loop stopping is the process
         // stopping, and every window still up at that moment is a window the
-        // reader had open — the file says so and the next launch opens them.
-        if let Err(error) = self.for_each_window(|runtime| runtime.close_window(true)) {
+        // reader had open — its unsaved edits are kept, the file says so and the
+        // next launch opens them.
+        if let Err(error) = self.stop_every_window() {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.windows.clear();
