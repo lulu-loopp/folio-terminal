@@ -25,7 +25,7 @@ use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
