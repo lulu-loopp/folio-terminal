@@ -3047,6 +3047,15 @@ text_entries! {
     /// An update's journal cannot be read and names no later Folio (`update_job::Failure::Newer`
     /// without a version; 0.4.8 E1).
     UpdateFailedUnreadable,
+    /// An unfinished update whose journal records no trial ever begun (`update_job::Failure::Incomplete`
+    /// with `untried`; 0.4.8 E4).
+    UpdateFailedUntried,
+    /// Another program held the update's journal open past the applier's window
+    /// (`update_job::Failure::JournalHeld`; 0.4.8 E4); `{error}` is the system's refusal.
+    UpdateFailedJournalHeld,
+    /// After *Updated.*, when the update was committed after its trial ended holding a person's
+    /// change (`update_job::TrialChanges::NotKept`; 0.4.8 E4); `{detail}` is the detail it follows.
+    UpdateCardTrialNotKept,
 }
 
 impl Text {
@@ -5912,6 +5921,21 @@ impl Text {
                 "{detail} Changes made in this session are not kept.",
                 "{detail} Changes made in this session are not kept.", // zh: pending E1
             ),
+            Self::UpdateFailedUntried => pick(
+                lang,
+                "The update stopped before the new version started.",
+                "The update stopped before the new version started.", // zh: pending T-UPDATE-RENAME-RETRY
+            ),
+            Self::UpdateFailedJournalHeld => pick(
+                lang,
+                "Another program held the update record open: {error}",
+                "Another program held the update record open: {error}", // zh: pending T-UPDATE-RENAME-RETRY
+            ),
+            Self::UpdateCardTrialNotKept => pick(
+                lang,
+                "{detail} Changes made before Folio confirmed the update were not kept.",
+                "{detail} Changes made before Folio confirmed the update were not kept.", // zh: pending T-UPDATE-RENAME-RETRY
+            ),
             Self::UpdateCardRestartMissed => pick(
                 lang,
                 "The restart did not happen.",
@@ -6102,6 +6126,14 @@ impl Text {
         (Self::UpdateCardNewerUnnamed, HostPlatform::MacOs),
         (Self::UpdateCardNotKept, HostPlatform::Windows),
         (Self::UpdateCardNotKept, HostPlatform::MacOs),
+        // 0.4.8 E4 (T-UPDATE-RENAME-RETRY): one heading per cause of an unfinished update, and
+        // an update committed after its trial ended.
+        (Self::UpdateFailedUntried, HostPlatform::Windows),
+        (Self::UpdateFailedUntried, HostPlatform::MacOs),
+        (Self::UpdateFailedJournalHeld, HostPlatform::Windows),
+        (Self::UpdateFailedJournalHeld, HostPlatform::MacOs),
+        (Self::UpdateCardTrialNotKept, HostPlatform::Windows),
+        (Self::UpdateCardTrialNotKept, HostPlatform::MacOs),
         // 0.4.8 E3: the Ready card after a restart that did not happen.
         (Self::UpdateCardRestartMissed, HostPlatform::Windows),
         (Self::UpdateCardRestartMissed, HostPlatform::MacOs),
@@ -6485,6 +6517,25 @@ pub fn update_card_newer(version: &str) -> String {
 #[must_use]
 pub fn update_card_not_kept(detail: &str) -> String {
     Text::UpdateCardNotKept.text().replace("{detail}", detail)
+}
+
+/// **The failed card's reason when another program held the update's journal
+/// open** — `Another program held the update record open: Access is denied.
+/// (os error 5)` (0.4.8 E4), filled from [`Text::UpdateFailedJournalHeld`].
+#[must_use]
+pub fn update_failed_journal_held(error: &str) -> String {
+    Text::UpdateFailedJournalHeld
+        .text()
+        .replace("{error}", error)
+}
+
+/// **A completed update's line when its trial's changes were not kept**
+/// (0.4.8 E4, R3), filled from [`Text::UpdateCardTrialNotKept`].
+#[must_use]
+pub fn update_card_trial_not_kept(detail: &str) -> String {
+    Text::UpdateCardTrialNotKept
+        .text()
+        .replace("{detail}", detail)
 }
 
 /// **The line beside the update card's determinate bar** — `12 / 41 MB`

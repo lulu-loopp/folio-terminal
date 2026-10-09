@@ -1185,11 +1185,26 @@ signer; the ordinary quit hands the installation to the applier only on a
 receipt for its own session document; the entrance at logon is one `Run` value
 `FolioUpdate-<txn8>`, armed before any move and removed when the transaction
 ends (`--uninstall-cleanup` removes one left behind for this copy); the new
-build runs as a trial and is `Committed` only on its receipt; a failed trial is
+build runs as a trial and is `Committed` only on its receipt; a journal write
+refused because another program holds the journal open is asked again for ten
+seconds, each refused round said in the log with the system's refusal and the
+time held, and a hold that outlasts them is named, with that refusal, on the
+card of the build that opens next — never as a new version that did not start
+(E4); a failed trial is
 rolled back by digest, and a rollback that fails is `Stuck` with everything kept,
 retried at the next logon or start three times at most; whatever phase a dead
 applier leaves, a start opens exactly one Folio, and the new build before
-`Committed` only as a trial. **On Windows, a start whose rescue build cannot
+`Committed` only as a trial. **The card of an unfinished update names its
+cause from the journal's facts, never from timing** (E4): the update stopped
+before the new version started when no trial was ever begun; the update did
+not finish when the start is itself the transaction's trial (the new version
+runs there); the new version did not start only when a trial was begun. A
+person's change a trial held — the settings, the shortcuts, the profiles, the
+pins — is marked in the transaction's folder until the trial reads its
+commit; a commit made after the trial ended (its applier dead, a recovery
+committing from its receipt) cannot carry what the trial held, and the start
+that retires it says that the changes made before Folio confirmed the update
+were not kept. **On Windows, a start whose rescue build cannot
 be started — its folder gone, its file held, the operating system refusing it —
 continues with its writes held** (E1, the owner's ruling E5 of 2026-10-08),
 over every destructive phase but `TrialStarting`, which keeps U-35's road
@@ -1289,7 +1304,7 @@ process of the new build, a held or unaskable data claim, a process list it
 cannot read, or a transaction folder whose receipts it cannot list, while a
 person's start
 keeps its delivery; a trial whose transaction is still undecided hands it back
-to the recovery build at 102, 204, 408 and 816 s, one recovery at a time, and
+to the recovery build at 110, 220, 440 and 880 s, one recovery at a time, and
 never ends itself — the recovery ends one that never became ready; on macOS the
 trial's launch (`open -n -W`) is watched, so one that ends before it is seen
 ends the applier's wait at once. **A start of Folio during the unsettled

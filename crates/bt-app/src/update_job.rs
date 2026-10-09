@@ -501,8 +501,16 @@ pub(crate) enum Failure {
     /// path (`launch_wire::accept`, U-36 round 2): the card then names no
     /// folder. `held`: this start continues with its writes held, because
     /// the rescue build could not be started (0.4.8 E1), and the card says
-    /// that this session's changes are not kept.
-    Incomplete { folder: Option<PathBuf>, held: bool },
+    /// that this session's changes are not kept. `untried`: the journal
+    /// records no trial of the new build ever begun
+    /// (`update_txn::Phase::trial_begun`, 0.4.8 E4) — the update stopped
+    /// before the new version started, and the card says that rather than
+    /// that it did not start.
+    Incomplete {
+        folder: Option<PathBuf>,
+        held: bool,
+        untried: bool,
+    },
     /// **An update this build cannot read whole is not finished** (0.4.8
     /// E1): the start continued past a journal another Folio wrote —
     /// `version`, when the journal names a later build, and otherwise one
@@ -513,17 +521,43 @@ pub(crate) enum Failure {
         version: Option<String>,
         held: bool,
     },
-    /// **Recovery could not be launched, so this already-running new build is
-    /// the recorded trial** (0.4.7 U-35). The update is still incomplete and
-    /// `folder` is where its journal is; unlike [`Failure::Incomplete`], the
-    /// card also tells the reader that this session is the trial.
+    /// **This start is the unfinished transaction's trial: the new version
+    /// runs here** — U-35's reserved trial, started because recovery could not
+    /// be launched (0.4.7), or the trial an exit guard starts with a fresh
+    /// nonce over a transaction whose new set is live (0.4.8 E4: W14long, a
+    /// `Stuck` one's retrial). The update is still incomplete and `folder` is
+    /// where its journal is; unlike [`Failure::Incomplete`], the card tells the
+    /// reader that this session is the trial — never that the new version did
+    /// not start.
     TrialIncomplete { folder: PathBuf },
+    /// **Another program held the update's journal open past the applier's
+    /// window for a refused write** (0.4.8 E4): `error` is the operating
+    /// system's last refusal, `then` the failure the journal itself shows. The
+    /// card names the hold and its error and says what `then` did; it never
+    /// says that the new version did not start.
+    JournalHeld { error: String, then: Box<Failure> },
+    /// **The update was committed after its trial ended, and what the person
+    /// changed in the trial was not kept** (0.4.8 E4, R3): the trial's writes
+    /// were held until a commit it never saw, and the trial left its mark in
+    /// the transaction's folder (`update_trial`). `version` is this build's.
+    ChangesNotKept { version: String },
     /// **This start stood in for U-35's reserved trial and found that trial
     /// already running** (0.4.8 E3, `update_startup::stand_down`): the trial
     /// did not take its launch within the claim's wait, so this session opens
     /// a window of its own, not as the trial, its writes held for its life.
     /// The update is not finished; `folder` is where its journal is.
     BesideTheTrial { folder: PathBuf },
+}
+
+impl Failure {
+    /// **The failure beneath a held journal's** — the one the journal itself
+    /// shows ([`Failure::JournalHeld`]'s `then`), or this failure.
+    pub(crate) fn beneath(&self) -> &Failure {
+        match self {
+            Failure::JournalHeld { then, .. } => then.beneath(),
+            other => other,
+        }
+    }
 }
 
 /// **Why a driver stopped** (U-18 decision 11, grown by the macOS Prepare,
@@ -629,8 +663,22 @@ pub(crate) enum State {
     /// and the trial's watch then read `Committed` — the receipt committed it
     /// forward. The card follows the
     /// journal's final phase, not the phase at launch; the version is this
-    /// build's own.
-    Updated(String),
+    /// build's own. Also **an update committed after its trial ended** (0.4.8
+    /// E4, R3), raised at the next start: the changes made in that trial were
+    /// not kept, and the card says so ([`TrialChanges::NotKept`]).
+    Updated(String, TrialChanges),
+}
+
+/// **What a completed update kept of what was changed in its trial** (0.4.8
+/// E4, R3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrialChanges {
+    /// The trial saw its commit and wrote what it had held (U-32's road), or
+    /// held nothing a person changed.
+    Kept,
+    /// The trial ended before its commit holding a person's change: it never
+    /// reached the disk.
+    NotKept,
 }
 
 /// A state's name, for the table.
@@ -678,7 +726,7 @@ impl State {
             Self::Quitting(_) => Kind::Quitting,
             Self::Committing(_) => Kind::Committing,
             Self::Failed(..) => Kind::Failed,
-            Self::Updated(_) => Kind::Updated,
+            Self::Updated(..) => Kind::Updated,
         }
     }
 
@@ -686,7 +734,7 @@ impl State {
     #[must_use]
     pub(crate) const fn offer(&self) -> Option<&Offer> {
         match self {
-            Self::Pending(_) | Self::Idle | Self::Updated(_) => None,
+            Self::Pending(_) | Self::Idle | Self::Updated(..) => None,
             Self::Available(offer)
             | Self::Downloading(offer, _)
             | Self::Staged(offer)
@@ -1510,8 +1558,15 @@ impl<W: Copy + Eq> Job<W> {
     /// is incomplete is kept until a commit says otherwise
     /// ([`Self::after_commit`]); a later report does not take it back.
     fn told(&mut self, failure: Failure) {
+        // Not a failure of the update: it completed, and the card says what
+        // its trial did not keep (0.4.8 E4, R3). Nothing to name in About.
+        if let Failure::ChangesNotKept { version } = failure {
+            self.state = State::Updated(version, TrialChanges::NotKept);
+            self.offered_this_launch = true;
+            return;
+        }
         self.said_incomplete |= matches!(
-            failure,
+            failure.beneath(),
             Failure::Incomplete { .. }
                 | Failure::TrialIncomplete { .. }
                 | Failure::Newer { .. }
@@ -1572,22 +1627,23 @@ impl<W: Copy + Eq> Job<W> {
     /// it). Every other launch is unchanged: a trial that was never told
     /// anything is not told this either. Answers whether the card changed.
     pub(crate) fn after_commit(&mut self, version: &str) -> bool {
-        let standing = matches!(
-            self.state,
-            State::Failed(
-                None,
+        let standing = match &self.state {
+            State::Failed(None, failure) => matches!(
+                failure.beneath(),
                 Failure::Incomplete { .. }
                     | Failure::TrialIncomplete { .. }
                     | Failure::BesideTheTrial { .. }
                     | Failure::Newer { .. }
-            ) | State::Idle
-        );
+            ),
+            State::Idle => true,
+            _ => false,
+        };
         if !(self.said_incomplete && standing) {
             return false;
         }
         self.said_incomplete = false;
         self.last_failure = None;
-        self.state = State::Updated(version.to_owned());
+        self.state = State::Updated(version.to_owned(), TrialChanges::Kept);
         true
     }
 
@@ -1846,7 +1902,7 @@ impl<W: Copy + Eq> Job<W> {
                 | State::Staged(_)
                 | State::Verified(_)
                 | State::Failed(..)
-                | State::Updated(_)
+                | State::Updated(..)
         );
         self.presenter.filter(|_| drawn && !self.put_away)
     }
@@ -1987,7 +2043,7 @@ impl<W: Copy + Eq> Job<W> {
     /// presenter changed.
     pub(crate) fn hand_over(&mut self, presenters: &Presenters<'_, W>) -> bool {
         let has_a_card = self.state.offer().is_some()
-            || matches!(self.state, State::Failed(..) | State::Updated(_));
+            || matches!(self.state, State::Failed(..) | State::Updated(..));
         if !has_a_card
             || self
                 .presenter
@@ -2213,7 +2269,7 @@ impl<W: Copy + Eq> Job<W> {
             )
             | (state @ State::Verified(_), Verb::Skip | Verb::Press | Verb::Cancel)
             | (
-                state @ (State::Failed(..) | State::Updated(_)),
+                state @ (State::Failed(..) | State::Updated(..)),
                 Verb::Skip | Verb::Press | Verb::Cancel | Verb::Restart,
             ) => (state, Err(Refusal::NotOnThisCard)),
             (State::Downloading(..) | State::Staged(_), Verb::Cancel) => {
@@ -2234,7 +2290,9 @@ impl<W: Copy + Eq> Job<W> {
             (State::Verified(offer), Verb::Restart) => (State::Quitting(offer), Ok(Effect::None)),
             (state @ State::Quitting(_), _) => (state, Err(Refusal::TheQuitAnswers)),
             (state @ State::Committing(_), _) => (state, Err(Refusal::Exiting)),
-            (State::Failed(..) | State::Updated(_), Verb::Later) => (State::Idle, Ok(Effect::None)),
+            (State::Failed(..) | State::Updated(..), Verb::Later) => {
+                (State::Idle, Ok(Effect::None))
+            }
         };
         if matches!(next, State::Idle) {
             self.presenter = None;
@@ -2663,7 +2721,9 @@ mod tests {
             Kind::Quitting => State::Quitting(offer),
             Kind::Committing => State::Committing(offer),
             Kind::Failed => State::Failed(Some(offer), Failure::Unsupported),
-            Kind::Updated => State::Updated("0.4.7".to_owned()),
+            Kind::Updated => {
+                State::Updated("0.4.7".to_owned(), crate::update_job::TrialChanges::Kept)
+            }
         };
         job
     }
@@ -3669,6 +3729,7 @@ mod tests {
         let mut job = job().after_rollback(Some(Failure::Incomplete {
             folder: Some(folder.clone()),
             held: false,
+            untried: false,
         }));
         assert_eq!(
             job.state(),
@@ -3677,6 +3738,7 @@ mod tests {
                 Failure::Incomplete {
                     folder: Some(folder),
                     held: false,
+                    untried: false,
                 }
             )
         );
@@ -3717,7 +3779,10 @@ mod tests {
             folder: PathBuf::from("update-journal"),
         }));
         assert!(job.after_commit("0.4.7"));
-        assert_eq!(job.state(), &State::Updated("0.4.7".to_owned()));
+        assert_eq!(
+            job.state(),
+            &State::Updated("0.4.7".to_owned(), crate::update_job::TrialChanges::Kept)
+        );
     }
 
     /// An unfinished rollback's report, its folder not ASCII.
@@ -3725,6 +3790,7 @@ mod tests {
         Failure::Incomplete {
             folder: Some(PathBuf::from(r"D:\工具\Folio 终端\.folio-update")),
             held: false,
+            untried: false,
         }
     }
 

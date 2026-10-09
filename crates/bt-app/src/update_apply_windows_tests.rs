@@ -635,8 +635,15 @@ fn limits(old_within_ms: u64, trial_ms: u64) -> Limits {
         poll: Duration::from_millis(40),
         quit_within: GRACE,
         end_within: Duration::from_secs(10),
+        journal_held_within: JOURNAL_HELD_WITHIN_UNDER_TEST,
     }
 }
+
+/// **A test's window for a journal write another program holds**: two
+/// seconds, so a test that holds the journal past it waits two; the product's
+/// [`crate::update_apply::JOURNAL_HELD_WITHIN`] is pinned by `update_apply`'s
+/// own tests, on a clock of their own.
+const JOURNAL_HELD_WITHIN_UNDER_TEST: Duration = Duration::from_secs(2);
 
 /// A test's grace for a trial asked to quit (the product's is 5 s).
 const GRACE: Duration = Duration::from_millis(600);
@@ -761,6 +768,19 @@ fn rolled_back_on_disk(install: &Install) {
 /// The words a build started after a rollback carries, then `handed`.
 fn failed_then(install: &Install, handed: &[OsString]) -> Vec<OsString> {
     let mut words = failed_words(&install.home).to_vec();
+    words.extend_from_slice(handed);
+    words
+}
+
+/// `--update-failed <journal>`, then `--update-journal-held` with the refusal
+/// a rename over a journal another program holds without delete sharing
+/// meets (`ERROR_ACCESS_DENIED`, in the system's words), then `handed`
+/// (0.4.8 E4).
+fn failed_held_then(install: &Install, handed: &[OsString]) -> Vec<OsString> {
+    let mut words = failed_words(&install.home).to_vec();
+    words.extend(crate::update_apply::journal_held_words(
+        &io::Error::from_raw_os_error(5).to_string(),
+    ));
     words.extend_from_slice(handed);
     words
 }
@@ -2044,6 +2064,7 @@ fn rolled_back_is_retired_at_the_next_start() {
         argv: &argv,
         trial: None,
         failed: Some(&journal),
+        journal_held: None,
     };
     let mut starting = StartWorld {
         said: Vec::new(),
@@ -2672,15 +2693,17 @@ fn a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_inc
     };
     assert!(why.contains("rename"), "{why}");
     assert!(
-        waited >= crate::update_apply::JOURNAL_WRITE_WITHIN,
+        waited >= JOURNAL_HELD_WITHIN_UNDER_TEST,
         "asked again for the whole bound: {waited:?}"
     );
     assert_eq!(install.on_disk().body.phase, Phase::Armed);
     assert!(install.registry.holds(install.txn), "the Run value is kept");
     nothing_moved(&install);
+    // The hold outlasted the window: the start is told what refused it, so
+    // its card names the hold (0.4.8 E4).
     assert_eq!(
         world.opened,
-        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        vec![(install.installed.clone(), failed_held_then(&install, &[]))],
         "{:?}",
         world.said
     );
@@ -2719,7 +2742,9 @@ fn a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_inc
 /// says the trial could not be recorded — past the whole retry bound.
 ///
 /// MUTATION: in `Txn::trial`, return the `TrialBegan` record's error with
-/// `?` (neither ending the trial nor declaring the rollback).
+/// `?` (neither ending the trial nor declaring the rollback). MUTATION (0.4.8
+/// E4): record `TrialBegan` with a sink that says nothing (`&mut |_| {}` for
+/// `world.say`) — no round in the log.
 #[test]
 fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
     let Some(install) = Install::new("unrecorded") else {
@@ -2733,6 +2758,20 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
     let unrecorded = said_at(&world, "could not be recorded").expect("said");
     let asked = said_at(&world, "is asked to").expect("the trial is stopped");
     assert!(unrecorded < asked, "{:?}", world.said);
+    // Every refused round of `TrialBegan` is in the applier's log before
+    // that, with the system's refusal, the last one giving up (0.4.8 E4).
+    let refusal = io::Error::from_raw_os_error(5).to_string();
+    let rounds = &world.said[..unrecorded];
+    assert!(
+        rounds.len() > 1
+            && rounds.iter().all(|line| {
+                line.starts_with("BT_UPDATE_JOURNAL held by another program for ")
+                    && line.contains(&refusal)
+            })
+            && rounds.last().unwrap().contains("the write is given up"),
+        "{:?}",
+        world.said
+    );
     assert!(
         wrote(&world).ends_with("[Armed, Moving, RollbackIntent, RolledBack, Retired]"),
         "{:?}",
@@ -2746,9 +2785,11 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
     );
     rolled_back_on_disk(&install);
     assert!(!install.registry.holds(install.txn));
+    // `TrialBegan` was refused past the window, so the build started after
+    // the rollback is told the hold (0.4.8 E4).
     assert_eq!(
         world.opened,
-        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        vec![(install.installed.clone(), failed_held_then(&install, &[]))],
         "{:?}",
         world.said
     );
@@ -3907,7 +3948,7 @@ fn the_applier_waits_for_o_within_one_budget() {
     let nonce = install.applier;
     let mut world = install.world(Trial::Answers);
     let expired = Instant::now() - Duration::from_millis(1);
-    let ((ended, successor), asked) = on_a_worker(move |worker| {
+    let ((ended, successor, _), asked) = on_a_worker(move |worker| {
         let mut asked = None;
         let answer = apply_under_the_lock_with(
             worker,
@@ -4028,6 +4069,7 @@ fn u35_two_windows_launch_refusals_reserve_exactly_one_last_trial() {
             handed: &[],
             worker: Some(worker),
             actor: Some(Actor::Applier),
+            journal_held: None,
         });
         let left = guard.leave();
         drop(guard);
@@ -4068,6 +4110,7 @@ fn u35_two_windows_launch_refusals_reserve_exactly_one_last_trial() {
             handed: &[],
             worker: Some(worker),
             actor: Some(Actor::Applier),
+            journal_held: None,
         });
         let left = guard.leave();
         drop(guard);
@@ -4111,6 +4154,7 @@ fn reserved_by_the_guard(install: &Install) -> (Nonce, Vec<(PathBuf, Vec<OsStrin
             handed: &[],
             worker: Some(worker),
             actor: Some(Actor::Applier),
+            journal_held: None,
         });
         let left = guard.leave();
         drop(guard);
@@ -4418,6 +4462,7 @@ fn a_start(
             argv,
             trial: trial.as_ref(),
             failed: failed.as_deref(),
+            journal_held: None,
         },
         world,
     )
@@ -5523,7 +5568,10 @@ fn trial_part(root: &Path) {
             };
             crate::update_trial::watch(
                 gate,
-                &journal,
+                (
+                    &journal,
+                    &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                ),
                 plan.txn,
                 Duration::from_millis(20),
                 &|| {},
@@ -5573,6 +5621,7 @@ fn rescue_part(root: &Path) {
             poll: Duration::from_millis(40),
             quit_within: Duration::from_millis(300),
             end_within: Duration::from_secs(10),
+            journal_held_within: JOURNAL_HELD_WITHIN_UNDER_TEST,
         },
         me,
         starter: install_flip::parent_of_this_process(),

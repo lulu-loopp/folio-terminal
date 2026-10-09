@@ -1219,6 +1219,7 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
             argv: &[],
             trial: None,
             failed: None,
+            journal_held: None,
         },
         &mut quiet,
     ) else {
