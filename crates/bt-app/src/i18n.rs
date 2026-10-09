@@ -3546,7 +3546,7 @@ impl Text {
             Self::PsReadLineCheckFailed => pick(
                 lang,
                 "Could not check which PSReadLine this machine has. Folio checks again when this page opens.",
-                "Could not check which PSReadLine this machine has. Folio checks again when this page opens.", // zh: pending T-PROBE-NO-CACHED-FAILURE
+                "无法检查本机的 PSReadLine 版本。再次打开此页时重新检测。",
             ),
             Self::PsReadLineRowGone => pick(
                 lang,
@@ -3849,26 +3849,12 @@ impl Text {
             // ── the hyperlink overlay ──────────────────────────────────────
             Self::HyperlinkBlockedSuffix => pick(lang, " · blocked", " · 已拦截"),
             Self::HyperlinkBlocked => pick(lang, "blocked", "已拦截"),
-            Self::HyperlinkInvalidSuffix => pick(
-                lang,
-                " · address invalid",
-                " · address invalid", // zh: pending F-SWEEP-2-048
-            ),
-            Self::HyperlinkInvalid => pick(
-                lang,
-                "address invalid",
-                "address invalid", // zh: pending F-SWEEP-2-048
-            ),
-            Self::HyperlinkNoProgramSuffix => pick(
-                lang,
-                " · no program to open it",
-                " · no program to open it", // zh: pending F-SWEEP-2-048
-            ),
-            Self::HyperlinkNoProgram => pick(
-                lang,
-                "no program to open it",
-                "no program to open it", // zh: pending F-SWEEP-2-048
-            ),
+            Self::HyperlinkInvalidSuffix => pick(lang, " · address invalid", " · 地址无效"),
+            Self::HyperlinkInvalid => pick(lang, "address invalid", "地址无效"),
+            Self::HyperlinkNoProgramSuffix => {
+                pick(lang, " · no program to open it", " · 无程序可打开")
+            }
+            Self::HyperlinkNoProgram => pick(lang, "no program to open it", "无程序可打开"),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -3982,7 +3968,7 @@ impl Text {
             Self::CapPowerShellConstrained => pick(
                 lang,
                 "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.",
-                "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.", // zh: pending T-PROBE-NO-CACHED-FAILURE
+                "此 PowerShell 运行于 Constrained Language Mode，不提供 PowerShell 整合。",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -5062,11 +5048,7 @@ impl Text {
             Self::CleanupMarkUpdateHome => {
                 pick(lang, "Update home beside the bundle", "应用旁的更新目录")
             }
-            Self::CleanupMarkTrialFolder => pick(
-                lang,
-                "Update trial folder",
-                "Update trial folder", // zh: pending G7-SWEEP-048
-            ),
+            Self::CleanupMarkTrialFolder => pick(lang, "Update trial folder", "更新试运行文件夹"),
             Self::CleanupMarkRuntimeClaims => pick(lang, "Unix runtime claims", "Unix 运行时锁"),
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
@@ -5353,21 +5335,15 @@ impl Text {
             Self::WebFailCrashSay => {
                 pick(lang, "This page stopped running.", "这个页面停止运行了。")
             }
-            Self::WebFailCannotOpen => pick(
-                lang,
-                "Cannot open",
-                "Cannot open", // zh: pending T-WEB-PANE-ADDRESS
-            ),
+            Self::WebFailCannotOpen => pick(lang, "Cannot open", "无法打开"),
             Self::WebFailBlockedSay => pick(
                 lang,
                 "This address does not open in a preview.",
                 "这个地址不在预览中打开。",
             ),
-            Self::WebFailAddressInvalidSay => pick(
-                lang,
-                "This address is not valid.",
-                "This address is not valid.", // zh: pending F-SWEEP-2-048
-            ),
+            Self::WebFailAddressInvalidSay => {
+                pick(lang, "This address is not valid.", "这个地址无效。")
+            }
             Self::WebFailDownloadSay => pick(
                 lang,
                 "Start this download in your browser instead.",
@@ -5769,7 +5745,7 @@ impl Text {
             Self::ShellProfileChangedElsewhere => pick(
                 lang,
                 "$PROFILE was changed elsewhere. Reload this page and try again.",
-                "$PROFILE was changed elsewhere. Reload this page and try again.", // zh: pending G7-SWEEP-048
+                "$PROFILE 已在别处被改动。重新加载此页后重试。",
             ),
             Self::ShellProfileChanged => pick(
                 lang,
@@ -5956,53 +5932,47 @@ impl Text {
             Self::UpdateFailedNewer => pick(
                 lang,
                 "An update by a newer Folio is not finished.",
-                "An update by a newer Folio is not finished.", // zh: pending E1
+                "较新版本的 Folio 发起的更新尚未完成。",
             ),
             Self::UpdateFailedUnreadable => pick(
                 lang,
                 "The update record cannot be read.",
-                "The update record cannot be read.", // zh: pending E1
+                "无法读取更新记录。",
             ),
             Self::UpdateCardNewer => pick(
                 lang,
                 "It finishes when you next sign in, or when you start Folio {version}.",
-                "It finishes when you next sign in, or when you start Folio {version}.", // zh: pending E1
+                "下次登录或启动 Folio {version} 时完成。",
             ),
             Self::UpdateCardNewerUnnamed => pick(
                 lang,
                 "It finishes when you next sign in.",
-                "It finishes when you next sign in.", // zh: pending E1
+                "下次登录时完成。",
             ),
             Self::UpdateCardNotKept => pick(
                 lang,
                 "{detail} Changes made in this session are not kept.",
-                "{detail} Changes made in this session are not kept.", // zh: pending E1
+                "{detail}本次运行中的更改不会保留。",
             ),
             Self::UpdateFailedUntried => pick(
                 lang,
                 "The update stopped before the new version started.",
-                "The update stopped before the new version started.", // zh: pending T-UPDATE-RENAME-RETRY
+                "更新在新版本启动前停止。",
             ),
             Self::UpdateFailedJournalHeld => pick(
                 lang,
                 "Another program held the update record open: {error}",
-                "Another program held the update record open: {error}", // zh: pending T-UPDATE-RENAME-RETRY
+                "另一个程序占用了更新记录：{error}",
             ),
             Self::UpdateCardTrialNotKept => pick(
                 lang,
                 "{detail} Changes made before Folio confirmed the update were not kept.",
-                "{detail} Changes made before Folio confirmed the update were not kept.", // zh: pending T-UPDATE-RENAME-RETRY
+                "{detail}更新确认前所做的更改没有保留。",
             ),
-            Self::UpdateCardRestartMissed => pick(
-                lang,
-                "The restart did not happen.",
-                "The restart did not happen.", // zh: pending T-UPDATE-HANDOFF-DEBT
-            ),
-            Self::ShellDidNotStart => pick(
-                lang,
-                "Shell not started",
-                "Shell not started", // zh: pending T-BIRTH-OFF-WINDOW
-            ),
+            Self::UpdateCardRestartMissed => {
+                pick(lang, "The restart did not happen.", "未能重启。")
+            }
+            Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
         }
     }
 
@@ -6171,59 +6141,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // 0.4.8 F5 (T-WEB-PANE-ADDRESS): the headline of a card for an address that does not
-        // open.
-        (Self::WebFailCannotOpen, HostPlatform::Windows),
-        (Self::WebFailCannotOpen, HostPlatform::MacOs),
-        // 0.4.8 E1: the cards of an update another Folio left unfinished.
-        (Self::UpdateFailedNewer, HostPlatform::Windows),
-        (Self::UpdateFailedNewer, HostPlatform::MacOs),
-        (Self::UpdateFailedUnreadable, HostPlatform::Windows),
-        (Self::UpdateFailedUnreadable, HostPlatform::MacOs),
-        (Self::UpdateCardNewer, HostPlatform::Windows),
-        (Self::UpdateCardNewer, HostPlatform::MacOs),
-        (Self::UpdateCardNewerUnnamed, HostPlatform::Windows),
-        (Self::UpdateCardNewerUnnamed, HostPlatform::MacOs),
-        (Self::UpdateCardNotKept, HostPlatform::Windows),
-        (Self::UpdateCardNotKept, HostPlatform::MacOs),
-        // 0.4.8 E4 (T-UPDATE-RENAME-RETRY): one heading per cause of an unfinished update, and
-        // an update committed after its trial ended.
-        (Self::UpdateFailedUntried, HostPlatform::Windows),
-        (Self::UpdateFailedUntried, HostPlatform::MacOs),
-        (Self::UpdateFailedJournalHeld, HostPlatform::Windows),
-        (Self::UpdateFailedJournalHeld, HostPlatform::MacOs),
-        (Self::UpdateCardTrialNotKept, HostPlatform::Windows),
-        (Self::UpdateCardTrialNotKept, HostPlatform::MacOs),
-        // 0.4.8 E3: the Ready card after a restart that did not happen.
-        (Self::UpdateCardRestartMissed, HostPlatform::Windows),
-        (Self::UpdateCardRestartMissed, HostPlatform::MacOs),
-        // 0.4.8 B4: a PSReadLine check that failed, and a PowerShell in Constrained Language Mode.
-        (Self::PsReadLineCheckFailed, HostPlatform::Windows),
-        (Self::PsReadLineCheckFailed, HostPlatform::MacOs),
-        (Self::CapPowerShellConstrained, HostPlatform::Windows),
-        (Self::CapPowerShellConstrained, HostPlatform::MacOs),
-        // 0.4.8 T-BIRTH-OFF-WINDOW: a pane whose shell could not be started.
-        (Self::ShellDidNotStart, HostPlatform::Windows),
-        (Self::ShellDidNotStart, HostPlatform::MacOs),
-        // 0.4.8 F-SWEEP-2-048: a refused link says why — not an address, or no program for it.
-        (Self::HyperlinkInvalidSuffix, HostPlatform::Windows),
-        (Self::HyperlinkInvalidSuffix, HostPlatform::MacOs),
-        (Self::HyperlinkInvalid, HostPlatform::Windows),
-        (Self::HyperlinkInvalid, HostPlatform::MacOs),
-        (Self::HyperlinkNoProgramSuffix, HostPlatform::Windows),
-        (Self::HyperlinkNoProgramSuffix, HostPlatform::MacOs),
-        (Self::HyperlinkNoProgram, HostPlatform::Windows),
-        (Self::HyperlinkNoProgram, HostPlatform::MacOs),
-        (Self::WebFailAddressInvalidSay, HostPlatform::Windows),
-        (Self::WebFailAddressInvalidSay, HostPlatform::MacOs),
-        // 0.4.8 G7-SWEEP-048: the uninstall's row for an update trial's folder.
-        (Self::CleanupMarkTrialFolder, HostPlatform::Windows),
-        (Self::CleanupMarkTrialFolder, HostPlatform::MacOs),
-        // 0.4.8 G7-SWEEP-048: a one-click `$PROFILE` edit against a file changed elsewhere.
-        (Self::ShellProfileChangedElsewhere, HostPlatform::Windows),
-        (Self::ShellProfileChangedElsewhere, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7674,7 +7592,6 @@ impl CliText<'_> {
                      right-click menu\n\
                      \x20 --remove-shell-integration  remove Folio lines from this account's PowerShell profiles"
                 ),
-                // zh: pending F-SWEEP-2-048 (the `--with-environment` line is English here).
                 Lang::Chinese => format!(
                     "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] \
                      [--with-environment] [<路径>]\n\n\
@@ -7682,8 +7599,7 @@ impl CliText<'_> {
                      \x20 --profile <id>    第一个窗格用哪种 shell：{profile_ids}\n\
                      \x20 --new-window      另开一扇窗，不在已经开着的 Folio 里加标签\n\
                      \x20 --tab             在已经开着的 Folio 里加标签，不另开窗\n\
-                     \x20 --with-environment  the tab keeps the environment of the terminal you \
-                     started it from\n\
+                     \x20 --with-environment  这个标签沿用启动它的终端的环境\n\
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
                      \x20 --version         显示这是哪一个构建\n\
