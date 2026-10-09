@@ -287,14 +287,9 @@ crates/bt-platform/src/lib.rs	macos_video_signature_tests::WINDOWS_ARM	include_s
 crates/bt-platform/src/lib.rs	macos_window_backend_tests::MACOS	include_str!	macos_impl.rs	P14	no
 crates/bt-platform/src/lib.rs	macos_window_backend_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
 crates/bt-platform/src/lib.rs	macos_window_backend_tests::a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows	include_str!	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	native_window_door_tests::a_stand_in_window_is_only_named_by_tests	dir walk	NativeWindow::stand_in, over the whole crates/ tree retained to src	P12	no
-crates/bt-platform/src/lib.rs	native_window_door_tests::crate_sources	dir walk	bt-platform/src, recursive (plan 3.1)	P12	no
 crates/bt-platform/src/lib.rs	native_window_door_tests::each_native_window_constructor_is_gated_to_its_own_platform	include_str!	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	native_window_door_tests::the_native_window_door_has_no_windows_type_in_its_signature	dir walk	every public declaration of bt-platform	P12	no
 crates/bt-platform/src/lib.rs	platform_door_tests::SOURCE	include_str!	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	dir walk	Command::new outside bt_platform::quiet	P12	no
 crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	runtime fs read	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	quiet_door_tests::shipped_sources	dir walk	crates/ retained to src, excluding bin/tests/target	P12	no
 crates/bt-platform/src/lib.rs	update_check_transport_tests::MACOS	include_str!	macos_http.rs	P14	no
 crates/bt-platform/src/lib.rs	update_check_transport_tests::PORTABLE	include_str!	http_portable.rs	P14	no
 crates/bt-platform/src/lib.rs	update_check_transport_tests::WHOLE_FILE	include_str!	lib.rs	P14	no
