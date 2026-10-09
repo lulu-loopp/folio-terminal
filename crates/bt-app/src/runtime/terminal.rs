@@ -650,9 +650,9 @@ impl Runtime<'_> {
     ///
     /// The old shell dies when its `LeafSession` is dropped — `PtySession::drop`
     /// runs `shutdown`, which kills the child and joins its reader — and the new
-    /// one is spawned **first**, so a ConPTY that cannot be created leaves the
-    /// pane exactly as it was rather than empty. That ordering is `stand_in_terminal`'s
-    /// own and it is the reason this cannot half-succeed.
+    /// one is born **first**, beside it (`LeafSession::successor`), so a ConPTY
+    /// that cannot be created leaves the pane exactly as it was rather than empty.
+    /// That is the reason this cannot half-succeed.
     ///
     /// **What this does not yet do**, and it is written down rather than
     /// forgotten: the transcript is not carried across with a boundary record
@@ -662,12 +662,12 @@ impl Runtime<'_> {
     /// and a confirmation that guessed would be a dialog in front of a fact
     /// nobody measured.
     pub(in crate::runtime) fn restart_shell(&mut self, seat: SeatId) -> Result<()> {
-        if self.window.restarting.is_some() {
-            return Ok(());
-        }
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
+        if leaf.successor.is_some() {
+            return Ok(());
+        }
         let seed = restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell());
         // **The replacement is born at the old view's rung** (ticket 37): *Restart shell* keeps
         // the pane, so it keeps its text size, and the constructor is handed the rung rather
@@ -684,7 +684,6 @@ impl Runtime<'_> {
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
         let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
-        self.window.restarting = Some(seat);
         let spawned = create_leaf_session(
             view,
             body,
@@ -700,12 +699,31 @@ impl Runtime<'_> {
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
-        );
-        self.window.restarting = None;
-        // The old leaf is dropped **here**, by the insert: `PtySession::drop`
-        // takes the child with it, and it takes it only once the replacement is
-        // known to exist.
-        self.sessions.insert(seat, spawned?);
+        )?;
+        // **A replacement still being born waits beside the shell it replaces** (T-BIRTH-OFF-WINDOW):
+        // the old shell goes on being the one typed into until the new one lands
+        // (`Runtime::land_births`), and a birth that fails leaves it as it was. A replacement
+        // with no shell to wait for replaces it now.
+        if spawned.birth.is_some() {
+            if let Some(leaf) = self.sessions.get_mut(&seat) {
+                leaf.successor = Some(Box::new(spawned));
+            }
+            self.refresh_chrome();
+            return Ok(());
+        }
+        self.replace_restarted_shell(seat, spawned)
+    }
+
+    /// **The restarted shell takes the pane** — the old leaf is dropped here, by the insert:
+    /// `PtySession::drop` takes the child with it, and it takes it only once the replacement is
+    /// known to exist. From `restart_shell` for a replacement with no shell to wait for, and from
+    /// the landing for one that was being born.
+    pub(crate) fn replace_restarted_shell(
+        &mut self,
+        seat: SeatId,
+        spawned: LeafSession,
+    ) -> Result<()> {
+        self.sessions.insert(seat, spawned);
         // **The window's frame slot held the pane that is gone.** `focus_pane_at`
         // empties it for the same reason when the keyboard moves: leaving a
         // frame there would let the next present assert a grid belonging to a
@@ -845,6 +863,10 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::DrainWake, || {
             self.window.pty_wake.accept()
         });
+        // **The panes whose shells have answered land first** (T-BIRTH-OFF-WINDOW), so a shell's
+        // first bytes are drained on the turn it is born: its worker woke this window through the
+        // pane's own wake, after publishing the answer.
+        hang_watch::during(hang_watch::Station::PtyBirth, || self.land_births())?;
         let mut active_changed = false;
         let mut active_uncapped = false;
         let mut active_sync_closed = false;

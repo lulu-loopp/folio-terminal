@@ -6811,8 +6811,8 @@ mod tests {
             "the window thread composes no PowerShell load"
         );
         let birth = index
-            .body_of(&bt_source::ItemQuery::function("spawn_shell"))
-            .expect("the birth door");
+            .body_of(&bt_source::ItemQuery::function("bear"))
+            .expect("the birth worker's body");
         assert_eq!(
             birth
                 .matches("shell_integration::compose_powershell_birth(")

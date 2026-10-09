@@ -11528,7 +11528,16 @@ struct LeafSession {
     /// owns no process yet; it holds the seed it will be born from — its identity, the
     /// unresolved default or a named profile and never a fallback — and what is typed into it
     /// meanwhile, which reaches the shell first and in order. See [`PaneBirth`].
+    ///
+    /// And `Some` while this pane's pseudoconsole and process are being made on their worker
+    /// (T-BIRTH-OFF-WINDOW): every pane whose shell is started is born this way, and lands on a
+    /// later turn (`Runtime::land_births`).
     birth: Option<PaneBirth>,
+    /// **The shell *Restart shell* is bringing up in this pane's place** (T-BIRTH-OFF-WINDOW), in
+    /// birth beside the shell it replaces: this pane goes on being the one typed into until the
+    /// successor lands, and a successor whose birth fails leaves it exactly as it was. `None` on
+    /// every pane not being restarted.
+    successor: Option<Box<LeafSession>>,
     foreground_program_cadence: foreground_program::Cadence,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
@@ -11872,10 +11881,12 @@ struct LeafSession {
     pending_paste: Option<PendingPaste>,
 }
 
-/// **What a pane in birth holds until the walk answers the rows it needs** (T-PROGRAMS-REFRESH).
+/// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
+/// answering the program rows it needs (T-PROGRAMS-REFRESH), and the `bt-pty-birth` worker
+/// answering for its pseudoconsole and process (T-BIRTH-OFF-WINDOW).
 ///
-/// The pane is found again where it stands by its window, tab and seat, so an answer that
-/// arrives after it closed finds nothing. `typed` is the queue that stands in for the
+/// The pane is found again where it stands, in whichever window holds it by then, so an answer
+/// that arrives after it closed finds nothing. `typed` is the queue that stands in for the
 /// pseudoconsole's input ring: every byte offered to this pane before its shell exists is kept, in
 /// order, and written to the shell at its birth.
 #[derive(Debug)]
@@ -11883,9 +11894,43 @@ struct PaneBirth {
     seed: LeafSeed,
     probe_input: Option<Vec<u8>>,
     typed: std::cell::RefCell<Vec<u8>>,
-    /// The program walk counts this pane as waiting while it is held: every walk asked meanwhile
-    /// runs in the band of a walk a pane waits on (`programs_lane::PaneWaits`).
-    _waits: programs_lane::PaneWaits,
+    waiting: BirthWait,
+}
+
+/// **What a pane in birth is waiting for.**
+#[derive(Debug)]
+enum BirthWait {
+    /// A program row the walk has not answered: nothing about the pane's shell is decided yet.
+    /// The walk counts this pane as waiting while it is held, so every walk asked meanwhile runs in
+    /// the band of a walk a pane waits on (`programs_lane::PaneWaits`).
+    Programs { _waits: programs_lane::PaneWaits },
+    /// Its pseudoconsole and process, asked of `bt-pty-birth` with everything decided.
+    Shell(ShellLanding),
+}
+
+/// **A shell being born for a decided pane**, and what its landing needs that the window thread
+/// decided before it asked (`finish_leaf_birth`).
+#[derive(Debug)]
+struct ShellLanding {
+    shell: pty_door::ShellBirth,
+    decision: BirthDecision,
+    /// The grid the pseudoconsole is born at — what it has been told.
+    born_grid: GridSize,
+    /// The physical size of the last resize released while the shell was being born, when one
+    /// was: the pane's grid moved and its pseudoconsole is owed it at the landing.
+    owed_physical: Option<PhysicalSize<u32>>,
+}
+
+/// **What the window thread decided about a pane's shell before asking for it**: the rule's
+/// verdict, the profile the spawn is for, where it is put down, and the program it starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BirthDecision {
+    started: Started,
+    spawn_profile: String,
+    spawn_place: Option<PathBuf>,
+    at_shell_home: bool,
+    named: bool,
+    program: Option<PathBuf>,
 }
 
 impl PaneBirth {
@@ -11922,9 +11967,9 @@ impl PaneBirth {
     }
 }
 
-/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane whose
-/// program this machine does not have (`Started::Nothing`), nowhere: then the bytes are dropped
-/// and `note` is told once how many, beside the pane's own no-program banner.
+/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane born with
+/// no shell (a program this machine does not have, `Started::Nothing`, or a shell that did not
+/// start), nowhere: then the bytes are dropped and `note` is told once how many.
 fn deliver_held_input(
     birth: &PaneBirth,
     target: PtyTarget<'_>,
@@ -11933,7 +11978,7 @@ fn deliver_held_input(
     birth.deliver(|held| match target {
         PtyTarget::Nowhere => {
             note(&format!(
-                "a pane born with no program dropped the {} byte(s) typed into it while it waited",
+                "a pane born with no shell (no program here, or its shell did not start) dropped                  the {} byte(s) typed into it while it waited",
                 held.len()
             ));
             Ok(())
@@ -15132,22 +15177,6 @@ struct WindowRuntime {
     /// frame put on the glass rather than a set it computes for itself and
     /// hopes matches.
     palette_layout: Option<palette::PaletteLayout>,
-    /// **The seat whose shell is being replaced**, for as long as it is.
-    ///
-    /// One at a time by construction — a restart is asked for from a menu, and
-    /// raising a menu is a gesture — so an `Option` rather than a set, and the
-    /// `Option` is what `Restart shell…` is greyed from (ticket #62, item 4).
-    ///
-    /// Today's teardown-and-spawn completes inside the call that starts it, so
-    /// nothing can read this between the two halves; it is a field rather than a
-    /// local because the contract's teardown is not finished. Per
-    /// `docs/M2-restart-shell-contract.md` §1.2 the old process is owed a gentle
-    /// exit signal and a **timeout** before it is killed outright, and a timeout
-    /// is a wait — the moment that lands, the greyed row is the only thing
-    /// standing between a reader and a second restart of a shell that has not
-    /// finished dying. Stating the rule where the wait will be is what keeps the
-    /// two from being written by different people.
-    restarting: Option<SeatId>,
     /// **The two `⌄` clocks** (user ruling, 2026-08-16) — one policy, two
     /// buttons, and a single struct so that there is nowhere for them to differ.
     chevrons: ChevronGates,
@@ -20818,6 +20847,15 @@ impl LeafSession {
     fn input_target(&self) -> PtyTarget<'_> {
         PtyTarget::of(self.pty.as_ref(), self.birth.as_ref())
     }
+
+    /// Whether this pane is in birth for its shell and the shell has answered — the landing is
+    /// due ([`land_shell_birth`]).
+    fn shell_answered(&self) -> bool {
+        matches!(
+            self.birth.as_ref().map(|birth| &birth.waiting),
+            Some(BirthWait::Shell(landing)) if landing.shell.answered()
+        )
+    }
 }
 
 /// **What became of the bytes** — the same door, for the callers that have to
@@ -21184,6 +21222,16 @@ fn release_due_leaf_resize(
     )?;
     leaf.grid = pending.grid;
     leaf.conpty_grid = pending.grid;
+    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW): it was
+    // asked for at the grid of its request, and nothing above could tell it.
+    if let Some(PaneBirth {
+        waiting: BirthWait::Shell(landing),
+        ..
+    }) = leaf.birth.as_mut()
+        && commit.told_the_child
+    {
+        landing.owed_physical = Some(pending.physical);
+    }
     Ok((Some(commit), wake))
 }
 
@@ -38420,7 +38468,7 @@ fn decided_birth(
 /// seed of the unresolved default whose named folder cannot cross into the profile it resolved to
 /// owes the reader a card, and the constructor has no window to say it in; such a pane is left in
 /// birth (`Err` naming its profile, which the walk then answers first), and its landing
-/// (`Runtime::land_pane_births`) — which decides it from the same answers — says the refusal. So no
+/// (`Runtime::land_births`) — which decides it from the same answers — says the refusal. So no
 /// refusal can be decided and dropped here.
 fn birth_here(
     seed: &LeafSeed,
@@ -38745,7 +38793,9 @@ mod program_birth_tests {
             seed: seed_of(profiles::DEFAULT_IDENTITY),
             probe_input: None,
             typed: std::cell::RefCell::default(),
-            _waits: programs_lane::pane_waits(),
+            waiting: BirthWait::Programs {
+                _waits: programs_lane::pane_waits(),
+            },
         };
         let first = offer_pty_input(PtyTarget::Birth(&birth), "git 状态".as_bytes(), "typed")
             .expect("held");
@@ -38777,7 +38827,9 @@ mod program_birth_tests {
             seed: seed_of(profiles::DEFAULT_IDENTITY),
             probe_input: None,
             typed: std::cell::RefCell::default(),
-            _waits: programs_lane::pane_waits(),
+            waiting: BirthWait::Programs {
+                _waits: programs_lane::pane_waits(),
+            },
         }
     }
 
@@ -38963,6 +39015,550 @@ mod program_birth_tests {
     }
 }
 
+/// **A pane's shell born off the window thread** (T-BIRTH-OFF-WINDOW): the pane exists and draws
+/// before its pseudoconsole does, what is typed into it waits and arrives first and in order, a
+/// birth that fails lands as a refusal, every answer reaches the pane that asked for it, an answer
+/// nobody waits for is not kept, and a pane landed later is the pane that would have been born with
+/// its shell in hand.
+#[cfg(test)]
+mod shell_birth_tests {
+    use super::*;
+    use bt_platform::admission::WorkerCtx;
+    use bt_pty::test_shell::{Hygiene, TestShell};
+    use std::num::NonZeroU16;
+    use std::sync::mpsc;
+
+    fn grid() -> GridSize {
+        GridSize {
+            columns: NonZeroU16::new(48).unwrap(),
+            rows: NonZeroU16::new(8).unwrap(),
+        }
+    }
+
+    fn view() -> LeafView {
+        LeafView {
+            text_scale: TextScale::ACTUAL,
+            metrics: fixture_cell_metrics(1.0, 16.0),
+        }
+    }
+
+    fn seed_of(profile: &str) -> LeafSeed {
+        LeafSeed {
+            profile: profile.to_owned(),
+            cwd: None,
+            unknown_profile_id: None,
+            card_skip: 0,
+            prefill: None,
+        }
+    }
+
+    fn decided(started: Started) -> BirthDecision {
+        BirthDecision {
+            started,
+            spawn_profile: profiles::fallback_profile_id().to_owned(),
+            spawn_place: None,
+            at_shell_home: false,
+            named: false,
+            program: Some(PathBuf::from("外壳")),
+        }
+    }
+
+    fn bare(decision: &BirthDecision, seed: &LeafSeed) -> LeafSession {
+        bare_leaf(
+            view(),
+            grid(),
+            decision,
+            seed,
+            "能力-capability".to_owned(),
+            None,
+            FormulaSwitches::from_settings(&bt_persist::SettingsV1::default()),
+            NonZeroUsize::new(1_000).unwrap(),
+            true,
+        )
+    }
+
+    /// A real shell on a pseudoconsole, through the test-shell door: `cmd` on Windows, `sh`
+    /// elsewhere — neither keeps a history the account owns.
+    fn a_shell() -> Result<(PtySession, Hygiene), PtyError> {
+        #[cfg(windows)]
+        let command = bt_pty::PtyCommand::new("cmd.exe").arg("/D");
+        #[cfg(not(windows))]
+        let command = bt_pty::PtyCommand::new("/bin/sh");
+        let size = PtySize::cells(grid().columns, grid().rows);
+        TestShell::spawn(command, size).map(TestShell::into_session)
+    }
+
+    /// The birth a test holds: it starts nothing until `gate` opens (or the lane suite's patience
+    /// runs out), then answers `answer`'s.
+    fn held_birth(
+        gate: mpsc::Receiver<()>,
+        answer: impl FnOnce() -> Result<PtySession, PtyError> + Send + 'static,
+    ) -> impl FnOnce(&WorkerCtx) -> Result<PtySession, PtyError> + Send + 'static {
+        move |_| {
+            let _ = gate.recv_timeout(crate::lane::PATIENCE);
+            answer()
+        }
+    }
+
+    /// A shell made only once `gate` opens; its hygiene directory is handed back on `kept`, to be
+    /// dropped after the pane.
+    fn shell_once(
+        gate: mpsc::Receiver<()>,
+        kept: mpsc::Sender<Hygiene>,
+    ) -> impl FnOnce(&WorkerCtx) -> Result<PtySession, PtyError> + Send + 'static {
+        held_birth(gate, move || {
+            a_shell().map(|(session, hygiene)| {
+                let _ = kept.send(hygiene);
+                session
+            })
+        })
+    }
+
+    /// The wake a birth is handed, and the receiver a test waits on it with.
+    fn waking() -> (OutputWake, mpsc::Receiver<()>) {
+        let (said, heard) = mpsc::channel();
+        (
+            Arc::new(move || {
+                let _ = said.send(());
+            }),
+            heard,
+        )
+    }
+
+    fn woken(heard: &mpsc::Receiver<()>) {
+        heard
+            .recv_timeout(crate::lane::PATIENCE)
+            .expect("the birth worker wakes its pane within the lane suite's patience");
+    }
+
+    /// How long a test waits for a birth that starts a **real** shell. Not a measure of
+    /// anything: on a machine whose every core is busy a pseudoconsole and its process take
+    /// seconds (the clean guest measured 7.7 s under load), so this is only the backstop for a
+    /// worker that never answers, set where the test shell's own ceiling is.
+    const SHELL_BIRTH_CEILING: Duration = Duration::from_secs(180);
+
+    fn woken_by_a_shell(heard: &mpsc::Receiver<()>) {
+        heard
+            .recv_timeout(SHELL_BIRTH_CEILING)
+            .expect("the birth worker wakes its pane once its shell is made");
+    }
+
+    /// What the shell said until every needle has been seen, in the order they are given, or the
+    /// shell has said nothing for a while. A pseudoconsole's opening cursor question is answered.
+    fn read_until(pty: &PtySession, needles: &[&str]) -> String {
+        const SILENCE: Duration = Duration::from_secs(60);
+        let mut seen = String::new();
+        let mut answered = false;
+        let mut last_byte = Instant::now();
+        loop {
+            let chunk = pty.read_output();
+            if chunk.is_empty() {
+                assert!(
+                    last_byte.elapsed() <= SILENCE,
+                    "the shell went quiet without saying {needles:?}; it said {seen:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            last_byte = Instant::now();
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+            if !answered && seen.contains("\x1b[6n") {
+                pty.write(b"\x1b[1;1R")
+                    .expect("the cursor answer is written");
+                answered = true;
+            }
+            let mut from = 0;
+            let in_order = needles
+                .iter()
+                .all(|needle| match seen[from..].find(needle) {
+                    Some(at) => {
+                        from += at + needle.len();
+                        true
+                    }
+                    None => false,
+                });
+            if in_order {
+                return seen;
+            }
+        }
+    }
+
+    /// RED — **the pane is there before its shell is, and what was typed meanwhile reaches the
+    /// shell first, in order.** The shell is not even started until the test opens the gate; the
+    /// pane already has a frame of its own grid, holds two typed lines (one Chinese), and, once
+    /// the worker has answered and the pane has landed, the shell runs both, in the order typed.
+    ///
+    /// MUTATIONS (observed red): `land_shell_birth` without its `deliver_held_input` — the shell
+    /// never says either line; `pty_door::request` joining its worker before it answers (the old
+    /// row 11) — the birth is already answered before the gate is opened.
+    #[test]
+    fn a_pane_draws_before_its_shell_exists_and_its_shell_gets_what_was_typed_in_order() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (open, gate) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+
+        assert!(
+            leaf.pty.is_none() && !leaf.shell_answered(),
+            "nothing is born yet"
+        );
+        let frame = leaf
+            .session
+            .viewport_frame(&mut leaf.projection)
+            .expect("a pane in birth projects a frame");
+        assert!(frame_matches_grid(&frame, leaf.grid), "of its own grid");
+        for line in ["echo 第一-first\r", "echo 第二-second\r"] {
+            assert_eq!(
+                offer_pty_input(leaf.input_target(), line.as_bytes(), "typed").expect("held"),
+                PtyInput::HeldForBirth
+            );
+        }
+
+        open.send(()).expect("the worker waits at the gate");
+        woken_by_a_shell(&heard);
+        assert!(leaf.shell_answered());
+        let refusal = land_shell_birth(&mut leaf, |line| panic!("nothing is dropped: {line}"))
+            .expect("the landing writes what was held");
+        assert!(refusal.is_none(), "{refusal:?}");
+        assert!(leaf.birth.is_none());
+        let pty = leaf.pty.as_ref().expect("the pane has its shell");
+        read_until(pty, &["第一-first", "第二-second"]);
+        drop(leaf);
+        drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// RED — **a birth that fails lands as the refusal to say**, over a pane with no shell: the
+    /// reason names the profile and keeps the system's own words, and what was typed is said
+    /// dropped, once.
+    ///
+    /// MUTATION (observed red): `land_shell_birth` answering `None` for a failed birth — the
+    /// refusal is never said.
+    #[test]
+    fn a_birth_that_fails_lands_the_refusal_over_a_pane_with_no_shell() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (open, gate) = mpsc::channel();
+        let (wake, heard) = waking();
+        let shell = pty_door::request(
+            held_birth(gate, || {
+                Err(PtyError::Backend(
+                    "CreatePseudoConsole refused: 找不到".into(),
+                ))
+            }),
+            wake,
+        )
+        .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+        offer_pty_input(leaf.input_target(), "dir 目录\r".as_bytes(), "typed").expect("held");
+        open.send(()).expect("the worker waits at the gate");
+        woken(&heard);
+        let mut notes = Vec::new();
+        let refusal = land_shell_birth(&mut leaf, |line| notes.push(line.to_owned()))
+            .expect("a failed birth is not this window's error")
+            .expect("it is the refusal to say");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains("ConPTY") && said.contains("CreatePseudoConsole refused: 找不到"),
+            "{said}"
+        );
+        assert!(leaf.pty.is_none() && leaf.birth.is_none() && leaf.wake.is_none());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains(&format!("{} byte(s)", "dir 目录\r".len())));
+    }
+
+    /// RED — **every answer reaches the pane that asked for it**, whatever order the workers
+    /// answer in: three panes of one restored tab, released last-first and all answered before
+    /// any lands, each land on their own birth's answer.
+    ///
+    /// MUTATION (observed red): `ShellBirth::take` taking the oldest answer in the mailbox rather
+    /// than its own number's — the panes land on each other's answers.
+    #[test]
+    fn every_pane_of_a_restored_tab_lands_on_its_own_answer() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut panes = Vec::new();
+        let (wake, heard) = waking();
+        for pane in ["甲", "乙", "丙"] {
+            let mut leaf = bare(&decision, &seed);
+            let (open, gate) = mpsc::channel();
+            let shell = pty_door::request(
+                held_birth(gate, move || {
+                    Err(PtyError::Backend(format!("the answer for {pane}")))
+                }),
+                Arc::clone(&wake),
+            )
+            .expect("a birth worker");
+            await_shell(&mut leaf, shell, decision.clone(), &seed);
+            panes.push((pane, leaf, open));
+        }
+        for (_, _, open) in panes.iter().rev() {
+            open.send(()).expect("the worker waits at the gate");
+            woken(&heard);
+        }
+        for (pane, leaf, _) in panes.iter_mut().rev() {
+            assert!(leaf.shell_answered());
+            let said = format!(
+                "{:#}",
+                land_shell_birth(leaf, |_| {})
+                    .expect("landed")
+                    .expect("the answer")
+            );
+            assert!(
+                said.contains(&format!("the answer for {pane}")),
+                "{pane}: {said}"
+            );
+        }
+    }
+
+    /// RED — **an answer nobody waits for is not kept**: a pane closed while its shell was being
+    /// born leaves nothing in the mailbox once the worker has answered, and neither does one
+    /// closed after the answer arrived.
+    ///
+    /// MUTATION (observed red): `ShellBirth`'s drop leaving the number unmarked — the answer of
+    /// the pane that closed first stays in the mailbox for ever.
+    #[test]
+    fn an_answer_for_a_pane_that_closed_is_not_kept() {
+        let (wake, heard) = waking();
+        let (open, gate) = mpsc::channel();
+        let closed_first = pty_door::request(
+            held_birth(gate, || Err(PtyError::Backend("关闭".into()))),
+            Arc::clone(&wake),
+        )
+        .expect("a birth worker");
+        let first = closed_first.generation();
+        drop(closed_first);
+        open.send(()).expect("the worker waits at the gate");
+        woken(&heard);
+        assert!(!pty_door::holds(first), "retired, not kept");
+
+        let (open, gate) = mpsc::channel();
+        let closed_after = pty_door::request(
+            held_birth(gate, || Err(PtyError::Backend("关闭".into()))),
+            wake,
+        )
+        .expect("a birth worker");
+        let second = closed_after.generation();
+        open.send(()).expect("the worker waits at the gate");
+        woken(&heard);
+        assert!(closed_after.answered());
+        drop(closed_after);
+        assert!(!pty_door::holds(second), "taken out when its asker went");
+    }
+
+    /// The facts of a landed pane a reader can see, and the session's own.
+    fn landed_facts(leaf: &LeafSession) -> String {
+        format!(
+            "{:#?}",
+            (
+                (
+                    &leaf.profile,
+                    &leaf.program,
+                    &leaf.spawn_place,
+                    leaf.born_named,
+                    leaf.integration,
+                    leaf.wake.is_some(),
+                    leaf.pty.as_ref().map(PtySession::conpty_kind),
+                    leaf.birth.is_some(),
+                    leaf.successor.is_some(),
+                ),
+                (
+                    leaf.grid,
+                    leaf.conpty_grid,
+                    leaf.text_scale,
+                    leaf.metrics,
+                    leaf.card_skip,
+                    &leaf.pending_typing,
+                    &leaf.attention_capability,
+                    leaf.has_rail,
+                ),
+                (
+                    leaf.session.terminal().visible_text(),
+                    leaf.session.reference_directory(),
+                    leaf.session.pty_transport(),
+                    leaf.session.layout_key(),
+                ),
+            )
+        )
+    }
+
+    /// RED — **a pane that waited for its shell is the pane that would have been born with it in
+    /// hand** (the differential): the same decision — a saved profile whose program is gone, so a
+    /// banner is said — landed through the birth road and finished at once on a second shell of
+    /// the same kind, compared fact by fact, the screen included.
+    ///
+    /// MUTATION (observed red): the landing finishing the pane as one still waiting on a row
+    /// (`in_birth` true in `land_shell_birth`) — no banner, and no place kept.
+    #[test]
+    fn a_pane_landed_later_is_the_pane_born_with_its_shell_in_hand() {
+        let decision = BirthDecision {
+            spawn_place: Some(std::env::temp_dir()),
+            ..decided(Started::FellBack(
+                profiles::fallback_profile_id().to_owned(),
+            ))
+        };
+        let seed = seed_of(profiles::WSL_ID);
+
+        let (at_once_shell, at_once_hygiene) = a_shell().expect("a real shell");
+        let mut at_once = bare(&decision, &seed);
+        finish_leaf_birth(
+            &mut at_once,
+            Some(at_once_shell),
+            &decision,
+            &seed,
+            None,
+            false,
+        )
+        .expect("born with its shell in hand");
+
+        let mut later = bare(&decision, &seed);
+        let (open, gate) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
+        await_shell(&mut later, shell, decision.clone(), &seed);
+        open.send(()).expect("the worker waits at the gate");
+        woken_by_a_shell(&heard);
+        assert!(
+            land_shell_birth(&mut later, |line| panic!("nothing was typed: {line}"))
+                .expect("landed")
+                .is_none()
+        );
+
+        assert_eq!(landed_facts(&later), landed_facts(&at_once));
+        drop((at_once, later));
+        drop((
+            at_once_hygiene,
+            hygiene.recv().expect("the shell's directory"),
+        ));
+    }
+
+    /// RED (round 2, B1) — **a birth worker that panics is a birth that failed**: its pane is
+    /// woken and lands the refusal toast's reason, naming the panic, instead of waiting for ever.
+    ///
+    /// MUTATION (observed red): the worker body without its `catch_unwind` — nothing is
+    /// published and the pane is never woken.
+    #[test]
+    fn a_birth_worker_that_panics_lands_the_refusal() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (wake, heard) = waking();
+        let shell = pty_door::request(|_| panic!("举手-planted"), wake).expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+        woken(&heard);
+        let said = format!(
+            "{:#}",
+            land_shell_birth(&mut leaf, |_| {})
+                .expect("a failed birth is not this window's error")
+                .expect("it is the refusal to say")
+        );
+        assert!(
+            said.contains("the PTY birth worker panicked: 举手-planted"),
+            "{said}"
+        );
+        assert!(leaf.birth.is_none() && leaf.pty.is_none());
+    }
+
+    /// RED (round 2, B2) — **a *Restart shell* successor that waits on an unknown row lands once
+    /// the walk answers**: the one scan finds it beside the pane in both of its waits — its rows,
+    /// then its shell — and once its shell lands it takes the pane's place and the restart is no
+    /// longer in flight.
+    ///
+    /// MUTATION (observed red): `births_due` scanning only the pane's own birth — the successor
+    /// is never found, and the restart stays in flight for ever.
+    #[test]
+    fn a_restart_waiting_on_an_unknown_row_lands_when_the_walk_answers() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        finish_leaf_birth(&mut leaf, None, &decision, &seed, None, false).expect("the old pane");
+        let mut waiting = bare(&decision, &seed);
+        waiting.birth = Some(PaneBirth {
+            seed: seed_of(profiles::DEFAULT_IDENTITY),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+            waiting: BirthWait::Programs {
+                _waits: programs_lane::pane_waits(),
+            },
+        });
+        leaf.successor = Some(Box::new(waiting));
+        assert!(leaf.restart_in_flight());
+        assert_eq!(births_due(&leaf, &|_| false), [], "the row is unknown");
+        assert_eq!(
+            births_due(&leaf, &|_| true),
+            [(BirthAt::Successor, BirthDue::Rows)],
+            "the walk answered: the successor is due to be made again"
+        );
+
+        // What `Runtime::land_pane_birth` puts back for a successor whose rows decided it: a
+        // pane in birth for its shell.
+        let (open, gate) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let mut remade = bare(&decision, &seed);
+        let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
+        await_shell(&mut remade, shell, decision, &seed);
+        leaf.successor = Some(Box::new(remade));
+        open.send(()).expect("the worker waits at the gate");
+        woken_by_a_shell(&heard);
+        assert_eq!(
+            births_due(&leaf, &|_| true),
+            [(BirthAt::Successor, BirthDue::Shell)]
+        );
+        let SuccessorLanding::Landed(successor) =
+            land_successor(&mut leaf, |line| panic!("nothing was typed: {line}")).expect("landed")
+        else {
+            panic!("the successor's shell was born");
+        };
+        assert!(successor.pty.is_some() && successor.birth.is_none());
+        assert!(!leaf.restart_in_flight(), "the menu row is offered again");
+        drop((leaf, successor));
+        drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// RED (round 2, nit 5) — **a launch shell that could not start completes the startup
+    /// trace** as `not-started`, so `BT_CONPTY_SOURCE` and `BT_STARTUP` are said, and not as a
+    /// probe's `direct-input`.
+    ///
+    /// MUTATION (observed red): `landed_source` ignoring the refusal — the failed tab is recorded
+    /// as `direct-input`.
+    #[test]
+    fn a_launch_shell_that_could_not_start_completes_the_startup_trace() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (wake, heard) = waking();
+        let shell = pty_door::request(|_| Err(PtyError::Backend("没有控制台".into())), wake)
+            .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+        woken(&heard);
+        let refusal = land_shell_birth(&mut leaf, |_| {}).expect("landed");
+        let mut shells = StartupShells {
+            tabs: vec![
+                (TabId(1), SeatId(0), Some("packaged".to_owned())),
+                (TabId(2), SeatId(0), None),
+            ],
+            conpty_line: true,
+            startup_owed: false,
+            startup: None,
+            phase_started: Instant::now(),
+        };
+        let source = landed_source(&leaf, refusal.is_some()).expect("a source");
+        shells.born(TabId(2), SeatId(0), source);
+        assert_eq!(
+            shells.lines_if_born(),
+            Some(vec![
+                r#"BT_CONPTY_SOURCE sources=["packaged", "not-started"]"#.to_owned()
+            ])
+        );
+    }
+}
+
 /// **Where a leaf's shell was born, said for the profile that actually started** (T-RESTART-CWD
 /// round 2) — the leaf's `spawn_place` and its shell's-home mark, given the place resolved for
 /// `asked` and the profile `started` that `bt-pty`'s one-shot fallback may have swapped in.
@@ -39059,7 +39655,7 @@ fn create_leaf_session(
     // **And only from answers in hand** (T-PROGRAMS-REFRESH). When the rule needs a row the
     // program walk has not answered, nothing is decided: the pane is made **in birth** — every
     // part of a pane but its process, holding its seed and what is typed into it — the walk is
-    // asked for the rows it waits on, and `Runtime::land_pane_births` comes back here with the
+    // asked for the rows it waits on, and `Runtime::land_births` comes back here with the
     // answers once they land.
     let decided = birth_here(seed, stored_default, programs);
     let in_birth = decided.is_err();
@@ -39141,7 +39737,7 @@ fn create_leaf_session(
     // the code says that rather than a comment claiming it: no shell is started
     // unless the row and the program are both in hand.
     let spawn_row = profiles::row_of(spawn_profile);
-    let mut pty = if let (Some(row), Some(program)) = (&spawn_row, programs.program(spawn_profile))
+    let shell = if let (Some(row), Some(program)) = (&spawn_row, programs.program(spawn_profile))
         && probe_input.is_none()
         && !in_birth
     {
@@ -39193,29 +39789,28 @@ fn create_leaf_session(
             ));
         }
         resolved_program = Some(PathBuf::from(&program));
-        // **The shell's birth is an owner-thread door** (`doors::PtyBirth`, row 11): the one join
-        // of the `bt-pty-birth` worker, admitted here and nowhere else. A refusal is this branch's
-        // own spawn failure.
+        // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
+        // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
+        // pane is made in birth around the request, holds what is typed into it, and lands when the
+        // answer does (`Runtime::land_births`). Only a worker that cannot be started is this
+        // branch's own failure.
         Some(
-            bt_platform::admission::admitted::<doors::PtyBirth, _>(|token| {
-                pty_door::spawn_shell(
-                    token,
-                    program.into(),
-                    &command.arguments,
+            pty_door::request_shell(
+                pty_door::ShellSpec {
+                    program: program.into(),
+                    arguments: command.arguments,
                     powershell_integration,
-                    command.environment_derivation,
-                    &command.environment,
-                    &command.profile_environment,
-                    pty_size(grid, PhysicalSize::new(body.width, body.height)),
-                    wake.output(),
-                    place.working_directory,
-                )
-                .map_err(anyhow::Error::from)
-            })
-            .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+                    environment_derivation: command.environment_derivation,
+                    folio_environment: command.environment,
+                    profile_environment: command.profile_environment,
+                    size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
+                    working_directory: place.working_directory,
+                },
+                wake.output(),
+            )
             .with_context(|| {
                 format!(
-                    "spawn the {} profile in ConPTY",
+                    "ask for the {} profile's shell",
                     profile_banner_name(spawn_profile)
                 )
             })?,
@@ -39223,6 +39818,199 @@ fn create_leaf_session(
     } else {
         None
     };
+    let decision = BirthDecision {
+        started: started.clone(),
+        spawn_profile: spawn_profile.to_owned(),
+        spawn_place,
+        at_shell_home: place.at_shell_home,
+        named: place.named,
+        program: resolved_program,
+    };
+    let mut leaf = bare_leaf(
+        LeafView {
+            text_scale,
+            metrics,
+        },
+        grid,
+        &decision,
+        seed,
+        capability,
+        // A wake-up is the other end of a reader thread: held from the request, because the
+        // worker hands the reader thread this very wake, and a pane moved to another window
+        // while it is being born must be woken there. None when no shell is asked for.
+        shell.is_some().then_some(wake),
+        formulas,
+        scrollback,
+        line_wrapping,
+    );
+    match shell {
+        // **Born later, standing where its shell will stand.** The place is said now, from the
+        // decision, so a pane split off or restarted from this one while it is being born is put
+        // down where this one will be; the landing says it again for the shell that started.
+        Some(shell) => await_shell(&mut leaf, shell, decision, seed),
+        // No shell to wait for — no program on this machine, the probe's direct input, or a rule
+        // that waits on a row: what is said about the pane is said now.
+        None => {
+            finish_leaf_birth(&mut leaf, None, &decision, seed, probe_input, in_birth)?;
+            if in_birth {
+                leaf.birth = Some(PaneBirth {
+                    seed: seed.clone(),
+                    probe_input: probe_input.map(<[u8]>::to_vec),
+                    typed: std::cell::RefCell::default(),
+                    waiting: BirthWait::Programs {
+                        _waits: programs_lane::pane_waits(),
+                    },
+                });
+            }
+        }
+    }
+    Ok(leaf)
+}
+
+/// **A pane, every part but its shell's** — its session made and dressed for its view, standing
+/// for the profile its shell is decided to be, with nothing fed and nowhere put down yet. The one
+/// construction every pane comes out of ([`create_leaf_session`]); what needs the shell is
+/// [`finish_leaf_birth`]'s.
+#[allow(clippy::too_many_arguments)]
+fn bare_leaf(
+    view: LeafView,
+    grid: GridSize,
+    decision: &BirthDecision,
+    seed: &LeafSeed,
+    capability: String,
+    wake: Option<Arc<LeafWake>>,
+    formulas: FormulaSwitches,
+    scrollback: NonZeroUsize,
+    line_wrapping: bool,
+) -> LeafSession {
+    let LeafView {
+        text_scale,
+        metrics,
+    } = view;
+    let columns = nonzero_u32(grid.columns.get());
+    let rows = nonzero_u32(grid.rows.get());
+    let mut session = DualPlaneSession::with_quotas_and_cell_height(
+        columns,
+        rows,
+        DEFAULT_STAGING_QUOTA,
+        scrollback,
+        metrics.cell_height_subpixels(),
+    );
+    session.set_cell_width_subpixels(cell_width_subpixels(metrics));
+    session.set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+    session.set_font_size_subpixels(metrics.font_size_subpixels());
+    session.set_math_layout_options(MathLayoutOptions {
+        detect_image_paths: true,
+        block_max_height_px: block_max_height_px(formulas.max_height),
+        restore_stripped_environment_newlines: formulas.repair_row_breaks,
+        ..MathLayoutOptions::default()
+    });
+    // A pane born from a split must obey the switches its neighbours already
+    // obey, which is exactly why this builder exists (see [`create_leaf_session`]).
+    session.set_display_math_bands(formulas.display);
+    session.set_inline_math_bands(formulas.inline);
+    session.set_table_bands(formulas.tables);
+    session.set_layout_key(window_layout_key(
+        columns,
+        metrics.dpi_milli(),
+        metrics.font_size_subpixels(),
+        1,
+        line_wrapping,
+    ));
+    let projection = session.new_projection(session.layout_key());
+    LeafSession {
+        incarnation: next_incarnation(),
+        wake,
+        pty: None,
+        foreground_program_cadence: foreground_program::Cadence::default(),
+        paste_recipient: profiles::paste_recipient(
+            profiles::index_of_id(&decision.spawn_profile),
+            &bt_pty::SystemShellEnvironment,
+        ),
+        integration: profiles::row_of(&decision.spawn_profile)
+            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+        profile: decision.spawn_profile.clone(),
+        program: decision.program.clone(),
+        born_named: false,
+        spawn_place: None,
+        // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
+        // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
+        pending_typing: seed.prefill.clone().map(|command| (command, false)),
+        session,
+        // Nobody has asked for anything yet.
+        attention: attention::AttentionLedger::default(),
+        bell_reported: false,
+        attention_clock: attention_wire::WaitClock::default(),
+        attention_capability: capability,
+        // Aimed at the tail, which is where a card looks until somebody turns a
+        // wheel over it — a shell that has just started has no furniture on its
+        // floor to be aimed past.
+        card_skip: seed.card_skip,
+        projection,
+        text_scale,
+        metrics,
+        thumb_awake: Instant::now(),
+        column_awake: Instant::now(),
+        grid,
+        conpty_grid: grid,
+        pending_pty_resize: None,
+        pending_psreadline_resize_reanchor: false,
+        last_finished_command: None,
+        // Its shell has not said anything yet, let alone marked a prompt.
+        has_rail: false,
+        output_revision: 0,
+        last_seen_revision: 0,
+        last_presented_frame: None,
+        presented_metrics: metrics,
+        frame_image_references: FrameImageReferences::default(),
+        // Nothing has been pasted into a shell that has just started.
+        pending_paste: None,
+        birth: None,
+        successor: None,
+    }
+}
+
+/// **A pane waits for the shell asked for it**: put down where the decision says it will stand —
+/// so a pane split off or restarted from it while it is being born starts there — and in birth on
+/// `shell`, at the grid the shell is being born at, until [`land_shell_birth`].
+fn await_shell(
+    leaf: &mut LeafSession,
+    shell: pty_door::ShellBirth,
+    decision: BirthDecision,
+    seed: &LeafSeed,
+) {
+    let spawn_profile = decision.spawn_profile.clone();
+    place_leaf(leaf, &decision, seed, &spawn_profile, false);
+    leaf.birth = Some(PaneBirth {
+        seed: seed.clone(),
+        probe_input: None,
+        typed: std::cell::RefCell::default(),
+        waiting: BirthWait::Shell(ShellLanding {
+            shell,
+            decision,
+            born_grid: leaf.grid,
+            owed_physical: None,
+        }),
+    });
+}
+
+/// **The half of a pane's birth that needs its shell** — run at creation for a pane with no shell
+/// to wait for, and at the landing for one whose shell was asked of `bt-pty-birth`
+/// (`land_shell_birth`): the same code on both roads, so a pane that waited for its shell is the
+/// pane that would have been made had the shell been there at once.
+///
+/// `pty` is the shell that was born (`None`: no program, the probe's direct input, a pane waiting
+/// on a row, or a birth that failed). `in_birth` is a pane still waiting on a row, about which
+/// nothing is said yet.
+fn finish_leaf_birth(
+    leaf: &mut LeafSession,
+    pty: Option<PtySession>,
+    decision: &BirthDecision,
+    seed: &LeafSeed,
+    probe_input: Option<&[u8]>,
+    in_birth: bool,
+) -> Result<()> {
+    let mut pty = pty;
     let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
@@ -39234,6 +40022,7 @@ fn create_leaf_session(
              written to it"
         ));
     }
+    let mut resolved_program = decision.program.clone();
     // **A pane is the shell it is actually running.** When the profile's own
     // program would not start, `bt-pty` falls back once to `powershell.exe` and
     // hands back the notice that says so — so what this leaf *is*, from here on,
@@ -39266,43 +40055,9 @@ fn create_leaf_session(
         // leaf still claiming to be Git Bash would write `"gitbash"` back into
         // `session.json` for a shell that is not one — so the next launch would
         // meet the same missing program and say the same thing again, for ever.
-        spawn_profile.to_owned()
+        decision.spawn_profile.clone()
     };
-    // **And the place it was born in is said in the namespace of the shell that started**
-    // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
-    // above this leaf is `profile`.
-    let (spawn_place, at_shell_home) =
-        birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place.at_shell_home);
-    let columns = nonzero_u32(grid.columns.get());
-    let rows = nonzero_u32(grid.rows.get());
-    let mut session = DualPlaneSession::with_quotas_and_cell_height(
-        columns,
-        rows,
-        DEFAULT_STAGING_QUOTA,
-        scrollback,
-        metrics.cell_height_subpixels(),
-    );
-    session.set_cell_width_subpixels(cell_width_subpixels(metrics));
-    session.set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
-    session.set_font_size_subpixels(metrics.font_size_subpixels());
-    session.set_math_layout_options(MathLayoutOptions {
-        detect_image_paths: true,
-        block_max_height_px: block_max_height_px(formulas.max_height),
-        restore_stripped_environment_newlines: formulas.repair_row_breaks,
-        ..MathLayoutOptions::default()
-    });
-    // A pane born from a split must obey the switches its neighbours already
-    // obey, which is exactly why this builder exists (see above).
-    session.set_display_math_bands(formulas.display);
-    session.set_inline_math_bands(formulas.inline);
-    session.set_table_bands(formulas.tables);
-    session.set_layout_key(window_layout_key(
-        columns,
-        metrics.dpi_milli(),
-        metrics.font_size_subpixels(),
-        1,
-        line_wrapping,
-    ));
+    let session = &mut leaf.session;
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
     // `fallback_profile()` before the spawn, so the shell starts cleanly and
@@ -39320,7 +40075,7 @@ fn create_leaf_session(
     // profile that was asked for, the one standing in for it, one line, dim —
     // because from the reader's side it is the same event: the pane is back, and
     // it is not the shell they left in it.
-    match &started {
+    match &decision.started {
         // Nothing has been decided about a pane in birth, so there is nothing to say yet.
         _ if in_birth => {}
         Started::AsAsked => {}
@@ -39330,7 +40085,7 @@ fn create_leaf_session(
                 .context("write the missing-program banner into the leaf's first line")?;
         }
         // Nothing on this machine can stand in, so there is no shell behind this
-        // pane at all: `pty` is `None` above and what is left is a pane that
+        // pane at all: no shell was asked for and what is left is a pane that
         // holds its place in the tree and says why it is empty.
         Started::Nothing => {
             session
@@ -39351,26 +40106,11 @@ fn create_leaf_session(
             .feed(bytes)
             .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
     }
-    // The second rung of §7.1.4's ladder, told to the shell that is standing on it. Only the spawn
-    // knows it (`profiles::spawn_place` has already folded HOME into it), so pushing it here is
-    // what keeps relative text in this pane from being measured by a second copy of the ladder.
-    session.set_spawn_directory(spawn_place.clone());
-    // And whether that rung is a *mark* rather than a place: a WSL leaf opening at its own `$HOME`
-    // was handed `--cd ~`, which only the shell can expand, so the session reads the expansion off
-    // the pane's first `OSC 7` report (§7.30, 2026-09-07).
-    session.set_spawn_at_shell_home(at_shell_home);
-    // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
-    // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
-    // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
-    // `/mnt/d/Demo/report.md` for files that are really on this disk.
-    session.set_path_namespace(profiles::printed_path_namespace(
-        profiles::index_of_id(&seed.profile),
-        &bt_pty::SystemShellEnvironment,
-    ));
+    place_leaf(leaf, decision, seed, &profile, in_birth);
     // Which modes the carrier itself keeps on, for the two roads that reset a dead program's
     // modes without a byte to the child: the person's verb and the session's own return from a
-    // stranded alternate screen. The pane's pseudoconsole is fixed here, at spawn.
-    session.set_pty_transport(
+    // stranded alternate screen. The pane's pseudoconsole is fixed here, at its birth.
+    leaf.session.set_pty_transport(
         match pty.as_ref().map_or(
             bt_pty::ConPtyKind::NotConPty,
             bt_pty::PtySession::conpty_kind,
@@ -39381,70 +40121,221 @@ fn create_leaf_session(
             bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
         },
     );
-    let projection = session.new_projection(session.layout_key());
-    Ok(LeafSession {
-        incarnation: next_incarnation(),
-        // A wake-up is the other end of a reader thread, and there is no thread
-        // when there is no ConPTY — see the field.
-        wake: pty.is_some().then_some(wake),
-        pty,
-        foreground_program_cadence: foreground_program::Cadence::default(),
-        paste_recipient: profiles::paste_recipient(
-            profiles::index_of_id(&profile),
-            &bt_pty::SystemShellEnvironment,
-        ),
-        // The door of the profile this pane actually came up as, read once,
-        // here, where that profile is finally known — after both fallbacks. See
-        // the field for why it is not read again later.
-        integration: profiles::row_of(&profile)
-            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+    leaf.projection = leaf.session.new_projection(leaf.session.layout_key());
+    // A wake-up is the other end of a reader thread, and there is no thread
+    // when there is no ConPTY — see the field.
+    if pty.is_none() {
+        leaf.wake = None;
+    }
+    leaf.paste_recipient = profiles::paste_recipient(
+        profiles::index_of_id(&profile),
+        &bt_pty::SystemShellEnvironment,
+    );
+    // The door of the profile this pane actually came up as, read once,
+    // here, where that profile is finally known — after both fallbacks. See
+    // the field for why it is not read again later.
+    leaf.integration = profiles::row_of(&profile)
+        .map_or(profiles::Integration::None, |row| profiles::served_by(&row));
+    leaf.profile = profile;
+    leaf.program = resolved_program;
+    leaf.pty = pty;
+    Ok(())
+}
+
+/// **Where a pane stands, said for the profile it is (or will be) running** — the spawn's place
+/// crossed into `profile`'s namespace after a fallback (`birth_place_of_the_started_shell`), told
+/// to the session as the second rung of §7.1.4's ladder, and kept on the leaf. A pane still waiting
+/// on a row was never put down anywhere; its seed says where it will be.
+fn place_leaf(
+    leaf: &mut LeafSession,
+    decision: &BirthDecision,
+    seed: &LeafSeed,
+    profile: &str,
+    in_birth: bool,
+) {
+    // **And the place it was born in is said in the namespace of the shell that started**
+    // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
+    // this leaf is `profile`.
+    let (spawn_place, at_shell_home) = birth_place_of_the_started_shell(
+        &decision.spawn_profile,
         profile,
-        program: resolved_program,
-        // Named only while the started shell stands in the named folder: a fallback profile that
-        // could not spell it was put down elsewhere (`birth_place_of_the_started_shell`).
-        born_named: !in_birth && place.named && spawn_place.is_some(),
-        // A pane in birth was never put down anywhere yet; its seed still says where it will be.
-        spawn_place: spawn_place.filter(|_| !in_birth),
-        // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
-        // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
-        pending_typing: seed.prefill.clone().map(|command| (command, false)),
-        session,
-        // Nobody has asked for anything yet.
-        attention: attention::AttentionLedger::default(),
-        bell_reported: false,
-        attention_clock: attention_wire::WaitClock::default(),
-        attention_capability: capability,
-        // Aimed at the tail, which is where a card looks until somebody turns a
-        // wheel over it — a shell that has just started has no furniture on its
-        // floor to be aimed past.
-        card_skip: seed.card_skip,
-        projection,
-        text_scale,
-        metrics,
-        thumb_awake: Instant::now(),
-        column_awake: Instant::now(),
-        grid,
-        conpty_grid: grid,
-        pending_pty_resize: None,
-        pending_psreadline_resize_reanchor: false,
-        last_finished_command: None,
-        // Its shell has not said anything yet, let alone marked a prompt.
-        has_rail: false,
-        output_revision: 0,
-        last_seen_revision: 0,
-        last_presented_frame: None,
-        presented_metrics: metrics,
-        frame_image_references: FrameImageReferences::default(),
-        // Nobody has asked the machine where this shell's `$PROFILE` is yet.
-        // Nothing has been pasted into a shell that has just started.
-        pending_paste: None,
-        birth: in_birth.then(|| PaneBirth {
-            seed: seed.clone(),
-            probe_input: probe_input.map(<[u8]>::to_vec),
-            typed: std::cell::RefCell::default(),
-            _waits: programs_lane::pane_waits(),
-        }),
+        decision.spawn_place.clone(),
+        decision.at_shell_home,
+    );
+    // The second rung of §7.1.4's ladder, told to the shell that is standing on it. Only the spawn
+    // knows it (`profiles::spawn_place` has already folded HOME into it), so pushing it here is
+    // what keeps relative text in this pane from being measured by a second copy of the ladder.
+    leaf.session.set_spawn_directory(spawn_place.clone());
+    // And whether that rung is a *mark* rather than a place: a WSL leaf opening at its own `$HOME`
+    // was handed `--cd ~`, which only the shell can expand, so the session reads the expansion off
+    // the pane's first `OSC 7` report (§7.30, 2026-09-07).
+    leaf.session.set_spawn_at_shell_home(at_shell_home);
+    // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
+    // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
+    // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
+    // `/mnt/d/Demo/report.md` for files that are really on this disk.
+    leaf.session
+        .set_path_namespace(profiles::printed_path_namespace(
+            profiles::index_of_id(&seed.profile),
+            &bt_pty::SystemShellEnvironment,
+        ));
+    // Named only while the started shell stands in the named folder: a fallback profile that
+    // could not spell it was put down elsewhere (`birth_place_of_the_started_shell`).
+    leaf.born_named = !in_birth && decision.named && spawn_place.is_some();
+    // A pane in birth was never put down anywhere yet; its seed still says where it will be.
+    leaf.spawn_place = spawn_place.filter(|_| !in_birth);
+}
+
+/// **A pane's shell has answered: land it** (T-BIRTH-OFF-WINDOW). The pane's birth is finished
+/// from the answer exactly as a pane with its shell in hand is ([`finish_leaf_birth`]); a resize
+/// released while the shell was being born is told to it; what was typed meanwhile is written to
+/// it first, in order. Answers the refusal to say when the birth failed — the pane is then a pane
+/// with no shell, and what was typed into it is said dropped. `None` and nothing changed while
+/// the shell has not answered.
+fn land_shell_birth(
+    leaf: &mut LeafSession,
+    note: impl FnMut(&str),
+) -> Result<Option<anyhow::Error>> {
+    let Some(BirthWait::Shell(landing)) = leaf.birth.as_mut().map(|birth| &mut birth.waiting)
+    else {
+        return Ok(None);
+    };
+    let Some(answer) = landing.shell.take() else {
+        return Ok(None);
+    };
+    // Read while the birth is still on the pane; it leaves the pane only below, into the delivery
+    // of what it holds, so nothing a birth carries can be dropped on the way.
+    let decision = landing.decision.clone();
+    let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
+    let (pty, refusal) = match answer {
+        Ok(pty) => (Some(pty), None),
+        Err(error) => (
+            None,
+            Some(anyhow::Error::from(error).context(format!(
+                "spawn the {} profile in ConPTY",
+                profile_banner_name(&decision.spawn_profile)
+            ))),
+        ),
+    };
+    let held = leaf.birth.take();
+    let seed = held
+        .as_ref()
+        .map_or_else(LeafSeed::default, |birth| birth.seed.clone());
+    finish_leaf_birth(leaf, pty, &decision, &seed, None, false)?;
+    if let (Some(pty), Some(physical)) = (leaf.pty.as_mut(), owed_physical)
+        && leaf.conpty_grid != born_grid
+    {
+        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
+        let grid = leaf.conpty_grid;
+        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
+            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+        .context("tell a landed shell the grid its pane moved to while it was being born")?;
+    }
+    if let Some(birth) = &held {
+        deliver_held_input(birth, leaf.input_target(), note)?;
+    }
+    Ok(refusal)
+}
+
+/// **Where a pane's birth sits**: the pane's own, or a *Restart shell* successor's beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BirthAt {
+    Pane,
+    Successor,
+}
+
+/// **What a due birth is due for**: its rows answered (made again through `create_leaf_session`,
+/// asking for its shell), or its shell answered (landed, [`land_shell_birth`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BirthDue {
+    Rows,
+    Shell,
+}
+
+impl LeafSession {
+    /// The birth at `at`, if there is one.
+    fn birth_at(&self, at: BirthAt) -> Option<&PaneBirth> {
+        match at {
+            BirthAt::Pane => self.birth.as_ref(),
+            BirthAt::Successor => self
+                .successor
+                .as_deref()
+                .and_then(|successor: &LeafSession| successor.birth.as_ref()),
+        }
+    }
+
+    /// Whether *Restart shell* is still bringing up this pane's replacement — the menu's greyed
+    /// row reads this.
+    fn restart_in_flight(&self) -> bool {
+        self.successor.is_some()
+    }
+}
+
+/// What one birth is due for now, if anything: a row-waiting birth whose rows `rows_decide`, a
+/// shell birth whose shell has answered.
+fn birth_due(birth: &PaneBirth, rows_decide: &dyn Fn(&LeafSeed) -> bool) -> Option<BirthDue> {
+    match &birth.waiting {
+        BirthWait::Programs { .. } => rows_decide(&birth.seed).then_some(BirthDue::Rows),
+        BirthWait::Shell(landing) => landing.shell.answered().then_some(BirthDue::Shell),
+    }
+}
+
+/// **The one scan of a pane's births** (round 2): both places a birth can sit — the pane's own
+/// and a *Restart shell* successor's — in both of its waits, so no birth is one no landing pass
+/// looks at.
+fn births_due(
+    leaf: &LeafSession,
+    rows_decide: &dyn Fn(&LeafSeed) -> bool,
+) -> Vec<(BirthAt, BirthDue)> {
+    [BirthAt::Pane, BirthAt::Successor]
+        .into_iter()
+        .filter_map(|at| {
+            leaf.birth_at(at)
+                .and_then(|birth| birth_due(birth, rows_decide))
+                .map(|due| (at, due))
+        })
+        .collect()
+}
+
+/// **What a *Restart shell* successor's shell landing came to.**
+enum SuccessorLanding {
+    /// Its shell has not answered.
+    Waiting,
+    /// Its birth failed; the pane keeps the shell it has.
+    Refused(anyhow::Error),
+    /// It was born and is taken off the pane, to take the pane's place.
+    Landed(Box<LeafSession>),
+}
+
+/// Land the successor's shell, if it answered ([`land_shell_birth`]); a landed or refused
+/// successor leaves the pane, which then has no restart in flight.
+fn land_successor(leaf: &mut LeafSession, note: impl FnMut(&str)) -> Result<SuccessorLanding> {
+    let Some(successor) = leaf.successor.as_deref_mut() else {
+        return Ok(SuccessorLanding::Waiting);
+    };
+    if !successor.shell_answered() {
+        return Ok(SuccessorLanding::Waiting);
+    }
+    let refusal = land_shell_birth(successor, note)?;
+    let Some(landed) = leaf.successor.take() else {
+        return Ok(SuccessorLanding::Waiting);
+    };
+    Ok(match refusal {
+        Some(refusal) => SuccessorLanding::Refused(refusal),
+        None => SuccessorLanding::Landed(landed),
     })
+}
+
+/// **The ConPTY source the startup trace records for a pane that has just landed** — its
+/// shell's, or `not-started` for a birth that failed (round 2: a failed identity shell is a
+/// launch shell the trace no longer waits for, and is not a probe's direct input).
+fn landed_source(leaf: &LeafSession, refused: bool) -> Option<String> {
+    if refused {
+        return Some("not-started".to_owned());
+    }
+    conpty_source_of(Some(leaf))
 }
 
 /// **A terminal pane's metrics for a test**, measured once per (scale, size) per process by the
@@ -42047,7 +42938,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         tab_menu: None,
         palette: None,
         palette_layout: None,
-        restarting: None,
         pane_menu: None,
         chevrons: ChevronGates::default(),
         graph_filter_menu: None,
@@ -61707,7 +62597,12 @@ impl FolioApp {
             // **The wake-up is re-pointed here and nowhere else** — see
             // [`LeafWake`] for what a shell nudging the bit of a window that has
             // closed costs, which is silence rather than a wrong picture.
-            if let Some(wake) = leaf.wake.as_ref() {
+            // A *Restart shell* successor being born beside it moves with it, and is woken there.
+            let successor_wake = leaf
+                .successor
+                .as_deref()
+                .and_then(|successor: &LeafSession| successor.wake.as_ref());
+            for wake in [leaf.wake.as_ref(), successor_wake].into_iter().flatten() {
                 wake.rebind(&target.pty_wake);
                 debug_assert!(
                     Arc::ptr_eq(&wake.bit(), &target.pty_wake.raised),
