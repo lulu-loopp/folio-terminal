@@ -12,7 +12,7 @@
 # and both under-report by construction: a reader assembled at run time, or one
 # split across two functions, is in neither. The tripwire
 # (`crates/bt-source/tests/tripwire.rs`) reads fewer rows still — it scans `.rs`
-# and `.ps1` only, so the three Python generators below are on this list and out
+# and `.ps1` only, so a Python generator below is on this list and out
 # of its reach. A reader with no row here and no allowlist variant is a gap, and
 # finding one is a finding, not a reason to widen either list.
 #
@@ -304,6 +304,4 @@ crates/bt-platform/src/macos_menu.rs	tests::the_menu_bar_does_not_end_the_proces
 crates/bt-platform/src/webview.rs	third_door_shape_tests::DOOR	include_str!	macos_webview.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::SOURCE	include_str!	lib.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::input_dump_off_write_path_has_only_the_option_gate	include_str!	lib.rs	P14	no
-scripts/dev/bt-app-graph.py	whole_test / contexts / the module walk	script: dir walk and named files	bt-app's module graph, rooted at main.rs	P0	no
 scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no
-scripts/dev/bt-app-split-table.py	the row manifest	script: named modules	the plan's 7.2 row table	P0	no
