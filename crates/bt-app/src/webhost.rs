@@ -1640,6 +1640,47 @@ fn button_bit(event: bt_platform::WebMouseEvent) -> Option<(u32, bool)> {
     })
 }
 
+/// **The window's answer to a page that asked for a window of its own** (F-SWEEP-048, #27).
+///
+/// The engine has already been told the request is handled, so it opens nothing; this says what
+/// happens instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NewWindow {
+    /// Open this address as a new web pane. It is the address bar's answer
+    /// ([`address_bar`]) — the first of webnav's two doors — and the new page meets the second,
+    /// `NavigationStarting`, when it loads.
+    Open(String),
+    /// Nothing opens, and this is the address the page asked for: the address bar's door refused
+    /// it, or no gesture was behind the request.
+    Refused(String),
+}
+
+/// **What a page's request for a new window becomes** — asked of the door a typed address is
+/// asked of (`webnav`'s two-door rule: [`address_bar`] at ask time, `navigation_starting` at
+/// load), so a link that opens elsewhere can reach exactly what a link that opens here can, and
+/// nothing more: a `javascript:`, `data:`, `file:` or `about:` target is refused, and so is
+/// `window.open()` with no address, which asks for `about:blank`.
+///
+/// **A request no gesture is behind is refused** — `docs/plans/web-preview/plan.md` §0's own
+/// rule (a pop-up no user started is cancelled). `webnav`'s policy table has no gesture rule — it judges
+/// addresses, and the same address is as admissible from a script as from a click — so the
+/// gesture is the engine's own reading carried on the request (WebView2's `IsUserInitiated`;
+/// WebKit asks only behind one, `javaScriptCanOpenWindowsAutomatically = NO`), asked first. It is
+/// a reading of user activation, not a security boundary (`w0-evidence.md` §2): the boundary is
+/// the address bar's door, which every request meets.
+///
+/// `Search` cannot come from an address the engine resolved — every one carries a scheme — and
+/// is folded in with the refusal, as `Runtime::open_web_address_here` folds it.
+pub(crate) fn new_window_verdict(uri: &str, user_initiated: bool) -> NewWindow {
+    if !user_initiated {
+        return NewWindow::Refused(uri.to_owned());
+    }
+    match address_bar(uri) {
+        Decision::Navigate(url) => NewWindow::Open(url),
+        Decision::Refuse(_) | Decision::Search(_) => NewWindow::Refused(uri.to_owned()),
+    }
+}
+
 /// What the window has to do about something the engine said.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum WebOutcome {
@@ -1678,6 +1719,9 @@ pub(crate) enum WebOutcome {
     /// The teardown is finished: the browser has let go and the seat may be
     /// forgotten.
     Gone,
+    /// **The page asked for a window of its own** (F-SWEEP-048, #27): open the address as a new
+    /// web pane, or say the refusal on this one — [`new_window_verdict`]'s answer.
+    NewWindow(NewWindow),
     /// A navigation was refused, and this is where it wanted to go.
     ///
     /// Slice ④ draws this as the「导航被拦」card (`DESIGN.md` §7.7 ④). Until then
@@ -2770,6 +2814,26 @@ impl WebSeat {
             // `data:` URL names memory inside a page rather than a request
             // anybody else can make, and those are exactly the ones that door
             // already refuses.
+            // **A window the page asked for** (F-SWEEP-048, #27). The engine opened nothing — the
+            // request was handled in its callback — and the answer goes out to the window, which
+            // owns the panes: a new page beside this one, or the refusal said on this one.
+            WebEvent::NewWindowRequested {
+                uri,
+                user_initiated,
+            } => {
+                crate::web_trace::line(|| {
+                    format!(
+                        "new_window_requested {} uri={uri} user_initiated={}",
+                        crate::web_trace::seat(self.address.page),
+                        u8::from(*user_initiated),
+                    )
+                });
+                outcomes.push(WebOutcome::NewWindow(new_window_verdict(
+                    uri,
+                    *user_initiated,
+                )));
+                WebEffect::Ignore
+            }
             WebEvent::DownloadStarting { uri, file_name } => {
                 crate::web_trace::line(|| {
                     format!(
@@ -6725,6 +6789,84 @@ mod rebuild_for_a_new_version_tests {
             "and the card the reader is looking at is still the retry's, saw {:?}",
             web.fault()
         );
+    }
+
+    /// RED (F-SWEEP-048, #27) — **a `target=_blank` link or a `window.open` behind a gesture
+    /// opens its address as a new web pane, and the page that asked does not move.**
+    ///
+    /// The engine has already handled the request (`bt-platform`'s
+    /// `a_window_request_is_handled_here_and_its_address_goes_to_the_caller`); the seat answers it
+    /// with the address bar's own verdict — normalised as a typed address is — and leaves its own
+    /// page alone: nothing loads here and the address it shows is unchanged.
+    ///
+    /// MUTATION: answer every allowed address with `NewWindow::Refused` in `new_window_verdict`
+    /// (no pane opens).
+    #[test]
+    fn a_new_window_with_a_gesture_opens_its_address_as_a_new_pane() {
+        let mut web = ready_seat();
+        let before = web.page.url.clone();
+        let mut outcomes = Vec::new();
+        for (asked, opened) in [
+            (
+                "https://example.com/报告?q=中文",
+                "https://example.com/报告?q=中文",
+            ),
+            ("http://0.0.0.0:8080/", "http://127.0.0.1:8080/"),
+        ] {
+            web.digest(
+                &bt_platform::WebEvent::NewWindowRequested {
+                    uri: asked.to_owned(),
+                    user_initiated: true,
+                },
+                &mut outcomes,
+            );
+            assert_eq!(
+                outcomes.pop(),
+                Some(WebOutcome::NewWindow(NewWindow::Open(opened.to_owned()))),
+                "{asked} opens as a new pane, as the address bar would have it"
+            );
+        }
+        assert!(outcomes.is_empty(), "one answer per request");
+        assert!(!web.page.loading, "the page that asked went nowhere");
+        assert_eq!(web.page.url, before, "and still shows where it was");
+    }
+
+    /// RED (F-SWEEP-048, #27) — **a new window the address bar would refuse, or that no gesture is
+    /// behind, opens nothing and is said as refused.**
+    ///
+    /// The address bar's door is the policy table (`webnav`); it has no gesture rule, so the
+    /// engine's gesture reading is asked first — a page cannot open panes on its own.
+    /// `window.open()` with no address asks for `about:blank`, which the address bar refuses.
+    ///
+    /// MUTATION: drop the `user_initiated` refusal from `new_window_verdict` (the last row
+    /// opens), or open the request's own address on a refusal (the first row opens).
+    #[test]
+    fn a_new_window_the_address_bar_refuses_or_no_gesture_asked_for_opens_nothing() {
+        let mut web = ready_seat();
+        let mut outcomes = Vec::new();
+        for (asked, user_initiated) in [
+            ("javascript:alert('文')", true),
+            ("data:text/html,<p>页</p>", true),
+            ("file:///C:/Users/someone/secret.html", true),
+            ("about:blank", true),
+            ("mailto:someone@example.com", true),
+            ("https://user:pass@example.com/", true),
+            ("https://example.com/弹窗", false),
+        ] {
+            web.digest(
+                &bt_platform::WebEvent::NewWindowRequested {
+                    uri: asked.to_owned(),
+                    user_initiated,
+                },
+                &mut outcomes,
+            );
+            assert_eq!(
+                outcomes.pop(),
+                Some(WebOutcome::NewWindow(NewWindow::Refused(asked.to_owned()))),
+                "{asked} (gesture: {user_initiated}) opens nothing"
+            );
+        }
+        assert!(!web.page.loading, "and the page that asked went nowhere");
     }
 
     /// RED (68) — **a browser that dies under a loading page stops the spinner.**

@@ -346,6 +346,46 @@ pub enum WebEvent {
     RequestRefused {
         uri: String,
     },
+    /// **A page asked for a window of its own** — a `target=_blank` link, `window.open`, a form
+    /// aimed at a new window (F-SWEEP-048, issue #27).
+    ///
+    /// The engine opens nothing: the request is answered as handled inside the callback
+    /// ([`new_window_answer`]), because `SetHandled` — and WebKit's `nil` — cannot be decided
+    /// later. What happens instead is the caller's: the address is asked of the same door a typed
+    /// address is, and a new page is opened, or the refusal said, by the window. `user_initiated`
+    /// is the engine's own reading of whether a gesture is behind the request.
+    NewWindowRequested {
+        uri: String,
+        user_initiated: bool,
+    },
+}
+
+/// **How the host answers a page's request for a window of its own**, on both engines: the
+/// request is **handled** — the engine opens no window, and on Windows no second WebView2 window
+/// ever exists — and the event that carries the address to the caller (F-SWEEP-048, #27).
+///
+/// One function for the two arms so that "handled" is one fact: WebView2's
+/// `ICoreWebView2NewWindowRequestedEventArgs::SetHandled` takes [`NewWindowAnswer::handled`],
+/// and WebKit's `createWebViewWithConfiguration:` returns no view and its navigation action is
+/// cancelled when it is `true`.
+#[must_use]
+pub fn new_window_answer(uri: String, user_initiated: bool) -> NewWindowAnswer {
+    NewWindowAnswer {
+        handled: true,
+        event: WebEvent::NewWindowRequested {
+            uri,
+            user_initiated,
+        },
+    }
+}
+
+/// What [`new_window_answer`] decides inside the engine's callback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewWindowAnswer {
+    /// Whether the engine is told the request is taken care of, so that it opens nothing itself.
+    pub handled: bool,
+    /// What the caller hears.
+    pub event: WebEvent,
 }
 
 /// What the caller's policy says about one thing a document asked for that is
@@ -2490,11 +2530,20 @@ impl WebHost {
             // made and slice ② implements. What slice ① owes them is that none
             // of them can happen behind its back before it does — so each is
             // attached and each refuses.
+            // **A window a page asks for is the host's to answer** (F-SWEEP-048, #27): handled
+            // here, so WebView2 opens no window of its own, and the address and the engine's
+            // gesture reading go to the caller, which opens it as a new pane or says the refusal.
+            let shared = Rc::clone(&self.shared);
             webview
                 .add_NewWindowRequested(
                     &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
                         let Some(args) = args else { return Ok(()) };
-                        args.SetHandled(true)?;
+                        let answer = new_window_answer(
+                            read_string(|out| args.Uri(out)),
+                            read_bool(|out| args.IsUserInitiated(out)),
+                        );
+                        args.SetHandled(answer.handled)?;
+                        shared.push(answer.event);
                         Ok(())
                     })),
                     &mut token,
@@ -4570,6 +4619,43 @@ pub use portable::{
     SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
     web_environment_epoch, webview2_runtime_version,
 };
+
+/// **A window a page asks for is the host's** (F-SWEEP-048, #27).
+#[cfg(test)]
+mod new_window_tests {
+    use super::*;
+
+    /// RED — **the engine is told the request is handled, and the caller hears the address
+    /// with the engine's gesture reading.**
+    ///
+    /// `handled` is what WebView2's `SetHandled` is given inside `NewWindowRequested`: left
+    /// `false`, the engine would open a window of its own with the page in it, outside every door
+    /// this window keeps. The event is what the seat answers with a new pane or a refusal.
+    ///
+    /// MUTATION: answer `handled: false` in [`new_window_answer`] (the first assertion), or drop
+    /// the gesture reading (the second).
+    #[test]
+    fn a_window_request_is_handled_here_and_its_address_goes_to_the_caller() {
+        for (uri, user_initiated) in [
+            ("https://example.com/报告/new?q=中文", true),
+            ("https://example.com/popup", false),
+        ] {
+            let answer = new_window_answer(uri.to_owned(), user_initiated);
+            assert!(
+                answer.handled,
+                "the engine opens no window of its own for {uri}"
+            );
+            assert_eq!(
+                answer.event,
+                WebEvent::NewWindowRequested {
+                    uri: uri.to_owned(),
+                    user_initiated,
+                },
+                "and the caller hears where the page wanted to go"
+            );
+        }
+    }
+}
 
 /// **The names under the card, on both engines** (M4-3).
 #[cfg(test)]
