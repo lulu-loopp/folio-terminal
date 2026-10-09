@@ -27896,23 +27896,29 @@ mod tests {
     /// MUTATION: drop `!character.is_ascii() ||` from `prose_seam_ends` and the row goes dark.
     #[test]
     fn a_printed_path_behind_a_full_width_stop_and_a_digit_is_a_link() {
-        /// The first reference's text and its target, read off one frame row. Only the first:
-        /// the prose behind it ends in ` /`, which is a second reference wherever `/` is the
-        /// root of this machine's own files.
-        fn linked_on(frame: &ViewportFrame, row: u32) -> Option<(String, String)> {
+        /// Every reference on one frame row, in order: each one's text and its target. A run of
+        /// linked cells with one target is one reference.
+        fn links_on(frame: &ViewportFrame, row: u32) -> Vec<(String, String)> {
             let columns = frame.columns.get() as usize;
             let start = row as usize * columns;
-            let mut text = String::new();
-            let mut uri: Option<String> = None;
+            let mut links: Vec<(String, String)> = Vec::new();
+            let mut previous_linked = false;
             for cell in &frame.cells[start..start + columns] {
-                if let Some(link) = &cell.hyperlink {
-                    let first = uri.get_or_insert_with(|| link.uri.to_string());
-                    if *first == link.uri.to_string() {
-                        text.push_str(&cell.text);
+                match &cell.hyperlink {
+                    Some(link) => {
+                        let uri = link.uri.to_string();
+                        match links.last_mut() {
+                            Some((text, last)) if previous_linked && *last == uri => {
+                                text.push_str(&cell.text);
+                            }
+                            _ => links.push((cell.text.to_string(), uri)),
+                        }
+                        previous_linked = true;
                     }
+                    None => previous_linked = false,
                 }
             }
-            uri.map(|uri| (text, uri))
+            links
         }
 
         let (directory, spare) = temporary_ordinary_file();
@@ -27937,12 +27943,21 @@ mod tests {
         let frame = frame_after_path_verification(&mut session, &mut projection);
 
         assert!(session.path_is_verified(&draft));
+        let mut expected = vec![(
+            name.clone(),
+            bt_transcript::paths::local_path_to_file_uri(&draft),
+        )];
+        // The prose ends in ` /`: no name on Windows, and this machine's own root everywhere
+        // else, which is on the disk and so is a second reference of its own.
+        if !cfg!(windows) {
+            expected.push((
+                "/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(Path::new("/")),
+            ));
+        }
         assert_eq!(
-            linked_on(&frame, 0),
-            Some((
-                name.clone(),
-                bt_transcript::paths::local_path_to_file_uri(&draft)
-            )),
+            links_on(&frame, 0),
+            expected,
             "the link is the name without the full-width stop, and it opens the file"
         );
 
@@ -32225,6 +32240,11 @@ mod tests {
         // The recorded prompt plus command lands exactly on the wrap boundary: 104 columns as
         // recorded on Windows, two fewer where the picture's root is `/` rather than `C:\`.
         let columns = (OSC133_ACCEPT2_PROMPT.len() + osc133_accept2_command().len()) as u32;
+        assert_eq!(
+            columns,
+            if cfg!(windows) { 104 } else { 102 },
+            "the recorded prompt plus command lands exactly on the recorded wrap boundary"
+        );
         let started = Instant::now();
         let mut session = DualPlaneSession::new(nz(columns), nz(26));
         enable_path_detection(&mut session);

@@ -74685,7 +74685,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 25] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 26] = [
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -74740,9 +74740,10 @@ mod platform_gate_tests {
         "update_handoff.rs",
         // Windows-only test fixtures: the UNC spelling of a share in a document.
         "web_trace_app_tests.rs",
-        // Windows-only test fixtures: WebView2's Win32 accelerator keys and its
-        // favicon fetch, beside the macOS twin.
-        "webhost.rs",
+        // Windows-only test fixtures: WebView2's favicon fetch, beside the macOS twin.
+        "webhost_favicon_tests.rs",
+        // Windows-only test fixtures: WebView2's Win32 accelerator keys.
+        "webhost_keyboard_tests.rs",
         // WSL.
         "wsl.rs",
     ];

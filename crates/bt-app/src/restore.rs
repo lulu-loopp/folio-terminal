@@ -4254,7 +4254,22 @@ in the folders you left them, as new shells."
             },
             1,
         );
+        // The mark itself, read off the floor's own seed row rather than through the table's
+        // index: on Windows the floor is Windows PowerShell and wears PowerShell's mark.
+        let floor = profiles::shipped()
+            .into_iter()
+            .find(|profile| profile.id == profiles::fallback_profile_id())
+            .expect("the floor is a row this build ships");
+        assert_eq!(stranger.mark, floor.mark);
         assert_eq!(stranger.mark, profiles::mark(profiles::fallback_profile()));
+        let windows_floor = profiles::shipped_for(
+            profiles::SeedPlatform::Windows,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .into_iter()
+        .find(|profile| profile.id == profiles::WINDOWS_POWERSHELL_ID)
+        .expect("the Windows floor is a Windows seed row");
+        assert_eq!(windows_floor.mark, ChromeMark::ProfilePowerShell);
     }
 
     /// PIN (i18n slice, 2026-08-17) — **Chinese wraps, and it wraps between
