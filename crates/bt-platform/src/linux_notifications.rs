@@ -751,11 +751,13 @@ mod tests {
             std::fs::create_dir(&directory).expect("create a private bus config directory");
             let services = directory.join("services");
             std::fs::create_dir(&services).expect("create an empty private bus service directory");
+            let socket_directory = directory.join(bt_testpath::unique_name("socket"));
+            std::fs::create_dir(&socket_directory).expect("create a private bus socket directory");
             let config = directory.join("session.conf");
             let config_text = format!(
                 "<busconfig>\n\
                  <type>session</type>\n\
-                 <listen>unix:tmpdir=/tmp</listen>\n\
+                 <listen>unix:tmpdir={}</listen>\n\
                  <auth>EXTERNAL</auth>\n\
                  <servicedir>{}</servicedir>\n\
                  <policy context=\"default\">\n\
@@ -764,6 +766,7 @@ mod tests {
                  <allow own=\"*\"/>\n\
                  </policy>\n\
                  </busconfig>\n",
+                socket_directory.display(),
                 services.display()
             );
             std::fs::write(&config, config_text).expect("write an isolated bus config");
