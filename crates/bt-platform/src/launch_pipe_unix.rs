@@ -736,18 +736,17 @@ mod tests {
     #[test]
     fn a_request_of_an_environments_size_crosses_whole() {
         let directory = scratch(line!());
-        let (sender, committed) = mpsc::channel();
+        // The reply is the server's count of what it read, so it is the whole of the proof: no
+        // waiting on the commit, which `a_request_crosses_the_launch_endpoint_and_is_answered` pins.
         let endpoint = LaunchPipe::start(
             &directory,
             |line| {
                 Some(Decision {
                     reply: format!("{} bytes", line.len()),
-                    admitted: Some(line.len()),
+                    admitted: Some(()),
                 })
             },
-            move |admitted: usize| {
-                let _ = sender.send(admitted);
-            },
+            |(): ()| {},
         )
         .expect("open the launch endpoint");
         let request = "环境".repeat(20_000);
@@ -757,10 +756,6 @@ mod tests {
         })
         .expect("hand the request over");
         assert_eq!(reply, Some(format!("{} bytes", request.len())));
-        assert_eq!(
-            committed.recv_timeout(Duration::from_secs(5)).ok(),
-            Some(request.len())
-        );
     }
 
     /// **RED — the endpoint is `0600` inside a `0700` directory, and it is gone

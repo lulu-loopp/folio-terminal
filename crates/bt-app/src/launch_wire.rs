@@ -1729,18 +1729,21 @@ mod tests {
     fn a_launch_carrying_its_environment_lands_with_it_in_the_running_folio() {
         let directory = bt_testpath::temp_path("bt-app-launch-wire-环境");
         std::fs::create_dir_all(&directory).expect("a data directory");
+        // What the running end decoded is kept as it decides, before it answers — so once the
+        // start has read `Taken` it is there, and nothing waits on a clock for it.
         let (sender, landed) = std::sync::mpsc::channel();
         let Ok(endpoint) = LaunchPipe::start(
             &directory,
-            |line| {
-                LaunchRequest::decode(line).map(|request| bt_platform::launch_pipe::Decision {
-                    reply: Reply::Taken.encode(),
-                    admitted: Some(request),
+            move |line| {
+                LaunchRequest::decode(line).map(|request| {
+                    let _ = sender.send(request.clone());
+                    bt_platform::launch_pipe::Decision {
+                        reply: Reply::Taken.encode(),
+                        admitted: Some(()),
+                    }
                 })
             },
-            move |request: LaunchRequest| {
-                let _ = sender.send(request);
-            },
+            |(): ()| {},
         ) else {
             // A platform with no launch endpoint carries nothing to anybody.
             return;
@@ -1758,8 +1761,8 @@ mod tests {
         drop(endpoint);
         assert_eq!(left, Some(0), "the running Folio took the launch");
         let request = landed
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("the launch landed");
+            .try_recv()
+            .expect("the running Folio decoded the launch before it answered");
         assert_eq!(
             names_of(request.environment.as_ref()),
             names_of(Some(&carried))
