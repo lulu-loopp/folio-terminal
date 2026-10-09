@@ -406,6 +406,7 @@ text_entries! {
     CleanupMarkRecovery,
     CleanupMarkUpdateEntrances,
     CleanupMarkUpdateHome,
+    CleanupMarkTrialFolder,
     CleanupMarkRuntimeClaims,
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
@@ -5024,6 +5025,11 @@ impl Text {
             Self::CleanupMarkUpdateHome => {
                 pick(lang, "Update home beside the bundle", "应用旁的更新目录")
             }
+            Self::CleanupMarkTrialFolder => pick(
+                lang,
+                "Update trial folder",
+                "Update trial folder", // zh: pending G7-SWEEP-048
+            ),
             Self::CleanupMarkRuntimeClaims => pick(lang, "Unix runtime claims", "Unix 运行时锁"),
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
@@ -6145,6 +6151,9 @@ impl Text {
         // 0.4.8 T-BIRTH-OFF-WINDOW: a pane whose shell could not be started.
         (Self::ShellDidNotStart, HostPlatform::Windows),
         (Self::ShellDidNotStart, HostPlatform::MacOs),
+        // 0.4.8 G7-SWEEP-048: the uninstall's row for an update trial's folder.
+        (Self::CleanupMarkTrialFolder, HostPlatform::Windows),
+        (Self::CleanupMarkTrialFolder, HostPlatform::MacOs),
     ];
 }
 

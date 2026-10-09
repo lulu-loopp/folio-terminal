@@ -1489,7 +1489,13 @@ system registrations (the Explorer verb, the sparse package, the toast identity)
 and its own data roots — and **every one of them must be inert and silent when
 `folio.exe` is missing, and must have a non-interactive undo owned by the module
 that wrote it**, all reachable through one door, `folio --uninstall-cleanup`
-(`--purge` for user data, never by default). Cleanup removes only marks belonging
+(`--purge` for user data, never by default). **An update's trial folder is this
+copy's** (0.4.8 G7): `folio-trial-<txn>` in the system's temporary directory, where a
+trial or a start holding its writes stages the integration script, is removed by both
+verbs, its transaction the one this copy's journal names — read as every journal reader
+reads it (`update_txn::Role::Uninstall`), so a journal it cannot read whole names its
+transaction by its header, and one of which nothing reads names none and the row says
+the record cannot be read. Cleanup removes only marks belonging
 to **this copy**, compared by executable path, and a mark naming a vanished path
 is nobody's and is removed; per-account marks (the `$PROFILE` line, the module)
 are removed and reported. **How Folio was installed is read from a written

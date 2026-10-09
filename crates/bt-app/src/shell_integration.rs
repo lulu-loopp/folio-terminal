@@ -4031,28 +4031,18 @@ fn trial_script_directory() -> Option<PathBuf> {
     let txn = crate::update_startup::trial()
         .map(|(txn, _)| txn)
         .or_else(crate::update_startup::held)?;
-    Some(
-        std::env::temp_dir()
-            .join(format!("folio-trial-{txn}"))
-            .join(SCRIPT_DIRECTORY),
-    )
+    Some(crate::update_trial::temp_folder(&std::env::temp_dir(), txn).join(SCRIPT_DIRECTORY))
 }
 
 /// Remove the script copy owned by a transaction after that transaction's
-/// own directory has been retired. The target is reconstructed from the same
-/// fixed prefix as [`trial_script_directory`] and checked before the recursive
-/// removal; no durable Folio or user directory is beneath this path.
+/// own directory has been retired: the transaction's temporary folder
+/// ([`crate::update_trial::temp_folder`], the name [`trial_script_directory`]
+/// writes under), its script folder and then the folder itself when nothing
+/// else is in it. No durable Folio or user directory is beneath this path.
 pub(crate) fn remove_trial_script(txn: crate::update_txn::TxnId) {
-    let temporary = std::env::temp_dir();
-    let root = temporary.join(format!("folio-trial-{txn}"));
-    if root.parent() == Some(temporary.as_path())
-        && root
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with("folio-trial-"))
-    {
-        let _ = std::fs::remove_dir_all(root.join(SCRIPT_DIRECTORY));
-        let _ = std::fs::remove_dir(root);
-    }
+    let root = crate::update_trial::temp_folder(&std::env::temp_dir(), txn);
+    let _ = std::fs::remove_dir_all(root.join(SCRIPT_DIRECTORY));
+    let _ = std::fs::remove_dir(root);
 }
 
 /// The trial half of [`powershell_script_for_birth`]'s rule, over directories a test can name:
@@ -7257,7 +7247,7 @@ mod tests {
     fn retired_trial_removes_its_powershell_script_root() {
         // Minted as the product mints one, so no other test's transaction is this one.
         let txn = crate::update_job::mint_txn();
-        let root = std::env::temp_dir().join(format!("folio-trial-{txn}"));
+        let root = crate::update_trial::temp_folder(&std::env::temp_dir(), txn);
         let script = root.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1);
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, SCRIPT_PS1).unwrap();
