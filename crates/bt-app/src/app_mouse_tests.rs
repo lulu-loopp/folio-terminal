@@ -892,7 +892,7 @@ fn hyperlink_hover_delay_and_departure_are_event_driven() {
     assert!(hover.underline_target().is_none());
     assert!(hover.show_at.is_none());
 
-    hover.show_blocked(link);
+    hover.show_refused(link, LinkRefusal::Door);
     assert_eq!(
         hover.status_text(80).as_deref(),
         Some("file:///actual-target · blocked")
@@ -979,10 +979,67 @@ fn the_hover_line_says_where_control_would_send_a_local_path() {
     // And a refusal is an answer to the very press the aside was offering,
     // so the two are never printed together.
     let mut refused = settled(&readme, false);
-    refused.show_blocked(hyperlink_hit(&readme));
+    refused.show_refused(hyperlink_hit(&readme), LinkRefusal::Door);
     assert_eq!(
         refused.status_text(120),
         Some(format!("{readme} · blocked"))
+    );
+}
+
+/// RED (F-SWEEP-2-048, owner ruling 2026-10-06) — **a refused link's suffix says what is true**:
+/// "address invalid" for text that is not an address, "blocked" for an address the door will not
+/// go to, "no program to open it" for one the system had nothing for — never 「已拦截」 for all
+/// three.
+///
+/// Each row is pressed through the table (`Ctrl`, so the request is made) and the refusal it
+/// answers is put on the hover line, as `activate_hyperlink` does; the page's own foot reads the
+/// same door.
+///
+/// MUTATION: one suffix for all (`LinkRefusal::suffix` answering `HyperlinkBlockedSuffix` for
+/// every arm) and the invalid rows say "blocked".
+#[test]
+fn a_refused_links_suffix_says_why_it_was_refused() {
+    let no_disk = |_: &Path| -> Option<bt_term::PathVerdict> { None };
+    for (uri, suffix) in [
+        ("http://www.glancepc.com：", " · address invalid"),
+        ("https://例子.测试：8080/文档", " · address invalid"),
+        ("http://", " · address invalid"),
+        ("https://user:pass@例子.测试/", " · blocked"),
+    ] {
+        let HyperlinkActivation::Blocked(refusal) = hyperlink_activation(
+            true,
+            true,
+            uri,
+            bt_transcript::paths::PathNamer::ThisWindow,
+            &no_disk,
+        ) else {
+            panic!("{uri:?} is refused under the hand-over chord");
+        };
+        let mut hover = HyperlinkHover::default();
+        hover.show_refused(hyperlink_hit(uri), refusal);
+        assert_eq!(
+            hover.status_text_in(120, i18n::Lang::English),
+            Some(format!("{uri}{suffix}")),
+            "{uri:?}"
+        );
+    }
+    // The system's refusal of a hand-off it took: the third sentence.
+    let mut hover = HyperlinkHover::default();
+    hover.show_refused(hyperlink_hit("vscode://文档"), LinkRefusal::NoProgram);
+    assert_eq!(
+        hover.status_text_in(120, i18n::Lang::English).as_deref(),
+        Some("vscode://文档 · no program to open it")
+    );
+    // A page's foot: a scheme the door refuses is blocked, a host that does not parse is not an
+    // address.
+    let page = "https://example.com/";
+    assert!(
+        page_foot_lead(page, "mailto:someone@例子.测试")
+            .ends_with(i18n::Text::HyperlinkBlockedSuffix.text())
+    );
+    assert!(
+        page_foot_lead(page, "http://www.glancepc.com：")
+            .ends_with(i18n::Text::HyperlinkInvalidSuffix.text())
     );
 }
 
@@ -1085,7 +1142,7 @@ fn the_hover_line_spends_grid_cells_and_not_characters() {
     // ④ The verdict is still printed on a grid too narrow for anything else,
     // and it too is measured in cells.
     let mut refused = settled(&demo, true);
-    refused.show_blocked(hyperlink_hit(&demo));
+    refused.show_refused(hyperlink_hit(&demo), LinkRefusal::Door);
     assert_eq!(
         refused.status_text_in(3, i18n::Lang::Chinese).as_deref(),
         Some("已"),

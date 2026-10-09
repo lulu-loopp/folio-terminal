@@ -36,6 +36,11 @@
 mod pump;
 mod typeset;
 
+/// The engine [`typeset`] and the two functions beneath it are handed, and the render key that
+/// engine is asked at a pane's em: a caller of composition names both here, beside the functions
+/// that take them, without a dependency on the math crate of its own (`bt-term`'s session tests,
+/// whose manifest names no math crate).
+pub use bt_math::{MathEngine, key_for_em_px};
 pub use pump::{Budget, Executor, Outcome, PumpReport, pump};
 pub use typeset::{render_detection_task, render_live_detection_task, typeset};
 

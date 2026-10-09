@@ -120,7 +120,7 @@ use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
     RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
     WebDpiOwnership, WebEvent, WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
-    WebRequestVerdict, WebSetting, install_rollback, new_window_answer,
+    WebRequestVerdict, WebSetting, http_status_of, install_rollback, new_window_answer,
 };
 use crate::admission::{WaitToken, doors};
 use crate::macos_impl::{window_for, window_thread};
@@ -215,9 +215,12 @@ struct Shared {
     /// The target of the rewrite currently in flight, if any — the Windows arm's
     /// belt against a normalisation that answered twice.
     rewriting_to: RefCell<Option<String>>,
-    /// The status the last main-frame response carried, so that
+    /// The status **this** main-frame navigation's response carried, so that
     /// [`WebEvent::NavigationCompleted`] can report one: WebKit's finish
-    /// callback carries no response.
+    /// callback carries no response. Set back to `0` when a main-frame
+    /// navigation is let go (`decide`), so a load that fails before any
+    /// response reports none rather than the page before it's
+    /// (T-WEB-404-SAYS-UNKNOWN).
     last_status: Cell<i32>,
     /// **The term the page is being searched for, and how.**
     ///
@@ -277,6 +280,7 @@ impl Shared {
             uri,
             success: false,
             status: self.last_status.get(),
+            http_status: http_status_of(self.last_status.get()),
         });
     }
 
@@ -925,6 +929,7 @@ define_class!(
                     uri,
                     success: true,
                     status: shared.last_status.get(),
+                    http_status: http_status_of(shared.last_status.get()),
                 });
             });
         }
@@ -1221,6 +1226,11 @@ impl Gate {
                 true
             }
         };
+        if !cancelled {
+            // A main-frame navigation let go has had no response yet: what the last one
+            // answered is not this one's (T-WEB-404-SAYS-UNKNOWN).
+            shared.last_status.set(0);
+        }
         shared.push(WebEvent::NavigationStarting { uri, cancelled });
         if cancelled {
             WKNavigationActionPolicy::Cancel

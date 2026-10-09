@@ -216,14 +216,15 @@ impl Runtime<'_> {
             .into_iter()
             .filter_map(|seat| {
                 let fault = self.web_on(seat)?.fault()?;
-                fault.stands_over_the_page().then(|| {
-                    (
-                        seat,
-                        fault.say(),
-                        fault.detail().unwrap_or_default().to_owned(),
-                        fault.verb_text().text().to_owned(),
-                    )
-                })
+                if !fault.stands_over_the_page() {
+                    return None;
+                }
+                Some((
+                    seat,
+                    fault.say(),
+                    fault.detail().unwrap_or_default(),
+                    fault.verb_text()?.text().to_owned(),
+                ))
             })
             .collect();
         let scale = self.window.renderer.scale_factor() as f32;
@@ -751,7 +752,8 @@ impl Runtime<'_> {
                 webhost::WebOutcome::NewWindow(webhost::NewWindow::Refused(uri)) => {
                     eprintln!("BT_WEB refused a new window for {uri}");
                     let surface = self.surface_of_page(leaf);
-                    self.say_address_refused(surface, &uri)?;
+                    let refusal = crate::LinkRefusal::of_address(&uri);
+                    self.say_address_refused(surface, &uri, refusal)?;
                 }
                 // What no card covers. The five §7.7 ④ states are drawn by the
                 // seat itself; this is the residue, and it goes where `BT_DPI`
@@ -1366,24 +1368,17 @@ impl Runtime<'_> {
         // two orders: what the box is seeded with is what the pane is showing
         // now.
         self.finish_rename(RenameExit::Blur)?;
-        let Some(url) = self.window.web.get(&leaf).map(|web| web.page().url.clone()) else {
+        // **Seeded with what the row is showing** (found on a real window, 2026-08-24; the
+        // address asked for since T-WEB-PANE-ADDRESS): one string, `WebSeat::row_address`, read
+        // by the row and by this box, so the reader never has to retype what is in front of them
+        // to correct one character of it.
+        let Some(url) = self
+            .window
+            .web
+            .get(&leaf)
+            .map(webhost::WebSeat::row_address)
+        else {
             return Ok(());
-        };
-        // **Seeded with what the row is showing** (found on a real window,
-        // 2026-08-24). A seat whose one navigation was refused has no committed
-        // URL, so this used to open an empty box over a row printing the address
-        // in full — the reader would have had to retype what was in front of
-        // them to correct one character of it. The two strings are now the same
-        // pair read in the same order, which is `dress_preview_rail`'s own.
-        let url = if url.is_empty() {
-            self.window
-                .web
-                .get(&leaf)
-                .and_then(webhost::WebSeat::fault)
-                .and_then(webhost::WebFault::refused_address)
-                .unwrap_or_default()
-        } else {
-            url
         };
         // **Seeded in the spelling the row is showing** (user ruling
         // 2026-08-25): a local file is a path here too, and `WebSeat::go_to`
@@ -1468,7 +1463,7 @@ impl Runtime<'_> {
         let Some(verb) = self
             .web_on(seat)
             .and_then(|web| web.fault())
-            .map(webhost::WebFault::verb)
+            .and_then(webhost::WebFault::verb)
         else {
             return Ok(());
         };
@@ -1497,10 +1492,6 @@ impl Runtime<'_> {
             webhost::WebFaultVerb::Reload => {
                 let surface = self.preview_here(seat);
                 self.run_web_head_verb(surface, WebHeadVerb::Reload)
-            }
-            webhost::WebFaultVerb::CopyAddress(address) => {
-                self.copy_text_to_clipboard(&address);
-                Ok(())
             }
             // The page is still there — that is the whole reason this card is a
             // sheet — so what is handed over is the address it is standing on.

@@ -89,10 +89,21 @@ use windows::Win32::{
 use windows::core::PCWSTR;
 
 use crate::attention_pipe::{
-    MAX_MESSAGE_BYTES, Overlapped, OwnedHandle, SecurityDescriptor, SendHandle, cancel, logon_sid,
-    open_client, security_descriptor_sddl, session_tag, wide, win32_io_error, win32_of,
-    write_bounded,
+    Overlapped, OwnedHandle, SecurityDescriptor, SendHandle, cancel, logon_sid, open_client,
+    security_descriptor_sddl, session_tag, wide, win32_io_error, win32_of, write_bounded,
 };
+
+/// **The most bytes one frame on this endpoint may carry** — 256 KiB (F-SWEEP-2-048).
+///
+/// Its own bound and not the doorbell's four kilobytes, because a launch may carry the
+/// environment it was started in (`folio --with-environment`): a full environment block is a few
+/// kilobytes on a plain account and tens of kilobytes on a developer's — a long `PATH`, an
+/// activated virtual environment or toolchain prompt — and it crosses as JSON, which doubles every
+/// backslash of a Windows path. A quarter of a mebibyte is several times the largest such block
+/// and still one read into one buffer. A request past it is refused whole before it is written,
+/// never cut. An earlier build reading with the doorbell's bound refuses a frame past four
+/// kilobytes, and the launch that sent it opens a window of its own.
+pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 /// **How long a second launch will wait for the running Folio before opening a window of its own.**
 ///
@@ -454,8 +465,8 @@ impl Instance {
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
-                u32::try_from(MAX_MESSAGE_BYTES).unwrap_or(0),
-                u32::try_from(MAX_MESSAGE_BYTES).unwrap_or(0),
+                u32::try_from(MAX_FRAME_BYTES).unwrap_or(0),
+                u32::try_from(MAX_FRAME_BYTES).unwrap_or(0),
                 0,
                 Some(&raw const *attributes),
             )
@@ -473,7 +484,7 @@ impl Instance {
             pipe,
             event,
             overlapped,
-            buffer: vec![0u8; MAX_MESSAGE_BYTES],
+            buffer: vec![0u8; MAX_FRAME_BYTES],
             outstanding: false,
         };
         instance.arm_connect()?;
@@ -670,7 +681,7 @@ pub fn hand_over(
     request: &str,
     on_reply: impl FnOnce(u32, &str),
 ) -> io::Result<()> {
-    if request.len() > MAX_MESSAGE_BYTES {
+    if request.len() > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "request longer than the launch endpoint's frame bound",
@@ -704,7 +715,7 @@ pub fn hand_over(
     // told it.
     let server = vetted_server(handle.0)?;
     write_bounded(handle.0, request.as_bytes())?;
-    let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
+    let mut buffer = vec![0u8; MAX_FRAME_BYTES];
     let left = HANDOVER_BUDGET.saturating_sub(began.elapsed());
     let read = read_reply(handle.0, &mut buffer, left)?;
     on_reply(server, &String::from_utf8_lossy(&buffer[..read]));
@@ -941,6 +952,38 @@ mod tests {
         );
     }
 
+    /// **RED (F-SWEEP-2-048) — a request far past the doorbell's four kilobytes crosses whole.**
+    ///
+    /// A launch carrying its environment is tens of kilobytes; the frame bound is this endpoint's
+    /// own ([`MAX_FRAME_BYTES`]).
+    ///
+    /// MUTATION: bound the endpoint by `attention_pipe::MAX_MESSAGE_BYTES` again and the request is
+    /// refused before it is written.
+    #[test]
+    fn a_request_of_an_environments_size_crosses_whole() {
+        let directory = scratch(line!());
+        // The reply is the server's count of what it read, so it is the whole of the proof: no
+        // waiting on the commit, which `a_request_crosses_the_launch_endpoint_and_is_answered` pins.
+        let endpoint = LaunchPipe::start(
+            &directory,
+            |line| {
+                Some(Decision {
+                    reply: format!("{} bytes", line.len()),
+                    admitted: Some(()),
+                })
+            },
+            |(): ()| {},
+        )
+        .expect("open the launch endpoint");
+        let request = "环境".repeat(20_000);
+        let mut reply = None;
+        hand_over(endpoint.name(), &request, |_, line| {
+            reply = Some(line.to_owned());
+        })
+        .expect("hand the request over");
+        assert_eq!(reply, Some(format!("{} bytes", request.len())));
+    }
+
     /// **RED — a line this build does not understand is dropped without a word and without
     /// effect.**
     ///
@@ -1011,7 +1054,7 @@ mod tests {
             let handle = open_client(&wide(pipe.name()), GENERIC_READ.0 | GENERIC_WRITE.0)
                 .expect("connect to the endpoint");
             write_bounded(handle.0, b"one request").expect("write the request");
-            let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
+            let mut buffer = vec![0u8; MAX_FRAME_BYTES];
             let read = read_reply(handle.0, &mut buffer, HANDOVER_BUDGET).expect("read the reply");
             assert_eq!(&buffer[..read], b"answer to one request");
             // And now this client goes away without a word, which is every client that lost the
@@ -1032,7 +1075,7 @@ mod tests {
     /// end has no reason to trust that the far end applied it, and neither has that one.
     #[test]
     fn a_request_past_the_frame_bound_is_refused_before_it_is_written() {
-        let oversized = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        let oversized = "x".repeat(MAX_FRAME_BYTES + 1);
         let refused = hand_over(r"\\.\pipe\folio-launch-nobody", &oversized, |_, _| {
             panic!("an oversized request must not reach a pipe at all");
         })

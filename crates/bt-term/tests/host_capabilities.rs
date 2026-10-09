@@ -3,7 +3,7 @@
 //!
 //! The installed facts are process-wide, so their contract can only be read in a process of its
 //! own: an integration-test binary links the library built without `cfg(test)`, where nothing is
-//! installed for it. Each test here touches one fact, so the two may run side by side.
+//! installed for it. Each test here touches one fact, so they may run side by side.
 //!
 //! The panic of a read before installation is a contract of every build profile, release
 //! included. This binary is run under the release profile as well:
@@ -123,5 +123,80 @@ fn the_resample_pool_runs_the_hook_the_host_installed() {
         panic_message(again.as_ref()).contains("installed twice"),
         "{}",
         panic_message(again.as_ref())
+    );
+}
+
+/// The picture an OSC 1337 inline image carrying `document` decodes to.
+fn decode_printed(
+    document: &[u8],
+) -> Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError> {
+    use base64::Engine as _;
+    bt_term::decode_inline_image(bt_term::InlineImageTask {
+        occurrence_id: 7,
+        source: bt_term::InlineImageSource::Osc1337(
+            base64::engine::general_purpose::STANDARD
+                .encode(document)
+                .into_bytes(),
+        ),
+    })
+}
+
+/// A codec that answers every document with one known 2x1 raster — not the test codec, so the
+/// picture read back below can only be this one's.
+fn two_pixel_codec(
+    _document: &[u8],
+) -> Result<bt_doc::svg::SvgRaster, bt_doc::svg::SvgRasterError> {
+    Ok(bt_doc::svg::SvgRaster {
+        rgba: vec![0xe6, 0x12, 0xa4, 0x40, 0x01, 0x02, 0x03, 0xff],
+        width_px: 2,
+        height_px: 1,
+    })
+}
+
+/// RED (CC-7) — **an SVG decode before the host installed a codec panics, with its named message,
+/// in every build profile; the installed codec is what decodes an inline SVG; the same codec
+/// again installs as nothing, and a different one is a panic**: one answer per process.
+///
+/// MUTATION ①: answer `UnsupportedFormat` from `decode_svg_bytes` when nothing is installed (or
+/// turn the reader's `expect` into a `debug_assert!` with that answer) — the first assertion goes
+/// red, under `--release` for the `debug_assert!` form. MUTATION ②: let a second, different
+/// installation replace the first — the last assertion goes red.
+#[test]
+fn the_svg_codec_is_read_only_after_the_host_installed_it_and_installed_once() {
+    let early = catch_unwind(|| decode_printed(bt_term::TEST_SVG_DOCUMENT))
+        .expect_err("an SVG decode before the host installed a codec panics");
+    assert_eq!(
+        panic_message(early.as_ref()),
+        bt_term::SVG_RASTERIZER_READ_BEFORE_INSTALL,
+        "and says what happened"
+    );
+    assert_eq!(
+        bt_term::SVG_RASTERIZER_READ_BEFORE_INSTALL,
+        "the SVG rasterizer read before the host installed it"
+    );
+
+    bt_term::install_svg_rasterizer(two_pixel_codec);
+    bt_term::install_svg_rasterizer(two_pixel_codec);
+    let decoded = decode_printed("<svg>\u{3b1}\u{e9}</svg>".as_bytes())
+        .expect("the installed codec answered a raster");
+    assert_eq!((decoded.width_px, decoded.height_px), (2, 1));
+    assert_eq!(
+        &decoded.rgba[..],
+        &[0xe6, 0x12, 0xa4, 0x40, 0x01, 0x02, 0x03, 0xff],
+        "the installed codec's raster, straight alpha as it answered it"
+    );
+
+    let other = catch_unwind(|| bt_term::install_svg_rasterizer(bt_term::test_svg_rasterizer))
+        .expect_err("a different codec is a second answer, and a process has one");
+    assert!(
+        panic_message(other.as_ref()).contains("installed twice with different codecs"),
+        "{}",
+        panic_message(other.as_ref())
+    );
+    assert_eq!(
+        decode_printed(bt_term::TEST_SVG_DOCUMENT)
+            .expect("the first codec still answers")
+            .width_px,
+        2
     );
 }

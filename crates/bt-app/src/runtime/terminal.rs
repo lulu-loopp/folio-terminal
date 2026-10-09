@@ -6,8 +6,8 @@ use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
     FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
-    TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, cmdrail,
-    coalesce, create_leaf_session, cubic_bezier, deliver_osc_attention,
+    TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, born_in_tab,
+    cmdrail, coalesce, create_leaf_session, cubic_bezier, deliver_osc_attention,
     drain_may_take_another_slice, drain_tab_pty, drain_whole_units, files, hang_watch,
     in_drain_feed_turn, input, input_line_needs_a_space_first, local_image_activation, marks,
     mouse_trace, paste_text, presentation_physical_size, reference_card, reference_run_rect,
@@ -668,7 +668,14 @@ impl Runtime<'_> {
         if leaf.successor.is_some() {
             return Ok(());
         }
-        let seed = restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell());
+        // **A Restart shell is born in its tab** (coordinator's ruling 2026-10-09): what a launch
+        // carried into the tab, it is born with again.
+        let seed = born_in_tab(
+            restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell()),
+            self.window.tabs[self.window.active_tab]
+                .carried_environment
+                .as_ref(),
+        );
         // **The replacement is born at the old view's rung** (ticket 37): *Restart shell* keeps
         // the pane, so it keeps its text size, and the constructor is handed the rung rather
         // than the new leaf being repaired to it afterwards. Nothing else of the old view is

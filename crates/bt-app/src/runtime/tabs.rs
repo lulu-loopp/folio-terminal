@@ -65,6 +65,7 @@ impl Runtime<'_> {
         place: Option<PathBuf>,
         source_profile: &str,
         source_cwd: Option<profiles::SeedPlace>,
+        environment: Option<crate::cli::CarriedEnvironment>,
     ) -> Result<()> {
         // No assertion that the table still holds this id, and that is the point
         // of the id: `Duplicate tab` names the profile the source pane is
@@ -102,7 +103,12 @@ impl Runtime<'_> {
             // root, so nothing to say about one, and no preview pane either.
             &BTreeMap::new(),
             &PreviewRestore::default(),
-            TabSeed::default(),
+            // What a launch carried, or a duplicated tab had, belongs to the new tab; nothing
+            // for any other new tab.
+            TabSeed {
+                carried_environment: environment,
+                ..TabSeed::default()
+            },
             &self.app.profile_programs,
             &self.default_profile_id(),
             &self.app.settings_store.loaded().default_profile,
@@ -1290,7 +1296,10 @@ impl Runtime<'_> {
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the
         // same place — said in the one function that knows how to say it.
-        self.new_tab_seeded_from(&profile, None, &profile, cwd)
+        // A duplicate of a tab a launch carried an environment into carries it too: it is the
+        // tab's (coordinator's ruling 2026-10-09).
+        let environment = state.carried_environment.clone();
+        self.new_tab_seeded_from(&profile, None, &profile, cwd, environment)
     }
 
     /// **`Move tab to new window`** — the row 丙2 exists for.
@@ -2795,6 +2804,8 @@ impl Runtime<'_> {
                 // gesture is not a tab the user has promised to bring back every
                 // time.
                 pinned: false,
+                // A new tab owns no launch's environment.
+                carried_environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),

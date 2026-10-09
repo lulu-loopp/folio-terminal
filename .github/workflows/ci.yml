@@ -226,7 +226,8 @@ jobs:
       # The crate dependency direction (docs/ARCHITECTURE.md section 3). Three planted
       # states, each of which must be refused with a message naming the planted crate
       # and the reason: an upward edge in a copy of the real metadata, an exemption
-      # whose edge the copy no longer has, and a first-party crate with no layer row.
+      # planted for an edge the metadata does not have, and a first-party crate with no
+      # layer row.
       # The scratch-repository suite plants an added exemption and requires the
       # merge-base comparison to refuse it.
       - name: the crate-edge gate can actually fail
@@ -262,11 +263,17 @@ jobs:
           [IO.File]::WriteAllText($fixture, ($meta | ConvertTo-Json -Depth 64))
           Assert-Refused @{ Metadata = $fixture } @("bt-unicode -> bt-app (normal)", "must go to a lower layer") "a planted upward edge"
 
-          $meta = $real | ConvertFrom-Json
-          $term = $meta.packages | Where-Object { $_.name -eq "bt-term" }
-          $term.dependencies = @($term.dependencies | Where-Object { $_.name -ne "bt-math" })
-          [IO.File]::WriteAllText($fixture, ($meta | ConvertTo-Json -Depth 64))
-          Assert-Refused @{ Metadata = $fixture } @("bt-term -> bt-math", "no longer exists") "an exemption whose edge is gone"
+          # bt-term has had no bt-math edge since CC-7 (D-15 repaid), so its old row, planted
+          # back into the list, names an edge the real metadata does not have.
+          $exemptions = "scripts/ci/crate-edge-exemptions.tsv"
+          $original = [IO.File]::ReadAllBytes($exemptions)
+          try {
+            $planted = [IO.File]::ReadAllText($exemptions).TrimEnd("`r", "`n") + "`nbt-term`tbt-math`tnormal`tD-15`tplanted by the canary`n"
+            [IO.File]::WriteAllText($exemptions, $planted)
+            Assert-Refused @{} @("bt-term -> bt-math", "no longer exists") "an exemption whose edge is gone"
+          } finally {
+            [IO.File]::WriteAllBytes($exemptions, $original)
+          }
 
           $layers = "scripts/ci/crate-layers.tsv"
           $original = [IO.File]::ReadAllBytes($layers)
@@ -690,9 +697,9 @@ jobs:
         run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
 
       # **A contract of every build profile, run in the one it is easiest to lose in.** A read of
-      # the host names before the host installed them panics in release too (CC-4): this binary
-      # is a process of its own with nothing installed, and a `debug_assert!` in place of the
-      # panic is green in the step above and red here. Release artefacts are a second build of
+      # the host names (CC-4) or of the SVG codec (CC-7) before the host installed it panics in
+      # release too: this binary is a process of its own with nothing installed, and a
+      # `debug_assert!` in place of the panic is green in the step above and red here. Release artefacts are a second build of
       # bt-term's graph (fat LTO) and go into the same cache.
       - name: the host-installed facts hold in release
         run: cargo test --release --locked -p bt-term --test host_capabilities

@@ -5801,6 +5801,51 @@ impl PreviewBuffer {
         SaveOutcome::Saved
     }
 
+    /// **A copy of this buffer's body in `folder`, never over the file it came from** (D-4,
+    /// 0.4.8 G7): what a stop that cannot wait for the reader keeps of an edit [`Self::save`]
+    /// could not write back — the file refused, or it changed on disk since it was read.
+    ///
+    /// In the encoding the file was read in, mark included, as [`Self::save`] writes it, under a
+    /// name that says when and what: `<UTC instant> <file name>`, with ` (n)` before the name when
+    /// that one is taken. Each copy is created whole and never replaces anything
+    /// ([`bt_platform::install_txn::durable_create`]: a temporary, a flush, a rename that never
+    /// replaces, a flush of the folder); `folder` is created the same way when it is not there.
+    /// Answers where the copy is, or why there is none.
+    pub fn recovery_copy(&self, folder: &Path, at: SystemTime) -> Result<PathBuf, String> {
+        let Some(content) = self.content.as_deref() else {
+            return Err(crate::i18n::Text::PreviewNothingToSave.text().to_owned());
+        };
+        let bytes = self.encoding.encode(content);
+        match bt_platform::install_txn::durable_create_dir(folder) {
+            Err(failure) if failure.error.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(failure.to_string());
+            }
+            Ok(()) | Err(_) => {}
+        }
+        let name = self
+            .source
+            .file_path()
+            .and_then(Path::file_name)
+            .map_or_else(
+                || self.name.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        let instant = crate::seed::format_iso8601_utc(at).replace(':', "");
+        for taken in 0_u32.. {
+            let copy = folder.join(if taken == 0 {
+                format!("{instant} {name}")
+            } else {
+                format!("{instant} ({taken}) {name}")
+            });
+            match bt_platform::install_txn::durable_create(&copy, &bytes) {
+                Ok(()) => return Ok(copy),
+                Err(failure) if failure.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(failure) => return Err(failure.to_string()),
+            }
+        }
+        unreachable!("a folder holds fewer than u32::MAX copies of one name from one instant")
+    }
+
     /// Over-limit files always name their actual size, including lossy heads.
     /// Otherwise report lossiness or another format's bounded head extent.
     /// Complete eligible Markdown carries no read-only notice.
@@ -6438,6 +6483,46 @@ impl PreviewPool {
             .collect()
     }
 
+    /// **Keep every dirty buffer when the process stops without asking anybody** (D-4, 0.4.8
+    /// G7): the controlled failure road's half of the quit's judged write, and nothing else.
+    ///
+    /// Each dirty buffer goes through [`PreviewBuffer::save`] — the door [`Self::save_dirty`]
+    /// and `Ctrl+S` write through, with its conflict check and its atomic write — so a file
+    /// that can still be written carries the edit. A buffer the save leaves dirty, because the
+    /// file refused or changed on disk since it was read, cannot stay in memory for the reader
+    /// to look at as it does after a refused quit: the process is going. Its body is copied
+    /// into `recovery` ([`PreviewBuffer::recovery_copy`]), never over the file. Every dirty
+    /// buffer is tried, in the pool's order, and each answers what became of it ([`Kept`]).
+    pub fn keep_dirty(&mut self, recovery: &Path, at: SystemTime) -> Vec<Kept> {
+        self.buffers
+            .iter_mut()
+            .filter(|buffer| buffer.dirty)
+            .map(|buffer| {
+                let name = buffer.name.clone();
+                let file = buffer.source.file_path().map(Path::to_path_buf);
+                let refused = match buffer.save() {
+                    SaveOutcome::Saved => return Kept::Saved { name, file },
+                    SaveOutcome::Conflict => preview_conflict_notice().to_owned(),
+                    SaveOutcome::Failed(error) => error,
+                };
+                match buffer.recovery_copy(recovery, at) {
+                    Ok(copy) => Kept::Copied {
+                        name,
+                        file,
+                        refused,
+                        copy,
+                    },
+                    Err(error) => Kept::Lost {
+                        name,
+                        file,
+                        refused,
+                        error,
+                    },
+                }
+            })
+            .collect()
+    }
+
     /// Forget everything. The two gates that take a pool's *home* away call it
     /// once the user has said the edits may go (P123/P124): closing the last
     /// preview pane strands the pool, and closing the tab is the pool's owner
@@ -6965,6 +7050,73 @@ pub enum SaveOutcome {
     /// The file on disk is not the file that was read (ruling 8⑨).
     Conflict,
     Failed(String),
+}
+
+/// **The folder in the data directory where a stop that cannot ask keeps the edits it could not
+/// write back** ([`PreviewPool::keep_dirty`]; D-4, 0.4.8 G7). Nothing reads it again: it is
+/// the reader's, and the diagnostics line names each copy in it.
+pub const RECOVERED_FOLDER: &str = "recovered";
+
+/// **What became of one dirty buffer on a stop that could not ask** ([`PreviewPool::keep_dirty`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Kept {
+    /// The file carries the edit.
+    Saved { name: String, file: Option<PathBuf> },
+    /// The file did not take it (`refused` says why); the edit is in `copy`.
+    Copied {
+        name: String,
+        file: Option<PathBuf>,
+        refused: String,
+        copy: PathBuf,
+    },
+    /// Neither the file nor a copy took it: the edit went with the process.
+    Lost {
+        name: String,
+        file: Option<PathBuf>,
+        refused: String,
+        error: String,
+    },
+}
+
+impl Kept {
+    /// **The diagnostics line**: which buffer, and where its edit is — the file, the copy, or
+    /// nowhere and why.
+    pub fn line(&self) -> String {
+        let place = |name: &str, file: &Option<PathBuf>| {
+            file.as_ref()
+                .map_or_else(|| name.to_owned(), |file| file.display().to_string())
+        };
+        match self {
+            Self::Saved { name, file } => format!(
+                "{} stopped with unsaved edits in {name}: they were saved to {}",
+                crate::APP_NAME,
+                place(name, file)
+            ),
+            Self::Copied {
+                name,
+                file,
+                refused,
+                copy,
+            } => format!(
+                "{} stopped with unsaved edits in {name}: {} was not written ({refused}); the \
+                 edits are in {}",
+                crate::APP_NAME,
+                place(name, file),
+                copy.display()
+            ),
+            Self::Lost {
+                name,
+                file,
+                refused,
+                error,
+            } => format!(
+                "{} stopped with unsaved edits in {name}: {} was not written ({refused}), and \
+                 no copy could be made ({error}); the edits are lost",
+                crate::APP_NAME,
+                place(name, file)
+            ),
+        }
+    }
 }
 
 /// The acknowledgement a save gets, and how long it stands.

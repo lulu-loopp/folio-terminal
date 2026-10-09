@@ -5,6 +5,7 @@
 mod anchor;
 mod document;
 pub mod math;
+pub mod svg;
 mod versions;
 
 pub use anchor::{

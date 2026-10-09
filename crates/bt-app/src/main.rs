@@ -9564,6 +9564,9 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
         unknown_profile_id: None,
         card_skip: 0,
         prefill: None,
+        // `--with-environment` (owner ruling 2026-10-05): the launcher's environment, when the
+        // command line asked for it, and the account's otherwise.
+        carried_environment: plan.carried_environment.clone(),
     }
 }
 
@@ -9607,6 +9610,9 @@ fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> Leaf
         card_skip: 0,
         // A restart is a new shell in the same place; nothing is owed to its prompt.
         prefill: None,
+        // Not the seed's to say: a Restart shell is born in its tab, and `born_in_tab` gives it
+        // the tab's carried environment (coordinator's ruling 2026-10-09).
+        carried_environment: None,
     }
 }
 
@@ -10460,8 +10466,9 @@ fn shown_address(url: &str) -> String {
 /// the page's own bottom edge every time the pointer crossed a link.
 ///
 /// A target this window will not follow is written out in full and stamped
-/// `· blocked` (2026-08-20's terminal hover-line ruling, same words from
-/// [`i18n::Text::HyperlinkBlockedSuffix`]). The stamp is on the hovered target
+/// with why — `· address invalid` or `· blocked` (2026-08-20's terminal
+/// hover-line ruling, the same words from [`LinkRefusal::suffix`]; owner ruling
+/// 2026-10-06, the suffix says what is true). The stamp is on the hovered target
 /// only: the seat's own URL committed, so it is by definition one this window
 /// went to, and there is no longer any rest state in which it could be stamped.
 /// **Both addresses are handed in, and the page's own is deliberately unused.**
@@ -10481,7 +10488,7 @@ fn page_foot_lead(_page_url: &str, hover: &str) -> String {
     // because a link into a local file is a local file (`shown_address`).
     let mut lead = shown_address(hover);
     if !matches!(webnav::address_bar(hover), webnav::Decision::Navigate(_)) {
-        lead.push_str(i18n::Text::HyperlinkBlockedSuffix.text());
+        lead.push_str(LinkRefusal::of_address(hover).suffix(i18n::current()));
     }
     lead
 }
@@ -12139,6 +12146,9 @@ struct TabState {
     /// sets it and every tab reads through to what the program or the shell
     /// said.
     manual_name: Option<String>,
+    /// **The environment a launch carried into this tab** ([`TabSeed::carried_environment`]), the source
+    /// for every shell born in it ([`born_in_tab`]). Held in memory and never saved.
+    carried_environment: Option<cli::CarriedEnvironment>,
     pending_keyboard_at: Option<Instant>,
     /// **A resize present is owed to this tab's focused pane** (ticket 47).
     ///
@@ -13630,7 +13640,7 @@ struct WindowRuntime {
     /// offered to undo is no longer the thing that would come back.
     profile_undo: Option<(toast::ToastId, profiles::Profile, usize)>,
     /// The one managed `$PROFILE` line a standing toast can remove again.
-    powershell_profile_undo: Option<(toast::ToastId, PathBuf, PathBuf)>,
+    powershell_profile_undo: Option<(toast::ToastId, PathBuf, shell_integration::ProfileEdit)>,
     /// **Where a checkout came from**, while it is in flight (user ruling,
     /// 2026-08-19): the repository, and the branch `HEAD` was on before.
     ///
@@ -15099,12 +15109,15 @@ struct WindowRuntime {
     /// persisted: it is a fact about this sitting, and a file that remembered it
     /// would let a refusal from last month be re-opened by a font change today.
     psreadline_size_changed: bool,
-    /// Whether the gate's `Discard` has asked for the window to go.
+    /// **Which window the gate's confirmed answer has asked to go**, if it has —
+    /// this window after its own shut, or the run's last ordinary window after
+    /// the run's end was answered here, in the summoned terminal
+    /// (T-SUMMON-DIRTY-PREVIEW).
     ///
-    /// A flag rather than a call, because the shut belongs to the event loop:
-    /// `CloseRequested` is what performs it, and the gate re-requests it rather
-    /// than performing half of it here (see [`Runtime::answer_dirty_gate`]).
-    window_close_requested: bool,
+    /// A request rather than a call, because the close belongs to the event
+    /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
+    /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
+    window_close_requested: Option<WindowId>,
     /// Which preview pane has its filename switcher up (P130-P137).
     ///
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
@@ -18429,7 +18442,11 @@ fn dirty_gate_names(
             }
         }
         restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
-        restore::GateRequest::Shut => tabs.iter().flat_map(one_tab).collect(),
+        // The run's end, asked in the summoned terminal, loses what its shut
+        // would: every tab's dirty buffers.
+        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
+            tabs.iter().flat_map(one_tab).collect()
+        }
         // A discard names one file, and it is never empty — which matters,
         // because `raise_dirty_gate` treats an empty list as "there is
         // nothing to ask about" and lets the verb through. There is always
@@ -18479,6 +18496,53 @@ fn raise_dirty_gate_over(
 ) -> restore::GateRaise {
     let at_risk = dirty_gate_names(tabs, active_tab, &request);
     gate.raise(request, &at_risk)
+}
+
+/// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
+/// (D-4, 0.4.8 G7) — the whole of [`Runtime::keep_unsaved_edits`] except its
+/// diagnostics lines. Every tab's pool and not the active tab's, on the quit
+/// gate's own reasoning: a dirty buffer on a tab nobody is looking at is still a
+/// dirty buffer. Each pool keeps its own through
+/// [`preview::PreviewPool::keep_dirty`].
+fn keep_unsaved_edits_over(
+    tabs: &mut [TabState],
+    recovery: &Path,
+    at: SystemTime,
+) -> Vec<preview::Kept> {
+    tabs.iter_mut()
+        .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
+        .collect()
+}
+
+/// **What an answer to one of the two exits comes to over the asking window's
+/// tabs** (B1; T-SUMMON-DIRTY-PREVIEW): the window whose close the loop is asked
+/// to re-run — `closes`, the window itself for a shut and the run's last ordinary
+/// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
+/// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
+/// has already made through [`Runtime::quit_save`] (`saved_all`: whether all of
+/// it landed).
+///
+/// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
+/// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
+/// the dirty buffers and only those: the rest of each pool is the list of files
+/// the switcher shows next launch (`TabState::preview_content`), and the gate
+/// raises itself off the dirty ones, so the re-run close finds nothing to ask.
+fn answer_an_exit_over(
+    tabs: &mut [TabState],
+    closes: WindowId,
+    answer: restore::GateAnswer,
+    saved_all: bool,
+) -> Option<WindowId> {
+    match answer {
+        restore::GateAnswer::Cancel => None,
+        restore::GateAnswer::Save => saved_all.then_some(closes),
+        restore::GateAnswer::Discard => {
+            for tab in tabs {
+                tab.preview_pool.discard_dirty();
+            }
+            Some(closes)
+        }
+    }
 }
 
 /// **Which of the tabs whose shells have all exited the loop may close on its
@@ -19664,6 +19728,12 @@ fn preview_opened_label() -> &'static str {
 /// built from a host or a scheme and a `&'static str` cannot carry one (§7.7 ④).
 struct CardWords {
     notice: String,
+    /// The address the card is about, in full and in the row's spelling, or empty
+    /// (owner's ruling 2026-10-09: a page that does not open names it).
+    address: String,
+    /// That address folded to the seat by `seats::fold_address` beside the renderer, the
+    /// counterpart of [`Self::detail_lines`].
+    address_line: String,
     /// The one fact, or empty.
     detail: String,
     /// That fact, wrapped to the seat beside the renderer (§7.43) — the
@@ -19731,6 +19801,8 @@ fn refused_preview_card(
 ) -> CardWords {
     CardWords {
         notice,
+        address: String::new(),
+        address_line: String::new(),
         detail: String::new(),
         detail_lines: Vec::new(),
         verb: offers_the_default_app.then(|| open_label.to_owned()),
@@ -23680,7 +23752,7 @@ impl ControlClickHint {
             | HyperlinkActivation::Page(_)
             | HyperlinkActivation::Preview(_, _)
             | HyperlinkActivation::FilesColumn(_)
-            | HyperlinkActivation::Blocked => None,
+            | HyperlinkActivation::Blocked(_) => None,
         }
     }
 
@@ -23721,12 +23793,59 @@ fn printable_address(uri: &str) -> String {
         .collect()
 }
 
+/// **Why a link was not followed** — the three things the hover line can truly say about it
+/// (owner ruling 2026-10-06: 「已拦截」/"blocked" is never said of an address that is not one).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkRefusal {
+    /// The text is not an address: its host does not parse, it has no host, it holds a control
+    /// character — or, for a reference, it names nothing this machine can name.
+    Invalid,
+    /// The system took the hand-off and had nothing to open it with.
+    NoProgram,
+    /// An address the door will not go to: a scheme, userinfo, a page asking for a window.
+    Door,
+}
+
+impl LinkRefusal {
+    /// What the address door says about `address`, as one of the three.
+    ///
+    /// An address the door admits was refused by a door after it (the gesture rule of a page's
+    /// new window), so it is the door's refusal; text the door would search for is not an
+    /// address.
+    fn of_address(address: &str) -> Self {
+        match webnav::address_bar(address) {
+            webnav::Decision::Refuse(refusal) if refusal.is_malformed() => Self::Invalid,
+            webnav::Decision::Search(_) => Self::Invalid,
+            webnav::Decision::Refuse(_) | webnav::Decision::Navigate(_) => Self::Door,
+        }
+    }
+
+    /// The suffix, separator included.
+    fn suffix(self, lang: i18n::Lang) -> &'static str {
+        match self {
+            Self::Invalid => i18n::Text::HyperlinkInvalidSuffix.in_lang(lang),
+            Self::NoProgram => i18n::Text::HyperlinkNoProgramSuffix.in_lang(lang),
+            Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
+        }
+    }
+
+    /// The same words alone, for a pane too narrow for the address as well.
+    fn word(self, lang: i18n::Lang) -> &'static str {
+        match self {
+            Self::Invalid => i18n::Text::HyperlinkInvalid.in_lang(lang),
+            Self::NoProgram => i18n::Text::HyperlinkNoProgram.in_lang(lang),
+            Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
+        }
+    }
+}
+
 #[derive(Default)]
 struct HyperlinkHover {
     candidate: Option<HyperlinkHit>,
     show_at: Option<Instant>,
     active: Option<HyperlinkHit>,
-    blocked: bool,
+    /// Why the press on [`Self::active`] was refused, when it was.
+    refused: Option<LinkRefusal>,
     /// Filled once, when the hover settles — see [`ControlClickHint`].
     ///
     /// Once and not per frame, because the status line is repainted on every frame the pane owes
@@ -23749,7 +23868,7 @@ impl HyperlinkHover {
             return false;
         }
         let active_changed = self.active.take().is_some();
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = None;
         // The underline is the affordance and follows the candidate immediately; only the status
         // tooltip waits out the hover delay. A candidate change therefore needs a republish too.
@@ -23782,7 +23901,7 @@ impl HyperlinkHover {
         }
         self.show_at = None;
         self.active = self.candidate.take();
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = self
             .active
             .as_ref()
@@ -23790,11 +23909,11 @@ impl HyperlinkHover {
         self.active.is_some()
     }
 
-    fn show_blocked(&mut self, hyperlink: HyperlinkHit) {
+    fn show_refused(&mut self, hyperlink: HyperlinkHit, refusal: LinkRefusal) {
         self.candidate = None;
         self.show_at = None;
         self.active = Some(hyperlink);
-        self.blocked = true;
+        self.refused = Some(refusal);
         // A refusal is the answer to the very press the sentence was offering;
         // printing the offer beside the refusal would be the line arguing with
         // itself.
@@ -23804,7 +23923,7 @@ impl HyperlinkHover {
     fn clear(&mut self) -> bool {
         self.candidate = None;
         self.show_at = None;
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = None;
         self.active.take().is_some()
     }
@@ -23833,8 +23952,8 @@ impl HyperlinkHover {
             return None;
         }
         let uri_columns = bt_unicode::text_width(&uri);
-        let suffix = if self.blocked {
-            i18n::Text::HyperlinkBlockedSuffix.in_lang(lang)
+        let suffix = if let Some(refusal) = self.refused {
+            refusal.suffix(lang)
         } else {
             // **The aside about `Ctrl` is printed only when it costs the target
             // nothing** (丙3). A verdict is the answer to a press somebody
@@ -23850,10 +23969,10 @@ impl HyperlinkHover {
         };
         let suffix_columns = bt_unicode::text_width(suffix);
         if columns <= suffix_columns {
-            return Some(head_within_columns(
-                i18n::Text::HyperlinkBlocked.in_lang(lang),
-                columns,
-            ));
+            // The refusal's word alone; with no refusal the suffix is the hint, which is only
+            // printed when it fits.
+            let word = self.refused.map_or(suffix, |refusal| refusal.word(lang));
+            return Some(head_within_columns(word, columns));
         }
         let target_columns = columns - suffix_columns;
         let mut status = if uri_columns > target_columns {
@@ -26271,9 +26390,9 @@ enum HyperlinkActivation {
     /// A local folder, opened the way this window opens every other folder — the
     /// files column, pointed at it.
     FilesColumn(PathBuf),
-    /// A target this window will not hand to the shell. The hover line says so
+    /// A target this window will not hand to the shell, and why. The hover line says so
     /// and nothing else happens.
-    Blocked,
+    Blocked(LinkRefusal),
 }
 
 /// **Which row of §7.1.5g's table a reference falls in**, read off its own text before any
@@ -26332,7 +26451,9 @@ fn reference_activation(intent: ClickIntent, row: ReferenceRow) -> HyperlinkActi
             WebAddressActivation::None => HyperlinkActivation::None,
             WebAddressActivation::Page => HyperlinkActivation::Page(uri),
             WebAddressActivation::Browser => HyperlinkActivation::Browser(uri),
-            WebAddressActivation::Blocked => HyperlinkActivation::Blocked,
+            WebAddressActivation::Blocked => {
+                HyperlinkActivation::Blocked(LinkRefusal::of_address(&uri))
+            }
         },
         ReferenceRow::Local { path, at, known } => match (known, intent) {
             // **Nobody has asked the disk about this name yet, so it is not a link yet** (audit 3
@@ -26371,7 +26492,7 @@ fn reference_activation(intent: ClickIntent, row: ReferenceRow) -> HyperlinkActi
         },
         ReferenceRow::Unnamed => match intent {
             ClickIntent::Here => HyperlinkActivation::None,
-            ClickIntent::System => HyperlinkActivation::Blocked,
+            ClickIntent::System => HyperlinkActivation::Blocked(LinkRefusal::Invalid),
         },
         ReferenceRow::Nothing => HyperlinkActivation::None,
     }
@@ -26888,7 +27009,7 @@ fn reference_card(
         | HyperlinkActivation::Page(_)
         | HyperlinkActivation::External(_)
         | HyperlinkActivation::Reveal(_)
-        | HyperlinkActivation::Blocked => None,
+        | HyperlinkActivation::Blocked(_) => None,
     }
 }
 
@@ -35752,6 +35873,8 @@ fn revive_plan(
     let seed = TabSeed {
         manual_name: saved.first().and_then(|leaf| leaf.manual_name.clone()),
         pinned: tab.pinned,
+        // Never saved, so never revived.
+        carried_environment: None,
     };
     // **Each pane comes back as its own shell in its own folder.** The two facts
     // are read out of the same saved leaf in the same pass, which is what makes
@@ -35799,6 +35922,7 @@ fn revive_plan(
                     // so "this shell never reported one" and "this rung does not restore them"
                     // arrive as one case (§7.54e ④).
                     prefill: Some(leaf.last_command.clone()).filter(|it| !it.is_empty()),
+                    carried_environment: None,
                 },
             )
         })
@@ -36604,6 +36728,22 @@ struct TabSeed {
     /// a profile is something each shell in it *is*.
     manual_name: Option<String>,
     pinned: bool,
+    /// **The environment `--with-environment` carried into this tab** (owner ruling 2026-10-05;
+    /// coordinator's ruling 2026-10-09: it belongs to the tab). Every shell born in the tab —
+    /// its first pane, a split, a duplicate pane or tab, a Restart shell — is born with it
+    /// ([`born_in_tab`]). `None` for every tab no launch carried one into, and for every tab
+    /// revived from disk: it is never saved.
+    carried_environment: Option<cli::CarriedEnvironment>,
+}
+
+/// **A shell born in a tab is born with the tab's carried environment** — the one rule for every
+/// birth inside a tab (the tab's own panes at its creation, a split, a duplicate, a Restart shell;
+/// coordinator's ruling 2026-10-09). The tab is the source, so the seed's own is replaced.
+fn born_in_tab(seed: LeafSeed, tab_environment: Option<&cli::CarriedEnvironment>) -> LeafSeed {
+    LeafSeed {
+        carried_environment: tab_environment.cloned(),
+        ..seed
+    }
 }
 
 /// What one Terminal leaf is started from: which profile, and where.
@@ -36666,6 +36806,14 @@ struct LeafSeed {
     /// one place the rung is read, so an empty `last_command` on the leaf and "this rung does not
     /// restore commands" are the same fact and cannot disagree.
     prefill: Option<String>,
+    /// **The environment a launch carried into this pane** (`--with-environment`, owner ruling
+    /// 2026-10-05), laid over the account's as the birth's `launch_overrides`.
+    ///
+    /// The tab's ([`TabSeed::carried_environment`]) for every shell born in a tab a launch carried
+    /// one into — its first pane, a split, a duplicate, a Restart shell — put here by
+    /// [`born_in_tab`]; `None` in every other tab. Never saved, so a revived pane takes the
+    /// account's environment.
+    carried_environment: Option<cli::CarriedEnvironment>,
 }
 
 /// **The profile a saved pane comes back as, and the id its banner names** — one reading of a
@@ -38093,6 +38241,7 @@ fn new_tab_leaf_seed(
         unknown_profile_id: None,
         card_skip: 0,
         prefill: None,
+        carried_environment: None,
     }
 }
 
@@ -38231,6 +38380,7 @@ impl SplitSeed {
                 card_skip: 0,
                 // A split is not a restore; nothing is owed to its prompt.
                 prefill: None,
+                carried_environment: None,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: profile.clone(),
@@ -38245,6 +38395,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                carried_environment: None,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -38263,6 +38414,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                carried_environment: None,
             },
         }
     }
@@ -39098,6 +39250,7 @@ mod shell_birth_tests {
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
+            carried_environment: None,
         }
     }
 
@@ -40031,6 +40184,7 @@ fn create_leaf_session(
                     environment_derivation: command.environment_derivation,
                     folio_environment: command.environment,
                     profile_environment: command.profile_environment,
+                    carried_environment: seed.carried_environment.clone(),
                     size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     working_directory: place.working_directory,
                     unless_gone: gone_spec,
@@ -40826,13 +40980,17 @@ fn create_tab_state(
             LeafId { tab: id, seat },
             wake,
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
-            &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
-                profile: default_profile.to_owned(),
-                cwd: None,
-                unknown_profile_id: None,
-                card_skip: 0,
-                prefill: None,
-            }),
+            &born_in_tab(
+                leaves.get(&seat).cloned().unwrap_or(LeafSeed {
+                    profile: default_profile.to_owned(),
+                    cwd: None,
+                    unknown_profile_id: None,
+                    card_skip: 0,
+                    prefill: None,
+                    carried_environment: None,
+                }),
+                seed.carried_environment.as_ref(),
+            ),
             programs,
             stored_default,
             formulas,
@@ -41006,6 +41164,7 @@ fn assemble_tab_state(
         focused_leaf,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
+        carried_environment: seed.carried_environment,
         pending_keyboard_at: None,
         // A tab that arrives pinned wears its pin from the first frame; it
         // is a fact about the tab, not an offer that has to be hovered out.
@@ -41235,6 +41394,8 @@ fn pane_into_new_tab(
             // The name belonged to the tab, not to the pane. A tear-out that
             // carried "build" across would name a room after the house.
             manual_name: None,
+            // A pane torn into a tab of its own takes the account's environment from here on.
+            carried_environment: None,
             pinned,
         },
         seats,
@@ -43165,7 +43326,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
-        window_close_requested: false,
+        window_close_requested: None,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
@@ -44245,7 +44406,12 @@ impl Runtime<'_> {
         // profile looked up in this build's table, and the crossing into that
         // profile's namespace. Everything it could not honour comes back in the
         // plan's own list and is said on a card once the window is up.
-        let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        let mut cli_plan: cli::CliPlan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        // **`--with-environment` reads this process's environment, which on a first launch is
+        // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
+        cli_plan.carried_environment = cli
+            .with_environment
+            .then(cli::CarriedEnvironment::of_this_process);
         // Pinned tabs are an answer already given, so they simply open; the rest
         // become a question the prompt will ask over a window that already works.
         let plan = if probe_input.is_some() {
@@ -44271,7 +44437,11 @@ impl Runtime<'_> {
                 .collect();
             (
                 seats,
-                TabSeed::default(),
+                TabSeed {
+                    // The command-line tab owns what `--with-environment` carried.
+                    carried_environment: cli_plan.carried_environment.clone(),
+                    ..TabSeed::default()
+                },
                 leaves,
                 BTreeMap::new(),
                 PreviewRestore::default(),
@@ -49105,15 +49275,20 @@ impl Runtime<'_> {
     /// The window's one door for 「这件事刚刚发生」 ([`Self::toast`]), which is
     /// also the one that makes the notice stand where the attention already is
     /// rather than in a corner. It carries the same two facts the terminal's
-    /// hover line carries when it is blocked, in the same words and with the
-    /// same control characters made printable: the address, and that it was
-    /// blocked. No new sentence is minted for a fact this window already has one
+    /// hover line carries when a press is refused, in the same words and with the
+    /// same control characters made printable: the address, and why it was
+    /// refused ([`LinkRefusal`]). No new sentence is minted for a fact this window already has one
     /// for.
-    fn say_address_refused(&mut self, surface: PreviewSurface, url: &str) -> Result<()> {
+    fn say_address_refused(
+        &mut self,
+        surface: PreviewSurface,
+        url: &str,
+        refusal: LinkRefusal,
+    ) -> Result<()> {
         let body = format!(
             "{}{}",
             printable_address(url),
-            i18n::Text::HyperlinkBlockedSuffix.text()
+            refusal.suffix(i18n::current())
         );
         self.toast(toast::ToastKind::Error, surface.toast_anchor(), None, body)
     }
@@ -50753,6 +50928,7 @@ impl Runtime<'_> {
         );
         let card = seats::PreviewCardContent {
             notice: &words.notice,
+            address: (!words.address_line.is_empty()).then_some(words.address_line.as_str()),
             detail: &words.detail_lines,
             mark: words.mark,
             fault: words.fault,
@@ -54047,7 +54223,8 @@ mod launch_landing_tests {
     fn a_request_opens_its_tab_where_it_asked_and_raises_the_window() {
         let tab = method_body("FolioApp", "open_a_tab_for_a_launch");
         assert!(
-            tab.contains("runtime.new_tab_with_profile(&profile, request.cwd.clone())"),
+            tab.contains("runtime.new_tab_with_profile_carrying(")
+                && tab.contains("request.cwd.clone(),"),
             "the tab door is not reached with the request's own folder:\n{tab}"
         );
         assert!(
@@ -55854,7 +56031,8 @@ mod files_locate_door_tests {
         let hit = method_body("Runtime", "float_hit_at");
         assert!(
             hit.contains("float::FloatPart::CardButton")
-                && hit.contains("preview_card_geometry(geometry.body, Some(open_button_px)"),
+                && hit.contains("seats::preview_card_geometry(")
+                && hit.contains("Some(open_button_px)"),
             "the float's no-preview button is not hit where the card drew it"
         );
         let press = method_body("Runtime", "press_float");
@@ -60377,8 +60555,8 @@ mod quit_transaction_tests {
         );
     }
 
-    /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` is
-    /// unchanged.**
+    /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` leaves by
+    /// the controlled failure road** (`FolioApp::stop_every_window`, 0.4.8 G7).
     ///
     /// The two are different machines for different events and the plan's whole
     /// §E2 rests on keeping them apart: `exiting` runs after the loop has stopped
@@ -60400,8 +60578,8 @@ mod quit_transaction_tests {
         let exiting =
             item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler"));
         assert!(
-            exiting.contains(&[shut.as_str(), "(true)"].concat()),
-            "and the backstop for a loop stopped by something else is untouched"
+            exiting.contains("self.stop_every_window()"),
+            "and the backstop for a loop stopped by something else leaves by the failure road, held to its tables by `restore_app_tests::failure_road`"
         );
     }
 
@@ -63232,6 +63410,14 @@ impl FolioApp {
         // program: it goes when the windows go, and comes back holding what the
         // restore row says — see `retire_the_summon_with_the_run` below.
         let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id));
+        // **And a close that ends the run asks the summoned terminal first**
+        // (T-SUMMON-DIRTY-PREVIEW): it goes with this window, so this close is
+        // its shut too, and an unsaved buffer in it is asked about in it before
+        // anything is told. Asked, this window stays open: the summoned terminal
+        // never stands alone.
+        if ending && !self.the_summon_lets_the_run_end(id)? {
+            return Ok(());
+        }
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -63326,6 +63512,39 @@ impl FolioApp {
                     .is_some_and(|window| window.leaving.is_none())
             })
             .count()
+    }
+
+    /// **Whether the summoned terminal lets the run end with `closing`**
+    /// (T-SUMMON-DIRTY-PREVIEW) — its dirty gate, put the run's end
+    /// ([`restore::GateRequest::ShutWithTheRun`]) over its own tabs.
+    ///
+    /// The run's end is a normal close of the summoned terminal, not a failure,
+    /// so it goes through the gate every other close of a window goes through:
+    /// nothing to ask lets the run end; a question raised — or one already up in
+    /// it, which no second request slips past (ticket 58) — holds the close, and
+    /// the summoned terminal is brought up by its own door
+    /// ([`Self::summon_quake`]) so that the question is on the screen. Its
+    /// confirmed answer re-runs the close of `closing`
+    /// ([`WindowRuntime::window_close_requested`]); `Cancel` leaves `closing` open, so
+    /// the summoned terminal never stands alone (§7.54e ①).
+    ///
+    /// No summoned window, or one already leaving, has nothing to ask.
+    fn the_summon_lets_the_run_end(&mut self, closing: WindowId) -> Result<bool> {
+        let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
+            return Ok(true);
+        };
+        if self.is_leaving(id) {
+            return Ok(true);
+        }
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(true);
+        };
+        let raised = runtime.raise_dirty_gate(restore::GateRequest::ShutWithTheRun(closing))?;
+        if raised.proceeds() {
+            return Ok(true);
+        }
+        self.summon_quake()?;
+        Ok(false)
     }
 
     /// **The summoned terminal goes with the run** (§7.54).
@@ -64429,7 +64648,11 @@ impl FolioApp {
             return Ok(());
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile_carrying(
+            &profile,
+            request.cwd.clone(),
+            request.carried_environment.clone(),
+        )?;
         runtime.report_launch_refusals(refusals)
     }
 
@@ -64461,7 +64684,11 @@ impl FolioApp {
         let Some(opened) = self.windows.key_at(self.windows.len().saturating_sub(1)) else {
             return Ok(None);
         };
-        if request.cwd.is_none() && request.profile.is_none() {
+        // A launch that carries its environment asks for its own tab, as one naming a place does.
+        if request.cwd.is_none()
+            && request.profile.is_none()
+            && request.carried_environment.is_none()
+        {
             return Ok(Some(opened));
         }
         let stand_in = self
@@ -64473,7 +64700,11 @@ impl FolioApp {
             return Ok(Some(opened));
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile_carrying(
+            &profile,
+            request.cwd.clone(),
+            request.carried_environment.clone(),
+        )?;
         if let Some(stand_in) = stand_in {
             runtime.retire_the_stand_in(stand_in)?;
         }
@@ -65847,12 +66078,7 @@ impl FolioApp {
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
             announce_panic(path);
         });
-        // Every window, because the failure is the process's: a shell left
-        // running behind a window nobody can see is the one outcome worse than
-        // stopping. `ending` for every one of them, and that is the point: this
-        // is the process stopping, not somebody closing five windows, so what
-        // was open stays in the file and nothing is filed away as "closed".
-        if let Err(shutdown_error) = self.for_each_window(|runtime| runtime.close_window(true)) {
+        if let Err(shutdown_error) = self.stop_every_window() {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
         // **The spare is abandoned, not waited for** (ticket 60, SW-2): its controller closed now,
@@ -65865,6 +66091,34 @@ impl FolioApp {
             app.finish();
         }
         event_loop.exit();
+    }
+
+    /// **The one road a stop that is not a quit leaves by** (D-4, 0.4.8 G7): a
+    /// controlled failure ([`Self::fail`], twelve sites) and a loop stopped by
+    /// something that is not a window closing (`exiting`).
+    ///
+    /// First every window keeps what it would lose ([`Runtime::keep_unsaved_edits`]):
+    /// each dirty preview buffer written back through the quit's judged write, or,
+    /// where the file refuses or has changed on disk, copied into the data
+    /// directory's [`preview::RECOVERED_FOLDER`] — with one diagnostics line each
+    /// saying where the edit is. The writes are made on this thread and are done
+    /// when the call returns, as the quit's are; nothing waits for anything else.
+    /// Then every window, because the stop is the process's: a shell left running
+    /// behind a window nobody can see is the one outcome worse than stopping.
+    /// `ending` for every one of them, and that is the point: this is the process
+    /// stopping, not somebody closing five windows, so what was open stays in the
+    /// file and nothing is filed away as "closed".
+    ///
+    /// The structural guard `failure_road` holds every closing of a window with
+    /// `ending` to this road or a row of its table, and the twelve `fail` sites to
+    /// theirs.
+    fn stop_every_window(&mut self) -> Result<()> {
+        let recovery = persist::storage_dir().join(preview::RECOVERED_FOLDER);
+        self.for_each_window(|runtime| {
+            runtime.keep_unsaved_edits(&recovery);
+            Ok(())
+        })?;
+        self.for_each_window(|runtime| runtime.close_window(true))
     }
 
     fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
@@ -66673,7 +66927,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         match outcome.clone() {
                             shell_integration::ProfileInstallOutcome::Installed {
                                 program,
-                                profile,
+                                edit,
                             } => {
                                 let id = runtime.toast_with_verb(
                                     toast::ToastKind::Info,
@@ -66681,8 +66935,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                                     i18n::Text::ShellProfileAddedToast.text(),
                                     i18n::Text::ProfilesUndo.text(),
                                 )?;
-                                runtime.window.powershell_profile_undo =
-                                    Some((id, program, profile));
+                                runtime.window.powershell_profile_undo = Some((id, program, edit));
                             }
                             shell_integration::ProfileInstallOutcome::Refused(reason)
                             | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
@@ -66693,7 +66946,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                                     reason,
                                 )?;
                             }
-                            shell_integration::ProfileInstallOutcome::Undone => {}
+                            shell_integration::ProfileInstallOutcome::Present
+                            | shell_integration::ProfileInstallOutcome::Undone => {}
                         }
                     }
                     Ok(())
@@ -67368,13 +67622,25 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // shut belongs to the event loop, and re-requesting it means closing goes
             // through the one door it always went through instead of a second one
             // opened for the gate.
-            shutting |= std::mem::take(&mut runtime.window.window_close_requested);
+            let requested = std::mem::take(&mut runtime.window.window_close_requested);
+            shutting |= requested == Some(window_id);
             let result = if shutting {
                 result.and(hang_watch::during(hang_watch::Station::EventShut, || {
                     self.close(window_id)
                 }))
             } else {
                 result
+            };
+            // **And the window another window's answer closes**
+            // (T-SUMMON-DIRTY-PREVIEW): the run's end, answered in the summoned
+            // terminal, re-runs the close of the ordinary window that ends the run
+            // — through the same door, which asks again and now finds nothing.
+            let result = match requested.filter(|closing| *closing != window_id) {
+                Some(closing) => result
+                    .and(hang_watch::during(hang_watch::Station::EventShut, || {
+                        self.close(closing)
+                    })),
+                None => result,
             };
             // Whatever this event changed about the *application*, handed to the
             // windows that were not this one. Before the door below, because a window
@@ -67479,10 +67745,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if self.windows.is_empty() {
             return;
         }
-        // `ending` for the reason `fail` gives: the loop stopping is the process
+        // `fail`'s road, for its reason: the loop stopping is the process
         // stopping, and every window still up at that moment is a window the
-        // reader had open — the file says so and the next launch opens them.
-        if let Err(error) = self.for_each_window(|runtime| runtime.close_window(true)) {
+        // reader had open — its unsaved edits are kept, the file says so and the
+        // next launch opens them.
+        if let Err(error) = self.stop_every_window() {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.windows.clear();
@@ -78520,7 +78787,7 @@ mod refused_preview_card_tests {
                 refusal.notice
             );
             assert_eq!(card.notice, refusal.notice, "the card says something else");
-            let geometry = seats::preview_card_geometry(seat, Some(96.0), 0, 1.0);
+            let geometry = seats::preview_card_geometry(seat, Some(96.0), false, 0, 1.0);
             let button = geometry
                 .button
                 .expect("a card with a verb lays out a rectangle for it");

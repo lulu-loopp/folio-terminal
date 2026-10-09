@@ -512,6 +512,21 @@ pub(crate) fn defer(writer: Writer) -> bool {
     GATE.defer(is_held_back(), writer)
 }
 
+/// **The name of a transaction's folder in the system's temporary directory**,
+/// `folio-trial-<txn>`: what a trial, or a start holding its writes, stages there
+/// in place of a durable write (the PowerShell integration script,
+/// `shell_integration::trial_script_directory`). One name for every reader — the
+/// writer, the retirement that removes it with its transaction, and the uninstall,
+/// which finds the transaction in this copy's journal (0.4.8 G7).
+pub(crate) fn temp_folder_name(txn: TxnId) -> String {
+    format!("folio-trial-{txn}")
+}
+
+/// [`temp_folder_name`] in the temporary directory `temp`.
+pub(crate) fn temp_folder(temp: &Path, txn: TxnId) -> PathBuf {
+    temp.join(temp_folder_name(txn))
+}
+
 /// How a document is read in this process: a refused file's copy is owed while
 /// writes are held back ([`Writer::RefusedCopies`]).
 pub(crate) fn keeping() -> bt_persist::Keeping {

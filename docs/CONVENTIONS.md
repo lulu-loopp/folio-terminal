@@ -197,6 +197,23 @@ loop around it looks like: under load the movement arrives later and the test is
 The shapes are `bt_platform::video::engine::engines_outstanding_reaching` (the engine ledger's
 `Condvar`) and `crate::lane::{wake_channel, wait_for_a_wake}`.
 
+**A red that only load produces is a test defect with a cause, and the cause is fixed where it
+lives** (H-SWEEP-048). Three such reds and their fixes: a fixture's write that another program
+holds for a moment (the trust harness's resource update, refused while a scanner reads the file
+it just wrote) is made again on exactly that refusal, with the pause handed in so the test of the
+retry lets its own hold go without a clock; a budget on one window's cost does not read the
+process's facts while it counts (the Settings pointer budget), and its twin that moves those facts
+on purpose runs alone in a process of its own; and a deadline that is not the test's subject is
+put out of the reach of any working run, while the waits the test does assert end on the phase
+they wait for (the applier's trial test). A retry with a bounded count and a growing pause is a
+fixture's answer to a hold, never to a slow machine.
+
+**A test ends every process it starts, on every path** (H-SWEEP-048). A child that the product
+does not end on drop — an uncontained probe, a helper that starts its own children — is guarded
+by a local made right after the start that ends it and its descendants when the test's scope
+ends, a panic included (`probe_child_tests::HelperTree`). A red run that leaves a helper up holds
+the test executable open and keeps the worktree from being removed.
+
 ### 【事故】A/B 必须在同一段时间里交替，先跑完一组再跑另一组等于把负载当结论
 
 同上一条的同一天。"带 `export` 跑全量会挂、单独不带 `export` 重跑就绿"这句观察里，`export` 与"全量 vs 单跑"两个变量是**捆在一起**的，而后者意味着 1856 个测试用 24 条线程一起抢机器。交替 A/B（两臂在同一窗口内轮流、每 rep 互换先后手）当场判 `export` 无罪：闲时两臂各 16 次 0 失败、时长不可分辨；加载后**两臂一起塌**。

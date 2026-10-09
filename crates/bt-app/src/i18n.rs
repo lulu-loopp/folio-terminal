@@ -406,6 +406,7 @@ text_entries! {
     CleanupMarkRecovery,
     CleanupMarkUpdateEntrances,
     CleanupMarkUpdateHome,
+    CleanupMarkTrialFolder,
     CleanupMarkRuntimeClaims,
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
@@ -995,6 +996,15 @@ text_entries! {
     /// The same word alone, for a pane too narrow for the URI as well. The short
     /// form must stay a substring of the long one.
     HyperlinkBlocked,
+    /// The suffix for a target whose text is not an address (owner ruling
+    /// 2026-10-06: "blocked" is never said of a malformed address).
+    HyperlinkInvalidSuffix,
+    /// Its words alone; a substring of the long form, as above.
+    HyperlinkInvalid,
+    /// The suffix for a target the system took and had nothing to open with.
+    HyperlinkNoProgramSuffix,
+    /// Its words alone; a substring of the long form, as above.
+    HyperlinkNoProgram,
 
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
@@ -2155,9 +2165,10 @@ text_entries! {
     // One contiguous block at the end, per this table's standing rule. Fifteen
     // entries and no more: the three navigation buttons and the stop they turn
     // into, the four rows this slice puts in the shortcut table, and the five
-    // failure cards' sentences and verbs. Everything else the seat says is
+    // failure cards' sentences and their verbs, where a card has one (an
+    // address that does not open has none since 2026-10-09). Everything else the seat says is
     // either a value (a host name, a scheme, an error string — see
-    // `web_fail_did_not_respond` below) or a word this table already owns
+    // `web_fail_blocked_scheme` below) or a word this table already owns
     // (`HyperlinkBlockedSuffix` is the foot's `· blocked`, and it is the same
     // ruling's same word).
     /// The `Address` row of the shortcut table, and the name of the verb
@@ -2224,8 +2235,12 @@ text_entries! {
     /// that is the fact a reader can act on: the window did not die, one page's
     /// renderer did.
     WebFailCrashSay,
-    /// The `Blocked` card's sentence when the address carries no scheme to name.
-    /// The spelling that *can* name one is `web_fail_blocked_scheme` below.
+    /// **The headline of a card for an address that does not open** — one that did not load
+    /// and one that was refused alike (owner's ruling 2026-10-09). The address and why are the
+    /// two lines under it.
+    WebFailCannotOpen,
+    /// The refused address's fact line when the scheme is not why it was refused, or there is
+    /// no scheme to name. The spelling that *does* name one is `web_fail_blocked_scheme` below.
     WebFailBlockedSay,
     /// Its one verb — the address is on the card, so the verb is to take it.
     WebFailBlockedVerb,
@@ -2233,6 +2248,8 @@ text_entries! {
     /// file on this machine (M-SWEEP-048) — said in the field, at its end, in
     /// the field's refused ink.
     WebAddressNoSuchFile,
+    /// The blocked card's fact when the text is not an address at all (F-SWEEP-2-048).
+    WebFailAddressInvalidSay,
     /// The `Download refused` card's two sentences. The second is the fact, not
     /// prose: it says which property of the request cannot cross a plain link,
     /// which is the difference between this card and one that could offer a
@@ -2874,6 +2891,9 @@ text_entries! {
     ShellProfileHardLink,
     ShellProfileReadOnly,
     ShellProfileChanged,
+    /// A one-click edit of `$PROFILE` refused because the file is not what the check, or the
+    /// write being undone, saw (0.4.8 G7).
+    ShellProfileChangedElsewhere,
     ShellProfileNothing,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
@@ -3532,7 +3552,7 @@ impl Text {
             Self::PsReadLineCheckFailed => pick(
                 lang,
                 "Could not check which PSReadLine this machine has. Folio checks again when this page opens.",
-                "Could not check which PSReadLine this machine has. Folio checks again when this page opens.", // zh: pending T-PROBE-NO-CACHED-FAILURE
+                "无法检查本机的 PSReadLine 版本。再次打开此页时重新检测。",
             ),
             Self::PsReadLineRowGone => pick(
                 lang,
@@ -3835,6 +3855,12 @@ impl Text {
             // ── the hyperlink overlay ──────────────────────────────────────
             Self::HyperlinkBlockedSuffix => pick(lang, " · blocked", " · 已拦截"),
             Self::HyperlinkBlocked => pick(lang, "blocked", "已拦截"),
+            Self::HyperlinkInvalidSuffix => pick(lang, " · address invalid", " · 地址无效"),
+            Self::HyperlinkInvalid => pick(lang, "address invalid", "地址无效"),
+            Self::HyperlinkNoProgramSuffix => {
+                pick(lang, " · no program to open it", " · 无程序可打开")
+            }
+            Self::HyperlinkNoProgram => pick(lang, "no program to open it", "无程序可打开"),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -3948,7 +3974,7 @@ impl Text {
             Self::CapPowerShellConstrained => pick(
                 lang,
                 "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.",
-                "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.", // zh: pending T-PROBE-NO-CACHED-FAILURE
+                "此 PowerShell 运行于 Constrained Language Mode，不提供 PowerShell 整合。",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -5028,6 +5054,7 @@ impl Text {
             Self::CleanupMarkUpdateHome => {
                 pick(lang, "Update home beside the bundle", "应用旁的更新目录")
             }
+            Self::CleanupMarkTrialFolder => pick(lang, "Update trial folder", "更新试运行文件夹"),
             Self::CleanupMarkRuntimeClaims => pick(lang, "Unix runtime claims", "Unix 运行时锁"),
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
@@ -5314,6 +5341,7 @@ impl Text {
             Self::WebFailCrashSay => {
                 pick(lang, "This page stopped running.", "这个页面停止运行了。")
             }
+            Self::WebFailCannotOpen => pick(lang, "Cannot open", "无法打开"),
             Self::WebFailBlockedSay => pick(
                 lang,
                 "This address does not open in a preview.",
@@ -5325,6 +5353,9 @@ impl Text {
                 "No such file",
                 "No such file", // zh: pending M-SWEEP-048
             ),
+            Self::WebFailAddressInvalidSay => {
+                pick(lang, "This address is not valid.", "这个地址无效。")
+            }
             Self::WebFailDownloadSay => pick(
                 lang,
                 "Start this download in your browser instead.",
@@ -5723,6 +5754,11 @@ impl Text {
                 "The profile is read-only or is not a regular file.",
                 "$PROFILE 为只读，或不是普通文件。",
             ),
+            Self::ShellProfileChangedElsewhere => pick(
+                lang,
+                "$PROFILE was changed elsewhere. Reload this page and try again.",
+                "$PROFILE 已在别处被改动。重新加载此页后重试。",
+            ),
             Self::ShellProfileChanged => pick(
                 lang,
                 "The profile changed during the operation; retry when the editor is finished.",
@@ -5908,53 +5944,47 @@ impl Text {
             Self::UpdateFailedNewer => pick(
                 lang,
                 "An update by a newer Folio is not finished.",
-                "An update by a newer Folio is not finished.", // zh: pending E1
+                "较新版本的 Folio 发起的更新尚未完成。",
             ),
             Self::UpdateFailedUnreadable => pick(
                 lang,
                 "The update record cannot be read.",
-                "The update record cannot be read.", // zh: pending E1
+                "无法读取更新记录。",
             ),
             Self::UpdateCardNewer => pick(
                 lang,
                 "It finishes when you next sign in, or when you start Folio {version}.",
-                "It finishes when you next sign in, or when you start Folio {version}.", // zh: pending E1
+                "下次登录或启动 Folio {version} 时完成。",
             ),
             Self::UpdateCardNewerUnnamed => pick(
                 lang,
                 "It finishes when you next sign in.",
-                "It finishes when you next sign in.", // zh: pending E1
+                "下次登录时完成。",
             ),
             Self::UpdateCardNotKept => pick(
                 lang,
                 "{detail} Changes made in this session are not kept.",
-                "{detail} Changes made in this session are not kept.", // zh: pending E1
+                "{detail}本次运行中的更改不会保留。",
             ),
             Self::UpdateFailedUntried => pick(
                 lang,
                 "The update stopped before the new version started.",
-                "The update stopped before the new version started.", // zh: pending T-UPDATE-RENAME-RETRY
+                "更新在新版本启动前停止。",
             ),
             Self::UpdateFailedJournalHeld => pick(
                 lang,
                 "Another program held the update record open: {error}",
-                "Another program held the update record open: {error}", // zh: pending T-UPDATE-RENAME-RETRY
+                "另一个程序占用了更新记录：{error}",
             ),
             Self::UpdateCardTrialNotKept => pick(
                 lang,
                 "{detail} Changes made before Folio confirmed the update were not kept.",
-                "{detail} Changes made before Folio confirmed the update were not kept.", // zh: pending T-UPDATE-RENAME-RETRY
+                "{detail}更新确认前所做的更改没有保留。",
             ),
-            Self::UpdateCardRestartMissed => pick(
-                lang,
-                "The restart did not happen.",
-                "The restart did not happen.", // zh: pending T-UPDATE-HANDOFF-DEBT
-            ),
-            Self::ShellDidNotStart => pick(
-                lang,
-                "Shell not started",
-                "Shell not started", // zh: pending T-BIRTH-OFF-WINDOW
-            ),
+            Self::UpdateCardRestartMissed => {
+                pick(lang, "The restart did not happen.", "未能重启。")
+            }
+            Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
         }
     }
 
@@ -6127,36 +6157,6 @@ impl Text {
         // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
         (Self::WebAddressNoSuchFile, HostPlatform::Windows),
         (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
-        // 0.4.8 E1: the cards of an update another Folio left unfinished.
-        (Self::UpdateFailedNewer, HostPlatform::Windows),
-        (Self::UpdateFailedNewer, HostPlatform::MacOs),
-        (Self::UpdateFailedUnreadable, HostPlatform::Windows),
-        (Self::UpdateFailedUnreadable, HostPlatform::MacOs),
-        (Self::UpdateCardNewer, HostPlatform::Windows),
-        (Self::UpdateCardNewer, HostPlatform::MacOs),
-        (Self::UpdateCardNewerUnnamed, HostPlatform::Windows),
-        (Self::UpdateCardNewerUnnamed, HostPlatform::MacOs),
-        (Self::UpdateCardNotKept, HostPlatform::Windows),
-        (Self::UpdateCardNotKept, HostPlatform::MacOs),
-        // 0.4.8 E4 (T-UPDATE-RENAME-RETRY): one heading per cause of an unfinished update, and
-        // an update committed after its trial ended.
-        (Self::UpdateFailedUntried, HostPlatform::Windows),
-        (Self::UpdateFailedUntried, HostPlatform::MacOs),
-        (Self::UpdateFailedJournalHeld, HostPlatform::Windows),
-        (Self::UpdateFailedJournalHeld, HostPlatform::MacOs),
-        (Self::UpdateCardTrialNotKept, HostPlatform::Windows),
-        (Self::UpdateCardTrialNotKept, HostPlatform::MacOs),
-        // 0.4.8 E3: the Ready card after a restart that did not happen.
-        (Self::UpdateCardRestartMissed, HostPlatform::Windows),
-        (Self::UpdateCardRestartMissed, HostPlatform::MacOs),
-        // 0.4.8 B4: a PSReadLine check that failed, and a PowerShell in Constrained Language Mode.
-        (Self::PsReadLineCheckFailed, HostPlatform::Windows),
-        (Self::PsReadLineCheckFailed, HostPlatform::MacOs),
-        (Self::CapPowerShellConstrained, HostPlatform::Windows),
-        (Self::CapPowerShellConstrained, HostPlatform::MacOs),
-        // 0.4.8 T-BIRTH-OFF-WINDOW: a pane whose shell could not be started.
-        (Self::ShellDidNotStart, HostPlatform::Windows),
-        (Self::ShellDidNotStart, HostPlatform::MacOs),
     ];
 }
 
@@ -6166,24 +6166,8 @@ impl Text {
 // return `String` and every one of the table's entries is `&'static str`. Mixing
 // the two would make the whole table allocate to serve fifteen of its members.
 
-/// The `Did not load` card's sentence (§7.7 ④), which names the host that was
-/// asked and nothing else.
-///
-/// The host and not the whole URL: the URL is on the head, in full, three
-/// centimetres above this card, and a sentence that repeated it would be the
-/// window reading its own address field back to a reader who is looking at it.
-/// What the sentence adds is *which name did not answer*, which is the half of
-/// a URL that a connection failure is about.
-#[must_use]
-pub fn web_fail_did_not_respond(host: &str) -> String {
-    match current() {
-        Lang::English => format!("{host} did not respond."),
-        Lang::Chinese => format!("{host} 没有响应。"),
-    }
-}
-
-/// The `Blocked` card's sentence when the refused address named a scheme
-/// (§7.7 ④). The scheme comes from `webnav::scheme_of` and from nowhere else —
+/// The refused address's fact line when its scheme is why it was refused
+/// (§7.7 ④; the card's headline since 2026-10-09 is `Cannot open`). The scheme comes from `webnav::scheme_of` and from nowhere else —
 /// a second reading of an address is a second answer about it.
 ///
 /// The colon stays glued to the scheme in both columns because it is part of
@@ -7608,12 +7592,15 @@ impl CliText<'_> {
         match self {
             Self::Usage { profile_ids } => match lang {
                 Lang::English => format!(
-                    "folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] [<path>]\n\n\
+                    "folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] \
+                     [--with-environment] [<path>]\n\n\
                      \x20 --cwd <folder>    the first pane opens in that folder\n\
                      \x20 --profile <id>    the first pane's shell: {profile_ids}\n\
                      \x20 --new-window      a window of its own, not a tab in the Folio already \
                      running\n\
                      \x20 --tab             a tab in the Folio already running, not a window\n\
+                     \x20 --with-environment  the tab keeps the environment of the terminal you \
+                     started it from\n\
                      \x20 <path>            a folder opens a pane there; a file opens a preview\n\
                      \x20 -h, --help        this text\n\
                      \x20 --version         which build this is\n\
@@ -7622,11 +7609,13 @@ impl CliText<'_> {
                      \x20 --remove-shell-integration  remove Folio lines from this account's PowerShell profiles"
                 ),
                 Lang::Chinese => format!(
-                    "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] [<路径>]\n\n\
+                    "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] \
+                     [--with-environment] [<路径>]\n\n\
                      \x20 --cwd <文件夹>    第一个窗格在这个文件夹里打开\n\
                      \x20 --profile <id>    第一个窗格用哪种 shell：{profile_ids}\n\
                      \x20 --new-window      另开一扇窗，不在已经开着的 Folio 里加标签\n\
                      \x20 --tab             在已经开着的 Folio 里加标签，不另开窗\n\
+                     \x20 --with-environment  这个标签沿用启动它的终端的环境\n\
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
                      \x20 --version         显示这是哪一个构建\n\
@@ -9484,8 +9473,8 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            // The summary, one blank line, and nine supported command forms.
-            assert_eq!(lines.len(), 11, "{lang:?}: {usage}");
+            // The summary, one blank line, and ten supported command forms.
+            assert_eq!(lines.len(), 12, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {
@@ -10115,12 +10104,18 @@ mod tests {
     #[test]
     fn the_blocked_word_is_the_same_word_with_and_without_its_separator() {
         for lang in [Lang::English, Lang::Chinese] {
-            let long = Text::HyperlinkBlockedSuffix.in_lang(lang);
-            let short = Text::HyperlinkBlocked.in_lang(lang);
-            assert!(
-                long.ends_with(short),
-                "{lang:?}: {long:?} must end with {short:?}"
-            );
+            for (long, short) in [
+                (Text::HyperlinkBlockedSuffix, Text::HyperlinkBlocked),
+                (Text::HyperlinkInvalidSuffix, Text::HyperlinkInvalid),
+                (Text::HyperlinkNoProgramSuffix, Text::HyperlinkNoProgram),
+            ] {
+                let long = long.in_lang(lang);
+                let short = short.in_lang(lang);
+                assert!(
+                    long.ends_with(short),
+                    "{lang:?}: {long:?} must end with {short:?}"
+                );
+            }
         }
     }
 

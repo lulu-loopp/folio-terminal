@@ -161,6 +161,10 @@ pub(crate) struct WebMachine {
     generation: u64,
     /// Last write wins. Storing a URL is not navigating to it.
     desired_url: Option<String>,
+    /// **Whether `desired_url` has been reached** (T-WEB-PANE-ADDRESS) — a navigation to it
+    /// completed, or ended without loading anything ([`Self::on_navigation_settled`]). Until then
+    /// it is the address the row shows: the one asked for, before anything commits.
+    desired_reached: bool,
     /// The URL a session file may record. Only a *successful* top-level
     /// navigation writes here.
     recoverable_url: Option<String>,
@@ -185,11 +189,29 @@ impl WebMachine {
             state: WebState::Uninitialized,
             generation: 0,
             desired_url: None,
+            desired_reached: true,
             recoverable_url: None,
             events_installed: false,
             cleanup: Cleanup::Idle,
             awaiting_bounds: false,
         }
+    }
+
+    /// **The address asked for and not reached yet** (T-WEB-PANE-ADDRESS, owner's ruling
+    /// 2026-10-09) — what the address row shows while a page is on its way, and after a load
+    /// that failed, so the row names what was asked rather than nothing or the page before it.
+    /// `None` once it is reached, and for the blank page this host mints for itself.
+    pub(crate) fn asked_url(&self) -> Option<&str> {
+        self.desired_url
+            .as_deref()
+            .filter(|url| !self.desired_reached && !is_blank(url))
+    }
+
+    /// A top-level navigation ended **without loading anything** — cancelled, or refused where
+    /// the page still stands — so what was asked is no longer on its way, and the row goes back
+    /// to the page that is there.
+    pub(crate) fn on_navigation_settled(&mut self) {
+        self.desired_reached = true;
     }
 
     pub(crate) fn state(&self) -> WebState {
@@ -223,6 +245,7 @@ impl WebMachine {
     /// the wish; if it is, it navigates.
     pub(crate) fn request(&mut self, url: &str) -> WebEffect {
         self.desired_url = Some(url.to_owned());
+        self.desired_reached = false;
         match self.state {
             // An adopted page still waiting for its size keeps waiting: last write wins, and the
             // one navigation comes with the bounds (ticket 60).
@@ -247,6 +270,7 @@ impl WebMachine {
     /// [`Self::release_on_bounds`], once, on the first bounds that arrive.
     pub(crate) fn adopt(&mut self, url: &str, sized: bool) -> WebEffect {
         self.desired_url = Some(url.to_owned());
+        self.desired_reached = false;
         if self.state != WebState::Ready || !self.events_installed {
             return WebEffect::Ignore;
         }
@@ -354,6 +378,12 @@ impl WebMachine {
         }
         if success && !is_blank(url) {
             self.recoverable_url = Some(url.to_owned());
+            self.desired_reached = true;
+        }
+        // A blank page landing reaches only a blank page that was asked for: the one this host
+        // mints lands while an address typed over it may already be on its way.
+        if success && is_blank(url) && self.desired_url.as_deref().is_none_or(is_blank) {
+            self.desired_reached = true;
         }
         WebEffect::Ignore
     }
@@ -1039,10 +1069,12 @@ impl WebBounds {
 ///
 /// # One drawing, six rows, two placements
 ///
-/// Every variant answers the same four questions the card asks: a sentence, at
-/// most one line of fact, exactly one verb, and whether it takes the seat or
-/// stands on a scrim over it. There is no fifth question and no second verb —
-/// 「一排按钮是程序把自己的判断交还给读者」.
+/// Every variant answers the same questions the card asks: a sentence, the
+/// address it is about if it is about one, at most one line of fact, at most one
+/// verb, and whether it takes the seat or stands on a scrim over it. There is no
+/// second verb — 「一排按钮是程序把自己的判断交还给读者」 — and an address that
+/// does not open has none at all (owner's ruling 2026-10-09): the row above it
+/// already holds `⟳`, the field and `⧉`.
 ///
 /// # Nothing here decides anything a machine already said
 ///
@@ -1092,9 +1124,8 @@ pub(crate) enum WebFault {
     },
     /// A navigation never committed a document.
     DidNotLoad {
-        /// The host that was asked — the half of a URL a connection failure is
-        /// about.
-        host: String,
+        /// The address that was asked for — the card names it, folded as the row folds it.
+        url: String,
         /// `WebErrorStatus` in the SDK's own spelling.
         detail: String,
     },
@@ -1149,8 +1180,6 @@ pub(crate) enum WebFaultVerb {
     RestartTheEngine,
     /// Try the navigation again.
     Reload,
-    /// Put the refused address on the clipboard.
-    CopyAddress(String),
     /// Hand the **page** over, since the file could not be.
     OpenPageInBrowser,
     /// Hand the **download's own address** over, which is the press that
@@ -1174,42 +1203,60 @@ impl WebFault {
         match self {
             Self::RuntimeMissing { .. } => crate::i18n::Text::WebFailRuntimeSay.text().to_owned(),
             Self::EngineDidNotStart { .. } => crate::i18n::Text::WebFailEngineSay.text().to_owned(),
-            Self::DidNotLoad { host, .. } => crate::i18n::web_fail_did_not_respond(host),
+            // **One headline for an address that does not open, whoever said no** (owner's ruling
+            // 2026-10-09): the network and the policy are told apart by the fact line under it.
+            Self::DidNotLoad { .. } | Self::Blocked { .. } => {
+                crate::i18n::Text::WebFailCannotOpen.text().to_owned()
+            }
             Self::RenderProcessGone => crate::i18n::Text::WebFailCrashSay.text().to_owned(),
             Self::GuardsUnavailable { .. } => crate::i18n::Text::WebFailGuardsSay.text().to_owned(),
-            // The scheme comes from `webnav::scheme_of` and from nowhere else
-            // (§7.8 ③: 「不另起第二种解析」). An address that carries none — a
-            // bare host, an empty string — gets the sentence that names no
-            // scheme rather than a sentence with a hole in it.
-            Self::Blocked { url, .. } => match crate::webnav::scheme_of(url) {
-                Some(scheme) => crate::i18n::web_fail_blocked_scheme(&scheme),
-                None => crate::i18n::Text::WebFailBlockedSay.text().to_owned(),
-            },
             Self::DownloadRefused { .. } => crate::i18n::Text::WebFailDownloadSay.text().to_owned(),
+        }
+    }
+
+    /// **The address the card names** (owner's ruling 2026-10-09): the one that did not load or
+    /// was refused, drawn under the headline in the fact face and folded as the address row
+    /// folds it. `None` for the cards that are not about an address.
+    pub(crate) fn address(&self) -> Option<&str> {
+        match self {
+            Self::DidNotLoad { url, .. } | Self::Blocked { url, .. } => Some(url.as_str()),
+            Self::RuntimeMissing { .. }
+            | Self::EngineDidNotStart { .. }
+            | Self::RenderProcessGone
+            | Self::GuardsUnavailable { .. }
+            | Self::DownloadRefused { .. } => None,
         }
     }
 
     /// The one line of fact under it, or nothing when there is no fact worth
     /// quoting into a bug report.
-    pub(crate) fn detail(&self) -> Option<&str> {
+    ///
+    /// A refused address's fact is **why**, said from the [`Refusal`] the door gave: a scheme
+    /// refused for what it is names that scheme, read with `webnav::scheme_of` and nothing else
+    /// (§7.8 ③: 「不另起第二种解析」); every other refusal — a password in the address, no host,
+    /// a network path — gets the sentence that names no scheme, because the scheme is not why.
+    pub(crate) fn detail(&self) -> Option<String> {
         match self {
             Self::RuntimeMissing { detail }
             | Self::EngineDidNotStart { detail }
             | Self::GuardsUnavailable { detail }
-            | Self::DidNotLoad { detail, .. } => (!detail.is_empty()).then_some(detail.as_str()),
+            | Self::DidNotLoad { detail, .. } => (!detail.is_empty()).then(|| detail.clone()),
             // The crash has none, and that is the mock-up's own answer: there is
             // no code a renderer's exit hands over that a reader could act on.
             Self::RenderProcessGone => None,
-            Self::Blocked { url, .. } => Some(url.as_str()),
+            Self::Blocked { url, refusal } => Some(refusal_sentence(url, *refusal)),
             Self::DownloadRefused { file_name, .. } => {
-                (!file_name.is_empty()).then_some(file_name.as_str())
+                (!file_name.is_empty()).then(|| file_name.clone())
             }
         }
     }
 
-    /// The word on the button.
-    pub(crate) fn verb_text(&self) -> crate::i18n::Text {
-        match self {
+    /// The word on the button, or `None` for a card that has none.
+    ///
+    /// **An address that does not open has no button** (owner's ruling 2026-10-09): `⟳` and the
+    /// address field stand right above the card, and the row's `⧉` copies the address.
+    pub(crate) fn verb_text(&self) -> Option<crate::i18n::Text> {
+        Some(match self {
             // The same verb as the missing runtime's, because it is the same
             // press for the same reason: what is wrong is the build of the
             // engine on this machine, and Microsoft's page is where a newer one
@@ -1218,32 +1265,30 @@ impl WebFault {
                 crate::i18n::Text::WebFailRuntimeVerb
             }
             Self::EngineDidNotStart { .. } => crate::i18n::Text::WebFailEngineVerb,
-            Self::DidNotLoad { .. } | Self::RenderProcessGone => {
-                crate::i18n::Text::PreviewWebReload
-            }
-            Self::Blocked { .. } => crate::i18n::Text::WebFailBlockedVerb,
+            Self::RenderProcessGone => crate::i18n::Text::PreviewWebReload,
+            Self::DidNotLoad { .. } | Self::Blocked { .. } => return None,
             Self::DownloadRefused {
                 target: Some(_), ..
             } => crate::i18n::Text::WebFailDownloadOpenVerb,
             Self::DownloadRefused { target: None, .. } => crate::i18n::Text::WebFailDownloadVerb,
-        }
+        })
     }
 
-    /// What pressing it does.
-    pub(crate) fn verb(&self) -> WebFaultVerb {
-        match self {
+    /// What pressing it does, or `None` for a card with no button.
+    pub(crate) fn verb(&self) -> Option<WebFaultVerb> {
+        Some(match self {
             Self::RuntimeMissing { .. } | Self::GuardsUnavailable { .. } => {
                 WebFaultVerb::DownloadTheRuntime
             }
             Self::EngineDidNotStart { .. } => WebFaultVerb::RestartTheEngine,
-            Self::DidNotLoad { .. } | Self::RenderProcessGone => WebFaultVerb::Reload,
-            Self::Blocked { url, .. } => WebFaultVerb::CopyAddress(url.clone()),
+            Self::RenderProcessGone => WebFaultVerb::Reload,
+            Self::DidNotLoad { .. } | Self::Blocked { .. } => return None,
             Self::DownloadRefused {
                 target: Some(target),
                 ..
             } => WebFaultVerb::OpenDownloadInBrowser(target.clone()),
             Self::DownloadRefused { target: None, .. } => WebFaultVerb::OpenPageInBrowser,
-        }
+        })
     }
 
     /// The address a refused navigation was aimed at, when that is what this
@@ -1271,6 +1316,29 @@ impl WebFault {
     /// WebView leaves (`w0-evidence.md` §2⑨), which is why they have no Escape.
     pub(crate) fn stands_over_the_page(&self) -> bool {
         matches!(self, Self::DownloadRefused { .. })
+    }
+}
+
+/// **Why an address does not open in a preview, in one sentence** — the blocked card's fact
+/// line (owner's ruling 2026-10-09), derived from the [`Refusal`] the door gave. Text that is not
+/// an address — a host that does not parse, no host, a control character — is said to be
+/// invalid, never blocked (F-SWEEP-2-048: the words say what is true).
+fn refusal_sentence(url: &str, refusal: Refusal) -> String {
+    if refusal.is_malformed() {
+        return crate::i18n::Text::WebFailAddressInvalidSay
+            .text()
+            .to_owned();
+    }
+    let refused_for_its_scheme = matches!(
+        refusal,
+        Refusal::ScriptOrInlineScheme
+            | Refusal::FileScheme
+            | Refusal::BrowserInternalScheme
+            | Refusal::ExternalScheme
+    );
+    match crate::webnav::scheme_of(url).filter(|_| refused_for_its_scheme) {
+        Some(scheme) => crate::i18n::web_fail_blocked_scheme(&scheme),
+        None => crate::i18n::Text::WebFailBlockedSay.text().to_owned(),
     }
 }
 
@@ -1308,20 +1376,38 @@ fn web_error_status_name(status: i32) -> &'static str {
 
 /// What a finished navigation leaves on the seat: a card, or nothing.
 ///
-/// A pure function so that the one distinction it makes can be shot at without
-/// an engine — and the distinction is the whole of it. A **refused** navigation
-/// completes with `IsSuccess == false` exactly as a connection failure does, and
-/// the two mean opposite things: one is the policy working and already has a
-/// card of its own, the other is the network. Without this, every `· blocked`
-/// in the foot would also raise a 「did not respond」 over the seat.
-pub(crate) fn load_fault(uri: &str, success: bool, status: i32) -> Option<WebFault> {
-    if success || status == WEB_ERROR_OPERATION_CANCELED {
+/// A pure function so that the distinctions it makes can be shot at without
+/// an engine. A **refused** navigation completes with `IsSuccess == false`
+/// exactly as a connection failure does, and the two mean opposite things: one
+/// is the policy working and already has a card of its own, the other is the
+/// network. Without this, every `· blocked` in the foot would also raise a
+/// 「did not respond」 over the seat.
+///
+/// **And a server that answered is a page, not a failure** (T-WEB-404-SAYS-UNKNOWN,
+/// ruling 2026-10-09). WebView2 completes a 404 or a 500 with `IsSuccess == false`
+/// and `WebErrorStatus` `Unknown` and draws the page the server sent; a card over
+/// it hid the server's own words behind "did not respond". With an HTTP status
+/// present the pane shows that page, as every browser does — the card is for a
+/// load that reached nothing.
+pub(crate) fn load_fault(
+    uri: &str,
+    success: bool,
+    status: i32,
+    http_status: Option<u16>,
+) -> Option<WebFault> {
+    if page_arrived(success, http_status) || status == WEB_ERROR_OPERATION_CANCELED {
         return None;
     }
     Some(WebFault::DidNotLoad {
-        host: crate::webnav::host_of(uri).unwrap_or_default(),
-        detail: format!("WebErrorStatus · {}", web_error_status_name(status)),
+        url: uri.to_owned(),
+        detail: web_error_status_name(status).to_owned(),
     })
+}
+
+/// **Whether a finished navigation put a page on the seat**: the engine said so,
+/// or a server answered it with a status of its own (T-WEB-404-SAYS-UNKNOWN).
+pub(crate) fn page_arrived(success: bool, http_status: Option<u16>) -> bool {
+    success || http_status.is_some()
 }
 
 /// What to do about a download the engine has already been told to cancel.
@@ -2775,14 +2861,19 @@ impl WebSeat {
                 uri,
                 success,
                 status,
+                http_status,
             } => {
                 crate::web_trace::line(|| {
                     format!(
-                        "navigation_completed {} uri={uri} success={} status={status}",
+                        "navigation_completed {} uri={uri} success={} status={status} http={}",
                         crate::web_trace::seat(self.address.page),
                         u8::from(*success),
+                        http_status.map_or(0, u16::from),
                     )
                 });
+                // **A server that answered put its page here** (T-WEB-404-SAYS-UNKNOWN): the
+                // seat, the card and the machine all read it as the page it is.
+                let arrived = page_arrived(*success, *http_status);
                 self.page.loading = false;
                 self.page.loading_since = None;
                 // **The seat's own blank page has landed** (ticket 60, SW-5): what "parked" means
@@ -2790,10 +2881,13 @@ impl WebSeat {
                 if *success && uri.eq_ignore_ascii_case(BLANK_PAGE) {
                     self.landed_blank = Some(self.machine.generation());
                 }
-                if *success {
+                if arrived {
                     self.fault = None;
-                } else if let Some(fault) = load_fault(uri, *success, *status) {
+                } else if let Some(fault) = load_fault(uri, *success, *status, *http_status) {
                     self.fault = Some(fault);
+                } else {
+                    // Cancelled: nothing loaded, and the row goes back to the page that is there.
+                    self.machine.on_navigation_settled();
                 }
                 // Asked *before* and *after*, and the answer is the machine's
                 // both times: a failure page, an `about:blank` and a cancelled
@@ -2804,7 +2898,7 @@ impl WebSeat {
                 let was = self.machine.recoverable_url().map(str::to_owned);
                 let effect =
                     self.machine
-                        .on_navigation_completed(self.machine.generation(), uri, *success);
+                        .on_navigation_completed(self.machine.generation(), uri, arrived);
                 if let Some(now) = self.machine.recoverable_url()
                     && was.as_deref() != Some(now)
                 {
@@ -3396,6 +3490,9 @@ impl WebSeat {
                 url: url.clone(),
                 refusal: why,
             });
+        } else {
+            // The page stands and the row names it again, not the address it would not go to.
+            self.machine.on_navigation_settled();
         }
         outcomes.push(WebOutcome::Refused(url));
     }
@@ -4154,6 +4251,24 @@ impl WebSeat {
     /// The card this seat is showing, if it is showing one.
     pub(crate) fn fault(&self) -> Option<&WebFault> {
         self.fault.as_ref()
+    }
+
+    /// **The address the row shows, in full** (T-WEB-PANE-ADDRESS, owner's ruling 2026-10-09):
+    /// the address asked for while it is on its way or after it failed to load
+    /// ([`WebMachine::asked_url`]); otherwise the committed one; otherwise, for a seat whose one
+    /// navigation was refused, the refused one. The row draws it (folded to its room) and the
+    /// field opens on it, so the two cannot name different addresses.
+    pub(crate) fn row_address(&self) -> String {
+        if let Some(asked) = self.machine.asked_url() {
+            return asked.to_owned();
+        }
+        if !self.page.url.is_empty() {
+            return self.page.url.clone();
+        }
+        self.fault
+            .as_ref()
+            .and_then(WebFault::refused_address)
+            .unwrap_or_default()
     }
 
     /// Take the sheet away.
@@ -5142,7 +5257,7 @@ mod rehost_address_tests {
             }
         };
         assert_eq!(
-            seat.fault.as_ref().and_then(WebFault::detail),
+            seat.fault.as_ref().and_then(WebFault::detail).as_deref(),
             Some(gates),
             "naming the gates, because that is the fact a reader can act on"
         );
@@ -5692,8 +5807,8 @@ mod fault_tests {
                 detail: "CreateCoreWebView2Environment failed (0x8007000e)".to_owned(),
             },
             WebFault::DidNotLoad {
-                host: "127.0.0.1".to_owned(),
-                detail: "WebErrorStatus · CannotConnect".to_owned(),
+                url: "http://127.0.0.1:9134/报告".to_owned(),
+                detail: "CannotConnect".to_owned(),
             },
             WebFault::RenderProcessGone,
             WebFault::Blocked {
@@ -5768,7 +5883,7 @@ mod fault_tests {
         );
         assert_eq!(
             fault.verb(),
-            WebFaultVerb::RestartTheEngine,
+            Some(WebFaultVerb::RestartTheEngine),
             "and the one verb asks for the engine, not for a page there never was"
         );
         assert!(
@@ -5834,31 +5949,42 @@ mod fault_tests {
         );
     }
 
-    /// PIN (§7.7 ④) — **one sentence, at most one fact, exactly one verb.**
+    /// PIN (§7.7 ④; owner's ruling 2026-10-09) — **one headline, at most one fact, at most one
+    /// verb, and none for an address that does not open.**
     ///
     /// 「一图五行、一句话一事实一动词、无旁白」. The shape is the ruling: a row
-    /// of buttons is the program handing its own decision back to the reader,
-    /// and a second sentence of prose under the first is the aside the ruling
-    /// forbids.
+    /// of buttons is the program handing its own decision back to the reader.
+    /// The two cards about an address — did not load, refused — share the
+    /// headline `Cannot open`, name the address, say why on the fact line, and
+    /// have no button: `⟳`, the field and `⧉` stand right above them.
     ///
     /// MUTATIONS:
     /// ① give any card a second verb — there is nowhere to put it, which is the
     ///    point of `verb()` being one value;
-    /// ② let a detail carry a sentence — the assertion on the full stop goes red.
+    /// ② let an engine's fact carry a sentence — the assertion on the full stop
+    ///    goes red.
     #[test]
-    fn every_failure_says_one_sentence_one_fact_and_one_verb() {
+    fn every_failure_says_one_headline_at_most_one_fact_and_at_most_one_verb() {
         for fault in every_fault() {
             let say = fault.say();
             assert!(!say.trim().is_empty(), "{fault:?} says nothing");
-            assert!(
-                say.ends_with('.') || say.ends_with('。'),
-                "{fault:?}'s sentence is a sentence: {say:?}"
-            );
-            let verb = fault.verb_text().text();
-            assert!(!verb.trim().is_empty(), "{fault:?} offers no way out");
-            // A fact is a thing you can copy into a bug report, never a second
-            // sentence: no card's detail ends in a full stop.
-            if let Some(detail) = fault.detail() {
+            if fault.address().is_some() {
+                assert_eq!(say, Text::WebFailCannotOpen.text(), "{fault:?}");
+                assert_eq!(fault.verb_text(), None, "{fault:?} has a button");
+            } else {
+                assert!(
+                    say.ends_with('.') || say.ends_with('。'),
+                    "{fault:?}'s sentence is a sentence: {say:?}"
+                );
+                let verb = fault.verb_text().expect("a way out").text();
+                assert!(!verb.trim().is_empty(), "{fault:?} offers no way out");
+            }
+            // A fact is a thing you can copy into a bug report: no engine's or
+            // file's fact ends in a full stop. A refused address's fact is why,
+            // in one sentence.
+            if let Some(detail) = fault.detail()
+                && !matches!(fault, WebFault::Blocked { .. })
+            {
                 assert!(
                     !detail.ends_with('.') && !detail.ends_with('。'),
                     "{fault:?}'s fact reads as prose: {detail:?}"
@@ -5870,9 +5996,64 @@ mod fault_tests {
         assert_eq!(WebFault::RenderProcessGone.detail(), None);
         assert_eq!(
             WebFault::RenderProcessGone.verb_text(),
-            Text::PreviewWebReload,
+            Some(Text::PreviewWebReload),
             "and the way out is the button the head already carries"
         );
+    }
+
+    /// RED (T-WEB-PANE-ADDRESS, owner's ruling 2026-10-09) — **a page that cannot open says
+    /// `Cannot open`, names the address, says why in one line, and offers no button.**
+    ///
+    /// The engine's fault and the policy's refusal are one card with two different fact lines:
+    /// `WebErrorStatus`'s own name for the first, the `Refusal`-derived sentence for the second —
+    /// which names the scheme only when the scheme is why (`https://user:pass@…` is refused for
+    /// its password, not for being `https:`).
+    ///
+    /// MUTATIONS: give `DidNotLoad` back `{host} did not respond.` as its `say` (the first
+    /// headline goes red); give `Blocked` back its `Copy address` verb (the button assertion goes
+    /// red); answer every refusal with `web_fail_blocked_scheme` (the password row goes red).
+    #[test]
+    fn a_page_that_cannot_open_names_the_address_and_why_and_has_no_button() {
+        let asked = "https://no-such-host.invalid/文档/页面?q=中文";
+        let failed =
+            load_fault(asked, false, 13, None).expect("a name that did not resolve is a card");
+        assert_eq!(failed.say(), "Cannot open");
+        assert_eq!(failed.address(), Some(asked), "the address asked, in full");
+        assert_eq!(failed.detail().as_deref(), Some("HostNameNotResolved"));
+        assert_eq!(failed.verb_text(), None);
+        assert_eq!(failed.verb(), None);
+        for (url, refusal, why) in [
+            (
+                "mailto:x@y",
+                Refusal::ExternalScheme,
+                "mailto: addresses do not open in a preview.",
+            ),
+            (
+                "javascript:alert('文')",
+                Refusal::ScriptOrInlineScheme,
+                "javascript: addresses do not open in a preview.",
+            ),
+            (
+                "https://user:pass@example.com/报告",
+                Refusal::UserInfo,
+                "This address does not open in a preview.",
+            ),
+            // F-SWEEP-2-048: text that is not an address is said to be invalid, not blocked.
+            (
+                "https://例子.测试：/文档",
+                Refusal::InvalidHost,
+                "This address is not valid.",
+            ),
+        ] {
+            let refused = WebFault::Blocked {
+                url: url.to_owned(),
+                refusal,
+            };
+            assert_eq!(refused.say(), "Cannot open", "{url}");
+            assert_eq!(refused.address(), Some(url), "{url}");
+            assert_eq!(refused.detail().as_deref(), Some(why), "{url}");
+            assert_eq!(refused.verb(), None, "{url}: the card has no button");
+        }
     }
 
     /// PIN (§7.7 ④, W2 slice ④) — **one of the five stands over a page and four
@@ -5895,7 +6076,7 @@ mod fault_tests {
         }
     }
 
-    /// PIN (§7.8 ③) — **the blocked card names the scheme the door named, and
+    /// PIN (§7.8 ③) — **the blocked card's fact names the scheme the door named, and
     /// through the door's own parser.**
     ///
     /// `webnav::scheme_of` is the one reader; 「不另起第二种解析」. An address
@@ -5908,7 +6089,8 @@ mod fault_tests {
                 url: url.to_owned(),
                 refusal: Refusal::ExternalScheme,
             }
-            .say()
+            .detail()
+            .unwrap_or_default()
         };
         assert!(blocked("mailto:a@b.c").starts_with("mailto:"));
         assert!(blocked("javascript:alert(1)").starts_with("javascript:"));
@@ -5917,14 +6099,13 @@ mod fault_tests {
             Text::WebFailBlockedSay.text(),
             "an address with no scheme gets the sentence that names none"
         );
-        // The address itself is the fact under the sentence, in full — that is
-        // what the `Copy address` verb is for.
+        // The address itself is on the card, in full, on its own line.
         assert_eq!(
             WebFault::Blocked {
                 url: "mailto:a@b.c".to_owned(),
                 refusal: Refusal::ExternalScheme,
             }
-            .detail(),
+            .address(),
             Some("mailto:a@b.c")
         );
     }
@@ -5940,19 +6121,16 @@ mod fault_tests {
     /// red — which is exactly the double card the ruling forbids.
     #[test]
     fn a_cancelled_navigation_is_not_a_page_that_did_not_load() {
-        assert_eq!(load_fault("http://127.0.0.1:9134/x", false, 14), None);
-        assert_eq!(load_fault("http://127.0.0.1:9134/x", true, 0), None);
-        let fault = load_fault("http://127.0.0.1:9134/x", false, 12).expect("a card");
+        assert_eq!(load_fault("http://127.0.0.1:9134/x", false, 14, None), None);
+        assert_eq!(load_fault("http://127.0.0.1:9134/x", true, 0, None), None);
+        let fault = load_fault("http://127.0.0.1:9134/x", false, 12, None).expect("a card");
         assert_eq!(
             fault,
             WebFault::DidNotLoad {
-                host: "127.0.0.1".to_owned(),
-                detail: "WebErrorStatus · CannotConnect".to_owned(),
+                url: "http://127.0.0.1:9134/x".to_owned(),
+                detail: "CannotConnect".to_owned(),
             }
         );
-        // The sentence names the host that was asked and nothing else: the URL
-        // is on the head, in full, three centimetres above this card.
-        assert!(fault.say().starts_with("127.0.0.1"));
     }
 
     /// PIN (方案 §0, R1-16) — **a cancelled download raises a card, and the
@@ -5984,7 +6162,9 @@ mod fault_tests {
         );
         assert_eq!(
             replayable.verb(),
-            WebFaultVerb::OpenDownloadInBrowser("http://127.0.0.1:9134/report.pdf".to_owned()),
+            Some(WebFaultVerb::OpenDownloadInBrowser(
+                "http://127.0.0.1:9134/report.pdf".to_owned()
+            )),
             "the address is on the button, which is where a press can reach it"
         );
 
@@ -5998,7 +6178,7 @@ mod fault_tests {
         );
         assert_eq!(
             unreplayable.verb(),
-            WebFaultVerb::OpenPageInBrowser,
+            Some(WebFaultVerb::OpenPageInBrowser),
             "nothing to replay, so the page that asked is what is offered"
         );
         assert_eq!(
@@ -6102,6 +6282,7 @@ mod fault_tests {
             Refusal::NetworkPath,
             Refusal::ControlOrWhitespace,
             Refusal::NoHost,
+            Refusal::InvalidHost,
             Refusal::NotMinted,
             Refusal::Empty,
         ] {
@@ -6110,7 +6291,11 @@ mod fault_tests {
                 refusal,
             };
             assert!(!fault.say().is_empty(), "{refusal:?}");
-            assert!(matches!(fault.verb(), WebFaultVerb::CopyAddress(_)));
+            assert!(
+                fault.detail().is_some_and(|why| !why.is_empty()),
+                "{refusal:?} says why"
+            );
+            assert_eq!(fault.verb(), None, "{refusal:?}: the card has no button");
             assert!(!fault.stands_over_the_page());
         }
     }
@@ -6681,7 +6866,7 @@ mod engine_absence_tests {
             web.fault()
         );
         assert!(matches!(
-            web.fault().map(WebFault::verb),
+            web.fault().and_then(WebFault::verb),
             Some(WebFaultVerb::DownloadTheRuntime | WebFaultVerb::RestartTheEngine)
         ));
         assert!(
@@ -6792,7 +6977,7 @@ mod rebuild_for_a_new_version_tests {
     }
 
     /// A seat whose engine is up — the state an Evergreen update arrives in.
-    fn ready_seat() -> WebSeat {
+    pub(super) fn ready_seat() -> WebSeat {
         let mut web = seat();
         let _ = web.machine.request("https://example.com/");
         let generation = web.machine.generation();
@@ -7110,6 +7295,72 @@ mod rebuild_for_a_new_version_tests {
         assert!(!web.page.loading, "and the page that asked went nowhere");
     }
 
+    /// RED (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — **a server that answered is its page,
+    /// and only a load that reached nothing is a card.**
+    ///
+    /// WebView2 completes a 404 with `IsSuccess == false` and `WebErrorStatus` `Unknown` (0); what
+    /// tells it from a load that reached nothing is the HTTP status the server sent. The page
+    /// stands: no card, the address committed for the row, the spinner stopped.
+    ///
+    /// MUTATION: a card for any failure (`page_arrived` answering `success` alone) and the 404
+    /// and the 500 raise "did not respond" over the server's own page.
+    #[test]
+    fn a_page_the_server_answered_with_an_error_is_shown_and_carded_only_when_nothing_answered() {
+        for (address, http_status) in [
+            ("https://例子.测试/缺页", 404),
+            ("https://example.com/missing", 404),
+            ("http://127.0.0.1:5173/错误", 500),
+        ] {
+            let mut web = ready_seat();
+            let mut outcomes = Vec::new();
+            web.digest(
+                &bt_platform::WebEvent::NavigationStarting {
+                    uri: address.to_owned(),
+                    cancelled: false,
+                },
+                &mut outcomes,
+            );
+            web.digest(
+                &bt_platform::WebEvent::NavigationCompleted {
+                    uri: address.to_owned(),
+                    success: false,
+                    status: 0,
+                    http_status: Some(http_status),
+                },
+                &mut outcomes,
+            );
+            assert_eq!(web.fault, None, "{address} answered {http_status}: no card");
+            assert_eq!(
+                web.machine.recoverable_url(),
+                Some(address),
+                "the server's page is the page the row names"
+            );
+            assert!(outcomes.contains(&WebOutcome::Committed), "{outcomes:?}");
+            assert!(!web.page.loading);
+        }
+        // Nothing answered — `Unknown` with no HTTP status — keeps its card, unchanged.
+        let mut web = ready_seat();
+        let mut outcomes = Vec::new();
+        web.digest(
+            &bt_platform::WebEvent::NavigationCompleted {
+                uri: "http://10.255.255.1:81/文档".to_owned(),
+                success: false,
+                status: 0,
+                http_status: None,
+            },
+            &mut outcomes,
+        );
+        assert!(
+            matches!(web.fault, Some(WebFault::DidNotLoad { .. })),
+            "{:?}",
+            web.fault
+        );
+        assert_ne!(
+            web.machine.recoverable_url(),
+            Some("http://10.255.255.1:81/文档")
+        );
+    }
+
     /// RED (68) — **a browser that dies under a loading page stops the spinner.**
     ///
     /// The renderer's own arm has always said so; the two browser-process doors
@@ -7257,20 +7508,16 @@ mod refusal_card_tests {
                 "{url} drew something other than the refusal card: {fault:?}"
             );
             assert_eq!(
-                fault.say(),
-                crate::i18n::web_fail_blocked_scheme(scheme),
+                fault.detail(),
+                Some(crate::i18n::web_fail_blocked_scheme(scheme)),
                 "{url}'s card does not name the scheme that was refused"
             );
             assert_eq!(
-                fault.detail(),
+                fault.address(),
                 Some(url),
                 "{url}'s card does not carry the address it is about"
             );
-            assert_eq!(
-                fault.verb(),
-                WebFaultVerb::CopyAddress(url.to_owned()),
-                "{url}'s card offers something other than the address"
-            );
+            assert_eq!(fault.verb(), None, "{url}'s card has a button");
         }
     }
 
@@ -7369,6 +7616,120 @@ mod refusal_card_tests {
             "the door still excuses every address that carries no mint, which is \
              every address a reader types:\n{arm}"
         );
+    }
+}
+
+/// **The address row names what was asked until it is reached** (T-WEB-PANE-ADDRESS, owner's
+/// ruling 2026-10-09).
+#[cfg(test)]
+mod asked_address_tests {
+    use super::rebuild_for_a_new_version_tests::ready_seat;
+    use super::*;
+    use bt_platform::WebEvent;
+
+    fn commit(web: &mut WebSeat, uri: &str) {
+        let mut outcomes = Vec::new();
+        web.digest(
+            &WebEvent::NavigationStarting {
+                uri: uri.to_owned(),
+                cancelled: false,
+            },
+            &mut outcomes,
+        );
+        web.digest(
+            &WebEvent::SourceChanged {
+                uri: uri.to_owned(),
+            },
+            &mut outcomes,
+        );
+        web.digest(
+            &WebEvent::NavigationCompleted {
+                uri: uri.to_owned(),
+                success: true,
+                status: 0,
+                http_status: Some(200),
+            },
+            &mut outcomes,
+        );
+    }
+
+    fn complete(web: &mut WebSeat, uri: &str, status: i32) {
+        let mut outcomes = Vec::new();
+        web.digest(
+            &WebEvent::NavigationCompleted {
+                uri: uri.to_owned(),
+                success: false,
+                status,
+                // A load that reached nothing: the one a card is for.
+                http_status: None,
+            },
+            &mut outcomes,
+        );
+    }
+
+    /// RED — **while a page is on its way the row shows the address asked for, and after it
+    /// fails to load it still does; a cancel gives the row back to the page that stands.**
+    ///
+    /// The row and the field both read `WebSeat::row_address`, so this is also what `Ctrl+L`
+    /// opens on: a failed address can be corrected one character at a time.
+    ///
+    /// MUTATION: answer `row_address` with the committed URL first (or make `asked_url` always
+    /// `None`) — the second assertion goes red: the row names the page before, not the one asked.
+    #[test]
+    fn the_row_names_the_address_asked_until_it_is_reached() {
+        let mut web = ready_seat();
+        assert_eq!(
+            web.row_address(),
+            "https://example.com/",
+            "the first page, asked and not yet committed"
+        );
+        commit(&mut web, "https://example.com/");
+        assert_eq!(web.row_address(), "https://example.com/");
+
+        let asked = "https://例子.invalid/文档?q=中文";
+        let _ = web.machine.request(asked);
+        assert_eq!(
+            web.row_address(),
+            asked,
+            "on its way: the asked address, not the page under it"
+        );
+        complete(&mut web, asked, 13);
+        assert!(matches!(web.fault(), Some(WebFault::DidNotLoad { .. })));
+        assert_eq!(web.row_address(), asked, "failed: still the asked address");
+
+        let cancelled = "https://example.org/下载.zip";
+        let _ = web.machine.request(cancelled);
+        complete(&mut web, cancelled, WEB_ERROR_OPERATION_CANCELED);
+        assert_eq!(
+            web.row_address(),
+            "https://example.com/",
+            "cancelled: nothing loaded, so the row names the page that stands"
+        );
+
+        commit(&mut web, "https://example.com/next");
+        assert_eq!(web.row_address(), "https://example.com/next");
+        assert!(web.fault().is_none());
+    }
+
+    /// RED — **the blank page this host mints is never what the row names, and its landing does
+    /// not reach an address asked over it.**
+    ///
+    /// MUTATION: drop the blank guard in `on_navigation_completed` — the blank page landing marks
+    /// the typed address reached, and the row empties while that address is still on its way.
+    #[test]
+    fn a_blank_page_landing_does_not_reach_the_address_typed_over_it() {
+        let mut web = ready_seat();
+        commit(&mut web, "https://example.com/");
+        let _ = web.machine.request(BLANK_PAGE);
+        assert_eq!(
+            web.row_address(),
+            "https://example.com/",
+            "the blank page is never named"
+        );
+        let typed = "https://github.com/tokio-rs/tokio/报告";
+        let _ = web.machine.request(typed);
+        commit(&mut web, BLANK_PAGE);
+        assert_eq!(web.row_address(), typed);
     }
 }
 

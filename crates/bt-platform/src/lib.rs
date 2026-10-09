@@ -5498,6 +5498,120 @@ mod probe_child_tests {
         }
     }
 
+    /// **Every process a test's helper started, ended when the test ends** — passed, failed or
+    /// panicked (H-SWEEP-048, item 4). A probe's job ends a contained helper with its owner, but
+    /// an uncontained probe (a refused job, which several tests make on purpose) and the owner
+    /// helper are ended by nothing in the product; a test that goes red between their start and
+    /// its own `kill` left them running, holding this executable open (one stayed up for hours
+    /// after a gate run on 2026-10-09). A test makes this guard right after it starts a helper,
+    /// as a local of its own beside the child, so the helper's own drop is still what the test
+    /// measures and the guard acts only at the end of the test's scope or on its unwinding.
+    ///
+    /// The guard holds a handle to the helper, so its process id names nobody else while the
+    /// guard lives; at the end it ends the helper and every descendant of it that is this test
+    /// executable started after its parent (so a stale parent id never reaches a stranger).
+    struct HelperTree {
+        root: std::os::windows::io::OwnedHandle,
+        pid: u32,
+    }
+
+    impl HelperTree {
+        fn of(pid: u32) -> Self {
+            use std::os::windows::io::FromRawHandle as _;
+            // SAFETY: a process this test has just started; the handle moves to `OwnedHandle`.
+            let root = unsafe {
+                std::os::windows::io::OwnedHandle::from_raw_handle(
+                    OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid)
+                        .expect("open the helper this test started")
+                        .0,
+                )
+            };
+            Self { root, pid }
+        }
+
+        /// The helper and its descendants that are this executable, each with its start.
+        fn members(&self) -> Vec<u32> {
+            use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+            use windows::Win32::System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            };
+            let ours = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.file_name().map(std::ffi::OsStr::to_os_string));
+            // SAFETY: a process snapshot; its handle moves to `OwnedHandle` at once.
+            let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+                return vec![self.pid];
+            };
+            // SAFETY: as above.
+            let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.0) };
+            let mut entry = PROCESSENTRY32W {
+                dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).expect("fits"),
+                ..PROCESSENTRY32W::default()
+            };
+            let mut table = Vec::new();
+            // SAFETY: the snapshot is live; `entry` carries its own size.
+            let mut more =
+                unsafe { Process32FirstW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }
+                    .is_ok();
+            while more {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|unit| *unit == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let image =
+                    std::ffi::OsString::from(String::from_utf16_lossy(&entry.szExeFile[..end]));
+                table.push((entry.th32ProcessID, entry.th32ParentProcessID, image));
+                // SAFETY: as above.
+                more = unsafe { Process32NextW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }
+                    .is_ok();
+            }
+            let mut members = vec![self.pid];
+            let mut parents = vec![(self.pid, crate::install_flip::started_of(self.pid))];
+            while let Some((parent, parent_started)) = parents.pop() {
+                for (pid, _, _) in table.iter().filter(|(pid, entry_parent, image)| {
+                    *entry_parent == parent
+                        && *pid != parent
+                        && ours
+                            .as_ref()
+                            .is_some_and(|ours| image.eq_ignore_ascii_case(ours))
+                }) {
+                    let started = crate::install_flip::started_of(*pid);
+                    if started.is_none() || started < parent_started {
+                        continue;
+                    }
+                    members.push(*pid);
+                    parents.push((*pid, started));
+                }
+            }
+            members
+        }
+    }
+
+    impl Drop for HelperTree {
+        fn drop(&mut self) {
+            for pid in self.members() {
+                let process = if pid == self.pid {
+                    Ok(HANDLE(self.root.as_raw_handle()))
+                } else {
+                    // SAFETY: a descendant of this test's own helper, found above.
+                    unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid) }
+                };
+                let Ok(process) = process else { continue };
+                // SAFETY: the handle names a process of this test's helper tree; a descendant's
+                // handle is this function's own and closed once.
+                unsafe {
+                    let _ = TerminateProcess(process, 1);
+                    let _ = WaitForSingleObject(process, 10_000);
+                    if pid != self.pid {
+                        let _ = CloseHandle(process);
+                    }
+                }
+            }
+        }
+    }
+
     fn helper_command() -> std::process::Command {
         helper_command_for("child")
     }
@@ -5617,7 +5731,9 @@ mod probe_child_tests {
             ProbeBirthSeam::default(),
         )
         .expect("start a contained helper");
+        let _contained_tree = HelperTree::of(contained.id());
         let uncontained = spawn_with_a_refused_job(&command);
+        let _uncontained_tree = HelperTree::of(uncontained.id());
         for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
             let pids = announced(child.take_stdout().expect("helper stdout"), "worked");
             let helper = Witness::of(pids[0]);
@@ -5664,7 +5780,9 @@ mod probe_child_tests {
             .expect("start a suspended helper")
         };
         let contained = born(probe_job());
+        let _contained_tree = HelperTree::of(contained.id());
         let uncontained = born(Err(std::io::Error::other("injected job refusal")));
+        let _uncontained_tree = HelperTree::of(uncontained.id());
         for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
             let helper = Witness::of(child.id());
             assert!(
@@ -5739,9 +5857,11 @@ mod probe_child_tests {
             .expect("start a suspended helper")
         };
         let mut held = born();
+        let _held_tree = HelperTree::of(held.id());
         assert!(held.held_suspended(&mut || {}), "held through the pause");
         held.kill().expect("end the held helper");
         let mut moment = born();
+        let _moment_tree = HelperTree::of(moment.id());
         let pid = moment.id();
         assert!(
             !moment.held_suspended(&mut || resume_threads_of(pid)),
@@ -5755,6 +5875,7 @@ mod probe_child_tests {
     #[test]
     fn a_running_probe_is_not_suspended() {
         let mut child = spawn_probe(&mut helper_command(), HELPER_STDIO).expect("start a helper");
+        let _child_tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         assert!(!child.suspended().expect("ask the helper's threads"));
         drop(child);
@@ -5769,6 +5890,7 @@ mod probe_child_tests {
     fn a_probe_deadline_ends_its_child_and_grandchild() {
         let mut command = helper_command();
         let mut child = spawn_probe(&mut command, HELPER_STDIO).expect("start contained helper");
+        let _child_tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         assert!(direct.alive() && grandchild.alive());
         child.kill().expect("end probe at deadline");
@@ -5782,6 +5904,7 @@ mod probe_child_tests {
     fn dropping_a_probe_guard_ends_its_child_and_grandchild() {
         let mut command = helper_command();
         let mut child = spawn_probe(&mut command, HELPER_STDIO).expect("start contained helper");
+        let _child_tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         drop(child);
         direct.wait_gone();
@@ -5795,6 +5918,7 @@ mod probe_child_tests {
     fn a_settled_probe_ends_a_descendant_holding_its_output_pipe() {
         let mut command = helper_command_for("child-exits");
         let mut child = spawn_probe(&mut command, HELPER_STDIO).expect("start contained helper");
+        let _child_tree = HelperTree::of(child.id());
         let (_direct, grandchild) = ready_probe(&mut child);
         let _ = child.wait().expect("settle direct child");
         assert!(child.guard.job.is_none(), "the settled probe kept its job");
@@ -5804,10 +5928,11 @@ mod probe_child_tests {
     /// Start the owner helper — inside a fresh job of `outer` limits when
     /// given, as a harness or a service host starts Folio — terminate it from
     /// outside once it holds its probe, and answer the witnesses of the
-    /// probe's direct child, its grandchild and the owner's later child.
+    /// probe's direct child, its grandchild and the owner's later child, with
+    /// the guard over the owner's tree, which the caller keeps to its end.
     fn terminate_an_owner_holding_a_probe(
         outer: Option<windows::Win32::System::JobObjects::JOB_OBJECT_LIMIT>,
-    ) -> (Witness, Witness, Witness) {
+    ) -> (Witness, Witness, Witness, HelperTree) {
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
         use windows::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -5826,6 +5951,7 @@ mod probe_child_tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut owner = owner.spawn().expect("start the owner helper");
+        let owner_tree = HelperTree::of(owner.id());
         let _outer = outer.map(|flags| {
             // SAFETY: an unnamed job owned by this test; the handle moves to
             // `OwnedHandle` at once, the information class matches `limits`,
@@ -5862,6 +5988,7 @@ mod probe_child_tests {
             Witness::of(pids[0]),
             Witness::of(pids[1]),
             Witness::of(pids[2]),
+            owner_tree,
         );
         owner.kill().expect("terminate the owner from outside");
         owner.wait().expect("the terminated owner is reaped");
@@ -5878,7 +6005,7 @@ mod probe_child_tests {
     /// `ProbeChildGuard::uncontained()` — nothing ends the probe.
     #[test]
     fn terminating_the_owning_process_ends_its_probe_and_grandchild() {
-        let (direct, grandchild, later) = terminate_an_owner_holding_a_probe(None);
+        let (direct, grandchild, later, _tree) = terminate_an_owner_holding_a_probe(None);
         direct.wait_gone();
         grandchild.wait_gone();
         assert!(later.alive(), "an ordinary child is not the probe's");
@@ -5899,7 +6026,8 @@ mod probe_child_tests {
             JOB_OBJECT_LIMIT_BREAKAWAY_OK,
             JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
         ] {
-            let (direct, grandchild, _later) = terminate_an_owner_holding_a_probe(Some(outer));
+            let (direct, grandchild, _later, _tree) =
+                terminate_an_owner_holding_a_probe(Some(outer));
             direct.wait_gone();
             grandchild.wait_gone();
         }
@@ -5923,6 +6051,7 @@ mod probe_child_tests {
     #[test]
     fn an_uncontained_probe_still_ends_its_direct_child_at_the_deadline() {
         let mut child = spawn_with_a_refused_job(&helper_command());
+        let _child_tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         // `kill` settles by waiting for the direct child, so it runs beside the
         // witness: the witness's ceiling, not that wait, decides the verdict.
@@ -5943,11 +6072,36 @@ mod probe_child_tests {
     #[test]
     fn a_refused_job_runs_the_probe_uncontained_and_its_owner_can_clean_up() {
         let mut child = spawn_with_a_refused_job(&helper_command());
+        let _child_tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         drop(child);
         assert!(direct.alive() && grandchild.alive());
         direct.end();
         grandchild.end();
+        direct.wait_gone();
+        grandchild.wait_gone();
+    }
+
+    /// RED — **a test that panics with its helpers up leaves none of them running**: an
+    /// uncontained probe (the refused-job road, which nothing in the product ends on drop) whose
+    /// helper has started its grandchild, guarded the way every test of this module guards what
+    /// it starts, and a test body that panics before it ends either. After the unwinding both are
+    /// gone.
+    ///
+    /// MUTATION: empty `HelperTree`'s `Drop` — both helpers outlive the panic (the witnesses then
+    /// end them, so the red run leaves nothing behind either).
+    #[test]
+    fn a_test_that_panics_with_its_helpers_up_leaves_none_running() {
+        let mut child = spawn_with_a_refused_job(&helper_command());
+        let tree = HelperTree::of(child.id());
+        let (direct, grandchild) = ready_probe(&mut child);
+        assert!(direct.alive() && grandchild.alive());
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _child = child;
+            let _tree = tree;
+            panic!("a test goes red with its helpers up");
+        }));
+        assert!(unwound.is_err());
         direct.wait_gone();
         grandchild.wait_gone();
     }
@@ -5975,6 +6129,7 @@ mod probe_child_tests {
             },
         )
         .expect("start a suspended contained helper");
+        let _child_tree = HelperTree::of(child.id());
         let direct = Witness::of(child.id());
         let job = HANDLE(
             child
@@ -6025,6 +6180,7 @@ mod probe_child_tests {
             },
         )
         .expect("start the helper the second way");
+        let _child_tree = HelperTree::of(child.id());
         let mut inside = BOOL(0);
         // SAFETY: both handles are live and owned by `child`; the call only
         // writes the answer into `inside`.
@@ -6196,6 +6352,7 @@ mod probe_child_tests {
             .env(HELPER_MODE, "job-report")
             .env(RUNNER, std::process::id().to_string());
         let mut child = spawn_probe(&mut command, HELPER_STDIO).expect("start the job reporter");
+        let _child_tree = HelperTree::of(child.id());
         let mut report = String::new();
         for line in BufReader::new(child.take_stdout().expect("reporter stdout")).lines() {
             let line = line.expect("read the report");
@@ -6316,6 +6473,7 @@ mod probe_child_tests {
             },
         )
         .expect("start the reading helper");
+        let _child_tree = HelperTree::of(child.id());
         let witness = Witness::of(child.id());
         let mut input = child.take_stdin().expect("stdin was piped");
         // The write runs beside the witness, whose ceiling decides the verdict.
@@ -6398,10 +6556,12 @@ mod probe_child_tests {
             },
         )
         .expect("start the answering probe");
+        let _child_tree = HelperTree::of(child.id());
         let mut beside_child = stranger
             .borrow_mut()
             .take()
             .expect("the process beside the birth was started");
+        let _beside_child_tree = HelperTree::of(beside_child.id());
         let beside = Witness::of(beside_child.id());
 
         // SAFETY: an unnamed manual-reset event owned here; it moves to

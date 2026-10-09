@@ -106,6 +106,9 @@ impl LaneUnderTest for ComputationAdapter {
     }
 
     fn submit(&mut self, target: u32, question: u64) -> Admission {
+        // The decode below reaches the host's SVG codec for any payload no raster container
+        // claims; install it as `main` does, so the lane's answer never depends on the payload.
+        crate::test_support::install_host_answers();
         self.opened.insert(target);
         let leaf = ShellAddress {
             window: adapter_window(),

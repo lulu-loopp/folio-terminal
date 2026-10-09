@@ -17257,6 +17257,69 @@ mod tests {
         assert_eq!(LAYOUT_CALLS.get(), 3, "reopening computes once");
     }
 
+    /// RED — **the pointer budget is a question about one window, so the
+    /// process changing its language and its profile table mid-operation
+    /// costs that window's pointer nothing.**
+    ///
+    /// The load-only red of 2026-10-07 in the budget test above was this
+    /// shape: other tests of the binary moved process-wide facts the key
+    /// reads while the budget was being counted. Here the move is planted, so
+    /// it is not a matter of load: the test runs alone in a process of its
+    /// own (the language and the profile revision are the process's; moving
+    /// them beside other tests would be the flake itself), opens the panel,
+    /// switches the language to Chinese and back and advances the profile
+    /// revision, then makes the pointer moves and their draws.
+    ///
+    /// MUTATION: in `SettingsPointerHarness::settings_geometry`, build the
+    /// key with `geometry::Inputs::new` on every reader (the global key) in
+    /// place of the harness's own inputs re-read for the panel — the first
+    /// draw after the switch is a second layout.
+    #[test]
+    fn a_language_switched_mid_operation_costs_the_pointer_budget_nothing() {
+        use geometry::PointerHost;
+        if !crate::test_support::alone_in_a_process(
+            "settings::tests::a_language_switched_mid_operation_costs_the_pointer_budget_nothing",
+            b"",
+        ) {
+            return;
+        }
+        let mut host = settings_pointer_harness();
+        LAYOUT_CALLS.set(0);
+        let layout = host.settings_geometry().unwrap();
+        assert_eq!(LAYOUT_CALLS.get(), 1, "opening: one layout");
+        let before = (
+            crate::i18n::lang_revision(),
+            crate::profiles::profile_revision(),
+        );
+        assert!(crate::i18n::install(crate::i18n::Lang::Chinese));
+        assert!(crate::i18n::install(crate::i18n::Lang::English));
+        crate::profiles::names_changed();
+        assert_ne!(
+            (
+                crate::i18n::lang_revision(),
+                crate::profiles::profile_revision()
+            ),
+            before,
+            "the process's facts moved under the open panel"
+        );
+        let row = layout.rows[0].band;
+        for index in 0..64 {
+            let (x, y) = if index % 2 == 0 {
+                (1.0, 1.0)
+            } else {
+                (f64::from(row[0] + 2.0), f64::from(row[1] + 2.0))
+            };
+            host.settings_geometry();
+            assert!(geometry::pointer_moved(&mut host, x, y).unwrap());
+            host.settings_geometry();
+        }
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            1,
+            "64 pointer moves and their draws after the switch: zero layouts"
+        );
+    }
+
     #[test]
     fn settings_pointer_production_wiring_uses_the_counted_handler_and_owner() {
         let body = |name: &str| method_body("Runtime", name);

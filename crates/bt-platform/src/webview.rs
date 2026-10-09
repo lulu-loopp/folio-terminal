@@ -181,6 +181,17 @@ pub enum WebEvent {
         uri: String,
         success: bool,
         status: i32,
+        /// **The HTTP status the server answered this navigation with**, when one answered
+        /// (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — [`http_status_of`] over WebView2's
+        /// `HttpStatusCode` (`ICoreWebView2NavigationCompletedEventArgs2`) or the main-frame
+        /// `NSHTTPURLResponse` WebKit showed this navigation. `None` when nothing was reached: a
+        /// name that did not resolve, a connection refused or cut before a response, a scheme
+        /// that is not HTTP.
+        ///
+        /// WebView2 completes a 404 or a 500 with `IsSuccess == false` and `WebErrorStatus`
+        /// `Unknown` while it draws the page the server sent; this is what tells that page from a
+        /// load that reached nothing.
+        http_status: Option<u16>,
     },
     /// A process under this WebView died. `kind` is
     /// `COREWEBVIEW2_PROCESS_FAILED_KIND`: `0` is the browser process, `1` the
@@ -358,6 +369,16 @@ pub enum WebEvent {
         uri: String,
         user_initiated: bool,
     },
+}
+
+/// **An engine's HTTP status code, as the answer of a server or as none** — `0` (and anything
+/// that is not a status) is "no HTTP response", which is how both engines spell it. One reading
+/// for the two arms (T-WEB-404-SAYS-UNKNOWN).
+#[must_use]
+pub fn http_status_of(code: i32) -> Option<u16> {
+    u16::try_from(code)
+        .ok()
+        .filter(|code| (100..=599).contains(code))
 }
 
 /// **How the host answers a page's request for a window of its own**, on both engines: the
@@ -2388,6 +2409,14 @@ impl WebHost {
                         let success = read_bool(|out| args.IsSuccess(out));
                         let status =
                             read::<COREWEBVIEW2_WEB_ERROR_STATUS>(|out| args.WebErrorStatus(out)).0;
+                        // The second args interface carries the server's answer (runtime 1.0.2210+);
+                        // a runtime without it says nothing, which is "no HTTP response".
+                        let http_status = args
+                            .cast::<ICoreWebView2NavigationCompletedEventArgs2>()
+                            .ok()
+                            .and_then(|args| {
+                                http_status_of(read::<i32>(|out| args.HttpStatusCode(out)))
+                            });
                         let uri = view
                             .map(|view| read_string(|out| view.Source(out)))
                             .unwrap_or_default();
@@ -2395,6 +2424,7 @@ impl WebHost {
                             uri,
                             success,
                             status,
+                            http_status,
                         });
                         Ok(())
                     })),
@@ -4624,6 +4654,24 @@ pub use portable::{
 #[cfg(test)]
 mod new_window_tests {
     use super::*;
+
+    /// RED (T-WEB-404-SAYS-UNKNOWN) — **a status code is a server's answer, and `0` is none.**
+    ///
+    /// MUTATION: read every code as an answer (`Some(code as u16)`) and `0` says a server
+    /// answered a load that reached nothing.
+    #[test]
+    fn an_http_status_is_an_answer_only_when_one_came_back() {
+        for (code, answer) in [
+            (0, None),
+            (-1, None),
+            (200, Some(200)),
+            (404, Some(404)),
+            (500, Some(500)),
+            (70_000, None),
+        ] {
+            assert_eq!(http_status_of(code), answer, "{code}");
+        }
+    }
 
     /// RED — **the engine is told the request is handled, and the caller hears the address
     /// with the engine's gesture reading.**

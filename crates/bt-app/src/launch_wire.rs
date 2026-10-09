@@ -9,12 +9,16 @@
 //! # No free payload crosses, here either
 //!
 //! The attention wire's founding rule, at the second door and in its strongest form: this channel
-//! carries **six declared fields and nothing else** — a folder, a profile id, whether the launch
-//! asked for a window of its own, whether it asked for a tab, who started it, and what an update's
+//! carries **seven declared fields and nothing else** — a folder, a profile id, whether the launch
+//! asked for a window of its own, whether it asked for a tab, who started it, what an update's
 //! rollback sent the launch to report (0.4.7 U-36: a word from a closed set, and for an unfinished
-//! rollback the folder of its journal). There is no room in it for a command to run, a document to
-//! open or a name to type, because a channel that carried any of those would be a channel worth
-//! attacking: it is answered by a process that has a terminal in it.
+//! rollback the folder of its journal), and the environment `--with-environment` carries
+//! (F-SWEEP-2-048: names and values the launcher's own shell already holds, laid over the
+//! account's environment of the one tab the launch opens). There is no room in it for a command to
+//! run, a document to open or a name to type, because a channel that carried any of those would be
+//! a channel worth attacking: it is answered by a process that has a terminal in it. The
+//! environment is not one of those: it is what a shell started from the launcher's own terminal
+//! would have had anyway, and it reaches a shell and nothing else.
 //!
 //! # The report crosses because nothing else can carry it
 //!
@@ -101,6 +105,11 @@ const REPORT_UNTRIED_KEY: &str = "failed_untried";
 /// crosses as, beside [`REPORT_KEY`] with any report ([`Report::JournalHeld`], 0.4.8 E4); an
 /// earlier build ignores it.
 const REPORT_HELD_KEY: &str = "failed_journal_held";
+
+/// The key `--with-environment`'s environment crosses as: an array of `[name, value]` pairs,
+/// absent when the launch carried none (F-SWEEP-2-048). A key, never a new value of a known one
+/// ([`WIRE_VERSION`]'s rule): an earlier build ignores it and opens the tab without it.
+const ENVIRONMENT_KEY: &str = "env";
 
 /// **The most bytes the refusal of a held journal may cross as** — an operating-system error
 /// message, a sentence: the profile id's bound is too short for a translated one, and a folder's
@@ -298,6 +307,9 @@ pub(crate) struct LaunchRequest {
     /// (`crate::update_startup::failed`), never the command line's word re-read. The running
     /// Folio's update job is told it where the launch lands ([`Self::told`]).
     pub(crate) report: Option<Report>,
+    /// **The environment `--with-environment` carries into the tab** (owner ruling 2026-10-05) —
+    /// the starting process's own, read by [`hand_over`]; `None` for every other launch.
+    pub(crate) carried_environment: Option<cli::CarriedEnvironment>,
 }
 
 /// **Where one launch lands.**
@@ -410,6 +422,8 @@ impl LaunchRequest {
             tab: request.tab,
             origin: request.origin,
             report: None,
+            // The command line says whether; the process says what — [`hand_over`] reads it.
+            carried_environment: None,
         })
     }
 
@@ -500,6 +514,22 @@ impl LaunchRequest {
                 value.insert(REPORT_HELD_KEY.to_owned(), error.into());
             }
         }
+        // **Only when one was carried**, for the report's reason. A name or value that is not
+        // text is written lossily here and so never reads back as itself: [`Self::is_sayable`]
+        // refuses that launch rather than change what it carries.
+        if let Some(environment) = &self.carried_environment {
+            let pairs = environment
+                .pairs()
+                .iter()
+                .map(|(name, value)| {
+                    serde_json::Value::Array(vec![
+                        name.to_string_lossy().into_owned().into(),
+                        value.to_string_lossy().into_owned().into(),
+                    ])
+                })
+                .collect();
+            value.insert(ENVIRONMENT_KEY.to_owned(), serde_json::Value::Array(pairs));
+        }
         serde_json::Value::Object(value).to_string()
     }
 
@@ -562,6 +592,32 @@ impl LaunchRequest {
                     held,
                 )?),
             },
+            // **Optional, and every pair a variable a process could hold** when present: a name
+            // that is not empty and holds no `=` past its first character (Windows keeps its
+            // per-drive folders as `=C:`), no control character in a name — the rule the text
+            // fields above keep — and no NUL in a value (a value may hold a newline or an escape:
+            // a shell's prompt does). Bounded by the frame
+            // (`bt_platform::launch_pipe::MAX_FRAME_BYTES`), which is the field that can be long.
+            carried_environment: match object.get(ENVIRONMENT_KEY) {
+                None => None,
+                Some(pairs) => Some(cli::CarriedEnvironment::from_pairs(
+                    pairs
+                        .as_array()?
+                        .iter()
+                        .map(|pair| {
+                            let [name, value] = pair.as_array()?.as_slice() else {
+                                return None;
+                            };
+                            let (name, value) = (name.as_str()?, value.as_str()?);
+                            let well_formed = !name.is_empty()
+                                && !name.chars().skip(1).any(|character| character == '=')
+                                && !name.chars().any(char::is_control)
+                                && !value.contains('\0');
+                            well_formed.then(|| (name.into(), value.into()))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )),
+            },
         })
     }
 
@@ -572,6 +628,25 @@ impl LaunchRequest {
     /// word. A launch that fails this opens its own window.
     fn is_sayable(&self) -> bool {
         Self::decode(&self.encode()).as_ref() == Some(self)
+    }
+
+    /// **Why the environment this launch carries cannot cross**, or `None` when it can or none was
+    /// carried: past the endpoint's frame bound, or holding a name or value the wire cannot write
+    /// as itself. Never cut to fit — a pane given half an environment is a pane that is quietly
+    /// wrong ([`offer_start`] refuses the launch instead). Names the count and the sizes, never a
+    /// variable's value.
+    fn environment_refusal(&self) -> Option<String> {
+        let environment = self.carried_environment.as_ref()?;
+        let bytes = self.encode().len();
+        let limit = bt_platform::launch_pipe::MAX_FRAME_BYTES;
+        let why = if bytes > limit {
+            format!("{bytes} bytes on the wire, more than the launch endpoint's {limit}")
+        } else if !self.is_sayable() {
+            "a variable whose name or value the wire cannot write as itself".to_owned()
+        } else {
+            return None;
+        };
+        Some(environment.refusal_line("handed to the running Folio", &why, "nothing was opened"))
     }
 }
 
@@ -936,6 +1011,10 @@ pub(crate) fn hand_over(
         directory,
         argv,
         admitted.failed().as_ref(),
+        // **`--with-environment` carries this process's environment** — the launcher's, which
+        // this start inherited (owner ruling 2026-10-05).
+        argv.with_environment
+            .then(cli::CarriedEnvironment::of_this_process),
         std::env::current_dir().ok().as_deref(),
         say,
         gave_up,
@@ -943,17 +1022,32 @@ pub(crate) fn hand_over(
 }
 
 /// [`hand_over`] past its door and its pass: this start's request — `argv`, what the pass sent it
-/// to report (`failed`), its folder resolved against `here` — offered to the Folio that holds
-/// `directory`, with [`hand_over`]'s answer and its give-up line.
+/// to report (`failed`), the environment it carries (`environment`), its folder resolved against
+/// `here` — offered to the Folio that holds `directory`, with [`hand_over`]'s answer and its
+/// give-up line.
+///
+/// **An environment that cannot cross refuses the launch** (F-SWEEP-2-048): the line that says so
+/// goes to this start's console and to `diagnostics.log` in `directory`, and the start leaves with
+/// `2`, as a launch whose folder is not there does. It is not cut to fit, and it does not open a
+/// window of its own, which could save nothing while the running Folio holds the data directory.
 fn offer_start(
     directory: &Path,
     argv: &cli::CliRequest,
     failed: Option<&Failure>,
+    environment: Option<cli::CarriedEnvironment>,
     here: Option<&Path>,
     say: impl Fn(&str),
     gave_up: impl FnOnce(String),
 ) -> Option<i32> {
-    let request = LaunchRequest::of_start(argv, failed, cli::machine_path_kind, here)?;
+    let request = LaunchRequest {
+        carried_environment: environment,
+        ..LaunchRequest::of_start(argv, failed, cli::machine_path_kind, here)?
+    };
+    if let Some(line) = request.environment_refusal() {
+        say(&line);
+        crate::diagnostics::append_note(&crate::diagnostics::log_path(directory), &line);
+        return Some(2);
+    }
     if !request.is_sayable() {
         return None;
     }
@@ -1132,6 +1226,7 @@ mod tests {
                 tab: false,
                 origin: cli::LaunchOrigin::Plain,
                 report: None,
+                carried_environment: None,
             }
         );
         assert_eq!(
@@ -1544,6 +1639,185 @@ mod tests {
             "and an ordinary run admits"
         );
         let _ = take();
+    }
+
+    /// The names of a carried environment — what these tests assert and print, never a value.
+    fn names_of(environment: Option<&cli::CarriedEnvironment>) -> Vec<String> {
+        environment.map_or_else(Vec::new, |environment| {
+            environment
+                .pairs()
+                .iter()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect()
+        })
+    }
+
+    /// A launcher's environment of the test's own making: a unique name, a CJK value, Windows'
+    /// per-drive folder variable, and an empty value.
+    fn a_launchers_environment() -> cli::CarriedEnvironment {
+        cli::CarriedEnvironment::from_pairs(vec![
+            (
+                "FSWEEP2_CARRIED_环境".into(),
+                "D:\\工具\\venv\\Scripts".into(),
+            ),
+            ("=C:".into(), "C:\\Users".into()),
+            ("FSWEEP2_EMPTY".into(), "".into()),
+        ])
+    }
+
+    /// **RED (F-SWEEP-2-048) — `--with-environment` crosses the wire as itself, and a pair that is
+    /// not a variable is not a frame.**
+    ///
+    /// MUTATION: drop the environment on the wire (`encode` writing no `env` key) and the decoded
+    /// request carries none.
+    #[test]
+    fn a_launch_wire_frame_carries_the_environment_and_refuses_one_that_is_not_one() {
+        let request = LaunchRequest {
+            cwd: Some(host_path(r"D:\项目")),
+            carried_environment: Some(a_launchers_environment()),
+            ..LaunchRequest::default()
+        };
+        let back = LaunchRequest::decode(&request.encode()).expect("the frame reads back");
+        assert_eq!(
+            names_of(back.carried_environment.as_ref()),
+            names_of(request.carried_environment.as_ref())
+        );
+        assert!(
+            back == request,
+            "the values crossed changed (not printed: an environment's values stay out of test \
+             output)"
+        );
+        // Absent is none, as every earlier sender writes it.
+        let plain = LaunchRequest::default();
+        assert_eq!(
+            LaunchRequest::decode(&plain.encode()).and_then(|it| it.carried_environment),
+            None
+        );
+        // Each of these is not a variable a process could hold.
+        let frame = |pairs: &str| {
+            format!(r#"{{"v":2,"new":false,"tab":false,"from":"plain","env":{pairs}}}"#)
+        };
+        for pairs in [
+            r#"[["", "x"]]"#,
+            r#"[["A=B", "x"]]"#,
+            r#"[["NAME", "a\u0000b"]]"#,
+            r#"[["NA\u0000ME", "x"]]"#,
+            r#"[["NA\u0001ME", "x"]]"#,
+            r#"[["NA\nME", "x"]]"#,
+            r#"[["NAME\u001b[31m", "x"]]"#,
+            r#"[["NAME"]]"#,
+            r#"[["NAME", "x", "y"]]"#,
+            r#"[["NAME", 1]]"#,
+            r#"{"NAME": "x"}"#,
+        ] {
+            assert_eq!(LaunchRequest::decode(&frame(pairs)), None, "{pairs}");
+        }
+        assert!(LaunchRequest::decode(&frame(r#"[["=D:", "D:\\"]]"#)).is_some());
+    }
+
+    /// **RED (F-SWEEP-2-048) — a launch carrying its environment, handed to a running Folio over
+    /// the real endpoint, lands with it.**
+    ///
+    /// The whole road of [`hand_over`] past its door: [`offer_start`] builds the request from the
+    /// command line and the carried environment, `bt_platform::launch_pipe` carries the frame, and
+    /// the running end decodes it. The running end here takes the decoded request as it is, so the
+    /// shared inbox other tests drain is not touched.
+    ///
+    /// MUTATION: drop it on the wire (`encode` writing no `env` key, or `offer_start` dropping its
+    /// `environment`) and the landed request carries no environment.
+    #[test]
+    fn a_launch_carrying_its_environment_lands_with_it_in_the_running_folio() {
+        let directory = bt_testpath::temp_path("bt-app-launch-wire-环境");
+        std::fs::create_dir_all(&directory).expect("a data directory");
+        // What the running end decoded is kept as it decides, before it answers — so once the
+        // start has read `Taken` it is there, and nothing waits on a clock for it.
+        let (sender, landed) = std::sync::mpsc::channel();
+        let Ok(endpoint) = LaunchPipe::start(
+            &directory,
+            move |line| {
+                LaunchRequest::decode(line).map(|request| {
+                    let _ = sender.send(request.clone());
+                    bt_platform::launch_pipe::Decision {
+                        reply: Reply::Taken.encode(),
+                        admitted: Some(()),
+                    }
+                })
+            },
+            |(): ()| {},
+        ) else {
+            // A platform with no launch endpoint carries nothing to anybody.
+            return;
+        };
+        let carried = a_launchers_environment();
+        let left = offer_start(
+            &directory,
+            &argv(&["--with-environment", "--tab"]),
+            None,
+            Some(carried.clone()),
+            None,
+            |_| panic!("a launch that was taken says nothing"),
+            |why| panic!("the hand-over gave up: {why}"),
+        );
+        drop(endpoint);
+        assert_eq!(left, Some(0), "the running Folio took the launch");
+        let request = landed
+            .try_recv()
+            .expect("the running Folio decoded the launch before it answered");
+        assert_eq!(
+            names_of(request.carried_environment.as_ref()),
+            names_of(Some(&carried))
+        );
+        assert!(
+            request.carried_environment.as_ref() == Some(&carried),
+            "the values landed are not the ones carried (not printed)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **RED (F-SWEEP-2-048) — an environment too large for the wire refuses the launch with a
+    /// line, and is never cut to fit.**
+    ///
+    /// No running Folio is needed: the refusal is decided before a byte is written. The line goes
+    /// to the start's console and to `diagnostics.log` in the data directory, and names the count
+    /// and the sizes, never a value.
+    ///
+    /// MUTATION: send it anyway (drop the `environment_refusal` arm in `offer_start`) and the start
+    /// gives up and opens a window of its own instead (`None`), with no line.
+    #[test]
+    fn a_launch_wire_environment_too_large_for_the_frame_is_refused_with_a_line() {
+        let directory = bt_testpath::temp_path("bt-app-launch-wire-过大");
+        std::fs::create_dir_all(&directory).expect("a data directory");
+        let large = cli::CarriedEnvironment::from_pairs(vec![(
+            "FSWEEP2_LARGE".into(),
+            "路"
+                .repeat(bt_platform::launch_pipe::MAX_FRAME_BYTES / 3 + 1)
+                .into(),
+        )]);
+        let said = std::cell::RefCell::new(Vec::new());
+        let left = offer_start(
+            &directory,
+            &argv(&["--with-environment"]),
+            None,
+            Some(large),
+            None,
+            |line| said.borrow_mut().push(line.to_owned()),
+            |why| panic!("an oversized environment is refused, not given up on: {why}"),
+        );
+        assert_eq!(left, Some(2), "the launch is refused and the start leaves");
+        let said = said.into_inner();
+        assert_eq!(said.len(), 1, "one line on the console");
+        assert!(
+            said[0].contains(cli::WITH_ENVIRONMENT_FLAG)
+                && said[0].contains("1 variables")
+                && said[0].contains(&bt_platform::launch_pipe::MAX_FRAME_BYTES.to_string()),
+            "{}",
+            said[0]
+        );
+        assert!(!said[0].contains('路'), "the line names no value");
+        let log = std::fs::read_to_string(crate::diagnostics::log_path(&directory))
+            .expect("the line is in the data directory's diagnostics.log");
+        assert!(log.contains(&said[0]));
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// **RED — the reply says yes or says which of the two kinds of no, and it names no process.**
@@ -2492,6 +2766,7 @@ mod tests {
                     &data,
                     &argv(&words),
                     failed.as_ref(),
+                    None,
                     None,
                     |said| println!("D3 SAID {said}"),
                     |line| why = Some(line),

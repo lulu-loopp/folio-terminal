@@ -434,3 +434,49 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
     };
     assert_eq!(at_home.place_for_a_new_shell(), Some(PathBuf::from("~")));
 }
+
+/// RED (F-SWEEP-2-048, owner ruling 2026-10-05) — **`folio --with-environment .` opens its pane
+/// carrying the launcher's environment, and `folio .` does not.**
+///
+/// The first launch's road from the command line to the pane's seed: `cli::parse`,
+/// `cli::resolve`, the environment `main` reads into the plan when the flag is there, and
+/// [`cli_leaf_seed`]; the seed's environment is the birth's `launch_overrides`
+/// (`pty_door::tests::launch_overrides_carry_the_launchers_environment_only_when_asked`). Names
+/// are asserted, never values.
+///
+/// MUTATION: `cli_leaf_seed` writing `carried_environment: None` and the asked pane carries nothing.
+#[test]
+fn with_environment_seeds_the_first_launchs_pane_with_the_launchers_environment() {
+    let launcher =
+        cli::CarriedEnvironment::from_pairs(vec![("FSWEEP2_LAUNCHER_环境".into(), "1".into())]);
+    let seed_of = |line: &[&str]| {
+        let request =
+            cli::parse(line.iter().map(std::ffi::OsString::from)).expect("the line parses");
+        let mut plan = cli::resolve(&request, Some(0), |_| cli::PathKind::Directory);
+        // `main`'s own line: the process environment, read when the flag asked for it.
+        plan.carried_environment = request.with_environment.then(|| launcher.clone());
+        (plan.wants_pane, cli_leaf_seed(&plan))
+    };
+    let names = |seed: &LeafSeed| {
+        seed.carried_environment.as_ref().map(|environment| {
+            environment
+                .pairs()
+                .iter()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+    };
+    let (wants_pane, asked) = seed_of(&["--with-environment", "."]);
+    assert!(wants_pane);
+    assert_eq!(
+        names(&asked),
+        Some(vec!["FSWEEP2_LAUNCHER_环境".to_owned()])
+    );
+    let (wants_pane, plain) = seed_of(&["."]);
+    assert!(wants_pane);
+    assert_eq!(
+        names(&plain),
+        None,
+        "without the flag the pane takes the account's environment"
+    );
+}

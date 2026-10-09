@@ -101,7 +101,9 @@ shell_integration/profile_runtime.rs: profile_carries_an_owned_line: Decoded::re
 shell_integration/profile_runtime.rs: undo_profile_install: ProfileFiles::read
 observe_profile_lines: Marks::read
 observe_profile_lines: ProfileFiles::read
-profile_bytes_carry_the_line: Decoded::read
+observe_profile_lines: ProfileRevision::read
+install_for_program: ProfileRevision::read
+ProfileRevision::carries_the_line: profile_marks::Decoded::read
 trace.rs: append: .open
 trace.rs: create: .open
 trace.rs: open: .open
