@@ -447,7 +447,7 @@ pub enum WebEvent {
 /// **An engine's HTTP status code, as the answer of a server or as none** — `0` (and anything
 /// that is not a status) is "no HTTP response", which is how both engines spell it. One reading
 /// for the two arms (T-WEB-404-SAYS-UNKNOWN).
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 #[must_use]
 pub fn http_status_of(code: i32) -> Option<u16> {
     u16::try_from(code)
