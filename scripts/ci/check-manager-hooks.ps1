@@ -123,6 +123,15 @@ try {
     $caskMarker = Get-QuotedMarker $caskText
     Check ($caskMarker -ceq '{"v":1,"manager":"homebrew","uninstall_hook":false}') `
         "the cask's postflight_steps write the homebrew marker without a hook ($caskMarker)"
+    # the_cask_declares_auto_updates (managed-update §2.2 R-H1): Folio updates
+    # a Homebrew copy itself, so a plain `brew upgrade` must compare the
+    # bundle's own version and leave an updated bundle alone.
+    Check ([regex]::IsMatch($caskText, '(?m)^  auto_updates true$')) 'the cask declares auto_updates true'
+    # The Caskroom attribute beside the marker (R-H2, install_channel::CASKROOM_ATTRIBUTE):
+    # the token Homebrew expands to the cask's Caskroom folder, on the same app.
+    Check ([regex]::IsMatch($caskText,
+            '(?m)^\s*"io\.github\.lulu-loopp\.folio\.caskroom",\r?\n\s*"\{\{caskroom_path\}\}",\r?\n\s*"\{\{appdir\}\}/Folio\.app",$')) `
+        "the cask's postflight_steps write the Caskroom attribute from {{caskroom_path}} on the app"
 
     # ── 3. the renderer keeps the hooks ───────────────────────────────────────
     $package = Join-Path $work 'package'

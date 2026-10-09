@@ -7,6 +7,12 @@ cask "folio" do
   desc "Terminal that typesets formulas where a command prints them, with files previewed beside the prompt"
   homepage "https://github.com/lulu-loopp/folio-terminal"
 
+  # Folio updates itself in place from its own card (the bundle at the app
+  # target this cask recorded, replaced as a whole). With this, a plain
+  # `brew upgrade` upgrades Folio only when the bundle's own version is older
+  # than this cask's, and never puts back a version Folio has moved past.
+  auto_updates true
+
   depends_on arch: :arm64
   depends_on macos: :sonoma
 
@@ -19,13 +25,22 @@ cask "folio" do
   # `brew reinstall` as well, with nothing that tells them which, so Folio's
   # cleanup runs from `zap` only. A step list, not a Ruby block (Homebrew 7
   # deprecates `postflight`): `{{appdir}}` is Homebrew's token, expanded when
-  # the step runs, not Ruby interpolation.
+  # the step runs, not Ruby interpolation. The second attribute names this
+  # cask's Caskroom folder (`{{caskroom_path}}`), where Folio reads which app
+  # Homebrew installed before it updates one in place.
   postflight_steps do
     run "/usr/bin/xattr",
         args: [
           "-w",
           "io.github.lulu-loopp.folio.install",
           '{"v":1,"manager":"homebrew","uninstall_hook":false}',
+          "{{appdir}}/Folio.app",
+        ]
+    run "/usr/bin/xattr",
+        args: [
+          "-w",
+          "io.github.lulu-loopp.folio.caskroom",
+          "{{caskroom_path}}",
           "{{appdir}}/Folio.app",
         ]
   end

@@ -419,6 +419,7 @@ mod tests {
             channel: Some(Channel::Ours),
             running: "0.4.6",
             capable: true,
+            recorded: false,
             trial: false,
             platform: HostPlatform::Windows,
         }

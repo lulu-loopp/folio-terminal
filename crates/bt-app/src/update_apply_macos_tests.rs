@@ -31,7 +31,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos, run, sign, version_of};
+use crate::update_prepare_macos::tests::fixture::{
+    HOMEBREW_MARKER, Scratch, fake_brew, homebrew_install, on_macos, run, sign, version_of,
+};
 use crate::update_txn::{
     Body, Cdhash, Class, Header, HeaderOutcome, Outcome, STUCK_ATTEMPT_LIMIT, StartAction,
     TrialSight,
@@ -354,6 +356,8 @@ struct Install {
     new: BundleIdentity,
     data: PathBuf,
     agents: PathBuf,
+    /// What the journal records was carried (a Homebrew copy's marks, D1), or nothing.
+    carried: Option<Carried>,
 }
 
 impl Install {
@@ -395,6 +399,7 @@ impl Install {
             new,
             data,
             agents,
+            carried: None,
         };
         install.write(Phase::Handoff {
             applier: install.applier,
@@ -418,7 +423,12 @@ impl Install {
                 .display()
                 .to_string(),
             body: Body {
-                adapter: crate::update_txn::Adapter::Ours,
+                adapter: if self.carried.is_some() {
+                    crate::update_txn::Adapter::Homebrew
+                } else {
+                    crate::update_txn::Adapter::Ours
+                },
+                marker: self.carried.clone(),
                 phase,
                 layout: Layout::Bundle {
                     old: self.old.clone(),
@@ -564,6 +574,7 @@ fn shape_install(tag: &str) -> Install {
         },
         data,
         agents,
+        carried: None,
     };
     install.write(Phase::Handoff {
         applier: install.applier,
@@ -4643,18 +4654,18 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
     );
     assert_eq!(version_of(&install.installed), "1.0");
 
-    let install = Install::new("points-homebrew");
+    let install = Install::new("points-scoop");
     let named = install
         .journal_at(Phase::Handoff {
             applier: install.applier,
         })
-        .naming(crate::update_txn::Adapter::Homebrew);
+        .naming(crate::update_txn::Adapter::Scoop);
     install_txn::durable_write(&install.home.journal(), &named.encode()).unwrap();
     let recorder = Recorder::of(&install);
     let road = recorded_road(&install, &recorder, limits(2_000, 2_000));
     let (ended, world) = applied(road, Fake::default());
     assert!(
-        matches!(&ended, Ended::Refused(why) if why.contains("Homebrew")),
+        matches!(&ended, Ended::Refused(why) if why.contains("Scoop")),
         "{ended:?} {:?}",
         world.said
     );
@@ -5108,4 +5119,267 @@ fn the_macos_outgoing_build_that_lingers_still_opens_the_one_window() {
         )],
         "O opens the one window"
     );
+}
+
+// ── Homebrew's layout: the M rows with the marks (0.4.8 D1, U-41b) ──────────
+
+impl Install {
+    /// **One Homebrew installation** (D1): [`Install::new`]'s, with the
+    /// installed bundle the app a Caskroom records under a prefix of its own
+    /// (`brew install --cask` as `fixture::homebrew_install` leaves it, with a
+    /// stand-in `brew` there), the cask's marks carried onto the staged
+    /// bundle through the Prepare's own door, and the journal naming the
+    /// Homebrew adapter and the marks it recorded. Answers the installation
+    /// and the stand-in `brew`'s record of calls.
+    fn homebrew(tag: &str) -> (Self, PathBuf) {
+        let mut install = Self::new(tag);
+        let prefix = install._scratch.root.join("homebrew 前缀");
+        let caskroom = homebrew_install(&prefix, "1.0", &install.installed);
+        let calls = fake_brew(&prefix);
+        let carried = Carried {
+            install: HOMEBREW_MARKER.as_bytes().to_vec(),
+            caskroom: Some(caskroom.to_str().unwrap().as_bytes().to_vec()),
+        };
+        bt_platform::macos_update::carry_attributes(
+            &install.stage(),
+            &[
+                (
+                    crate::install_channel::MARKER_ATTRIBUTE,
+                    carried.install.as_slice(),
+                ),
+                (
+                    crate::install_channel::CASKROOM_ATTRIBUTE,
+                    carried.caskroom.as_deref().unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+        install.carried = Some(carried);
+        install.write(Phase::Handoff {
+            applier: install.applier,
+        });
+        (install, calls)
+    }
+
+    /// The marks on the bundle at `bundle`, as the journal records them.
+    fn marks_on(&self, bundle: &Path) -> Option<Carried> {
+        crate::install_channel::homebrew_marks(bundle)
+            .ok()
+            .map(|marks| Carried {
+                install: marks.marker,
+                caskroom: Some(marks.caskroom),
+            })
+    }
+
+    /// How a start of the installed executable reads its channel now.
+    fn channel_now(&self) -> crate::install_channel::Channel {
+        crate::install_channel::channel_of(&self.installed.join(EXE))
+    }
+}
+
+/// The channel the cask's marker gives a copy.
+const HOMEBREW: crate::install_channel::Channel = crate::install_channel::Channel::Managed {
+    manager: crate::install_channel::Manager::Homebrew,
+    uninstall_hook: false,
+};
+
+/// RED (D1, managed-update §2.2, M1, M3, M5, §6's M row "marker carried on
+/// commit") — **a Homebrew copy's road commits with the new bundle live
+/// carrying the recorded marks byte for byte, and the copy is still
+/// Homebrew's in every sense the next start and the next update read: its
+/// channel is managed by Homebrew, its uninstall row names `brew uninstall
+/// --zap folio`, and the Caskroom's record still names it (the next update
+/// takes the same road) — and Homebrew is never run.**
+///
+/// MUTATION: `own_layouts` without `.with_homebrew(..)` — the journal's
+/// adapter has no layout and the road is refused.
+#[test]
+fn a_homebrew_copy_commits_with_its_marks_and_stays_homebrews() {
+    if !on_macos() {
+        return;
+    }
+    let (install, calls) = Install::homebrew("hb-commit");
+    let children = Children::default();
+    let world = launching(a_healthy_trial(&install, &children, None));
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(version_of(&install.installed), "2.0");
+    assert_eq!(install.marks_on(&install.installed), install.carried, "M1");
+    assert_eq!(install.channel_now(), HOMEBREW, "M3: the next start");
+    assert_eq!(
+        crate::uninstall::manager_uninstall(crate::install_channel::Manager::Homebrew, false),
+        "brew uninstall --zap folio",
+        "M5: the uninstall row"
+    );
+    assert!(
+        crate::install_channel::homebrew_record(&install.installed).is_ok(),
+        "the next update is eligible"
+    );
+    assert!(!calls.exists(), "Homebrew is never run");
+}
+
+/// RED (D1, managed-update M1, §6's M row "marker checked on the live
+/// side") — **a new bundle that went live without the recorded marks is
+/// rolled back at once, untried: the old bundle is live again with its own
+/// marks, and the copy is still Homebrew's.**
+///
+/// The staged bundle here lost its marks after the Prepare carried them;
+/// left live, the next start would read the copy as Folio's own and the
+/// uninstall row would stop naming Homebrew.
+///
+/// MUTATION: in `Homebrew::activate`, drop the last `Self::carries(places,
+/// places.installed)` — the road commits a bundle with no marks.
+#[test]
+fn a_new_bundle_without_the_recorded_marks_is_never_left_live() {
+    if !on_macos() {
+        return;
+    }
+    let (install, _calls) = Install::homebrew("hb-unmarked");
+    let stage = install.stage();
+    let first = AtomicBool::new(true);
+    // Between `Activate`'s look at the staged bundle and its exchange.
+    let world = Fake {
+        on_exchange: Some(Box::new(move |_, _| {
+            if !first.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            for name in [
+                crate::install_channel::MARKER_ATTRIBUTE,
+                crate::install_channel::CASKROOM_ATTRIBUTE,
+            ] {
+                run(
+                    "/usr/bin/xattr",
+                    &[OsStr::new("-d"), OsStr::new(name), stage.as_os_str()],
+                );
+            }
+        })),
+        ..Fake::default()
+    };
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(world.launched.lock().unwrap().is_empty(), "no trial");
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(install.marks_on(&install.installed), install.carried);
+    assert_eq!(install.channel_now(), HOMEBREW);
+}
+
+/// RED (D1, managed-update M4, §6's M row "marker restored on rollback") —
+/// **a Homebrew copy whose trial dies is rolled back with the old bundle
+/// live carrying its own marks unchanged, and the copy is still Homebrew's
+/// and still the app its Caskroom records.**
+///
+/// The attributes belong to the bundle directory, and the swap back moves
+/// the directory: nothing is rewritten on the way back.
+///
+/// MUTATION: in `Homebrew::activate_back`, after the exchange, remove the
+/// marker from the live bundle (a rollback that rebuilds the old bundle
+/// instead of moving it back) — the old bundle comes back without it.
+#[test]
+fn rollback_restores_the_old_marks_unchanged() {
+    if !on_macos() {
+        return;
+    }
+    let (install, calls) = Install::homebrew("hb-rollback");
+    let before = install.marks_on(&install.installed);
+    assert_eq!(before, install.carried);
+    let children = Children::default();
+    let started = children.clone();
+    let world = launching(Box::new(move |bundle, args| {
+        started.start_trial(bundle, args);
+        Ok(())
+    }));
+    let killer = {
+        let children = children.clone();
+        let journal = install.home.journal();
+        std::thread::spawn(move || {
+            let give_up = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < give_up {
+                let trial = std::fs::read(&journal)
+                    .ok()
+                    .and_then(|bytes| Journal::parse(&bytes).ok())
+                    .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
+                if trial {
+                    for pid in children.started.lock().unwrap().clone() {
+                        children.end(pid);
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    killer.join().unwrap();
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(install.marks_on(&install.installed), before, "M4");
+    assert_eq!(install.channel_now(), HOMEBREW);
+    assert!(crate::install_channel::homebrew_record(&install.installed).is_ok());
+    assert!(!calls.exists(), "Homebrew is never run");
+}
+
+/// RED (D1, managed-update M2, §3.2 F12) — **marks on the live bundle that
+/// are no longer the ones the journal recorded refuse `Activate` before the
+/// exchange: nothing is exchanged, the transaction is reverted to
+/// `Prepared`, and the old build is relaunched plainly.**
+///
+/// Something rewrote the marker after `Allocated` (here, by hand); the road
+/// would otherwise carry bytes the manager no longer stands behind onto the
+/// copy it leaves live.
+///
+/// MUTATION: in `Homebrew::activate`, drop the two `Self::carries` checks
+/// before `Ours.activate` — the bundles are exchanged and the road goes on.
+#[test]
+fn marks_changed_since_allocation_refuse_the_exchange() {
+    if !on_macos() {
+        return;
+    }
+    let (install, _calls) = Install::homebrew("hb-changed");
+    let other = HOMEBREW_MARKER.replace("false", "true");
+    run(
+        "/usr/bin/xattr",
+        &[
+            OsStr::new("-w"),
+            OsStr::new(crate::install_channel::MARKER_ATTRIBUTE),
+            OsStr::new(&other),
+            install.installed.as_os_str(),
+        ],
+    );
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Ended::Reverted, "{:?}", world.said);
+    assert_eq!(world.exchanges, 0, "nothing is exchanged");
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert!(matches!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Prepared { .. }
+    ));
+    assert!(world.launched.lock().unwrap().is_empty(), "no trial");
+}
+
+/// RED (D1, managed-update M3) — **every start at every Homebrew row reads
+/// the same managed channel**: before the exchange (the old bundle live),
+/// after it (the new bundle live, the old one in `stage/`), and after the
+/// swap back — whichever executable can start there.
+///
+/// MUTATION: in `bt_platform::macos_update::carry_attributes`, write only
+/// the last attribute (`attributes.last()`) — the new bundle has no marker,
+/// and a start after the exchange reads the copy as Folio's own.
+#[test]
+fn every_start_at_every_homebrew_row_reads_the_same_managed_channel() {
+    if !on_macos() {
+        return;
+    }
+    let (install, _calls) = Install::homebrew("hb-rows");
+    assert_eq!(install.channel_now(), HOMEBREW, "before the exchange");
+    install.exchanged();
+    assert_eq!(version_of(&install.installed), "2.0");
+    assert_eq!(install.channel_now(), HOMEBREW, "the new bundle live");
+    assert_eq!(
+        crate::install_channel::channel_of(&install.stage().join(EXE)),
+        HOMEBREW,
+        "the old bundle in stage/"
+    );
+    install.exchanged();
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(install.channel_now(), HOMEBREW, "after the swap back");
 }

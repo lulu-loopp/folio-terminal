@@ -177,9 +177,9 @@ enum Pre {
 }
 pub(crate) use crate::update_apply::{Opener, Opens, failed_words, trial_words};
 use crate::update_txn::{
-    Action, Actor, Asker, BundleIdentity, Class, Disk, Effect, Event, HeaderOutcome, Home, Journal,
-    Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, Role, Sight, TrialProcess, TxnId,
-    decide,
+    Action, Actor, Asker, BundleIdentity, Carried, Class, Disk, Effect, Event, HeaderOutcome, Home,
+    Journal, Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, Role, Sight, TrialProcess,
+    TxnId, decide,
 };
 
 /// `open`, by its absolute path: LaunchServices starts the trial as it starts
@@ -369,10 +369,60 @@ impl ApplyPoints for Ours {
     }
 }
 
-/// **The layouts of this road** as the product has them: [`Ours`] alone.
+/// **Homebrew's layout** (0.4.8 ticket D1, U-41b; managed-update §2.2, §4):
+/// [`Ours`]' exchange at the app target Homebrew recorded — the extended
+/// attributes the cask wrote belong to the bundle directory and travel with
+/// it through `RENAME_SWAP`, so the new bundle the Prepare carried them onto
+/// goes live with them, and a swap back brings the old bundle back with its
+/// own (M4). `Activate` holds both sides to the marks the journal recorded:
+/// before the exchange, on the live bundle and on the staged one (M2: a mark
+/// changed since `Allocated` refuses, and nothing is exchanged); after it, on
+/// the live side (M1: refused, and the road rolls back by what is live).
+/// Homebrew itself is never run (R3).
+pub(crate) struct Homebrew;
+
+impl Homebrew {
+    /// Whether the bundle at `bundle` carries exactly the marks `places`
+    /// records.
+    fn carries(places: &Places<'_>, bundle: &Path) -> Result<(), String> {
+        let found = crate::install_channel::homebrew_marks(bundle).map(|marks| Carried {
+            install: marks.marker,
+            caskroom: Some(marks.caskroom),
+        });
+        match (found, places.carried) {
+            (Ok(found), Some(recorded)) if found == *recorded => Ok(()),
+            (Err(why), _) => Err(format!("the Homebrew marks: {why}")),
+            _ => Err("the Homebrew marks are not the ones the journal recorded".to_owned()),
+        }
+    }
+}
+
+impl ApplyPoints for Homebrew {
+    fn activate(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        Self::carries(places, places.installed)?;
+        Self::carries(places, places.stage)?;
+        Ours.activate(places, hands)?;
+        Self::carries(places, places.installed)
+    }
+
+    fn activate_back(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        Ours.activate_back(places, hands)
+    }
+
+    fn locate(
+        &self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+    ) -> (Option<BundleIdentity>, Option<BundleIdentity>) {
+        Ours.locate(worker, places)
+    }
+}
+
+/// **The layouts of this road** as the product has them: [`Ours`], and
+/// [`Homebrew`]'s.
 #[must_use]
 pub(crate) fn own_layouts() -> Layouts<dyn ApplyPoints> {
-    Layouts::of(Arc::new(Ours))
+    Layouts::of(Arc::new(Ours) as Arc<dyn ApplyPoints>).with_homebrew(Arc::new(Homebrew))
 }
 
 /// **The effects of a lock holder that a test stands in for**: its lines, the
@@ -964,6 +1014,7 @@ fn exit_places(home: &Home, journal: &Journal) -> Option<Bundles> {
         rescue_program,
         old,
         new,
+        carried: journal.body.marker.clone(),
     })
 }
 
@@ -976,6 +1027,7 @@ struct Bundles {
     rescue_program: PathBuf,
     old: BundleIdentity,
     new: BundleIdentity,
+    carried: Option<Carried>,
 }
 
 impl Bundles {
@@ -988,6 +1040,7 @@ impl Bundles {
             rescue_program: &self.rescue_program,
             old: &self.old,
             new: &self.new,
+            carried: self.carried.as_ref(),
         }
     }
 }
@@ -1004,6 +1057,8 @@ pub(crate) struct Places<'a> {
     rescue_program: &'a Path,
     old: &'a BundleIdentity,
     new: &'a BundleIdentity,
+    /// What the journal records was carried onto the staged set (D1, M1).
+    carried: Option<&'a Carried>,
 }
 
 /// **One transaction under its lock**: the journal as it stands durably, and
@@ -1086,6 +1141,7 @@ impl<'a> Txn<'a> {
             .map_err(|not_built| Ended::Refused(not_built.to_string()))?;
         let inside = program.strip_prefix(&installed).unwrap_or(&program);
         let stage_program = stage.join(inside);
+        let carried = journal.body.marker.clone();
         let txn = Txn {
             road,
             worker,
@@ -1110,6 +1166,7 @@ impl<'a> Txn<'a> {
                 rescue_program,
                 old,
                 new,
+                carried,
             },
         ))
     }
