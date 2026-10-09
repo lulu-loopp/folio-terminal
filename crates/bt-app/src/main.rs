@@ -9566,7 +9566,7 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
         prefill: None,
         // `--with-environment` (owner ruling 2026-10-05): the launcher's environment, when the
         // command line asked for it, and the account's otherwise.
-        environment: plan.environment.clone(),
+        carried_environment: plan.carried_environment.clone(),
     }
 }
 
@@ -9612,7 +9612,7 @@ fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> Leaf
         prefill: None,
         // A restart is a new shell and takes the account's environment: what a launch carried
         // was for the shell it was carried to (owner ruling 2026-10-05).
-        environment: None,
+        carried_environment: None,
     }
 }
 
@@ -12146,9 +12146,9 @@ struct TabState {
     /// sets it and every tab reads through to what the program or the shell
     /// said.
     manual_name: Option<String>,
-    /// **The environment a launch carried into this tab** ([`TabSeed::environment`]), the source
+    /// **The environment a launch carried into this tab** ([`TabSeed::carried_environment`]), the source
     /// for every shell born in it ([`born_in_tab`]). Held in memory and never saved.
-    environment: Option<cli::CarriedEnvironment>,
+    carried_environment: Option<cli::CarriedEnvironment>,
     pending_keyboard_at: Option<Instant>,
     /// **A resize present is owed to this tab's focused pane** (ticket 47).
     ///
@@ -35793,7 +35793,7 @@ fn revive_plan(
         manual_name: saved.first().and_then(|leaf| leaf.manual_name.clone()),
         pinned: tab.pinned,
         // Never saved, so never revived.
-        environment: None,
+        carried_environment: None,
     };
     // **Each pane comes back as its own shell in its own folder.** The two facts
     // are read out of the same saved leaf in the same pass, which is what makes
@@ -35841,7 +35841,7 @@ fn revive_plan(
                     // so "this shell never reported one" and "this rung does not restore them"
                     // arrive as one case (§7.54e ④).
                     prefill: Some(leaf.last_command.clone()).filter(|it| !it.is_empty()),
-                    environment: None,
+                    carried_environment: None,
                 },
             )
         })
@@ -36652,7 +36652,7 @@ struct TabSeed {
     /// its first pane, a split, a duplicate pane or tab, a Restart shell — is born with it
     /// ([`born_in_tab`]). `None` for every tab no launch carried one into, and for every tab
     /// revived from disk: it is never saved.
-    environment: Option<cli::CarriedEnvironment>,
+    carried_environment: Option<cli::CarriedEnvironment>,
 }
 
 /// **A shell born in a tab is born with the tab's carried environment** — the one rule for every
@@ -36660,7 +36660,7 @@ struct TabSeed {
 /// coordinator's ruling 2026-10-09). The tab is the source, so the seed's own is replaced.
 fn born_in_tab(seed: LeafSeed, tab_environment: Option<&cli::CarriedEnvironment>) -> LeafSeed {
     LeafSeed {
-        environment: tab_environment.cloned(),
+        carried_environment: tab_environment.cloned(),
         ..seed
     }
 }
@@ -36732,7 +36732,7 @@ struct LeafSeed {
     /// ([`cli_leaf_seed`]) and a handed-over launch's tab (`launch_wire::LaunchRequest`). Never
     /// saved: a revived, split, duplicated or restarted pane is a new shell and takes the
     /// account's environment.
-    environment: Option<cli::CarriedEnvironment>,
+    carried_environment: Option<cli::CarriedEnvironment>,
 }
 
 /// **The profile a saved pane comes back as, and the id its banner names** — one reading of a
@@ -38160,7 +38160,7 @@ fn new_tab_leaf_seed(
         unknown_profile_id: None,
         card_skip: 0,
         prefill: None,
-        environment: None,
+        carried_environment: None,
     }
 }
 
@@ -38299,7 +38299,7 @@ impl SplitSeed {
                 card_skip: 0,
                 // A split is not a restore; nothing is owed to its prompt.
                 prefill: None,
-                environment: None,
+                carried_environment: None,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: profile.clone(),
@@ -38314,7 +38314,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
-                environment: None,
+                carried_environment: None,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -38333,7 +38333,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
-                environment: None,
+                carried_environment: None,
             },
         }
     }
@@ -39169,7 +39169,7 @@ mod shell_birth_tests {
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
-            environment: None,
+            carried_environment: None,
         }
     }
 
@@ -40103,7 +40103,7 @@ fn create_leaf_session(
                     environment_derivation: command.environment_derivation,
                     folio_environment: command.environment,
                     profile_environment: command.profile_environment,
-                    carried_environment: seed.environment.clone(),
+                    carried_environment: seed.carried_environment.clone(),
                     size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     working_directory: place.working_directory,
                     unless_gone: gone_spec,
@@ -40906,9 +40906,9 @@ fn create_tab_state(
                     unknown_profile_id: None,
                     card_skip: 0,
                     prefill: None,
-                    environment: None,
+                    carried_environment: None,
                 }),
-                seed.environment.as_ref(),
+                seed.carried_environment.as_ref(),
             ),
             programs,
             stored_default,
@@ -41083,7 +41083,7 @@ fn assemble_tab_state(
         focused_leaf,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
-        environment: seed.environment,
+        carried_environment: seed.carried_environment,
         pending_keyboard_at: None,
         // A tab that arrives pinned wears its pin from the first frame; it
         // is a fact about the tab, not an offer that has to be hovered out.
@@ -41314,7 +41314,7 @@ fn pane_into_new_tab(
             // carried "build" across would name a room after the house.
             manual_name: None,
             // A pane torn into a tab of its own takes the account's environment from here on.
-            environment: None,
+            carried_environment: None,
             pinned,
         },
         seats,
@@ -44325,10 +44325,10 @@ impl Runtime<'_> {
         // profile looked up in this build's table, and the crossing into that
         // profile's namespace. Everything it could not honour comes back in the
         // plan's own list and is said on a card once the window is up.
-        let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        let mut cli_plan: cli::CliPlan = cli::resolve(cli, default_profile, cli::machine_path_kind);
         // **`--with-environment` reads this process's environment, which on a first launch is
         // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
-        cli_plan.environment = cli
+        cli_plan.carried_environment = cli
             .with_environment
             .then(cli::CarriedEnvironment::of_this_process);
         // Pinned tabs are an answer already given, so they simply open; the rest
@@ -44358,7 +44358,7 @@ impl Runtime<'_> {
                 seats,
                 TabSeed {
                     // The command-line tab owns what `--with-environment` carried.
-                    environment: cli_plan.environment.clone(),
+                    carried_environment: cli_plan.carried_environment.clone(),
                     ..TabSeed::default()
                 },
                 leaves,
@@ -64529,7 +64529,7 @@ impl FolioApp {
         runtime.new_tab_with_profile_carrying(
             &profile,
             request.cwd.clone(),
-            request.environment.clone(),
+            request.carried_environment.clone(),
         )?;
         runtime.report_launch_refusals(refusals)
     }
@@ -64563,7 +64563,10 @@ impl FolioApp {
             return Ok(None);
         };
         // A launch that carries its environment asks for its own tab, as one naming a place does.
-        if request.cwd.is_none() && request.profile.is_none() && request.environment.is_none() {
+        if request.cwd.is_none()
+            && request.profile.is_none()
+            && request.carried_environment.is_none()
+        {
             return Ok(Some(opened));
         }
         let stand_in = self
@@ -64578,7 +64581,7 @@ impl FolioApp {
         runtime.new_tab_with_profile_carrying(
             &profile,
             request.cwd.clone(),
-            request.environment.clone(),
+            request.carried_environment.clone(),
         )?;
         if let Some(stand_in) = stand_in {
             runtime.retire_the_stand_in(stand_in)?;

@@ -783,7 +783,7 @@ pub struct CliPlan {
     /// What `--with-environment` carries into the pane — `None` here, always: [`resolve`] reads
     /// no process environment, and the launch that holds the request fills it in
     /// ([`CarriedEnvironment::of_this_process`]).
-    pub environment: Option<CarriedEnvironment>,
+    pub carried_environment: Option<CarriedEnvironment>,
     /// Everything the caller asked for that this launch could not do. One card
     /// each, on the window, after it opens.
     pub refusals: Vec<CliRefusal>,
@@ -1434,7 +1434,7 @@ pub fn resolve(
         profile,
         cwd,
         preview,
-        environment: None,
+        carried_environment: None,
         refusals,
     }
 }
@@ -1482,7 +1482,7 @@ mod tests {
             "the flag alone asks for the pane it carries into"
         );
         assert_eq!(
-            alone.environment, None,
+            alone.carried_environment, None,
             "resolve reads no process environment"
         );
         assert!(!resolve(&parsed(&[]), Some(0), |_| PathKind::Absent).wants_pane);

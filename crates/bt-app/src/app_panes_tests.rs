@@ -98,7 +98,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
-            environment: None,
+            carried_environment: None,
         }
     );
     assert_eq!(
@@ -109,7 +109,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
-            environment: None,
+            carried_environment: None,
         }
     );
     assert_ne!(

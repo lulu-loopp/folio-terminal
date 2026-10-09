@@ -309,7 +309,7 @@ pub(crate) struct LaunchRequest {
     pub(crate) report: Option<Report>,
     /// **The environment `--with-environment` carries into the tab** (owner ruling 2026-10-05) —
     /// the starting process's own, read by [`hand_over`]; `None` for every other launch.
-    pub(crate) environment: Option<cli::CarriedEnvironment>,
+    pub(crate) carried_environment: Option<cli::CarriedEnvironment>,
 }
 
 /// **Where one launch lands.**
@@ -423,7 +423,7 @@ impl LaunchRequest {
             origin: request.origin,
             report: None,
             // The command line says whether; the process says what — [`hand_over`] reads it.
-            environment: None,
+            carried_environment: None,
         })
     }
 
@@ -517,7 +517,7 @@ impl LaunchRequest {
         // **Only when one was carried**, for the report's reason. A name or value that is not
         // text is written lossily here and so never reads back as itself: [`Self::is_sayable`]
         // refuses that launch rather than change what it carries.
-        if let Some(environment) = &self.environment {
+        if let Some(environment) = &self.carried_environment {
             let pairs = environment
                 .pairs()
                 .iter()
@@ -596,7 +596,7 @@ impl LaunchRequest {
             // that is not empty and holds no `=` past its first character (Windows keeps its
             // per-drive folders as `=C:`), and no NUL in a name or a value. Bounded by the frame
             // (`bt_platform::launch_pipe::MAX_FRAME_BYTES`), which is the field that can be long.
-            environment: match object.get(ENVIRONMENT_KEY) {
+            carried_environment: match object.get(ENVIRONMENT_KEY) {
                 None => None,
                 Some(pairs) => Some(cli::CarriedEnvironment::from_pairs(
                     pairs
@@ -634,7 +634,7 @@ impl LaunchRequest {
     /// wrong ([`offer_start`] refuses the launch instead). Names the count and the sizes, never a
     /// variable's value.
     fn environment_refusal(&self) -> Option<String> {
-        let environment = self.environment.as_ref()?;
+        let environment = self.carried_environment.as_ref()?;
         let bytes = self.encode().len();
         let limit = bt_platform::launch_pipe::MAX_FRAME_BYTES;
         let why = if bytes > limit {
@@ -1043,7 +1043,7 @@ fn offer_start(
     gave_up: impl FnOnce(String),
 ) -> Option<i32> {
     let request = LaunchRequest {
-        environment,
+        carried_environment: environment,
         ..LaunchRequest::of_start(argv, failed, cli::machine_path_kind, here)?
     };
     if let Some(line) = request.environment_refusal() {
@@ -1229,7 +1229,7 @@ mod tests {
                 tab: false,
                 origin: cli::LaunchOrigin::Plain,
                 report: None,
-                environment: None,
+                carried_environment: None,
             }
         );
         assert_eq!(
@@ -1677,13 +1677,13 @@ mod tests {
     fn a_launch_wire_frame_carries_the_environment_and_refuses_one_that_is_not_one() {
         let request = LaunchRequest {
             cwd: Some(host_path(r"D:\项目")),
-            environment: Some(a_launchers_environment()),
+            carried_environment: Some(a_launchers_environment()),
             ..LaunchRequest::default()
         };
         let back = LaunchRequest::decode(&request.encode()).expect("the frame reads back");
         assert_eq!(
-            names_of(back.environment.as_ref()),
-            names_of(request.environment.as_ref())
+            names_of(back.carried_environment.as_ref()),
+            names_of(request.carried_environment.as_ref())
         );
         assert!(
             back == request,
@@ -1693,7 +1693,7 @@ mod tests {
         // Absent is none, as every earlier sender writes it.
         let plain = LaunchRequest::default();
         assert_eq!(
-            LaunchRequest::decode(&plain.encode()).and_then(|it| it.environment),
+            LaunchRequest::decode(&plain.encode()).and_then(|it| it.carried_environment),
             None
         );
         // Each of these is not a variable a process could hold.
@@ -1764,11 +1764,11 @@ mod tests {
             .try_recv()
             .expect("the running Folio decoded the launch before it answered");
         assert_eq!(
-            names_of(request.environment.as_ref()),
+            names_of(request.carried_environment.as_ref()),
             names_of(Some(&carried))
         );
         assert!(
-            request.environment.as_ref() == Some(&carried),
+            request.carried_environment.as_ref() == Some(&carried),
             "the values landed are not the ones carried (not printed)"
         );
         let _ = std::fs::remove_dir_all(&directory);

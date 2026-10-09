@@ -444,7 +444,7 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
 /// (`pty_door::tests::launch_overrides_carry_the_launchers_environment_only_when_asked`). Names
 /// are asserted, never values.
 ///
-/// MUTATION: `cli_leaf_seed` writing `environment: None` and the asked pane carries nothing.
+/// MUTATION: `cli_leaf_seed` writing `carried_environment: None` and the asked pane carries nothing.
 #[test]
 fn with_environment_seeds_the_first_launchs_pane_with_the_launchers_environment() {
     let launcher =
@@ -454,11 +454,11 @@ fn with_environment_seeds_the_first_launchs_pane_with_the_launchers_environment(
             cli::parse(line.iter().map(std::ffi::OsString::from)).expect("the line parses");
         let mut plan = cli::resolve(&request, Some(0), |_| cli::PathKind::Directory);
         // `main`'s own line: the process environment, read when the flag asked for it.
-        plan.environment = request.with_environment.then(|| launcher.clone());
+        plan.carried_environment = request.with_environment.then(|| launcher.clone());
         (plan.wants_pane, cli_leaf_seed(&plan))
     };
     let names = |seed: &LeafSeed| {
-        seed.environment.as_ref().map(|environment| {
+        seed.carried_environment.as_ref().map(|environment| {
             environment
                 .pairs()
                 .iter()

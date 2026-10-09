@@ -106,7 +106,7 @@ impl Runtime<'_> {
             // What a launch carried, or a duplicated tab had, belongs to the new tab; nothing
             // for any other new tab.
             TabSeed {
-                environment,
+                carried_environment: environment,
                 ..TabSeed::default()
             },
             &self.app.profile_programs,
@@ -1298,7 +1298,7 @@ impl Runtime<'_> {
         // same place — said in the one function that knows how to say it.
         // A duplicate of a tab a launch carried an environment into carries it too: it is the
         // tab's (coordinator's ruling 2026-10-09).
-        let environment = state.environment.clone();
+        let environment = state.carried_environment.clone();
         self.new_tab_seeded_from(&profile, None, &profile, cwd, environment)
     }
 
@@ -2805,7 +2805,7 @@ impl Runtime<'_> {
                 // time.
                 pinned: false,
                 // A new tab owns no launch's environment.
-                environment: None,
+                carried_environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),

@@ -38,7 +38,7 @@ impl Runtime<'_> {
                 embedding: false,
                 new_window: request.new_window,
                 tab: request.tab,
-                with_environment: request.environment.is_some(),
+                with_environment: request.carried_environment.is_some(),
                 origin: request.origin,
                 update_trial: None,
                 update_failed: None,

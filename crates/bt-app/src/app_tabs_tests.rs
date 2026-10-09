@@ -3635,7 +3635,7 @@ fn carried_names(environment: Option<&cli::CarriedEnvironment>) -> Option<Vec<St
 /// it, whatever its own seed said; a revived tab holds none, because it was never saved.
 ///
 /// MUTATIONS: `born_in_tab` keeping the seed's own environment and a split of a tab carrying one
-/// is born without it; `assemble_tab_state` dropping `TabSeed::environment` and the tab holds
+/// is born without it; `assemble_tab_state` dropping `TabSeed::carried_environment` and the tab holds
 /// nothing to give.
 #[test]
 fn a_tabs_carried_environment_is_the_tabs_and_every_shell_born_in_it_takes_it() {
@@ -3653,7 +3653,7 @@ fn a_tabs_carried_environment_is_the_tabs_and_every_shell_born_in_it_takes_it() 
         BTreeMap::new(),
         focused,
         TabSeed {
-            environment: Some(carried.clone()),
+            carried_environment: Some(carried.clone()),
             ..TabSeed::default()
         },
         seats,
@@ -3661,14 +3661,14 @@ fn a_tabs_carried_environment_is_the_tabs_and_every_shell_born_in_it_takes_it() 
         overflow,
     );
     assert_eq!(
-        carried_names(tab.environment.as_ref()),
+        carried_names(tab.carried_environment.as_ref()),
         Some(vec!["FSWEEP2_TAB_环境".to_owned()]),
         "the tab holds what was carried into it"
     );
     // A split, a duplicate and a restart are each a seed born in the tab.
     let split = SplitSeed::Inherit.applied("pwsh", None);
     assert_eq!(
-        split.environment, None,
+        split.carried_environment, None,
         "a split's own seed carries nothing"
     );
     for (verb, seed) in [
@@ -3677,8 +3677,8 @@ fn a_tabs_carried_environment_is_the_tabs_and_every_shell_born_in_it_takes_it() 
     ] {
         assert_eq!(
             carried_names(
-                born_in_tab(seed, tab.environment.as_ref())
-                    .environment
+                born_in_tab(seed, tab.carried_environment.as_ref())
+                    .carried_environment
                     .as_ref()
             ),
             Some(vec!["FSWEEP2_TAB_环境".to_owned()]),
@@ -3687,10 +3687,10 @@ fn a_tabs_carried_environment_is_the_tabs_and_every_shell_born_in_it_takes_it() 
     }
     // A tab no launch carried one into gives its shells the account's environment.
     let launched = LeafSeed {
-        environment: Some(carried),
+        carried_environment: Some(carried),
         ..restart_seed("pwsh", None)
     };
-    assert_eq!(born_in_tab(launched, None).environment, None);
+    assert_eq!(born_in_tab(launched, None).carried_environment, None);
 }
 
 /// RED (F-SWEEP-2-048, coordinator's ruling 2026-10-09) — **every verb that starts a shell inside
@@ -3716,14 +3716,14 @@ fn every_shell_born_in_a_tab_is_born_with_the_tabs_carried_environment() {
     }
     let duplicate = method_body("Runtime", "duplicate_tab");
     assert!(
-        duplicate.contains("state.environment.clone()"),
+        duplicate.contains("state.carried_environment.clone()"),
         "`Duplicate tab` carries the tab's environment to the new tab:\n{duplicate}"
     );
     let birth = free_fn_body("create_tab_state")
         .split_whitespace()
         .collect::<String>();
     assert!(
-        birth.contains("born_in_tab(") && birth.contains("seed.environment.as_ref()"),
+        birth.contains("born_in_tab(") && birth.contains("seed.carried_environment.as_ref()"),
         "a tab's own panes are born with its environment:\n{birth}"
     );
 }

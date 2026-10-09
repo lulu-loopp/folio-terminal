@@ -1615,7 +1615,7 @@ impl Runtime<'_> {
         let inherited = born_in_tab(
             inherited,
             self.window.tabs[self.window.active_tab]
-                .environment
+                .carried_environment
                 .as_ref(),
         );
         let wake = &self.window.pty_wake;

@@ -803,7 +803,7 @@ impl Runtime<'_> {
                         unknown_profile_id,
                         card_skip: 0,
                         prefill: None,
-                        environment: None,
+                        carried_environment: None,
                     },
                 )]);
                 (seats, manual_name, leaves, BTreeMap::new())
@@ -927,7 +927,7 @@ impl Runtime<'_> {
                 // it back every time.
                 pinned: false,
                 // A new tab owns no launch's environment.
-                environment: None,
+                carried_environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),

@@ -673,7 +673,7 @@ impl Runtime<'_> {
         let seed = born_in_tab(
             restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell()),
             self.window.tabs[self.window.active_tab]
-                .environment
+                .carried_environment
                 .as_ref(),
         );
         // **The replacement is born at the old view's rung** (ticket 37): *Restart shell* keeps
