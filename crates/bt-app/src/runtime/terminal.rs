@@ -1,6 +1,7 @@
 //! `terminal` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::CaptureOwner;
 use crate::PtyTarget;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
@@ -1416,6 +1417,7 @@ impl Runtime<'_> {
             hyperlink_control,
             local_image_activation,
         })));
+        self.capture_mirror_begin(CaptureOwner::TerminalSelection);
         // The route the press armed, and what it promised (`BT_MOUSE_TRACE`).
         // Read back out of the route rather than off the locals, so what the
         // trace reports is what the release will actually find.
@@ -1458,6 +1460,7 @@ impl Runtime<'_> {
         // whatever pane wears its seat now.
         if self.live_paste_target(owner).is_none() {
             self.window.mouse_route = None;
+            self.capture_mirror_end(CaptureOwner::TerminalSelection);
             return Ok(());
         }
         let seat = owner.seat;
@@ -1647,6 +1650,7 @@ impl Runtime<'_> {
             self.app.settings_store.loaded().copy_on_select,
         );
         self.window.mouse_route = None;
+        self.capture_mirror_end(CaptureOwner::TerminalSelection);
         if single_click {
             self.clear_pane_selection(seat);
             self.publish_interaction_frame()?;

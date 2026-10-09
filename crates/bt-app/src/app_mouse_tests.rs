@@ -3756,7 +3756,7 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
     // A selection drag is addressed the same way.
     assert!(
         squeezed_body("Runtime", "extend_local_selection").contains(
-            "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;returnOk(());}letseat=owner.seat;"
+            "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;self.capture_mirror_end(CaptureOwner::TerminalSelection);returnOk(());}letseat=owner.seat;"
         ),
         "selection: its moves go to its own shell, and a gone shell lets it go"
     );

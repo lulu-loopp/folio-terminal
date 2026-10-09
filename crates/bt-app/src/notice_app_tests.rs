@@ -293,7 +293,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
         "the forwarded release is sent from the owner's cell"
     );
     assert!(
-        release.contains("self.window.mouse_route=None;returnOk(true);"),
+        release.contains("self.window.mouse_route=None;self.capture_mirror_end(CaptureOwner::ForwardedPress);returnOk(true);"),
         "and a pane with no frame still lets go of the route"
     );
     let hit = squeezed_body("Runtime", "forwarded_gesture_hit");

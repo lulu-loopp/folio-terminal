@@ -1,6 +1,7 @@
 //! `peek` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::CaptureOwner;
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
     LeafId, MathWorkerRequest, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock, PeekFacts,
@@ -937,6 +938,8 @@ impl Runtime<'_> {
         // nothing left to promote, and a promotion that fired afterwards would
         // open a window over a file nobody is pointing at any more.
         self.window.file_peek_press = None;
+        self.capture_mirror_end(CaptureOwner::GlanceThumb);
+        self.capture_mirror_end(CaptureOwner::GlanceHeadPress);
         self.window.peek_buffer = None;
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
@@ -962,6 +965,7 @@ impl Runtime<'_> {
             .is_some_and(|drag| drag.surface == PreviewSurface::Peek)
         {
             self.preview_block_drag = None;
+            self.capture_mirror_end(CaptureOwner::BlockThumb(self.id));
         }
         if self
             .preview_block_hover
@@ -1989,6 +1993,7 @@ impl Runtime<'_> {
                 self.window.file_peek_press = Some(FilePeekPress {
                     latch: DragLatch::new(position),
                 });
+                self.capture_mirror_begin_pressed(CaptureOwner::GlanceHeadPress, button);
                 Ok(true)
             }
             // **A card with no window to become keeps the head it always had**
@@ -2001,6 +2006,7 @@ impl Runtime<'_> {
                 if let Some(peek) = self.window.file_peek.as_mut() {
                     peek.thumb_grab = Some(grab);
                 }
+                self.capture_mirror_begin_pressed(CaptureOwner::GlanceThumb, button);
                 // The thumb's ink changes the moment it is taken, so this owes a
                 // frame even though nothing has moved yet.
                 if self.refresh_overlay() {
@@ -2250,6 +2256,7 @@ impl Runtime<'_> {
             return Ok(true);
         }
         self.window.file_peek_press = None;
+        self.capture_mirror_end(CaptureOwner::GlanceHeadPress);
         self.promote_file_peek(position)?;
         Ok(true)
     }
@@ -2354,6 +2361,7 @@ impl Runtime<'_> {
             win: id,
             kind: FloatDragKind::Move { grab },
         });
+        self.capture_mirror_begin(CaptureOwner::FloatDrag);
         self.forget_dead_float_gestures();
         self.apply_pointer_cursor();
         self.refresh_chrome();
@@ -2375,6 +2383,7 @@ impl Runtime<'_> {
         if self.window.file_peek_press.take().is_none() {
             return Ok(false);
         }
+        self.capture_mirror_end(CaptureOwner::GlanceHeadPress);
         // The same door, and literally the same one: a head that decided it was
         // a press and a face that never had a choice must arrive at one
         // document, or the card would lead two places depending on where in it
@@ -2400,6 +2409,9 @@ impl Runtime<'_> {
             .file_peek
             .as_mut()
             .is_some_and(|peek| peek.thumb_grab.take().is_some());
+        if released {
+            self.capture_mirror_end(CaptureOwner::GlanceThumb);
+        }
         if released && self.refresh_overlay() {
             self.present_chrome_change()?;
         }

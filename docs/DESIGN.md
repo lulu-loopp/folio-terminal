@@ -14652,3 +14652,11 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** Every item of bt-app outside `crate::runtime::pointer` that reads a pointer field, holds a `PhysicalPosition`, names a button or wheel type, reads the system cursor, names a pointer event kind or the touch step is a row of `docs/plans/POINTER-DEBT.tsv` (547 rows, one per occurrence); the file only shrinks (`scripts/ci/check-pointer-debt.ps1`, the migration-debt gate's rules). The overlay walk costs 0.1 µs at p99 with eight floats up and under 1 ns per further float.
 
 **Pinned by** `pointer_app_tests::every_band_is_a_pointer_layer_or_takes_no_pointer`, `the_walk_visits_one_frame_per_float_and_the_parts_of_one` (F = 0, 1, 8, 64, 512), `the_walk_allocates_nothing` (a counting allocator in the test build), `a_complete_event_walks_once` (index) and `every_pointer_read_is_the_routers_or_a_captures`.
+
+### 2026-10-09 — Every latched gesture is recorded in one application slot beside its legacy field (T-POINTER-CAPTURE cut 2)
+
+**What is built.** `App::pointer_capture`, a `CaptureMirror`: a list of `PointerCapture` records (window, `CaptureOwner` — one variant per latched gesture, a tab's own naming the tab — button, and the router's answer at the latching event). Every site that sets or clears one of the twenty legacy latch fields writes the same fact beside it through `capture_mirror_begin`/`_end` (`docs/plans/design/pointer-capture-2026-10-09.md` §4.1 cut 2, revision (f)). Nothing reads it; no behaviour changes.
+
+**The rule.** The mirror records every overlap the fields can be in today — a latch whose release was eaten beside the next gesture's, a settings drag beside another latch, a formula press over a forwarded one — rather than resolving it; cut 3's one slot brings the count to zero.
+
+**Pinned by** `pointer_app_tests::the_mirror_names_every_live_legacy_latch` (every writer the ownership census proves names its latch's record; the three overlaps scripted and counted).

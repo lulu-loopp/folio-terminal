@@ -1,6 +1,7 @@
 //! `panes` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::CaptureOwner;
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
     conpty_source_of, decided_birth, deliver_held_input, diagnostics, i18n, land_shell_birth,
@@ -1370,6 +1371,7 @@ impl Runtime<'_> {
     pub(crate) fn settle_seat_set_change(&mut self) -> Result<()> {
         self.window.seat_pointer = seats::ChromePointer::default();
         self.window.divider_drag = None;
+        self.capture_mirror_end(CaptureOwner::Divider);
         self.sweep_preview_panes();
         self.apply_window_min_inner_size()?;
         self.commit_seat_geometry()
@@ -3825,6 +3827,7 @@ impl Runtime<'_> {
             .find(|slot| slot.id == drag.split)
         else {
             self.window.divider_drag = None;
+            self.capture_mirror_end(CaptureOwner::Divider);
             return Ok(false);
         };
         let along = match drag.dir {
@@ -3936,6 +3939,7 @@ impl Runtime<'_> {
         let Some(drag) = self.window.divider_drag.take() else {
             return Ok(false);
         };
+        self.capture_mirror_end(CaptureOwner::Divider);
         self.window.seat_pointer.dragging = None;
         let usable = self
             .seats

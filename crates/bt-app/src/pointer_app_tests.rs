@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::runtime::pointer::{
-    BANDS_THAT_TAKE_NO_POINTER, FloatFacts, POINTER_LAYERS_TOP_FIRST, Plane, PointerFacts,
-    PointerHit, PointerScene, Visits, walk_pointer_layers,
+    BANDS_THAT_TAKE_NO_POINTER, CaptureMirror, CaptureOwner, FloatFacts, POINTER_LAYERS_TOP_FIRST,
+    Plane, PointerCapture, PointerFacts, PointerHit, PointerScene, Visits, walk_pointer_layers,
 };
 use crate::test_support::{calls_of, source};
 use bt_source::{Pattern, Search, View, needle};
@@ -744,5 +744,189 @@ fn every_pointer_read_is_the_routers_or_a_captures() {
     assert_eq!(
         held, wanted,
         "the file is the rendering, row for row and count for count"
+    );
+}
+
+// ── the capture mirror (cut 2) ─────────────────────────────────────────────────
+
+/// **Every legacy latch field** (§1.2), as the census names a fact: the
+/// window's, the tab's, and the glance card's thumb.
+const LEGACY_LATCHES: [(&str, &[&str]); 20] = [
+    ("WindowRuntime.divider_drag", &["Divider"]),
+    ("WindowRuntime.tab_press", &["TabPress"]),
+    ("WindowRuntime.pane_press", &["PanePress"]),
+    ("WindowRuntime.row_press", &["RowPress"]),
+    ("WindowRuntime.drag", &["Drag"]),
+    ("WindowRuntime.float_head_press", &["FloatHeadPress"]),
+    ("WindowRuntime.float_drag", &["FloatDrag"]),
+    ("WindowRuntime.file_peek_press", &["GlanceHeadPress"]),
+    ("FilePeek.thumb_grab", &["GlanceThumb"]),
+    ("WindowRuntime.video_bar_drag", &["VideoBar"]),
+    ("TabState.preview_body_drag", &["PreviewBodyThumb"]),
+    ("TabState.preview_block_drag", &["BlockThumb"]),
+    ("TabState.preview_image_drag", &["PicturePan"]),
+    ("TabState.preview_selecting", &["EditSelection"]),
+    ("TabState.preview_text_drag", &["RenderedSelection"]),
+    ("TabState.terminal_thumb_drag", &["TerminalThumb"]),
+    ("TabState.terminal_column_drag", &["TerminalFootMark"]),
+    (
+        "WindowRuntime.mouse_route",
+        &["TerminalSelection", "ForwardedPress", "FormulaBlock"],
+    ),
+    ("WindowRuntime.settings_slider_drag", &["SettingsSlider"]),
+    ("WindowRuntime.settings_menu_bar_drag", &["SettingsMenuBar"]),
+];
+
+/// One latch taken in a window.
+fn a_capture(window: winit::window::WindowId, owner: CaptureOwner) -> PointerCapture {
+    PointerCapture {
+        window,
+        owner,
+        button: MouseButton::Left,
+        started: None,
+    }
+}
+
+/// RED (T-POINTER-CAPTURE cut 2) — **the mirror names every live legacy
+/// latch**, and records today's overlaps rather than resolving them.
+///
+/// Two halves. Every function that sets or clears a latch field — an
+/// assignment or a `take`, as the ownership census proves a write — writes the
+/// mirror beside it (`capture_mirror_begin`, `capture_mirror_end`, or the
+/// route's `capture_mirror_end_route`), so the mirror holds what the fields
+/// hold. And the mirror keeps every latch it is told of, so the three overlaps
+/// the fields can be in today are each one more record: a latch whose release
+/// was eaten beside the next gesture's, a settings drag beside another latch,
+/// a formula press over a forwarded one. Cut 3's one slot cannot hold two; it
+/// brings the count to zero.
+///
+/// MUTATION: drop the mirror call from one set site (`press_tab`'s, say) and
+/// the first half names the function.
+#[test]
+fn the_mirror_names_every_live_legacy_latch() {
+    let app = source();
+    let census =
+        bt_source::FieldCensus::take(app, &["WindowRuntime", "TabState", "FilePeek"], &[app])
+            .unwrap_or_else(|failure| panic!("{failure}"));
+    // A function that reaches the latch through `as_mut` changes the gesture in
+    // place (its latch travelling, its anchor moving): that is not a latch set
+    // or cleared, and the census says which functions those are.
+    let in_place: Vec<(&str, &str, &str)> = census
+        .rows()
+        .iter()
+        .filter(|row| {
+            row.column == bt_source::Column::Access
+                && row.kinds.iter().any(|kind| kind == "call:as_mut")
+        })
+        .map(|row| {
+            (
+                row.fact.as_str(),
+                row.module.as_str(),
+                row.function.as_str(),
+            )
+        })
+        .collect();
+    let mut writers = 0;
+    for row in census.rows() {
+        if in_place.contains(&(
+            row.fact.as_str(),
+            row.module.as_str(),
+            row.function.as_str(),
+        )) {
+            continue;
+        }
+        let Some((_, owners)) = LEGACY_LATCHES
+            .iter()
+            .find(|(fact, _)| *fact == row.fact.as_str())
+        else {
+            continue;
+        };
+        if row.column != bt_source::Column::Write
+            || !row
+                .kinds
+                .iter()
+                .any(|kind| kind == "assign" || kind == "call:take")
+        {
+            continue;
+        }
+        let (owner, name) = row
+            .function
+            .split_once("::")
+            .unwrap_or(("", row.function.as_str()));
+        let query = bt_source::ItemQuery::method(owner, name).in_module(&row.module);
+        let in_the_item = |pattern: Pattern| {
+            app.search(
+                &Search::new(needle!(pattern), View::Identifiers)
+                    .in_scope(bt_source::Scope::Item(query.clone())),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+        };
+        // The record named by its owner, or — for the route, one field holding
+        // three gestures — the two doors that write the route's records.
+        let mirrored = owners
+            .iter()
+            .map(|owner| in_the_item(Pattern::path(&format!("CaptureOwner::{owner}"))))
+            .sum::<usize>()
+            + if row.fact == "WindowRuntime.mouse_route" {
+                in_the_item(Pattern::call("capture_mirror_end_route"))
+                    + in_the_item(Pattern::call("capture_mirror_forwarded"))
+            } else {
+                0
+            };
+        writers += 1;
+        assert!(
+            mirrored > 0,
+            "`{}::{}` sets or clears `{}` and writes no record of {owners:?} to the mirror beside it",
+            row.module,
+            row.function,
+            row.fact
+        );
+    }
+    assert!(
+        writers > 40,
+        "the census found the latches' writers ({writers})"
+    );
+
+    let (a, b) = (
+        winit::window::WindowId::from(1_u64),
+        winit::window::WindowId::from(2_u64),
+    );
+    let tab = TabId(7);
+    let mut overlaps = 0;
+    // 1. A thumb whose release a menu ate, and the next gesture beside it.
+    let mut mirror = CaptureMirror::default();
+    mirror.begin(a_capture(a, CaptureOwner::PreviewBodyThumb(tab)));
+    mirror.begin(a_capture(a, CaptureOwner::TerminalThumb(tab)));
+    assert_eq!(
+        mirror.held().len(),
+        2,
+        "the stale thumb and the new one are both named"
+    );
+    overlaps += mirror.overlaps();
+    // 2. A settings drag beside a latch in another window.
+    let mut mirror = CaptureMirror::default();
+    mirror.begin(a_capture(b, CaptureOwner::TabPress));
+    mirror.begin(a_capture(a, CaptureOwner::SettingsSlider));
+    assert_eq!(mirror.held().len(), 2);
+    overlaps += mirror.overlaps();
+    // 3. A formula press over a forwarded one: the field holds the formula's
+    //    route now, and the forwarded press is still down in the program.
+    let mut mirror = CaptureMirror::default();
+    mirror.begin(a_capture(a, CaptureOwner::ForwardedPress));
+    mirror.begin(a_capture(a, CaptureOwner::FormulaBlock));
+    assert_eq!(mirror.held().len(), 2);
+    overlaps += mirror.overlaps();
+    // Writing a latch again is the same latch, and clearing it ends only its
+    // own window's record.
+    mirror.begin(a_capture(a, CaptureOwner::FormulaBlock));
+    mirror.end(b, CaptureOwner::FormulaBlock);
+    assert_eq!(mirror.held().len(), 2);
+    mirror.end(a, CaptureOwner::FormulaBlock);
+    mirror.end(a, CaptureOwner::ForwardedPress);
+    assert!(mirror.held().is_empty());
+    assert_eq!(
+        overlaps, 3,
+        "today's three overlaps, each recorded; cut 3 brings this to zero"
     );
 }

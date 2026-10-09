@@ -1,6 +1,7 @@
 //! `tabs` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::CaptureOwner;
 use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
     FolderPick, FormulaSwitches, HandoverInto, LeafId, MathHoverExit, MenuPaint, NewWindowPlan,
@@ -194,6 +195,8 @@ impl Runtime<'_> {
         self.window.preedit = None;
         self.window.mouse_route = None;
         self.window.divider_drag = None;
+        self.capture_mirror_end_route();
+        self.capture_mirror_end(CaptureOwner::Divider);
         self.window.seat_pointer = seats::ChromePointer::default();
         self.window.hyperlink_hover.clear();
         self.window.peek_hover.clear();
@@ -293,6 +296,7 @@ impl Runtime<'_> {
                 .is_some_and(|tab| tab.id == press.tab)
         }) {
             self.window.tab_press = None;
+            self.capture_mirror_end(CaptureOwner::TabPress);
         }
         if self.window.drag.as_ref().is_some_and(|drag| {
             self.window
@@ -301,6 +305,7 @@ impl Runtime<'_> {
                 .is_some_and(|tab| drag.tab() == Some(tab.id))
         }) {
             self.window.drag = None;
+            self.capture_mirror_end(CaptureOwner::Drag);
             // F2: the payload stopped existing, so the application's pointer has
             // nothing left to broker either.
             self.app.drag_broker = None;
@@ -1817,6 +1822,9 @@ impl Runtime<'_> {
         } else {
             TabPress::armed(tab, position, now)
         });
+        self.capture_mirror_end(CaptureOwner::PanePress);
+        self.capture_mirror_end(CaptureOwner::RowPress);
+        self.capture_mirror_begin(CaptureOwner::TabPress);
         Ok(())
     }
 

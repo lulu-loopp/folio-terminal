@@ -13009,6 +13009,11 @@ struct App {
     /// (Esc, and the release) take it down from inside the window that was
     /// holding the payload.
     drag_broker: Option<DragBroker>,
+    /// **The application's pointer capture** (T-POINTER-CAPTURE §2.2): one slot
+    /// for every window. In cut 2 a mirror of the legacy latch fields, written
+    /// beside each of them and read by nothing; see
+    /// [`runtime::pointer::CaptureMirror`].
+    pointer_capture: runtime::pointer::CaptureMirror,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).
     ///
@@ -44722,6 +44727,7 @@ impl Runtime<'_> {
             pending_application_change: None,
             pending_new_windows: Vec::new(),
             drag_broker: None,
+            pointer_capture: runtime::pointer::CaptureMirror::default(),
             pending_handover: None,
             quit_requested: false,
             quit: None,
@@ -47511,6 +47517,12 @@ impl Runtime<'_> {
             && (self.window.settings_slider_drag.take().is_some()
                 || self.window.settings_menu_bar_drag.take().is_some())
         {
+            if self.window.settings_slider_drag.is_none() {
+                self.capture_mirror_end(runtime::pointer::CaptureOwner::SettingsSlider);
+            }
+            if self.window.settings_menu_bar_drag.is_none() {
+                self.capture_mirror_end(runtime::pointer::CaptureOwner::SettingsMenuBar);
+            }
             if let Some(position) = self.window.pointer_position {
                 let hover = settings::hit(layout, &self.settings_values(), position.x, position.y);
                 self.window.settings.set_hover(Some(hover));
@@ -47534,6 +47546,7 @@ impl Runtime<'_> {
         {
             let held = (position.y as f32 - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1]);
             self.window.settings_menu_bar_drag = Some(held);
+            self.capture_mirror_begin(runtime::pointer::CaptureOwner::SettingsMenuBar);
             self.drag_settings_menu_bar(&bar, position)?;
             return Ok(());
         }
@@ -47603,6 +47616,7 @@ impl Runtime<'_> {
                     self.apply_slider(row, value)?;
                 }
                 self.window.settings_slider_drag = Some(row);
+                self.capture_mirror_begin(runtime::pointer::CaptureOwner::SettingsSlider);
             }
             // Turning a page puts the reader at the top of it.
             (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
@@ -49053,6 +49067,7 @@ impl Runtime<'_> {
             seat,
             grab: bar.grip(at[0]),
         });
+        self.capture_mirror_begin(runtime::pointer::CaptureOwner::TerminalFootMark(self.id));
         self.wake_terminal_column(seat);
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -49128,6 +49143,7 @@ impl Runtime<'_> {
                 // the pointer rather than jumping its top edge there.
                 grab: bar.grip(at[1]),
             });
+            self.capture_mirror_begin(runtime::pointer::CaptureOwner::TerminalThumb(self.id));
             self.woke_terminal_thumb(seat)?;
             return Ok(true);
         }
@@ -67502,6 +67518,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     runtime.window.tab_press = None;
                     runtime.window.pane_press = None;
                     runtime.window.row_press = None;
+                    runtime.capture_mirror_end(runtime::pointer::CaptureOwner::TabPress);
+                    runtime.capture_mirror_end(runtime::pointer::CaptureOwner::PanePress);
+                    runtime.capture_mirror_end(runtime::pointer::CaptureOwner::RowPress);
                     // P149's `window blur`: a glance is about where the pointer is,
                     // and a window that is not listening has no pointer.
                     runtime.hide_file_peek();

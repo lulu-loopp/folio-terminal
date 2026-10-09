@@ -1951,7 +1951,7 @@ fn a_text_selection_drawn_into_the_strip_is_finished_in_its_own_pane() {
     let release = squeezed_body("Runtime", "release_owned_gesture");
     assert!(
         release.contains(
-            "ifself.live_paste_target(drag.owner).is_none(){self.window.mouse_route=None;returnOk(true);}self.finish_local_selection(*drag)?;Ok(true)}"
+            "ifself.live_paste_target(drag.owner).is_none(){self.window.mouse_route=None;self.capture_mirror_end(CaptureOwner::TerminalSelection);returnOk(true);}self.finish_local_selection(*drag)?;Ok(true)}"
         ),
         "a selection's release finishes it, wherever the pointer is"
     );

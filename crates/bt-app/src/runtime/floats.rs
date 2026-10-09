@@ -1,6 +1,7 @@
 //! `floats` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::CaptureOwner;
 use crate::{
     CardWords, DropLanding, FileMenuState, FileMenuTarget, FileMenuTreeRow, HoverFloat, Layered,
     LeafId, MenuPaint, OwnTrigger, PAGE_SPINNER_STROKE_LOGICAL_PX, PointerTarget, PopoverTrigger,
@@ -2912,11 +2913,13 @@ impl Runtime<'_> {
             && self.window.float.live(drag.win).is_none()
         {
             self.window.float_drag = None;
+            self.capture_mirror_end(CaptureOwner::FloatDrag);
         }
         if let Some(press) = self.window.float_head_press
             && self.window.float.peek_id() != Some(press.win)
         {
             self.window.float_head_press = None;
+            self.capture_mirror_end(CaptureOwner::FloatHeadPress);
         }
         if let Some((id, _)) = self.window.float_hover
             && self.window.float.live(id).is_none()
