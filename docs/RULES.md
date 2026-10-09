@@ -1728,6 +1728,13 @@ again on every theme or setting change; nothing else about a page is changed.
 (0.4.5 ticket 60; owner's ruling 2026-09-25, option A): only for a profile whose receipt
 says a page has committed there, one spare per process, never replenished, handed over by
 `WebSeat::rehost`; the controller stays on the window thread (§5.2, ruling 2026-09-24).
+2026-10-09 *a page that answers with an error shows that page* (T-WEB-404-SAYS-UNKNOWN,
+coordinator's ruling 2026-10-09): a navigation a server answered — an HTTP status is present
+(`WebEvent::NavigationCompleted::http_status`: WebView2's `HttpStatusCode`, the main-frame
+`NSHTTPURLResponse` of that navigation on macOS) — is a page: no card, the address committed for
+the row, as every browser shows a 404 or a 500. The "Cannot open" / did-not-load card is only for
+a load that reached nothing (a name that did not resolve, a connection refused or cut before a
+response).
 
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,

@@ -12,6 +12,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A web page that answers with an error, such as 404 Not Found, shows the page the server sent instead of a card saying it could not be opened; the card is for an address that could not be reached at all. <!-- zh: pending F-SWEEP-2-048 -->
 - `folio --with-environment` opens a tab that keeps the environment of the terminal you started it from — an activated Python or conda environment, a developer prompt — also when Folio is already running. <!-- zh: pending F-SWEEP-2-048 -->
 - A link an agent printed with a stray full-width mark after it, such as `http://example.com：`, now opens the right address, and a link Folio will not open says why — the address is invalid, it is blocked, or no program opens it — instead of always saying it was blocked. <!-- zh: pending F-SWEEP-2-048 -->
 - On a Mac with two copies of Folio installed, opening the second one joins the one already running instead of opening a window that saves nothing; this includes the copy an update restores after it fails. <!-- zh: pending T-MAC-CROSS-COPY-HANDOVER -->

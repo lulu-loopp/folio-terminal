@@ -1308,20 +1308,38 @@ fn web_error_status_name(status: i32) -> &'static str {
 
 /// What a finished navigation leaves on the seat: a card, or nothing.
 ///
-/// A pure function so that the one distinction it makes can be shot at without
-/// an engine — and the distinction is the whole of it. A **refused** navigation
-/// completes with `IsSuccess == false` exactly as a connection failure does, and
-/// the two mean opposite things: one is the policy working and already has a
-/// card of its own, the other is the network. Without this, every `· blocked`
-/// in the foot would also raise a 「did not respond」 over the seat.
-pub(crate) fn load_fault(uri: &str, success: bool, status: i32) -> Option<WebFault> {
-    if success || status == WEB_ERROR_OPERATION_CANCELED {
+/// A pure function so that the distinctions it makes can be shot at without
+/// an engine. A **refused** navigation completes with `IsSuccess == false`
+/// exactly as a connection failure does, and the two mean opposite things: one
+/// is the policy working and already has a card of its own, the other is the
+/// network. Without this, every `· blocked` in the foot would also raise a
+/// 「did not respond」 over the seat.
+///
+/// **And a server that answered is a page, not a failure** (T-WEB-404-SAYS-UNKNOWN,
+/// ruling 2026-10-09). WebView2 completes a 404 or a 500 with `IsSuccess == false`
+/// and `WebErrorStatus` `Unknown` and draws the page the server sent; a card over
+/// it hid the server's own words behind "did not respond". With an HTTP status
+/// present the pane shows that page, as every browser does — the card is for a
+/// load that reached nothing.
+pub(crate) fn load_fault(
+    uri: &str,
+    success: bool,
+    status: i32,
+    http_status: Option<u16>,
+) -> Option<WebFault> {
+    if page_arrived(success, http_status) || status == WEB_ERROR_OPERATION_CANCELED {
         return None;
     }
     Some(WebFault::DidNotLoad {
         host: crate::webnav::host_of(uri).unwrap_or_default(),
         detail: format!("WebErrorStatus · {}", web_error_status_name(status)),
     })
+}
+
+/// **Whether a finished navigation put a page on the seat**: the engine said so,
+/// or a server answered it with a status of its own (T-WEB-404-SAYS-UNKNOWN).
+pub(crate) fn page_arrived(success: bool, http_status: Option<u16>) -> bool {
+    success || http_status.is_some()
 }
 
 /// What to do about a download the engine has already been told to cancel.
@@ -2653,14 +2671,19 @@ impl WebSeat {
                 uri,
                 success,
                 status,
+                http_status,
             } => {
                 crate::web_trace::line(|| {
                     format!(
-                        "navigation_completed {} uri={uri} success={} status={status}",
+                        "navigation_completed {} uri={uri} success={} status={status} http={}",
                         crate::web_trace::seat(self.address.page),
                         u8::from(*success),
+                        http_status.map_or(0, u16::from),
                     )
                 });
+                // **A server that answered put its page here** (T-WEB-404-SAYS-UNKNOWN): the
+                // seat, the card and the machine all read it as the page it is.
+                let arrived = page_arrived(*success, *http_status);
                 self.page.loading = false;
                 self.page.loading_since = None;
                 // **The seat's own blank page has landed** (ticket 60, SW-5): what "parked" means
@@ -2668,9 +2691,9 @@ impl WebSeat {
                 if *success && uri.eq_ignore_ascii_case(BLANK_PAGE) {
                     self.landed_blank = Some(self.machine.generation());
                 }
-                if *success {
+                if arrived {
                     self.fault = None;
-                } else if let Some(fault) = load_fault(uri, *success, *status) {
+                } else if let Some(fault) = load_fault(uri, *success, *status, *http_status) {
                     self.fault = Some(fault);
                 }
                 // Asked *before* and *after*, and the answer is the machine's
@@ -2682,7 +2705,7 @@ impl WebSeat {
                 let was = self.machine.recoverable_url().map(str::to_owned);
                 let effect =
                     self.machine
-                        .on_navigation_completed(self.machine.generation(), uri, *success);
+                        .on_navigation_completed(self.machine.generation(), uri, arrived);
                 if let Some(now) = self.machine.recoverable_url()
                     && was.as_deref() != Some(now)
                 {
@@ -5821,9 +5844,9 @@ mod fault_tests {
     /// red — which is exactly the double card the ruling forbids.
     #[test]
     fn a_cancelled_navigation_is_not_a_page_that_did_not_load() {
-        assert_eq!(load_fault("http://127.0.0.1:9134/x", false, 14), None);
-        assert_eq!(load_fault("http://127.0.0.1:9134/x", true, 0), None);
-        let fault = load_fault("http://127.0.0.1:9134/x", false, 12).expect("a card");
+        assert_eq!(load_fault("http://127.0.0.1:9134/x", false, 14, None), None);
+        assert_eq!(load_fault("http://127.0.0.1:9134/x", true, 0, None), None);
+        let fault = load_fault("http://127.0.0.1:9134/x", false, 12, None).expect("a card");
         assert_eq!(
             fault,
             WebFault::DidNotLoad {
@@ -6868,6 +6891,72 @@ mod rebuild_for_a_new_version_tests {
             );
         }
         assert!(!web.page.loading, "and the page that asked went nowhere");
+    }
+
+    /// RED (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — **a server that answered is its page,
+    /// and only a load that reached nothing is a card.**
+    ///
+    /// WebView2 completes a 404 with `IsSuccess == false` and `WebErrorStatus` `Unknown` (0); what
+    /// tells it from a load that reached nothing is the HTTP status the server sent. The page
+    /// stands: no card, the address committed for the row, the spinner stopped.
+    ///
+    /// MUTATION: a card for any failure (`page_arrived` answering `success` alone) and the 404
+    /// and the 500 raise "did not respond" over the server's own page.
+    #[test]
+    fn a_page_the_server_answered_with_an_error_is_shown_and_carded_only_when_nothing_answered() {
+        for (address, http_status) in [
+            ("https://例子.测试/缺页", 404),
+            ("https://example.com/missing", 404),
+            ("http://127.0.0.1:5173/错误", 500),
+        ] {
+            let mut web = ready_seat();
+            let mut outcomes = Vec::new();
+            web.digest(
+                &bt_platform::WebEvent::NavigationStarting {
+                    uri: address.to_owned(),
+                    cancelled: false,
+                },
+                &mut outcomes,
+            );
+            web.digest(
+                &bt_platform::WebEvent::NavigationCompleted {
+                    uri: address.to_owned(),
+                    success: false,
+                    status: 0,
+                    http_status: Some(http_status),
+                },
+                &mut outcomes,
+            );
+            assert_eq!(web.fault, None, "{address} answered {http_status}: no card");
+            assert_eq!(
+                web.machine.recoverable_url(),
+                Some(address),
+                "the server's page is the page the row names"
+            );
+            assert!(outcomes.contains(&WebOutcome::Committed), "{outcomes:?}");
+            assert!(!web.page.loading);
+        }
+        // Nothing answered — `Unknown` with no HTTP status — keeps its card, unchanged.
+        let mut web = ready_seat();
+        let mut outcomes = Vec::new();
+        web.digest(
+            &bt_platform::WebEvent::NavigationCompleted {
+                uri: "http://10.255.255.1:81/文档".to_owned(),
+                success: false,
+                status: 0,
+                http_status: None,
+            },
+            &mut outcomes,
+        );
+        assert!(
+            matches!(web.fault, Some(WebFault::DidNotLoad { .. })),
+            "{:?}",
+            web.fault
+        );
+        assert_ne!(
+            web.machine.recoverable_url(),
+            Some("http://10.255.255.1:81/文档")
+        );
     }
 
     /// RED (68) — **a browser that dies under a loading page stops the spinner.**
