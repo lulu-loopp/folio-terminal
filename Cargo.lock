@@ -304,13 +304,10 @@ version = "0.4.7"
 dependencies = [
  "bt-detect",
  "bt-doc",
- "bt-effects",
  "bt-render",
  "bt-term",
  "bt-viewport",
- "pollster",
  "web-time",
- "wgpu",
 ]
 
 [[package]]
