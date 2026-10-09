@@ -102,10 +102,10 @@ mod lane;
 #[cfg(test)]
 mod lane_contract_tests;
 mod launch_wire;
-#[cfg(target_os = "linux")]
-mod linux_hang_probe;
 mod layout_tables;
 mod linebreak;
+#[cfg(target_os = "linux")]
+mod linux_hang_probe;
 mod marks;
 mod menubar;
 mod mouse_trace;
