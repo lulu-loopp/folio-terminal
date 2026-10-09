@@ -192,8 +192,8 @@ to the running process's update job where the launch lands (`Job::told_by_a_laun
 | the uninstaller, `folio.exe --uninstall [--remove-data] --after-pid <pid>` (macOS: the bundle's executable) | a Folio's very last act after *Uninstall* on the Settings card, `uninstall::leave_armed`, through `quiet_breakaway_command` by `current_exe` (0.4.7 T-UNINSTALL-UX) | detached and not reaped, with all three standard streams the null device (`quiet_breakaway_command`), so it holds nothing in the data folder it may remove; it waits for the exact pid/start identity it is given (60 s) before cleanup. On Windows it asks for `CREATE_BREAKAWAY_FROM_JOB`; if the containing job disallows that, creation fails, the leaving Folio shows `standalone_alert`, and no uninstall is claimed |
 | the remover — a native copy of the running executable checked as a regular, single-link file with the expected size and SHA-256, in a random account-owned directory below `%LOCALAPPDATA%\Folio-uninstall\` on Windows or a mode-0700 directory below `~/Library/Application Support/Folio-uninstall/` on macOS (`uninstall::REMOVER_HOME`, beside the data folders and inside none of them; the remover and a refused schedule both remove it once empty, `deferred_removal::retire_private`, and a purge takes what an ended remover left), run through the internal, undocumented `--uninstall-remove` door | `bt_platform::deferred_removal::schedule`, from `uninstall::remove_the_program` (0.4.7 T-UNINSTALL-UX rounds 2 and 6) | the scheduler waits only for a readiness-pipe acknowledgement and then returns “scheduled”; the remover outlives the door, waits at most five minutes for every `(pid,start time)` in the explicit list plus every process whose image identity is the installed `folio.exe`, retries held files with bounded backoff, and checks each named file's single-link size and SHA-256 by path immediately before each deletion attempt. Final accounting uses a fallible existence read: only confirmed absence is success, and the last error for every uninspectable remaining path is written to `result.txt` and shown through bounded `standalone_alert`. The path-based check/delete instant is not defended against a deliberately racing same-account process. It removes the install folder only if empty and its copied executable last. On Windows it also requests breakaway; a job that refuses it makes scheduling fail synchronously. If the remover is ended or power is lost, deletion can be partial and no final reporter survives |
 | `powershell.exe` — the PSReadLine probe | `psreadline::run_probe`, through `shell_integration::run_powershell_probe` and `spawn_probe`, in the current logon environment (`shell_integration::ProbeEnvironment`) | at every open of the Terminal page, and at a Windows PowerShell birth while no usable answer is held; one at a time, the requests made while one is out answered by one more (`psreadline::PsReadLineProbe`, T-PROBE-NO-CACHED-FAILURE); within `POWERSHELL_PROBE_DEADLINE` (five seconds); the contained tree ends at the deadline, on completion, drop, panic or Folio exit |
-| `powershell.exe` — the `$PROFILE` probe | `shell_integration::run_profile_path_probe` through `run_powershell_probe` and `spawn_probe`, in the current logon environment inside Folio (this process's own for the command-line removal verbs) | once per distinct program until an answer is held, which the edition observation then replaces at each Profiles-page visit; five-second deadline (sixty for a removal); the whole contained tree ends at the deadline |
-| the resolved `powershell.exe` or `pwsh.exe` — the command-row parser probe | `shell_integration::run_parse_probe`, through `spawn_probe` on the existing `powershell-script-prepare` below-normal worker, in the current logon environment | at most three attempts per exact resolved executable and argv; the command text travels on UTF-8 stdin to a fixed `Parser::ParseInput` command, never on the probe's command line or environment; a five-second deadline ends the contained tree, and only a clean parse admits injection. Pending, invalid, failed and timed-out questions leave the row unchanged. A failure is unknown: a later birth may schedule the next background attempt but never waits for it; the per-key attempt limit prevents one child per birth |
+| `powershell.exe` — the `$PROFILE` probe | `shell_integration::run_profile_path_probe` through `run_powershell_probe` and `spawn_probe`, in the current logon environment inside Folio (this process's own for the command-line removal verbs) | once per distinct program until an answer is held, which the edition observation then replaces at each Profiles-page visit; `POWERSHELL_PROBE_PATIENCE` — ended after five seconds without life, two minutes in all (a fixed sixty seconds for a removal); the whole contained tree ends with it |
+| the resolved `powershell.exe` or `pwsh.exe` — the command-row parser probe | `shell_integration::run_parse_probe`, through `spawn_probe` on the existing `powershell-script-prepare` below-normal worker, in the current logon environment | at most three attempts per exact resolved executable and argv; the command text travels on UTF-8 stdin to a fixed `Parser::ParseInput` command, never on the probe's command line or environment; `POWERSHELL_PROBE_PATIENCE` ends the contained tree after five seconds without life or two minutes in all (a cold module analysis cache takes 22–46 s, working), and only a clean parse admits injection. Pending, invalid, failed and timed-out questions leave the row unchanged. A failure is unknown: a later birth may schedule the next background attempt but never waits for it; the per-key attempt limit prevents one child per birth |
 | `cmd.exe /c "<copilot> --version"` | `attention_copilot::run_probe`, through `probe_output_with_raw_tail` (the `/c` string is passed as written), in the current logon environment | the first time the Agents page or the first-run card needs it, at every open of the Agents page, and when the program walk finds copilot elsewhere; one at a time, the requests made while one is out answered by one more, stopped at a 10 s deadline (T-FRESH-FACTS); the contained tree ends with the probe or Folio |
 | `git` | `git::git_command`, always from `bt-git-worker`; `clean`, `diff`, `for-each-ref`, `log`, `rev-list`, `rev-parse`, `show` and `status` use `spawn_probe`; `add`, `branch`, `checkout`, `restore` and `tag` retain only the direct child | never from the window thread; one status costs three threads. The contained commands invoke no Git hook (`status` also forces `core.fsmonitor=false` and forbids optional index locks), so their whole process tree shares the deadline. `add` and `restore` can invoke `post-index-change`, `checkout` can invoke `post-checkout`, and ref updates can invoke `reference-transaction`; a process deliberately backgrounded by those hooks is a hand-off and may outlive Git. The closed subcommand policy refuses a new verb until its hook lifetime is decided |
 | `explorer.exe`, the registered handler, Finder | `bt_platform::handoff` | fully detached: no handle, no wait, no kill |
@@ -236,6 +236,17 @@ sees the leader exit does that and keeps the status, and every later wait
 answers from it, as `std::process::Child` does, so poll-then-collect and
 kill-then-collect are legal on every platform. Deliberate hand-offs above keep
 using `Command::spawn` and are never given a probe guard.
+
+**A probe's deadline has one owner** (G-SWEEP-048): `ProbeChild::wait_within` with a
+`ProbePatience` — how long the probe may show no life (`quiet`) and how long it may run at all
+(`budget`); a fixed deadline is the two equal. Life is the probe's processor time advancing
+(`ProbeChild::processor_time`: its job's accounting on Windows, its immediate child's otherwise,
+read on each 20 ms look the owner already made), so a PowerShell analysing a cold module cache is
+waited for while it works, and one another program holds suspended is ended after the quiet period
+with its contained tree. `ProbeWatch::look` is the rule as a function of the looks. When the probe
+was silent and a thread of it is held suspended (`ProbeChild::suspended`: a suspend count above
+zero on Windows, a stopped leader on Unix) the answer is `ProbeOverdue::Suspended`, and the
+PowerShell probe owner writes "suspended by another program" to `diagnostics.log`.
 
 **Not a child: the Windows identity check.** `bt_platform::trust` (0.4.6 U-15)
 asks `WinVerifyTrust`, the time-stamp and chain calls and the package reader in
@@ -736,6 +747,15 @@ and profile declarations. No product start road currently identifies a launcher
 override; inherited differences are not evidence of one. On non-Windows hosts the
 door returns no block and `bt-pty` retains ordinary process inheritance.
 
+**Whether the pane's folder still stands is the birth's question** (G-SWEEP-048, #29).
+`profiles::spawn_place` decides a pane's place without the disk (`BirthPlace`: the place with the
+carried folder, and — where the folder decides it and this machine can see it — where the pane
+opens when the folder is gone); the `bt-pty-birth` worker asks (`pty_door::gone_place`, an
+`is_dir` that waits out an offline share's 20–60 s there) and its answer (`pty_door::Born`) says
+whether the folder was gone; the landing then stands the pane where no folder would have put it
+and says which folder in `diagnostics.log`. A restore and a Recent row carry the saved folder
+unasked for the same reason.
+
 **Nothing waits for that worker** (T-BIRTH-OFF-WINDOW, 2026-10-08; §5.3 row 11
 retired). `create_leaf_session` decides the pane's shell on the window thread and
 asks for it (`pty_door::request_shell`): one `bt-pty-birth` worker per birth, as
@@ -788,8 +808,8 @@ requests, the newest waiting request answered by one more probe, merges and repl
 `diagnostics.log`, an older answer refused, a failure the newest answer and not a verdict. The Terminal
 page's open edge asks every time; a Windows PowerShell birth asks only while no usable answer is held.
 The child runs in the current logon environment (`shell_integration::ProbeEnvironment`, which every
-PowerShell probe — `$PROFILE` path, edition observation, parse — now uses) within the five-second
-`POWERSHELL_PROBE_DEADLINE`. The worker is started by a request and ends when nothing waits; nothing
+PowerShell probe — `$PROFILE` path, edition observation, parse — now uses) within
+`POWERSHELL_PROBE_PATIENCE`: five seconds without life, two minutes in all. The worker is started by a request and ends when nothing waits; nothing
 waits for it.
 
 **What this machine can start has one observation worker** (`program-walk`, T-PROGRAMS-REFRESH;
@@ -1286,6 +1306,17 @@ happen" has one answer and a guard can hold it.
 | waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; every door's function takes its token by value (A1d), and `tests::every_owner_door_takes_its_own_token_by_value` checks each signature; the source guard (§5.1, A1e) holds every function that takes a token to one registry door and to running its effect inside its own call |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
+
+**Where the program's own files are** has one owner, `bt_platform::running_image`
+(G-SWEEP-048): the loaded image's path (`GetModuleFileNameW`) with its links followed
+(`GetFinalPathNameByHandleW`), resolved once; off Windows the started path. The ConPTY sidecar
+lookup is told its folder (`bt_pty::use_sidecars_in`, named by `fn main` before the event loop and
+by the elevated host before it serves; vendored `portable-pty` guesses none), and the
+install-channel marker and the Explorer verb read the same answer.
+
+**The folder check that left the window thread had no row.** `profiles::revived_cwd`'s `is_dir`
+(#29 of the 0.4.7 ledger) is not a vocabulary entry, so neither the §5.3 registry nor the bare-site
+inventory listed it; moving it to the birth worker (above, §5.1) changes no row and no count.
 
 Two corollaries. **Each lane declares itself**: a new kind of read joins
 `file_reads` with a named lane rather than reading bytes beside it. **The worker

@@ -8,6 +8,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Restart shell, Split and Duplicate in a folder on a network share that stopped answering no longer freeze the window: the pane waits for the share by itself and, when the folder does not answer, starts in its usual folder and says so in the diagnostics log. <!-- zh: pending G-SWEEP-048 -->
+- A PowerShell check that a security program held suspended no longer waits for ever: it is stopped after five seconds without progress and the diagnostics log says another program suspended it; a check that is still working, such as a first start on a new account, is given the time it needs. <!-- zh: pending G-SWEEP-048 -->
+- Folio started through a link — the one winget installs — finds its own files, so its panes run on the console host that comes with it. <!-- zh: pending G-SWEEP-048 -->
 - After Restart to update, Folio always comes back, also when the update cannot write to its own folder and the closing Folio takes a long time to go away — before, nothing reopened until you started Folio again. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - If the updater stops on an internal error before it starts working, one Folio opens afterwards, not two. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - A second window's Git page now follows changes on disk as the first window's does.
