@@ -35,7 +35,6 @@ that would otherwise drift:
 | `scripts/check-doc-words.ps1` | `README.md`, `CHANGELOG.md` and the rest, against the forbidden-word list |
 | `scripts/check-notices.ps1` | `THIRD-PARTY-NOTICES.md` and the lock file |
 | `scripts/check-vendor-notices.ps1` | every copied-in dependency and its licence text |
-| `scripts/check-adapter-boundary.ps1` | the terminal adapter and the policy it must not import |
 | `scripts/ci/check-timing-bound.ps1` | the whole-row list of tests whose own body waits on or measures the real clock only shrinks (`bt-source`'s `timing` test holds the tree to the list) |
 | `scripts/check-machine-paths.ps1` | no tracked file naming a person, an address or a checkout path |
 

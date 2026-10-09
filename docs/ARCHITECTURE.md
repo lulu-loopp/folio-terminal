@@ -520,10 +520,10 @@ those manifests actually practise, restated here from what they say:
   non-Windows compile; CI proves the same property by compiling on macOS and
   Linux. `bt_app::platform_gate_tests` alone owns the separate rule that only
   the files in `FILES_THAT_MAY_NAME_A_PLATFORM` may select a platform.
-- **`scripts/check-adapter-boundary.ps1`** — `crates/bt-term/src/adapter.rs` and
-  `cell_capture.rs` may not name `bt_doc`, `bt_detect` or `bt_viewport`. The
-  vendor seam answers "what did the terminal do", never "what shall we do
-  about it".
+- **`bt_term::adapter_boundary_tests`** — `bt-term`'s `adapter` and
+  `cell_capture` module trees may not name `bt_doc`, `bt_detect` or
+  `bt_viewport`. The vendor seam answers "what did the terminal do", never
+  "what shall we do about it".
 - **Adding an edge edits this file.** The direction is enforced by
   **`scripts/ci/check-crate-edges.ps1`** over
   `cargo metadata --no-deps --locked --offline`: every normal and build

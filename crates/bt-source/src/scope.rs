@@ -34,11 +34,11 @@
 //! of that test reads [`crate::universes::shipped_program`], and the document
 //! is safe because nothing moves it, not because a list says so.
 //!
-//! `scripts/check-adapter-boundary.ps1` names `adapter.rs` and `cell_capture.rs`
-//! as the vendor compatibility seam, and it reads as if the concern were those
-//! two files. It is not: the concern is the adapter *module*, and the day either
-//! file gains a submodule the gate stops covering it without a word. It is on
-//! the debt list, at P17.
+//! The vendor compatibility seam in `bt-term` reads as if its concern were the
+//! two files `adapter.rs` and `cell_capture.rs`. It is not: the concern is the
+//! two *modules*, and `bt_term::adapter_boundary_tests` names them by their
+//! paths, each with its whole tree, so a submodule either one gains is covered
+//! the day it is declared.
 
 /// A reader whose concern really is a file.
 ///

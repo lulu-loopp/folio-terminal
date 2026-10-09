@@ -509,6 +509,7 @@ dependencies = [
  "bt-detect",
  "bt-doc",
  "bt-effects",
+ "bt-source",
  "bt-testpath",
  "bt-transcript",
  "bt-unicode",
