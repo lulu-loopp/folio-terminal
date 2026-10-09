@@ -1133,11 +1133,7 @@ mod tests {
     use super::*;
 
     fn sandbox(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "folio-native-removal-{tag}-{}-{:032x}",
-            std::process::id(),
-            crate::attention_pipe::unguessable_bits()
-        ));
+        let root = bt_testpath::temp_path(&format!("folio-native-removal-{tag}"));
         fs::create_dir_all(&root).unwrap();
         root
     }

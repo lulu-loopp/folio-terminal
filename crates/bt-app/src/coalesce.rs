@@ -336,10 +336,10 @@ mod session_tests {
     use std::num::NonZeroU32;
     use std::time::{Duration, Instant};
 
+    use bt_compose::{render_detection_task, render_live_detection_task};
     use bt_math::MathEngine;
     use bt_term::{
         DualPlaneSession, LIVE_MATH_STABLE_INTERVAL, SessionMathTask, observe_formula_frame,
-        render_detection_task, render_live_detection_task,
     };
     use bt_viewport::ViewportProjection;
 

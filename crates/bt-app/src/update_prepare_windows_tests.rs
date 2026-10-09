@@ -204,11 +204,7 @@ impl Scene {
     /// The scene, or `None` off Windows, where no test root can sign.
     fn new(tag: &str) -> Option<Self> {
         let ca = TestCa::new().ok()?;
-        let root = std::env::temp_dir().join(format!(
-            "bt-u20-{tag}-{}-{}",
-            std::process::id(),
-            bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-        ));
+        let root = bt_testpath::temp_path(&format!("bt-u20-{tag}"));
         let scratch = Scratch(root.clone());
         let install = root.join("Folio");
         let release = root.join("release");
@@ -486,6 +482,7 @@ fn offered(txn: u8) -> Job<u32> {
             channel: Some(Channel::Ours),
             running: "0.4.6",
             capable: true,
+            recorded: false,
             trial: false,
             platform: HostPlatform::Windows,
         },
@@ -537,11 +534,7 @@ fn failed_with(job: &Job<u32>, txn: u8, stop: Stop) {
 /// (`trust` refuses by name), so no home is made.
 fn refused_off_windows() {
     assert_ne!(bt_platform::host_platform(), HostPlatform::Windows);
-    let root = std::env::temp_dir().join(format!(
-        "bt-u20-elsewhere-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path("bt-u20-elsewhere");
     let _scratch = Scratch(root.clone());
     std::fs::create_dir_all(&root).unwrap();
     let exe = root.join(EXECUTABLE);
@@ -937,22 +930,26 @@ fn a_deferred_transaction_survives_the_first_relaunch() {
     let home = scene.home();
     let first = {
         let home = home.clone();
-        on_a_worker(move |worker| match at_launch(worker, &home).unwrap() {
-            AtLaunch::Counted(staged) => staged.journal.body.phase,
-            _ => panic!("the first launch counts"),
+        on_a_worker(move |worker| {
+            match at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap() {
+                AtLaunch::Kept(staged) => staged.journal.body.phase,
+                _ => panic!("the first launch counts"),
+            }
         })
     };
     assert_eq!(
         first,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         }
     );
     let on_disk = journal_on_disk(&home);
     assert_eq!(
         on_disk.body.phase,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         }
     );
     assert_eq!(on_disk.header().class, Class::Deferred);
@@ -963,7 +960,12 @@ fn a_deferred_transaction_survives_the_first_relaunch() {
 
     let second = {
         let home = home.clone();
-        on_a_worker(move |worker| matches!(at_launch(worker, &home).unwrap(), AtLaunch::Discarded))
+        on_a_worker(move |worker| {
+            matches!(
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap(),
+                AtLaunch::Discarded
+            )
+        })
     };
     assert!(second, "the second launch discards");
     scene.left_nothing(1);
@@ -1007,7 +1009,9 @@ fn revalidation_before_resume_refuses_a_changed_set() {
     let (unchanged, kept, changed) = {
         let (home, exe, policy) = (home.clone(), scene.exe.clone(), scene.ca.policy());
         on_a_worker(move |worker| {
-            let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() else {
+            let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            else {
                 panic!("a prepared transaction is counted");
             };
             let resume = Resume {
@@ -1130,11 +1134,7 @@ fn every_failure_road_removes_the_transaction_and_says_nothing_changed() {
 
 /// What the scene's archive declares its members add up to.
 fn declared(archive: &[u8]) -> u64 {
-    let root = std::env::temp_dir().join(format!(
-        "bt-u20-declared-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path("bt-u20-declared");
     let _scratch = Scratch(root.clone());
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("release.zip");
@@ -1190,7 +1190,8 @@ fn the_applier_copy_is_verified_and_never_moved() {
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(
@@ -1224,7 +1225,9 @@ fn the_applier_copy_is_verified_and_never_moved() {
     on_a_worker({
         let home = home.clone();
         move |worker| {
-            if let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() {
+            if let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            {
                 let _ = crate::update_prepare::discard(worker, *staged, &Event::Discarded);
             }
         }
@@ -1313,11 +1316,7 @@ fn feed_of(folder: &Path, archive: &[u8], sums: &str) -> crate::update::Feed {
 /// the Windows `fetch` (the wrong sum is `Verified`).
 #[test]
 fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
-    let root = std::env::temp_dir().join(format!(
-        "bt-u30b-copy-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path("bt-u30b-copy");
     let _scratch = Scratch(root.clone());
     let archive = b"a release archive, by the feed".repeat(5_000);
     let feed = feed_of(&root.join("feed"), &archive, &sums_for(&archive));
@@ -1372,7 +1371,9 @@ fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
     on_a_worker({
         let home = scene.home();
         move |worker| {
-            if let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() {
+            if let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            {
                 let _ = crate::update_prepare::discard(worker, *staged, &Event::Discarded);
             }
         }
@@ -1481,6 +1482,7 @@ fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathere
         argv: &[],
         trial: None,
         failed: None,
+        journal_held: None,
     };
     let mut world = Quiet::default();
     let crate::update_startup::Verdict::Continue { waiting, .. } =
@@ -1490,10 +1492,15 @@ fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathere
     };
     assert!(world.0.is_empty(), "the start said {:?}", world.0);
     let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut job = Job::with_offers(true).after_start(waiting, resume, {
-        let checked = Arc::clone(&checked);
-        move || checked.store(true, std::sync::atomic::Ordering::SeqCst)
-    });
+    let mut job = Job::with_offers(true).after_start(
+        waiting.map(|home| *home),
+        crate::update_txn::PreviousRun::Orderly,
+        resume,
+        {
+            let checked = Arc::clone(&checked);
+            move || checked.store(true, std::sync::atomic::Ordering::SeqCst)
+        },
+    );
     let presenters = Presenters {
         visited: &[1],
         open: &[1],
@@ -1524,6 +1531,7 @@ fn at_launch_gathered(knows_the_release: bool) -> Gathered {
         channel: Some(Channel::Ours),
         running: "0.4.6",
         capable: true,
+        recorded: false,
         trial: false,
         platform: HostPlatform::Windows,
     }
@@ -1556,11 +1564,7 @@ fn prepared_and_closed(scene: &Scene) {
 /// `Allocated`, as the Windows Prepare writes it, with part of an archive in
 /// `H\<txn>\download\`. No signature is needed: nothing here is verified.
 fn allocated_scene(tag: &str) -> (Scratch, PathBuf, Home, TxnId) {
-    let root = std::env::temp_dir().join(format!(
-        "bt-u33-{tag}-{}-{}",
-        std::process::id(),
-        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-    ));
+    let root = bt_testpath::temp_path(&format!("bt-u33-{tag}"));
     let scratch = Scratch(root.clone());
     let install = root.join("Folio");
     std::fs::create_dir_all(&install).unwrap();
@@ -1650,7 +1654,8 @@ fn a_later_launch_shows_the_verified_card_from_the_staged_set_without_downloadin
     assert_eq!(
         journal_on_disk(&home).body.phase,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         },
         "the launch is counted"
     );
@@ -1939,7 +1944,8 @@ fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_once_at_allocated
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(journal.body.adapter, crate::update_txn::Adapter::Ours);

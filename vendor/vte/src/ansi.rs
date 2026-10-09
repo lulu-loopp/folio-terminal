@@ -4,6 +4,8 @@
 // still pops one); `CSI > m` resets modifyOtherKeys; `CSI > flags u` and
 // `CSI = flags ; mode u` hand the handler the flags as their full `u16`, so
 // `Handler::push_keyboard_mode` and `Handler::set_keyboard_mode` take a `u16`.
+// And `StdSyncHandler`'s synchronized-update timeout is a `web_time::Instant`,
+// which is `std::time::Instant` on every target but `wasm32-unknown-unknown`.
 // Index: vendor/vte/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -29,7 +31,7 @@ use core::str::FromStr;
 use core::time::Duration;
 use core::{iter, mem, str};
 #[cfg(feature = "std")]
-use std::time::Instant;
+use web_time::Instant;
 
 use bitflags::bitflags;
 #[doc(inline)]

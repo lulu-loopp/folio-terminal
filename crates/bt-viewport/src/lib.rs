@@ -2095,6 +2095,22 @@ impl PrintedPathPass<'_> {
         links
     }
 
+    /// The `[Image #k]` placeholder an agent's own word wrap split between two neighbouring
+    /// logical lines of its input area, if one stands across that seam (T-IMAGE-N-GAPS), with its
+    /// unanswered candidates recorded on the way past.
+    fn image_placeholder_link_across(
+        &mut self,
+        upper: &str,
+        lower: &str,
+    ) -> Option<(HyperlinkRange, HyperlinkRange, String)> {
+        let mut unknown = BTreeSet::new();
+        let link = self
+            .links
+            .image_placeholder_link_across(upper, lower, &mut unknown);
+        self.record(unknown);
+        link
+    }
+
     fn record(&mut self, unknown: BTreeSet<PathBuf>) {
         for path in unknown {
             if self.probes.len() >= MAX_PRINTED_PATH_PROBES {
@@ -5302,6 +5318,33 @@ fn implicit_hyperlinks(
             );
         }
     }
+    // T-IMAGE-N-GAPS. Claude Code wraps its own input line at word boundaries and draws each row
+    // as a physical line, so a placeholder at the right edge stands as `…[Image` over `#k]…`. On
+    // the input area, each seam between two neighbouring logical lines is read for that one
+    // shape; both halves carry one link, marked as one reference across the seam, under the rule a
+    // whole placeholder follows. A cell something else already claimed is left alone.
+    if let (Some(paths), Some(from)) = (paths.as_deref_mut(), input_area_from) {
+        for index in 1..lines.len() {
+            let (upper, lower) = (&lines[index - 1], &lines[index]);
+            if upper.first_row < from {
+                continue;
+            }
+            let Some((head, tail, uri)) =
+                paths.image_placeholder_link_across(&upper.text, &lower.text)
+            else {
+                continue;
+            };
+            if cells_claimed(upper, head, &claims) || cells_claimed(lower, tail, &claims) {
+                continue;
+            }
+            let link = CellHyperlink {
+                id: Some(rejoined_reference_mark(index - 1).into()),
+                uri: uri.into(),
+            };
+            claim_cells(rows, upper, head, &link, true, &mut claims);
+            claim_cells(rows, lower, tail, &link, true, &mut claims);
+        }
+    }
     // §7.1.5k ②. A run of neighbouring logical lines is a run of **physical** lines by
     // construction — each run above ends only where `continues` says the terminal did not wrap — so
     // every seam between two of them is an application newline, the one break no record covers.
@@ -5394,6 +5437,19 @@ fn logical_line_of(line: &[&CapturedRow], base: usize) -> LogicalLine {
         spots,
         edge,
     }
+}
+
+/// Whether any cell of `range` on `line` already carries an inferred claim.
+fn cells_claimed(
+    line: &LogicalLine,
+    range: HyperlinkRange,
+    claims: &[Vec<ImplicitCellLink>],
+) -> bool {
+    line.spots.iter().any(|(row, column, bytes)| {
+        bytes.start < range.byte_end
+            && range.byte_start < bytes.end
+            && claims[*row].iter().any(|claim| claim.column == *column)
+    })
 }
 
 /// Lay one inferred reference's claim over the cells its printed text occupies.

@@ -97,12 +97,15 @@ impl Runtime<'_> {
                     self.publish_interaction_frame()?;
                 }
                 match duty.refused {
-                    Some(OnRefused::HyperlinkBlocked(hyperlink)) => {
-                        self.window.hyperlink_hover.show_blocked(hyperlink);
+                    // The system took the hand-off and had nothing to open it with.
+                    Some(OnRefused::HyperlinkRefused(hyperlink)) => {
+                        self.window
+                            .hyperlink_hover
+                            .show_refused(hyperlink, crate::LinkRefusal::NoProgram);
                         self.publish_interaction_frame()?;
                     }
                     Some(OnRefused::PreviewAddressRefused(surface, address)) => {
-                        self.say_address_refused(surface, &address)?;
+                        self.say_address_refused(surface, &address, crate::LinkRefusal::NoProgram)?;
                     }
                     Some(OnRefused::FontsToast) => {
                         self.toast(

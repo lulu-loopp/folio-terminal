@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn preserving_replace_writes_content_and_refuses_hardlinks() {
-        let dir = std::env::temp_dir().join(format!("bt-preserving-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-preserving");
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("profile.ps1");
         fs::write(&target, b"before").unwrap();
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn a_save_keeps_the_stream_the_ace_and_the_attributes_the_file_carried() {
         use std::os::windows::fs::MetadataExt;
-        let dir = std::env::temp_dir().join(format!("bt-carried-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-carried");
         fs::create_dir_all(&dir).unwrap();
         let path = downloaded(&dir, "notes.md");
         assert!(
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn a_read_only_or_locked_file_is_refused_and_loses_nothing() {
         use std::os::windows::fs::OpenOptionsExt;
-        let dir = std::env::temp_dir().join(format!("bt-refused-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-refused");
         fs::create_dir_all(&dir).unwrap();
         let path = downloaded(&dir, "notes.md");
 
@@ -462,7 +462,7 @@ mod tests {
     /// [`atomic_replace_preserving`] and the first assertion is an `Err`.
     #[test]
     fn a_hard_linked_target_saves_the_way_it_always_has() {
-        let dir = std::env::temp_dir().join(format!("bt-keeping-linked-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-keeping-linked");
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("notes.md");
         fs::write(&target, b"before").unwrap();
@@ -510,7 +510,7 @@ mod tests {
     /// call made — not a name something else planted (closure review R9, R10).
     #[test]
     fn a_staging_file_is_this_calls_own_and_nobody_elses_to_read() {
-        let dir = std::env::temp_dir().join(format!("bt-birth-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-birth");
         fs::create_dir_all(&dir).unwrap();
         let tmp_path = temp_sibling_path(&dir.join("notes.md")).unwrap();
         write_temp(&tmp_path, b"private", TempBirth::OwnerOnly).unwrap();
@@ -539,7 +539,7 @@ mod tests {
     /// the arm leaves nothing beside the file it replaced.
     #[test]
     fn a_single_named_file_takes_the_preserving_arm_and_leaves_nothing_beside_it() {
-        let dir = std::env::temp_dir().join(format!("bt-keeping-plain-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-keeping-plain");
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("notes.md");
         fs::write(&target, b"before").unwrap();
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn preserving_replace_missing_target_is_refused_without_temps() {
-        let dir = std::env::temp_dir().join(format!("bt-preserving-missing-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-preserving-missing");
         fs::create_dir_all(&dir).unwrap();
         assert!(atomic_replace_preserving(&dir.join("missing"), b"no").is_err());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn preserving_replace_keeps_mode_and_ownership() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let dir = std::env::temp_dir().join(format!("bt-preserving-mode-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-preserving-mode");
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("profile.ps1");
         fs::write(&target, b"before").unwrap();
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn happy_path_replaces_content_and_leaves_no_temp_file() {
-        let dir = std::env::temp_dir().join(format!("bt-persist-atomic-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-persist-atomic");
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("session.json");
 
@@ -617,7 +617,7 @@ mod tests {
     /// later, successful `commit_rename` may change it.
     #[test]
     fn interrupted_write_leaves_old_file_intact() {
-        let dir = std::env::temp_dir().join(format!("bt-persist-atomic-crash-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-persist-atomic-crash");
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("session.json");
         fs::write(&target, b"OLD-CONTENT").unwrap();
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn write_failure_before_rename_never_touches_target() {
-        let dir = std::env::temp_dir().join(format!("bt-persist-atomic-fail-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-persist-atomic-fail");
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("session.json");
         fs::write(&target, b"OLD-CONTENT").unwrap();
@@ -681,7 +681,7 @@ mod tests {
     /// the directory listing below holds the temp file.
     #[test]
     fn a_rename_that_fails_takes_its_temp_file_with_it() {
-        let dir = std::env::temp_dir().join(format!("bt-persist-atomic-stuck-{}", unique_suffix()));
+        let dir = bt_testpath::temp_path("bt-persist-atomic-stuck");
         fs::create_dir_all(&dir).unwrap();
         // A directory cannot be replaced by a file, and it is the one refusal
         // available without a full volume or a permission edit.

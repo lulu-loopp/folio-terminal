@@ -81,8 +81,14 @@ use crate::i18n::Text;
 /// "there is nothing to do" rather than to a guess. It is deliberately **not**
 /// `current_dir()`, which for a process the shell started is `folio.exe`'s own
 /// folder and has nothing to do with what was clicked (`cli.rs`'s header).
+///
+/// The program's own file, links followed (`bt_platform::running_image`, G-SWEEP-048): a verb that
+/// named winget's alias would start the program through a link whose folder holds none of its
+/// files.
 fn executable() -> Option<PathBuf> {
-    std::env::current_exe().ok()
+    bt_platform::running_image()
+        .ok()
+        .map(|image| image.path.clone())
 }
 
 /// The three values this build would write right now, in the language the window

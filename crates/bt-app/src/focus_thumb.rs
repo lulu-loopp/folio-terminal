@@ -3503,7 +3503,9 @@ mod tests {
     #[test]
     fn an_unloaded_preview_stays_a_face() {
         let buffer = PreviewBuffer::new(
-            PreviewSource::File(std::path::PathBuf::from(r"D:\Developer\folio\notes.md")),
+            PreviewSource::File(crate::test_support::host_path(
+                r"D:\Developer\folio\notes.md",
+            )),
             "notes.md".to_owned(),
         );
         assert!(

@@ -178,26 +178,32 @@ pub fn probe_31(
     unsafe { windows::Win32::UI::Shell::ShellExecuteW(None, o, o, o, o, n) } // probe: windows::Win32::UI::Shell::ShellExecuteW
 }
 
+/// `windows::Win32::UI::Shell::ShellExecuteExW` - windows
+#[cfg(windows)]
+pub fn probe_32(i: &mut windows::Win32::UI::Shell::SHELLEXECUTEINFOW) -> impl Sized {
+    unsafe { windows::Win32::UI::Shell::ShellExecuteExW(i) } // probe: windows::Win32::UI::Shell::ShellExecuteExW
+}
+
 /// `windows::Win32::System::Threading::SetEvent` - windows
 #[cfg(windows)]
-pub fn probe_32(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_33(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::System::Threading::SetEvent(h) } // probe: windows::Win32::System::Threading::SetEvent
 }
 
 /// `windows::Win32::Foundation::CloseHandle` - windows
 #[cfg(windows)]
-pub fn probe_33(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_34(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::Foundation::CloseHandle(h) } // probe: windows::Win32::Foundation::CloseHandle
 }
 
 /// `libc::write` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_34(fd: i32, b: &[u8]) -> impl Sized {
+pub fn probe_35(fd: i32, b: &[u8]) -> impl Sized {
     unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) } // probe: libc::write
 }
 
 /// `libc::close` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_35(fd: i32) -> impl Sized {
+pub fn probe_36(fd: i32) -> impl Sized {
     unsafe { libc::close(fd) } // probe: libc::close
 }

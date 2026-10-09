@@ -1,6 +1,7 @@
 //! `first_run` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::profiles;
 use crate::shell_integration;
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
@@ -14,10 +15,13 @@ use winit::keyboard::{Key, NamedKey};
 impl Runtime<'_> {
     /// What the Terminal page's PSReadLine row is describing.
     pub(crate) fn psreadline_row_state(&self) -> psreadline::RowState {
-        psreadline::row_state(
-            psreadline::probe(),
-            self.app.settings_store.loaded().psreadline_invite,
-            self.app.psreadline_installed.unwrap_or_default(),
+        psreadline::after_the_newest_check(
+            psreadline::row_state(
+                psreadline::probe(),
+                self.app.settings_store.loaded().psreadline_invite,
+                self.app.psreadline_installed.unwrap_or_default(),
+            ),
+            psreadline::probe_failed(),
         )
     }
 
@@ -569,6 +573,25 @@ impl Runtime<'_> {
         if !first_run::due(store.was_missing(), store.loaded().first_run_card)
             && !diagnostics::switched_on(std::env::var_os("BT_FIRST_RUN_CARD"))
         {
+            return Ok(());
+        }
+        // **Nothing about the agents is decided from unknown** (T-PROGRAMS-REFRESH): the card
+        // offers its rows on whether claude, codex and copilot are on this machine, and waits —
+        // polled here every turn — until the program walk has answered those rows.
+        if ["claude", "codex", "copilot"]
+            .iter()
+            .any(|id| profiles::has_id(id) && self.app.profile_programs.is_unknown(id))
+        {
+            return Ok(());
+        }
+        // Nor, for one turn, where they keep their configuration (T-FRESH-FACTS): the rows it
+        // offers write hooks into the folders the walk read out of the account's environment,
+        // which arrive with the walk's end, after the rows. After that turn the card reads the
+        // folders it has — the launch environment's, when no walk has answered.
+        if !first_run::agent_folders_settled(
+            &mut self.app.first_run_waited_for_agent_folders,
+            attention_hooks::AGENT_HOMES.answered(),
+        ) {
             return Ok(());
         }
         // The one row whose offer depends on a version, and the version comes

@@ -224,10 +224,7 @@ impl ManifestSource for Given {
 
 /// A fresh folder with an empty `staging` in it.
 fn scratch(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "bt-app-update-archive-{}-{name}",
-        std::process::id()
-    ));
+    let root = bt_testpath::temp_path(&format!("bt-app-update-archive-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("staging")).unwrap();
     root

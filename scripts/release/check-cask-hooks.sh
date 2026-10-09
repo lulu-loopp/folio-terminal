@@ -9,11 +9,15 @@
 # (docs/RELEASING.md, "Distribution manifests"):
 #
 #   1. `brew install --cask`: `postflight_steps` wrote the marker attribute
-#      `io.github.lulu-loopp.folio.install` on the installed bundle, and a Folio
+#      `io.github.lulu-loopp.folio.install` on the installed bundle and the
+#      Caskroom attribute `io.github.lulu-loopp.folio.caskroom` naming
+#      `$(brew --caskroom)/folio`
+#      (0.4.8 D1: where Folio reads which app Homebrew installed), and a Folio
 #      started from it says in `diagnostics.log` that it is managed by homebrew
 #      (with no uninstall hook: E-10).
 #   2. `brew upgrade --cask` to a bumped version, and `brew reinstall --cask`:
-#      the marker is there after each (`postflight_steps` write it again), and
+#      the marker and the Caskroom attribute are there after each
+#      (`postflight_steps` write them again), and
 #      Folio's cleanup did not run (a planted update entrance is still there).
 #   3. plain `brew uninstall --cask`: the app is gone and the cleanup did not
 #      run — the consequence of `uninstall_hook: false`, recorded.
@@ -63,6 +67,7 @@ mkdir -p "$home/Library/LaunchAgents" "$apps"
 tap="folio-u2-check/hooks"
 attribute="io.github.lulu-loopp.folio.install"
 expected='{"v":1,"manager":"homebrew","uninstall_hook":false}'
+caskroom_attribute="io.github.lulu-loopp.folio.caskroom"
 planted="$home/Library/LaunchAgents/io.github.lulu-loopp.folio.update-00c0ffee.plist"
 diagnostics="$home/Library/Application Support/Folio/diagnostics.log"
 sha=$(shasum -a 256 "$dmg" | cut -d' ' -f1)
@@ -106,6 +111,10 @@ marker_is_there() {
 	[ "$(xattr -p "$attribute" "$apps/Folio.app" 2>/dev/null)" = "$expected" ]
 }
 
+caskroom_is_there() {
+	[ "$(xattr -p "$caskroom_attribute" "$apps/Folio.app" 2>/dev/null)" = "$(b --caskroom)/folio" ]
+}
+
 plant() {
 	printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>io.github.lulu-loopp.folio.update-00c0ffee</string></dict></plist>\n' >"$planted"
 }
@@ -141,6 +150,7 @@ mkdir -p "$casks"
 render "$version"
 b install --cask --appdir="$apps" "$tap/folio"
 check "$(ok marker_is_there)" "install: the marker attribute is $(xattr -p "$attribute" "$apps/Folio.app" 2>/dev/null)"
+check "$(ok caskroom_is_there)" "install: the Caskroom attribute is $(xattr -p "$caskroom_attribute" "$apps/Folio.app" 2>/dev/null)"
 start_folio
 line=$(grep 'install channel' "$diagnostics" | tail -1 || true)
 case "$line" in
@@ -154,9 +164,11 @@ plant
 render "$version.1"
 b upgrade --cask --appdir="$apps" "$tap/folio"
 check "$(ok marker_is_there)" "upgrade: the marker attribute is there after the upgrade"
+check "$(ok caskroom_is_there)" "upgrade: the Caskroom attribute is there after the upgrade"
 check "$(ok [ -f "$planted" ])" "upgrade: the cleanup did not run"
 b reinstall --cask --appdir="$apps" "$tap/folio"
 check "$(ok marker_is_there)" "reinstall: the marker attribute is there after the reinstall"
+check "$(ok caskroom_is_there)" "reinstall: the Caskroom attribute is there after the reinstall"
 check "$(ok [ -f "$planted" ])" "reinstall: the cleanup did not run"
 
 # ── 3. plain uninstall ────────────────────────────────────────────────────────

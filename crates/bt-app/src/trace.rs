@@ -257,13 +257,37 @@ mod tests {
     const HEADER: &str = "# BT_TRACE_TEST_V1 elapsed_ms event field=value…";
 
     fn scratch(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("bt-trace-{}-{name}.log", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "{}.log",
+            bt_testpath::unique_name(&format!("bt-trace-{name}"))
+        ));
         let _ = std::fs::remove_file(&path);
         path
     }
 
     fn body(path: &Path) -> String {
         std::fs::read_to_string(path).expect("the trace file was created")
+    }
+
+    /// RED (mutation: a trace file that cannot be opened stops the process — `TraceFile::open`
+    /// panicking where it reports) — **a debugging switch naming a folder that is not there says
+    /// so once and the run goes on** (G-SWEEP-048): `BT_IME_TRACE` and its siblings name a file;
+    /// when its folder is missing, one line goes to the writer's report, nothing is written, and
+    /// every later line is dropped without asking again.
+    #[test]
+    fn a_trace_file_in_a_missing_folder_is_said_once_and_the_run_goes_on() {
+        let path = scratch("没有这个文件夹").join("ime.log");
+        let file = TraceFile::new(&path, None);
+        let mut report = Vec::new();
+        file.append("IME_OUT_NOTIFY first", &mut report);
+        file.append("IME_OUT_NOTIFY second", &mut report);
+        let said = String::from_utf8(report).expect("the report is text");
+        assert_eq!(said.lines().count(), 1, "{said}");
+        assert!(
+            said.contains("没有这个文件夹") && said.contains("could not be opened for the trace"),
+            "{said}"
+        );
+        assert!(!path.exists());
     }
 
     /// **A [`Dump`]'s bytes are the caller's bytes** — no header, no timestamp,

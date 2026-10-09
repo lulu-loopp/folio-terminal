@@ -88,10 +88,32 @@ pub enum Refusal {
     ControlOrWhitespace,
     /// A scheme with no authority after it — `http://` and nothing else.
     NoHost,
+    /// An authority whose host does not parse as one — `http://www.glancepc.com：`, where an
+    /// autolinker kept a full-width colon (`bt_transcript::web_host_parses`, the one check the
+    /// declared-link road asks too).
+    InvalidHost,
     /// The host asked to navigate to a target it had not minted.
     NotMinted,
     /// Empty, or nothing but whitespace.
     Empty,
+}
+
+impl Refusal {
+    /// **Whether the text was not an address at all**, as against an address this door will not
+    /// go to — the line between a hover that says "address invalid" and one that says "blocked"
+    /// (owner ruling 2026-10-06: the suffix says what is true).
+    pub fn is_malformed(self) -> bool {
+        match self {
+            Self::InvalidHost | Self::NoHost | Self::ControlOrWhitespace | Self::Empty => true,
+            Self::ScriptOrInlineScheme
+            | Self::FileScheme
+            | Self::BrowserInternalScheme
+            | Self::ExternalScheme
+            | Self::UserInfo
+            | Self::NetworkPath
+            | Self::NotMinted => false,
+        }
+    }
 }
 
 /// What a door decided.
@@ -658,6 +680,9 @@ fn check_by_scheme(trimmed: &str, origin: Origin<'_>) -> Decision {
             if authority.is_empty() {
                 return Decision::Refuse(Refusal::NoHost);
             }
+            if !bt_transcript::web_host_parses(authority) {
+                return Decision::Refuse(Refusal::InvalidHost);
+            }
             Decision::Navigate(rewrite_unspecified_host(trimmed))
         }
         None => match origin {
@@ -671,6 +696,11 @@ fn check_by_scheme(trimmed: &str, origin: Origin<'_>) -> Decision {
                     return Decision::Search(trimmed.to_owned());
                 }
                 let (host, _) = split_host_port(authority(trimmed));
+                // Text whose would-be host does not parse is not an address either; it is
+                // searched for, as a browser's address bar does with it.
+                if !bt_transcript::web_host_parses(authority(trimmed)) {
+                    return Decision::Search(trimmed.to_owned());
+                }
                 if is_loopback_host(&host) || (host.contains('.') && !host.ends_with('.')) {
                     Decision::Navigate(rewrite_unspecified_host(&format!("http://{trimmed}")))
                 } else {
@@ -1047,18 +1077,88 @@ pub fn scheme_of(input: &str) -> Option<String> {
     split_scheme(input.trim()).map(|(scheme, _)| scheme)
 }
 
-/// The host of an address, for the card that has to say **which name did not
-/// answer** (§7.7 ④'s 「加载失败」 row). `None` when the text carries no
-/// authority at all.
+/// **An address the way the address row may fold it** (T-WEB-PANE-ADDRESS, owner's ruling
+/// 2026-10-09): what goes first when the row is too narrow, cut where the address itself is cut.
 ///
-/// Here and not beside the card, for the reason `scheme_of` is here: this file
-/// already splits an address four ways and a second splitter would be a second
-/// answer about the same string. The port is dropped — a connection failure is
-/// about the name, and the port is on the head in full.
-pub fn host_of(input: &str) -> Option<String> {
-    let (_, rest) = split_scheme(input.trim())?;
-    let (host, _) = split_host_port(authority(rest));
-    (!host.is_empty()).then_some(host)
+/// `scheme` is the text up to and including `//` (`https://`), empty for a local path; `host` is
+/// the authority as written (port kept: it is part of which server) or a local path's root (`C:`,
+/// or empty for `/`); `lead` is what stands between the host and the first segment as written —
+/// the separator, or nothing when the address goes straight from its host to a query or a
+/// fragment (`https://host?q=1`); `segments` are the path's parts between `separator`s, the last
+/// one carrying the query and the fragment, because `builder.rs#L1240` is one place in one file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressParts<'a> {
+    pub scheme: &'a str,
+    pub host: &'a str,
+    pub lead: &'a str,
+    pub separator: char,
+    pub segments: Vec<&'a str>,
+}
+
+/// [`AddressParts`] of an address as the row prints it — a URL with an authority, or the local
+/// path [`local_path_form`] prints for a page on this disk. `None` for anything else (an
+/// `about:` or `mailto:` address has no host to keep and no path to fold), which the row cuts at
+/// its end.
+///
+/// Read with this file's own [`split_scheme`], so the row and the door agree about where the
+/// scheme of a string ends.
+#[must_use]
+pub fn address_parts(shown: &str) -> Option<AddressParts<'_>> {
+    if let Some((_, rest)) = split_scheme(shown)
+        && let Some(after) = rest.strip_prefix("//")
+    {
+        let scheme = &shown[..shown.len() - after.len()];
+        let host_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        let host = &after[..host_end];
+        let rest = &after[host_end..];
+        let (lead, path) = match rest.strip_prefix('/') {
+            Some(path) => ("/", path),
+            None => ("", rest),
+        };
+        return Some(AddressParts {
+            scheme,
+            host,
+            lead,
+            separator: '/',
+            segments: segments_of(path, '/'),
+        });
+    }
+    let bytes = shown.as_bytes();
+    let (host_end, separator) = if shown.starts_with('/') {
+        (0, '/')
+    } else if bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\'
+    {
+        (2, '\\')
+    } else {
+        return None;
+    };
+    Some(AddressParts {
+        scheme: "",
+        host: &shown[..host_end],
+        lead: &shown[host_end..host_end + 1],
+        separator,
+        segments: segments_of(&shown[host_end + 1..], separator),
+    })
+}
+
+/// A path's parts between `separator`s, the query and fragment riding on the last one.
+fn segments_of(path: &str, separator: char) -> Vec<&str> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let path_end = path.find(['?', '#']).unwrap_or(path.len());
+    let last_start = path[..path_end]
+        .rfind(separator)
+        .map_or(0, |at| at + separator.len_utf8());
+    // Everything before the last segment, split: the empty piece after its final separator is
+    // where the last segment begins, and that one is taken whole, tail and all.
+    let mut segments: Vec<&str> = path[..last_start].split(separator).collect();
+    segments.pop();
+    segments.push(&path[last_start..]);
+    segments
 }
 
 /// The schemes this door has an opinion about **by name**, and what that
@@ -3068,6 +3168,46 @@ mod tests {
         assert_eq!(address_bar("http://"), Decision::Refuse(Refusal::NoHost));
     }
 
+    /// RED (F-SWEEP-2-048) — **an address whose host does not parse is refused at the door, by
+    /// the one check the declared-link road asks** (`bt_transcript::web_host_parses`), and the
+    /// refusal is a malformed address, not a blocked one.
+    ///
+    /// MUTATION: drop the `InvalidHost` arm in `check_by_scheme` and the full-width colon is
+    /// navigated to.
+    #[test]
+    fn an_address_whose_host_does_not_parse_is_refused_as_invalid() {
+        for input in [
+            "http://www.glancepc.com：",
+            "https://例子.测试：/文档",
+            "https://[::1/",
+        ] {
+            assert_eq!(
+                address_bar(input),
+                Decision::Refuse(Refusal::InvalidHost),
+                "{input:?}"
+            );
+            assert!(Refusal::InvalidHost.is_malformed());
+        }
+        // Text with no scheme whose would-be host does not parse is searched for.
+        assert_eq!(
+            address_bar("www.glancepc.com：官网"),
+            Decision::Search("www.glancepc.com：官网".into())
+        );
+        // And a host that parses is unchanged: an internationalised name, a port, loopback.
+        for input in [
+            "https://例子.测试/文档",
+            "http://localhost:5173/",
+            "http://[::1]:8080/",
+        ] {
+            assert_eq!(
+                address_bar(input),
+                Decision::Navigate(input.into()),
+                "{input:?}"
+            );
+        }
+        assert!(!Refusal::ExternalScheme.is_malformed());
+    }
+
     /// The mint admits exactly what it holds and not its neighbours.
     #[test]
     fn a_mint_admits_one_target_and_no_relatives() {
@@ -3233,6 +3373,7 @@ mod tests {
                 address_bar("http://example.com/\u{0}"),
             ),
             (Refusal::NoHost, address_bar("https://")),
+            (Refusal::InvalidHost, address_bar("https://例子.测试：/")),
             (
                 Refusal::NotMinted,
                 check("https://example.com/", Origin::HostMinted(&Mint::Nothing)),

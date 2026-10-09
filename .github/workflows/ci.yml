@@ -98,8 +98,11 @@ jobs:
       # The compiler and the shared cache both come from
       # `.github/actions/toolchain`, which is the one place in this repository
       # that decides what Rust a job is built with. `release.yml` calls the same
-      # action, so the two files cannot drift apart again.
+      # action, so the two files cannot drift apart again. The wasm32 target is
+      # for the wasm-floor canary below.
       - uses: ./.github/actions/toolchain
+        with:
+          targets: wasm32-unknown-unknown
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
       # terminal facts; importing document, detection, or viewport policy here recreates the
@@ -223,7 +226,8 @@ jobs:
       # The crate dependency direction (docs/ARCHITECTURE.md section 3). Three planted
       # states, each of which must be refused with a message naming the planted crate
       # and the reason: an upward edge in a copy of the real metadata, an exemption
-      # whose edge the copy no longer has, and a first-party crate with no layer row.
+      # planted for an edge the metadata does not have, and a first-party crate with no
+      # layer row.
       # The scratch-repository suite plants an added exemption and requires the
       # merge-base comparison to refuse it.
       - name: the crate-edge gate can actually fail
@@ -259,11 +263,17 @@ jobs:
           [IO.File]::WriteAllText($fixture, ($meta | ConvertTo-Json -Depth 64))
           Assert-Refused @{ Metadata = $fixture } @("bt-unicode -> bt-app (normal)", "must go to a lower layer") "a planted upward edge"
 
-          $meta = $real | ConvertFrom-Json
-          $term = $meta.packages | Where-Object { $_.name -eq "bt-term" }
-          $term.dependencies = @($term.dependencies | Where-Object { $_.name -ne "bt-math" })
-          [IO.File]::WriteAllText($fixture, ($meta | ConvertTo-Json -Depth 64))
-          Assert-Refused @{ Metadata = $fixture } @("bt-term -> bt-math", "no longer exists") "an exemption whose edge is gone"
+          # bt-term has had no bt-math edge since CC-7 (D-15 repaid), so its old row, planted
+          # back into the list, names an edge the real metadata does not have.
+          $exemptions = "scripts/ci/crate-edge-exemptions.tsv"
+          $original = [IO.File]::ReadAllBytes($exemptions)
+          try {
+            $planted = [IO.File]::ReadAllText($exemptions).TrimEnd("`r", "`n") + "`nbt-term`tbt-math`tnormal`tD-15`tplanted by the canary`n"
+            [IO.File]::WriteAllText($exemptions, $planted)
+            Assert-Refused @{} @("bt-term -> bt-math", "no longer exists") "an exemption whose edge is gone"
+          } finally {
+            [IO.File]::WriteAllBytes($exemptions, $original)
+          }
 
           $layers = "scripts/ci/crate-layers.tsv"
           $original = [IO.File]::ReadAllBytes($layers)
@@ -321,6 +331,82 @@ jobs:
             throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
           }
           Write-Host "clippy refused the planted todo!() with exit $clippy, which is this gate passing."
+          exit 0
+
+      # G1's canary: a call of an item that exists only under `cfg(unix)`, the
+      # shape of the hole the wasm floor closed in `bt-platform`, planted in a
+      # checked crate. The wasm32 check must refuse it and name that crate.
+      - name: the wasm-floor gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-doc/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`n#[cfg(unix)]`nfn _wasm_floor_probe_unix_only() {}`npub fn _wasm_floor_probe() { _wasm_floor_probe_unix_only() }`n")
+            $failed = $false
+            $message = ""
+            try {
+              & ./scripts/ci/check-wasm-lib.ps1 *> $null
+            } catch {
+              $failed = $true
+              $message = $_.Exception.Message
+            }
+            if (-not $failed) { throw "the wasm32 library check accepted a planted cfg(unix)-only call" }
+            if ($message -notmatch '(?m)^\s+bt-doc - ' -or $message -notmatch '_wasm_floor_probe_unix_only') {
+              throw "the wasm32 library check failed for the wrong reason: $message"
+            }
+            Write-Host $message
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
+      # G3's five canaries. `clock-guard` reads source text, so each plant is a
+      # line appended to a file and nothing is compiled but bt-source's test. A
+      # qualified `std::time::Instant::now()` and a nested `use std::{time::{…}}`
+      # in a crate of the source set must each be refused by file, and so must a
+      # nested import written from the crate root (`use ::std::{time::Instant}`,
+      # which no qualified-path reading sees), and a qualified clock in
+      # bt-compose, the composition crate, refused by its file too; the same clock in bt-platform's
+      # `http` module, which is out of scope by name, must not be - the scope is
+      # the stated set and nothing outside it joins silently.
+      - name: the clock guard can actually fail, and its scope is the stated one
+        shell: pwsh
+        run: |
+          $plants = @(
+            @{ file = "crates/bt-doc/src/lib.rs"; line = "pub fn _clock_guard_probe() -> u128 { std::time::Instant::now().elapsed().as_nanos() }"; refused = $true },
+            @{ file = "crates/bt-layout/src/lib.rs"; line = "#[allow(unused_imports)] use std::{time::{SystemTime}};"; refused = $true },
+            @{ file = "crates/bt-viewport/src/lib.rs"; line = "#[allow(unused_imports)] use ::std::{time::Instant};"; refused = $true },
+            @{ file = "crates/bt-compose/src/lib.rs"; line = "pub fn _clock_guard_probe() -> u128 { std::time::Instant::now().elapsed().as_nanos() }"; refused = $true },
+            @{ file = "crates/bt-platform/src/http.rs"; line = "pub fn _clock_guard_probe() -> u128 { std::time::Instant::now().elapsed().as_nanos() }"; refused = $false }
+          )
+          foreach ($plant in $plants) {
+            $original = [IO.File]::ReadAllText($plant.file)
+            try {
+              [IO.File]::AppendAllText($plant.file, "`n$($plant.line)`n")
+              $failed = $false
+              $message = ""
+              try {
+                & ./scripts/ci/check-clock-guard.ps1 *> $null
+              } catch {
+                $failed = $true
+                $message = $_.Exception.Message
+              }
+              if ($plant.refused) {
+                if (-not $failed) { throw "the clock guard accepted '$($plant.line)' in $($plant.file)" }
+                if ($message -notmatch [regex]::Escape($plant.file)) {
+                  throw "the clock guard failed for the wrong reason on $($plant.file): $message"
+                }
+                Write-Host "refused as required: $message"
+              } elseif ($failed) {
+                throw "the clock guard reported $($plant.file), which is out of its scope by name: $message"
+              } else {
+                Write-Host "not reported, as required: $($plant.file) is out of scope"
+              }
+            } finally {
+              [IO.File]::WriteAllText($plant.file, $original)
+            }
+          }
           exit 0
 
       # **The split plan's budgets, watched where a red is information.**
@@ -583,6 +669,7 @@ jobs:
           --package bt-platform --package bt-persist --package bt-unicode
           --package bt-render --package bt-winres --package bt-source
           --package bt-workbench --package bt-app --package bt-lint-probe
+          --package bt-testpath --package bt-effects --package bt-compose
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -608,6 +695,14 @@ jobs:
       # and where a failure means something specific.
       - name: test
         run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
+
+      # **A contract of every build profile, run in the one it is easiest to lose in.** A read of
+      # the host names (CC-4) or of the SVG codec (CC-7) before the host installed it panics in
+      # release too: this binary is a process of its own with nothing installed, and a
+      # `debug_assert!` in place of the panic is green in the step above and red here. Release artefacts are a second build of
+      # bt-term's graph (fat LTO) and go into the same cache.
+      - name: the host-installed facts hold in release
+        run: cargo test --release --locked -p bt-term --test host_capabilities
 
       # This canary belongs after the workspace build it needs. A leaf crate
       # makes the second harness query seconds rather than a second workspace
@@ -645,6 +740,14 @@ jobs:
       - name: the migration-debt list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
+
+      # Gate G3: the crates a browser build reads name no clock of the standard
+      # library (`scripts/ci/check-clock-guard.ps1` states the source set and what
+      # is out of it by name). The workspace test above ran the same reading;
+      # this is its name, its counts and its refusals on their own line.
+      - name: clock-guard
+        shell: pwsh
+        run: ./scripts/ci/check-clock-guard.ps1
 
       - name: the timing-bound test list only shrinks
         shell: pwsh
@@ -728,6 +831,25 @@ jobs:
             $ran++
           }
           Write-Host "$ran of $($gates.Count) licensing gates ran."
+
+  # ── the library crates a browser build will reference (gate G1) ───────────
+  #
+  # `scripts/ci/check-wasm-lib.ps1` holds the list and says why each crate is on
+  # it. A job of its own because it builds every dependency of those crates a
+  # second time, for `wasm32-unknown-unknown`, and nothing else here can share
+  # that build.
+  wasm-lib-check:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/toolchain
+        with:
+          targets: wasm32-unknown-unknown
+      - name: the library crates check for wasm32
+        shell: pwsh
+        run: ./scripts/ci/check-wasm-lib.ps1
 
   # ── real ConPTY, real child processes ─────────────────────────────────────
   conpty:
@@ -882,7 +1004,7 @@ jobs:
   #    point: a `#[cfg(test)]` module and an example are where a platform
   #    assumption hides most cheaply, and the three targets M1-10 fixed were
   #    exactly those;
-  # ③ sixteen suites run, `bt-platform`'s and `bt-pty`'s among them — the second
+  # ③ the portable suites run, `bt-platform`'s and `bt-pty`'s among them — the second
   #    starts real Unix children over a real pty, which is a thing no Windows job
   #    in this file can do — and, since ticket 72, `bt-render`'s against the
   #    runner's own Metal device and `bt-corpus`'s (D-63);
@@ -896,15 +1018,17 @@ jobs:
   #    `gates-can-fail` mechanism run on this platform (the Windows job cannot
   #    plant it — Windows never compiles the item).
   #
-  # What is still checked and not tested, and why, as measured on the owner's
-  # Mac mini on 2026-09-26 (ticket 72): **`bt-term`** — 43 of its tests assert a
-  # Windows fact (drive-letter working directories, `cmd`/Git Bash/WSL
-  # integration scripts) and are red here by design; they are spread over
-  # `inline_image::tests`, `session::tests` and five integration binaries next to
-  # hundreds of green neighbours, so no name filter excludes exactly them (D-83).
-  # **`bt-app`** — 282 of its 4,600 tests fail here (Windows path fixtures,
-  # Ctrl-for-Cmd chords, Windows-only rows), so its suite is not portable yet
-  # and a longer command would only be a red one; that is D-83.
+  # **`bt-term`'s suite runs here since H1 (D-83).** Its tests that asserted a
+  # Windows fact on every platform now spell their fixtures the way this
+  # platform roots a path, and the three whose fact exists only on Windows are
+  # `#[cfg(windows)]` (docs/CONVENTIONS.md, "A test that is not limited to one
+  # platform asserts a fact of every platform"). Measured on the owner's Mac mini
+  # on 2026-10-08: the whole `cargo test -p bt-term` is about 40 s once its
+  # dependencies are built, which the steps above have already built.
+  # **`bt-app`'s whole suite is still not a step here.** H1 took it from 288
+  # reds to the few that are real macOS defects (ledger, "H1"), and the
+  # ignored-tests gate cannot yet hold a macOS-only ignore for them; a longer
+  # command would only be a red one until those tickets land.
   core-macos:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
@@ -946,7 +1070,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
-          -p bt-source -p bt-workbench -p alacritty_terminal
+          -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
 
       # **The application, every target of it** (M1-10). A step of its own and
       # not a name on the line above, because the claim is a different one: the
@@ -971,6 +1095,8 @@ jobs:
       # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
       # The uninstall door runs here too: its bundle, LaunchAgents and Application Support rows are
       # macOS product code, and its per-platform labels were red here with nothing running them.
+      # The launch wire runs here too (0.4.8 D3): its two-copy tests start two copies of the test
+      # binary over one data directory, and the refusal they pin was a macOS-only defect.
       - name: test the macOS updater modules
         run: |
           set -euo pipefail
@@ -998,6 +1124,7 @@ jobs:
           run_app_filter update_trial
           run_app_filter update_startup
           run_app_filter uninstall::
+          run_app_filter launch_wire
           log="$RUNNER_TEMP/macos-updater-install-flip.log"
           cargo test --locked -p bt-platform install_flip | tee "$log"
           grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
@@ -1025,8 +1152,8 @@ jobs:
           cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
-          -p bt-platform -p bt-pty -p bt-source -p bt-workbench -p alacritty_terminal
-          -p bt-render -p bt-corpus
+          -p bt-platform -p bt-pty -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p alacritty_terminal
+          -p bt-render -p bt-corpus -p bt-term
 
       # **The lint line, held on the second platform** — `logic`'s own clippy
       # line, word for word (ticket 72, D-63). M1-10 started it on `bt-platform`
@@ -1188,15 +1315,14 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
-          -p bt-source -p bt-workbench -p alacritty_terminal
+          -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
 
       # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
       # `bt-math` for one of the same shape. `bt-render` is still checked and not
       # tested: it asks for a real adapter, and a runner without one is a
       # different failure wearing the same red. `bt-term` and `bt-corpus` stay
-      # off for the reason the mac job gives — nobody has measured their suites
-      # on a second platform, and a list of what we have measured is worth more
-      # than a list of what we hope.
+      # off: nobody has measured their suites on Linux, and a list of what we
+      # have measured is worth more than a list of what we hope.
       #
       # **`bt-math` asks the machine for fonts, and this one has none worth the
       # name.** Three of its tests are deliberately about real installed faces
@@ -1213,7 +1339,7 @@ jobs:
           cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-transcript -p bt-viewport
-          -p bt-pty -p bt-source -p bt-workbench -p alacritty_terminal
+          -p bt-pty -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p alacritty_terminal
 
       # The Linux platform providers get the same lint bar the `gates` job
       # holds the workspace to: the Linux arms are compiled only here, so this
@@ -1238,6 +1364,9 @@ jobs:
 
       - name: test X11 and Wayland window handles
         run: cargo test -p bt-app --bin folio --locked -j 2 linux_window_tests
+
+      - name: test Linux event-loop hang questions
+        run: cargo test -p bt-app --bin folio --locked -j 2 linux_hang_probe::tests
 
       - name: present terminal text on a private X11 display
         run: python3 scripts/ci/linux-smoke.py x11 --exe target/debug/folio

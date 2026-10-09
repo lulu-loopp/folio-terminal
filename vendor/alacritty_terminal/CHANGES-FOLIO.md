@@ -31,12 +31,12 @@ byte-for-byte with the upstream copy, and fails if any file differs without a
 `MODIFIED BY THE FOLIO CONTRIBUTORS` notice — or if a file carries the notice
 without differing.
 
-## The 23 files that differ
+## The 24 files that differ
 
-211 upstream files were compared. None was deleted, 23 differ, and one file was
+211 upstream files were compared. None was deleted, 24 differ, and one file was
 added: this one.
 
-Nineteen of the twenty-two `.rs` files differ **only in formatting**. That is not
+Eighteen of the twenty-three `.rs` files differ **only in formatting**. That is not
 a judgement call: running `rustfmt --edition 2024` (this repository's
 `rustfmt.toml` is stock rustfmt pinned to the 2024 edition) over the *upstream*
 file produces the vendored file byte for byte. Upstream formats with its own
@@ -44,7 +44,8 @@ file produces the vendored file byte for byte. Upstream formats with its own
 
 | File | What changed |
 |---|---|
-| `Cargo.toml` | A path dependency on this repository's `bt-unicode` crate, which `src/term/mod.rs` needs for grapheme segmentation. |
+| `Cargo.toml` | A path dependency on this repository's `bt-unicode` crate, which `src/term/mod.rs` needs for grapheme segmentation; and `home` and `polling` moved from `[dependencies]` to a `cfg(not(target_arch = "wasm32"))` target table, because only `src/tty/` and `src/event_loop.rs` use them and neither is compiled for `wasm32` (`polling` refuses to build for a target it has no backend for). Every other target resolves exactly the dependencies it did. |
+| `src/lib.rs` | **Code.** `pub mod event_loop;` and `pub mod tty;` carry `#[cfg(not(target_arch = "wasm32"))]`: `wasm32` has no pseudoterminal to drive. The rest of the crate — the grid, the terminal state machine, selection, search — compiles for `wasm32` unchanged, and nothing outside the two modules names them. |
 | `src/grid/mod.rs` | **Code.** Two new methods on `Grid<T>`: `take_history`, which drains the whole native scrollback oldest-first and resets `max_scroll_limit`, and `restore_history`, which puts a previously taken tail back. They exist so a resize transaction can move history out of the grid and back without going through reflow. Everything else in the file is formatting. |
 | `src/term/mod.rs` | **Code.** The bulk of Folio's divergence — see the section below. |
 | `src/event.rs` | **Code.** One added variant, `Event::KeyboardFlagsRefused { requested, in_force }`, which the kitty keyboard protocol's handlers send when a request asks for flags the terminal does not honour (see `src/term/mod.rs` below). Everything else in the file is formatting. |

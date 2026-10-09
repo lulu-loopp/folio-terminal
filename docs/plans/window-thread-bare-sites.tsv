@@ -157,7 +157,6 @@ bt-platform	[unix]	crate::launch_pipe::<LaunchPipe as Drop>::drop	libc::write	1
 bt-platform	[unix]	crate::launch_pipe::<LaunchPipe as Drop>::drop	std::thread::JoinHandle::join	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start	libc::close	2
 bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
-bt-platform	[unix]	crate::launch_pipe::vet_executable	std::fs::metadata	2
 bt-platform	[windows]	crate::attention_pipe::<AttentionPipe as Drop>::drop	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::attention_pipe::<AttentionPipe as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<AttentionPipe as Drop>::drop	windows::Win32::System::Threading::SetEvent	1

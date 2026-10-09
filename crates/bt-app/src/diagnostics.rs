@@ -784,14 +784,7 @@ mod tests {
 
     /// A directory of this test's own, under the machine's temporary folder.
     fn a_reports_directory(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!(
-            "bt-app-crash-reports-{tag}-{}-{serial}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path(&format!("bt-app-crash-reports-{tag}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a temporary directory");
         directory
@@ -1039,11 +1032,7 @@ mod tests {
     /// opens.
     #[test]
     fn an_oversized_log_is_moved_aside_exactly_once() {
-        let directory = std::env::temp_dir().join(format!(
-            "folio-diagnostics-rotate-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let directory = bt_testpath::temp_path("folio-diagnostics-rotate");
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a private directory for this test");
         let log = directory.join("diagnostics.log");

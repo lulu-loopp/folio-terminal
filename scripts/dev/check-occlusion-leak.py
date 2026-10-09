@@ -12,7 +12,7 @@ Run:
   BT_PROBE_VERBOSE=1 BT_PROBE_INPUT=.tmp-repaint-capture/cc-topbot.vt \
     BT_PROBE_CHUNKS=.tmp-repaint-capture/cc-topbot.vt.chunks \
     BT_PROBE_COLUMNS=106 BT_PROBE_ROWS=33 \
-    cargo run --locked --offline -p bt-term --bin bt-repaint-oracle \
+    cargo run --locked --offline -p bt-corpus --bin bt-repaint-oracle \
     1>trace.txt 2>verbose.txt
   python scripts/dev/check-occlusion-leak.py verbose.txt   # exit 0 = clean, 1 = leak
 

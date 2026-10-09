@@ -219,7 +219,15 @@ pub fn current_thread_id() -> u32 {
 #[cfg(target_os = "macos")]
 static MAIN_THREAD_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+/// The kernel thread id used by Linux debuggers and `/proc/<pid>/task`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn current_thread_id() -> u32 {
+    // SAFETY: gettid reads the calling thread's positive kernel id and owns no resource.
+    unsafe { libc::gettid() }.cast_unsigned()
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[must_use]
 pub fn current_thread_id() -> u32 {
     0
@@ -776,6 +784,47 @@ pub fn scan_frames(modules: &[ModuleRange], stack: &[u8], max_frames: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::{ModuleRange, ModuleSite, resolve, scan_frames};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_thread_id_matches_the_kernel_thread_self_entry() {
+        let thread_self = std::fs::read_link("/proc/thread-self")
+            .expect("Linux exposes the calling thread in procfs");
+        let expected = thread_self
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u32>().ok())
+            .expect("the thread-self entry ends in a numeric thread id");
+        assert_ne!(expected, 0);
+        assert_eq!(super::current_thread_id(), expected);
+        assert_eq!(super::current_thread_id(), expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_live_threads_have_distinct_ids() {
+        let main = super::current_thread_id();
+        let barrier = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                let id = super::current_thread_id();
+                barrier.wait();
+                id
+            });
+            let second = scope.spawn(|| {
+                let id = super::current_thread_id();
+                barrier.wait();
+                id
+            });
+            barrier.wait();
+            let first = first.join().expect("first thread returned its id");
+            let second = second.join().expect("second thread returned its id");
+            assert_ne!(main, 0);
+            assert_ne!(first, main);
+            assert_ne!(second, main);
+            assert_ne!(first, second);
+        });
+    }
 
     fn map() -> Vec<ModuleRange> {
         vec![
