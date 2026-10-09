@@ -216,15 +216,14 @@ fn a_share_handed_over_meets_the_same_program_list() {
     };
     assert_eq!(handed, &path);
 
-    let mut lane = handoff_lane::HandoffLane::spawn(|| {}).expect("the lane starts");
+    let (wake, wakes) = crate::lane::wake_channel();
+    let mut lane = handoff_lane::HandoffLane::spawn(wake).expect("the lane starts");
     let id = lane.submit(bt_platform::NativeWindow::stand_in(0), request);
-    let deadline = Instant::now() + Duration::from_secs(10);
     let answer = loop {
         if let Some(answer) = lane.answers().into_iter().find(|answer| answer.id == id) {
             break answer;
         }
-        assert!(Instant::now() < deadline, "the lane answered");
-        std::thread::sleep(Duration::from_millis(2));
+        crate::lane::wait_for_a_wake(&wakes, "the share's answer");
     };
     let reason = answer.outcome.expect_err("a program on a share is refused");
     assert_eq!(reason, bt_platform::PROGRAM_REFUSED, "the door's own words");

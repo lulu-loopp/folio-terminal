@@ -2729,25 +2729,31 @@ pub(crate) fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
 
 /// **Wait for the ledger to reach `target`**, and answer where it got to.
 ///
-/// Since `Engine::open` stopped waiting for the engine to be built (§7.44
-/// ⑫), "an engine exists" becomes true shortly *after* the open returns
-/// rather than before it: the counter is bumped on the engine's own thread,
-/// where the `IMFMediaEngine` is actually made. A test that reads the
-/// counter on the next instruction is reading that race.
+/// `Engine::open` does not wait for the engine to be built (§7.44 ⑫), so "an
+/// engine exists" becomes true shortly *after* the open returns rather than
+/// before it: the counter is moved on the engine's own thread, where the
+/// `IMFMediaEngine` is actually made — and taken off on that thread too,
+/// possibly after a `shutdown` that ran out of its budget has returned. A test
+/// that reads the counter on the next instruction is reading that race.
 ///
-/// A deadline and not a sleep, so a machine that is quick pays nothing and a
-/// machine that is slow is not called wrong. Under [`ledger_gate`], so
-/// nothing else is moving the number while this watches it.
+/// So the wait is on the ledger's own signal: it ends the moment an engine
+/// thread moves the count onto `target`, whatever the machine's load, and
+/// [`crate::lane::PATIENCE`] only bounds a wait for a movement that is never
+/// coming — **which is a red here, by this helper**, naming the patience and
+/// the count that stood, so no caller can pass by the wait running out. A
+/// caller that wants the count itself asks
+/// `bt_platform::video::engine::engines_outstanding_reaching`. Under
+/// [`ledger_gate`], so nothing else is moving the number while this watches it.
 pub(crate) fn engines_settling_to(target: u64) -> u64 {
-    use bt_platform::video::engine::engines_outstanding;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let now = engines_outstanding();
-        if now == target || Instant::now() >= deadline {
-            return now;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let reached =
+        bt_platform::video::engine::engines_outstanding_reaching(target, crate::lane::PATIENCE);
+    assert_eq!(
+        reached,
+        target,
+        "the engine ledger did not reach {target} within the lane suite's patience ({:?});          {reached} engines stood",
+        crate::lane::PATIENCE
+    );
+    reached
 }
 
 /// A real folder with a real file in it, for the glance-foot tests: the path
