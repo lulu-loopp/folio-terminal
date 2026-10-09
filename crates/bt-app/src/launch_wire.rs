@@ -91,6 +91,22 @@ const REPORT_KEY: &str = "failed";
 /// [`Report::Incomplete`].
 const REPORT_FOLDER_KEY: &str = "failed_folder";
 
+/// The key an unfinished update whose journal records no trial ever begun crosses as — `true`,
+/// beside [`REPORT_KEY`] and only with [`Report::Incomplete`] (0.4.8 E4). A key, never a new value
+/// of a known one ([`WIRE_VERSION`]'s rule): an earlier build ignores it and says *Update
+/// incomplete.* as it always did.
+const REPORT_UNTRIED_KEY: &str = "failed_untried";
+
+/// The key the refusal of a journal write that another program's hold outlasted the window for
+/// crosses as, beside [`REPORT_KEY`] with any report ([`Report::JournalHeld`], 0.4.8 E4); an
+/// earlier build ignores it.
+const REPORT_HELD_KEY: &str = "failed_journal_held";
+
+/// **The most bytes the refusal of a held journal may cross as** — an operating-system error
+/// message, a sentence: the profile id's bound is too short for a translated one, and a folder's
+/// is generous.
+const MAX_REFUSAL_BYTES: usize = 512;
+
 /// **What a start a rollback sent was told to report**, in the words it crosses the pipe in
 /// (0.4.7 U-36).
 ///
@@ -110,7 +126,15 @@ pub(crate) enum Report {
     /// (`Failure::Incomplete`). A sender always names it — its own pass read the journal there —
     /// and the frame always carries it; it is `None` only once [`accept`] has taken away a
     /// folder that is not a local path, which leaves the report and drops the folder.
-    Incomplete { folder: Option<PathBuf> },
+    /// `untried`: the journal records no trial ever begun ([`REPORT_UNTRIED_KEY`]).
+    Incomplete {
+        folder: Option<PathBuf>,
+        untried: bool,
+    },
+    /// **Another program held the journal open past its holder's window**
+    /// (`Failure::JournalHeld`, 0.4.8 E4): `error`, the system's refusal, over the report the
+    /// journal itself makes ([`REPORT_HELD_KEY`]).
+    JournalHeld { error: String, then: Box<Report> },
 }
 
 impl Report {
@@ -120,17 +144,36 @@ impl Report {
         match failure {
             Failure::RolledBack => Some(Self::RolledBack),
             Failure::Interrupted => Some(Self::Interrupted),
+            Failure::JournalHeld { error, then } => Some(Self::JournalHeld {
+                error: error.clone(),
+                then: Box::new(Self::of(then)?),
+            }),
             // A later Folio's unfinished update crosses as *Update
             // incomplete.* (0.4.8 E1): the key and its words are the ones every
             // build since 0.4.7 reads, and a new value of a known key would
             // drop the whole frame there ([`WIRE_VERSION`]'s rule). Whether this
             // session's writes are held is the sender's own and does not cross.
-            Failure::Incomplete { folder, .. } | Failure::Newer { folder, .. } => {
-                Some(Self::Incomplete {
-                    folder: folder.clone(),
-                })
-            }
-            Failure::TrialIncomplete { .. } | Failure::Unsupported | Failure::Stopped(_) => None,
+            Failure::Incomplete {
+                folder, untried, ..
+            } => Some(Self::Incomplete {
+                folder: folder.clone(),
+                untried: *untried,
+            }),
+            Failure::Newer { folder, .. } => Some(Self::Incomplete {
+                folder: folder.clone(),
+                untried: false,
+            }),
+            // The trial's own card (above), an update committed after its trial
+            // ended (nothing failed), and a driver's own stops: none is a
+            // start's to tell another Folio. A stand-in that stood down
+            // beside the reserved trial reports nothing either: its card is
+            // about this session, and the Folio it would cross to is that
+            // very trial (0.4.8 E3).
+            Failure::TrialIncomplete { .. }
+            | Failure::BesideTheTrial { .. }
+            | Failure::ChangesNotKept { .. }
+            | Failure::Unsupported
+            | Failure::Stopped(_) => None,
         }
     }
 
@@ -140,33 +183,76 @@ impl Report {
         match self {
             Self::RolledBack => Failure::RolledBack,
             Self::Interrupted => Failure::Interrupted,
-            Self::Incomplete { folder } => Failure::Incomplete {
+            Self::Incomplete { folder, untried } => Failure::Incomplete {
                 folder: folder.clone(),
                 held: false,
+                untried: *untried,
+            },
+            Self::JournalHeld { error, then } => Failure::JournalHeld {
+                error: error.clone(),
+                then: Box::new(then.failure()),
             },
         }
     }
 
-    /// The token this report crosses as — short and from a closed set, [`origin_token`]'s rule.
-    const fn token(&self) -> &'static str {
+    /// **The report beneath a held journal's** — the one whose word crosses as [`REPORT_KEY`].
+    fn beneath(&self) -> &Self {
         match self {
-            Self::RolledBack => "rolled-back",
-            Self::Interrupted => "interrupted",
-            Self::Incomplete { .. } => "incomplete",
+            Self::JournalHeld { then, .. } => then.beneath(),
+            other => other,
         }
     }
 
-    /// A token and its folder, read back: the folder comes with `incomplete` and with nothing else,
-    /// and anything else is not a report this build knows.
-    fn from_token(token: &str, folder: Option<String>) -> Option<Self> {
-        match (token, folder) {
-            ("rolled-back", None) => Some(Self::RolledBack),
-            ("interrupted", None) => Some(Self::Interrupted),
-            ("incomplete", Some(folder)) => Some(Self::Incomplete {
-                folder: Some(PathBuf::from(folder)),
-            }),
+    /// [`Self::beneath`], to change.
+    fn beneath_mut(&mut self) -> &mut Self {
+        match self {
+            Self::JournalHeld { then, .. } => then.beneath_mut(),
+            other => other,
+        }
+    }
+
+    /// The refusal of a held journal over this report, if there is one.
+    fn held(&self) -> Option<&str> {
+        match self {
+            Self::JournalHeld { error, .. } => Some(error),
             _ => None,
         }
+    }
+
+    /// The token this report crosses as — short and from a closed set, [`origin_token`]'s rule.
+    fn token(&self) -> &'static str {
+        match self.beneath() {
+            Self::RolledBack => "rolled-back",
+            Self::Interrupted => "interrupted",
+            Self::Incomplete { .. } | Self::JournalHeld { .. } => "incomplete",
+        }
+    }
+
+    /// A token, its folder, whether no trial began and the hold's refusal, read back: the folder
+    /// and `untried` come with `incomplete` and with nothing else, a hold with any word, and
+    /// anything else is not a report this build knows.
+    fn from_token(
+        token: &str,
+        folder: Option<String>,
+        untried: bool,
+        held: Option<String>,
+    ) -> Option<Self> {
+        let report = match (token, folder, untried) {
+            ("rolled-back", None, false) => Self::RolledBack,
+            ("interrupted", None, false) => Self::Interrupted,
+            ("incomplete", Some(folder), untried) => Self::Incomplete {
+                folder: Some(PathBuf::from(folder)),
+                untried,
+            },
+            _ => return None,
+        };
+        Some(match held {
+            Some(error) => Self::JournalHeld {
+                error,
+                then: Box::new(report),
+            },
+            None => report,
+        })
     }
 }
 
@@ -399,14 +485,19 @@ impl LaunchRequest {
         // exactly the frame every earlier build writes (see [`WIRE_VERSION`]).
         if let Some(report) = &self.report {
             value.insert(REPORT_KEY.to_owned(), report.token().into());
-            if let Report::Incomplete {
-                folder: Some(folder),
-            } = report
-            {
-                value.insert(
-                    REPORT_FOLDER_KEY.to_owned(),
-                    folder.to_string_lossy().into_owned().into(),
-                );
+            if let Report::Incomplete { folder, untried } = report.beneath() {
+                if let Some(folder) = folder {
+                    value.insert(
+                        REPORT_FOLDER_KEY.to_owned(),
+                        folder.to_string_lossy().into_owned().into(),
+                    );
+                }
+                if *untried {
+                    value.insert(REPORT_UNTRIED_KEY.to_owned(), true.into());
+                }
+            }
+            if let Some(error) = report.held() {
+                value.insert(REPORT_HELD_KEY.to_owned(), error.into());
             }
         }
         serde_json::Value::Object(value).to_string()
@@ -456,10 +547,20 @@ impl LaunchRequest {
             report: match (
                 object.get(REPORT_KEY),
                 bounded(REPORT_FOLDER_KEY, MAX_FOLDER_BYTES)?,
+                object.get(REPORT_UNTRIED_KEY),
+                bounded(REPORT_HELD_KEY, MAX_REFUSAL_BYTES)?,
             ) {
-                (None, None) => None,
-                (None, Some(_)) => return None,
-                (Some(token), folder) => Some(Report::from_token(token.as_str()?, folder)?),
+                (None, None, None, None) => None,
+                (None, ..) => return None,
+                (Some(token), folder, untried, held) => Some(Report::from_token(
+                    token.as_str()?,
+                    folder,
+                    match untried {
+                        None => false,
+                        Some(untried) => untried.as_bool()?,
+                    },
+                    held,
+                )?),
             },
         })
     }
@@ -537,7 +638,8 @@ pub(crate) fn accept(mut request: LaunchRequest) -> Result<LaunchRequest, Refusa
     {
         return Err(Refusal::NoSuchFolder);
     }
-    if let Some(Report::Incomplete { folder }) = &mut request.report
+    if let Some(Report::Incomplete { folder, .. }) =
+        request.report.as_mut().map(Report::beneath_mut)
         && folder.as_deref().is_some_and(|path| !is_a_local_path(path))
     {
         *folder = None;
@@ -831,6 +933,33 @@ pub(crate) fn hand_over(
     if !request.is_sayable() {
         return None;
     }
+    let answer = converse(directory, &request);
+    after_reply(request, answer?, say)
+}
+
+/// **The command line a person's start handed a rescue build, as the request it crosses in**
+/// (0.4.8 E3): `handed` (`--then-launch`'s words) parsed as that start parsed them, its folder
+/// resolved against `here` — the start's working directory, which the rescue build it started
+/// inherits — and nothing to report, since the road decided no failure for it. `None` for a line
+/// this wire cannot carry, as [`LaunchRequest::from_cli`] says (a document), or one that does not
+/// parse.
+#[must_use]
+pub(crate) fn carried(handed: &[std::ffi::OsString], here: Option<&Path>) -> Option<LaunchRequest> {
+    let line = cli::parse(handed.iter().cloned()).ok()?;
+    LaunchRequest::from_cli(&line, cli::machine_path_kind, here).filter(LaunchRequest::is_sayable)
+}
+
+/// **A person's start a recovery carried, handed to the Folio that holds `directory`** (0.4.8
+/// E3, `update_apply::carry_the_start`): one conversation on the launch endpoint, the one
+/// [`hand_over`] has — from a road process's worker, which has no console to say a refusal on, so
+/// the answer itself is returned. `None` when nobody answered.
+pub(crate) fn hand_over_carried(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
+    converse(directory, request)
+}
+
+/// **One conversation with the Folio that holds `directory`**: `request` sent, and its answer —
+/// `None` for no endpoint, nobody listening, or an answer this build cannot read.
+fn converse(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
     let endpoint = bt_platform::launch_pipe::endpoint_for(directory)?;
     let mut answer = None;
     bt_platform::launch_pipe::hand_over(&endpoint, &request.encode(), |server, line| {
@@ -852,7 +981,7 @@ pub(crate) fn hand_over(
         }
     })
     .ok()?;
-    after_reply(request, answer?, say)
+    answer
 }
 
 /// **What the start does with the running Folio's answer** — `Some(code)` to leave, `None` to carry
@@ -1425,14 +1554,26 @@ mod tests {
         ])
     }
 
-    /// The three reports a start can carry, an unfinished rollback's naming `folder`.
-    fn reports(folder: PathBuf) -> [Failure; 3] {
+    /// The reports a start can carry, an unfinished rollback's naming `folder`.
+    fn reports(folder: PathBuf) -> [Failure; 5] {
         [
             Failure::RolledBack,
             Failure::Interrupted,
             Failure::Incomplete {
+                folder: Some(folder.clone()),
+                held: false,
+                untried: false,
+            },
+            // 0.4.8 E4: the update stopped before the new version started, and
+            // a hold of the journal over the restored one.
+            Failure::Incomplete {
                 folder: Some(folder),
                 held: false,
+                untried: true,
+            },
+            Failure::JournalHeld {
+                error: "拒绝访问。 (os error 5)".to_owned(),
+                then: Box::new(Failure::RolledBack),
             },
         ]
     }
@@ -1717,6 +1858,7 @@ mod tests {
             let request = LaunchRequest {
                 report: Some(Report::Incomplete {
                     folder: Some(sent.clone()),
+                    untried: false,
                 }),
                 ..LaunchRequest::default()
             };
@@ -1732,7 +1874,8 @@ mod tests {
             assert_eq!(
                 arrived[0].report,
                 Some(Report::Incomplete {
-                    folder: kept.clone()
+                    folder: kept.clone(),
+                    untried: false,
                 }),
                 "{sent:?}"
             );
@@ -1780,6 +1923,7 @@ mod tests {
             Some(&Failure::Incomplete {
                 folder: Some(folder.clone()),
                 held: false,
+                untried: false,
             }),
             all_folders,
             Some(typed_in().as_path()),
@@ -1796,7 +1940,8 @@ mod tests {
                 assert_eq!(
                     Report::of(&failure),
                     Some(Report::Incomplete {
-                        folder: Some(folder.clone())
+                        folder: Some(folder.clone()),
+                        untried: false,
                     })
                 );
                 let frame = LaunchRequest::of_start(
@@ -1817,7 +1962,8 @@ mod tests {
                 assert_eq!(
                     LaunchRequest::decode(&frame).and_then(|request| request.report),
                     Some(Report::Incomplete {
-                        folder: Some(folder.clone())
+                        folder: Some(folder.clone()),
+                        untried: false,
                     })
                 );
             }
@@ -1892,10 +2038,76 @@ mod tests {
             ))
             .and_then(|request| request.report),
             Some(Report::Incomplete {
-                folder: Some(journal_folder())
+                folder: Some(journal_folder()),
+                untried: false,
             }),
             "and a well-formed one is"
         );
+    }
+
+    /// **RED (0.4.8 E4) — a report's cause crosses in keys of its own: whether no trial was
+    /// begun, and the refusal of a journal another program held; the receiver tells its job the
+    /// very failure the start had, so its card has the same heading.** The keys come only where
+    /// they mean something — `failed_untried` with `incomplete` alone, as a boolean; the refusal
+    /// with any word, bounded and free of control bytes — and the word itself is the one every
+    /// build since 0.4.7 reads (an earlier receiver says *Update incomplete.* or *Previous
+    /// version restored.* as it always did; `a_0_4_6_receiver_takes_a_reported_launch_as_the_same_launch`
+    /// holds the version's frozen reader to these frames too).
+    ///
+    /// MUTATIONS: leave `REPORT_UNTRIED_KEY` out of `encode` — the untried report comes back
+    /// tried; leave `REPORT_HELD_KEY` out — the held report comes back without its hold.
+    #[test]
+    fn a_reports_cause_crosses_in_keys_of_its_own() {
+        let refusal = "拒绝访问。 (os error 5)".to_owned();
+        let untried = Failure::Incomplete {
+            folder: Some(journal_folder()),
+            held: false,
+            untried: true,
+        };
+        for failure in [
+            untried.clone(),
+            Failure::JournalHeld {
+                error: refusal.clone(),
+                then: Box::new(untried.clone()),
+            },
+            Failure::JournalHeld {
+                error: refusal.clone(),
+                then: Box::new(Failure::Interrupted),
+            },
+        ] {
+            let request =
+                LaunchRequest::of_start(&sent_by_a_rollback(), Some(&failure), all_folders, None)
+                    .expect("it crosses");
+            let frame = request.encode();
+            let words: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_ne!(
+                words[REPORT_KEY], "journal-held",
+                "never a new word: {frame}"
+            );
+            let arrived = LaunchRequest::decode(&frame).expect("this build reads it");
+            assert_eq!(
+                arrived.report.map(|report| report.failure()),
+                Some(failure.clone()),
+                "{frame}"
+            );
+        }
+        let base = r#""v":2,"new":false,"tab":false,"from":"plain""#;
+        for line in [
+            format!(r#"{{{base},"failed":"rolled-back","failed_untried":true}}"#),
+            format!(
+                r#"{{{base},"failed":"incomplete","failed_folder":"C:\\x","failed_untried":"yes"}}"#
+            ),
+            format!(r#"{{{base},"failed_untried":true}}"#),
+            format!(r#"{{{base},"failed_journal_held":"拒绝访问。"}}"#),
+            format!(r#"{{{base},"failed":"interrupted","failed_journal_held":""}}"#),
+            format!(r#"{{{base},"failed":"interrupted","failed_journal_held":"a\nb"}}"#),
+        ] {
+            assert_eq!(
+                LaunchRequest::decode(&line),
+                None,
+                "{line} is not a request this build understands"
+            );
+        }
     }
 
     /// **RED (U-36) — a launch with a report is never refused into nothing.**
@@ -2067,5 +2279,81 @@ mod tests {
                 "the frozen reader reads its own build's frames: {frame}"
             );
         }
+    }
+
+    /// **RED (0.4.8 E3, #12) — a person's start a recovery deferred reaches the Folio that opens
+    /// the window: its folder, over the real launch endpoint.**
+    ///
+    /// A recovery handed `--then-launch --cwd <folder>` that started nothing, because another
+    /// process opens the window, carries that start ([`carried`], `update_apply::carry_the_start`):
+    /// once a Folio holds the data directory, the request crosses the endpoint that Folio listens
+    /// on, folder and origin intact, and no report rides with it. The far end here is a listener
+    /// of the test's own on a private directory whose claim the test holds.
+    ///
+    /// MUTATION: in [`hand_over_carried`], converse with `&LaunchRequest::default()` (the folder
+    /// dropped on the way to the window).
+    #[test]
+    fn a_carried_start_reaches_the_folio_that_holds_the_data_directory() {
+        let directory = bt_testpath::temp_path("launch-wire-carried-数据");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let folder = bt_testpath::temp_path("工作 文件夹 carried");
+        std::fs::create_dir_all(&folder).unwrap();
+        if bt_platform::launch_pipe::endpoint_for(&directory).is_none() {
+            return;
+        }
+        let _holder = crate::persist::try_claim(&directory).expect("the window's Folio holds it");
+        let (sender, landed) = std::sync::mpsc::channel();
+        let Ok(_endpoint) = bt_platform::launch_pipe::LaunchPipe::start(
+            &directory,
+            |line: &str| {
+                let request = LaunchRequest::decode(line)?;
+                Some(bt_platform::launch_pipe::Decision {
+                    reply: Reply::Taken.encode(),
+                    admitted: Some(request),
+                })
+            },
+            move |request: LaunchRequest| {
+                let _ = sender.send(request);
+            },
+        ) else {
+            return;
+        };
+        let handed: Vec<std::ffi::OsString> = ["--from-explorer", "--cwd"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .chain([folder.clone().into_os_string()])
+            .collect();
+        let request = carried(&handed, None).expect("a folder crosses");
+        assert_eq!(request.cwd.as_deref(), Some(folder.as_path()));
+        assert_eq!(request.origin, cli::LaunchOrigin::Explorer);
+        assert_eq!(request.report, None, "a carried start reports nothing");
+        let sent = request.clone();
+        let carried = bt_platform::spawn_at_priority(
+            "bt-launch-wire-carry-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                crate::update_apply::carry_the_start(
+                    worker,
+                    &directory,
+                    &crate::update_apply::Ahead::DataHolder,
+                    &sent,
+                    std::time::Duration::from_secs(1),
+                )
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(carried, crate::update_apply::Carried::Taken);
+        assert_eq!(
+            // The listener commits once this end has confirmed `Taken`: its one
+            // message is the completion signal.
+            landed
+                .recv()
+                .expect("the window's Folio was handed the start"),
+            request
+        );
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

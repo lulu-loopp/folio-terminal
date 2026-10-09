@@ -930,22 +930,26 @@ fn a_deferred_transaction_survives_the_first_relaunch() {
     let home = scene.home();
     let first = {
         let home = home.clone();
-        on_a_worker(move |worker| match at_launch(worker, &home).unwrap() {
-            AtLaunch::Counted(staged) => staged.journal.body.phase,
-            _ => panic!("the first launch counts"),
+        on_a_worker(move |worker| {
+            match at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap() {
+                AtLaunch::Kept(staged) => staged.journal.body.phase,
+                _ => panic!("the first launch counts"),
+            }
         })
     };
     assert_eq!(
         first,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         }
     );
     let on_disk = journal_on_disk(&home);
     assert_eq!(
         on_disk.body.phase,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         }
     );
     assert_eq!(on_disk.header().class, Class::Deferred);
@@ -956,7 +960,12 @@ fn a_deferred_transaction_survives_the_first_relaunch() {
 
     let second = {
         let home = home.clone();
-        on_a_worker(move |worker| matches!(at_launch(worker, &home).unwrap(), AtLaunch::Discarded))
+        on_a_worker(move |worker| {
+            matches!(
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap(),
+                AtLaunch::Discarded
+            )
+        })
     };
     assert!(second, "the second launch discards");
     scene.left_nothing(1);
@@ -1000,7 +1009,9 @@ fn revalidation_before_resume_refuses_a_changed_set() {
     let (unchanged, kept, changed) = {
         let (home, exe, policy) = (home.clone(), scene.exe.clone(), scene.ca.policy());
         on_a_worker(move |worker| {
-            let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() else {
+            let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            else {
                 panic!("a prepared transaction is counted");
             };
             let resume = Resume {
@@ -1179,7 +1190,8 @@ fn the_applier_copy_is_verified_and_never_moved() {
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(
@@ -1213,7 +1225,9 @@ fn the_applier_copy_is_verified_and_never_moved() {
     on_a_worker({
         let home = home.clone();
         move |worker| {
-            if let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() {
+            if let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            {
                 let _ = crate::update_prepare::discard(worker, *staged, &Event::Discarded);
             }
         }
@@ -1357,7 +1371,9 @@ fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
     on_a_worker({
         let home = scene.home();
         move |worker| {
-            if let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() {
+            if let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            {
                 let _ = crate::update_prepare::discard(worker, *staged, &Event::Discarded);
             }
         }
@@ -1466,6 +1482,7 @@ fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathere
         argv: &[],
         trial: None,
         failed: None,
+        journal_held: None,
     };
     let mut world = Quiet::default();
     let crate::update_startup::Verdict::Continue { waiting, .. } =
@@ -1475,10 +1492,15 @@ fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathere
     };
     assert!(world.0.is_empty(), "the start said {:?}", world.0);
     let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut job = Job::with_offers(true).after_start(waiting.map(|home| *home), resume, {
-        let checked = Arc::clone(&checked);
-        move || checked.store(true, std::sync::atomic::Ordering::SeqCst)
-    });
+    let mut job = Job::with_offers(true).after_start(
+        waiting.map(|home| *home),
+        crate::update_txn::PreviousRun::Orderly,
+        resume,
+        {
+            let checked = Arc::clone(&checked);
+            move || checked.store(true, std::sync::atomic::Ordering::SeqCst)
+        },
+    );
     let presenters = Presenters {
         visited: &[1],
         open: &[1],
@@ -1632,7 +1654,8 @@ fn a_later_launch_shows_the_verified_card_from_the_staged_set_without_downloadin
     assert_eq!(
         journal_on_disk(&home).body.phase,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         },
         "the launch is counted"
     );
@@ -1921,7 +1944,8 @@ fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_once_at_allocated
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(journal.body.adapter, crate::update_txn::Adapter::Ours);

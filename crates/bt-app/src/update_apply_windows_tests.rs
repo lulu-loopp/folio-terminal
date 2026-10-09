@@ -209,6 +209,15 @@ struct Fake {
     /// the installed program started with no trial words at each launch, its
     /// pid kept here.
     beside_launch: Option<Arc<Mutex<Vec<u32>>>>,
+    /// **The person's starts a recovery carried to the window** (0.4.8 E3):
+    /// whom it waited for, and the request it handed over.
+    carried: Vec<(
+        crate::update_apply::Ahead,
+        crate::launch_wire::LaunchRequest,
+    )>,
+    /// What the window's Folio answers a carried start: taken, unless a test
+    /// says otherwise.
+    carry_answer: crate::update_apply::Carried,
 }
 
 impl World for Fake {
@@ -322,6 +331,18 @@ impl World for Fake {
 
     fn show_here(&mut self, text: &str) {
         self.shown.push(text.to_owned());
+    }
+
+    fn carry(
+        &mut self,
+        _worker: &WorkerCtx,
+        _data: &Path,
+        ahead: &crate::update_apply::Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        _within: Duration,
+    ) -> crate::update_apply::Carried {
+        self.carried.push((ahead.clone(), request.clone()));
+        self.carry_answer
     }
 }
 
@@ -502,6 +523,8 @@ impl Install {
             before_start: None,
             real_ack: None,
             beside_launch: None,
+            carried: Vec::new(),
+            carry_answer: crate::update_apply::Carried::Taken,
         }
     }
 
@@ -613,8 +636,15 @@ fn limits(old_within_ms: u64, trial_ms: u64) -> Limits {
         poll: Duration::from_millis(40),
         quit_within: GRACE,
         end_within: Duration::from_secs(10),
+        journal_held_within: JOURNAL_HELD_WITHIN_UNDER_TEST,
     }
 }
+
+/// **A test's window for a journal write another program holds**: two
+/// seconds, so a test that holds the journal past it waits two; the product's
+/// [`crate::update_apply::JOURNAL_HELD_WITHIN`] is pinned by `update_apply`'s
+/// own tests, on a clock of their own.
+const JOURNAL_HELD_WITHIN_UNDER_TEST: Duration = Duration::from_secs(2);
 
 /// A test's grace for a trial asked to quit (the product's is 5 s).
 const GRACE: Duration = Duration::from_millis(600);
@@ -739,6 +769,19 @@ fn rolled_back_on_disk(install: &Install) {
 /// The words a build started after a rollback carries, then `handed`.
 fn failed_then(install: &Install, handed: &[OsString]) -> Vec<OsString> {
     let mut words = failed_words(&install.home).to_vec();
+    words.extend_from_slice(handed);
+    words
+}
+
+/// `--update-failed <journal>`, then `--update-journal-held` with the refusal
+/// a rename over a journal another program holds without delete sharing
+/// meets (`ERROR_ACCESS_DENIED`, in the system's words), then `handed`
+/// (0.4.8 E4).
+fn failed_held_then(install: &Install, handed: &[OsString]) -> Vec<OsString> {
+    let mut words = failed_words(&install.home).to_vec();
+    words.extend(crate::update_apply::journal_held_words(
+        &io::Error::from_raw_os_error(5).to_string(),
+    ));
     words.extend_from_slice(handed);
     words
 }
@@ -930,7 +973,8 @@ fn a_held_open_file_refuses_before_any_move_and_relaunches_o() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     nothing_moved(&install);
@@ -2021,6 +2065,7 @@ fn rolled_back_is_retired_at_the_next_start() {
         argv: &argv,
         trial: None,
         failed: Some(&journal),
+        journal_held: None,
     };
     let mut starting = StartWorld {
         said: Vec::new(),
@@ -2365,11 +2410,14 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
 /// transaction to it**: `WindowHolder::Unmarked` is `Deferral::WindowDuty` —
 /// nothing written, nothing started, and the line says why. The test holds
 /// the election lock through the whole recovery (an applier's election
-/// stalled past `ELECTION_WITHIN`).
+/// stalled past `ELECTION_WITHIN`). The person's start it was handed is
+/// carried to whichever window that election's road opens — the applier's,
+/// or the outgoing build's when the applier stands aside (0.4.8 E3, E2's road
+/// carries it too): it waits on the election, then on the mark it leaves.
 ///
-/// MUTATION: in `recover`, settle the transaction on `WindowHolder::Unmarked`
+/// MUTATIONS: in `recover`, settle the transaction on `WindowHolder::Unmarked`
 /// as on `Ok(None)` (the recovery reverts a transaction an applier is still
-/// deciding).
+/// deciding); or answer `deferred_to: None` there (the start dropped).
 #[test]
 fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
     let Some(install) = Install::new("e2-election-in-flight") else {
@@ -2400,6 +2448,24 @@ fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
         "the transaction is left to the election in flight"
     );
     assert!(world.opened.is_empty(), "{:?}", world.opened);
+    assert_eq!(
+        world
+            .carried
+            .iter()
+            .map(|(ahead, request)| (ahead.clone(), request.cwd.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            crate::update_apply::Ahead::Election {
+                home: install.home.clone(),
+                txn: install.txn,
+                me: install.road(limits(20_000, 20_000)).me,
+            },
+            crate::launch_wire::carried(&handed(), std::env::current_dir().ok().as_deref())
+                .and_then(|request| request.cwd),
+        )],
+        "{:?}",
+        world.said
+    );
     nothing_moved(&install);
 }
 
@@ -2416,8 +2482,15 @@ fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
 /// never took the mark is nobody's successor. U-23 let the lock go and waited
 /// up to 180 s instead; that wait is removed.
 ///
-/// MUTATION: in `recover`, leave a `Handoff` to any live process of the rescue
-/// image, named or not.
+/// **The person's start it was handed is not dropped** (0.4.8 E3, #12): the
+/// recovery carries it to the window that applier opens — its request (the
+/// folder, the switches, who started it) handed over the launch wire once a
+/// Folio holds the data directory (the world's `carry`) — and starts nothing
+/// itself; the start it was handed reverts with is still its own start.
+///
+/// MUTATIONS: in `recover`, leave a `Handoff` to any live process of the
+/// rescue image, named or not; or answer `deferred_to: None` (the deferred
+/// start dropped, as before E3).
 #[test]
 fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
     let Some(install) = Install::new("alive") else {
@@ -2464,7 +2537,7 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
         "nothing is waited for: {:?}",
         began.elapsed()
     );
-    assert_eq!(code, 1, "{:?}", world.said);
+    assert_eq!(code, 0, "{:?}", world.said);
     assert!(
         said_at(&world, &format!("{} has the update's window", applier.pid)).is_some(),
         "{:?}",
@@ -2476,6 +2549,24 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
         "the live applier's transaction is left to it"
     );
     assert!(world.opened.is_empty(), "that applier opens Folio");
+    let here = std::env::current_dir().ok();
+    assert_eq!(
+        world.carried,
+        vec![(
+            crate::update_apply::Ahead::Process(applier),
+            crate::launch_wire::carried(&handed(), here.as_deref()).expect("a folder crosses"),
+        )],
+        "the person's start is carried to the window that applier opens: {:?}",
+        world.said
+    );
+    assert!(
+        world
+            .said
+            .iter()
+            .any(|line| line.contains("was taken by the Folio that holds the data directory")),
+        "{:?}",
+        world.said
+    );
     nothing_moved(&install);
 
     // Not named — it never took the mark: not waited for.
@@ -2485,7 +2576,8 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     assert_eq!(
@@ -2494,6 +2586,7 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
         "{:?}",
         world.said
     );
+    assert!(world.carried.is_empty(), "its own start carries it");
 }
 
 // ── a journal write refused (U-34) ──────────────────────────────────────────
@@ -2601,15 +2694,17 @@ fn a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_inc
     };
     assert!(why.contains("rename"), "{why}");
     assert!(
-        waited >= crate::update_apply::JOURNAL_WRITE_WITHIN,
+        waited >= JOURNAL_HELD_WITHIN_UNDER_TEST,
         "asked again for the whole bound: {waited:?}"
     );
     assert_eq!(install.on_disk().body.phase, Phase::Armed);
     assert!(install.registry.holds(install.txn), "the Run value is kept");
     nothing_moved(&install);
+    // The hold outlasted the window: the start is told what refused it, so
+    // its card names the hold (0.4.8 E4).
     assert_eq!(
         world.opened,
-        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        vec![(install.installed.clone(), failed_held_then(&install, &[]))],
         "{:?}",
         world.said
     );
@@ -2648,7 +2743,9 @@ fn a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_inc
 /// says the trial could not be recorded — past the whole retry bound.
 ///
 /// MUTATION: in `Txn::trial`, return the `TrialBegan` record's error with
-/// `?` (neither ending the trial nor declaring the rollback).
+/// `?` (neither ending the trial nor declaring the rollback). MUTATION (0.4.8
+/// E4): record `TrialBegan` with a sink that says nothing (`&mut |_| {}` for
+/// `world.say`) — no round in the log.
 #[test]
 fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
     let Some(install) = Install::new("unrecorded") else {
@@ -2662,6 +2759,20 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
     let unrecorded = said_at(&world, "could not be recorded").expect("said");
     let asked = said_at(&world, "is asked to").expect("the trial is stopped");
     assert!(unrecorded < asked, "{:?}", world.said);
+    // Every refused round of `TrialBegan` is in the applier's log before
+    // that, with the system's refusal, the last one giving up (0.4.8 E4).
+    let refusal = io::Error::from_raw_os_error(5).to_string();
+    let rounds = &world.said[..unrecorded];
+    assert!(
+        rounds.len() > 1
+            && rounds.iter().all(|line| {
+                line.starts_with("BT_UPDATE_JOURNAL held by another program for ")
+                    && line.contains(&refusal)
+            })
+            && rounds.last().unwrap().contains("the write is given up"),
+        "{:?}",
+        world.said
+    );
     assert!(
         wrote(&world).ends_with("[Armed, Moving, RollbackIntent, RolledBack, Retired]"),
         "{:?}",
@@ -2675,9 +2786,11 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
     );
     rolled_back_on_disk(&install);
     assert!(!install.registry.holds(install.txn));
+    // `TrialBegan` was refused past the window, so the build started after
+    // the rollback is told the hold (0.4.8 E4).
     assert_eq!(
         world.opened,
-        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        vec![(install.installed.clone(), failed_held_then(&install, &[]))],
         "{:?}",
         world.said
     );
@@ -3259,7 +3372,8 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     assert_eq!(
@@ -3835,7 +3949,7 @@ fn the_applier_waits_for_o_within_one_budget() {
     let nonce = install.applier;
     let mut world = install.world(Trial::Answers);
     let expired = Instant::now() - Duration::from_millis(1);
-    let ((ended, successor), asked) = on_a_worker(move |worker| {
+    let ((ended, successor, _), asked) = on_a_worker(move |worker| {
         let mut asked = None;
         let answer = apply_under_the_lock_with(
             worker,
@@ -3956,6 +4070,7 @@ fn u35_two_windows_launch_refusals_reserve_exactly_one_last_trial() {
             handed: &[],
             worker: Some(worker),
             actor: Some(Actor::Applier),
+            journal_held: None,
         });
         let left = guard.leave();
         drop(guard);
@@ -3996,6 +4111,7 @@ fn u35_two_windows_launch_refusals_reserve_exactly_one_last_trial() {
             handed: &[],
             worker: Some(worker),
             actor: Some(Actor::Applier),
+            journal_held: None,
         });
         let left = guard.leave();
         drop(guard);
@@ -4039,6 +4155,7 @@ fn reserved_by_the_guard(install: &Install) -> (Nonce, Vec<(PathBuf, Vec<OsStrin
             handed: &[],
             worker: Some(worker),
             actor: Some(Actor::Applier),
+            journal_held: None,
         });
         let left = guard.leave();
         drop(guard);
@@ -4346,6 +4463,7 @@ fn a_start(
             argv,
             trial: trial.as_ref(),
             failed: failed.as_deref(),
+            journal_held: None,
         },
         world,
     )
@@ -5369,6 +5487,8 @@ fn bare_world(home: Home) -> Fake {
         before_start: None,
         real_ack: None,
         beside_launch: None,
+        carried: Vec::new(),
+        carry_answer: crate::update_apply::Carried::Taken,
     }
 }
 
@@ -5449,7 +5569,10 @@ fn trial_part(root: &Path) {
             };
             crate::update_trial::watch(
                 gate,
-                &journal,
+                (
+                    &journal,
+                    &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                ),
                 plan.txn,
                 Duration::from_millis(20),
                 &|| {},
@@ -5499,6 +5622,7 @@ fn rescue_part(root: &Path) {
             poll: Duration::from_millis(40),
             quit_within: Duration::from_millis(300),
             end_within: Duration::from_secs(10),
+            journal_held_within: JOURNAL_HELD_WITHIN_UNDER_TEST,
         },
         me,
         starter: install_flip::parent_of_this_process(),

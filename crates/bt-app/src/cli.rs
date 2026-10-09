@@ -136,6 +136,12 @@ pub struct CliRequest {
     /// incomplete.* and the folder), and past a rollback that did not finish
     /// the start continues instead of handing itself back to the rescue build.
     pub update_failed: Option<PathBuf>,
+    /// `--update-journal-held <error>` — **beside `--update-failed`: a journal
+    /// write of the lock holder that sent this start was refused because
+    /// another program held the journal open, past the holder's window**
+    /// (0.4.8 E4). The value is the operating system's last refusal, kept as
+    /// given; `crate::update_startup` puts it on the card.
+    pub update_journal_held: Option<String>,
     /// `--update-feed <file-URL>` — **this process's update check and
     /// download read a local release feed instead of github.com** (0.4.6
     /// U-30b; `crate::update::Feed`).
@@ -351,6 +357,11 @@ pub const UPDATE_APPLY_FLAG: &str = "--update-apply";
 /// rises at `Failed` ([`CliRequest::update_failed`], U-29). Written first on
 /// the line, before whatever the start that handed itself over was given.
 pub const UPDATE_FAILED_FLAG: &str = "--update-failed";
+/// `--update-journal-held <error>`: written after [`UPDATE_FAILED_FLAG`] by a
+/// lock holder whose journal write another program's hold refused past its
+/// window ([`CliRequest::update_journal_held`], 0.4.8 E4). One value; like the
+/// other update words, never typed by a person and not in the usage block.
+pub const UPDATE_JOURNAL_HELD_FLAG: &str = "--update-journal-held";
 /// `--update-feed <file-URL>`: an ordinary start whose update check and
 /// download read a local release feed (U-30b, [`CliRequest::update_feed`]) —
 /// typed by the person rehearsing an update on a clean machine
@@ -485,6 +496,14 @@ where
                 }
                 let journal = value_for(UPDATE_FAILED_FLAG, flag, &arg, &mut args)?;
                 request.update_failed = Some(PathBuf::from(journal));
+            }
+            // The same rule: the word and the refusal are two arguments.
+            Some(flag) if flag == UPDATE_JOURNAL_HELD_FLAG => {
+                if request.update_journal_held.is_some() {
+                    return Err(CliFault::Repeated(UPDATE_JOURNAL_HELD_FLAG));
+                }
+                let error = value_for(UPDATE_JOURNAL_HELD_FLAG, flag, &arg, &mut args)?;
+                request.update_journal_held = Some(error.to_string_lossy().into_owned());
             }
             // The same rule once more: the word and the feed's URL are two
             // arguments.
@@ -1606,6 +1625,7 @@ mod tests {
                 origin: LaunchOrigin::Plain,
                 update_trial: None,
                 update_failed: None,
+                update_journal_held: None,
                 update_feed: None,
             }
         );
@@ -2253,6 +2273,42 @@ mod tests {
             CliFault::Repeated(UPDATE_FAILED_FLAG)
         );
         assert_eq!(update_door(args(&["--update-failed", journal])), None);
+    }
+
+    /// RED (0.4.8 E4) — **`--update-journal-held <error>` is one value, kept
+    /// as given (a refusal in the system's own language), and refused like
+    /// any other flag when the value is missing or the word is given twice.**
+    ///
+    /// MUTATION: drop the `UPDATE_JOURNAL_HELD_FLAG` arm of `parse` (the word
+    /// is an unknown flag).
+    #[test]
+    fn the_journal_held_word_takes_the_refusal_as_given() {
+        let journal = r"C:\Folio 终端\.folio-update\journal.json";
+        let refusal = "拒绝访问。 (os error 5)";
+        let request = parsed(&[
+            "--update-failed",
+            journal,
+            "--update-journal-held",
+            refusal,
+            "--tab",
+        ]);
+        assert_eq!(request.update_journal_held.as_deref(), Some(refusal));
+        assert_eq!(request.update_failed, Some(PathBuf::from(journal)));
+        assert!(request.tab);
+        assert_eq!(parsed(&[]).update_journal_held, None);
+        assert_eq!(
+            refused(&["--update-journal-held"]),
+            CliFault::MissingValue(UPDATE_JOURNAL_HELD_FLAG)
+        );
+        assert_eq!(
+            refused(&[
+                "--update-journal-held",
+                refusal,
+                "--update-journal-held",
+                refusal
+            ]),
+            CliFault::Repeated(UPDATE_JOURNAL_HELD_FLAG)
+        );
     }
 
     /// RED (U-28) — **`--update-apply` takes exactly the home, the

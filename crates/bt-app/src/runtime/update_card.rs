@@ -108,7 +108,7 @@ impl Runtime<'_> {
         if !self.update_card_is_up() {
             return None;
         }
-        let paint = update_card::paint(self.app.update_job.state())?;
+        let paint = update_card::paint_of(&self.app.update_job)?;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.scale_factor() as f32;
@@ -122,7 +122,7 @@ impl Runtime<'_> {
 
     /// The verbs the card that is up here carries, in C9's order.
     fn update_card_verbs(&self) -> Vec<update_card::CardVerb> {
-        update_card::paint(self.app.update_job.state())
+        update_card::paint_of(&self.app.update_job)
             .map(|paint| paint.verbs)
             .unwrap_or_default()
     }
@@ -205,7 +205,7 @@ impl Runtime<'_> {
             }
             update_card::Asks::ShowFolder => {
                 if let Some(folder) =
-                    update_card::paint(self.app.update_job.state()).and_then(|paint| paint.folder)
+                    update_card::paint_of(&self.app.update_job).and_then(|paint| paint.folder)
                 {
                     self.reveal_in_explorer(&folder);
                 }
@@ -591,6 +591,7 @@ mod tests {
         let mut job = Job::with_offers(true).after_rollback(Some(Failure::Incomplete {
             folder: Some(PathBuf::from("txn-更新-1")),
             held: false,
+            untried: false,
         }));
         consider(&mut job, "v0.4.7");
         let driver = Starts::default();

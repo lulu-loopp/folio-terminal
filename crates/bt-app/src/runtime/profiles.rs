@@ -42,6 +42,7 @@ impl Runtime<'_> {
                 update_trial: None,
                 update_failed: None,
                 update_feed: None,
+                update_journal_held: None,
             },
             self.default_profile(),
             cli::machine_path_kind,
