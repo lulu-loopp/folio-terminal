@@ -208,6 +208,12 @@ put out of the reach of any working run, while the waits the test does assert en
 they wait for (the applier's trial test). A retry with a bounded count and a growing pause is a
 fixture's answer to a hold, never to a slow machine.
 
+**A test ends every process it starts, on every path** (H-SWEEP-048). A child that the product
+does not end on drop — an uncontained probe, a helper that starts its own children — is guarded
+by a local made right after the start that ends it and its descendants when the test's scope
+ends, a panic included (`probe_child_tests::HelperTree`). A red run that leaves a helper up holds
+the test executable open and keeps the worktree from being removed.
+
 ### 【事故】A/B 必须在同一段时间里交替，先跑完一组再跑另一组等于把负载当结论
 
 同上一条的同一天。"带 `export` 跑全量会挂、单独不带 `export` 重跑就绿"这句观察里，`export` 与"全量 vs 单跑"两个变量是**捆在一起**的，而后者意味着 1856 个测试用 24 条线程一起抢机器。交替 A/B（两臂在同一窗口内轮流、每 rep 互换先后手）当场判 `export` 无罪：闲时两臂各 16 次 0 失败、时长不可分辨；加载后**两臂一起塌**。
