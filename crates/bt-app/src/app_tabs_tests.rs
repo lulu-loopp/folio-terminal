@@ -3710,7 +3710,7 @@ fn every_shell_born_in_a_tab_is_born_with_the_tabs_carried_environment() {
         let body = method_body("Runtime", door);
         let joined = body.split_whitespace().collect::<String>();
         assert!(
-            joined.contains("born_in_tab(") && joined.contains(".environment.as_ref()"),
+            joined.contains("born_in_tab(") && joined.contains(".carried_environment.as_ref()"),
             "`{door}` is born in its tab:\n{body}"
         );
     }
