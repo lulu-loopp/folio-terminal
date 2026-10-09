@@ -5,8 +5,10 @@ use std::{
 };
 
 use bt_detect::resolve_detection_task;
-use bt_doc::{ContentAnchor, DecorationIntent, DecorationLifecycle};
-use bt_math::{MathRaster, MathRenderError};
+use bt_doc::{
+    ContentAnchor, DecorationIntent, DecorationLifecycle,
+    math::{MathRaster, MathRenderError},
+};
 use bt_term::{DualPlaneSession, LIVE_MATH_STABLE_INTERVAL, SessionMathTask, WORKER_QUEUE_CAP};
 use bt_transcript::{CellFlags, TerminalColor};
 use bt_viewport::{FrameViewportOrigin, ViewportFrame};

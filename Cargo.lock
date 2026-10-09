@@ -376,7 +376,6 @@ dependencies = [
  "resvg",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "typst-as-lib",
  "typst-layout",
  "typst-library",

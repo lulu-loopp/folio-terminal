@@ -385,12 +385,20 @@ makes its sessions. The tests that start a real shell through `bt_pty::test_shel
 — whose door reaches the platform layer — live in `bt-pty/tests`, beside the
 transport they run on.
 
-**`bt-term → bt-math` — real coupling, recorded debt.** `session.rs` imports six
-math types and calls into the math crate in product code,
-`inline_image::decode_svg_bytes` rasterises through it,
-and `crates/bt-term/src/lib.rs` re-exports the engine. Hiding it behind
-re-exports changes nothing. **Recorded as
-debt** until the composition layer is designed.
+**`bt-term → bt-math` — real coupling, recorded debt (D-15).** The math data
+types — `MathRenderKey`, `MathRaster`, `MathRenderError` and `MathFailureStage` —
+are `bt-doc`'s (`bt_doc::math`, since CC-5): renderer-neutral, standard-library
+types only, so `bt-term` files a render, carries its raster and records its
+failure without naming the engine. `bt-math` re-exports the four at its root, so
+every `bt_math::MathRaster`-style path still resolves; the two limits their
+messages name (`MAX_NESTING_DEPTH`, `MAX_LAYOUT_CELLS`) are `bt_doc::math`
+constants that `bt-math` asserts at compile time equal the limits it enforces.
+What still couples the crates is execution: `session.rs` typesets through
+`MathEngine` and `key_for_em_px`, `inline_image::decode_svg_bytes` rasterises
+through `rasterize_svg_document`, and `crates/bt-term/src/lib.rs` re-exports the
+engine. Hiding that behind re-exports changes nothing. **Recorded as debt**
+until the composition layer takes math execution (design T-COMPOSE-CRATE §3.4:
+CC-6b moves `typeset`, CC-7 the SVG codec).
 
 ### 3.3 The dependency policy — this file is now its address
 
@@ -648,7 +656,7 @@ does not have to find it later.
 | **the session's screen-owned fence state** (0.4.7, T-PANE-IDENTITY) — which pane rows a fence opened by the incoming checkpoint or an excluded status row covers, together with the frame identity it was computed for | `DualPlaneSession::screen_fence_state` (`Option<SessionScreenFenceState>`) beside `current_frame` | `DualPlaneSession::observe_frame` is the one value writer, from the incoming capture's checkpoint and `ScreenFrame::screen_fence_state`; scheduling recomputes it when the checkpoint changes and unowned-row damage recomputes it when that row's revision advances. A difference invokes the same full-pane invalidation as a frame change. Completion compares the task's value, the current capture's value and the stored frame identity | a single writer on the window thread | 0.4.7 69b; the excluded-status-row open/close pin and its pre-opening in-flight task pin the transition and completion fence |
 | **the pane's foreground program** (0.4.7, T-PANE-COLUMNS E8) — `Unknown` or one canonical local image name, never a process tree | `DualPlaneSession::foreground_program`, one fact per pane session | the addressed foreground-program worker answer, after window/tab/seat and shell-incarnation routing, is the only writer. `DualPlaneSession::live_capture` snapshots it into `ScreenFrame`; the detector classifies trust only through `multiplexer_allowlist.txt` | one window-thread writer; worker observation delivered by address | every OSC 133 command start is dispatched at once or retained as one pending successor behind the in-flight probe; a frame candidate asks every five seconds; WSL/ssh boundaries store `Unknown`; every identity change invalidates the full pane tier |
 | **each window's seat in the git watch** (0.4.8, T-WINDOWS-ALL — **an ownership split recorded under RULES §55**: the repositories a window's drawn Git pages show, and the kernel news it has been told and not yet acted on, were the first window's alone) — per window: the roots it wants and the roots it is owed | `bt-app::window_news::WindowSeats`, held inside the application's `git_watch::GitWatch` (`App::git_watch`), one seat per window keyed by `WindowId`; the kernel subscriptions and their clocks stay the application's, one per root, over the union of every seat | three writers on the window thread: the window directory's walk (`FolioApp::publish_window_directory` → `window_news::seat_every_holder`, which levels every `SeatedByDirectory` holder in one walk — today the git watch) seats every window the directory names and releases every other, with the subscriptions only it wanted (the walk only ever drops subscriptions); the window's own turn (`Runtime::advance_git_watch` → `GitWatch::want`, then `take`) says what it draws (`git_roots_on_glass`, R31's drawn rule) and takes its news; `FolioApp::ripen_git_news` (`GitWatch::ripen`), once a pass before the window turns, files each ripened root under every seat that wants it | one window-thread owner per window, filled by the application; the directory is the only registrar, so news reaches only a window the directory names | B2 and B3 reuse the `WindowSeats` shape through a separately owned `WindowSeats<WindowId, FreshnessSubject>`, leveled by the same directory walk; an all-seats broadcast operation (`WindowSeats::tell_all`, every current seat told once, whatever it wants) is added for Environment news, while accepted fact values remain with their fact owners; a preview's file watch is already one per window (`WindowRuntime::preview_watch`) and is not part of it |
-| **what this machine can start** (0.4.8, T-PROGRAMS-REFRESH) — each profile row's program, **known or unknown**, with the number of the walk that answered it and the program source it answered; WSL's installation; where git is | the application: `App::profile_programs` (`profiles::ProfilePrograms`), `wsl::INSTALLATION`, `git::GIT_LOCATION`; asked on the program-walk lane (`bt-app::programs_lane`, one `program-walk` worker) | the worker publishes row by row into the lane's mailbox (newest per row), then the WSL and git facts; the window thread is the one adopter (`adopt_program_answers`, read without waiting at the launch and in `FolioApp::adopt_program_walk` on `AppEvent::ProgramsAnswered`), which refuses an answer older than the one held for its row and an answer about a source the row no longer has; a table edit keeps the answers of the rows it did not change (`carried_into_live_table`) and asks again. Asked at the launch, on a table edit, when a menu that lists programs or the Profiles, Agents or a Git page opens, on `WM_SETTINGCHANGE` (`SystemPreferencesChanged`, the one listener) and when a pane's birth needs an unknown row — never on a timer | observation of external state; one window-thread owner for the application, told to every window through `App::program_news` (`WindowSeats::tell_all`) | built. **The invariant** (T-LAUNCH-PROBE's, re-implemented here): an unknown row is never "not here" — no fallback, banner, saved-pane rewrite, default, hidden agent or "git not found" is decided from unknown (`profiles::decided_from_answers`); a pane whose program depends on an unknown row is born **in birth** (`LeafSession::birth`, no process, its typed bytes held) and born for real through the same `PtyBirth` door when the answer lands (`Runtime::land_pane_births`); a late answer is always used and nothing has a deadline |
+| **what this machine can start** (0.4.8, T-PROGRAMS-REFRESH) — each profile row's program, **known or unknown**, with the number of the walk that answered it and the program source it answered; WSL's installation; where git is | the application: `App::profile_programs` (`profiles::ProfilePrograms`), `wsl::INSTALLATION`, `git::GIT_LOCATION`; asked on the program-walk lane (`bt-app::programs_lane`, one `program-walk` worker) | the worker publishes row by row into the lane's mailbox (newest per row), then the WSL and git facts; the window thread is the one adopter (`adopt_program_answers`, read without waiting at the launch and in `FolioApp::adopt_program_walk` on `AppEvent::ProgramsAnswered`), which refuses an answer older than the one held for its row and an answer about a source the row no longer has; a table edit keeps the answers of the rows it did not change (`carried_into_live_table`) and asks again. Asked at the launch, on a table edit, when a menu that lists programs or the Profiles, Agents or a Git page opens, on `WM_SETTINGCHANGE` (`SystemPreferencesChanged`, the one listener) and when a pane's birth needs an unknown row — never on a timer | observation of external state; one window-thread owner for the application, told to every window through `App::program_news` (`WindowSeats::tell_all`) | built. **The invariant** (T-LAUNCH-PROBE's, re-implemented here): an unknown row is never "not here" — no fallback, banner, saved-pane rewrite, default, hidden agent or "git not found" is decided from unknown (`profiles::decided_from_answers`); a pane whose program depends on an unknown row is born **in birth** (`LeafSession::birth`, no process, its typed bytes held) and made again when the answer lands (`Runtime::land_births`), asking for its shell like every other pane (T-BIRTH-OFF-WINDOW); a late answer is always used and nothing has a deadline |
 | **the machine facts frozen at launch, re-asked when the machine changes** (0.4.8, T-FRESH-FACTS; B1's survey row 15) — one owner per fact, each re-asked on its own signal, no timer, no window-thread wait | **git location, WSL** — the program walk (row above). **Copilot's version** — `attention_copilot::CopilotProbe` (`PROBE`): last answer + request number, one probe out, merged requests, a failure not kept as a verdict; asked at the Agents page's open edge, at the first ask, and when the walk moves the `copilot` row; looked up and run in the current logon environment. **the display's refresh rate** — each window's `frame_clock`, read again on `AppEvent::DisplayChanged` (`WM_DISPLAYCHANGE` / `NSApplicationDidChangeScreenParametersNotification`, heard by the window's `SystemSettingsWatch`, `bt_platform::SystemNews::Display`) besides a move and a scale change. **the summon's virtual key** — `quake::Quake::claimed_key`, asked of the layout again on `AppEvent::InputLanguageChanged` (`WM_INPUTLANGCHANGE`, the same ear); re-claimed only when it moved (macOS: a key position, no layout question). **`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME` and the home variable** — `attention_hooks::AGENT_HOMES`, the newest program walk's reading of the logon block (the launch environment until the first walk answers). **macOS font files** — each CoreText row carries its faces' files (`kCTFontURLAttribute`), so `set_terminal_font` loads a family installed after the renderer's database was built. **the palette's files under folded folders** — `palette_index::FileIndexes::reopened`: every palette open walks its roots again (an open while a walk is out is merged into it). **a hover peek of a file that failed** — `peek_reads_the_file`: a `Failed` entry for a named file is read again by the next settled hover | one writer each: the window thread (`adopt_program_answers` for `AGENT_HOMES`, the `DisplayChanged` / `InputLanguageChanged` arms, the palette's open, the peek's settle), the probe worker for its own answer, the font lane for its rows | process cells (`PROBE`, `AGENT_HOMES`), per-window values (`frame_clock`, `peek_cache`), the application's `Quake` and `file_indexes` | 0.4.8 T-FRESH-FACTS; `window_waits.tsv` unchanged (233); no spawn site added |
 
 ---
@@ -694,10 +702,31 @@ coalescing, completion as the door's own `Result`),
 child block, and owns PTY/process creation. Its layers are the current account
 block, launcher overrides a caller identified explicitly, Folio declarations,
 and profile declarations. No product start road currently identifies a launcher
-override; inherited differences are not evidence of one. The window thread
-enters the existing `PtyBirth` admission and joins the worker; it never calls the
-environment door. On non-Windows hosts the door returns no block and `bt-pty`
-retains ordinary process inheritance.
+override; inherited differences are not evidence of one. On non-Windows hosts the
+door returns no block and `bt-pty` retains ordinary process inheritance.
+
+**Nothing waits for that worker** (T-BIRTH-OFF-WINDOW, 2026-10-08; §5.3 row 11
+retired). `create_leaf_session` decides the pane's shell on the window thread and
+asks for it (`pty_door::request_shell`): one `bt-pty-birth` worker per birth, as
+before, numbered, publishing its answer into one process-wide mailbox
+(`pty_door::BIRTHS`) under its number and then waking the pane's window through
+the pane's own `LeafWake`. The pane is made **in birth** around the request —
+the road B2 built for an unknown program row, with a second trigger:
+`PaneBirth::waiting` is `Programs` (a row the walk has not answered) or `Shell`
+(its pseudoconsole and process being made). Its tab reads the profile's name, what
+is typed into it is held (`PaneBirth::hold`), and at the head of every drain
+`Runtime::land_births` finishes the pane from the answer
+(`finish_leaf_birth`, the same half a pane with no shell to wait for runs at
+creation), tells it a resize it missed, writes the held bytes first, and feeds the
+startup trace. A birth that fails lands as an error toast over a pane with no
+shell; an answer whose pane has gone (`ShellBirth` dropped) is retired off the
+window thread; a worker that panics answers the panic as a failed birth.
+*Restart shell* keeps the old shell until its successor lands
+(`LeafSession::successor`); one landing pass (`Runtime::land_births`,
+`births_due`) scans both places a birth can sit — a pane's own and a
+successor's — in both of its waits. A restored session's panes are born by
+as many workers at once, each below normal and gone after its one birth.
+macOS takes the same road.
 
 **The storage worker has a second job** (0.4.6 U-13): besides `session.json`, the
 `SessionWriter` thread (`session-writer`) writes an update trial's receipt,
@@ -1024,7 +1053,6 @@ A2e puts one `expect` on each; revision (k) allocates the rest.
 | 8 | open | `bt-platform::macos_watch::DirWatch::start_scoped` and, on Windows, `windows_impl::DirWatch::start_scoped` wait on `listening.recv()` with no deadline and join the watcher on their refusal arm; each `Drop` does `SetEvent` then an unbounded `join()` | the watch subscriptions: `DirNews::arm` (the scheme and storage watches, from `Runtime::create`; the scheme watch again from `Runtime::add_scheme`), and the `subscribe` roads of `files_watch`, `git_watch` and `preview_watch` (from `Runtime::advance_files_watch`, `advance_git_watch`, `advance_preview_watch` and `ask_the_unwatched_preview_files`; `git_watch`'s also from `FolioApp::publish_window_directory`, whose walk releases a closed window's seat and the subscriptions only it wanted); both platforms by the thread-door note's revision (l) | **0.4.4** — make watcher start and retirement asynchronous |
 | 9 | open | surface acquire, queue submit, swapchain present, surface configure, DirectComposition size and commit | `Runtime::present_seats_and_commit` | **0.5** — presentation lane; the present mode itself comes from `get_default_config` and has no owner |
 | 10 | open | device recovery's `pollster::block_on(rebuild_after_device_loss)` plus deliberate 150 ms and 450 ms sleeps across three attempts | `FolioApp::recovered_from_a_lost_device` | **0.5** — an explicit asynchronous state machine |
-| 11 | open | joining the `bt-pty-birth` worker, which owns `CreatePseudoConsole` + `CreateProcessW`, the working-directory `stat`, and the fresh-logon environment read | `create_leaf_session` → `pty_door::spawn_shell` | **0.5→0.6** — process birth is off the window thread; the admitted synchronous join remains until the session lane preserves input and resize ordering |
 | 12 | open | the synchronous `ResizePseudoConsole` round trip | `Runtime::flush_pending_pty_resize` | **0.5→0.6** — session lane; moving it must preserve the ordering this function represents |
 | 13 | done | `sample_window_place` — 4 to 8 syscalls, at three call sites for one instant | `drain_pty`, `advance_strip_animation`, `FolioApp::user_event` | **done** — *where the window is gets asked once per turn, at the turn's head; the drain and the strip tick read that answer* (`DESIGN.md`, 2026-09-24); one writer, `Runtime::observe_window_place`, also called at a window's birth and by an attention delivery between turns; each probe has its own station |
 | 14 | done | `Window::set_title` at five call sites with no throttle | `drain_pty`, `activate_tab`, `dress_new_window`, `finish_synchronized_update_if_due`, `finish_rename` | **done** — *the window's title is one wanted value, written to the system only when it changes and at most once a frame* (`DESIGN.md`, 2026-09-24); the one remaining call is `Runtime::flush_title`, on this thread by §5.2 |
@@ -1055,7 +1083,6 @@ A2e puts one `expect` on each; revision (k) allocates the rest.
 | `CompositorBirth` | 9 | `CompositorBirth` | Running | `bt_platform::Compositor::new`, `bt_platform::spare_parent` | `Runtime::create`, `Runtime::open_window`, `Runtime::make_spare_web_controller` | the tree and its commit |
 | `CompositorWindowSize` | 9 | `CompositorWindowSize` | Running, Exiting | `bt_platform::Compositor::set_window_size` | `Runtime::resize` | the ground and its commit |
 | `SurfaceBirth` | 9 | `SurfaceConfigure` | Running | `WindowRenderer::new` | `Runtime::open_window` | the surface and its configure |
-| `PtyBirth` | 11 | `PtyBirth` | Running, Exiting | `pty_door::spawn_shell` (join of `bt-pty-birth`) | `create_leaf_session` | one call |
 | `PtyResize` | 12 | `PtyResize` | Running, Exiting | `pty_door::resize` (`PtySession::resize`) | `commit_leaf_resize` | one call per leaf |
 | `PlaceHidden` | 13 | `PlaceHidden` | Running, Exiting | `window_is_hidden` | `sample_window_place` | one call |
 | `PlaceExposure` | 13 | `PlaceExposure` | Running, Exiting | `window_is_exposed` | `sample_window_place` | one call |
@@ -1170,8 +1197,11 @@ and the present never ask, and the allowance moves no deadline.
    owner-thread costs in the first cut, and the platform acquire affinity is a
    prerequisite. **Do not advertise the first cut as eliminating every
    window-thread stall.**
-5. **0.5 toward 0.6** — PTY birth, resize and lifetime behind the session owner
-   (rows 11–12), preserving input and resize ordering. A separate keyboard thread
+5. **0.5 toward 0.6** — PTY resize and lifetime behind the session owner
+   (row 12), preserving input and resize ordering. The birth left the window
+   thread first (row 11 retired, T-BIRTH-OFF-WINDOW): a pane in birth holds its
+   input and owes its shell the resizes it missed, so order is kept without the
+   session owner. A separate keyboard thread
    is not a prerequisite; keeping the existing event owner runnable is.
 
 Each step retains its existing implementation behind the new door and ships

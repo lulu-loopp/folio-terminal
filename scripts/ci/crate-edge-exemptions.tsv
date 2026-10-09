@@ -4,4 +4,4 @@
 # or now goes down a layer (the change that removes the edge deletes the row), and on a row that is
 # not at the merge base with origin/main.
 from	to	kind	ledger	reason
-bt-term	bt-math	normal	D-15	session.rs, inline_image::decode_svg_bytes and the MathEngine re-export use the math crate; recorded debt until the composition layer is designed
+bt-term	bt-math	normal	D-15	math execution only (the data types are bt-doc's since CC-5): session.rs typesets through MathEngine and key_for_em_px, inline_image::decode_svg_bytes rasterises through rasterize_svg_document, and lib.rs re-exports MathEngine; recorded debt until the composition layer takes them (CC-6b, CC-7)
