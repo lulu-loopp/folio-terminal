@@ -1134,8 +1134,9 @@ pub enum GateAnswer {
     /// **Write every buffer the card named back, and carry on only if all of it
     /// reached the disk** (B1, user ruling 2026-08-25).
     ///
-    /// Offered by one request — the shut — because that is the one this gate
-    /// asks that is an *exit*. See [`GateRequest::offers_save`], which is where
+    /// Offered by the two shuts — a window's, and the run's asked in the summoned
+    /// terminal — because they are the *exits* this gate asks about. See
+    /// [`GateRequest::offers_save`], which is where
     /// that is decided and why.
     Save,
     /// Throw the unsaved edits away and carry on with what was asked.
@@ -1410,6 +1411,16 @@ pub enum GateRequest {
     CloseTab(usize),
     /// Shutting the window (P125).
     Shut,
+    /// **The run ending with the window it names**, asked in the summoned
+    /// terminal (T-SUMMON-DIRTY-PREVIEW).
+    ///
+    /// The summoned terminal goes when the last ordinary window goes (§7.54e ①),
+    /// so that window's close is a shut of the summoned terminal too, and its
+    /// unsaved buffers are asked about in the window that holds them. The window
+    /// carried is the ordinary one whose close ends the run: a confirmed answer
+    /// re-runs *its* close, and `Cancel` leaves it open — the
+    /// summoned terminal never stands alone.
+    ShutWithTheRun(winit::window::WindowId),
     /// Throwing a file's working-tree changes away, or deleting an untracked
     /// file (R14).
     ///
@@ -1522,7 +1533,9 @@ impl GateRequest {
     #[must_use]
     pub fn title(&self) -> &'static str {
         match self {
-            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => gate_title_text(),
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut | Self::ShutWithTheRun(_) => {
+                gate_title_text()
+            }
             Self::GitDiscard {
                 untracked: false, ..
             } => gate_git_discard_title(),
@@ -1545,9 +1558,11 @@ impl GateRequest {
     #[must_use]
     pub fn answer_text(&self) -> &'static str {
         match self {
-            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut | Self::GitDiscard { .. } => {
-                gate_discard_text()
-            }
+            Self::ClosePane(_)
+            | Self::CloseTab(_)
+            | Self::Shut
+            | Self::ShutWithTheRun(_)
+            | Self::GitDiscard { .. } => gate_discard_text(),
             Self::GitDeleteBranch { .. } | Self::GitDeleteTag { .. } => gate_delete_text(),
             Self::GitCheckout { .. } => gate_checkout_text(),
             Self::ClearScrollback(_) => gate_clear_text(),
@@ -1557,8 +1572,9 @@ impl GateRequest {
     /// **Whether this question offers `Save all`** (B1, user ruling
     /// 2026-08-25).
     ///
-    /// The shut and no other, and the line between them is *exit*. Closing a
-    /// window is the reader leaving, and a reader leaving is entitled to the
+    /// The two shuts and no other, and the line between them is *exit*. Closing a
+    /// window — or the run's last one, which takes the summoned terminal with it —
+    /// is the reader leaving, and a reader leaving is entitled to the
     /// third answer the ruling names — keep the work and go anyway. The rest of
     /// this list is not an exit: a pane, a tab and a scrollback are things being
     /// closed inside a window that stays, and the two git requests are not about
@@ -1566,7 +1582,7 @@ impl GateRequest {
     /// to write files the question was never about.
     #[must_use]
     pub fn offers_save(&self) -> bool {
-        matches!(self, Self::Shut)
+        matches!(self, Self::Shut | Self::ShutWithTheRun(_))
     }
 
     /// **The lines under the title — one per unsaved file** (B1, user ruling
@@ -1578,7 +1594,9 @@ impl GateRequest {
     #[must_use]
     pub fn lines(&self, names: &[String]) -> Vec<String> {
         match self {
-            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => unsaved_lines(names),
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut | Self::ShutWithTheRun(_) => {
+                unsaved_lines(names)
+            }
             other => vec![other.message(names)],
         }
     }
@@ -1592,7 +1610,9 @@ impl GateRequest {
     #[must_use]
     pub fn message(&self, names: &[String]) -> String {
         match self {
-            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => gate_message(names),
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut | Self::ShutWithTheRun(_) => {
+                gate_message(names)
+            }
             Self::GitDiscard {
                 untracked: false, ..
             } => crate::i18n::gate_git_discard_message(&names.join(", ")),

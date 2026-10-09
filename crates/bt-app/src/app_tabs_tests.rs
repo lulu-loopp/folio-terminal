@@ -1731,9 +1731,18 @@ fn every_producer_of_the_dirty_gate_goes_on_only_when_there_was_nothing_to_ask()
             "close_pane",
             "close_tab",
             "run_term_menu_row",
+            "the_summon_lets_the_run_end",
             "window_event",
         ],
         "a new producer of the gate: pin it above once it goes on only on `proceeds()`"
+    );
+    // **The run's end, asked in the summoned terminal** (T-SUMMON-DIRTY-PREVIEW):
+    // the ending close goes on only on `proceeds()`.
+    let summon = squeezed(method_body("FolioApp", "the_summon_lets_the_run_end"));
+    assert!(
+        summon.contains("ifraised.proceeds(){returnOk(true);}"),
+        "`FolioApp::the_summon_lets_the_run_end` lets the run end for a reason other than \
+         nothing to ask:\n{summon}"
     );
 }
 

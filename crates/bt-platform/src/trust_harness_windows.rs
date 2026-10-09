@@ -868,17 +868,150 @@ pub fn program_doing(
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     file.write_all(&small_program(behaviour)).unwrap();
     drop(file);
+    resources_written(
+        path,
+        version,
+        resources,
+        &mut std::thread::sleep,
+        &mut || {},
+    );
+}
+
+/// **How many times a resource update of a file another program holds is
+/// made**: with the pauses between them (the first [`RESOURCE_FIRST_PAUSE`],
+/// each next one twice the last, at most [`RESOURCE_LONGEST_PAUSE`]) about
+/// 10 s in all, which outlasts an on-access scan of a file just written (an
+/// antivirus, an indexer) the way the applier's own journal write does.
+const RESOURCE_ATTEMPTS: usize = 10;
+/// The pause after the first refused attempt.
+const RESOURCE_FIRST_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+/// The longest pause between two attempts.
+const RESOURCE_LONGEST_PAUSE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The step of a resource update that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateStep {
+    /// `BeginUpdateResourceW`, which reads the file.
+    Begin,
+    /// An `UpdateResourceW`, which only stages in memory.
+    Stage,
+    /// `EndUpdateResourceW`, which writes the file.
+    End,
+}
+
+/// A refused or failed resource update: the step and its error.
+#[derive(Debug)]
+struct UpdateFailure {
+    step: UpdateStep,
+    error: windows::core::Error,
+}
+
+impl UpdateFailure {
+    /// **Whether another program holding the file is what refused it.**
+    ///
+    /// The begin reads the file and the end writes it; each opens it, and an
+    /// open another program's handle refuses comes back as one of three
+    /// codes: `ERROR_SHARING_VIOLATION` or `ERROR_ACCESS_DENIED` passed on, or
+    /// `ERROR_OPEN_FAILED`, the update's own word for any open it was refused
+    /// (what a hold taken by a test reads as). The file is the one this
+    /// harness has just written and still names, so none of the three is
+    /// anything but a hold. Staging touches no file, and nothing else is a
+    /// hold.
+    fn held(&self) -> bool {
+        use windows::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_OPEN_FAILED, ERROR_SHARING_VIOLATION,
+        };
+        let code = self.error.code();
+        match self.step {
+            UpdateStep::Begin | UpdateStep::End => [
+                ERROR_SHARING_VIOLATION,
+                ERROR_ACCESS_DENIED,
+                ERROR_OPEN_FAILED,
+            ]
+            .iter()
+            .any(|held| code == held.to_hresult()),
+            UpdateStep::Stage => false,
+        }
+    }
+
+    /// `end 0x80070020`: the step and the code, as a refusal is listed.
+    fn named(&self) -> String {
+        let step = match self.step {
+            UpdateStep::Begin => "begin",
+            UpdateStep::Stage => "stage",
+            UpdateStep::End => "end",
+        };
+        format!("{step} {:#010x}", self.error.code().0)
+    }
+}
+
+/// **`version` and `resources` written into the program at `path`**, the
+/// whole update made again while another program holds the file.
+///
+/// A file this harness has just written is what an on-access scanner opens
+/// next, and while it holds the file the update cannot open it
+/// ([`UpdateFailure::held`]). Each attempt is the whole update — begin,
+/// every resource, end — against the file as written, which a refused begin
+/// or end left untouched. `pause` is called between attempts (the harness
+/// sleeps; a test hands in what lets its own hold go), and `before_end`
+/// just before each end (the harness does nothing there; a test takes its
+/// hold there, as a scanner that opens the file mid-update does). Any other
+/// failure, or a hold that outlasts [`RESOURCE_ATTEMPTS`], panics naming
+/// every refusal.
+fn resources_written(
+    path: &Path,
+    version: FileVersion,
+    resources: &[(&str, &[u8])],
+    pause: &mut impl FnMut(std::time::Duration),
+    before_end: &mut impl FnMut(),
+) {
     let block = version_block(version);
     let file = wide(path.as_os_str());
     let names: Vec<Vec<u16>> = resources
         .iter()
         .map(|(name, _)| wide(std::ffi::OsStr::new(name)))
         .collect();
+    let mut refused = Vec::new();
+    let mut wait = RESOURCE_FIRST_PAUSE;
+    loop {
+        match update_resources(&file, &block, resources, &names, before_end) {
+            Ok(()) => return,
+            Err(failure) if failure.held() && refused.len() + 1 < RESOURCE_ATTEMPTS => {
+                refused.push(failure.named());
+                pause(wait);
+                wait = (wait * 2).min(RESOURCE_LONGEST_PAUSE);
+            }
+            Err(failure) => panic!(
+                "{}: the resource update failed at attempt {} of {RESOURCE_ATTEMPTS} at {} ({}); \
+                 refused {} times before it while the file was held: [{}]",
+                path.display(),
+                refused.len() + 1,
+                failure.named(),
+                failure.error,
+                refused.len(),
+                refused.join(", "),
+            ),
+        }
+    }
+}
+
+/// One resource update of `file`: the version block as `VERSIONINFO` 1, each
+/// of `resources` as `RCDATA` under its name, written by the end. A failure
+/// while staging discards the update.
+fn update_resources(
+    file: &[u16],
+    block: &[u8],
+    resources: &[(&str, &[u8])],
+    names: &[Vec<u16>],
+    before_end: &mut impl FnMut(),
+) -> Result<(), UpdateFailure> {
+    let at = |step| move |error| UpdateFailure { step, error };
     // SAFETY: the path and the names are NUL-terminated; the blocks live
-    // across the update.
+    // across the update, and the handle is ended on every path.
     unsafe {
-        let update = BeginUpdateResourceW(PCWSTR(file.as_ptr()), false).unwrap();
-        UpdateResourceW(
+        let update =
+            BeginUpdateResourceW(PCWSTR(file.as_ptr()), false).map_err(at(UpdateStep::Begin))?;
+        let staged = UpdateResourceW(
             update,
             PCWSTR(16 as _),
             PCWSTR(1 as _),
@@ -886,19 +1019,27 @@ pub fn program_doing(
             Some(block.as_ptr().cast()),
             block.len() as u32,
         )
-        .unwrap();
-        for ((_, bytes), name) in resources.iter().zip(&names) {
-            UpdateResourceW(
-                update,
-                PCWSTR(10 as _),
-                PCWSTR(name.as_ptr()),
-                0x0409,
-                Some(bytes.as_ptr().cast()),
-                bytes.len() as u32,
-            )
-            .unwrap();
+        .and_then(|()| {
+            resources
+                .iter()
+                .zip(names)
+                .try_for_each(|((_, bytes), name)| {
+                    UpdateResourceW(
+                        update,
+                        PCWSTR(10 as _),
+                        PCWSTR(name.as_ptr()),
+                        0x0409,
+                        Some(bytes.as_ptr().cast()),
+                        bytes.len() as u32,
+                    )
+                })
+        });
+        if let Err(error) = staged {
+            let _ = EndUpdateResourceW(update, true);
+            return Err(at(UpdateStep::Stage)(error));
         }
-        EndUpdateResourceW(update, false).unwrap();
+        before_end();
+        EndUpdateResourceW(update, false).map_err(at(UpdateStep::End))
     }
 }
 
@@ -1146,5 +1287,165 @@ impl World {
         let path = executable(folder, name, version);
         sign(&path, leaf, &[&self.root], Some(&self.stamping(now())));
         path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    /// A fresh program in `folder`, before any resource is written into it.
+    fn bare_program(folder: &Folder, name: &str) -> PathBuf {
+        let path = folder.0.join(name);
+        std::fs::write(&path, small_program(Behaviour::Returns)).unwrap();
+        path
+    }
+
+    /// `FILE_SHARE_READ | FILE_SHARE_DELETE`: a hold the way an on-access
+    /// scanner takes one, letting others read the file and nobody write it.
+    const SCANNER: u32 = 0x5;
+    /// No sharing at all: a hold that refuses even the update's read.
+    const ALONE: u32 = 0x0;
+
+    /// **A hold on `path`**: the file open for reading, with `share`.
+    fn hold(path: &Path, share: u32) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share)
+            .open(path)
+            .unwrap()
+    }
+
+    /// What the program at `path` carries: its file version and its `NOTE`.
+    fn carried(path: &Path) -> (Option<FileVersion>, Vec<u8>) {
+        (
+            crate::trust::file_version(path).ok(),
+            crate::pe_resource::read_rcdata(path, "NOTE", 64).unwrap(),
+        )
+    }
+
+    /// RED — **an update whose end is refused because another program opened
+    /// the file mid-update is made again once the hold is let go**, and the
+    /// program then carries what was written. The `EndUpdateResourceW` reds
+    /// of 2026-10-09 were this: a scanner opening the file between the begin
+    /// and the end.
+    ///
+    /// The hold is this test's own — taken just before the first end, let go
+    /// by the first pause — so no clock decides anything.
+    ///
+    /// MUTATION: in `UpdateFailure::held`, answer `false` for
+    /// `UpdateStep::End` — the first attempt panics at its end.
+    #[test]
+    fn an_end_refused_by_a_hold_taken_mid_update_is_made_again() {
+        let folder = Folder::new("资源 end");
+        let path = bare_program(&folder, "程序 end.exe");
+        let held = std::cell::RefCell::new(None);
+        let mut pauses = Vec::new();
+        let note = "公式 note, ½".as_bytes();
+        let mut ends = 0;
+        resources_written(
+            &path,
+            FileVersion([4, 8, 15, 16]),
+            &[("NOTE", note)],
+            &mut |pause| {
+                pauses.push(pause);
+                held.replace(None);
+            },
+            &mut || {
+                ends += 1;
+                if ends == 1 {
+                    held.replace(Some(hold(&path, SCANNER)));
+                }
+            },
+        );
+        assert_eq!(
+            (ends, pauses),
+            (2, vec![RESOURCE_FIRST_PAUSE]),
+            "the first end was refused, the update waited once, and the second end wrote"
+        );
+        assert_eq!(
+            carried(&path),
+            (Some(FileVersion([4, 8, 15, 16])), note.to_vec())
+        );
+    }
+
+    /// RED — **an update whose begin is refused because another program holds
+    /// the file is made again once the hold is let go.** A hold that shares
+    /// nothing refuses even the begin's read.
+    ///
+    /// MUTATION: in `UpdateFailure::held`, answer `false` for
+    /// `UpdateStep::Begin` — the first attempt panics at its begin.
+    #[test]
+    fn a_begin_refused_by_a_hold_is_made_again() {
+        let folder = Folder::new("资源 begin");
+        let path = bare_program(&folder, "程序 begin.exe");
+        let mut held = Some(hold(&path, ALONE));
+        let mut pauses = Vec::new();
+        let note = "Ω 字".as_bytes();
+        resources_written(
+            &path,
+            FileVersion([1, 2, 3, 4]),
+            &[("NOTE", note)],
+            &mut |pause| {
+                pauses.push(pause);
+                held = None;
+            },
+            &mut || {},
+        );
+        assert!(held.is_none(), "the hold was let go by the pause");
+        assert_eq!(pauses, [RESOURCE_FIRST_PAUSE]);
+        assert_eq!(
+            carried(&path),
+            (Some(FileVersion([1, 2, 3, 4])), note.to_vec())
+        );
+    }
+
+    /// RED — **a hold that outlasts every attempt is a panic that names each
+    /// refusal**, after exactly [`RESOURCE_ATTEMPTS`] attempts with the pauses
+    /// doubling up to [`RESOURCE_LONGEST_PAUSE`].
+    ///
+    /// MUTATION: list no refusal in the panic message — red at the message;
+    /// or drop the `RESOURCE_ATTEMPTS` bound — red at the tenth pause.
+    #[test]
+    fn a_hold_that_outlasts_every_attempt_names_each_refusal() {
+        let folder = Folder::new("资源 kept");
+        let path = bare_program(&folder, "程序 kept.exe");
+        let held = hold(&path, SCANNER);
+        let mut pauses = Vec::new();
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resources_written(
+                &path,
+                FileVersion([1, 0, 0, 0]),
+                &[],
+                &mut |pause| {
+                    assert!(pauses.len() < RESOURCE_ATTEMPTS, "unbounded: {pauses:?}");
+                    pauses.push(pause);
+                },
+                &mut || {},
+            );
+        }))
+        .expect_err("the hold never ends, so the update cannot be made");
+        drop(held);
+        let said = failed
+            .downcast_ref::<String>()
+            .expect("a formatted panic")
+            .clone();
+        let ms = |ms| std::time::Duration::from_millis(ms);
+        assert_eq!(
+            pauses,
+            [25, 50, 100, 200, 400, 800, 1600, 3200, 4000].map(ms),
+            "{said}"
+        );
+        let before = ["end 0x8007006e"; RESOURCE_ATTEMPTS - 1].join(", ");
+        assert!(
+            said.contains(&format!(
+                "attempt {RESOURCE_ATTEMPTS} of {RESOURCE_ATTEMPTS} at end 0x8007006e"
+            )) && said.contains(&format!(
+                "refused {} times before it while the file was held: [{before}]",
+                RESOURCE_ATTEMPTS - 1
+            )),
+            "every refusal is named, the last as the failure: {said}"
+        );
     }
 }
