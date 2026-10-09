@@ -693,6 +693,9 @@ text_entries! {
     /// real state and not a placeholder: the probe starts a process, and on a
     /// cold machine that takes long enough to see.
     PsReadLineProbing,
+    /// The row's line when the newest probe failed: unknown, never "no module", and asked again
+    /// when the page opens (T-PROBE-NO-CACHED-FAILURE).
+    PsReadLineCheckFailed,
     /// `settings.json` says Folio installed the module and the directory is not
     /// there. Something outside Folio removed it, which is a fact the row owes
     /// the reader rather than a state to silently correct.
@@ -1199,6 +1202,9 @@ text_entries! {
     /// A question the row depends on (the parse answer, the edition's observation) got no
     /// answer; the next visit to the Profiles page asks again (release read m2).
     CapPowerShellUndetermined,
+    /// The edition runs `-Command` text in Constrained Language Mode, where the loader does
+    /// nothing: the row claims nothing and offers nothing (T-PROBE-NO-CACHED-FAILURE).
+    CapPowerShellConstrained,
     /// WSL. The same everything, and the same honest condition — a `zsh` or
     /// `fish` login never reads the init file the launcher was handed.
     CapWslBash,
@@ -3507,6 +3513,11 @@ impl Text {
                 "Checking which PSReadLine this machine has",
                 "正在检查本机的 PSReadLine 版本",
             ),
+            Self::PsReadLineCheckFailed => pick(
+                lang,
+                "Could not check which PSReadLine this machine has. Folio checks again when this page opens.",
+                "Could not check which PSReadLine this machine has. Folio checks again when this page opens.", // zh: pending T-PROBE-NO-CACHED-FAILURE
+            ),
             Self::PsReadLineRowGone => pick(
                 lang,
                 "The copy Folio installed is no longer on disk",
@@ -3917,6 +3928,11 @@ impl Text {
                 lang,
                 "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
                 "自定义启动参数，PowerShell 整合状态未知。再次打开此页时重新检测。",
+            ),
+            Self::CapPowerShellConstrained => pick(
+                lang,
+                "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.",
+                "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.", // zh: pending T-PROBE-NO-CACHED-FAILURE
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -6035,6 +6051,7 @@ impl Text {
         //   written under that account's `Documents`
         Self::RowPsReadLine,
         Self::PsReadLineProbing,
+        Self::PsReadLineCheckFailed,
         Self::PsReadLineRowNotOurs,
         Self::PsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
@@ -6077,6 +6094,11 @@ impl Text {
         (Self::UpdateCardNewerUnnamed, HostPlatform::MacOs),
         (Self::UpdateCardNotKept, HostPlatform::Windows),
         (Self::UpdateCardNotKept, HostPlatform::MacOs),
+        // 0.4.8 B4: a PSReadLine check that failed, and a PowerShell in Constrained Language Mode.
+        (Self::PsReadLineCheckFailed, HostPlatform::Windows),
+        (Self::PsReadLineCheckFailed, HostPlatform::MacOs),
+        (Self::CapPowerShellConstrained, HostPlatform::Windows),
+        (Self::CapPowerShellConstrained, HostPlatform::MacOs),
         // 0.4.8 T-BIRTH-OFF-WINDOW: a pane whose shell could not be started.
         (Self::ShellDidNotStart, HostPlatform::Windows),
         (Self::ShellDidNotStart, HostPlatform::MacOs),

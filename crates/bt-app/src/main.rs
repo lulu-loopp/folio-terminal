@@ -39676,7 +39676,7 @@ fn create_leaf_session(
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
     // Idempotent — see `psreadline::begin_probe`.
     if !in_birth && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
-        psreadline::begin_probe();
+        psreadline::begin_probe(psreadline::ProbeTrigger::Birth);
     }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
     // beside this spawn to ask the default distribution which shell it logs
@@ -44829,9 +44829,10 @@ impl Runtime<'_> {
             .settings
             .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
         if psreadline_opened {
-            // A failed machine query remains unknown and is retried at the next
-            // real reader edge, never on every frame while this page is open.
-            psreadline::begin_probe();
+            // Asked at every visit (T-PROBE-NO-CACHED-FAILURE): a module installed or updated
+            // while Folio runs is seen here, and a failed check is asked again. One probe per
+            // visit, never per frame while this page is open.
+            psreadline::begin_probe(psreadline::ProbeTrigger::TerminalPage);
             // An out-of-band module change becomes visible when the reader
             // opens its page. A redraw or hover on the open page is not an edge.
             self.psreadline_documents();
@@ -74019,6 +74020,7 @@ fn main() -> Result<()> {
     if cli::remove_shell_integration(std::env::args_os().skip(1)) {
         let report = shell_integration::remove_shell_integration(
             shell_integration::profile_marks::Asker::Door,
+            &shell_integration::ProbeEnvironment::Inherited,
         );
         let done = report.text(false);
         if done.is_empty() && report.exit_code() == 0 {

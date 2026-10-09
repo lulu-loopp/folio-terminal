@@ -162,8 +162,8 @@ use bt_platform::{HostPlatform, launch_agent};
 use crate::cli;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    BeforeDeciding, Deferral, ExitGuard, Leave, Recording, TransactionLock, Watch, Watched, Window,
-    stop_trial, trial_runs,
+    BeforeDeciding, Deferral, ExitGuard, Leave, Recording, Watch, Watched, Window, stop_trial,
+    trial_runs,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -657,10 +657,32 @@ pub(crate) fn retire_entrance_in(agents: Option<&Path>, txn: TxnId) -> Result<()
 
 /// **The applier, over any road** — see the module header.
 pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> Ended {
+    apply_electing(worker, road, world, |worker, until| {
+        crate::update_apply::take_the_window_for_applier(
+            worker,
+            &road.home,
+            road.txn,
+            crate::update_apply::this_process(),
+            until,
+            road.limits.poll,
+        )
+    })
+}
+
+/// [`apply`], with the window election `elect` asked by the road deadline it
+/// is given: the product's is `update_apply::take_the_window_for_applier`.
+fn apply_electing(
+    worker: &WorkerCtx,
+    road: &Road,
+    world: &mut impl World,
+    elect: impl FnOnce(&WorkerCtx, Instant) -> Window,
+) -> Ended {
     let window = Instant::now() + road.limits.old_within;
     // Every way out of the road, a panic included, leaves through the guard
-    // (U-34).
-    let mut guard = ExitGuard::new(MacLeave {
+    // (U-34). It owes a window only once the election is won (0.4.8 E2):
+    // before that the duty is O's, and an applier that ends or panics there
+    // starts nothing.
+    let mut guard = ExitGuard::contender(MacLeave {
         worker: Some(worker),
         home: &road.home,
         world,
@@ -675,16 +697,7 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     // for O** (round 7): the mark, the transaction lock, the claim and the
     // admission all spend `window` — the election's own wait for its lock
     // too (round 8).
-    let until = window;
-    let duty = crate::update_apply::take_the_window_for_applier(
-        worker,
-        &road.home,
-        road.txn,
-        crate::update_apply::this_process(),
-        until,
-        road.limits.poll,
-    );
-    match duty {
+    match elect(worker, window) {
         Window::Mine(duty) => {
             if let Some(warning) = duty.warning() {
                 guard
@@ -699,7 +712,6 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
             // nothing recorded, and the window duty stays with the build
             // that armed it, as for any applier that proved none — the
             // Windows applier's own arm.
-            guard.not_mine(None);
             let left = guard.leave();
             guard
                 .inner()
@@ -708,11 +720,12 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
             return Ended::StoodAside(why);
         }
         other => {
-            let owner = match &other {
-                Window::Theirs(owner) => Some(owner.pid),
-                _ => None,
-            };
-            guard.not_mine(owner);
+            // Another live owner, an election O still runs, or this
+            // applier's own mark that did not land (0.4.8 E2): the duty is
+            // the owner's or O's, which armed it.
+            if let Window::Theirs(owner) = &other {
+                guard.not_mine(Some(owner.pid));
+            }
             let left = guard.leave();
             guard
                 .inner()
@@ -721,7 +734,7 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
             return Ended::Refused(format!("the window is not this applier's: {other:?}"));
         }
     }
-    let (ended, successor, transaction_lock) = {
+    let (ended, successor) = {
         let world = &mut *guard.inner().world;
         match Txn::hold(road, worker, Asker::LockHolder, window) {
             Ok((mut txn, bundles)) => {
@@ -737,13 +750,12 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
                 // The lock is let go (`txn` dropped here) before the
                 // installed build starts: its own start retires a finished
                 // transaction, which needs it.
-                (ended, txn.successor, TransactionLock::Held)
+                (ended, txn.successor)
             }
-            Err((ended, transaction_lock)) => (ended, None, transaction_lock),
+            Err(ended) => (ended, None),
         }
     };
     guard.succeeded_by(successor);
-    guard.road_ended(transaction_lock);
     if ended.deferred_to_a_holder() {
         guard.window_elsewhere();
     }
@@ -819,7 +831,7 @@ pub(crate) fn recover(
                     }
                     Ok(Some(crate::update_apply::WindowHolder::Unmarked)) => {
                         hands.say(
-                            "BT_UPDATE_RECOVER an election-lock holder has the update's window; the handed-off update is left to it",
+                            "BT_UPDATE_RECOVER an applier's window election is still in flight; the handed-off update is left to it",
                         );
                         Ended::Deferred(Deferral::WindowDuty)
                     }
@@ -841,7 +853,7 @@ pub(crate) fn recover(
             ));
             (ended, txn.successor)
         }
-        Err((ended, _)) => (ended, None),
+        Err(ended) => (ended, None),
     };
     // At login, every end that attempted the transaction owes a window; only
     // the no-op ends do not (U-34, round 2, blocker 4 — as
@@ -1022,23 +1034,21 @@ struct Txn<'a> {
 impl<'a> Txn<'a> {
     /// **The transaction lock by `until`** — the road's one deadline, counted
     /// from its start ([`Limits::old_within`]) — **then the journal**: this
-    /// road's transaction, a bundle's. A refusal says whether the lock had
-    /// been taken before it (`update_apply::ExitGuard::road_ended`).
+    /// road's transaction, a bundle's.
     fn hold(
         road: &'a Road,
         worker: &'a WorkerCtx,
         asker: Asker,
         until: Instant,
-    ) -> Result<(Self, Bundles), (Ended, TransactionLock)> {
+    ) -> Result<(Self, Bundles), Ended> {
         let (Some(installed), Some(program), Some(stage), Some(rescue_program)) = (
             road.home.installed_bundle(),
             road.home.installed_program(),
             road.home.stage_bundle(road.txn),
             road.home.rescue_executable(road.txn),
         ) else {
-            return Err((
-                Ended::Refused("the home is not a macOS bundle's".to_owned()),
-                TransactionLock::NeverHeld,
+            return Err(Ended::Refused(
+                "the home is not a macOS bundle's".to_owned(),
             ));
         };
         let lock = match install_txn::hold_within(
@@ -1047,15 +1057,9 @@ impl<'a> Txn<'a> {
             until.saturating_duration_since(Instant::now()),
         ) {
             Ok(Some(held)) => held,
-            Ok(None) => return Err((Ended::LockHeld, TransactionLock::NeverHeld)),
-            Err(failure) => {
-                return Err((
-                    Ended::Failed(failure.to_string()),
-                    TransactionLock::NeverHeld,
-                ));
-            }
+            Ok(None) => return Err(Ended::LockHeld),
+            Err(failure) => return Err(Ended::Failed(failure.to_string())),
         };
-        let locked = |ended: Ended| (ended, TransactionLock::Held);
         // A journal this build cannot read whole is stood aside from: nothing
         // recorded, the lock let go as this returns (E1, `Role::MacHolder`).
         let journal = match Role::MacHolder
@@ -1063,25 +1067,23 @@ impl<'a> Txn<'a> {
         {
             Some(Sight::Known(journal)) => journal,
             Some(beyond) => {
-                return Err(locked(Ended::StoodAside(beyond.said(Role::MacHolder))));
+                return Err(Ended::StoodAside(beyond.said(Role::MacHolder)));
             }
-            None => return Err(locked(Ended::Refused("there is no journal".to_owned()))),
+            None => return Err(Ended::Refused("there is no journal".to_owned())),
         };
         if journal.txn != road.txn {
-            return Err(locked(Ended::Refused(format!(
+            return Err(Ended::Refused(format!(
                 "the journal is transaction {}, not {}",
                 journal.txn, road.txn
-            ))));
+            )));
         }
         let Layout::Bundle { old, new } = journal.body.layout.clone() else {
-            return Err(locked(Ended::Refused(
-                "the journal is not a bundle's".to_owned(),
-            )));
+            return Err(Ended::Refused("the journal is not a bundle's".to_owned()));
         };
         let layout = road
             .layouts
             .named(journal.body.adapter)
-            .map_err(|not_built| locked(Ended::Refused(not_built.to_string())))?;
+            .map_err(|not_built| Ended::Refused(not_built.to_string()))?;
         let inside = program.strip_prefix(&installed).unwrap_or(&program);
         let stage_program = stage.join(inside);
         let txn = Txn {
