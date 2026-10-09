@@ -3326,6 +3326,10 @@ fn overdue_words(
     patience: bt_platform::ProbePatience,
 ) -> String {
     match overdue {
+        bt_platform::ProbeOverdue::Suspended => format!(
+            "no sign of work for {:?}: suspended by another program, ended",
+            patience.quiet
+        ),
         bt_platform::ProbeOverdue::Silent => {
             format!("no sign of work for {:?}, ended", patience.quiet)
         }
@@ -3333,6 +3337,20 @@ fn overdue_words(
             format!("still running after {:?}, ended", patience.budget)
         }
     }
+}
+
+/// The `diagnostics.log` line a PowerShell probe that ran out of patience leaves — the one place a
+/// probe another program held suspended is said (G-SWEEP-048, #31).
+fn overdue_line(
+    program: &Path,
+    overdue: bt_platform::ProbeOverdue,
+    patience: bt_platform::ProbePatience,
+) -> String {
+    format!(
+        "PowerShell probe {}: {}",
+        program.display(),
+        overdue_words(overdue, patience)
+    )
 }
 
 fn output_prefix(bytes: &[u8]) -> String {
@@ -3758,6 +3776,7 @@ pub(crate) fn run_powershell_probe(
     }) {
         Ok(Ok(_)) => {}
         Ok(Err(overdue)) => {
+            crate::diagnostics::note(&overdue_line(program, overdue, patience));
             let output = stopped_output(child);
             return Err(ParseProbeFailure::Overdue {
                 overdue,
@@ -6973,6 +6992,37 @@ mod tests {
                 .map(|look| (look + 1) * 250),
             Some(5_000),
             "a probe that shows no life is ended after the quiet period"
+        );
+    }
+
+    /// RED (mutation: `overdue_words` says a suspended probe in the silent probe's words) — **a
+    /// probe another program held suspended is said so in `diagnostics.log`** (G-SWEEP-048, #31),
+    /// and one that only showed no life is not called suspended.
+    #[test]
+    fn a_probe_held_suspended_is_said_to_be_suspended_by_another_program() {
+        let program = Path::new(r"C:\工具\PowerShell 7\pwsh.exe");
+        assert_eq!(
+            overdue_line(
+                program,
+                bt_platform::ProbeOverdue::Suspended,
+                POWERSHELL_PROBE_PATIENCE
+            ),
+            "PowerShell probe C:\\工具\\PowerShell 7\\pwsh.exe: no sign of work for 5s: \
+             suspended by another program, ended"
+        );
+        let silent = overdue_line(
+            program,
+            bt_platform::ProbeOverdue::Silent,
+            POWERSHELL_PROBE_PATIENCE,
+        );
+        assert!(!silent.contains("suspended"), "{silent}");
+        assert!(
+            overdue_line(
+                program,
+                bt_platform::ProbeOverdue::OverBudget,
+                POWERSHELL_PROBE_PATIENCE
+            )
+            .ends_with("still running after 120s, ended")
         );
     }
 

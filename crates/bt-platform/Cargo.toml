@@ -1119,6 +1119,10 @@ windows = { version = "0.62.2", features = [
     # manifest, and `folio.exe` has none; this decides whether the machine has a
     # first-page context menu at all (`src/msix.rs`).
     "Wdk_System_SystemServices",
+    # `NtQueryInformationThread(ThreadSuspendCount)`: whether a probe that showed no life is held
+    # suspended by another program (`ProbeChild::suspended`, G-SWEEP-048). A feature, not a
+    # package — `docs/DESIGN.md` §8's bar.
+    "Wdk_System_Threading",
     # `NtCreateFile` with a `RootDirectory` and `OBJECT_ATTRIBUTES`: the update
     # archive's members created **under the staging directory's handle**, never
     # through a path that could be re-pointed between the check and the write

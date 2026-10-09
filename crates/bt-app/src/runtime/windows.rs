@@ -25,7 +25,7 @@ use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -795,11 +795,11 @@ impl Runtime<'_> {
                     seats.identity(),
                     LeafSeed {
                         profile,
-                        cwd: profiles::revived_cwd(
-                            profiles::index_of_id(&profile_id),
-                            Path::new(&cwd),
-                        )
-                        .map(profiles::SeedPlace::Carried),
+                        // Whether the folder still stands is asked by the pane's birth
+                        // (`profiles::BirthPlace`), never this thread.
+                        cwd: Some(cwd)
+                            .filter(|cwd| !cwd.is_empty())
+                            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
                         unknown_profile_id,
                         card_skip: 0,
                         prefill: None,

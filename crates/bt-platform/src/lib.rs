@@ -3188,7 +3188,13 @@ impl ProbePatience {
 /// Why a probe's owner ended it ([`ProbeChild::wait_within`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeOverdue {
-    /// It showed no life for its patience's `quiet`.
+    /// It showed no life for its patience's `quiet` and a thread of it was held suspended — on
+    /// Windows a suspend count above zero, on Unix a stopped leader. The probe door leaves no
+    /// probe so (a probe born suspended is resumed before the door returns), so another program
+    /// suspended it: a security product that injects into new processes does.
+    Suspended,
+    /// It showed no life for its patience's `quiet`, and nothing of it was held suspended (or
+    /// that could not be asked).
     Silent,
     /// It showed life to the end of its patience's `budget`.
     OverBudget,
@@ -3277,6 +3283,7 @@ impl ProbeChild {
                     rest();
                     continue;
                 }
+                ProbeLook::Silent if self.suspended().unwrap_or(false) => ProbeOverdue::Suspended,
                 ProbeLook::Silent => ProbeOverdue::Silent,
                 ProbeLook::OverBudget => ProbeOverdue::OverBudget,
             };
@@ -3395,6 +3402,134 @@ impl ProbeChild {
             u64::try_from(time.tv_sec).unwrap_or(0),
             u32::try_from(time.tv_nsec).unwrap_or(0),
         ))
+    }
+
+    /// Whether a thread of the probe is held suspended: any thread of any process in its job (of
+    /// its immediate child, when it is uncontained) with a suspend count above zero.
+    #[cfg(windows)]
+    pub fn suspended(&self) -> std::io::Result<bool> {
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+        use windows::Wdk::System::Threading::{NtQueryInformationThread, ThreadSuspendCount};
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows::Win32::System::JobObjects::{
+            JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject,
+        };
+        use windows::Win32::System::Threading::{OpenThread, THREAD_QUERY_LIMITED_INFORMATION};
+
+        /// Room for this many process ids in a job's list; a probe's tree is a handful.
+        const ROOM: usize = 64;
+        #[repr(C)]
+        struct Listed {
+            head: JOBOBJECT_BASIC_PROCESS_ID_LIST,
+            more: [usize; ROOM - 1],
+        }
+
+        let processes: Vec<u32> = match &self.guard.job {
+            Some(job) => {
+                let mut list = Listed {
+                    head: JOBOBJECT_BASIC_PROCESS_ID_LIST::default(),
+                    more: [0; ROOM - 1],
+                };
+                // SAFETY: the job handle is live; `list` is a process-id list header followed by
+                // room for `ROOM` ids in all, and its size is what the call is told.
+                unsafe {
+                    QueryInformationJobObject(
+                        Some(HANDLE(job.as_raw_handle())),
+                        JobObjectBasicProcessIdList,
+                        std::ptr::from_mut(&mut list).cast(),
+                        u32::try_from(std::mem::size_of::<Listed>())
+                            .expect("process-id list size fits u32"),
+                        None,
+                    )
+                }?;
+                let listed = usize::try_from(list.head.NumberOfProcessIdsInList).unwrap_or(ROOM);
+                std::iter::once(list.head.ProcessIdList[0])
+                    .chain(list.more)
+                    .take(listed.min(ROOM))
+                    .filter_map(|id| u32::try_from(id).ok())
+                    .collect()
+            }
+            None => vec![self.leader.id],
+        };
+        // SAFETY: a snapshot of the system's threads; its handle moves to `OwnedHandle` at once.
+        let snapshot = unsafe {
+            OwnedHandle::from_raw_handle(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?.0)
+        };
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+                .expect("thread entry size fits u32"),
+            ..THREADENTRY32::default()
+        };
+        // SAFETY: the snapshot handle is live and `entry` carries its own size.
+        let mut more =
+            unsafe { Thread32First(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+        while more {
+            if processes.contains(&entry.th32OwnerProcessID) {
+                // SAFETY: opens a thread of this probe's own processes for a query; the handle
+                // moves to `OwnedHandle` at once. A thread that ended meanwhile is skipped.
+                let opened = unsafe {
+                    OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, entry.th32ThreadID)
+                };
+                if let Ok(thread) = opened {
+                    // SAFETY: as above.
+                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.0) };
+                    let mut count = 0_u32;
+                    // SAFETY: the thread handle is live; `count` is the four bytes the
+                    // `ThreadSuspendCount` class writes.
+                    let status = unsafe {
+                        NtQueryInformationThread(
+                            HANDLE(thread.as_raw_handle()),
+                            ThreadSuspendCount,
+                            std::ptr::from_mut(&mut count).cast(),
+                            u32::try_from(std::mem::size_of::<u32>()).expect("four bytes"),
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    if status.is_ok() && count > 0 {
+                        return Ok(true);
+                    }
+                }
+            }
+            // SAFETY: as for `Thread32First`.
+            more =
+                unsafe { Thread32Next(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+        }
+        Ok(false)
+    }
+
+    /// Whether the probe's immediate child is stopped — held by a signal another program sent.
+    /// Observed without reaping it and without consuming the report.
+    #[cfg(unix)]
+    pub fn suspended(&self) -> std::io::Result<bool> {
+        let pid = libc::id_t::from(self.leader.id());
+        let mut information = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        loop {
+            // SAFETY: `information` is valid writable storage; `WNOWAIT` leaves the child's
+            // state to be reported again and `WNOHANG` answers at once.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    information.as_mut_ptr(),
+                    libc::WSTOPPED | libc::WNOWAIT | libc::WNOHANG,
+                )
+            };
+            if result == 0 {
+                // SAFETY: a successful `waitid` initialises the result; a zero `si_pid` means the
+                // child is not stopped.
+                let information = unsafe { information.assume_init() };
+                // SAFETY: as above.
+                let reported = unsafe { information.si_pid() } != 0;
+                return Ok(reported && information.si_code == libc::CLD_STOPPED);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
     }
 }
 
@@ -3727,7 +3862,17 @@ fn probe_leader_has_exited(child: &std::process::Child, block: bool) -> std::io:
         if result == 0 {
             // SAFETY: a successful `waitid` initializes the result; with
             // `WNOHANG`, a zero `si_pid` means no child state was available.
-            return Ok(unsafe { information.assume_init().si_pid() } != 0);
+            let information = unsafe { information.assume_init() };
+            // SAFETY: as above.
+            let reported = unsafe { information.si_pid() } != 0;
+            // Only an end is an exit: macOS's `waitid` also answers `WEXITED` for a child that
+            // is stopped (measured on the Mac gate, G-SWEEP-048), which then read as exited was
+            // ended and reaped as if it had finished.
+            return Ok(reported
+                && matches!(
+                    information.si_code,
+                    libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+                ));
         }
         let error = std::io::Error::last_os_error();
         if error.kind() != std::io::ErrorKind::Interrupted {
@@ -5197,6 +5342,66 @@ mod probe_child_tests {
         }
     }
 
+    /// How the tests below rest between two looks at a probe.
+    fn rest_a_moment() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    /// **A probe another program holds suspended is ended after its quiet period, and the
+    /// answer says it was held** (G-SWEEP-048, #31). The harness plays the security product: the
+    /// helper is created suspended (this test's seam) and never resumed, in its job and outside
+    /// one. Its owner's watch sees no life, finds its thread suspended, ends it — the helper's
+    /// process is gone — and answers [`ProbeOverdue::Suspended`].
+    ///
+    /// RED (mutation: wait forever — `ProbeWatch::look` never answers `Silent`, so only the
+    /// budget ends a stalled probe): the answer is `OverBudget`, ten seconds on.
+    #[test]
+    fn a_probe_held_suspended_is_ended_after_its_quiet_period_and_said_so() {
+        let patience = ProbePatience {
+            quiet: std::time::Duration::from_millis(300),
+            budget: std::time::Duration::from_secs(10),
+        };
+        let born = |job| {
+            spawn_probe_born(
+                &helper_command(),
+                HELPER_STDIO,
+                None,
+                job,
+                ProbeBirthSeam {
+                    suspended: true,
+                    ..ProbeBirthSeam::default()
+                },
+            )
+            .expect("start a suspended helper")
+        };
+        let contained = born(probe_job());
+        let uncontained = born(Err(std::io::Error::other("injected job refusal")));
+        for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
+            let helper = Witness::of(child.id());
+            assert!(
+                child.suspended().expect("ask the helper's threads"),
+                "the {how} helper is held suspended"
+            );
+            let waited = child
+                .wait_within(patience, &mut rest_a_moment)
+                .expect("wait for the helper");
+            assert_eq!(waited, Err(ProbeOverdue::Suspended), "the {how} helper");
+            helper.wait_gone();
+            drop(child.take_stdout());
+        }
+    }
+
+    /// A probe that is running is not held suspended.
+    #[test]
+    fn a_running_probe_is_not_suspended() {
+        let mut child = spawn_probe(&mut helper_command(), HELPER_STDIO).expect("start a helper");
+        let (direct, grandchild) = ready_probe(&mut child);
+        assert!(!child.suspended().expect("ask the helper's threads"));
+        drop(child);
+        direct.wait_gone();
+        grandchild.wait_gone();
+    }
+
     /// RED mutation: make `probe_job` return
     /// `ProbeChildGuard::uncontained()`; `kill` ends only the direct child and
     /// the grandchild remains live.
@@ -6321,6 +6526,70 @@ mod probe_child_unix_tests {
             "the shell worked and shows {time:?}"
         );
         child.kill().expect("end the probe");
+    }
+
+    /// How the test below rests between two looks at a probe.
+    fn rest_a_moment() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    /// Wait until `child` reports stopped (a signal is delivered after `kill` returns), within
+    /// the lane suite's patience.
+    fn until_stopped(child: &ProbeChild) {
+        let given_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !child.suspended().expect("ask the shell") {
+            assert!(
+                std::time::Instant::now() < given_up,
+                "the shell never stopped"
+            );
+            rest_a_moment();
+        }
+    }
+
+    /// **A probe another program stopped is ended after its quiet period, and the answer says it
+    /// was held** (G-SWEEP-048, #31): the harness plays that program and sends the shell
+    /// `SIGSTOP`. A stopped shell has not exited; its owner's watch sees no life, finds the leader
+    /// stopped, ends the group and answers [`ProbeOverdue::Suspended`]; the leader was ended by the
+    /// probe's signal.
+    ///
+    /// RED (mutation: wait forever — `ProbeWatch::look` never answers `Silent`): the answer is
+    /// `OverBudget`, ten seconds on. Observed red on macOS before the leader's exit was read off
+    /// `si_code`: its `waitid` answered `WEXITED` for the stopped shell, which was then ended and
+    /// reaped as finished (`Ok(SIGKILL)`).
+    #[test]
+    fn a_probe_held_stopped_is_ended_after_its_quiet_period_and_said_so() {
+        static GROUPS: ProbeGroups = ProbeGroups::new();
+        let (_hygiene, mut command) = shell("printf 'ready\\n' >&2; sleep 30");
+        let mut child = spawn_in(&GROUPS, &mut command);
+        let mut stderr = BufReader::new(child.take_stderr().expect("stderr was piped"));
+        let mut line = String::new();
+        stderr.read_line(&mut line).expect("read readiness");
+        assert_eq!(line, "ready\n");
+        assert!(
+            !child.suspended().expect("ask the shell"),
+            "a running shell"
+        );
+        let leader = libc::pid_t::try_from(child.id()).expect("a process id");
+        // SAFETY: signals this test's own unreaped child.
+        assert_eq!(unsafe { libc::kill(leader, libc::SIGSTOP) }, 0);
+        until_stopped(&child);
+        assert_eq!(
+            child.try_wait().expect("poll the stopped shell"),
+            None,
+            "a stopped shell has not exited"
+        );
+        let patience = ProbePatience {
+            quiet: std::time::Duration::from_millis(300),
+            budget: std::time::Duration::from_secs(10),
+        };
+        let waited = child
+            .wait_within(patience, &mut rest_a_moment)
+            .expect("wait for the shell");
+        assert_eq!(waited, Err(ProbeOverdue::Suspended));
+        assert_eq!(
+            child.wait().expect("the ended probe is settled").signal(),
+            Some(libc::SIGKILL)
+        );
     }
 
     /// RED mutation: in `ProbeChild::settle`, drop the early return of the

@@ -1495,6 +1495,7 @@ impl Runtime<'_> {
                     None,
                     &bt_pty::SystemShellEnvironment,
                 )
+                .place
                 .working_directory
             });
         match self.window.folder_picker.request(start.as_deref()) {
