@@ -11,11 +11,12 @@ use std::{
 
 use web_time::Instant;
 
+use bt_compose::{render_detection_task, render_live_detection_task};
 use bt_math::MathEngine;
 use bt_term::{
     DualPlaneSession, FormulaFlashOracle, FormulaFrameState, InlineImageDecoder,
     LIVE_MATH_STABLE_INTERVAL, MathLayoutOptions, SessionDecorationTask, SessionMathTask,
-    band_owns_its_rows, is_banded_artifact, render_detection_task, render_live_detection_task,
+    band_owns_its_rows, is_banded_artifact,
 };
 use bt_transcript::CellFlags;
 use bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES;

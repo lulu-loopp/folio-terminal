@@ -370,6 +370,39 @@ pub enum SessionDecorationTask {
     VerifyPath(PathBuf),
 }
 
+/// One piece of decoration work a worker holds, named by what its completion carries back.
+///
+/// Keys, not tasks: a second task for the same key handed out while the first is still held is
+/// one entry, and the first answer for it clears the entry. A path question is not one of these;
+/// `path_verify_in_flight` holds it.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DecorationWorkOut {
+    FrozenMath(TranscriptId),
+    /// Screen, grid generation and candidate row: the three a live task keeps unchanged from
+    /// scheduling to completion (resolution may rewrite its pane).
+    LiveMath(ScreenId, u64, u32),
+    Decode(u64),
+    Scale(u64),
+}
+
+impl DecorationWorkOut {
+    fn of(task: &SessionDecorationTask) -> Option<Self> {
+        match task {
+            SessionDecorationTask::Math(task) => Some(match task.as_ref() {
+                SessionMathTask::Frozen(task) => Self::FrozenMath(task.candidate_id),
+                SessionMathTask::Live(task) => Self::live(task),
+            }),
+            SessionDecorationTask::InlineImage(task) => Some(Self::Decode(task.occurrence_id)),
+            SessionDecorationTask::ScaleInlineImage(task) => Some(Self::Scale(task.occurrence_id)),
+            SessionDecorationTask::VerifyPath(_) => None,
+        }
+    }
+
+    fn live(task: &LiveDetectionTask) -> Self {
+        Self::LiveMath(task.screen, task.grid_generation.0, task.candidate_row)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineImageRecordView {
     pub occurrence_id: u64,
@@ -383,6 +416,10 @@ pub struct InlineImageRecordView {
     pub display_height_px: Option<u32>,
     pub display_rows: Option<u32>,
     pub failed: bool,
+    /// The failure is the host's refusal to decode pictures
+    /// ([`InlineImageDecodeError::HostDeclined`]), not anything about the file: `failed` is also
+    /// set, and the reference stays text either way.
+    pub declined_by_host: bool,
     pub local_path: Option<PathBuf>,
 }
 
@@ -469,7 +506,13 @@ struct InlineImageRecord {
     /// Display size of an outstanding resample request, so a layout that has not moved does not
     /// re-ask the worker the same question every frame.
     display_pending: Option<(u32, u32)>,
+    /// A display size the host declined to resample to
+    /// ([`DualPlaneSession::decline_inline_image_scale`]): that size is not asked for again; a
+    /// layout that needs another size asks for that one.
+    display_declined: Option<(u32, u32)>,
     failed: bool,
+    /// See [`InlineImageRecordView::declined_by_host`].
+    declined_by_host: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1690,6 +1733,17 @@ pub struct DualPlaneSession {
     /// while a question is in flight do not ask it again — an unanswered path is re-detected on
     /// every one of them, and without this a slow drive would collect one task per frame.
     path_verify_in_flight: BTreeSet<PathBuf>,
+    /// Paths the host that answers this pane's work declined to look at
+    /// ([`Self::decline_path_verification`]), with their insertion order so the ledger is held to
+    /// [`PATH_VERDICT_LEDGER_CAP`] like the verdicts. A name in it is never asked about again:
+    /// nothing a host that does not look at disks could be asked would change its answer.
+    path_declined: BTreeSet<PathBuf>,
+    path_declined_order: VecDeque<PathBuf>,
+    /// **Decoration work handed out and not answered yet** — what
+    /// [`Self::take_decoration_worker_task`] gave a worker, until the completion or the decline for
+    /// it arrives, whatever its verdict. Path questions are `path_verify_in_flight`'s. Only
+    /// [`Self::outstanding_decoration_work`] reads it.
+    decoration_work_out: BTreeSet<DecorationWorkOut>,
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
@@ -2245,6 +2299,9 @@ impl DualPlaneSession {
             path_verdict_order: VecDeque::new(),
             path_verify_tasks: VecDeque::new(),
             path_verify_in_flight: BTreeSet::new(),
+            path_declined: BTreeSet::new(),
+            path_declined_order: VecDeque::new(),
+            decoration_work_out: BTreeSet::new(),
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             image_placeholders: bt_transcript::paths::ImagePlaceholderTargets::default(),
@@ -2992,6 +3049,7 @@ impl DualPlaneSession {
                     display_height_px: record.display.as_ref().map(|display| display.height_px),
                     display_rows,
                     failed: record.failed,
+                    declined_by_host: record.declined_by_host,
                     local_path: match &record.kind {
                         InlineImageRecordKind::Osc1337 { .. } => None,
                         InlineImageRecordKind::LocalPath { path, .. } => Some(path.clone()),
@@ -3422,7 +3480,10 @@ impl DualPlaneSession {
     /// which is what holds a re-ask to one question however fast the row that carries the name is
     /// being rewritten: the second printing finds the first one's question still out.
     fn queue_path_question(&mut self, path: PathBuf) {
-        if self.path_verify_in_flight.contains(&path) || self.path_verify_tasks.contains(&path) {
+        if self.path_verify_in_flight.contains(&path)
+            || self.path_verify_tasks.contains(&path)
+            || self.path_declined.contains(&path)
+        {
             return;
         }
         if self.path_verify_tasks.len() == PATH_VERIFY_QUEUE_CAP {
@@ -3463,6 +3524,31 @@ impl DualPlaneSession {
         // them, and on a crowded screen it is the whole of how the scan reaches the bottom.
         self.rebuild_printed_path_links();
         exists || self.printed_path_budget_full
+    }
+
+    /// **The host will not look at this path** — the declined answer to a
+    /// [`SessionDecorationTask::VerifyPath`] (a host with no disk to ask, design T-COMPOSE-CRATE
+    /// §3.2). The question leaves the in-flight set and the name is recorded as declined, which
+    /// is final: it is never queued again, by a reprint or a link target either. No verdict is
+    /// written, so the name stays what an unanswered name is — text, not a link — and stays
+    /// distinct from a name the disk said is absent ([`Self::path_declined_by_host`] against
+    /// [`Self::path_verdict`]).
+    pub fn decline_path_verification(&mut self, path: PathBuf) {
+        self.path_verify_in_flight.remove(&path);
+        self.path_verify_tasks.retain(|queued| *queued != path);
+        if self.path_declined.insert(path.clone()) {
+            self.path_declined_order.push_back(path);
+        }
+        while self.path_declined_order.len() > PATH_VERDICT_LEDGER_CAP {
+            if let Some(evicted) = self.path_declined_order.pop_front() {
+                self.path_declined.remove(&evicted);
+            }
+        }
+    }
+
+    /// Whether the host declined to verify `path` ([`Self::decline_path_verification`]).
+    pub fn path_declined_by_host(&self, path: &Path) -> bool {
+        self.path_declined.contains(path)
     }
 
     /// Whether the disk has told this pane that a printed path is real — the `verified` bit of
@@ -9016,6 +9102,8 @@ impl DualPlaneSession {
                             self.complete_worker_task(task);
                         }
                         SessionMathTask::Live(mut task) => {
+                            self.decoration_work_out
+                                .remove(&DecorationWorkOut::live(&task));
                             if resolve_live_detection_task(&mut task) {
                                 let artifact = live_placeholder(&task);
                                 size_resolved_live_task_band(&mut task);
@@ -9092,6 +9180,7 @@ impl DualPlaneSession {
     /// its own — a change to the lane rather than to the move.
     pub fn forget_work_in_flight(&mut self) {
         self.path_verify_in_flight.clear();
+        self.decoration_work_out.clear();
         for record in self.inline_images.values_mut() {
             record.display_pending = None;
         }
@@ -9122,7 +9211,8 @@ impl DualPlaneSession {
         if self.inline_image_bands {
             self.request_inline_image_displays();
         }
-        self.take_math_worker_task()
+        let task = self
+            .take_math_worker_task()
             .map(|task| SessionDecorationTask::Math(Box::new(task)))
             // Finishing a band the user is already waiting on outranks starting another decode.
             .or_else(|| {
@@ -9147,7 +9237,32 @@ impl DualPlaneSession {
                 let path = self.path_verify_tasks.pop_front()?;
                 self.path_verify_in_flight.insert(path.clone());
                 Some(SessionDecorationTask::VerifyPath(path))
-            })
+            });
+        if let Some(out) = task.as_ref().and_then(DecorationWorkOut::of) {
+            self.decoration_work_out.insert(out);
+        }
+        task
+    }
+
+    /// **How much decoration work this session is still owed an answer for**: every task queued
+    /// for a worker (frozen and live math, the frozen retries a full queue turned away, decodes,
+    /// resamples, path questions) and every task handed out by
+    /// [`Self::take_decoration_worker_task`] that no completion or decline has answered. A host
+    /// that answers everything it takes brings it to zero once the queues are drained; one that
+    /// drops a task leaves it above zero.
+    ///
+    /// Resamples are requested where work is handed out, so a display size the layout has just
+    /// started to need is counted from the next take on.
+    pub fn outstanding_decoration_work(&self) -> usize {
+        self.scheduler.pending_len()
+            + self.scheduler.retry_len()
+            + self.live_tasks.len()
+            + self.inline_image_scale_tasks.len()
+            + self.inline_image_tasks.len()
+            + self.local_image_path_tasks.len()
+            + self.path_verify_tasks.len()
+            + self.path_verify_in_flight.len()
+            + self.decoration_work_out.len()
     }
 
     pub fn complete_inline_image_result(
@@ -9155,6 +9270,8 @@ impl DualPlaneSession {
         task: InlineImageTask,
         result: Result<DecodedInlineImage, InlineImageDecodeError>,
     ) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::Decode(task.occurrence_id));
         // The late half of the input-region gate, and a band gate like the early one: a decode that
         // lands on a span the shell has since declared to be the command the user typed must not
         // inject a row there. It says nothing about verification, so with bands retired the record
@@ -9190,17 +9307,20 @@ impl DualPlaneSession {
                     .is_none_or(|previous| previous.key != artifact.key);
                 record.artifact = Some(artifact);
                 record.failed = false;
+                record.declined_by_host = false;
                 if content_changed {
                     record.display = None;
                     record.display_pending = None;
+                    record.display_declined = None;
                 }
             }
             Ok(_) => return false,
-            Err(_) => {
+            Err(error) => {
                 record.artifact = None;
                 record.display = None;
                 record.display_pending = None;
                 record.failed = true;
+                record.declined_by_host = error == InlineImageDecodeError::HostDeclined;
             }
         }
         self.bump_view_generation();
@@ -9210,6 +9330,8 @@ impl DualPlaneSession {
     /// Accept a display raster. A resample of content the record no longer holds is a stale answer
     /// to a superseded question and is dropped.
     pub fn complete_inline_image_scale(&mut self, scaled: ScaledInlineImage) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::Scale(scaled.occurrence_id));
         let Some(record) = self.inline_images.get_mut(&scaled.occurrence_id) else {
             return false;
         };
@@ -9228,7 +9350,26 @@ impl DualPlaneSession {
         true
     }
 
+    /// **The host will not resample this picture** — the declined answer to a
+    /// [`SessionDecorationTask::ScaleInlineImage`]. The request is no longer outstanding and its
+    /// size is not asked for again; the record keeps whatever display raster it had (none, for a
+    /// first size), so nothing new is drawn for it.
+    pub fn decline_inline_image_scale(&mut self, task: &InlineImageScaleTask) {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::Scale(task.occurrence_id));
+        let Some(record) = self.inline_images.get_mut(&task.occurrence_id) else {
+            return;
+        };
+        let size = (task.display_width_px, task.display_height_px);
+        if record.display_pending == Some(size) {
+            record.display_pending = None;
+        }
+        record.display_declined = Some(size);
+    }
+
     pub fn complete_worker_task(&mut self, task: DetectionTask) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::FrozenMath(task.candidate_id));
         if !self.worker_task_is_current(&task) {
             self.stale_results += 1;
             return false;
@@ -9253,6 +9394,8 @@ impl DualPlaneSession {
         task: DetectionTask,
         result: Result<MathRaster, MathRenderError>,
     ) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::FrozenMath(task.candidate_id));
         let render_error = result.as_ref().err().cloned();
         let failure_reason = render_error
             .as_ref()
@@ -9291,6 +9434,8 @@ impl DualPlaneSession {
         mut task: LiveDetectionTask,
         result: Result<MathRaster, MathRenderError>,
     ) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::live(&task));
         let render_time = result.as_ref().ok().map(|raster| raster.render_time);
         let render_error = result.as_ref().err().cloned();
         let failure_reason = render_error
@@ -10924,7 +11069,10 @@ impl DualPlaneSession {
                 .display
                 .as_ref()
                 .map(|display| (display.width_px, display.height_px));
-            if resident == Some(target) || record.display_pending == Some(target) {
+            if resident == Some(target)
+                || record.display_pending == Some(target)
+                || record.display_declined == Some(target)
+            {
                 continue;
             }
             requests.push(InlineImageScaleTask {
@@ -12116,7 +12264,9 @@ impl DualPlaneSession {
                 artifact: None,
                 display: None,
                 display_pending: None,
+                display_declined: None,
                 failed: false,
+                declined_by_host: false,
             },
         );
         if self.inline_image_tasks.len() == INLINE_IMAGE_WORKER_QUEUE_CAP {
@@ -12575,7 +12725,9 @@ impl DualPlaneSession {
                 artifact: None,
                 display: None,
                 display_pending: None,
+                display_declined: None,
                 failed: false,
+                declined_by_host: false,
             },
         );
         if self.local_image_path_tasks.len() == LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP
@@ -15129,7 +15281,11 @@ fn exact_live_source_match(
     ))
 }
 
-fn extend_live_task_band(task: &mut LiveDetectionTask) {
+/// **The rows a live task's picture may stand on**: its own source rows, and for a display
+/// block on the primary screen up to two blank rows of its own pane borrowed above and below.
+/// Set on the task before it is typeset (`bt_compose::render_live_detection_task`), because the
+/// band is part of the answer the session judges.
+pub fn extend_live_task_band(task: &mut LiveDetectionTask) {
     task.band_start_row = task.start.row;
     task.band_end_row = task.end.row;
     if task.span.mode == MathMode::Inline {
@@ -16982,7 +17138,7 @@ fn live_logical_line_rows(inputs: &[LiveDetectionInput], row: u32) -> Vec<(u32, 
 /// The snapshot's own rows and not the terminal's: a worker holds the grid as it stood when the
 /// task was built, which is the grid the run's offsets were measured against.
 /// [`DualPlaneSession::live_logical_line_text`] answers the same question of the live terminal.
-fn live_snapshot_logical_line_text(inputs: &[LiveDetectionInput], row: u32) -> String {
+pub fn live_snapshot_logical_line_text(inputs: &[LiveDetectionInput], row: u32) -> String {
     live_logical_line_rows(inputs, row)
         .into_iter()
         .filter_map(|(grid_row, _)| live_grid_input(inputs, grid_row))
@@ -25986,6 +26142,152 @@ mod tests {
             native_size: None,
             animated,
         }
+    }
+
+    /// RED — **a resample the host declined is answered, and that size is not asked for again**
+    /// (CC-6b; design T-COMPOSE-CRATE §3.2, the bt-term additions). There was no failure
+    /// completion for a resample: a host that cannot resample would have left it in flight, and
+    /// the next hand-out would have asked for the same size again.
+    ///
+    /// MUTATION: drop `record.display_declined = Some(size)` from `decline_inline_image_scale` —
+    /// the next hand-out asks for the same resample again.
+    #[test]
+    fn a_declined_resample_is_answered_and_not_asked_again() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
+        session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 200, 300, false)),
+        ));
+        let Some(SessionDecorationTask::ScaleInlineImage(scale)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("a decoded picture is resampled to its display box");
+        };
+        assert_eq!(
+            session.outstanding_decoration_work(),
+            1,
+            "the resample is out"
+        );
+
+        session.decline_inline_image_scale(&scale);
+        assert_eq!(session.outstanding_decoration_work(), 0, "and answered");
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "the declined size is not asked for again"
+        );
+        let record = &session.inline_image_records()[0];
+        assert_eq!(record.display_width_px, None, "nothing new is drawn for it");
+        assert!(!record.failed, "the decode itself stands");
+    }
+
+    /// RED — **a picture the host declined is a failed record that says so; a missing file is a
+    /// failed record that does not** (CC-6b, `InlineImageDecodeError::HostDeclined`).
+    ///
+    /// MUTATION: set `declined_by_host` from `error != InlineImageDecodeError::HostDeclined` — both
+    /// halves go red.
+    #[test]
+    fn a_declined_picture_is_told_apart_from_a_missing_file() {
+        for (error, declined) in [
+            (InlineImageDecodeError::HostDeclined, true),
+            (
+                InlineImageDecodeError::Io("\u{627e}\u{4e0d}\u{5230} not found".into()),
+                false,
+            ),
+        ] {
+            let mut session = DualPlaneSession::new(nz(20), nz(6));
+            session
+                .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+                .unwrap();
+            let Some(SessionDecorationTask::InlineImage(task)) =
+                session.take_decoration_worker_task()
+            else {
+                panic!("OSC 1337 files a decode");
+            };
+            assert_eq!(session.outstanding_decoration_work(), 1);
+            session.complete_inline_image_result(task, Err(error));
+            assert_eq!(session.outstanding_decoration_work(), 0);
+            let record = &session.inline_image_records()[0];
+            assert!(record.failed);
+            assert_eq!(record.declined_by_host, declined, "{record:?}");
+        }
+    }
+
+    /// RED — **a path the host declined to verify is out of flight, has no verdict, and is never
+    /// asked about again** — not when the frame is drawn again, not when the program prints it
+    /// again, not when a link target re-asks it (CC-6b, `decline_path_verification`).
+    ///
+    /// MUTATION: take `|| self.path_declined.contains(&path)` out of `queue_path_question` — the
+    /// reprint files the question again.
+    #[test]
+    fn a_declined_path_is_answered_and_never_asked_again() {
+        let path = bt_testpath::temp_path("bt-term-declined").join("\u{7b14}\u{8bb0}.md");
+        let printed = format!("{}\r\n", path.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let Some(SessionDecorationTask::VerifyPath(asked)) = session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        assert_eq!(asked, path);
+        assert_eq!(session.outstanding_decoration_work(), 1, "in flight");
+
+        session.decline_path_verification(asked);
+        assert_eq!(session.outstanding_decoration_work(), 0);
+        assert!(session.path_declined_by_host(&path));
+        assert_eq!(session.path_verdict(&path), None, "declined is not absent");
+
+        session.feed(printed.as_bytes()).unwrap();
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        session.re_ask_about_link_target(path.clone());
+        session.ask_about_link_target(path);
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "a declined name is not asked about again"
+        );
+    }
+
+    /// RED — **a task handed out and never answered stays outstanding** (CC-6b; the design's
+    /// bypass shape: a task taken directly and dropped). `forget_work_in_flight`, which gives up
+    /// every answer owed to an old address, is what lets it go.
+    ///
+    /// MUTATION: do not record the handed-out task in `take_decoration_worker_task` — the
+    /// dropped formula is no longer outstanding.
+    #[test]
+    fn a_task_taken_and_dropped_stays_outstanding() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        session
+            .feed_at("\u{516c}\u{5f0f}\r\n$$x^2$$\r\n".as_bytes(), start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(session.outstanding_decoration_work(), 1, "queued");
+        let Some(SessionDecorationTask::Math(task)) = session.take_decoration_worker_task() else {
+            panic!("the formula is filed");
+        };
+        drop(task);
+        assert_eq!(
+            session.outstanding_decoration_work(),
+            1,
+            "taken, dropped, still owed"
+        );
+        session.forget_work_in_flight();
+        assert_eq!(session.outstanding_decoration_work(), 0);
     }
 
     /// The band's texture is display-resolution, so `render_scale_milli` is 1000 and the band is

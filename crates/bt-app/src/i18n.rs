@@ -7295,7 +7295,9 @@ pub fn picture_refused(error: &bt_term::InlineImageDecodeError) -> String {
         | Refusal::TooLarge
         | Refusal::InvalidPath
         | Refusal::UnsupportedFormat
-        | Refusal::InvalidDimensions => Text::PreviewFailedImageLoad.text().to_owned(),
+        | Refusal::InvalidDimensions
+        // A host's executor answers it (`bt_compose::pump`); this build's lane never does.
+        | Refusal::HostDeclined => Text::PreviewFailedImageLoad.text().to_owned(),
     }
 }
 

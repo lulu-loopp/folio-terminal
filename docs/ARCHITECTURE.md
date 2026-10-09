@@ -288,7 +288,8 @@ of the two test-support features, `bt-pty`'s `test-shell` and `bt-platform`'s
 `trust-harness`, and it depends on nothing; `bt-effects` (CC-3), layer 0; and
 `bt-compose` (CC-6a), layer 6. Normal and
 target-specific edges as the manifests declare them (2026-09-23; `bt-workbench`
-2026-09-25; `bt-effects` and `bt-compose` 2026-10-08):
+2026-09-25; `bt-effects` and `bt-compose` 2026-10-08; `bt-compose`'s math edges
+2026-10-09):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
@@ -297,18 +298,20 @@ bt-effects      ← bt-platform, bt-render, bt-math, bt-term (itself: std and
                   it through bt-platform's re-exports)
 bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty,
                   bt-platform
-bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
+bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math, bt-compose
 bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
 bt-platform     ← bt-persist, bt-app, bt-lint-probe
 bt-viewport     ← bt-render, bt-term, bt-compose
-bt-detect       ← bt-term
-bt-math         ← bt-term
+bt-detect       ← bt-term, bt-compose
+bt-math         ← bt-term (the SVG codec and the engine re-export, until CC-7),
+                  bt-compose
 bt-term         ← bt-compose, bt-app (bt-pty only as a dev-dependency, since
-                  2026-09-21)
+                  2026-09-21; bt-term's own tests name bt-compose as one, for
+                  a real typesetter, since 2026-10-09)
 bt-render       ← bt-compose, bt-app
-bt-compose      ← bt-app (itself: bt-term, bt-viewport, bt-render and
-                  web-time)
+bt-compose      ← bt-app, bt-corpus (itself: bt-term, bt-viewport, bt-render,
+                  bt-doc, bt-detect, bt-math, unicode-width and web-time)
 bt-pty          ← bt-app
 bt-app          ← (nothing; the top)
 ```
@@ -354,7 +357,27 @@ is already on the glass" half of the hold, the decoration lane and its
 dispatch, present admission and the GPU context, the retry that files a frame
 back after a failed present (without acknowledging it again), the perf traces,
 hover marks, notices and the IME, and the synchronized-update loop's title
-evidence. Math execution (`typeset`) and the bounded `pump` join it in CC-6b.
+evidence.
+
+**Composition owns math execution** (CC-6b, design §3.4 D-15). `typeset` — with
+`render_detection_task` and `render_live_detection_task` beneath it — is the one
+place a terminal formula becomes a raster: the render key at the pane's em, the
+inline composite with each run fitted to its row or left at its source, and the
+empty raster a proven table comes back with. It moved out of `bt-term`
+verbatim; `bt-term` files the task, settles a live task's band
+(`extend_live_task_band`) and reads its logical line
+(`live_snapshot_logical_line_text`), and judges the answer, and runs no engine
+for a formula any more (its `bt-math` edge is the SVG codec and the `MathEngine`
+re-export until CC-7, structural-debt D-15). **`pump`** is the bounded step for
+a host with no lane of its own: it takes at most `Budget::tasks` decoration
+tasks and answers each through the host's `Executor` (`math`, `table`, `image`,
+`scale`, `verify`), giving every task taken one terminal completion — the
+executor's answer, or for an `Outcome::Declined` the declined completion of its
+kind (`MathRenderError::HostDeclined`, `InlineImageDecodeError::HostDeclined`,
+`decline_inline_image_scale`, `decline_path_verification`), which is final: the
+session shows the source text. It never blocks and never spawns; its
+`PumpReport::more_pending` reads `DualPlaneSession::outstanding_decoration_work`.
+`bt-app` does not call it: its lane is its executor (§5.1).
 
 The library crates below `bt-app` that a browser build will reference —
 `bt-unicode`, `bt-transcript`, `bt-doc`, `bt-layout`, `bt-viewport`,
@@ -719,6 +742,16 @@ per row.
 | **Session transport and lifecycle** | PTY birth, input and output transport, ordered resize, close, retirement | per-session incarnation and operation order; bounded input admission; no driver call while holding a lock the window needs |
 | **Presentation** | surface acquisition, submission and presentation of an admitted frame | surface lease and frame identity; bounded pending picture; asynchronous completion; shared GPU preparation lifetime explicitly serialized |
 | **Ingress and diagnostics** | endpoint listening and admission, watch delivery, trace writing, independent hang observation | publish before waking; explicit capacity and loss policy; the watchdog must stay able to observe a blocked owner |
+
+**The decoration lane's terminal formula is typeset by the composition crate.**
+`run_decoration_worker`'s `MathWorkerRequest::Math` arm is one
+`bt_compose::typeset` call on the lane's own engine (CC-6b; §3.1); the lane keeps
+the engine, the decoder, the stack size and the thread, and the answer goes back
+to the session through the same completion as before. The preview formula arm
+renders a document formula on the same engine and is not terminal typesetting.
+`app_math_tests::the_lane_typesets_a_terminal_formula_through_the_composition_crate`
+holds the arm to it. A host with no lane answers the same tasks a budget at a
+time through `bt_compose::pump`.
 
 The seams that already implement this shape: `bt-app::main::run_path_verify_worker`
 (*one question, one call, one answer, and nothing else runs here*),

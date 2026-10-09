@@ -1662,8 +1662,9 @@ fn expanded_presented_row_map_drives_forwarded_mouse_row_and_column() {
         1
     );
     let mut task = session.take_live_worker_task().unwrap();
-    let raster = render_live_detection_task(&MathEngine::new(), &mut task, foreground_rgb())
-        .expect("test formula rasterizes through the production live worker entry");
+    let raster =
+        bt_compose::render_live_detection_task(&MathEngine::new(), &mut task, foreground_rgb())
+            .expect("test formula rasterizes through the production live worker entry");
     let ink_height_px = raster.height_px;
     assert!(session.complete_live_worker_result(task, Ok(raster)));
 

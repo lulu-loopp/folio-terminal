@@ -48,9 +48,12 @@ fn a_late_zoom_reprint_keeps_the_last_formula_frame_until_exact_source_reanchors
         1
     );
     let mut initial_task = harness.session.take_live_worker_task().unwrap();
-    let initial_raster =
-        render_live_detection_task(&MathEngine::new(), &mut initial_task, foreground_rgb())
-            .expect("initial formula rasterizes");
+    let initial_raster = bt_compose::render_live_detection_task(
+        &MathEngine::new(),
+        &mut initial_task,
+        foreground_rgb(),
+    )
+    .expect("initial formula rasterizes");
     assert!(
         harness
             .session
@@ -954,5 +957,33 @@ fn one_video_texture_is_one_file_at_one_version_at_one_size() {
     assert!(base.starts_with("video-frame:"));
     assert!(
         peek_page_texture_key(Path::new(r"D:\shots\clip.mp4"), Some(now), 0, 1920, 1080) != base
+    );
+}
+
+/// GUARD — **the lane typesets a terminal formula through `bt_compose::typeset` and nowhere
+/// else** (design T-COMPOSE-CRATE §3.4 D-15, composition owns math execution; §6.2 planted
+/// violation "math execution owner", the call-site half — the half inside the crate is
+/// `bt_compose`'s own typesetting tests).
+///
+/// A guard: the lane is a worker thread's loop and its arms cannot be told apart by what they
+/// return. In `run_decoration_worker` the terminal formula's arm is the one `typeset` call, and the
+/// engine's own `render` is named once, by the preview formula's arm (a document formula, which
+/// is not this crate's terminal typesetting).
+///
+/// MUTATION: answer the `MathWorkerRequest::Math` arm with `engine.render(..)` instead of
+/// `bt_compose::typeset` — both assertions go red.
+#[test]
+fn the_lane_typesets_a_terminal_formula_through_the_composition_crate() {
+    let lane = crate::test_support::free_fn_body("run_decoration_worker");
+    assert_eq!(
+        lane.matches("bt_compose::typeset(&engine, &mut task, foreground_rgb)")
+            .count(),
+        1,
+        "the terminal formula's arm typesets through the composition crate:\n{lane}"
+    );
+    assert_eq!(
+        lane.matches("engine.render(").count(),
+        1,
+        "the only formula the lane renders itself is a preview's:\n{lane}"
     );
 }

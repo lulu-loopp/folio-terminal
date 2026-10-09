@@ -20,15 +20,23 @@ bt-term = { path = "../bt-term" }
 bt-viewport = { path = "../bt-viewport" }
 # `SeatFrame`, `SeatViewport` and `CellMetrics`: the draw list's vocabulary.
 bt-render = { path = "../bt-render" }
+# `DetectionTask`/`LiveDetectionTask`, the math span and their resolution: what `typeset` reads.
+bt-detect = { path = "../bt-detect" }
+# The raster, its error and its key, the layout and the subpixel unit (`typeset`, `pump`).
+bt-doc = { path = "../bt-doc" }
+# `MathEngine`: composition owns math execution (design T-COMPOSE-CRATE §3.4 D-15).
+bt-math = { path = "../bt-math" }
+# The column a run starts at on its line (`typeset`'s inline composite).
+unicode-width.workspace = true
 # The `Instant` in its signatures: `std::time::Instant` on every native target,
 # `performance.now()` in a browser (the clock guard, gate G3).
 web-time.workspace = true
 
 [dev-dependencies]
-# The tests answer the session's math tasks as the lane would: `bt-detect` resolves a task's
-# source, and the raster and its error are `bt-doc`'s types.
-bt-detect = { path = "../bt-detect" }
-bt-doc = { path = "../bt-doc" }
+# A scratch name for the folder the pump tests print paths into (it is never created).
+bt-testpath = { path = "../bt-testpath" }
+# `TranscriptId`, the name a frozen formula's record is read back under.
+bt-transcript = { path = "../bt-transcript" }
 
 [lints]
 workspace = true

@@ -304,9 +304,13 @@ version = "0.4.7"
 dependencies = [
  "bt-detect",
  "bt-doc",
+ "bt-math",
  "bt-render",
  "bt-term",
+ "bt-testpath",
+ "bt-transcript",
  "bt-viewport",
+ "unicode-width",
  "web-time",
 ]
 
@@ -315,6 +319,7 @@ name = "bt-corpus"
 version = "0.4.7"
 dependencies = [
  "anyhow",
+ "bt-compose",
  "bt-detect",
  "bt-math",
  "bt-platform",
