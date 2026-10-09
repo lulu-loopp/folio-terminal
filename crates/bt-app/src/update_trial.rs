@@ -2607,6 +2607,14 @@ mod tests {
             .write(&data)
             .unwrap();
         std::fs::write(root.join("profile.ps1"), "# the reader's own profile\n").unwrap();
+        // An edit an earlier stop kept and no start has said yet (T-RECOVERED-FOLDER).
+        let recovered = data.join(crate::preview::RECOVERED_FOLDER);
+        std::fs::create_dir_all(&recovered).unwrap();
+        std::fs::write(
+            recovered.join("2026-10-09T120000Z 说明.md"),
+            "typed by hand — 手写\n",
+        )
+        .unwrap();
         crate::psreadline::tests::an_older_build_stands_in(&root.join("documents"))
     }
 
@@ -2646,6 +2654,8 @@ mod tests {
             "Profiles"
         } else if name == "pins.json" {
             "Pins"
+        } else if name == crate::recovered::ANNOUNCED_RECORD {
+            "RecoveredAnnouncement"
         } else if name.starts_with("update-check") {
             "UpdateCheck"
         } else if text.starts_with("documents") {
@@ -2663,9 +2673,9 @@ mod tests {
     /// through its own product entry and each asked to write something: the
     /// data folder, the stores and a change to each, the update check's state,
     /// the integration marks' migration, the shell scripts and the PSReadLine
-    /// upgrade. The registry writers (the Explorer repair, the toast identity)
-    /// are not run here: a test that reached them would change the machine it
-    /// runs on.
+    /// upgrade, and the recovered folder's record. The registry writers (the
+    /// Explorer repair, the toast identity) are not run here: a test that
+    /// reached them would change the machine it runs on.
     ///
     /// Answers whether the marks' migration started (its worker's wake came).
     fn run_the_start_writers(root: &Path) -> bool {
@@ -2728,7 +2738,20 @@ mod tests {
             );
         }
 
-        let started = migration.recv_timeout(Duration::from_secs(3)).is_ok();
+        // And the recovered folder's question, which a start asks at its first frame
+        // (T-RECOVERED-FOLDER): its record is written on its worker before it wakes.
+        let (announced, announcement) = mpsc::channel();
+        crate::recovered::install_wake(move || {
+            let _ = announced.send(());
+        });
+        crate::recovered::begin(&storage);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let started = migration
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .is_ok();
+        let _ = announcement
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         // The session's own writer finishes what it was handed, or nothing.
         session.close();
         started
@@ -2790,6 +2813,7 @@ mod tests {
                 Writer::RefusedCopies,
                 Writer::UpdateCheck,
                 Writer::ProfileMigration,
+                Writer::RecoveredAnnouncement,
             ] {
                 assert!(pending.contains(&writer), "{writer:?} in {pending:?}");
             }
@@ -2839,6 +2863,7 @@ mod tests {
                 Writer::RefusedCopies,
                 Writer::UpdateCheck,
                 Writer::ProfileMigration,
+                Writer::RecoveredAnnouncement,
             ] {
                 assert!(pending.contains(&writer), "{writer:?} in {pending:?}");
             }
@@ -2903,6 +2928,7 @@ mod tests {
             "pins.json",
             "session.json",
             "update-check.json",
+            crate::recovered::ANNOUNCED_RECORD,
         ] {
             let path = data.join(name);
             assert!(

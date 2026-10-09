@@ -27,19 +27,7 @@ impl Runtime<'_> {
         title: Option<String>,
         body: impl Into<String>,
     ) -> Result<()> {
-        self.raise_toast(kind, anchor, title, body).map(drop)
-    }
-
-    /// [`Self::toast`], answering which card it raised — for a surface whose card a press is
-    /// owed an answer on ([`Self::announce_recovered_edits`]).
-    pub(crate) fn raise_toast(
-        &mut self,
-        kind: toast::ToastKind,
-        anchor: toast::ToastAnchor,
-        title: Option<String>,
-        body: impl Into<String>,
-    ) -> Result<toast::ToastId> {
-        let id = self.window.toasts.raise(
+        self.window.toasts.raise(
             kind,
             anchor,
             title,
@@ -60,23 +48,6 @@ impl Runtime<'_> {
         if let Some(position) = self.window.pointer_position {
             self.drive_toast_hover(position)?;
         }
-        Ok(id)
-    }
-
-    /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): one card on the window, its
-    /// sentence naming the folder, and a press on it opening that folder
-    /// ([`Self::press_toast`]).
-    pub(crate) fn announce_recovered_edits(
-        &mut self,
-        announcement: &crate::recovered::Announcement,
-    ) -> Result<()> {
-        let card = self.raise_toast(
-            toast::ToastKind::Info,
-            toast::ToastAnchor::Window,
-            None,
-            announcement.sentence(),
-        )?;
-        self.window.recovered_card = Some(crate::recovered::Raised::of(card, announcement));
         Ok(())
     }
 
@@ -206,6 +177,40 @@ impl Runtime<'_> {
         Ok(id)
     }
 
+    /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): one card on the window, its
+    /// sentence naming the folder, and its one verb — the reveal's own words — opening that
+    /// folder ([`Self::take_recovered_folder`]). An error card: a file did not take an edit, and
+    /// the error kind's life is the longest a card has.
+    pub(crate) fn announce_recovered_edits(
+        &mut self,
+        announcement: &crate::recovered::Announcement,
+    ) -> Result<()> {
+        let card = self.toast_with_verb(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            announcement.sentence(),
+            i18n::Text::MenuRevealInExplorer.text(),
+        )?;
+        self.window.recovered_card = Some(crate::recovered::Raised::of(card, announcement));
+        Ok(())
+    }
+
+    /// **The verb on the card that says where kept edits are**: the folder, handed to the
+    /// system's file manager through the window's one reveal. A verb pressed on another card
+    /// leaves the offer standing.
+    fn take_recovered_folder(&mut self, card: toast::ToastId) {
+        let Some(raised) = self.window.recovered_card.take() else {
+            return;
+        };
+        match raised.press(toast::ToastHit::Action(card)) {
+            Some(folder) => {
+                let folder = folder.to_path_buf();
+                self.reveal_in_explorer(&folder);
+            }
+            None => self.window.recovered_card = Some(raised),
+        }
+    }
+
     /// Which card, which `×` and which verb the pointer is on, for the reveal
     /// ladder.
     fn toast_pointer(&self, layouts: &[toast::ToastLayout]) -> toast::ToastPointer {
@@ -299,8 +304,7 @@ impl Runtime<'_> {
         Ok(hit.is_some())
     }
 
-    /// A press on a card: the `×` sends it away, the card that says where kept edits are opens
-    /// their folder, and anywhere else is swallowed.
+    /// A press on a card: the `×` sends it away, and anywhere else is swallowed.
     ///
     /// **Swallowed, not ignored.** A toast stands over a list of files with a
     /// verb on every row; a press that fell through it would stage whatever
@@ -323,6 +327,7 @@ impl Runtime<'_> {
             self.take_profile_undo(id)?;
             self.take_powershell_profile_undo(id);
             self.take_checkout_undo(id)?;
+            self.take_recovered_folder(id);
             if self
                 .window
                 .toasts
@@ -332,27 +337,6 @@ impl Runtime<'_> {
                 self.present_chrome_change()?;
             }
             return Ok(true);
-        }
-        // **The card that says where the kept edits are opens their folder** (T-RECOVERED-FOLDER):
-        // a press on its body hands the folder to the system's file manager, and the card goes,
-        // its sentence acted on.
-        if let Some(raised) = self.window.recovered_card.take() {
-            match raised.press(hit) {
-                Some(folder) => {
-                    let folder = folder.to_path_buf();
-                    self.reveal_in_explorer(&folder);
-                    if self
-                        .window
-                        .toasts
-                        .dismiss(raised.card, Instant::now(), self.app.motion)
-                        && self.refresh_overlay()
-                    {
-                        self.present_chrome_change()?;
-                    }
-                    return Ok(true);
-                }
-                None => self.window.recovered_card = Some(raised),
-            }
         }
         if let toast::ToastHit::Close(id) = hit
             && self

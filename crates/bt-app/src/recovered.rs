@@ -5,12 +5,12 @@
 //! unsaved preview edit the file would not take as a copy in the data directory's
 //! [`crate::preview::RECOVERED_FOLDER`], and says so in `diagnostics.log` only: nothing is
 //! announced while the failure is happening. The next start says it once, in one toast — "An
-//! unsaved edit was kept at <folder>", or "2 unsaved edits were kept at …" — and a press on the
-//! card opens that folder in the system's file manager. Nothing in the folder is ever removed by
+//! unsaved edit was kept at <folder>", or "2 unsaved edits were kept at …" — and the card's one
+//! verb opens that folder in the system's file manager. Nothing in the folder is ever removed by
 //! Folio: it is the person's work.
 //!
 //! **Which copies have been said** is the file [`ANNOUNCED_RECORD`] in the data directory, beside
-//! the folder and never in it (the folder the press opens holds the person's edits and nothing
+//! the folder and never in it (the folder the verb opens holds the person's edits and nothing
 //! of Folio's): a JSON array of the names of the copies the folder held when it was last said.
 //! It is written whole ([`bt_platform::install_txn::durable_write`]) **before** the toast is
 //! raised, so a start that dies before or after its toast has already recorded the copies, and a
@@ -55,7 +55,7 @@ impl Announcement {
     }
 }
 
-/// **The card that said it, and the folder a press on it opens.**
+/// **The card that said it, and the folder its verb opens.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Raised {
     pub card: ToastId,
@@ -71,14 +71,14 @@ impl Raised {
         }
     }
 
-    /// **The folder a press on the card asks the system to open**, through the window's one
-    /// reveal (`Runtime::reveal_in_explorer`, the files column's foot's door, which opens a folder
-    /// as itself in Explorer or Finder). Only a press on the card's body: its `×` closes it, and
-    /// a press on another card is that card's.
+    /// **The folder the card's verb asks the system to open**, through the window's one reveal
+    /// (`Runtime::reveal_in_explorer`, the files column's foot's door, which opens a folder as
+    /// itself in Explorer or Finder). Only the verb, as on every card that has one: a press on
+    /// the card's body is swallowed, its `×` closes it, and another card's verb is that card's.
     pub fn press(&self, hit: ToastHit) -> Option<&Path> {
         match hit {
-            ToastHit::Card(card) if card == self.card => Some(&self.folder),
-            ToastHit::Card(_) | ToastHit::Close(_) | ToastHit::Action(_) => None,
+            ToastHit::Action(card) if card == self.card => Some(&self.folder),
+            ToastHit::Action(_) | ToastHit::Card(_) | ToastHit::Close(_) => None,
         }
     }
 }
@@ -334,11 +334,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    /// RED (T-RECOVERED-FOLDER) — **a press on the card asks the system to open the recovered
-    /// folder**, the folder that was listed; its `×` and another card ask nothing.
+    /// RED (T-RECOVERED-FOLDER) — **the card's verb asks the system to open the recovered
+    /// folder**, the folder that was listed; a press on the card's body, its `×` and another
+    /// card's verb ask nothing.
     ///
     /// MUTATION: wrong folder (`Raised::of` keeps `announcement.folder.parent()`, the data
-    /// directory) — the press names the data directory.
+    /// directory) — the verb names the data directory. MUTATION (review round 2): a body press
+    /// opens (`ToastHit::Action(card) | ToastHit::Card(card) if …` in `Raised::press`) — the body
+    /// press names the folder.
     #[test]
     fn a_press_on_the_card_opens_the_recovered_folder() {
         let (data, folder, record) = data_with("recovered-press-文件夹", &["x.md"]);
@@ -349,9 +352,14 @@ mod tests {
 
         let raised = Raised::of(card, &announcement);
 
-        assert_eq!(raised.press(ToastHit::Card(card)), Some(folder.as_path()));
+        assert_eq!(raised.press(ToastHit::Action(card)), Some(folder.as_path()));
+        assert_eq!(
+            raised.press(ToastHit::Card(card)),
+            None,
+            "a press on the body is swallowed"
+        );
         assert_eq!(raised.press(ToastHit::Close(card)), None);
-        assert_eq!(raised.press(ToastHit::Card(ToastId(8))), None);
+        assert_eq!(raised.press(ToastHit::Action(ToastId(8))), None);
         let _ = std::fs::remove_dir_all(&data);
     }
 

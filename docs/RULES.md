@@ -1685,8 +1685,8 @@ said in `diagnostics.log` with where its edit is; no card, no question, and the
 writes are done before the road goes on. **The next start says it** (T-RECOVERED-FOLDER,
 owner ruling 2026-10-09): after the first frame, the `bt-recovered` worker lists the
 `recovered` folder, and copies no start has said yet raise one toast — "An unsaved edit
-was kept at <folder>", "N unsaved edits were kept at …" — whose press opens the folder in
-the system's file manager. The names said are recorded in the data directory's
+was kept at <folder>", "N unsaved edits were kept at …" — an error card, six seconds and held while the pointer is on it, whose one verb
+opens the folder in the system's file manager. The names said are recorded in the data directory's
 `recovered-announced.json` before the toast is raised, so no copy is said twice, a crash
 loop included; nothing in the folder is ever pruned, and there is no switch. It then closes **every** window with the
 ending flag through `Runtime::close_window` so that no shell outlives its window, **abandons the

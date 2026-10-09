@@ -56,7 +56,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | channel constructions | **34** — 28 `mpsc::channel`, 6 `mpsc::sync_channel`; `bt-app` 27 (T-KEYBOARD-CTRLALT adds the layout-table request and answer pair), `bt-platform` 7 (T-UNINSTALL-UX adds the remover readiness pipe) — and **8** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 3 — T-PROGRAMS-REFRESH adds the program walk's requests and git's place); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **40**, recounted at T-PROGRAMS-REFRESH (T-RECOVERED-FOLDER adds `RecoveredEditsListed`; the row said 34 before it while the enum had 36; T-PROGRAMS-REFRESH added `ProgramsAnswered`; T-FRESH-FACTS added `DisplayChanged` and `InputLanguageChanged`; T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
 | child-process construction | **one** `Command::new`, inside the doors `bt_platform::quiet_command` and `quiet_breakaway_command`, with **17** product callers — the existing probe, shell, Git, update, rescue and trial callers; `bt_platform::foreground_program` starts the private console-membership helper; `uninstall::leave_armed` starts `--uninstall [--remove-data] --after-pid <pid>`; and `bt_platform::deferred_removal::schedule` starts the internal native copy as `--uninstall-remove`. Both uninstall starts request `CREATE_BREAKAWAY_FROM_JOB` on Windows; a containing job that disallows breakaway makes creation fail and the caller reports failure instead of claiming a detached child exists. No command interpreter or mutable removal script is involved; besides this door, `bt-pty::PtySession::spawn`'s `spawn_command`, the one `ShellExecuteW` in `bt_platform::handoff` and the one `ShellExecuteExW` in `bt_platform::elevated_pipe` (verb `runas`, the elevated host, T-ADMIN-2) remain | `quiet_command(_named)?\(`, `quiet_breakaway_command\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(`, `ShellExecuteExW\(` |
-| `Runtime` methods | **1,426** — 1,225 in the 27 `runtime/*.rs` topics, 201 still in `main.rs` (§13) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
+| `Runtime` methods | **1,520** — 1,317 in the 28 `runtime/*.rs` topics, 203 still in `main.rs` (§13; recounted at T-RECOVERED-FOLDER round 2, 2026-10-09 — the per-topic cells of §13 other than `attention.rs` keep their 2026-09-23 counts) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
 
 ---
 
@@ -1756,7 +1756,7 @@ preview buffer written back through `PreviewBuffer::save`, the quit's judged
 write with its conflict check, and where the file refuses or has changed on disk,
 copied into the data directory's `recovered` folder, never over the file — with
 one `diagnostics.log` line each saying where the edit is (and, at the next start,
-one toast whose press opens the folder: `recovered`, T-RECOVERED-FOLDER); then every window is
+one toast whose verb opens the folder: `recovered`, T-RECOVERED-FOLDER); then every window is
 closed with `ending` (`Runtime::close_window(true)` finishes a pending rename and
 marks the session dirty), the windows cleared and the application finished. The
 writes are made on the window thread and are done when the call returns, as the
@@ -1907,7 +1907,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
-| `attention.rs` | 29 | toasts, pane notices, the Agents rows, terminal and turn-end notifications; raising, answering, marking seen and jumping to an attention request | ingress (the ledger the endpoint feeds, §7.2 — `bt_workbench::attention` since 2026-09-25, §12.1) | none; `notify::desktop_reach` and `interruption` decide what reaches the desktop |
+| `attention.rs` | 33 | toasts, pane notices, the Agents rows, terminal and turn-end notifications; raising, answering, marking seen and jumping to an attention request | ingress (the ledger the endpoint feeds, §7.2 — `bt_workbench::attention` since 2026-09-25, §12.1) | none; `notify::desktop_reach` and `interruption` decide what reaches the desktop |
 | `clipboard.rs` | 19 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
 | `configuration.rs` | 10 | Settings ▸ About ▸ Export… and Import…, each imported part through its own door (§9) | — | `file_reads` (the settings lane, through `bt_persist::read_export`); store writes, row 20 |
 | `diagnostics.rs` | 5 | the OS theme change, application-change notes, the trace drain, grid-change scheduling | ingress (trace) | — |
