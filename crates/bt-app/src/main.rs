@@ -19680,6 +19680,12 @@ fn preview_opened_label() -> &'static str {
 /// built from a host or a scheme and a `&'static str` cannot carry one (§7.7 ④).
 struct CardWords {
     notice: String,
+    /// The address the card is about, in full and in the row's spelling, or empty
+    /// (owner's ruling 2026-10-09: a page that does not open names it).
+    address: String,
+    /// That address folded to the seat by `seats::fold_address` beside the renderer, the
+    /// counterpart of [`Self::detail_lines`].
+    address_line: String,
     /// The one fact, or empty.
     detail: String,
     /// That fact, wrapped to the seat beside the renderer (§7.43) — the
@@ -19747,6 +19753,8 @@ fn refused_preview_card(
 ) -> CardWords {
     CardWords {
         notice,
+        address: String::new(),
+        address_line: String::new(),
         detail: String::new(),
         detail_lines: Vec::new(),
         verb: offers_the_default_app.then(|| open_label.to_owned()),
@@ -50726,6 +50734,7 @@ impl Runtime<'_> {
         );
         let card = seats::PreviewCardContent {
             notice: &words.notice,
+            address: (!words.address_line.is_empty()).then_some(words.address_line.as_str()),
             detail: &words.detail_lines,
             mark: words.mark,
             fault: words.fault,
@@ -55827,7 +55836,8 @@ mod files_locate_door_tests {
         let hit = method_body("Runtime", "float_hit_at");
         assert!(
             hit.contains("float::FloatPart::CardButton")
-                && hit.contains("preview_card_geometry(geometry.body, Some(open_button_px)"),
+                && hit.contains("seats::preview_card_geometry(")
+                && hit.contains("Some(open_button_px)"),
             "the float's no-preview button is not hit where the card drew it"
         );
         let press = method_body("Runtime", "press_float");
@@ -78514,7 +78524,7 @@ mod refused_preview_card_tests {
                 refusal.notice
             );
             assert_eq!(card.notice, refusal.notice, "the card says something else");
-            let geometry = seats::preview_card_geometry(seat, Some(96.0), 0, 1.0);
+            let geometry = seats::preview_card_geometry(seat, Some(96.0), false, 0, 1.0);
             let button = geometry
                 .button
                 .expect("a card with a verb lays out a rectangle for it");
