@@ -596,7 +596,7 @@ fn a_web_address_printed_in_the_terminal_opens_in_this_window() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Blocked
+        HyperlinkActivation::Blocked(LinkRefusal::Invalid)
     );
 }
 
@@ -627,7 +627,7 @@ fn the_browser_door_refuses_the_userinfo_shape_the_address_field_refuses() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories,
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Door),
             "{uri} is the shape the address field already refuses"
         );
         // The plain half is the seat's, and the seat's own door says the
@@ -834,7 +834,7 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         ],
         [
             (false, HyperlinkActivation::None),
-            (true, HyperlinkActivation::Blocked),
+            (true, HyperlinkActivation::Blocked(LinkRefusal::Invalid)),
         ],
     ) {
         assert_eq!(
@@ -1021,7 +1021,7 @@ fn ctrl_on_any_scheme_hands_the_uri_to_the_system() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Invalid),
             "{not_a_scheme:?} is not a URI"
         );
     }
@@ -1056,7 +1056,7 @@ fn device_and_verbatim_spellings_stay_refused_under_ctrl() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|_| panic!("a device or verbatim spelling is never asked about")
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Invalid),
             "{uri:?} stays refused under Ctrl"
         );
     }
@@ -1302,7 +1302,7 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
         ],
         [
             (false, HyperlinkActivation::None),
-            (true, HyperlinkActivation::Blocked),
+            (true, HyperlinkActivation::Blocked(LinkRefusal::Invalid)),
         ],
     ) {
         assert_eq!(
@@ -1361,7 +1361,7 @@ fn only_a_well_formed_web_address_is_ever_handed_to_the_shell() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Blocked,
+            HyperlinkActivation::Blocked(LinkRefusal::Invalid),
             "{uri:?}"
         );
     }
@@ -1655,6 +1655,63 @@ fn a_wrapped_link_activates_the_same_target_from_either_segment() {
             "either segment opens the one file the run names"
         );
     }
+}
+
+/// RED (F-SWEEP-2-048, owner ruling 2026-10-06) — **a declared web target whose host does not
+/// parse is no declaration, and this window's own recogniser reads the text.**
+///
+/// The owner's line, as an agent printed it: an autolinker that trims only ASCII punctuation
+/// declared `http://www.glancepc.com：` with OSC 8. From bytes, because what is under test is the
+/// whole road — the vendor's cells, the capture, the recogniser — and only the terminal makes
+/// it.
+///
+/// MUTATION: trust every declaration (drop the `web_host_parses` arm in
+/// `CapturedRow::trim_program_url_hyperlink_spans`) and the hit is the declared target, colon and
+/// all, with the program's id on it.
+#[test]
+fn a_declared_link_whose_host_does_not_parse_is_read_by_the_recogniser() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(60).unwrap(), NonZeroU32::new(4).unwrap());
+    session
+        .feed(
+            "官网 \x1b]8;;http://www.glancepc.com：\x1b\\http://www.glancepc.com：\x1b]8;;\x1b\\见上"
+                .as_bytes(),
+        )
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    // `官网 ` is five cells, so the address starts at column 5.
+    let hit = frame
+        .hyperlink_at(0, 8)
+        .expect("the visible address is a link");
+    assert_eq!(
+        hit.uri, "http://www.glancepc.com",
+        "the recogniser's link, not the declared one"
+    );
+    assert_eq!(hit.id, None, "an inferred link, not a program's");
+    // The full-width colon (columns 28 and 29) is prose again.
+    assert_eq!(frame.hyperlink_at(0, 28), None);
+}
+
+/// RED (F-SWEEP-2-048) — **a declared web target with a host still wins**, label and all: the
+/// regression half of the row above.
+///
+/// MUTATION: refuse every non-ASCII host in `bt_transcript::web_host_parses` and the program's
+/// label `官网`, declaring an internationalised host, is no link at all.
+#[test]
+fn a_declared_link_whose_host_parses_is_the_programs_link() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(60).unwrap(), NonZeroU32::new(4).unwrap());
+    session
+        .feed("见 \x1b]8;;https://例子.测试/文档\x1b\\官网\x1b]8;;\x1b\\。".as_bytes())
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let hit = frame
+        .hyperlink_at(0, 3)
+        .expect("the program's label is its link");
+    assert_eq!(hit.uri, "https://例子.测试/文档");
+    assert!(hit.id.is_some(), "the program's own declaration");
 }
 
 /// **And P0 is not bought back.** With every pane beside the keyboard

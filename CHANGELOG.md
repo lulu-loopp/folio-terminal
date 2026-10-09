@@ -12,6 +12,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A link an agent printed with a stray full-width mark after it, such as `http://example.com：`, now opens the right address, and a link Folio will not open says why — the address is invalid, it is blocked, or no program opens it — instead of always saying it was blocked. <!-- zh: pending F-SWEEP-2-048 -->
 - On a Mac with two copies of Folio installed, opening the second one joins the one already running instead of opening a window that saves nothing; this includes the copy an update restores after it fails. <!-- zh: pending T-MAC-CROSS-COPY-HANDOVER -->
 - An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
 - The card after an unfinished update says what happened — that the update stopped before the new version started, or that it did not finish while the new version is already running — instead of always saying the new version did not start. <!-- zh: pending T-UPDATE-RENAME-RETRY -->

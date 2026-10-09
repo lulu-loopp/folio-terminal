@@ -534,6 +534,7 @@ dependencies = [
  "regex",
  "unicode-properties",
  "unicode-segmentation",
+ "url",
 ]
 
 [[package]]

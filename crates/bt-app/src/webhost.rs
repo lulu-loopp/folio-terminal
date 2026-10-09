@@ -5983,6 +5983,7 @@ mod fault_tests {
             Refusal::NetworkPath,
             Refusal::ControlOrWhitespace,
             Refusal::NoHost,
+            Refusal::InvalidHost,
             Refusal::NotMinted,
             Refusal::Empty,
         ] {

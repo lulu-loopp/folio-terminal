@@ -12,6 +12,7 @@ bt-unicode = { path = "../bt-unicode" }
 regex.workspace = true
 unicode-properties.workspace = true
 unicode-segmentation.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 # Every test's scratch name comes from one place (`bt_testpath`, T-TEST-HYGIENE-048).

@@ -640,11 +640,13 @@ impl Runtime<'_> {
                 Some(handed) => {
                     self.if_refused(
                         handed,
-                        crate::handoff_lane::OnRefused::HyperlinkBlocked(hyperlink),
+                        crate::handoff_lane::OnRefused::HyperlinkRefused(hyperlink),
                     );
                 }
                 None => {
-                    self.window.hyperlink_hover.show_blocked(hyperlink);
+                    self.window
+                        .hyperlink_hover
+                        .show_refused(hyperlink, crate::LinkRefusal::of_address(&url));
                     self.publish_interaction_frame()?;
                 }
             },
@@ -671,7 +673,9 @@ impl Runtime<'_> {
                 // surface that sentence is the hover line, under the very cells
                 // the address is printed in.
                 if !self.open_web_address_here(&url)? {
-                    self.window.hyperlink_hover.show_blocked(hyperlink);
+                    self.window
+                        .hyperlink_hover
+                        .show_refused(hyperlink, crate::LinkRefusal::of_address(&url));
                     self.publish_interaction_frame()?;
                 }
             }
@@ -716,7 +720,7 @@ impl Runtime<'_> {
                 let handed = self.hand_uri_to_the_system(&uri);
                 self.if_refused(
                     handed,
-                    crate::handoff_lane::OnRefused::HyperlinkBlocked(hyperlink),
+                    crate::handoff_lane::OnRefused::HyperlinkRefused(hyperlink),
                 );
             }
             // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
@@ -748,8 +752,8 @@ impl Runtime<'_> {
             HyperlinkActivation::FilesColumn(path) => {
                 self.locate_folder_in_files_column(&path, None)?
             }
-            HyperlinkActivation::Blocked => {
-                self.window.hyperlink_hover.show_blocked(hyperlink);
+            HyperlinkActivation::Blocked(refusal) => {
+                self.window.hyperlink_hover.show_refused(hyperlink, refusal);
                 self.publish_interaction_frame()?;
             }
         }

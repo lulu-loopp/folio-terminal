@@ -410,7 +410,7 @@ fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
     );
     assert_eq!(
         preview_link_activation(true, "http://", document),
-        HyperlinkActivation::Blocked
+        HyperlinkActivation::Blocked(LinkRefusal::Invalid)
     );
     assert!(!preview_link_answers_a_press(false, "http://", document));
     assert!(preview_link_answers_a_press(true, "http://", document));

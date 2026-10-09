@@ -751,7 +751,8 @@ impl Runtime<'_> {
                 webhost::WebOutcome::NewWindow(webhost::NewWindow::Refused(uri)) => {
                     eprintln!("BT_WEB refused a new window for {uri}");
                     let surface = self.surface_of_page(leaf);
-                    self.say_address_refused(surface, &uri)?;
+                    let refusal = crate::LinkRefusal::of_address(&uri);
+                    self.say_address_refused(surface, &uri, refusal)?;
                 }
                 // What no card covers. The five §7.7 ④ states are drawn by the
                 // seat itself; this is the residue, and it goes where `BT_DPI`

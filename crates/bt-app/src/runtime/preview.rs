@@ -5438,7 +5438,8 @@ impl Runtime<'_> {
             // a document has no cells.
             HyperlinkActivation::Page(url) => {
                 if !self.open_web_address_here(&url)? {
-                    self.say_address_refused(surface, &url)?;
+                    let refusal = crate::LinkRefusal::of_address(&url);
+                    self.say_address_refused(surface, &url, refusal)?;
                 }
             }
             HyperlinkActivation::Browser(url) => {
@@ -5479,7 +5480,9 @@ impl Runtime<'_> {
             HyperlinkActivation::FilesColumn(path) => {
                 self.locate_folder_in_files_column(&path, None)?
             }
-            HyperlinkActivation::Blocked => self.say_address_refused(surface, target.trim())?,
+            HyperlinkActivation::Blocked(refusal) => {
+                self.say_address_refused(surface, target.trim(), refusal)?
+            }
             // A scheme-less target this window cannot place, or an anchor it
             // cannot yet honour. The press is still the link's: it landed on a
             // control, and letting it fall through would put a caret in the prose.

@@ -88,10 +88,32 @@ pub enum Refusal {
     ControlOrWhitespace,
     /// A scheme with no authority after it — `http://` and nothing else.
     NoHost,
+    /// An authority whose host does not parse as one — `http://www.glancepc.com：`, where an
+    /// autolinker kept a full-width colon (`bt_transcript::web_host_parses`, the one check the
+    /// declared-link road asks too).
+    InvalidHost,
     /// The host asked to navigate to a target it had not minted.
     NotMinted,
     /// Empty, or nothing but whitespace.
     Empty,
+}
+
+impl Refusal {
+    /// **Whether the text was not an address at all**, as against an address this door will not
+    /// go to — the line between a hover that says "address invalid" and one that says "blocked"
+    /// (owner ruling 2026-10-06: the suffix says what is true).
+    pub fn is_malformed(self) -> bool {
+        match self {
+            Self::InvalidHost | Self::NoHost | Self::ControlOrWhitespace | Self::Empty => true,
+            Self::ScriptOrInlineScheme
+            | Self::FileScheme
+            | Self::BrowserInternalScheme
+            | Self::ExternalScheme
+            | Self::UserInfo
+            | Self::NetworkPath
+            | Self::NotMinted => false,
+        }
+    }
 }
 
 /// What a door decided.
@@ -658,6 +680,9 @@ fn check_by_scheme(trimmed: &str, origin: Origin<'_>) -> Decision {
             if authority.is_empty() {
                 return Decision::Refuse(Refusal::NoHost);
             }
+            if !bt_transcript::web_host_parses(authority) {
+                return Decision::Refuse(Refusal::InvalidHost);
+            }
             Decision::Navigate(rewrite_unspecified_host(trimmed))
         }
         None => match origin {
@@ -671,6 +696,11 @@ fn check_by_scheme(trimmed: &str, origin: Origin<'_>) -> Decision {
                     return Decision::Search(trimmed.to_owned());
                 }
                 let (host, _) = split_host_port(authority(trimmed));
+                // Text whose would-be host does not parse is not an address either; it is
+                // searched for, as a browser's address bar does with it.
+                if !bt_transcript::web_host_parses(authority(trimmed)) {
+                    return Decision::Search(trimmed.to_owned());
+                }
                 if is_loopback_host(&host) || (host.contains('.') && !host.ends_with('.')) {
                     Decision::Navigate(rewrite_unspecified_host(&format!("http://{trimmed}")))
                 } else {
@@ -3068,6 +3098,46 @@ mod tests {
         assert_eq!(address_bar("http://"), Decision::Refuse(Refusal::NoHost));
     }
 
+    /// RED (F-SWEEP-2-048) — **an address whose host does not parse is refused at the door, by
+    /// the one check the declared-link road asks** (`bt_transcript::web_host_parses`), and the
+    /// refusal is a malformed address, not a blocked one.
+    ///
+    /// MUTATION: drop the `InvalidHost` arm in `check_by_scheme` and the full-width colon is
+    /// navigated to.
+    #[test]
+    fn an_address_whose_host_does_not_parse_is_refused_as_invalid() {
+        for input in [
+            "http://www.glancepc.com：",
+            "https://例子.测试：/文档",
+            "https://[::1/",
+        ] {
+            assert_eq!(
+                address_bar(input),
+                Decision::Refuse(Refusal::InvalidHost),
+                "{input:?}"
+            );
+            assert!(Refusal::InvalidHost.is_malformed());
+        }
+        // Text with no scheme whose would-be host does not parse is searched for.
+        assert_eq!(
+            address_bar("www.glancepc.com：官网"),
+            Decision::Search("www.glancepc.com：官网".into())
+        );
+        // And a host that parses is unchanged: an internationalised name, a port, loopback.
+        for input in [
+            "https://例子.测试/文档",
+            "http://localhost:5173/",
+            "http://[::1]:8080/",
+        ] {
+            assert_eq!(
+                address_bar(input),
+                Decision::Navigate(input.into()),
+                "{input:?}"
+            );
+        }
+        assert!(!Refusal::ExternalScheme.is_malformed());
+    }
+
     /// The mint admits exactly what it holds and not its neighbours.
     #[test]
     fn a_mint_admits_one_target_and_no_relatives() {
@@ -3233,6 +3303,7 @@ mod tests {
                 address_bar("http://example.com/\u{0}"),
             ),
             (Refusal::NoHost, address_bar("https://")),
+            (Refusal::InvalidHost, address_bar("https://例子.测试：/")),
             (
                 Refusal::NotMinted,
                 check("https://example.com/", Origin::HostMinted(&Mint::Nothing)),

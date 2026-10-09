@@ -255,7 +255,7 @@ pub(crate) enum OnAccepted {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OnRefused {
     /// The hover line under the address a `Ctrl`+click was on.
-    HyperlinkBlocked(bt_viewport::HyperlinkHit),
+    HyperlinkRefused(bt_viewport::HyperlinkHit),
     /// The settings dialog's card under `Install fonts…`, holding the door's words.
     FontsToast,
     /// The notice a refused address raises on the preview surface a link was pressed on — a

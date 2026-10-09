@@ -10460,8 +10460,9 @@ fn shown_address(url: &str) -> String {
 /// the page's own bottom edge every time the pointer crossed a link.
 ///
 /// A target this window will not follow is written out in full and stamped
-/// `· blocked` (2026-08-20's terminal hover-line ruling, same words from
-/// [`i18n::Text::HyperlinkBlockedSuffix`]). The stamp is on the hovered target
+/// with why — `· address invalid` or `· blocked` (2026-08-20's terminal
+/// hover-line ruling, the same words from [`LinkRefusal::suffix`]; owner ruling
+/// 2026-10-06, the suffix says what is true). The stamp is on the hovered target
 /// only: the seat's own URL committed, so it is by definition one this window
 /// went to, and there is no longer any rest state in which it could be stamped.
 /// **Both addresses are handed in, and the page's own is deliberately unused.**
@@ -10481,7 +10482,7 @@ fn page_foot_lead(_page_url: &str, hover: &str) -> String {
     // because a link into a local file is a local file (`shown_address`).
     let mut lead = shown_address(hover);
     if !matches!(webnav::address_bar(hover), webnav::Decision::Navigate(_)) {
-        lead.push_str(i18n::Text::HyperlinkBlockedSuffix.text());
+        lead.push_str(LinkRefusal::of_address(hover).suffix(i18n::current()));
     }
     lead
 }
@@ -23638,7 +23639,7 @@ impl ControlClickHint {
             | HyperlinkActivation::Page(_)
             | HyperlinkActivation::Preview(_, _)
             | HyperlinkActivation::FilesColumn(_)
-            | HyperlinkActivation::Blocked => None,
+            | HyperlinkActivation::Blocked(_) => None,
         }
     }
 
@@ -23679,12 +23680,59 @@ fn printable_address(uri: &str) -> String {
         .collect()
 }
 
+/// **Why a link was not followed** — the three things the hover line can truly say about it
+/// (owner ruling 2026-10-06: 「已拦截」/"blocked" is never said of an address that is not one).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkRefusal {
+    /// The text is not an address: its host does not parse, it has no host, it holds a control
+    /// character — or, for a reference, it names nothing this machine can name.
+    Invalid,
+    /// The system took the hand-off and had nothing to open it with.
+    NoProgram,
+    /// An address the door will not go to: a scheme, userinfo, a page asking for a window.
+    Door,
+}
+
+impl LinkRefusal {
+    /// What the address door says about `address`, as one of the three.
+    ///
+    /// An address the door admits was refused by a door after it (the gesture rule of a page's
+    /// new window), so it is the door's refusal; text the door would search for is not an
+    /// address.
+    fn of_address(address: &str) -> Self {
+        match webnav::address_bar(address) {
+            webnav::Decision::Refuse(refusal) if refusal.is_malformed() => Self::Invalid,
+            webnav::Decision::Search(_) => Self::Invalid,
+            webnav::Decision::Refuse(_) | webnav::Decision::Navigate(_) => Self::Door,
+        }
+    }
+
+    /// The suffix, separator included.
+    fn suffix(self, lang: i18n::Lang) -> &'static str {
+        match self {
+            Self::Invalid => i18n::Text::HyperlinkInvalidSuffix.in_lang(lang),
+            Self::NoProgram => i18n::Text::HyperlinkNoProgramSuffix.in_lang(lang),
+            Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
+        }
+    }
+
+    /// The same words alone, for a pane too narrow for the address as well.
+    fn word(self, lang: i18n::Lang) -> &'static str {
+        match self {
+            Self::Invalid => i18n::Text::HyperlinkInvalid.in_lang(lang),
+            Self::NoProgram => i18n::Text::HyperlinkNoProgram.in_lang(lang),
+            Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
+        }
+    }
+}
+
 #[derive(Default)]
 struct HyperlinkHover {
     candidate: Option<HyperlinkHit>,
     show_at: Option<Instant>,
     active: Option<HyperlinkHit>,
-    blocked: bool,
+    /// Why the press on [`Self::active`] was refused, when it was.
+    refused: Option<LinkRefusal>,
     /// Filled once, when the hover settles — see [`ControlClickHint`].
     ///
     /// Once and not per frame, because the status line is repainted on every frame the pane owes
@@ -23707,7 +23755,7 @@ impl HyperlinkHover {
             return false;
         }
         let active_changed = self.active.take().is_some();
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = None;
         // The underline is the affordance and follows the candidate immediately; only the status
         // tooltip waits out the hover delay. A candidate change therefore needs a republish too.
@@ -23740,7 +23788,7 @@ impl HyperlinkHover {
         }
         self.show_at = None;
         self.active = self.candidate.take();
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = self
             .active
             .as_ref()
@@ -23748,11 +23796,11 @@ impl HyperlinkHover {
         self.active.is_some()
     }
 
-    fn show_blocked(&mut self, hyperlink: HyperlinkHit) {
+    fn show_refused(&mut self, hyperlink: HyperlinkHit, refusal: LinkRefusal) {
         self.candidate = None;
         self.show_at = None;
         self.active = Some(hyperlink);
-        self.blocked = true;
+        self.refused = Some(refusal);
         // A refusal is the answer to the very press the sentence was offering;
         // printing the offer beside the refusal would be the line arguing with
         // itself.
@@ -23762,7 +23810,7 @@ impl HyperlinkHover {
     fn clear(&mut self) -> bool {
         self.candidate = None;
         self.show_at = None;
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = None;
         self.active.take().is_some()
     }
@@ -23791,8 +23839,8 @@ impl HyperlinkHover {
             return None;
         }
         let uri_columns = bt_unicode::text_width(&uri);
-        let suffix = if self.blocked {
-            i18n::Text::HyperlinkBlockedSuffix.in_lang(lang)
+        let suffix = if let Some(refusal) = self.refused {
+            refusal.suffix(lang)
         } else {
             // **The aside about `Ctrl` is printed only when it costs the target
             // nothing** (丙3). A verdict is the answer to a press somebody
@@ -23808,10 +23856,10 @@ impl HyperlinkHover {
         };
         let suffix_columns = bt_unicode::text_width(suffix);
         if columns <= suffix_columns {
-            return Some(head_within_columns(
-                i18n::Text::HyperlinkBlocked.in_lang(lang),
-                columns,
-            ));
+            // The refusal's word alone; with no refusal the suffix is the hint, which is only
+            // printed when it fits.
+            let word = self.refused.map_or(suffix, |refusal| refusal.word(lang));
+            return Some(head_within_columns(word, columns));
         }
         let target_columns = columns - suffix_columns;
         let mut status = if uri_columns > target_columns {
@@ -26229,9 +26277,9 @@ enum HyperlinkActivation {
     /// A local folder, opened the way this window opens every other folder — the
     /// files column, pointed at it.
     FilesColumn(PathBuf),
-    /// A target this window will not hand to the shell. The hover line says so
+    /// A target this window will not hand to the shell, and why. The hover line says so
     /// and nothing else happens.
-    Blocked,
+    Blocked(LinkRefusal),
 }
 
 /// **Which row of §7.1.5g's table a reference falls in**, read off its own text before any
@@ -26290,7 +26338,9 @@ fn reference_activation(intent: ClickIntent, row: ReferenceRow) -> HyperlinkActi
             WebAddressActivation::None => HyperlinkActivation::None,
             WebAddressActivation::Page => HyperlinkActivation::Page(uri),
             WebAddressActivation::Browser => HyperlinkActivation::Browser(uri),
-            WebAddressActivation::Blocked => HyperlinkActivation::Blocked,
+            WebAddressActivation::Blocked => {
+                HyperlinkActivation::Blocked(LinkRefusal::of_address(&uri))
+            }
         },
         ReferenceRow::Local { path, at, known } => match (known, intent) {
             // **Nobody has asked the disk about this name yet, so it is not a link yet** (audit 3
@@ -26329,7 +26379,7 @@ fn reference_activation(intent: ClickIntent, row: ReferenceRow) -> HyperlinkActi
         },
         ReferenceRow::Unnamed => match intent {
             ClickIntent::Here => HyperlinkActivation::None,
-            ClickIntent::System => HyperlinkActivation::Blocked,
+            ClickIntent::System => HyperlinkActivation::Blocked(LinkRefusal::Invalid),
         },
         ReferenceRow::Nothing => HyperlinkActivation::None,
     }
@@ -26845,7 +26895,7 @@ fn reference_card(
         | HyperlinkActivation::Page(_)
         | HyperlinkActivation::External(_)
         | HyperlinkActivation::Reveal(_)
-        | HyperlinkActivation::Blocked => None,
+        | HyperlinkActivation::Blocked(_) => None,
     }
 }
 
@@ -49062,15 +49112,20 @@ impl Runtime<'_> {
     /// The window's one door for 「这件事刚刚发生」 ([`Self::toast`]), which is
     /// also the one that makes the notice stand where the attention already is
     /// rather than in a corner. It carries the same two facts the terminal's
-    /// hover line carries when it is blocked, in the same words and with the
-    /// same control characters made printable: the address, and that it was
-    /// blocked. No new sentence is minted for a fact this window already has one
+    /// hover line carries when a press is refused, in the same words and with the
+    /// same control characters made printable: the address, and why it was
+    /// refused ([`LinkRefusal`]). No new sentence is minted for a fact this window already has one
     /// for.
-    fn say_address_refused(&mut self, surface: PreviewSurface, url: &str) -> Result<()> {
+    fn say_address_refused(
+        &mut self,
+        surface: PreviewSurface,
+        url: &str,
+        refusal: LinkRefusal,
+    ) -> Result<()> {
         let body = format!(
             "{}{}",
             printable_address(url),
-            i18n::Text::HyperlinkBlockedSuffix.text()
+            refusal.suffix(i18n::current())
         );
         self.toast(toast::ToastKind::Error, surface.toast_anchor(), None, body)
     }

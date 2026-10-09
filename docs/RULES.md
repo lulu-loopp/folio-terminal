@@ -229,7 +229,13 @@ protected prefix ends where the declared target itself stops being
 address-shaped, at its first Unicode punctuation or whitespace character, so
 an IRI target's ideographs stay linked while a target that runs on into
 Chinese is cut there like its label. A program-chosen label and a non-HTTP(S)
-target stay whole, and the target is unchanged. The scope is one captured row: a soft-wrapped continuation fragment
+target stay whole, and the target is unchanged. **A declared HTTP(S) target whose host does
+not parse is no declaration** (owner ruling 2026-10-06): the span is plain text and the bare
+address recogniser reads it, so `http://www.glancepc.com：` declared by an autolinker becomes a link
+to `http://www.glancepc.com` and the full-width colon stays prose. The host check is one function,
+`bt_transcript::web_host_parses` (the WHATWG host parser, IDNA included), and it is the check the
+address door refuses with (`webnav::Refusal::InvalidHost`), so a link Folio draws is never one its
+own door would refuse as malformed. The scope is one captured row: a soft-wrapped continuation fragment
 that does not begin with the target stays linked (T-71B;
 `bt-transcript::CapturedRow`, invoked by `bt-term::cell_capture` before
 transcript or viewport clipping; trailing DESIGN entry 2026-09-30). An `OSC 8`
@@ -244,8 +250,12 @@ the network card for a share, nothing for `mailto:` or any other scheme);
 `Ctrl`/`⌘`+click = the system's — the browser for `http`/`https`, the registered
 handler for a file, Explorer for a folder, **the system for a share on another
 machine, and whatever the machine has registered for any other scheme**
-(`mailto:`, `vscode:`, `ssh:` …), with no list of schemes; what the machine
-refuses is said on the hover line as a refused address. A single letter before a
+(`mailto:`, `vscode:`, `ssh:` …), with no list of schemes. A refused press is said on
+the hover line with why, and only what is true (owner ruling 2026-10-06): `address invalid`
+for text that is not an address (a host that does not parse, no host, a control character, a
+target that names nothing this machine can name), `blocked` for an address the door will not go
+to (a scheme, userinfo), `no program to open it` for one the system took and had nothing for; a
+page's foot and a refused link in a document use the same three. A single letter before a
 colon is a drive, not a scheme, and a path never leaves as a URI. **A link in a
 previewed document follows this row**, both halves. **An `[Image #k]`
 placeholder in an agent's input area is the same object again**: a pane learns
@@ -273,7 +283,8 @@ input line, `[Image #N]` is a link to the picture the pane saw that agent link t
 same label to*, and the owner's ruling of 2026-09-29 that a number not yet
 linked is inferred beside the newest learned picture, bounded by the disk;
 trailing entry 2026-10-08 *every pasted picture's `[Image #N]` on an agent's
-input line can be opened, not only the last one*.
+input line can be opened, not only the last one*; trailing entry 2026-10-09 *a declared link
+whose host does not parse is read by the recogniser, and a refused link says why*.
 **Overrides.** §7.1.5g's original "plain click does nothing, Ctrl hands it over"
 was reversed by the 2026-08-20 ruling *plain click stays in the window, Ctrl+click
 hands it over*, aligning hyperlinks with image references. The owner's rulings of

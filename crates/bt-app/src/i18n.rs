@@ -995,6 +995,15 @@ text_entries! {
     /// The same word alone, for a pane too narrow for the URI as well. The short
     /// form must stay a substring of the long one.
     HyperlinkBlocked,
+    /// The suffix for a target whose text is not an address (owner ruling
+    /// 2026-10-06: "blocked" is never said of a malformed address).
+    HyperlinkInvalidSuffix,
+    /// Its words alone; a substring of the long form, as above.
+    HyperlinkInvalid,
+    /// The suffix for a target the system took and had nothing to open with.
+    HyperlinkNoProgramSuffix,
+    /// Its words alone; a substring of the long form, as above.
+    HyperlinkNoProgram,
 
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
@@ -3831,6 +3840,26 @@ impl Text {
             // ── the hyperlink overlay ──────────────────────────────────────
             Self::HyperlinkBlockedSuffix => pick(lang, " · blocked", " · 已拦截"),
             Self::HyperlinkBlocked => pick(lang, "blocked", "已拦截"),
+            Self::HyperlinkInvalidSuffix => pick(
+                lang,
+                " · address invalid",
+                " · address invalid", // zh: pending F-SWEEP-2-048
+            ),
+            Self::HyperlinkInvalid => pick(
+                lang,
+                "address invalid",
+                "address invalid", // zh: pending F-SWEEP-2-048
+            ),
+            Self::HyperlinkNoProgramSuffix => pick(
+                lang,
+                " · no program to open it",
+                " · no program to open it", // zh: pending F-SWEEP-2-048
+            ),
+            Self::HyperlinkNoProgram => pick(
+                lang,
+                "no program to open it",
+                "no program to open it", // zh: pending F-SWEEP-2-048
+            ),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -6145,6 +6174,15 @@ impl Text {
         // 0.4.8 T-BIRTH-OFF-WINDOW: a pane whose shell could not be started.
         (Self::ShellDidNotStart, HostPlatform::Windows),
         (Self::ShellDidNotStart, HostPlatform::MacOs),
+        // 0.4.8 F-SWEEP-2-048: a refused link says why — not an address, or no program for it.
+        (Self::HyperlinkInvalidSuffix, HostPlatform::Windows),
+        (Self::HyperlinkInvalidSuffix, HostPlatform::MacOs),
+        (Self::HyperlinkInvalid, HostPlatform::Windows),
+        (Self::HyperlinkInvalid, HostPlatform::MacOs),
+        (Self::HyperlinkNoProgramSuffix, HostPlatform::Windows),
+        (Self::HyperlinkNoProgramSuffix, HostPlatform::MacOs),
+        (Self::HyperlinkNoProgram, HostPlatform::Windows),
+        (Self::HyperlinkNoProgram, HostPlatform::MacOs),
     ];
 }
 
@@ -10103,12 +10141,18 @@ mod tests {
     #[test]
     fn the_blocked_word_is_the_same_word_with_and_without_its_separator() {
         for lang in [Lang::English, Lang::Chinese] {
-            let long = Text::HyperlinkBlockedSuffix.in_lang(lang);
-            let short = Text::HyperlinkBlocked.in_lang(lang);
-            assert!(
-                long.ends_with(short),
-                "{lang:?}: {long:?} must end with {short:?}"
-            );
+            for (long, short) in [
+                (Text::HyperlinkBlockedSuffix, Text::HyperlinkBlocked),
+                (Text::HyperlinkInvalidSuffix, Text::HyperlinkInvalid),
+                (Text::HyperlinkNoProgramSuffix, Text::HyperlinkNoProgram),
+            ] {
+                let long = long.in_lang(lang);
+                let short = short.in_lang(lang);
+                assert!(
+                    long.ends_with(short),
+                    "{lang:?}: {long:?} must end with {short:?}"
+                );
+            }
         }
     }
 
