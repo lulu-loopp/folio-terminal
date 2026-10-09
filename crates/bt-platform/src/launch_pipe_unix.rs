@@ -42,10 +42,11 @@
 //! * **The server** takes the peer's credentials off the connected socket —
 //!   [`crate::peer::credentials`], which is the uid and the pid this kernel
 //!   recorded when that peer connected — and refuses a peer whose uid is not its
-//!   own or whose executable is not the same file as its own. A pid out of a
-//!   frame would be a number the peer chose; these come from the kernel. (The
-//!   two calls that answer it are not the same two on the two Unixes this
-//!   workspace compiles, which is what that module is for.)
+//!   own or whose executable is not a Folio: an image whose file name is not
+//!   this executable's ([`vet_executable`]). A pid out of a frame would be a
+//!   number the peer chose; these come from the kernel. (The two calls that
+//!   answer it are not the same two on the two Unixes this workspace compiles,
+//!   which is what that module is for.)
 //! * **The client** reads the endpoint's own file before it connects — a
 //!   socket, not a link, owned by this user, mode `0600` — and then asks the
 //!   same two questions of the connected peer, before a byte of the command
@@ -514,32 +515,36 @@ fn vetted_peer(stream: &UnixStream) -> io::Result<u32> {
     Ok(pid)
 }
 
-/// **Is that executable this one?**
+/// **Is that executable a Folio?** — the Windows arm's rule (`vetted_server`),
+/// and one rule for both platforms.
 ///
-/// Device and inode, which is the filesystem's own identity: the two paths can
-/// be spelled differently — a bundle reached through a symlink, a `..` — and
-/// still be one file, and two builds in two folders are two files however alike
-/// their names are.
+/// **The file name and not the file** (0.4.8 D3). Two installed copies of Folio
+/// that share one data directory — a second `Folio.app` in another folder, the
+/// copy an update restored beside one that kept running — are two files, and
+/// the launch wire is keyed by the data directory, not by the bundle: a second
+/// copy reaches the running one exactly as a second start of the same copy
+/// does. A version difference between them is the wire's own version check's
+/// to answer, as it is on Windows. What this rules out is a program that is
+/// not this program, under the uid check beside it and inside the private
+/// runtime folder the endpoint lives in — the door's boundary is still this
+/// user, and the module's own sentence still stands: this is not a defence
+/// against a hostile process running as you.
 ///
-/// **This is stricter than the Windows arm and deliberately so.** There the
-/// comparison is on the file *name*, because a second Folio may be a newer
-/// build in another folder and the wire's own version check is what answers
-/// that difference. Here the peer's path comes from the kernel rather than from
-/// an image name this program chose, and an application on this platform lives
-/// at one path inside one bundle — so the stronger question is the one that can
-/// be asked, and the cost of the difference is benign: two Folios that are
-/// genuinely two files refuse each other, and the second one opens its own
-/// window, which is the fallback every path here already takes.
+/// ASCII case is folded, as the Windows arm folds it: the default volume on
+/// this platform does not tell the two spellings of one name apart.
 fn vet_executable(theirs: &Path) -> io::Result<()> {
     let mine = std::env::current_exe()?;
-    let (mine, theirs) = (std::fs::metadata(mine)?, std::fs::metadata(theirs)?);
-    if mine.dev() == theirs.dev() && mine.ino() == theirs.ino() {
-        return Ok(());
+    let named = |path: &Path| path.file_name().map(std::ffi::OsStr::to_ascii_lowercase);
+    match (named(&mine), named(theirs)) {
+        (Some(mine), Some(theirs)) if mine == theirs => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the launch endpoint is held by {}, which is not a Folio",
+                theirs.display()
+            ),
+        )),
     }
-    Err(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "the launch endpoint is held by a process that is not this program",
-    ))
 }
 
 /// The executable one pid is running, from the kernel.
@@ -577,10 +582,17 @@ fn peer_executable(pid: u32) -> io::Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsString::from_vec(buffer)))
 }
 
-/// The same question where `/proc` answers it.
+/// The same question where `/proc` answers it: the link `/proc/<pid>/exe` names
+/// the image, and the name [`vet_executable`] reads is the image's, not the
+/// link's.
 #[cfg(not(target_os = "macos"))]
 fn peer_executable(pid: u32) -> io::Result<PathBuf> {
-    Ok(PathBuf::from(format!("/proc/{pid}/exe")))
+    std::fs::read_link(format!("/proc/{pid}/exe")).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the other end of the launch endpoint has an image this process cannot read",
+        )
+    })
 }
 
 /// The two descriptors a `drop` uses to reach a thread parked in `poll`.
@@ -879,27 +891,37 @@ mod tests {
         assert_eq!(refused.kind(), io::ErrorKind::NotFound);
     }
 
-    /// **RED — a door that is not this program's is not written to.**
+    /// **RED (0.4.8 D3) — a door held by a program that is not a Folio is not
+    /// written to, and a door held by another copy of Folio is.**
     ///
     /// The peer rule, asked of the one half of it a single process can stand
-    /// both sides of: an executable that is a real file and is not this one is
-    /// refused, and this one is not. The connected half of the rule is proved
+    /// both sides of. This program is a Folio; so is another copy of it in
+    /// another folder — another bundle, another file, the same name; a shell is
+    /// not, and its refusal names it. The connected half of the rule is proved
     /// by every test above — each of them is a peer whose executable is this
-    /// test binary, and each of them is served.
+    /// test binary, and each of them is served — and by `bt-app`'s
+    /// `launch_wire` tests across two real copies.
     ///
-    /// MUTATION: compare file names instead of device and inode and the first
-    /// half of this stays green while two different builds start trusting each
-    /// other.
+    /// MUTATION: compare device and inode (this bundle, not a Folio) and the
+    /// other copy is refused.
     #[test]
-    fn an_executable_that_is_not_this_one_is_refused() {
+    fn a_program_that_is_not_a_folio_is_refused_and_another_copy_is_not() {
         let mine = std::env::current_exe().expect("this process has an image");
         vet_executable(&mine).expect("this program is this program");
+        let name = mine.file_name().expect("an image has a name");
+        let other = scratch(line!())
+            .join("其他 副本")
+            .join("Folio.app/Contents/MacOS");
+        std::fs::create_dir_all(&other).expect("make the other copy's folder");
+        let other = other.join(name);
+        std::fs::write(&other, b"another build of the same program").expect("stand it there");
+        vet_executable(&other).expect("another copy of this program is a Folio");
         let refused = vet_executable(Path::new("/bin/sh"))
             .expect_err("a shell is not a Folio, whatever it is called");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
         assert!(
-            vet_executable(Path::new("/nowhere/folio")).is_err(),
-            "and an image this process cannot read is a peer it cannot vouch for"
+            refused.to_string().contains("/bin/sh"),
+            "the refusal names what holds the door: {refused}"
         );
     }
 

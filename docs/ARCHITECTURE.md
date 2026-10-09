@@ -170,7 +170,14 @@ anything asks — the updated build's road (`docs/plans/design/self-update-2026-
 take the data directory's claim*). A second process hands its argv down the launch pipe
 (`launch_wire::hand_over`) and leaves through `bt_platform::leave_process`; what its
 update pass sent it to report crosses with it (`launch_wire::Report`, U-36) and is told
-to the running process's update job where the launch lands (`Job::told_by_a_launch`).
+to the running process's update job where the launch lands (`Job::told_by_a_launch`). The
+running process may be another installed copy sharing the data directory: the
+endpoint is keyed by the directory, and each end asks the kernel who the other is and
+takes any process of this user whose image has Folio's file name (0.4.8 D3; on Windows
+the client asks, on Unix both ends). A hand-over that gives up — the wire's OS error,
+the running Folio's answer, no endpoint — leaves one line in `diagnostics.log`
+(`launch_wire::gave_up_line`, written by `main` once the resident run has opened the
+log) and the start opens its own window.
 
 ### 2.2 The twenty-five kinds of child process
 

@@ -1088,6 +1088,8 @@ jobs:
       # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
       # The uninstall door runs here too: its bundle, LaunchAgents and Application Support rows are
       # macOS product code, and its per-platform labels were red here with nothing running them.
+      # The launch wire runs here too (0.4.8 D3): its two-copy tests start two copies of the test
+      # binary over one data directory, and the refusal they pin was a macOS-only defect.
       - name: test the macOS updater modules
         run: |
           set -euo pipefail
@@ -1115,6 +1117,7 @@ jobs:
           run_app_filter update_trial
           run_app_filter update_startup
           run_app_filter uninstall::
+          run_app_filter launch_wire
           log="$RUNNER_TEMP/macos-updater-install-flip.log"
           cargo test --locked -p bt-platform install_flip | tee "$log"
           grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {

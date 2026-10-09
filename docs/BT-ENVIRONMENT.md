@@ -169,7 +169,14 @@ tests' child halves read them, and they write only into the test's own temporary
 `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`
 sets on the copies of its own test binary that play the trial and the recovery. Only
 those tests' child halves read them, and they write only into the test's own
-temporary folder. `BT_U42D_WINDOWS_SAY`, `BT_U42D_MACOS_SAY` and
+temporary folder. `BT_LAUNCH_WIRE_COPY_CHILD` and `BT_LAUNCH_WIRE_COPY_ROOT` name the test
+and its half (`serve` or `start`) and the private folder (the shared data directory and the
+second start's command line) that `bt-app`'s three `launch_wire::tests` of two installed
+copies sharing one data directory (0.4.8 D3) set on the copies of their own test binary that
+play the copy holding the data directory and the second copy's start, with `APPDATA`,
+`LOCALAPPDATA`, `HOME` and `XDG_DATA_HOME` pointed inside that folder. Only those tests'
+child halves read them, and they write nothing but the claim and the endpoint of that
+folder's data directory. `BT_U42D_WINDOWS_SAY`, `BT_U42D_MACOS_SAY` and
 `BT_U42D_RECOVER_SAY` name the `diagnostics.log` in a test's own temporary folder
 that `bt-app`'s `update_apply_windows::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log`,
 its `update_apply_macos` twin and `update_recover::tests::a_recovery_line_reaches_the_log_once_whatever_standard_error_is`

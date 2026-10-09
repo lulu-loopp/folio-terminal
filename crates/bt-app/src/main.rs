@@ -74051,9 +74051,19 @@ fn main() -> Result<()> {
     //
     // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
     // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+    // **Why a hand-over gave up is kept for the log** (0.4.8 D3): the front door has none, so the
+    // line waits here and is written once `enter_resident_run` has opened this run's.
+    let gave_up = std::cell::Cell::new(None::<String>);
     let hand_over = || {
         bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-            launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
+            launch_wire::hand_over(
+                token,
+                &admitted,
+                &storage,
+                &request,
+                say_at_the_front_door,
+                |line| gave_up.set(Some(line)),
+            )
         })
         .ok()
         .flatten()
@@ -74096,6 +74106,11 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // A start whose hand-over gave up says why where this run's diagnostics go
+    // (0.4.8 D3), above the line that says its window saves nothing.
+    if let Some(line) = gave_up.take() {
+        diagnostics::note(&line);
+    }
     // A stand-in that stood down beside the reserved trial says so where this
     // run's diagnostics go (0.4.8 E3).
     if let Some(line) = stood_down {
