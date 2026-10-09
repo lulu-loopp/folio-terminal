@@ -2753,10 +2753,11 @@ mod tests {
     /// why.**
     ///
     /// The other side of the narrowed identity: a Folio is this program's name, and a program
-    /// of another name holding the door — here this binary under another name, listening as a
-    /// Folio would — is not handed the folder. The start carries on to its own window (whose
-    /// card is the second-instance notice, unchanged) and its give-up line names the OS's
-    /// refusal.
+    /// of another name holding the door — here a copy of this binary under another name,
+    /// listening as a Folio would — is not handed the folder. The start carries on to its own
+    /// window (whose card is the second-instance notice, unchanged) and its give-up line names
+    /// the OS's refusal. A copy and not a hard link: macOS names a hard-linked image by
+    /// whichever of its links it cached, so the program's name would not be the one it ran as.
     ///
     /// MUTATION (accept any peer): `bt_platform`'s Unix `vet_executable` answers `Ok` whatever
     /// the peer, or Windows' `vetted_server` its pid whatever the image — the start leaves with
@@ -2773,7 +2774,8 @@ mod tests {
         std::fs::create_dir_all(&folder_of_it).unwrap();
         let impostor =
             folder_of_it.join(format!("another-program{}", std::env::consts::EXE_SUFFIX));
-        std::fs::hard_link(&this, &impostor).expect("stand this program there under another name");
+        std::fs::copy(&this, &impostor)
+            .expect("stand a copy of this program there under another name");
         let folder = handed_folder();
         let words = vec!["--cwd".to_owned(), folder.to_string_lossy().into_owned()];
         let run = two_copies(SELECTOR, &impostor, &this, &words, false);
