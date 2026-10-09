@@ -3157,6 +3157,247 @@ impl Drop for ProbeChild {
     }
 }
 
+/// **How long a probe's owner waits for it** (G-SWEEP-048): a probe may go `quiet` without
+/// showing life, and run `budget` in all.
+///
+/// Life is the probe's processor time advancing ([`ProbeChild::processor_time`]) — what a
+/// PowerShell starting on a cold module analysis cache shows for the tens of seconds it analyses
+/// (measured 22–46 s on a CI image; the analysis is processor-bound, its processor time within a
+/// quarter-second of its wall time on the development machine), and what a probe that another
+/// program holds suspended never shows. So a working probe is waited for to the end of the
+/// budget, and a stalled one is ended after `quiet`, where a fixed deadline of `quiet` ended both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbePatience {
+    /// How long the probe may show no life before it is ended.
+    pub quiet: std::time::Duration,
+    /// How long it may run at all, life or not.
+    pub budget: std::time::Duration,
+}
+
+impl ProbePatience {
+    /// A fixed deadline: the probe is ended at `deadline` whatever it shows.
+    #[must_use]
+    pub const fn fixed(deadline: std::time::Duration) -> Self {
+        Self {
+            quiet: deadline,
+            budget: deadline,
+        }
+    }
+}
+
+/// Why a probe's owner ended it ([`ProbeChild::wait_within`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeOverdue {
+    /// It showed no life for its patience's `quiet`.
+    Silent,
+    /// It showed life to the end of its patience's `budget`.
+    OverBudget,
+}
+
+/// What one look at a probe decides ([`ProbeWatch::look`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeLook {
+    /// Look again later.
+    Wait,
+    /// No life for the whole quiet period.
+    Silent,
+    /// The budget is spent.
+    OverBudget,
+}
+
+/// **The owner's reading of one probe over time**: given when each look happens and the
+/// processor time it read, whether to keep waiting. Clock and probe stay the caller's
+/// ([`ProbeChild::wait_within`]), so the rule is one function of its inputs.
+#[derive(Clone, Copy, Debug)]
+pub struct ProbeWatch {
+    patience: ProbePatience,
+    started: std::time::Instant,
+    /// When the probe last showed life (its start, before it has).
+    lively: std::time::Instant,
+    /// The most processor time any look has read.
+    seen: std::time::Duration,
+}
+
+impl ProbeWatch {
+    /// A watch over a probe started at `now`.
+    #[must_use]
+    pub fn new(patience: ProbePatience, now: std::time::Instant) -> Self {
+        Self {
+            patience,
+            started: now,
+            lively: now,
+            seen: std::time::Duration::ZERO,
+        }
+    }
+
+    /// One look at `now`, which read `processor_time` (`None`: it could not be read, which shows
+    /// no life). More processor time than any earlier look read is life, and the quiet period
+    /// starts again from `now`; the budget never does.
+    pub fn look(
+        &mut self,
+        now: std::time::Instant,
+        processor_time: Option<std::time::Duration>,
+    ) -> ProbeLook {
+        if now.saturating_duration_since(self.started) >= self.patience.budget {
+            return ProbeLook::OverBudget;
+        }
+        if let Some(time) = processor_time
+            && time > self.seen
+        {
+            self.seen = time;
+            self.lively = now;
+            return ProbeLook::Wait;
+        }
+        if now.saturating_duration_since(self.lively) >= self.patience.quiet {
+            ProbeLook::Silent
+        } else {
+            ProbeLook::Wait
+        }
+    }
+}
+
+impl ProbeChild {
+    /// **Wait for the immediate child within `patience`** — the one owner of a probe's deadline.
+    /// `rest` is how the caller waits between two looks (a worker's sleep). A probe that runs out
+    /// of patience is ended with everything it started, and the answer says why
+    /// ([`ProbeOverdue`]); what it wrote before that is still collected by
+    /// [`Self::wait_with_output`].
+    pub fn wait_within(
+        &mut self,
+        patience: ProbePatience,
+        rest: &mut dyn FnMut(),
+    ) -> std::io::Result<Result<std::process::ExitStatus, ProbeOverdue>> {
+        let mut watch = ProbeWatch::new(patience, std::time::Instant::now());
+        loop {
+            if let Some(status) = self.try_wait()? {
+                return Ok(Ok(status));
+            }
+            let overdue = match watch.look(std::time::Instant::now(), self.processor_time().ok()) {
+                ProbeLook::Wait => {
+                    rest();
+                    continue;
+                }
+                ProbeLook::Silent => ProbeOverdue::Silent,
+                ProbeLook::OverBudget => ProbeOverdue::OverBudget,
+            };
+            self.kill()?;
+            return Ok(Err(overdue));
+        }
+    }
+
+    /// **The processor time the probe has used so far** — its job's (every process it started,
+    /// ended ones included) when it is contained, its immediate child's otherwise.
+    #[cfg(windows)]
+    pub fn processor_time(&self) -> std::io::Result<std::time::Duration> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::{FILETIME, HANDLE};
+        use windows::Win32::System::JobObjects::{
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+            QueryInformationJobObject,
+        };
+        use windows::Win32::System::Threading::GetProcessTimes;
+
+        /// A count of 100-nanosecond intervals.
+        fn hundreds(count: u64) -> std::time::Duration {
+            std::time::Duration::from_nanos(count.saturating_mul(100))
+        }
+
+        if let Some(job) = &self.guard.job {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            // SAFETY: the job handle is live and owned by the guard; the information class
+            // matches `accounting`, which is all the call writes.
+            unsafe {
+                QueryInformationJobObject(
+                    Some(HANDLE(job.as_raw_handle())),
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut accounting).cast(),
+                    u32::try_from(std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
+                        .expect("job accounting size fits u32"),
+                    None,
+                )
+            }?;
+            let count = |time: i64| u64::try_from(time).unwrap_or(0);
+            return Ok(hundreds(count(accounting.TotalUserTime))
+                + hundreds(count(accounting.TotalKernelTime)));
+        }
+        let mut times = [FILETIME::default(); 4];
+        let [created, exited, kernel, user] = &mut times;
+        // SAFETY: the process handle is the live one owned by the leader; the four outputs are
+        // valid writable storage.
+        unsafe {
+            GetProcessTimes(
+                HANDLE(self.leader.process.as_raw_handle()),
+                std::ptr::from_mut(created),
+                std::ptr::from_mut(exited),
+                std::ptr::from_mut(kernel),
+                std::ptr::from_mut(user),
+            )
+        }?;
+        let count = |time: &FILETIME| {
+            (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+        };
+        Ok(hundreds(count(&times[2])) + hundreds(count(&times[3])))
+    }
+
+    /// **The processor time the probe's immediate child has used so far** — a Unix probe's work
+    /// is read off its leader (no call answers for a whole process group).
+    #[cfg(target_os = "macos")]
+    pub fn processor_time(&self) -> std::io::Result<std::time::Duration> {
+        let pid = libc::c_int::try_from(self.leader.id())
+            .map_err(|_| std::io::Error::other("the probe pid does not fit a process id"))?;
+        let mut information = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+        let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>())
+            .expect("task information size fits c_int");
+        // SAFETY: `information` is valid writable storage of exactly `size` bytes for the
+        // `PROC_PIDTASKINFO` flavour, which is what the call writes.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKINFO,
+                0,
+                information.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if written != size {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a full-size answer initialised the structure.
+        let information = unsafe { information.assume_init() };
+        // The two totals are in the kernel's time units; only their growth is read.
+        Ok(std::time::Duration::from_nanos(
+            information
+                .pti_total_user
+                .saturating_add(information.pti_total_system),
+        ))
+    }
+
+    /// **The processor time the probe's immediate child has used so far** — a Unix probe's work
+    /// is read off its leader (no call answers for a whole process group).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn processor_time(&self) -> std::io::Result<std::time::Duration> {
+        let pid = libc::pid_t::try_from(self.leader.id())
+            .map_err(|_| std::io::Error::other("the probe pid does not fit a process id"))?;
+        let mut clock = 0;
+        // SAFETY: `clock` is valid writable storage for the clock id.
+        let answered = unsafe { libc::clock_getcpuclockid(pid, &raw mut clock) };
+        if answered != 0 {
+            return Err(std::io::Error::from_raw_os_error(answered));
+        }
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::zeroed();
+        // SAFETY: `clock` names the child's processor-time clock; `time` is writable storage.
+        if unsafe { libc::clock_gettime(clock, time.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a successful call initialised `time`.
+        let time = unsafe { time.assume_init() };
+        Ok(std::time::Duration::new(
+            u64::try_from(time.tv_sec).unwrap_or(0),
+            u32::try_from(time.tv_nsec).unwrap_or(0),
+        ))
+    }
+}
+
 /// One of a probe's output pipes, as this process reads it.
 ///
 /// On Windows a read reaches the end when the probe's immediate child has
@@ -4498,9 +4739,9 @@ pub enum ProbeEnding {
 /// standard library's quoting would change. The command's own arguments, if
 /// any, come first and are quoted as [`std::process::Command::arg`] quotes them.
 ///
-/// **Held to `deadline_after`**, the probes' child-wait shape (`shell_integration`'s
-/// `run_powershell_probe`): `try_wait` polled on the worker every 20 ms through
-/// [`wait::sleep_within`], and a child still running at the deadline killed and reported
+/// **Held to `deadline_after`** through the one owner of a probe's deadline
+/// ([`ProbeChild::wait_within`], a fixed [`ProbePatience`]): looked at on the worker every 20 ms
+/// through [`wait::sleep_within`], and a child still running at the deadline ended and reported
 /// [`ProbeEnding::Overran`] (T-FRESH-FACTS round 2: a hung `copilot --version` wedged its
 /// probe for the life of the process).
 #[cfg(windows)]
@@ -4517,17 +4758,104 @@ pub fn probe_output_with_raw_tail(
         probe_job(),
         ProbeBirthSeam::default(),
     )?;
-    let deadline = std::time::Instant::now() + deadline_after;
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output().map(ProbeEnding::Finished);
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait_with_output();
-            return Ok(ProbeEnding::Overran);
-        }
+    let waited = child.wait_within(ProbePatience::fixed(deadline_after), &mut || {
         wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    })?;
+    match waited {
+        Ok(_) => child.wait_with_output().map(ProbeEnding::Finished),
+        Err(_) => {
+            let _ = child.wait_with_output();
+            Ok(ProbeEnding::Overran)
+        }
+    }
+}
+
+/// **A probe's owner reads life, not the clock alone** (G-SWEEP-048, T-PROBE-COLD-CACHE): the
+/// rule of [`ProbeWatch`] over synthetic looks — no process, no clock.
+#[cfg(test)]
+mod probe_patience_tests {
+    use super::{ProbeLook, ProbePatience, ProbeWatch};
+    use std::time::{Duration, Instant};
+
+    const PATIENCE: ProbePatience = ProbePatience {
+        quiet: Duration::from_secs(5),
+        budget: Duration::from_secs(120),
+    };
+
+    /// Every look of a watch over `seconds`, a look each quarter-second, the probe's processor
+    /// time at each given by `time` (in milliseconds since its start); the first verdict that is
+    /// not [`ProbeLook::Wait`], with the millisecond it came at.
+    fn first_verdict(
+        patience: ProbePatience,
+        seconds: u64,
+        time: impl Fn(u64) -> Option<u64>,
+    ) -> Option<(u64, ProbeLook)> {
+        let start = Instant::now();
+        let mut watch = ProbeWatch::new(patience, start);
+        (1..=seconds * 4).map(|look| look * 250).find_map(|at| {
+            let verdict = watch.look(
+                start + Duration::from_millis(at),
+                time(at).map(Duration::from_millis),
+            );
+            (verdict != ProbeLook::Wait).then_some((at, verdict))
+        })
+    }
+
+    /// RED (mutation: restore the fixed five seconds — `look` leaves the quiet period where it
+    /// started when the processor time grows): a PowerShell analysing a cold module cache
+    /// for 46 s, the slowest the CI image measured, working all the while (its processor time
+    /// grows by 40 ms a second), is told to wait at every look; the fixed deadline ended it at
+    /// 5 s, three attempts in a row.
+    #[test]
+    fn a_probe_that_keeps_working_is_waited_for_past_its_quiet_period() {
+        assert_eq!(
+            first_verdict(PATIENCE, 46, |at| Some(at / 1000 * 40)),
+            None,
+            "a probe that shows life within every quiet period is waited for"
+        );
+    }
+
+    /// A probe that shows no life — its processor time never moves, or cannot be read — is
+    /// ended at the first look past the quiet period, never before.
+    #[test]
+    fn a_probe_that_shows_no_life_is_silent_after_its_quiet_period() {
+        assert_eq!(
+            first_verdict(PATIENCE, 60, |_| Some(0)),
+            Some((5_000, ProbeLook::Silent))
+        );
+        assert_eq!(
+            first_verdict(PATIENCE, 60, |_| None),
+            Some((5_000, ProbeLook::Silent)),
+            "a reading that failed is no life"
+        );
+        // Life for ten seconds, then none: the quiet period counts from the last life.
+        assert_eq!(
+            first_verdict(PATIENCE, 60, |at| Some(at.min(10_000))),
+            Some((15_000, ProbeLook::Silent))
+        );
+    }
+
+    /// The budget does not move with life: a probe working to the end of it is ended there.
+    #[test]
+    fn a_probe_that_works_to_the_end_of_its_budget_is_over_budget() {
+        assert_eq!(
+            first_verdict(PATIENCE, 200, Some),
+            Some((120_000, ProbeLook::OverBudget))
+        );
+    }
+
+    /// A fixed deadline ends a probe at that deadline, life or not.
+    #[test]
+    fn a_fixed_patience_is_a_deadline() {
+        let fixed = ProbePatience::fixed(Duration::from_secs(5));
+        assert_eq!(
+            first_verdict(fixed, 60, Some),
+            Some((5_000, ProbeLook::OverBudget))
+        );
+        assert_eq!(
+            first_verdict(fixed, 60, |_| Some(0)),
+            Some((5_000, ProbeLook::OverBudget))
+        );
     }
 }
 
@@ -4783,6 +5111,90 @@ mod probe_child_tests {
     fn ready_probe(child: &mut ProbeChild) -> (Witness, Witness) {
         let pids = announced(child.take_stdout().expect("helper stdout"), "ready");
         (Witness::of(pids[0]), Witness::of(pids[1]))
+    }
+
+    /// How much processor time [`helper_works_then_waits`] uses before it says so.
+    const WORKED: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// This process's own processor time.
+    fn own_processor_time() -> std::time::Duration {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        let mut times = [FILETIME::default(); 4];
+        let [created, exited, kernel, user] = &mut times;
+        // SAFETY: the pseudo-handle names this process; the four outputs are writable storage.
+        unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                std::ptr::from_mut(created),
+                std::ptr::from_mut(exited),
+                std::ptr::from_mut(kernel),
+                std::ptr::from_mut(user),
+            )
+        }
+        .expect("this process's times");
+        let count = |time: &FILETIME| {
+            (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+        };
+        std::time::Duration::from_nanos((count(&times[2]) + count(&times[3])) * 100)
+    }
+
+    /// The helper that works: it uses [`WORKED`] of processor time, says `worked` with its
+    /// process id, and waits to be ended.
+    #[test]
+    fn helper_works_then_waits() {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("works") {
+            return;
+        }
+        let mut sum = 0_u64;
+        while own_processor_time() < WORKED {
+            for step in 0..100_000_u64 {
+                sum = std::hint::black_box(sum.wrapping_add(step));
+            }
+        }
+        std::hint::black_box(sum);
+        println!("worked {}", std::process::id());
+        std::io::stdout().flush().expect("flush readiness");
+        std::thread::park();
+    }
+
+    /// The test executable started as `test`'s helper in `mode`.
+    fn helper_running(test: &str, mode: &'static str) -> std::process::Command {
+        let mut command = quiet_command(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", test, "--nocapture"])
+            .env(HELPER_MODE, mode);
+        command
+    }
+
+    /// **A probe's life is read off the system** (G-SWEEP-048): a helper that has used
+    /// [`WORKED`] of processor time shows at least that much, through its job when it is
+    /// contained and through its own process when it is not.
+    ///
+    /// RED (mutation: `ProbeChild::processor_time` answers zero) — both readings are short.
+    #[test]
+    fn a_probe_that_worked_shows_its_processor_time() {
+        let command = helper_running("probe_child_tests::helper_works_then_waits", "works");
+        let contained = spawn_probe_born(
+            &command,
+            HELPER_STDIO,
+            None,
+            probe_job(),
+            ProbeBirthSeam::default(),
+        )
+        .expect("start a contained helper");
+        let uncontained = spawn_with_a_refused_job(&command);
+        for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
+            let pids = announced(child.take_stdout().expect("helper stdout"), "worked");
+            let helper = Witness::of(pids[0]);
+            let time = child.processor_time().expect("the probe's processor time");
+            assert!(
+                time >= WORKED,
+                "the {how} helper used {WORKED:?} and shows {time:?}"
+            );
+            child.kill().expect("end the helper");
+            helper.wait_gone();
+        }
     }
 
     /// RED mutation: make `probe_job` return
@@ -5886,6 +6298,29 @@ mod probe_child_unix_tests {
     /// completion signal a poll is asked after.
     fn exited(child: &ProbeChild) {
         assert!(probe_leader_has_exited(&child.leader, true).expect("observe the child"));
+    }
+
+    /// **A probe's life is read off the system** (G-SWEEP-048): a shell that counted to two
+    /// hundred thousand before saying `ready` shows processor time, read off its leader.
+    ///
+    /// RED (mutation: `ProbeChild::processor_time` answers zero).
+    #[test]
+    fn a_probe_that_worked_shows_its_processor_time() {
+        static GROUPS: ProbeGroups = ProbeGroups::new();
+        let (_hygiene, mut command) = shell(
+            "i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done; printf 'ready\\n' >&2; sleep 30",
+        );
+        let mut child = spawn_in(&GROUPS, &mut command);
+        let mut stderr = BufReader::new(child.take_stderr().expect("stderr was piped"));
+        let mut line = String::new();
+        stderr.read_line(&mut line).expect("read readiness");
+        assert_eq!(line, "ready\n");
+        let time = child.processor_time().expect("the probe's processor time");
+        assert!(
+            time > std::time::Duration::ZERO,
+            "the shell worked and shows {time:?}"
+        );
+        child.kill().expect("end the probe");
     }
 
     /// RED mutation: in `ProbeChild::settle`, drop the early return of the
