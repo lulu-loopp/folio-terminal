@@ -619,14 +619,14 @@ pub(crate) struct HomebrewMarks {
 /// # Errors
 /// Why not, in words with no path: an attribute missing or unreadable.
 pub(crate) fn homebrew_marks(bundle: &Path) -> Result<HomebrewMarks, &'static str> {
-    let read = |name| match install_evidence::attribute(bundle, name) {
+    let attribute_of = |name| match install_evidence::attribute(bundle, name) {
         Ok(Some(bytes)) => Ok(bytes),
         Ok(None) => Err("an attribute the cask writes is missing"),
         Err(_) => Err("an attribute the cask writes cannot be read"),
     };
     Ok(HomebrewMarks {
-        marker: read(MARKER_ATTRIBUTE)?,
-        caskroom: read(CASKROOM_ATTRIBUTE)?,
+        marker: attribute_of(MARKER_ATTRIBUTE)?,
+        caskroom: attribute_of(CASKROOM_ATTRIBUTE)?,
     })
 }
 

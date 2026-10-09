@@ -5288,28 +5288,17 @@ fn rollback_restores_the_old_marks_unchanged() {
         started.start_trial(bundle, args);
         Ok(())
     }));
-    let killer = {
-        let children = children.clone();
-        let journal = install.home.journal();
-        std::thread::spawn(move || {
-            let give_up = Instant::now() + Duration::from_secs(20);
-            while Instant::now() < give_up {
-                let trial = std::fs::read(&journal)
-                    .ok()
-                    .and_then(|bytes| Journal::parse(&bytes).ok())
-                    .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
-                if trial {
-                    for pid in children.started.lock().unwrap().clone() {
-                        children.end(pid);
-                    }
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        })
+    let applier = start(install.road(limits(5_000, 20_000)), world);
+    journal_reaches(&install, &applier, |journal| {
+        journal.body.phase.kind() == PhaseKind::Trial
+    });
+    for pid in children.started.lock().unwrap().clone() {
+        children.end(pid);
+    }
+    let (ended, world) = match applier.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
     };
-    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
-    killer.join().unwrap();
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert_eq!(version_of(&install.installed), "1.0");
     assert_eq!(install.marks_on(&install.installed), before, "M4");
