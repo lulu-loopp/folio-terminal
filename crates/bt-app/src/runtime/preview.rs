@@ -12010,15 +12010,15 @@ impl Runtime<'_> {
         // Leaving the no-op there is what made the mock-up's window duplicate
         // itself (3838-3843), docked and floating at once.
         if !self.seats.close_seat(&metrics, seat) {
-            // **The shell is spawned before the tree is touched**, against the
+            // **The stand-in is made before the tree is touched**, against the
             // slot the preview is standing in this very frame — which is the slot
             // the stand-in inherits unchanged, because `ReplaceSeat` swaps the
             // leaf inside the slot and moves no rectangle. Nothing here is
             // invented (L10): it is the rectangle already on screen, and
             // `settle_seat_set_change` below re-solves and tells the shell its
-            // real columns the ordinary way. Doing it in this order is what keeps
-            // the failure clean — a `create_leaf_session` that cannot start a
-            // ConPTY leaves the pane exactly where it was.
+            // real columns the ordinary way. Its shell is asked for, not waited
+            // for (T-BIRTH-OFF-WINDOW): a ConPTY that cannot be started lands
+            // later as an error toast over the stand-in, which keeps its place.
             let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
             else {
                 *self.preview_panes.entry(surface) = pane;

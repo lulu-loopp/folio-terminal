@@ -2966,6 +2966,9 @@ text_entries! {
     /// After the detail, when this session's writes are held (0.4.8 E1); `{detail}` is the
     /// detail it follows.
     UpdateCardNotKept,
+    /// The title of the error toast for a pane whose shell could not be started
+    /// (T-BIRTH-OFF-WINDOW); its body is the reason.
+    ShellDidNotStart,
     /// About > Version: no newer release is known.
     VersionUpToDate,
     /// About > Version controls and inline links.
@@ -5906,6 +5909,11 @@ impl Text {
                 "{detail} Changes made in this session are not kept.",
                 "{detail} Changes made in this session are not kept.", // zh: pending E1
             ),
+            Self::ShellDidNotStart => pick(
+                lang,
+                "Shell not started",
+                "Shell not started", // zh: pending T-BIRTH-OFF-WINDOW
+            ),
         }
     }
 
@@ -6091,6 +6099,9 @@ impl Text {
         (Self::PsReadLineCheckFailed, HostPlatform::MacOs),
         (Self::CapPowerShellConstrained, HostPlatform::Windows),
         (Self::CapPowerShellConstrained, HostPlatform::MacOs),
+        // 0.4.8 T-BIRTH-OFF-WINDOW: a pane whose shell could not be started.
+        (Self::ShellDidNotStart, HostPlatform::Windows),
+        (Self::ShellDidNotStart, HostPlatform::MacOs),
     ];
 }
 

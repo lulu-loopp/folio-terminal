@@ -1387,6 +1387,15 @@ impl TestShell {
         &mut self.session
     }
 
+    /// **The session itself, given away** — for a test whose subject takes a [`PtySession`] by
+    /// value and keeps it (`bt-app`'s pane birth), under the same condition as [`Self::write`]:
+    /// a PowerShell's history refusal is established first. The [`Hygiene`] comes with it and must
+    /// be dropped after the session, so the child is ended before its directory is removed.
+    pub fn into_session(mut self) -> (PtySession, Hygiene) {
+        self.establish();
+        (self.session, self.hygiene)
+    }
+
     fn establish(&mut self) {
         let Gate::PowerShell {
             proof,

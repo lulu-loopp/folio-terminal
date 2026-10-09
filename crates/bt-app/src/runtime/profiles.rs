@@ -506,7 +506,7 @@ impl Runtime<'_> {
         if !told.contains(&MachineNews::Programs) {
             return Ok(());
         }
-        self.land_pane_births()?;
+        self.land_births()?;
         if !news.any() {
             return Ok(());
         }

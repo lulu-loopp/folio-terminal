@@ -624,8 +624,6 @@ pub mod doors {
         CompositorWindowSize => "9", 217, [Running, Exiting];
         /// Row 9: a second window's surface created and configured (`SurfaceConfigure`).
         SurfaceBirth => "9", 194, [Running];
-        /// Row 11: `CreatePseudoConsole` and the shell's process (`PtyBirth`).
-        PtyBirth => "11", 210, [Running, Exiting];
         /// Row 12: one leaf's `ResizePseudoConsole` round trip (`PtyResize`).
         PtyResize => "12", 4, [Running, Exiting];
         /// Row 13's residue: `IsIconic` and the cloak (`PlaceHidden`).
