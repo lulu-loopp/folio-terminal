@@ -1121,6 +1121,7 @@ mod tests {
             channel: Some(channel),
             running: RUNNING,
             capable: true,
+            recorded: false,
             trial: false,
             platform: HostPlatform::Windows,
         }
@@ -1633,6 +1634,7 @@ mod tests {
                 "not an updater build",
                 Gathered {
                     capable: false,
+                    recorded: false,
                     ..gathered("v0.4.7", Channel::Ours)
                 },
                 true,
@@ -2441,40 +2443,78 @@ mod tests {
         }
     }
 
-    /// PIN (U-41a1, managed-update §1.5) — **a Homebrew copy on macOS and a
-    /// scoop copy on Windows, whose adapters are not built yet, keep their
-    /// manager's command with Copy and no card, on the platform whose road
-    /// their adapter would take.**
+    /// A job that considered `latest` for a copy installed as `channel` on
+    /// `platform`, whose manager's record names it or not (`recorded`).
+    fn considered_recorded(
+        latest: &str,
+        channel: Channel,
+        platform: HostPlatform,
+        recorded: bool,
+    ) -> Job<u32> {
+        let mut job = Job::with_offers(true);
+        job.consider(
+            Gathered {
+                platform,
+                recorded,
+                ..gathered(latest, channel)
+            },
+            &windows(),
+            || TxnId::new([7; 16]),
+        );
+        job
+    }
+
+    /// PIN (U-41a1, managed-update §1.5; D1) — **a scoop copy on Windows,
+    /// whose adapter is not built yet, and a Homebrew copy whose own record
+    /// does not name it (R-H2) or that runs where Homebrew's road is not
+    /// built, keep their manager's command with Copy and no card.**
     ///
     /// The journal can name `Homebrew` and `Scoop` (`update_txn::Adapter`),
-    /// and eligibility now asks the adapter whether its road is built
-    /// (`update_adapter::built_on`) instead of refusing every managed copy;
-    /// until U-41b and U-41c build them, the answer must stay the row it was.
+    /// and eligibility asks the adapter whether its road is built
+    /// (`update_adapter::built_on`) and whether its precondition holds
+    /// instead of refusing every managed copy; until U-41c builds scoop's,
+    /// and wherever Homebrew's precondition fails, the answer must stay the
+    /// row it was.
     ///
-    /// MUTATION: `HOMEBREW_ROAD = true` or `SCOOP_ROAD = true` — that copy
-    /// is offered the card on its platform.
+    /// MUTATION: `SCOOP_ROAD = true` — the scoop copy is offered the card;
+    /// drop `|| (manager == Manager::Homebrew && !self.recorded)` from
+    /// `Evidence::eligibility` — the Homebrew copy the record does not name
+    /// is offered it.
     #[test]
-    fn a_managed_copy_whose_adapter_is_not_built_keeps_the_copy_row() {
-        for (manager, platform, command) in [
+    fn a_managed_copy_whose_road_is_not_built_or_not_its_records_keeps_the_copy_row() {
+        for (manager, platform, command, recorded) in [
             (
                 Manager::Homebrew,
                 HostPlatform::MacOs,
                 "brew upgrade --cask folio",
+                false,
             ),
-            (Manager::Scoop, HostPlatform::Windows, "scoop update folio"),
+            (
+                Manager::Homebrew,
+                HostPlatform::Windows,
+                "brew upgrade --cask folio",
+                true,
+            ),
+            (
+                Manager::Scoop,
+                HostPlatform::Windows,
+                "scoop update folio",
+                true,
+            ),
         ] {
             let adapter = crate::update_adapter::of_manager(manager);
             assert!(
-                !crate::update_adapter::built_on(adapter, platform),
-                "{manager:?}: this proof is for an unbuilt manager road"
+                !crate::update_adapter::built_on(adapter, platform) || !recorded,
+                "{manager:?}: this proof is for a road not built or not recorded"
             );
-            let job = considered_on(
+            let job = considered_recorded(
                 "v0.4.7",
                 Channel::Managed {
                     manager,
                     uninstall_hook: true,
                 },
                 platform,
+                recorded,
             );
             assert_eq!(job.card_window(), None, "{manager:?}: no card");
             assert_eq!(row_foot(&job), RowFoot::Copy { command }, "{manager:?}");
@@ -2501,6 +2541,49 @@ mod tests {
             let job = considered_on("v0.4.7", Channel::Ours, platform);
             assert!(job.card_window().is_some(), "{platform:?}: ours is offered");
         }
+    }
+
+    /// RED (D1, managed-update §1.5, §2.2 R-H2, §5.2) — **a Homebrew copy on
+    /// macOS whose own record names it is offered the card, with no manager
+    /// word on it: the card and the About row are ours.**
+    ///
+    /// The owner's ruling of 2026-09-27: a managed copy presses one *Restart
+    /// to update* and the update completes. The card is C9's, the row's
+    /// control is Folio's updater, and nothing names Homebrew or its command.
+    ///
+    /// MUTATION: `HOMEBREW_ROAD = false` — the copy keeps the row with
+    /// `brew upgrade --cask folio` and Copy.
+    #[test]
+    fn a_homebrew_copy_at_its_recorded_target_is_offered_the_card() {
+        let homebrew = Channel::Managed {
+            manager: Manager::Homebrew,
+            uninstall_hook: false,
+        };
+        let job = considered_recorded("v0.4.7", homebrew, HostPlatform::MacOs, true);
+        let ours = considered_on("v0.4.7", Channel::Ours, HostPlatform::MacOs);
+        assert!(job.card_window().is_some(), "the card is offered");
+        assert_eq!(job.answer(), ours.answer());
+        assert_eq!(job.state(), ours.state());
+        let row = |job: &Job<u32>| {
+            version_row(
+                job,
+                crate::update::CheckView::default(),
+                Some("v0.4.7"),
+                0,
+                Lang::English,
+            )
+        };
+        assert_eq!(row(&job), row(&ours), "the About row is ours");
+        assert_eq!(
+            row(&job).control.kind(),
+            VersionControlKind::UpdateAndRestart
+        );
+        assert_ne!(
+            row_foot(&job),
+            RowFoot::Copy {
+                command: "brew upgrade --cask folio"
+            }
+        );
     }
 
     /// RED (U-4) — **a copy winget's own record names is offered no card, and

@@ -257,7 +257,7 @@ pub(crate) fn pressed_button_of_gesture(
 /// as this window is concerned, and it is taken off here, once, at the door
 /// every modifier state in this process comes through
 /// (`WindowEvent::ModifiersChanged`). Downstream nothing changes and nothing
-/// asks: the encoder does not prefix `ESC`, the search capsule's `Alt`-toggles
+/// asks: the encoder does not prefix `ESC` (Backspace aside, [`encoder_modifiers`]), the search capsule's `Alt`-toggles
 /// do not fire, a field inserts the character the layout produced, and the chord
 /// table is not consulted about a modifier nobody is holding. With the setting
 /// on, winit reports the raw letter instead and the Alt comes through untouched,
@@ -275,6 +275,29 @@ pub(crate) fn effective_modifiers(
         reported.difference(ModifiersState::ALT)
     } else {
         reported
+    }
+}
+
+/// **Option+Backspace is Alt+Backspace on a Mac whatever *Option key sends Alt* says** — the one
+/// key [`effective_modifiers`]' Option-as-text policy does not take Alt from (owner ruling
+/// 2026-10-09, design note `keyboard-protocol-2026-09-29.md` revision (k)).
+///
+/// Option-as-text is about the characters Option composes, and Backspace composes none: Terminal.app
+/// and iTerm2 both delete a word on Option+Delete with their Option-as-Meta switch off. So the
+/// encoder is handed the Alt the hand is holding (`held`, `WindowRuntime::modifiers_held`) for
+/// Backspace, and [`legacy_bytes`] sends `ESC DEL`. Every other key keeps `effective` — Option+a
+/// is still `å` or `ESC a` as the setting decides. Off macOS the two states are one, so this
+/// changes nothing there.
+#[must_use]
+pub(crate) fn encoder_modifiers(
+    key: &Key,
+    effective: ModifiersState,
+    held: ModifiersState,
+) -> ModifiersState {
+    if matches!(key, Key::Named(NamedKey::Backspace)) && held.alt_key() {
+        effective | ModifiersState::ALT
+    } else {
+        effective
     }
 }
 
@@ -1359,9 +1382,19 @@ pub(crate) fn legacy_bytes(
     // key either as the letter or as the control character it produces
     // (`"\u{2}"`), depending on layout and Ctrl handling — both spellings are
     // read here so the answer does not depend on which one arrived.
+    //
+    // **The space bar is in the alphabet too.** winit reports it as
+    // `NamedKey::Space` and never as the character, so it is read here as the
+    // `" "` it types: `Ctrl+Space` (and `Ctrl+Shift+Space`) is NUL, with ESC in
+    // front under Alt — kitty's legacy table, xterm, WezTerm and Windows
+    // Terminal all send it, and emacs' set-mark and readline's completion menus
+    // read it (design note `keyboard-protocol-2026-09-29.md` §8 F-2, revision (k)).
     if modifiers.control_key()
-        && let Key::Character(text) = key
-        && let Some(byte) = control_byte(text)
+        && let Some(byte) = match key {
+            Key::Character(text) => control_byte(text),
+            Key::Named(NamedKey::Space) => control_byte(" "),
+            _ => None,
+        }
     {
         return Some(meta_prefix(&[byte], modifiers.alt_key()));
     }
@@ -1421,13 +1454,20 @@ pub(crate) fn legacy_bytes(
             Some(meta_prefix(text.as_bytes(), modifiers.alt_key()))
         }
         Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
-        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
+        // **Alt+Backspace is `ESC DEL`** — readline's, zsh's and fish's
+        // backward-kill-word, and what kitty's legacy table, WezTerm (termwiz
+        // `KeyCode::encode`), Windows Terminal (`TerminalInput`'s `VK_BACK`
+        // `altPrefix`) and xterm under `metaSendsEscape` send. Alt prefixes ESC here as it does for a typed
+        // character; Ctrl and Super leave the byte as it is (design note
+        // `keyboard-protocol-2026-09-29.md` §8 F-3, revision (k)).
+        Key::Named(NamedKey::Backspace) => Some(meta_prefix(&[0x7f], modifiers.alt_key())),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
         // winit reports the text-producing space key as Named rather than
         // Character. It is text, so it answers to the same rule one arm up: the
-        // Windows key produces no character here either.
-        Key::Named(NamedKey::Space) if !modifiers.control_key() && !modifiers.super_key() => {
+        // Windows key produces no character here either. Under Ctrl it is the
+        // control alphabet's NUL, answered above.
+        Key::Named(NamedKey::Space) if !modifiers.super_key() => {
             Some(meta_prefix(b" ", modifiers.alt_key()))
         }
         // **F1–F12** (T-FKEYS): before this arm a function key no chrome rung
@@ -4652,7 +4692,8 @@ mod tests {
             ),
             ("Tab", ModifiersState::SHIFT, b"\x1b[Z".to_vec()),
             ("Backspace", ModifiersState::CONTROL, b"\x7f".to_vec()),
-            ("Space", ModifiersState::CONTROL, Vec::new()),
+            ("Space", ModifiersState::CONTROL, b"\x00".to_vec()),
+            ("Backspace", ModifiersState::ALT, b"\x1b\x7f".to_vec()),
             ("1", ModifiersState::CONTROL, Vec::new()),
             (
                 "1",
@@ -4693,6 +4734,125 @@ mod tests {
                 "{name} {modifiers:?} on the shipped ConPTY is its record pair"
             );
         }
+    }
+
+    /// RED (F-SWEEP-048, design note revision (k)) — **where no key record and no keyboard
+    /// protocol carries the chord, Alt+Backspace is `ESC DEL` and Ctrl+Space is NUL**; where one
+    /// does, the chord is what it was.
+    ///
+    /// The legacy roads are a Unix pty (the press said to come from a Mac, which has no
+    /// records), a Windows pane whose program turned win32-input-mode off, and a Windows pane on
+    /// the inbox ConPTY (records refused there). On each, Alt+Backspace (with or without Shift
+    /// or Ctrl) is `1b 7f` and Ctrl+Space (with or without Shift) is `00`, `1b 00` under Alt.
+    /// With win32-input-mode on the shipped ConPTY the two chords are their record pairs, written
+    /// out here from the spec (`VK_BACK` 8 / scan 14 / Alt 2, `VK_SPACE` 32 / scan 57 / Ctrl 8);
+    /// with kitty's flag 1 they are `CSI 127;3u` and `CSI 32;5u`, as kitty's own encoder writes.
+    ///
+    /// MUTATION: put `legacy_bytes`' Backspace arm back to a bare `0x7f` (the Alt rows read
+    /// `7f`); or drop `Key::Named(NamedKey::Space)` from the control alphabet (Ctrl+Space reads
+    /// a space); or ask `legacy_bytes` before `key_records` in `keyboard_bytes` (the records rows
+    /// read `ESC DEL`); or skip the `kitty_bytes` rung (the kitty rows read `ESC DEL`).
+    #[test]
+    fn alt_backspace_is_esc_del_and_ctrl_space_is_nul_where_no_record_or_protocol_carries_them() {
+        let alt = ModifiersState::ALT;
+        let control = ModifiersState::CONTROL;
+        let shift = ModifiersState::SHIFT;
+        let records_off = KeyboardProtocol {
+            win32_input_mode: false,
+            ..RECORDS
+        };
+        for (name, modifiers, legacy) in [
+            ("Backspace", alt, &b"\x1b\x7f"[..]),
+            ("Backspace", alt | shift, b"\x1b\x7f"),
+            ("Backspace", alt | control, b"\x1b\x7f"),
+            ("Backspace", ModifiersState::empty(), b"\x7f"),
+            ("Backspace", control, b"\x7f"),
+            ("Space", control, b"\x00"),
+            ("Space", control | shift, b"\x00"),
+            ("Space", control | alt, b"\x1b\x00"),
+            ("Space", ModifiersState::empty(), b" "),
+            ("Space", alt, b"\x1b "),
+        ] {
+            let (logical, base) = windows_us_event(name, modifiers);
+            let press = UsPress::new(name, modifiers);
+            let sent = |protocol, origin| {
+                keyboard_bytes(
+                    &logical,
+                    &base,
+                    KeyLocation::Standard,
+                    modifiers,
+                    false,
+                    protocol,
+                    origin,
+                )
+            };
+            for (road, protocol, origin) in [
+                ("a Unix pty", RECORDS, press.on(HostPlatform::MacOs)),
+                (
+                    "a Windows pane with records off",
+                    records_off,
+                    press.on(HostPlatform::Windows),
+                ),
+                (
+                    "a Windows pane on the inbox ConPTY",
+                    RECORDS,
+                    press.on_the_inbox_conpty(),
+                ),
+            ] {
+                assert_eq!(
+                    sent(protocol, origin).as_deref(),
+                    Some(legacy),
+                    "{name} {modifiers:?} on {road}"
+                );
+            }
+        }
+
+        let records = |name: &str, modifiers| {
+            let (logical, base) = windows_us_event(name, modifiers);
+            let press = UsPress::new(name, modifiers);
+            keyboard_bytes(
+                &logical,
+                &base,
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                RECORDS,
+                press.on(HostPlatform::Windows),
+            )
+        };
+        assert_eq!(
+            records("Backspace", alt).as_deref(),
+            Some(&b"\x1b[8;14;8;1;2;1_\x1b[8;14;8;0;2;1_"[..]),
+            "Alt+Backspace with records on is its record pair, unchanged"
+        );
+        assert_eq!(
+            records("Space", control).as_deref(),
+            Some(&b"\x1b[32;57;32;1;8;1_\x1b[32;57;32;0;8;1_"[..]),
+            "Ctrl+Space with records on is its record pair, unchanged"
+        );
+
+        let kitty = |name: &str, modifiers| {
+            let (logical, base) = windows_us_event(name, modifiers);
+            keyboard_bytes(
+                &logical,
+                &base,
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                KITTY,
+                NOWHERE,
+            )
+        };
+        assert_eq!(
+            kitty("Backspace", alt).as_deref(),
+            Some(&b"\x1b[127;3u"[..]),
+            "under kitty's flag 1 Alt+Backspace is the protocol's"
+        );
+        assert_eq!(
+            kitty("Space", control).as_deref(),
+            Some(&b"\x1b[32;5u"[..]),
+            "under kitty's flag 1 Ctrl+Space is the protocol's"
+        );
     }
 
     /// RED (T-KEYBOARD-RECORDS, review round 2) — **Ctrl+Alt+1 on Windows, as winit really hands
@@ -5272,6 +5432,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// RED (owner ruling 2026-10-09, design note revision (k)) — **on a Mac, Option+Backspace
+    /// sends `ESC DEL` whether or not *Option key sends Alt* is on**, and Option on a text key
+    /// still follows the setting.
+    ///
+    /// With the setting off, [`effective_modifiers`] takes Alt off at the door, so Backspace
+    /// alone gets the hand's Alt back ([`encoder_modifiers`]) — what Terminal.app and iTerm2 send
+    /// with their Option-as-Meta switch off. Option+a, with the setting off, is the composed
+    /// `å` (here the 2-byte `c3 a5`) and no ESC; and a Backspace with no Option is `DEL`.
+    ///
+    /// MUTATION: strip Alt from Backspace too (`encoder_modifiers` returns `effective`): the
+    /// first row reads `7f`.
+    #[test]
+    fn macos_option_backspace_deletes_a_word_whatever_the_option_setting() {
+        const MAC: HostPlatform = HostPlatform::MacOs;
+        let option = ModifiersState::ALT;
+        let sent = |logical: &Key, base: &Key, held: ModifiersState, option_sends_alt: bool| {
+            let effective = effective_modifiers(held, option_sends_alt, MAC);
+            keyboard_bytes(
+                logical,
+                base,
+                KeyLocation::Standard,
+                encoder_modifiers(logical, effective, held),
+                false,
+                UNASKED,
+                UsPress::new("Backspace", held).on(MAC),
+            )
+        };
+        let backspace = Key::Named(NamedKey::Backspace);
+        for option_sends_alt in [false, true] {
+            assert_eq!(
+                sent(&backspace, &backspace, option, option_sends_alt).as_deref(),
+                Some(&b"\x1b\x7f"[..]),
+                "Option+Backspace with Option key sends Alt {option_sends_alt}"
+            );
+        }
+        assert_eq!(
+            sent(&backspace, &backspace, ModifiersState::empty(), false).as_deref(),
+            Some(&b"\x7f"[..]),
+            "Backspace with no Option is DEL"
+        );
+        let composed = Key::Character("å".into());
+        let a = Key::Character("a".into());
+        assert_eq!(
+            sent(&composed, &a, option, false).as_deref(),
+            Some("å".as_bytes()),
+            "Option+a with the setting off is the composed character, with no ESC"
+        );
+        assert_eq!(
+            encoder_modifiers(&composed, effective_modifiers(option, false, MAC), option),
+            ModifiersState::empty(),
+            "and only Backspace gets the hand's Alt back"
+        );
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **on a Mac, Option types text unless the setting makes it

@@ -2030,7 +2030,13 @@ impl Runtime<'_> {
             &event.logical_key,
             &event.key_without_modifiers(),
             event.location,
-            self.window.modifiers,
+            // Option-as-text's one exception: Option+Backspace keeps its Alt (owner ruling
+            // 2026-10-09).
+            input::encoder_modifiers(
+                &event.logical_key,
+                self.window.modifiers,
+                self.window.modifiers_held,
+            ),
             application_cursor_mode,
             keyboard,
             // What a win32-input-mode record is built from (T-KEYBOARD-RECORDS): where the key

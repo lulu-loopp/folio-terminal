@@ -531,6 +531,7 @@ mod tests {
                     new: Vec::new(),
                 }),
                 adapter: Adapter::Ours,
+                marker: None,
             },
         }
         .encode();
@@ -618,6 +619,7 @@ mod tests {
                         new: Vec::new(),
                     }),
                     adapter: Adapter::Ours,
+                    marker: None,
                 },
             }
             .encode();

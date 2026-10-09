@@ -2051,7 +2051,7 @@ fn agent_command(profile: &Profile) -> Option<&str> {
 ///
 /// **One table, and it lives here rather than on `Runtime`.** Every consumer of
 /// a profile is already a free function in this module taking a `usize`
-/// ([`title`], [`spawn_place`], [`revived_cwd`], [`index_of_id`]…) and two of
+/// ([`title`], [`spawn_place`], [`index_of_id`]…) and two of
 /// them are in other modules entirely (`restore.rs`, `shell_integration.rs`).
 /// Threading a borrowed table through all of that would have made the table an
 /// argument of forty signatures to serve one owner; [`crate::i18n::install`] set
@@ -5039,23 +5039,42 @@ pub struct SpawnPlace {
     pub named: bool,
 }
 
-/// A directory a leaf of `profile` was saved standing in, if it is still a
-/// directory — the existence check that guards every revival, asked in the
-/// namespace the path is written in.
+/// **Where a leaf of `profile` opens, decided without asking the disk** (G-SWEEP-048, #29): the
+/// place as if the folder it carries still stands, and — when that folder decides the place and
+/// this machine can ask about it — where it opens if the folder does not answer as a directory.
+/// The birth asks (`pty_door`'s birth worker), so a folder on a network share that stopped
+/// answering holds a pane in birth, never the window thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BirthPlace {
+    /// The place, when the carried folder is still a directory or none needs asking.
+    pub place: SpawnPlace,
+    /// The folder the birth asks about, and the place it opens in when that folder is not a
+    /// directory now.
+    pub unless_gone: Option<GoneFolder>,
+}
+
+/// [`BirthPlace::unless_gone`]: a folder to ask the disk about, and the place a leaf opens in when
+/// it is gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoneFolder {
+    pub folder: PathBuf,
+    pub place: SpawnPlace,
+}
+
+/// **Whether a folder a leaf of `profile` carries can be asked about on this machine** — the
+/// namespace the path is written in decides.
 ///
-/// `is_dir()` is a Win32 question, and asking it of `/mnt/d/Developer` answers
-/// **no** on a machine where that directory is perfectly fine: nothing under
-/// `/mnt` exists as far as Windows is concerned, so an unguarded check would
-/// drop the directory of every WSL pane it ever restored, silently, and every
-/// revived WSL tab would come back at `~`. The check is therefore asked only
-/// where it can be answered, and a WSL directory is taken at its word — if it
-/// has since been deleted, `wsl.exe --cd` reports that itself, in the pane,
-/// which is an honest answer this side could not have produced anyway.
-#[must_use]
-pub fn revived_cwd(profile: usize, cwd: &Path) -> Option<PathBuf> {
-    match paths(profile) {
-        PathNamespace::Windows => cwd.is_dir().then(|| cwd.to_path_buf()),
-        PathNamespace::Wsl => Some(cwd.to_path_buf()),
+/// `is_dir()` is a Win32 question, and asking it of `/mnt/d/Developer` answers **no** on a machine
+/// where that directory is perfectly fine: nothing under `/mnt` exists as far as Windows is
+/// concerned, so an unguarded check would drop the directory of every WSL pane it ever restored,
+/// silently, and every revived WSL tab would come back at `~`. The check is therefore asked only
+/// where it can be answered, and a WSL directory is taken at its word — if it has since been
+/// deleted, `wsl.exe --cd` reports that itself, in the pane, which is an honest answer this side
+/// could not have produced anyway.
+fn folder_is_answerable(namespace: PathNamespace) -> bool {
+    match namespace {
+        PathNamespace::Windows => true,
+        PathNamespace::Wsl => false,
     }
 }
 
@@ -5161,17 +5180,17 @@ pub fn spawn_place(
     profile: usize,
     inherited: Option<SeedPlace>,
     environment: &dyn ShellEnvironment,
-) -> SpawnPlace {
-    // **A folder that is no longer a directory is no folder** (T-RESTART-CWD round 2). Every
-    // shell started in a pane's place comes through here — `Restart shell`, a split, a duplicate,
-    // a revived tab, a Recent row — and the folder it carries may have been deleted since it was
-    // reported or since the pane was born. Handed on as it stands, `bt-pty`'s boundary check would
-    // start the shell in *this process's* directory (`C:\WINDOWS\system32` for a shortcut
-    // launch); answered here, it falls to what no folder falls to for this profile — its own
-    // starting directory or the account's home. The check is `revived_cwd`'s, the one a restore
-    // already made, so a WSL folder, which Windows cannot see, is taken at its word.
-    let inherited = inherited
-        .and_then(|place| revived_cwd(profile, place.path()).map(|cwd| place.with_path(cwd)));
+) -> BirthPlace {
+    // **A folder that is no longer a directory is no folder** (T-RESTART-CWD round 2), and **the
+    // disk is asked on the birth, not here** (G-SWEEP-048, #29). Every shell started in a pane's
+    // place comes through here — `Restart shell`, a split, a duplicate, a revived tab, a Recent
+    // row — and the folder it carries may have been deleted since it was reported, or sit on a
+    // network share that stopped answering (an `is_dir` there waits out the redirector's timeout,
+    // 20–60 s). Handed on as it stands, `bt-pty`'s boundary check would start the shell in *this
+    // process's* directory (`C:\WINDOWS\system32` for a shortcut launch); answered, it falls to
+    // what no folder falls to for this profile — its own starting directory or the account's home.
+    // So both places are decided here, and the birth asks the disk which one stands
+    // ([`BirthPlace`]); a WSL folder, which Windows cannot see, is taken at its word.
     let (start_at, starting_dir, namespace) = with_table(|table| {
         table.get(profile).map_or_else(
             || {
@@ -5190,7 +5209,21 @@ pub fn spawn_place(
             },
         )
     });
-    place_for(&start_at, &starting_dir, namespace, inherited, environment)
+    let place = place_for(
+        &start_at,
+        &starting_dir,
+        namespace,
+        inherited.clone(),
+        environment,
+    );
+    let unless_gone = inherited
+        .filter(|_| folder_is_answerable(namespace))
+        .map(|carried| GoneFolder {
+            folder: carried.path().to_path_buf(),
+            place: place_for(&start_at, &starting_dir, namespace, None, environment),
+        })
+        .filter(|gone| gone.place != place);
+    BirthPlace { place, unless_gone }
 }
 
 /// [`spawn_place`]'s pure half — the three answers resolved against one
@@ -18085,7 +18118,7 @@ mod tests {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
         for profile in ["pwsh", "gitbash", "cmd"] {
             assert_eq!(
-                spawn_place(index_of_id(profile), None, &machine),
+                spawn_place(index_of_id(profile), None, &machine).place,
                 SpawnPlace {
                     working_directory: Some(PathBuf::from(r"C:\Users\dev")),
                     arguments: Vec::new(),
@@ -18097,7 +18130,7 @@ mod tests {
             );
         }
         assert_eq!(
-            spawn_place(index_of_id("wsl"), None, &machine),
+            spawn_place(index_of_id("wsl"), None, &machine).place,
             SpawnPlace {
                 working_directory: None,
                 arguments: vec![OsString::from("--cd"), OsString::from("~")],
@@ -18120,11 +18153,12 @@ mod tests {
                 None,
                 &FakeMachine::default().with_var("USERPROFILE", r"\\server\redirected\dev")
             )
+            .place
             .working_directory,
             Some(PathBuf::from(r"\\server\redirected\dev")),
         );
         assert_eq!(
-            spawn_place(fallback_profile(), None, &FakeMachine::default()),
+            spawn_place(fallback_profile(), None, &FakeMachine::default()).place,
             SpawnPlace::default(),
             "a machine that cannot name its own home is told nothing, not a guess"
         );
@@ -18156,7 +18190,8 @@ mod tests {
                 index_of_id("pwsh"),
                 Some(SeedPlace::Carried(here.clone())),
                 &machine
-            ),
+            )
+            .place,
             SpawnPlace {
                 working_directory: Some(here.clone()),
                 arguments: Vec::new(),
@@ -18171,7 +18206,8 @@ mod tests {
                 index_of_id("wsl"),
                 Some(SeedPlace::Carried(PathBuf::from("/mnt/d/Developer"))),
                 &machine
-            ),
+            )
+            .place,
             SpawnPlace {
                 working_directory: None,
                 arguments: vec![OsString::from("--cd"), OsString::from("/mnt/d/Developer")],
@@ -18184,17 +18220,20 @@ mod tests {
         );
     }
 
-    /// RED (T-RESTART-CWD round 2, finding 1) — **a folder that is no longer a directory starts
-    /// the shell where no folder would**, never in this process's own directory.
+    /// RED (T-RESTART-CWD round 2, finding 1; G-SWEEP-048 #29) — **a folder that is no longer a
+    /// directory starts the shell where no folder would**, never in this process's own directory,
+    /// **and the disk is asked by the birth, not by the window.**
     ///
     /// `Restart shell`, a split, a duplicate and a revived tab all hand `spawn_place` the folder
-    /// the pane stood in, and it may have been deleted since. Handed on as it stood, `bt-pty`'s
-    /// boundary check started the shell in Folio's own process directory (`C:\WINDOWS\system32`
-    /// for a shortcut launch). A WSL folder cannot be checked from Windows and is taken at its
-    /// word, as a restore already takes it.
+    /// the pane stood in, and it may have been deleted since — or sit on a share that stopped
+    /// answering. Handed on as it stood, `bt-pty`'s boundary check started the shell in Folio's
+    /// own process directory (`C:\WINDOWS\system32` for a shortcut launch). So the window decides
+    /// both places without asking (the folder kept, and where no folder would put the shell), and
+    /// the birth's [`crate::pty_door::gone_place`] asks. A WSL folder cannot be checked from
+    /// Windows and is taken at its word, as a restore already takes it.
     ///
-    /// MUTATION, observed red: drop the `revived_cwd` filter from `spawn_place` — the deleted
-    /// folder is handed on as the working directory.
+    /// MUTATION, observed red: `gone_place` answering the folder standing — the deleted folder is
+    /// handed on as the working directory.
     ///
     /// **Windows only:** the rows are the Windows seed's and the half no folder
     /// can be checked for is a WSL one. The same rule for the shells of the
@@ -18208,32 +18247,55 @@ mod tests {
         let gone = bt_testpath::temp_path("folio-restart-cwd-no-such-directory");
         for id in ["pwsh", "gitbash", "cmd"] {
             let profile = index_of_id(id);
+            let nowhere = spawn_place(profile, None, &machine).place;
+            for folder in [&live, &gone] {
+                let decided =
+                    spawn_place(profile, Some(SeedPlace::Carried(folder.clone())), &machine);
+                assert_eq!(
+                    decided.place.working_directory.as_ref(),
+                    Some(folder),
+                    "{id}: the window puts the shell in the folder it carries, asking nobody"
+                );
+                assert_eq!(
+                    decided.unless_gone,
+                    Some(GoneFolder {
+                        folder: folder.clone(),
+                        place: nowhere.clone(),
+                    }),
+                    "{id}: and leaves the birth the folder to ask about, and where else to go"
+                );
+            }
+            let ask = |folder: &PathBuf| {
+                crate::pty_door::gone_place(
+                    Some(crate::pty_door::GoneSpec {
+                        folder: folder.clone(),
+                        arguments: Vec::new(),
+                        working_directory: nowhere.working_directory.clone(),
+                    }),
+                    &Path::is_dir,
+                )
+                .map(|gone| gone.working_directory)
+            };
             assert_eq!(
-                spawn_place(profile, Some(SeedPlace::Carried(live.clone())), &machine)
-                    .working_directory,
-                Some(live.clone()),
+                ask(&live),
+                None,
                 "{id}: a folder that is there is where the shell starts"
             );
             assert_eq!(
-                spawn_place(profile, Some(SeedPlace::Carried(gone.clone())), &machine),
-                spawn_place(profile, None, &machine),
+                ask(&gone),
+                Some(Some(PathBuf::from(home))),
                 "{id}: a folder that is gone is answered as no folder"
-            );
-            assert_eq!(
-                spawn_place(profile, Some(SeedPlace::Carried(gone.clone())), &machine)
-                    .working_directory,
-                Some(PathBuf::from(home))
             );
         }
         let unseen = PathBuf::from("/mnt/d/folio-restart-cwd-no-such-directory");
+        let wsl = spawn_place(
+            index_of_id("wsl"),
+            Some(SeedPlace::Carried(unseen.clone())),
+            &machine,
+        );
         assert_eq!(
-            spawn_place(
-                index_of_id("wsl"),
-                Some(SeedPlace::Carried(unseen.clone())),
-                &machine
-            )
-            .directory,
-            Some(unseen),
+            (wsl.place.directory, wsl.unless_gone),
+            (Some(unseen), None),
             "a WSL folder is taken at its word: Windows cannot see it to check"
         );
     }
@@ -18254,12 +18316,14 @@ mod tests {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
         let wsl = index_of_id("wsl");
         assert_eq!(
-            spawn_place(wsl, Some(SeedPlace::Carried(PathBuf::from("~"))), &machine),
-            spawn_place(wsl, None, &machine),
+            spawn_place(wsl, Some(SeedPlace::Carried(PathBuf::from("~"))), &machine).place,
+            spawn_place(wsl, None, &machine).place,
             "`--cd ~` is the same launch as no place at all"
         );
         assert!(
-            spawn_place(wsl, Some(SeedPlace::Carried(PathBuf::from("~"))), &machine).at_shell_home
+            spawn_place(wsl, Some(SeedPlace::Carried(PathBuf::from("~"))), &machine)
+                .place
+                .at_shell_home
         );
         assert!(
             !spawn_place(
@@ -18267,6 +18331,7 @@ mod tests {
                 Some(SeedPlace::Carried(PathBuf::from("/home/alice/src"))),
                 &machine
             )
+            .place
             .at_shell_home,
             "a folder the pane inherited is not its home"
         );
@@ -18527,7 +18592,8 @@ mod tests {
     /// directory is fine. An unguarded check therefore drops the directory of
     /// every WSL pane it restores — every revived WSL tab comes back at `~`,
     /// nothing is logged, and the session file that has the right answer in it
-    /// is overwritten with the wrong one on the next save.
+    /// is overwritten with the wrong one on the next save. So only a folder in a
+    /// namespace this machine can answer for is left for the birth to ask about.
     ///
     /// **Windows only:** the rows are the Windows seed's and the namespace no
     /// check can answer for is WSL's. The check for the shells of the platform
@@ -18536,25 +18602,28 @@ mod tests {
     #[test]
     fn a_saved_directory_is_only_checked_for_existence_where_that_is_answerable() {
         let real = std::env::temp_dir();
-        let gone = bt_testpath::temp_path("betterterminal-no-such-directory-here");
         for id in ["pwsh", "gitbash", "cmd"] {
-            let profile = index_of_id(id);
-            assert_eq!(
-                revived_cwd(profile, &real).as_deref(),
-                Some(real.as_path()),
-                "{id} comes back where it was"
+            let decided = spawn_place(
+                index_of_id(id),
+                Some(SeedPlace::Carried(real.clone())),
+                &FakeMachine::default(),
             );
             assert_eq!(
-                revived_cwd(profile, &gone),
-                None,
-                "{id} does not come back in a directory that is gone"
+                decided.unless_gone.map(|gone| gone.folder),
+                Some(real.clone()),
+                "{id}: its folder is asked about"
             );
         }
         let wsl = index_of_id("wsl");
         for inside in ["/home/alice/src", "/mnt/d/Developer"] {
             assert_eq!(
-                revived_cwd(wsl, Path::new(inside)).as_deref(),
-                Some(Path::new(inside)),
+                spawn_place(
+                    wsl,
+                    Some(SeedPlace::Carried(PathBuf::from(inside))),
+                    &FakeMachine::default()
+                )
+                .unless_gone,
+                None,
                 "a WSL directory is taken at its word: Windows cannot see it to check"
             );
         }
@@ -26296,9 +26365,9 @@ mod tests {
     /// over this process's own rows — every row whose program is handed its
     /// place as a working directory — and its own home variable.
     ///
-    /// MUTATION: drop the `revived_cwd` filter from `spawn_place` and the folder
-    /// that has gone is handed on as the working directory; read the home from a
-    /// variable this platform does not set and the first assertion finds nothing.
+    /// MUTATION: `pty_door::gone_place` answering every folder standing, and the folder that has
+    /// gone is handed on as the working directory; read the home from a variable this platform
+    /// does not set and the first assertion finds nothing.
     #[test]
     fn a_shell_of_this_platform_starts_where_its_place_says() {
         let home = bt_testpath::temp_path("folio-starting-place-home");
@@ -26318,7 +26387,7 @@ mod tests {
         for profile in rows {
             let name = id(profile);
             assert_eq!(
-                spawn_place(profile, None, &machine),
+                spawn_place(profile, None, &machine).place,
                 SpawnPlace {
                     working_directory: Some(home.clone()),
                     arguments: Vec::new(),
@@ -26330,23 +26399,33 @@ mod tests {
             );
             assert_eq!(
                 spawn_place(profile, Some(SeedPlace::Carried(live.clone())), &machine)
+                    .place
                     .working_directory,
                 Some(live.clone()),
                 "{name}: a folder that is there is where the shell starts"
             );
-            assert_eq!(revived_cwd(profile, &live).as_deref(), Some(live.as_path()));
-            assert_eq!(
-                revived_cwd(profile, &gone),
-                None,
-                "{name}: a folder that has gone does not come back"
+            let nowhere = spawn_place(profile, None, &machine).place;
+            let gone_spec = |folder: &PathBuf| {
+                spawn_place(profile, Some(SeedPlace::Carried(folder.clone())), &machine)
+                    .unless_gone
+                    .map(|gone| crate::pty_door::GoneSpec {
+                        folder: gone.folder,
+                        arguments: gone.place.arguments,
+                        working_directory: gone.place.working_directory,
+                    })
+            };
+            assert!(
+                crate::pty_door::gone_place(gone_spec(&live), &Path::is_dir).is_none(),
+                "{name}: a folder that is there stands"
             );
             assert_eq!(
-                spawn_place(profile, Some(SeedPlace::Carried(gone.clone())), &machine),
-                spawn_place(profile, None, &machine),
+                crate::pty_door::gone_place(gone_spec(&gone), &Path::is_dir)
+                    .map(|gone| gone.working_directory),
+                Some(nowhere.working_directory),
                 "{name}: a folder that has gone is answered as no folder"
             );
             assert_eq!(
-                spawn_place(profile, None, &FakeMachine::default()),
+                spawn_place(profile, None, &FakeMachine::default()).place,
                 SpawnPlace::default(),
                 "{name}: a machine that cannot name its own home is told nothing, not a guess"
             );

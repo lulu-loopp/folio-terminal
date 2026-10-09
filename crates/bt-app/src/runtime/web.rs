@@ -743,6 +743,16 @@ impl Runtime<'_> {
                 // went and came back" is not otherwise visible from outside the
                 // process.
                 webhost::WebOutcome::Refused(uri) => eprintln!("BT_WEB refused {uri}"),
+                // **A window the page asked for** (F-SWEEP-048, #27): a new web pane, or the
+                // refusal said where the page is — the line a refused link in a document gets.
+                webhost::WebOutcome::NewWindow(webhost::NewWindow::Open(url)) => {
+                    self.open_web_page_beside(leaf, &url)?;
+                }
+                webhost::WebOutcome::NewWindow(webhost::NewWindow::Refused(uri)) => {
+                    eprintln!("BT_WEB refused a new window for {uri}");
+                    let surface = self.surface_of_page(leaf);
+                    self.say_address_refused(surface, &uri)?;
+                }
                 // What no card covers. The five §7.7 ④ states are drawn by the
                 // seat itself; this is the residue, and it goes where `BT_DPI`
                 // goes for its reason — a fact with nowhere to be drawn is still
@@ -896,6 +906,49 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **A page's request for a window of its own, opened as a new web pane** (F-SWEEP-048,
+    /// issue #27) — `url` is already the address bar's answer (`webhost::new_window_verdict`).
+    ///
+    /// **Beside the page that asked**, on the road the pane menu's splits take: the asking pane
+    /// is split in the direction a split with no direction of its own takes
+    /// (`Self::settings_split_axis`), the new pane is a preview, and the page opens on it with
+    /// nothing minted — so `NavigationStarting` asks the same rule again when it loads — and takes
+    /// the keyboard, as a page opened by any door that chose its pane does. The asking page stays
+    /// where it is: a link that opens elsewhere never replaces the page it was on, which the
+    /// landing rule would do when that page is the tab's reusable preview.
+    ///
+    /// A page that is not a pane of the tab in front — one carried in a float — has nothing to
+    /// split (the split answers `None` for a seat its tree does not hold; it no longer refuses
+    /// one for size), and its new page goes where any newly opened page goes
+    /// (`Self::open_web_page`), which is never into a float.
+    pub(crate) fn open_web_page_beside(&mut self, opener: LeafId, url: &str) -> Result<()> {
+        let arriving = if opener.tab == self.id {
+            let metrics = self.seat_metrics();
+            let dir = self.settings_split_axis(opener.seat);
+            self.seats.split_preview(&metrics, opener.seat, dir)
+        } else {
+            None
+        };
+        let Some(arriving) = arriving else {
+            return self.open_web_page(url);
+        };
+        self.settle_seat_set_change()?;
+        self.open_web_page_on(self.leaf_here(arriving), url, webnav::Mint::Nothing)?;
+        self.focus_seat(arriving)
+    }
+
+    /// **The surface a page is drawn on** — its pane, or the float carrying it — so that what is
+    /// said about the page is said where it is.
+    fn surface_of_page(&self, leaf: LeafId) -> PreviewSurface {
+        self.window
+            .float
+            .drawn()
+            .find(|win| win.preview().and_then(|preview| preview.page) == Some(leaf))
+            .map_or(PreviewSurface::Seat(leaf), |win| {
+                PreviewSurface::Float(win.epoch)
+            })
     }
 
     /// `BT_WEB_DEV=<url>` — open a preview seat and put that page on it.

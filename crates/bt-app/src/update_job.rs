@@ -257,6 +257,10 @@ pub(crate) struct Gathered {
     pub(crate) running: &'static str,
     /// Whether this build was made with the updater flag ([`crate::update::eligible`]).
     pub(crate) capable: bool,
+    /// **Whether the manager's own record names this copy** (managed-update
+    /// §1.5: Homebrew's R-H2, [`crate::install_channel::at_recorded_target`]);
+    /// `false` for a copy no record was asked of.
+    pub(crate) recorded: bool,
     /// Whether this process is an update's trial ([`crate::update_startup::trial`]).
     pub(crate) trial: bool,
     /// Which platform's release files an offer would name.
@@ -273,6 +277,7 @@ impl Gathered {
             channel: crate::install_channel::channel(),
             running: crate::version::VERSION,
             capable: crate::update::eligible(),
+            recorded: crate::install_channel::at_recorded_target(),
             trial: crate::update_startup::trial().is_some(),
             platform: bt_platform::host_platform(),
         }
@@ -289,6 +294,7 @@ impl Gathered {
                 running: self.running,
                 channel,
                 capable: self.capable,
+                recorded: self.recorded,
                 trial: self.trial,
                 platform: self.platform,
             }),
@@ -310,6 +316,8 @@ pub(crate) struct Evidence {
     pub(crate) channel: Channel,
     /// Whether this build was made with the updater flag.
     pub(crate) capable: bool,
+    /// Whether the manager's own record names this copy ([`Gathered::recorded`]).
+    pub(crate) recorded: bool,
     /// Whether this process is an update's trial.
     pub(crate) trial: bool,
     /// Which platform's release files an offer would name.
@@ -436,13 +444,14 @@ impl Evidence {
         match self.channel {
             Channel::Ours => {}
             // A managed copy takes its manager's adapter only where that
-            // road is built (managed-update §1.5); everywhere else, its row
-            // keeps the manager's command.
+            // road is built and its precondition holds (managed-update §1.5:
+            // Homebrew's is its own record naming this copy, §2.2 R-H2);
+            // everywhere else, its row keeps the manager's command.
             Channel::Managed { manager, .. } => {
-                if !crate::update_adapter::built_on(
-                    crate::update_adapter::of_manager(manager),
-                    self.platform,
-                ) {
+                let adapter = crate::update_adapter::of_manager(manager);
+                if !crate::update_adapter::built_on(adapter, self.platform)
+                    || (manager == Manager::Homebrew && !self.recorded)
+                {
                     return Err(NotEligible::Managed {
                         manager,
                         command: manager_command(manager),
@@ -2361,6 +2370,7 @@ mod tests {
             channel,
             running: RUNNING,
             capable: true,
+            recorded: false,
             trial: false,
             platform: HostPlatform::Windows,
         }
@@ -2991,6 +3001,7 @@ mod tests {
             running: RUNNING,
             channel,
             capable,
+            recorded: false,
             trial: false,
             platform,
         }
@@ -3340,6 +3351,7 @@ mod tests {
                     channel: Some(channel),
                     running: crate::version::VERSION,
                     capable: true,
+                    recorded: false,
                     trial: false,
                     platform: HostPlatform::Windows,
                 },
@@ -3486,6 +3498,7 @@ mod tests {
                 channel: Some(channel),
                 running: crate::version::VERSION,
                 capable: true,
+                recorded: false,
                 trial: false,
                 platform: HostPlatform::Windows,
             };

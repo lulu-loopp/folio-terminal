@@ -603,10 +603,11 @@ fn two_saved_files_columns_come_back_to_their_own_roots() {
 /// says so by contributing no entry at all.
 ///
 /// The same filter the single-cwd version had, kept per leaf: an empty `cwd`
-/// is "nobody said", not "the root of the drive", and a folder that has since
-/// been deleted is answered the same way — the honest answer to both is HOME.
-/// Absent rather than present-and-empty, so `create_tab_state` has one shape
-/// to read and not two.
+/// is "nobody said", not "the root of the drive". Absent rather than
+/// present-and-empty, so `create_tab_state` has one shape to read and not two.
+/// A folder that has since been deleted is carried as saved: whether it still
+/// stands is the pane's birth's question, never the window thread's
+/// (G-SWEEP-048, `profiles::BirthPlace`), and the birth answers it as no folder.
 #[test]
 fn a_saved_pane_that_named_no_folder_contributes_no_entry() {
     let (seats, _, none, _files, _preview) = revive_plan(&saved_row_of_two("", ""));
@@ -631,8 +632,11 @@ fn a_saved_pane_that_named_no_folder_contributes_no_entry() {
     };
     assert_eq!(one[&left].cwd, Some(profiles::SeedPlace::Carried(here)));
     assert_eq!(
-        one[&right].cwd, None,
-        "a folder that is no longer a directory is answered like one never named"
+        one[&right].cwd,
+        Some(profiles::SeedPlace::Carried(PathBuf::from(
+            r"C:\definitely\not\here"
+        ))),
+        "a folder that is no longer a directory is carried unasked, for the birth to ask about"
     );
 }
 

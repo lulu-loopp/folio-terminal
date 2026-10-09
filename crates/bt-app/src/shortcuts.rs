@@ -2455,6 +2455,17 @@ impl Shortcuts {
 /// changes with the language the window started in.
 pub(crate) const SUMMON_QUAKE_ID: &str = "summon-quake";
 
+/// **Which line of the shortcut page is the summon row** — the index a `Record` on that page would
+/// carry, and the one the Terminal page's caps box starts the same capture on (§7.54e ⑤).
+///
+/// One answer for the pointer's press (`Runtime::summon_shortcut_line`) and the keyboard's Enter
+/// (`SettingsPanel::activate`), so the two roads cannot open the capture on different lines.
+/// `None` on a build whose table has no summon row.
+pub(crate) fn summon_line(rows: &[ShortcutRow]) -> Option<usize> {
+    rows.iter()
+        .position(|line| line.ids.contains(&SUMMON_QUAKE_ID))
+}
+
 /// **Say on the summon's own row that another program holds its key** (§7.54,
 /// user ruling next29).
 ///

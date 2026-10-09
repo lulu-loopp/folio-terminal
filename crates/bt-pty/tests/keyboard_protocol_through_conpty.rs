@@ -445,6 +445,71 @@ fn a_native_node_reader_reads_the_answer_and_csi_u_as_its_bytes() {
     probe.finish();
 }
 
+/// **A key-record reader sent the legacy bytes for Alt+Backspace and Ctrl+Space reads those
+/// keys** (F-SWEEP-048, design note revision (k)).
+///
+/// Where a pane carries no win32-input-mode records — the inbox ConPTY, or a pane whose program
+/// turned the mode off — the encoder sends `ESC DEL` for Alt+Backspace and NUL for Ctrl+Space.
+/// ConPTY's input parser turns each into one key event, measured through the shipped and the
+/// inbox ConPTY alike: `ESC DEL` is `Backspace` with Alt (character 0x08), never a lone Escape,
+/// which PSReadLine would read as `RevertLine`; NUL is `Ctrl+@` — `D2` with Control and Shift,
+/// character 0 — the chord PSReadLine binds to the same function as `Ctrl+Spacebar`
+/// (`MenuComplete` in its Windows mode, `SetMark` in its Emacs mode).
+///
+/// MUTATION: send `DEL` alone, the byte before F-SWEEP-048 (the reader reads `Backspace` with
+/// no modifier).
+#[test]
+fn a_key_record_reader_reads_esc_del_as_alt_backspace_and_nul_as_ctrl_space() {
+    const SCRIPT: &str = r#"
+Write-Output ('BT_KKP_' + 'READY')
+$t = @()
+while ($true) {
+  $k = [Console]::ReadKey($true)
+  if ($k.KeyChar -eq 'q') { break }
+  $t += ('{0}/{1}/{2:x2}' -f $k.Key, [int]$k.Modifiers, [int]$k.KeyChar)
+}
+Write-Output ('BT_KKP_' + 'KEYS=' + ($t -join ' '))
+"#;
+    let mut probe = Probe::spawn(powershell(SCRIPT));
+    probe.wait_for("BT_KKP_READY");
+    probe.send(b"\x1b\x7f");
+    probe.send(b"x");
+    probe.send(b"\x00");
+    probe.send(b"q");
+    let keys = probe.wait_for("BT_KKP_KEYS=");
+    eprintln!(
+        "BT_KKP_ESC_DEL_NUL conpty={:?} keys={keys:?}",
+        bt_pty::conpty_source()
+    );
+    let events = keys.split(' ').collect::<Vec<_>>();
+    let segments = events
+        .split(|event| event.ends_with("/78"))
+        .map(<[&str]>::to_vec)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        segments.len(),
+        2,
+        "two sends either side of one `x` sentinel: {keys:?}"
+    );
+    // `ConsoleModifiers`: Alt = 1, Shift = 2, Control = 4.
+    assert_eq!(
+        segments[0].len(),
+        1,
+        "`ESC DEL` is one key press, not an Escape and then a Backspace: {keys:?}"
+    );
+    assert_eq!(
+        segments[0][0], "Backspace/1/08",
+        "and it is Backspace with Alt, character 0x08: {keys:?}"
+    );
+    assert_eq!(segments[1].len(), 1, "NUL is one key press: {keys:?}");
+    assert_eq!(
+        segments[1][0], "D2/6/00",
+        "and it is Ctrl+@ (`D2` with Control and Shift), character 0 — the key PSReadLine binds \
+         beside Ctrl+Spacebar: {keys:?}"
+    );
+    probe.finish();
+}
+
 // ── T-KEYBOARD-RECORDS (design note §7.3, gates 1 and 2) ──────────────────────────────────────
 //
 // **Scope of the byte literals.** The VT-input and Node readbacks below are what the ConPTY Folio

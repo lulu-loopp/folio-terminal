@@ -260,8 +260,7 @@ use bt_render::{
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
     SessionDecorationTask, SessionMathTask, SessionStatus, TerminalCanvas, TerminalModes,
-    TerminalPalette, normalized_local_image_path_key, render_detection_task,
-    render_live_detection_task,
+    TerminalPalette, normalized_local_image_path_key,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -2348,27 +2347,12 @@ fn run_decoration_worker(
         let completion = match work {
             MathWorkerRequest::Math {
                 leaf,
-                task,
+                mut task,
                 foreground_rgb,
-            } => (
-                leaf,
-                match *task {
-                    SessionMathTask::Frozen(mut task) => {
-                        let result = render_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Frozen(task)),
-                            result,
-                        }
-                    }
-                    SessionMathTask::Live(mut task) => {
-                        let result = render_live_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Live(task)),
-                            result,
-                        }
-                    }
-                },
-            ),
+            } => {
+                let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                (leaf, DecorationWorkerCompletion::Math { task, result })
+            }
             MathWorkerRequest::InlineImage { leaf, task } => {
                 let result = image_decoder.decode(task.clone());
                 (
@@ -11931,6 +11915,31 @@ struct BirthDecision {
     at_shell_home: bool,
     named: bool,
     program: Option<PathBuf>,
+    /// The folder the birth asks the disk about, and where the pane stands when it is gone
+    /// (G-SWEEP-048, #29).
+    unless_gone: Option<Box<profiles::GoneFolder>>,
+}
+
+impl BirthDecision {
+    /// **The decision for a pane whose folder the birth found gone**: standing where no folder
+    /// would have put it, and a `diagnostics.log` line that says which folder and where instead.
+    fn with_folder_gone(mut self, note: &mut dyn FnMut(&str)) -> Self {
+        if let Some(gone) = self.unless_gone.take().map(|gone| *gone) {
+            note(&format!(
+                "{} is not a folder this machine can open now (removed, or on a share that is not \
+                 answering); the shell started in {} instead",
+                gone.folder.display(),
+                gone.place.directory.as_deref().map_or_else(
+                    || "this process's folder".to_owned(),
+                    |directory| directory.display().to_string()
+                )
+            ));
+            self.spawn_place = gone.place.directory;
+            self.at_shell_home = gone.place.at_shell_home;
+            self.named = gone.place.named;
+        }
+        self
+    }
 }
 
 impl PaneBirth {
@@ -35724,10 +35733,11 @@ fn revive_plan(
     //
     // An empty `cwd` is a shell that never reported one, not a path to the root
     // of the drive — hand over nothing and let the new shell start where a fresh
-    // one would. Whether the folder still exists is a filesystem question, and
-    // the answer to a missing one is the same as the answer to none: HOME. Both
-    // are expressed as `None` rather than as an empty path, so
-    // `create_leaf_session` has one shape to read instead of two.
+    // one would, expressed as `None` rather than as an empty path, so
+    // `create_leaf_session` has one shape to read instead of two. Whether the
+    // folder still exists is a filesystem question the pane's birth asks
+    // (`profiles::BirthPlace`), never this thread, and the answer to a missing
+    // one is the same as the answer to none.
     //
     // An unknown `profile_id` falls to the default profile and keeps the pane —
     // §5.4 逐叶降级, and `index_of_id`'s own rule: a profile that was removed, or
@@ -35751,11 +35761,7 @@ fn revive_plan(
                     unknown_profile_id,
                     cwd: Some(leaf.cwd.as_str())
                         .filter(|cwd| !cwd.is_empty())
-                        .map(Path::new)
-                        .and_then(|cwd| {
-                            profiles::revived_cwd(profiles::index_of_id(&leaf.profile_id), cwd)
-                        })
-                        .map(profiles::SeedPlace::Carried),
+                        .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
                     // The third fact read out of the same saved leaf in the same
                     // pass, for the reason the two above it are: a pane revived
                     // with somebody else's aim is a card pointed at the wrong
@@ -39076,6 +39082,7 @@ mod shell_birth_tests {
             at_shell_home: false,
             named: false,
             program: Some(PathBuf::from("外壳")),
+            unless_gone: None,
         }
     }
 
@@ -39209,6 +39216,156 @@ mod shell_birth_tests {
         }
     }
 
+    /// A folder resolver that says it was asked, then waits for the test to answer for the disk —
+    /// a network share that has stopped answering, until the test lets it.
+    fn share_that_waits(
+        asked: mpsc::Sender<PathBuf>,
+        answer: mpsc::Receiver<bool>,
+    ) -> impl Fn(&Path) -> bool {
+        move |folder| {
+            let _ = asked.send(folder.to_path_buf());
+            answer.recv_timeout(crate::lane::PATIENCE).unwrap_or(true)
+        }
+    }
+
+    /// The folder a birth worker asked the disk about.
+    fn asked_about(asked: &mpsc::Receiver<PathBuf>) -> PathBuf {
+        asked
+            .recv_timeout(crate::lane::PATIENCE)
+            .expect("the birth worker asks about the folder within the lane suite's patience")
+    }
+
+    /// RED — **a pane whose folder is on a share that stopped answering is made without the
+    /// window waiting, and its shell lands where no folder would have put it** (G-SWEEP-048, #29).
+    /// The window decides the place without the disk: the folder kept, and where the pane goes
+    /// if the folder is gone. The birth worker asks — here a resolver that blocks until the test
+    /// answers for the share — while the pane already draws and holds what is typed; the share
+    /// then answers "no folder", and the shell starts and lands in the profile's own place, with
+    /// one `diagnostics.log` line naming the folder.
+    ///
+    /// MUTATION (observed red): check on the window thread — `spawn_place` keeping a carried
+    /// folder only when it is a directory now, as `revived_cwd` did — the window answers the
+    /// share itself and leaves the birth nothing to ask.
+    #[test]
+    fn a_folder_that_does_not_answer_is_asked_by_the_birth_and_the_shell_lands_where_no_folder_would()
+     {
+        let share = PathBuf::from(if cfg!(windows) {
+            r"\\共享-offline.invalid\项目\folio"
+        } else {
+            "/Volumes/共享-offline/项目/folio"
+        });
+        let profile = profiles::fallback_profile_id();
+        let decided = profiles::spawn_place(
+            profiles::index_of_id(profile),
+            Some(profiles::SeedPlace::Carried(share.clone())),
+            &bt_pty::SystemShellEnvironment,
+        );
+        assert_eq!(
+            decided.place.directory.as_ref(),
+            Some(&share),
+            "the window puts the pane in its folder, asking nobody"
+        );
+        let gone = decided
+            .unless_gone
+            .clone()
+            .expect("and leaves the folder for the birth to ask about");
+        let decision = BirthDecision {
+            started: Started::AsAsked,
+            spawn_profile: profile.to_owned(),
+            spawn_place: decided.place.directory.clone(),
+            at_shell_home: decided.place.at_shell_home,
+            named: decided.place.named,
+            program: Some(PathBuf::from("外壳")),
+            unless_gone: decided.unless_gone.clone().map(Box::new),
+        };
+        let seed = LeafSeed {
+            cwd: Some(profiles::SeedPlace::Carried(share.clone())),
+            ..seed_of(profile)
+        };
+        let mut leaf = bare(&decision, &seed);
+        let (asked_by, asked) = mpsc::channel();
+        let (answer, share_answers) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let spec = pty_door::GoneSpec {
+            folder: gone.folder.clone(),
+            arguments: Vec::new(),
+            working_directory: gone.place.working_directory.clone(),
+        };
+        let shell = pty_door::request(
+            move |_| {
+                let resolver = share_that_waits(asked_by, share_answers);
+                let folder_gone = pty_door::gone_place(Some(spec), &resolver).is_some();
+                pty_door::Born {
+                    session: a_shell().map(|(session, hygiene)| {
+                        let _ = kept.send(hygiene);
+                        session
+                    }),
+                    folder_gone,
+                }
+            },
+            wake,
+        )
+        .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+
+        assert_eq!(asked_about(&asked), share, "the birth asks the disk");
+        assert!(!leaf.shell_answered(), "and waits on it, not the window");
+        assert_eq!(leaf.spawn_place.as_ref(), Some(&share));
+        let frame = leaf
+            .session
+            .viewport_frame(&mut leaf.projection)
+            .expect("the pane draws while its folder is asked about");
+        assert!(frame_matches_grid(&frame, leaf.grid));
+        assert_eq!(
+            offer_pty_input(leaf.input_target(), "echo 共享\r".as_bytes(), "typed").expect("held"),
+            PtyInput::HeldForBirth
+        );
+
+        answer.send(false).expect("the worker waits on the share");
+        woken_by_a_shell(&heard);
+        let mut notes = Vec::new();
+        let refusal =
+            land_shell_birth(&mut leaf, |line| notes.push(line.to_owned())).expect("the landing");
+        assert!(refusal.is_none(), "{refusal:?}");
+        assert!(leaf.pty.is_some(), "the shell started");
+        assert_eq!(
+            leaf.spawn_place, gone.place.directory,
+            "where no folder would have put it"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains(&share.display().to_string()) && notes[0].contains("not a folder"),
+            "{notes:?}"
+        );
+        drop(leaf);
+        drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// PIN (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS) — **both roads that make a pseudoconsole name the
+    /// folder of the program's own file before the first one**: the elevated host before it
+    /// serves, and the resident run after its diagnostics are in the log (the line that says which
+    /// file was resolved goes there) and before the event loop that makes the first pane. A road
+    /// that names nothing runs every pane on the inbox ConPTY (`bt_pty::use_sidecars_in`).
+    ///
+    /// MUTATION (observed red): drop the resident run's `use_sidecars_in`.
+    #[test]
+    fn the_program_names_its_sidecar_folder_before_any_pane() {
+        use bt_source::{Index, ItemQuery};
+        let main = Index::of_package("bt-app")
+            .body_of(&ItemQuery::function("main"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let naming = "bt_pty::use_sidecars_in(bt_platform::own_files_folder())";
+        let named: Vec<usize> = main.match_indices(naming).map(|(at, _)| at).collect();
+        assert_eq!(named.len(), 2, "the host and the resident run each name it");
+        let at = |needle: &str| {
+            main.find(needle)
+                .unwrap_or_else(|| panic!("`main` no longer does `{needle}`"))
+        };
+        assert!(named[0] < at("elevated_host::serve("));
+        assert!(at("diagnostics::enter_resident_run(") < named[1]);
+        assert!(named[1] < at("EventLoop::<AppEvent>::with_user_event()"));
+    }
     /// RED — **the pane is there before its shell is, and what was typed meanwhile reaches the
     /// shell first, in order.** The shell is not even started until the test opens the gate; the
     /// pane already has a frame of its own grid, holds two typed lines (one Chinese), and, once
@@ -39474,7 +39631,8 @@ mod shell_birth_tests {
         let seed = seed_of(profiles::fallback_profile_id());
         let mut leaf = bare(&decision, &seed);
         let (wake, heard) = waking();
-        let shell = pty_door::request(|_| panic!("举手-planted"), wake).expect("a birth worker");
+        let shell = pty_door::request(|_| -> pty_door::Born { panic!("举手-planted") }, wake)
+            .expect("a birth worker");
         await_shell(&mut leaf, shell, decision, &seed);
         woken(&heard);
         let said = format!(
@@ -39733,7 +39891,11 @@ fn create_leaf_session(
     // Hoisted out of the spawn branch because `LeafSession::spawn_place` is the
     // second rung of §7.1.4's ladder and a leaf is asked where it stands whether
     // or not a process was started behind it.
-    let place = profiles::spawn_place(
+    //
+    // **And without asking the disk** (G-SWEEP-048, #29): whether a carried folder still stands is
+    // the birth worker's question ([`profiles::BirthPlace`]), so a folder on a share that stopped
+    // answering holds this pane in birth and never this thread.
+    let profiles::BirthPlace { place, unless_gone } = profiles::spawn_place(
         profiles::index_of_id(spawn_profile),
         seed.cwd.clone(),
         &bt_pty::SystemShellEnvironment,
@@ -39787,6 +39949,19 @@ fn create_leaf_session(
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
         );
+        // The same row composed for the place the pane opens in when its folder is gone: the
+        // birth worker takes this command line and working directory instead, having asked.
+        let gone_spec = unless_gone.as_ref().map(|gone| pty_door::GoneSpec {
+            folder: gone.folder.clone(),
+            arguments: shell_integration::shell_command(
+                row,
+                &gone.place.arguments,
+                shell_integration::Scripts::installed(),
+                &bt_pty::SystemShellEnvironment,
+            )
+            .arguments,
+            working_directory: gone.place.working_directory.clone(),
+        });
         // **The PowerShell load is finished on the birth worker**, not here: naming `folio.ps1`
         // means preparing it, which is disk work. The switch is read here, once, and travels with
         // the birth, which composes both this argv and the last-resort retry's with it.
@@ -39831,6 +40006,7 @@ fn create_leaf_session(
                     profile_environment: command.profile_environment,
                     size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     working_directory: place.working_directory,
+                    unless_gone: gone_spec,
                 },
                 wake.output(),
             )
@@ -39851,6 +40027,7 @@ fn create_leaf_session(
         at_shell_home: place.at_shell_home,
         named: place.named,
         program: resolved_program,
+        unless_gone: unless_gone.map(Box::new),
     };
     let mut leaf = bare_leaf(
         LeafView {
@@ -40220,18 +40397,26 @@ fn place_leaf(
 /// the shell has not answered.
 fn land_shell_birth(
     leaf: &mut LeafSession,
-    note: impl FnMut(&str),
+    mut note: impl FnMut(&str),
 ) -> Result<Option<anyhow::Error>> {
     let Some(BirthWait::Shell(landing)) = leaf.birth.as_mut().map(|birth| &mut birth.waiting)
     else {
         return Ok(None);
     };
-    let Some(answer) = landing.shell.take() else {
+    let Some(pty_door::Born {
+        session: answer,
+        folder_gone,
+    }) = landing.shell.take()
+    else {
         return Ok(None);
     };
     // Read while the birth is still on the pane; it leaves the pane only below, into the delivery
     // of what it holds, so nothing a birth carries can be dropped on the way.
-    let decision = landing.decision.clone();
+    let decision = if folder_gone {
+        landing.decision.clone().with_folder_gone(&mut note)
+    } else {
+        landing.decision.clone()
+    };
     let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
     let (pty, refusal) = match answer {
         Ok(pty) => (Some(pty), None),
@@ -47196,126 +47381,44 @@ impl Runtime<'_> {
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
         // a shut dialog remembering one.
-        self.window.settings.press(target);
-        match target {
-            settings::SettingsTarget::Scrim => self.window.settings.close(),
-            settings::SettingsTarget::Close => self.window.settings.close(),
-            settings::SettingsTarget::Combo(row) => {
-                self.window.settings.toggle_menu(row);
-                // The list opens showing the answer it already has, whatever
-                // page of it that answer is on — a capped picker whose thirty
-                // faces begin at `Agency FB` would otherwise open nowhere near
-                // the one that is ticked. Asked after the open, because only
-                // then is there a menu whose body can say where the item is.
-                self.show_open_settings_choice(row);
-            }
-            // A press on a track is a jump to the pointer AND the first frame of
-            // a drag — one gesture, so one door (`SettingsLayout::slider_at`).
-            // Grabbing the thumb and not moving is a press that asked for the
-            // value it already had, which costs nothing.
-            settings::SettingsTarget::Slider(row) => {
-                self.window.settings.close_menu();
+        // **The dialog's half of the press is the panel's** (`SettingsPanel::press_verb`), in the
+        // vocabulary `Enter` answers in, so the two roads are one model (F-SWEEP-048): the focus
+        // follows the finger with the ring off — stated before the verb, because closing the
+        // dialog drops the focus — and what comes back is what only the window can do.
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        let verdict = self.window.settings.press_verb(target, content);
+        match (target, verdict) {
+            // The list opens showing the answer it already has, whatever page of it that answer
+            // is on. Asked after the open, because only then is there a menu whose body can say
+            // where the item is.
+            (settings::SettingsTarget::Combo(row), _) => self.show_open_settings_choice(row),
+            // A press on a track is a jump to the pointer AND the first frame of a drag — one
+            // gesture, so one door (`SettingsLayout::slider_at`).
+            (settings::SettingsTarget::Slider(row), _) => {
                 if let Some(value) = layout.slider_at(row, position.x) {
                     self.apply_slider(row, value)?;
                 }
                 self.window.settings_slider_drag = Some(row);
             }
-            target @ settings::SettingsTarget::Choice(..) => {
-                self.window.settings.close_menu();
-                self.apply_settings_choice(target)?;
+            // Turning a page puts the reader at the top of it.
+            (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
+                self.window.settings_scroll = 0.0;
             }
-            // **A press on a greyed item leaves the picker standing and still
-            // speaks** (§7.47). Nothing was chosen, so nothing closes and no
-            // value moves — that half is exactly what it always was. What is
-            // new is that it leaves through the same door a chosen press
-            // leaves by, so a row that knows why its item is dark gets to say
-            // it. Rows with nothing to say answer `None` all the way down the
-            // chain and this is a press that did nothing, as before.
-            target @ settings::SettingsTarget::ChoiceRefused(..) => {
-                self.apply_settings_choice(target)?;
+            (
+                _,
+                settings::SettingsKeyVerdict::Chose(
+                    target @ (settings::SettingsTarget::RestoreRow(_)
+                    | settings::SettingsTarget::RestoreAll),
+                ),
+            ) => self.apply_shortcut_edit(target)?,
+            // Every verb that leaves the dialog goes through the door `Enter` on it goes through:
+            // a verb reachable two ways whose body lives on one of them is a verb that half works.
+            (_, settings::SettingsKeyVerdict::Chose(target)) => {
+                self.apply_settings_choice(target)?
             }
-            // Turning a page puts the reader at the top of it. The distance
-            // belonged to the page they were on, and carrying it across would
-            // open the next one somewhere in its middle.
-            settings::SettingsTarget::Nav(category) => {
-                if self.window.settings.select_category(category) {
-                    self.window.settings_scroll = 0.0;
-                }
-            }
-            settings::SettingsTarget::Record(index) => self.window.settings.begin_recording(index),
-            // **The same capture, started from the other page** (§7.54e ⑤). The
-            // recorder is indexed by a line of the shortcut table and this row is
-            // not on that page, so the index is resolved here — the one place
-            // that holds both the press and the table — and everything after it
-            // is the road the Shortcuts page's own `Record` goes down:
-            // `record_settings_key`, `Shortcuts::set`, `store_keybindings`, and
-            // `settle_quake`'s reconciliation on the very next turn.
-            //
-            // A build with no summon row is a build with nothing to record, and
-            // the press does nothing rather than opening a capture on whatever
-            // line happened to be first.
-            settings::SettingsTarget::QuakeChord => {
-                if let Some(index) = self.summon_shortcut_line() {
-                    self.window.settings.begin_recording(index);
-                }
-            }
-            target @ (settings::SettingsTarget::RestoreRow(_)
-            | settings::SettingsTarget::RestoreAll) => self.apply_shortcut_edit(target)?,
-            // Both leave through the same door the keyboard's Enter leaves
-            // through, which is `apply_settings_choice`'s founding rule: a verb
-            // reachable two ways whose body lives on one of them is a verb that
-            // half works.
-            target @ (settings::SettingsTarget::Advanced(_)
-            | settings::SettingsTarget::ResetAdvanced(_)
-            | settings::SettingsTarget::ProfileUp(_)
-            | settings::SettingsTarget::ProfileDown(_)
-            | settings::SettingsTarget::ProfileEnable(_)
-            | settings::SettingsTarget::ProfileCopyPolicyCommand(_)
-            | settings::SettingsTarget::MenuAction(_)
-            | settings::SettingsTarget::MenuItemEdit(..)
-            | settings::SettingsTarget::MenuItemDelete(..)
-            // The About page's three doors, on that rule exactly
-            // (T-SETTINGS-ABOUT): the pointer and `Enter` open the same address
-            // or the same file, because both arrive at
-            // `apply_settings_choice`'s `Link` arm and neither carries a body of
-            // its own. No `close_menu` beside it, unlike the run below — the
-            // page this target can be drawn on holds no picker to close.
-            | settings::SettingsTarget::Link(_)) => {
-                self.apply_settings_choice(target)?;
-            }
-            // A press on the dialog's own body, or inside the open menu but on
-            // none of its items, lands nowhere. It notably does *not* close: the
-            // mock-up closes on the scrim and on the `×`, and nothing else.
-            settings::SettingsTarget::Panel => {}
-            settings::SettingsTarget::Menu(_) => {}
-            // A press on a row's band is a press on the row and not on a verb.
-            // It moves the focus (see `SettingsPanel::press`) so that `Enter`
-            // opens the editor from where the finger left the keyboard, and does
-            // nothing else: a single click that opened a sub-page would make the
-            // row a button, and the row is a row with buttons on it.
-            settings::SettingsTarget::ProfileRow(_) => {}
-            settings::SettingsTarget::ProfileMore(index) => {
-                self.window.settings.toggle_row_menu(index);
-            }
-            target @ (settings::SettingsTarget::ProfileEdit(_)
-            | settings::SettingsTarget::ProfileMoreItem(..)
-            | settings::SettingsTarget::ProfileNew
-            | settings::SettingsTarget::EditorBack
-            | settings::SettingsTarget::EditorBrowse
-            | settings::SettingsTarget::EnvRemove(_)
-            | settings::SettingsTarget::EnvGhost(_)
-            | settings::SettingsTarget::EnvAdd
-            | settings::SettingsTarget::EditorRestore
-            | settings::SettingsTarget::EditorDelete) => {
-                self.window.settings.close_menu();
-                self.apply_settings_choice(target)?;
-            }
-            // A press into a field puts the caret there and nothing more: the
-            // field already holds the table's own value, and this dialog writes
-            // on change rather than on commit.
-            settings::SettingsTarget::Field(_)
-            | settings::SettingsTarget::EnvName(_)
-            | settings::SettingsTarget::EnvValue(_) => self.window.settings.close_menu(),
+            _ => {}
         }
         if let Some(position) = self.window.pointer_position {
             let hover = self.settings_layout().map(|layout| {
@@ -74002,6 +74105,8 @@ fn main() -> Result<()> {
     // host is a headless process that authenticates its pipe and is otherwise nothing.
     if let Some(line) = bt_platform::elevated_protocol::HostLine::parse(std::env::args_os().skip(1))
     {
+        // The host makes the elevated pane's pseudoconsole: its sidecars are named first.
+        bt_pty::use_sidecars_in(bt_platform::own_files_folder());
         std::process::exit(match line {
             Ok(line) => elevated_host::serve(&line),
             Err(_) => elevated_host::USAGE,
@@ -74189,9 +74294,19 @@ fn main() -> Result<()> {
     //
     // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
     // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+    // **Why a hand-over gave up is kept for the log** (0.4.8 D3): the front door has none, so the
+    // line waits here and is written once `enter_resident_run` has opened this run's.
+    let gave_up = std::cell::Cell::new(None::<String>);
     let hand_over = || {
         bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-            launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
+            launch_wire::hand_over(
+                token,
+                &admitted,
+                &storage,
+                &request,
+                say_at_the_front_door,
+                |line| gave_up.set(Some(line)),
+            )
         })
         .ok()
         .flatten()
@@ -74234,11 +74349,26 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // A start whose hand-over gave up says why where this run's diagnostics go
+    // (0.4.8 D3), above the line that says its window saves nothing.
+    if let Some(line) = gave_up.take() {
+        diagnostics::note(&line);
+    }
     // A stand-in that stood down beside the reserved trial says so where this
     // run's diagnostics go (0.4.8 E3).
     if let Some(line) = stood_down {
         diagnostics::note(&line);
     }
+    // **Where this program's own files are, said once and named before any pane** (G-SWEEP-048,
+    // T-EXE-SYMLINK-SIDECARS): the loaded image with its links followed, so a start through
+    // winget's alias finds its ConPTY pair beside the real file and says which file that is.
+    if let Some(note) = bt_platform::running_image()
+        .ok()
+        .and_then(bt_platform::RunningImage::note)
+    {
+        diagnostics::note(&note);
+    }
+    bt_pty::use_sidecars_in(bt_platform::own_files_folder());
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and

@@ -3238,7 +3238,11 @@ pub(crate) enum ParseProbeFailure {
         stdout: String,
         stderr: String,
     },
-    Deadline {
+    /// The probe ran out of its patience ([`bt_platform::ProbeChild::wait_within`]) and was
+    /// ended.
+    Overdue {
+        overdue: bt_platform::ProbeOverdue,
+        patience: bt_platform::ProbePatience,
         stdout: String,
         stderr: String,
     },
@@ -3258,8 +3262,19 @@ pub(crate) enum ParseProbeFailure {
     },
 }
 
-/// The deadline shared by every PowerShell machine probe.
-pub(crate) const POWERSHELL_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// **The patience shared by every PowerShell machine probe a pane or a page asks**
+/// (G-SWEEP-048): five seconds without life, two minutes in all.
+///
+/// The quiet period is the old fixed deadline; the budget is what a Windows PowerShell on a cold
+/// module analysis cache needs before its first command — 22–46 s measured on a CI image
+/// (T-INTEGRATION-INJECT-4 round 7; the product parse probe gave no bytes in three 5 s attempts
+/// there, CI runs 37443551146 and 37691957530), working all the while — with room for a machine
+/// slower than that image.
+pub(crate) const POWERSHELL_PROBE_PATIENCE: bt_platform::ProbePatience =
+    bt_platform::ProbePatience {
+        quiet: std::time::Duration::from_secs(5),
+        budget: std::time::Duration::from_secs(120),
+    };
 
 impl std::fmt::Display for ParseProbeFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3274,9 +3289,15 @@ impl std::fmt::Display for ParseProbeFailure {
                 formatter,
                 "stdin write: {error}; stdout first bytes {stdout}; stderr first bytes {stderr}"
             ),
-            Self::Deadline { stdout, stderr } => write!(
+            Self::Overdue {
+                overdue,
+                patience,
+                stdout,
+                stderr,
+            } => write!(
                 formatter,
-                "five-second deadline; stdout first bytes {stdout}; stderr first bytes {stderr}"
+                "{}; stdout first bytes {stdout}; stderr first bytes {stderr}",
+                overdue_words(*overdue, *patience)
             ),
             Self::Wait {
                 error,
@@ -3300,6 +3321,39 @@ impl std::fmt::Display for ParseProbeFailure {
             ),
         }
     }
+}
+
+/// Why a probe was ended, in a diagnostics line's words.
+fn overdue_words(
+    overdue: bt_platform::ProbeOverdue,
+    patience: bt_platform::ProbePatience,
+) -> String {
+    match overdue {
+        bt_platform::ProbeOverdue::Suspended => format!(
+            "no sign of work for {:?}: suspended by another program, ended",
+            patience.quiet
+        ),
+        bt_platform::ProbeOverdue::Silent => {
+            format!("no sign of work for {:?}, ended", patience.quiet)
+        }
+        bt_platform::ProbeOverdue::OverBudget => {
+            format!("still running after {:?}, ended", patience.budget)
+        }
+    }
+}
+
+/// The `diagnostics.log` line a PowerShell probe that ran out of patience leaves — the one place a
+/// probe another program held suspended is said (G-SWEEP-048, #31).
+fn overdue_line(
+    program: &Path,
+    overdue: bt_platform::ProbeOverdue,
+    patience: bt_platform::ProbePatience,
+) -> String {
+    format!(
+        "PowerShell probe {}: {}",
+        program.display(),
+        overdue_words(overdue, patience)
+    )
 }
 
 fn output_prefix(bytes: &[u8]) -> String {
@@ -3327,7 +3381,7 @@ fn run_parse_probe(
         program,
         PARSE_COMMAND,
         Some(text),
-        POWERSHELL_PROBE_DEADLINE,
+        POWERSHELL_PROBE_PATIENCE,
         environment,
     )?;
     parse_probe_answer(output)
@@ -3362,10 +3416,10 @@ fn profile_key(program: &Path) -> PathBuf {
 }
 
 /// **What a caller brings to `program`'s `$PROFILE` slot**: a question to ask when the slot holds
-/// no answer, with the asker's patience ([`POWERSHELL_PROBE_DEADLINE`] for the Profiles page,
-/// [`REMOVAL_PROBE_DEADLINE`] for a removal somebody asked for), or an answer heard elsewhere.
+/// no answer, with the asker's patience ([`POWERSHELL_PROBE_PATIENCE`] for the Profiles page,
+/// [`REMOVAL_PROBE_PATIENCE`] for a removal somebody asked for), or an answer heard elsewhere.
 enum ProfileQuestion {
-    Ask(std::time::Duration),
+    Ask(bt_platform::ProbePatience),
     /// **A newer answer**, heard by edition observation run number `.1` (which asks the same
     /// edition the same question at every Profiles-page open, T-PROBE-NO-CACHED-FAILURE): it
     /// replaces the slot's unless a newer run's is held, so a removal reads the newest any probe
@@ -3399,8 +3453,8 @@ fn cached_profile_answer(
         slot
     };
     match question {
-        ProfileQuestion::Ask(deadline) => answer_once(&slot.path, || {
-            run_profile_path_probe(&resolved, deadline, environment)
+        ProfileQuestion::Ask(patience) => answer_once(&slot.path, || {
+            run_profile_path_probe(&resolved, patience, environment)
         }),
         ProfileQuestion::Heard(path, observation) => {
             let mut held = slot.path.lock().unwrap_or_else(|error| error.into_inner());
@@ -3670,14 +3724,16 @@ fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
 /// operation somebody asked for once, which is not asked again by itself. A Windows PowerShell
 /// whose module analysis cache is cold can take tens of seconds before its first command
 /// (measured 22–46 s on a CI image, T-INTEGRATION-INJECT-4 round 7); the path question runs no
-/// command, so this is the bound on a start, not on a lookup (release read M1).
-const REMOVAL_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+/// command, so this is the bound on a start, not on a lookup (release read M1). A fixed deadline,
+/// whatever the probe shows.
+const REMOVAL_PROBE_PATIENCE: bt_platform::ProbePatience =
+    bt_platform::ProbePatience::fixed(std::time::Duration::from_secs(60));
 
 pub(crate) fn run_powershell_probe(
     program: &Path,
     command: &str,
     input: Option<&str>,
-    deadline_after: std::time::Duration,
+    patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
@@ -3715,29 +3771,30 @@ pub(crate) fn run_powershell_probe(
             });
         }
     }
-    let _started_pid = child.id(); // Only this owned child may be stopped.
-    let deadline = std::time::Instant::now() + deadline_after;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20))
-            }
-            Ok(None) => {
-                let output = stopped_output(child);
-                return Err(ParseProbeFailure::Deadline {
-                    stdout: output_prefix(&output.stdout),
-                    stderr: output_prefix(&output.stderr),
-                });
-            }
-            Err(error) => {
-                let output = stopped_output(child);
-                return Err(ParseProbeFailure::Wait {
-                    error: error.to_string(),
-                    stdout: output_prefix(&output.stdout),
-                    stderr: output_prefix(&output.stderr),
-                });
-            }
+    // **Waited for while it works** (G-SWEEP-048): the probe door's own patience, looked at every
+    // 20 ms on this worker; a probe that shows no life for the quiet period, or works past the
+    // budget, is ended with everything it started.
+    match child.wait_within(patience, &mut || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }) {
+        Ok(Ok(_)) => {}
+        Ok(Err(overdue)) => {
+            crate::diagnostics::note(&overdue_line(program, overdue, patience));
+            let output = stopped_output(child);
+            return Err(ParseProbeFailure::Overdue {
+                overdue,
+                patience,
+                stdout: output_prefix(&output.stdout),
+                stderr: output_prefix(&output.stderr),
+            });
+        }
+        Err(error) => {
+            let output = stopped_output(child);
+            return Err(ParseProbeFailure::Wait {
+                error: error.to_string(),
+                stdout: output_prefix(&output.stdout),
+                stderr: output_prefix(&output.stderr),
+            });
         }
     }
     let output = child
@@ -3772,7 +3829,7 @@ const PROFILE_PATH_COMMAND: &str =
 #[cfg(windows)]
 fn run_profile_path_probe(
     program: &Path,
-    patience: std::time::Duration,
+    patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
 ) -> Option<PathBuf> {
     if profile_sandboxed() {
@@ -3786,7 +3843,7 @@ fn run_profile_path_probe(
 #[cfg(not(windows))]
 fn run_profile_path_probe(
     _program: &Path,
-    _patience: std::time::Duration,
+    _patience: bt_platform::ProbePatience,
     _environment: &ProbeEnvironment,
 ) -> Option<PathBuf> {
     None
@@ -3823,7 +3880,7 @@ fn probe_profile_observation(
                 program,
                 PROFILE_COMMAND,
                 None,
-                POWERSHELL_PROBE_DEADLINE,
+                POWERSHELL_PROBE_PATIENCE,
                 environment,
             )
             .ok()?;
@@ -4695,7 +4752,9 @@ mod tests {
                 question.key.clone(),
                 ParseAnswer::Failed {
                     attempts: PARSE_PROBE_ATTEMPT_LIMIT,
-                    failure: ParseProbeFailure::Deadline {
+                    failure: ParseProbeFailure::Overdue {
+                        overdue: bt_platform::ProbeOverdue::Silent,
+                        patience: POWERSHELL_PROBE_PATIENCE,
                         stdout: "[]".to_owned(),
                         stderr: "[]".to_owned(),
                     },
@@ -4739,7 +4798,7 @@ mod tests {
             cached_profile_answer(
                 &program,
                 &environment,
-                ProfileQuestion::Ask(POWERSHELL_PROBE_DEADLINE),
+                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE),
             )
         };
         file_profile_answer(&program, old.clone(), 1, &environment);
@@ -4808,7 +4867,7 @@ mod tests {
             cached_profile_answer(
                 &program,
                 &environment,
-                ProfileQuestion::Ask(POWERSHELL_PROBE_DEADLINE)
+                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE)
             ),
             Some(PathBuf::from(newer)),
             "a removal reads the newer run's path"
@@ -5171,8 +5230,8 @@ mod tests {
         assert!(command.contains("environment.program(program)"));
         assert!(command.contains("bt_platform::quiet_command(resolved)"));
         assert!(probe.contains("-NoProfile"));
-        assert!(include_str!("shell_integration.rs").contains("const POWERSHELL_PROBE_DEADLINE:"));
-        assert!(REMOVAL_PROBE_DEADLINE > POWERSHELL_PROBE_DEADLINE);
+        assert!(include_str!("shell_integration.rs").contains("const POWERSHELL_PROBE_PATIENCE:"));
+        assert!(REMOVAL_PROBE_PATIENCE.quiet > POWERSHELL_PROBE_PATIENCE.quiet);
         let parse_probe = include_str!("shell_integration.rs")
             .split_once("fn run_parse_probe(")
             .expect("the Windows target parser probe")
@@ -5180,7 +5239,7 @@ mod tests {
             .split_once("fn profile_key")
             .expect("the item after that probe")
             .0;
-        assert!(parse_probe.contains("POWERSHELL_PROBE_DEADLINE"));
+        assert!(parse_probe.contains("POWERSHELL_PROBE_PATIENCE"));
         assert!(probe.contains("ProbeStdio::FED"));
         assert!(probe.contains("input.as_bytes()"));
         assert!(!probe.contains(".arg(input)"));
@@ -6845,7 +6904,9 @@ mod tests {
                 os_words(&["-Command", "probe failed"]),
                 ParseAnswer::Failed {
                     attempts: 1,
-                    failure: ParseProbeFailure::Deadline {
+                    failure: ParseProbeFailure::Overdue {
+                        overdue: bt_platform::ProbeOverdue::Silent,
+                        patience: POWERSHELL_PROBE_PATIENCE,
                         stdout: "[]".to_owned(),
                         stderr: "[]".to_owned(),
                     },
@@ -6987,7 +7048,9 @@ mod tests {
         publish_parse_attempt(
             first.question.key,
             first.number,
-            Err(ParseProbeFailure::Deadline {
+            Err(ParseProbeFailure::Overdue {
+                overdue: bt_platform::ProbeOverdue::Silent,
+                patience: POWERSHELL_PROBE_PATIENCE,
                 stdout: "[]".to_owned(),
                 stderr: "[]".to_owned(),
             }),
@@ -6999,6 +7062,74 @@ mod tests {
         assert_eq!(second.number, 2);
         publish_parse_attempt(second.question.key, second.number, Ok(true));
         assert_eq!(cached_parse_answer(program, &arguments), Some(true));
+    }
+
+    /// RED (mutation: restore the fixed five seconds — `POWERSHELL_PROBE_PATIENCE` as
+    /// `ProbePatience::fixed(5 s)`) — **a PowerShell starting on a cold module analysis cache is
+    /// waited for while it works** (G-SWEEP-048, T-PROBE-COLD-CACHE). The slowest cold start
+    /// measured on the CI image, 46 s, working all the while (its processor time growing by
+    /// 40 ms a second), read by the probe's own watch a look each quarter-second: no look ends
+    /// it. A probe that shows nothing for the quiet period is still ended there.
+    #[test]
+    fn a_cold_powershell_start_is_waited_for_while_it_works() {
+        let start = std::time::Instant::now();
+        let verdicts = |time: &dyn Fn(u64) -> u64| {
+            let mut watch = bt_platform::ProbeWatch::new(POWERSHELL_PROBE_PATIENCE, start);
+            (1..=46 * 4)
+                .map(|look| look * 250)
+                .map(|at| {
+                    watch.look(
+                        start + std::time::Duration::from_millis(at),
+                        Some(std::time::Duration::from_millis(time(at))),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            verdicts(&|at| at / 1000 * 40)
+                .iter()
+                .all(|verdict| *verdict == bt_platform::ProbeLook::Wait),
+            "a working cold start is waited for to its end"
+        );
+        assert_eq!(
+            verdicts(&|_| 0)
+                .iter()
+                .position(|verdict| *verdict != bt_platform::ProbeLook::Wait)
+                .map(|look| (look + 1) * 250),
+            Some(5_000),
+            "a probe that shows no life is ended after the quiet period"
+        );
+    }
+
+    /// RED (mutation: `overdue_words` says a suspended probe in the silent probe's words) — **a
+    /// probe another program held suspended is said so in `diagnostics.log`** (G-SWEEP-048, #31),
+    /// and one that only showed no life is not called suspended.
+    #[test]
+    fn a_probe_held_suspended_is_said_to_be_suspended_by_another_program() {
+        let program = Path::new(r"C:\工具\PowerShell 7\pwsh.exe");
+        assert_eq!(
+            overdue_line(
+                program,
+                bt_platform::ProbeOverdue::Suspended,
+                POWERSHELL_PROBE_PATIENCE
+            ),
+            "PowerShell probe C:\\工具\\PowerShell 7\\pwsh.exe: no sign of work for 5s: \
+             suspended by another program, ended"
+        );
+        let silent = overdue_line(
+            program,
+            bt_platform::ProbeOverdue::Silent,
+            POWERSHELL_PROBE_PATIENCE,
+        );
+        assert!(!silent.contains("suspended"), "{silent}");
+        assert!(
+            overdue_line(
+                program,
+                bt_platform::ProbeOverdue::OverBudget,
+                POWERSHELL_PROBE_PATIENCE
+            )
+            .ends_with("still running after 120s, ended")
+        );
     }
 
     /// RED (mutation: raise `PARSE_PROBE_ATTEMPT_LIMIT` from three to four) — a permanently
@@ -7046,7 +7177,9 @@ mod tests {
             publish_parse_attempt(
                 attempt.question.key,
                 attempt.number,
-                Err(ParseProbeFailure::Deadline {
+                Err(ParseProbeFailure::Overdue {
+                    overdue: bt_platform::ProbeOverdue::Silent,
+                    patience: POWERSHELL_PROBE_PATIENCE,
                     stdout: "[]".to_owned(),
                     stderr: "[]".to_owned(),
                 }),
@@ -7465,11 +7598,26 @@ mod tests {
         output
     }
 
+    /// The product's parse probe, asked about `text` the way a pane's birth asks it — in an
+    /// environment that is the test shell's for `program` (G-SWEEP-048): its warmed module
+    /// analysis cache, the module path a pane gets and the per-user folders inside its own
+    /// directory, laid over this process's, so the answer does not wait on the runner account's
+    /// own cache being warm.
     #[cfg(windows)]
     fn real_parse_answer(program: &Path, text: &str) -> bool {
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let shaped = hygiene.command(program, bt_platform::quiet_command);
+        let mut block: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        for (name, value) in shaped.get_envs() {
+            block.retain(|(held, _)| !same_name(held, name));
+            if let Some(value) = value {
+                block.push((name.to_owned(), value.to_owned()));
+            }
+        }
+        let environment = ProbeEnvironment::Logon(block);
         let mut failures = Vec::new();
         for attempt in 1..=PARSE_PROBE_ATTEMPT_LIMIT {
-            match run_parse_probe(program, text, &ProbeEnvironment::Inherited) {
+            match run_parse_probe(program, text, &environment) {
                 Ok(answer) => return answer,
                 Err(failure) => {
                     eprintln!(

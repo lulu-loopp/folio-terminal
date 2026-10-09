@@ -178,6 +178,14 @@ fn fresh_module_path() -> Option<Option<OsString>> {
         .clone()
 }
 
+/// **A test process names its ConPTY sidecar folder as the program does** (G-SWEEP-048): the
+/// folder of its own resolved image (`bt_platform::running_image`), where the build puts the
+/// packaged pair beside every test executable. Asked before each first use of the loader; only the
+/// first naming is kept.
+pub(crate) fn name_the_sidecars() {
+    crate::use_sidecars_in(bt_platform::own_files_folder());
+}
+
 /// The variable a PowerShell keeps its module analysis cache under — a file path.
 const MODULE_ANALYSIS_CACHE: &str = "PSModuleAnalysisCachePath";
 

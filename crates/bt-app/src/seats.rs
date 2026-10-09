@@ -725,7 +725,8 @@ impl Seats {
     /// shell for: a Terminal seat with no session behind it is a black rectangle,
     /// so the two happen together or not at all.
     ///
-    /// `None` when the solver refuses — the run cannot be divided at this size —
+    /// `None` when `target` is not a seat of this tree — since the 2026-08-08 ruling
+    /// the edit no longer refuses a split for size (`bt_layout::EditError::Refused`) —
     /// and refusing leaves the tree untouched, so the caller has nothing to undo.
     /// The names are spent only on success, for the reason `adopt_drop` gives at
     /// length: an id handed out twice is a `find_seat` answering about the wrong
@@ -737,6 +738,32 @@ impl Seats {
         dir: Axis,
         leading: bool,
     ) -> Option<SeatId> {
+        self.split_as(metrics, target, dir, leading, SeatKind::Terminal)
+    }
+
+    /// **Split a pane with a preview arriving beside it** — where a page's request for a window of
+    /// its own opens (F-SWEEP-048, #27): the page that asked keeps its pane, and the new page gets
+    /// one of its own after it, the side every direction-less split puts a new pane on.
+    ///
+    /// [`Self::split_terminal`]'s edit with the other kind of leaf, and its answers: `None` when
+    /// `target` is not a seat of this tree, with the tree untouched and no name spent.
+    pub fn split_preview(
+        &mut self,
+        metrics: &SeatMetrics,
+        target: SeatId,
+        dir: Axis,
+    ) -> Option<SeatId> {
+        self.split_as(metrics, target, dir, false, SeatKind::Preview)
+    }
+
+    fn split_as(
+        &mut self,
+        metrics: &SeatMetrics,
+        target: SeatId,
+        dir: Axis,
+        leading: bool,
+        kind: SeatKind,
+    ) -> Option<SeatId> {
         let arriving = SeatId(self.next_seat);
         match apply(
             &self.tree,
@@ -745,7 +772,7 @@ impl Seats {
                 target,
                 dir,
                 leading,
-                arriving: LayoutNode::seat(Seat::new(arriving, SeatKind::Terminal)),
+                arriving: LayoutNode::seat(Seat::new(arriving, kind)),
                 split_id: SplitId(self.next_split),
             },
         ) {
@@ -23154,6 +23181,47 @@ mod tests {
         assert!(
             left.x + left.width <= right.x || right.x + right.width <= left.x,
             "split terminals must not overlap: {left:?} vs {right:?}"
+        );
+    }
+
+    /// RED (F-SWEEP-048, #27) — **a page's new window is a new preview pane beside the page that
+    /// asked, and the asking pane stays as it was.**
+    ///
+    /// The page is on the tab's reusable preview, which is exactly the pane the landing rule would
+    /// have handed a newly opened page — over the page that asked. The split leaves it where it is
+    /// and mints a second preview after it.
+    ///
+    /// MUTATION: seat a `Terminal` in `split_preview` (the arriving pane is not a preview), or
+    /// split with `leading: true` (it lands before the page that asked).
+    #[test]
+    fn a_pages_new_window_is_a_preview_pane_beside_it() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let page = seats
+            .add_preview(&metrics)
+            .expect("a 1600x900 window has room for a preview");
+        assert_eq!(
+            seats.landing_preview(),
+            Some(page),
+            "the page is the reusable preview"
+        );
+
+        let arriving = seats
+            .split_preview(&metrics, page, Axis::Row)
+            .expect("and room for a second one beside it");
+        assert_ne!(arriving, page, "a new pane, not the page that asked");
+        assert_eq!(
+            seats.preview_seats(),
+            vec![page, arriving],
+            "both are previews, the new one after the page that asked"
+        );
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+        let asked = seat_viewport(&layout, page).expect("the page that asked is still drawn");
+        let opened = seat_viewport(&layout, arriving).expect("the new page has a box");
+        assert!(
+            asked.x + asked.width <= opened.x,
+            "beside it, to its right: {asked:?} then {opened:?}"
         );
     }
 

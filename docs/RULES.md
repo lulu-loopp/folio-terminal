@@ -1481,7 +1481,10 @@ multi-line paste question's rules) are not this row's and are not folded here.
 Entries: §7.59 *a second launch is no longer a second process: it hands its one
 sentence to the copy already running, then exits*; §7.59a *a second launch opens a
 window, unless you say otherwise* (owner's ruling 2026-09-11); §7.59b *a launch
-needs one thing that sees it from end to end*. The Unix stale-claim sweep and
+needs one thing that sees it from end to end*; the 2026-10-09 entry *a second
+installed copy that shares the data directory hands its launch to the one running*
+(D3): the copy already running is any Folio of this user holding the data directory,
+whichever installed copy it was started from. The Unix stale-claim sweep and
 its `sweep.guard` protocol are one unreleased change; no released build may
 sweep without participating in that guard.
 
@@ -1507,12 +1510,20 @@ the record cannot be read. Cleanup removes only marks belonging
 to **this copy**, compared by executable path, and a mark naming a vanished path
 is nobody's and is removed; per-account marks (the `$PROFILE` line, the module)
 are removed and reported. **How Folio was installed is read from a written
-channel marker, never inferred from a path.** The marker is written by the
-package manager, never by Folio: on Windows the file `folio-install.json`
+channel marker, never inferred from a path.** **The marker is composed by the
+package manager; Folio may carry those exact bytes across an update it
+performs** (managed-update §4, M1–M5: read before the transaction is
+allocated, recorded in its journal, written only onto the staged new set and
+read back equal, found again on the live side, and back unchanged with the old
+set on a rollback; 0.4.8 D1): on Windows the file `folio-install.json`
 beside `folio.exe`, on macOS the extended attribute
 `io.github.lulu-loopp.folio.install` on the `.app` bundle, both holding
 `{"v":1,"manager":"scoop"|"homebrew"|"winget","uninstall_hook":true|false}`
 (exactly those keys; a byte-order mark and surrounding whitespace allowed).
+The cask writes a second attribute beside it,
+`io.github.lulu-loopp.folio.caskroom`, holding its Caskroom folder; Folio
+carries it the same way, and updates a Homebrew copy in place only where that
+Caskroom's own record names this very bundle as the app it installed.
 scoop's own receipt in the version folder (`install.json` with `manifest.json`)
 also says scoop. **The one exception to "a marker written by a hook" is winget**,
 which runs no hook and so writes no marker: its own uninstall record stands in —

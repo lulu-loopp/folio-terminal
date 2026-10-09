@@ -1288,6 +1288,7 @@ mod tests {
             rescue: "rescue".to_owned(),
             body: Body {
                 adapter: crate::update_txn::Adapter::Ours,
+                marker: None,
                 phase,
                 layout: Layout::Members(Inventories {
                     old_shipped: Vec::new(),

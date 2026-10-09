@@ -482,6 +482,7 @@ fn offered(txn: u8) -> Job<u32> {
             channel: Some(Channel::Ours),
             running: "0.4.6",
             capable: true,
+            recorded: false,
             trial: false,
             platform: HostPlatform::Windows,
         },
@@ -1530,6 +1531,7 @@ fn at_launch_gathered(knows_the_release: bool) -> Gathered {
         channel: Some(Channel::Ours),
         running: "0.4.6",
         capable: true,
+        recorded: false,
         trial: false,
         platform: HostPlatform::Windows,
     }

@@ -376,7 +376,7 @@ pub fn serve() -> i32 {
     crate::i18n::install(crate::door_language(
         &crate::persist::storage_dir_as_it_stands(),
     ));
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(exe) = bt_platform::running_image().map(|image| image.path.clone()) else {
         // Without this there is no icon to name and no program to start. There
         // is also nowhere to report it: this process has no console and no
         // window, and Explorer's answer to a class that will not start is to
@@ -531,9 +531,9 @@ pub fn supported() -> bool {
 /// classic verb and cannot have this one, and the row says which.
 #[must_use]
 pub fn package_file() -> Option<PathBuf> {
-    let beside = std::env::current_exe()
+    let beside = bt_platform::running_image()
         .ok()?
-        .parent()?
+        .folder()?
         .join(PACKAGE_FILE_NAME);
     beside.is_file().then_some(beside)
 }
@@ -575,11 +575,11 @@ fn read_state() -> PackageState {
     )
 }
 
-/// The folder this executable is in.
+/// The folder this executable is in, links followed (`bt_platform::running_image`).
 fn this_folder() -> Option<PathBuf> {
-    std::env::current_exe()
+    bt_platform::running_image()
         .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .and_then(|image| image.folder().map(Path::to_path_buf))
 }
 
 /// **What the deployment database's answer means for the row** — [`classify`]
@@ -814,7 +814,7 @@ pub fn removal_for(state: &PackageState) -> Removal<'_> {
 /// install's registration alone: a process that cannot say which file it is has
 /// no business claiming to be the one over there.
 fn is_this_executable(exe: &Path) -> bool {
-    std::env::current_exe().is_ok_and(|ours| same_path(exe, &ours))
+    bt_platform::running_image().is_ok_and(|ours| same_path(exe, &ours.path))
 }
 
 // ── `--remove-explorer-menu`: the mark taken back off, with no window ───────

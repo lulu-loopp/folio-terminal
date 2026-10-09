@@ -533,6 +533,10 @@ pub enum InlineImageDecodeError {
     /// answered by resampling, the sentence has to be able to say which happened.
     TooManyPixels,
     InvalidDimensions,
+    /// The host that answers this session's decoration work does not decode pictures, and said so
+    /// for this one (`bt_compose::Outcome::Declined`). Final: the reference stays text, and it is
+    /// not a failure of the file — a missing file is [`Self::Io`].
+    HostDeclined,
 }
 
 impl fmt::Display for InlineImageDecodeError {
@@ -558,6 +562,7 @@ impl fmt::Display for InlineImageDecodeError {
             Self::InvalidDimensions => {
                 formatter.write_str("inline image dimensions are invalid or too large")
             }
+            Self::HostDeclined => formatter.write_str("this host does not decode pictures"),
         }
     }
 }

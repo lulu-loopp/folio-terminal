@@ -682,12 +682,12 @@ if ($m) { $m.Version.ToString() } else { '' }; \
 #[cfg(windows)]
 fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Probe> {
     let environment = crate::shell_integration::ProbeEnvironment::current(ctx, "PSReadLine probe");
-    run_probe_with(&environment, |program, command, deadline, environment| {
+    run_probe_with(&environment, |program, command, patience, environment| {
         crate::shell_integration::run_powershell_probe(
             program,
             command,
             None,
-            deadline,
+            patience,
             environment,
         )
     })
@@ -699,7 +699,7 @@ fn run_probe_with(
     ask: impl FnOnce(
         &Path,
         &str,
-        std::time::Duration,
+        bt_platform::ProbePatience,
         &crate::shell_integration::ProbeEnvironment,
     ) -> Result<
         crate::shell_integration::ProbeOutput,
@@ -709,7 +709,7 @@ fn run_probe_with(
     let output = ask(
         Path::new("powershell.exe"),
         PROBE_COMMAND,
-        crate::shell_integration::POWERSHELL_PROBE_DEADLINE,
+        crate::shell_integration::POWERSHELL_PROBE_PATIENCE,
         environment,
     )
     .ok()?;
@@ -2491,14 +2491,16 @@ pub(crate) mod tests {
     #[test]
     fn the_psreadline_probe_uses_the_contained_powershell_deadline() {
         let environment = crate::shell_integration::ProbeEnvironment::Inherited;
-        let answer = run_probe_with(&environment, |program, command, deadline, _| {
+        let answer = run_probe_with(&environment, |program, command, patience, _| {
             assert_eq!(program, Path::new("powershell.exe"));
             assert_eq!(command, PROBE_COMMAND);
             assert_eq!(
-                deadline,
-                crate::shell_integration::POWERSHELL_PROBE_DEADLINE
+                patience,
+                crate::shell_integration::POWERSHELL_PROBE_PATIENCE
             );
-            Err(crate::shell_integration::ParseProbeFailure::Deadline {
+            Err(crate::shell_integration::ParseProbeFailure::Overdue {
+                overdue: bt_platform::ProbeOverdue::Silent,
+                patience: crate::shell_integration::POWERSHELL_PROBE_PATIENCE,
                 stdout: "[]".to_owned(),
                 stderr: "[]".to_owned(),
             })
@@ -2546,7 +2548,7 @@ pub(crate) mod tests {
             |program, script, deadline, environment| {
                 assert_eq!(
                     deadline,
-                    crate::shell_integration::POWERSHELL_PROBE_DEADLINE
+                    crate::shell_integration::POWERSHELL_PROBE_PATIENCE
                 );
                 let product =
                     crate::shell_integration::powershell_probe_command(program, environment)?;

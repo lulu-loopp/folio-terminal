@@ -306,7 +306,7 @@ ledger's.
 | D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.5 — `bt-platform` is not split in 0.4.8 (plan K, *Not in 0.4.8*); J2's small boundary crate for D-14 is the first extraction | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | — | repaid on `21cf1ef8` (2026-09-21) — the ConPTY width probe lives in `bt-corpus` and `bt-pty`'s manifest names `bt-term` only under `[dev-dependencies]` (ARCHITECTURE §3.2, *Done 2026-09-21*); carried open by mistake from 2026-09-23 to 2026-10-08 (J4). Not this row: `bt-pty`'s optional edge to `bt-platform` behind its test-only `test-shell` feature and `bt-term`'s dev-dependency on `bt-pty` (T-TEST-SHELL-HYGIENE, T-INTEGRATION-INJECT-4 round 6), for J1 to classify |
 | D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | CC-3 (`bt-effects`), CC-4 | 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite | open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', and three surfaces remain for CC-4 (thread priority, `resolved_for_a_door`, `host_names`); **repaid on `744cc02a` (CC-4; the product edge went in `0479c1ca`, the last, dev, edge in `744cc02a`)**: `bt-term`'s manifest names `bt-platform` nowhere (not as a dev-dependency either); the host names and the resample pool's thread-start hook are installed by the host (`bt_term::install_host_names`, `install_pool_thread_start`; `bt-app`'s `host_answers::install`), and `verify_path` takes the door-ready resolver as a parameter |
-| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27; CC-5, CC-6b, CC-7 (design T-COMPOSE-CRATE §3.4) | 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then | open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-08 (CC-5):** **narrowed**: the four math data types are `bt_doc::math`'s (re-exported by `bt-math`); what remains is execution — `MathEngine`/`key_for_em_px` in `session.rs` (CC-6b), `rasterize_svg_document` in `inline_image` and the `MathEngine` re-export (CC-7); **2026-10-08 (CC-6a):** untouched; the receiving crate exists — `bt-compose`, layer 6, which `typeset` moves into with CC-6b |
+| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27; CC-5, CC-6b, CC-7 (design T-COMPOSE-CRATE §3.4) | 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then | open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-08 (CC-5):** **narrowed**: the four math data types are `bt_doc::math`'s (re-exported by `bt-math`); what remains is execution — `MathEngine`/`key_for_em_px` in `session.rs` (CC-6b), `rasterize_svg_document` in `inline_image` and the `MathEngine` re-export (CC-7); **2026-10-08 (CC-6a):** untouched; the receiving crate exists — `bt-compose`, layer 6, which `typeset` moves into with CC-6b; **2026-10-09 (CC-6b):** **narrowed**: math execution is `bt_compose::typeset`'s (moved verbatim; `bt-app`'s lane and the tools call it); what remains is CC-7's — `rasterize_svg_document` in `inline_image` and the `MathEngine` re-export |
 | D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.5 — **0.5 precondition**: the side-effect contract's admission half; its note is 0.4.8 J5 (T-05-CONTRACTS); the enumeration lane and the observation threads' band are built in 0.5 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain; **2026-10-08 (J4):** untouched: every thread 0.4.7 added comes through the door (T-PROBE-CHILD's reader, T-KEYBOARD-CTRLALT's `folio-layout-tables`, T-UNINSTALL-UX's remover pipe); `folio-web-thumb` still stands at `Normal`; RULES 53's 0.4.7 ticket was never cut; was 0.4.7 |
 | D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.5 — with D-1's document owner, after J5's note | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | repaid (census-2, 0.4.6) — each subject is item-bound or file-bound by how the test reads it (`ITEM_QUERIES` and the helpers derived from it); only a file-bound subject read out of `main.rs` is a reader 2a must retarget; `--self-check` holds the fixture |
@@ -963,9 +963,10 @@ forbids. **Status.** repaid on `744cc02a`.
 
 *C-4 (refinement) · K-11* · **Class:** wrong layer — **recorded debt, not a task**.
 
-**Evidence.** `session.rs` typesets through `MathEngine` and `key_for_em_px` in
-product code; `inline_image::decode_svg_bytes` rasterises through
-`rasterize_svg_document`; and `crates/bt-term/src/lib.rs` re-exports the engine.
+**Evidence.** `inline_image::decode_svg_bytes` rasterises through
+`rasterize_svg_document`, and `crates/bt-term/src/lib.rs` re-exports the engine.
+(Until CC-6b `session.rs` also typeset formulas through `MathEngine` and
+`key_for_em_px`; that execution is `bt_compose::typeset`'s now.)
 The math data types (`MathRenderKey`, `MathRaster`, `MathRenderError`,
 `MathFailureStage`) are `bt_doc::math`'s since CC-5, and `bt-term` names them
 there. (The binary target that
@@ -976,13 +977,13 @@ dependency behind re-exports changes nothing.
 
 **Smallest change.** The composition design's three steps (T-COMPOSE-CRATE
 §3.4 D-15): the data types to `bt-doc` (CC-5, done), math execution to
-`bt-compose` (CC-6b), the SVG codec installed by the host (CC-7), after which
+`bt-compose` (CC-6b, done), the SVG codec installed by the host (CC-7), after which
 `bt-term` has no `bt-math` edge.
 **This row exists so that the edge is recorded rather than rediscovered.**
 
 **Version.** 0.5 at the earliest. **Status.** decided — recorded as debt.
 
-**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27; CC-5, CC-6b, CC-7 (design T-COMPOSE-CRATE §3.4) · version: 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then · status: open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-08 (CC-5):** **narrowed**: the data types moved to `bt-doc`; execution remains (`typeset`'s engine calls for CC-6b, the SVG codec and the `MathEngine` re-export for CC-7); **2026-10-08 (CC-6a):** untouched; the receiving crate `bt-compose` exists (layer 6).
+**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27; CC-5, CC-6b, CC-7 (design T-COMPOSE-CRATE §3.4) · version: 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then · status: open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-08 (CC-5):** **narrowed**: the data types moved to `bt-doc`; execution remains (`typeset`'s engine calls for CC-6b, the SVG codec and the `MathEngine` re-export for CC-7); **2026-10-08 (CC-6a):** untouched; the receiving crate `bt-compose` exists (layer 6); **2026-10-09 (CC-6b):** **narrowed**: math execution moved to `bt_compose::typeset`; the SVG codec and the `MathEngine` re-export remain (CC-7).
 
 ---
 

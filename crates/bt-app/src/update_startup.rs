@@ -1144,6 +1144,7 @@ mod tests {
                         new: Vec::new(),
                     }),
                     adapter: Adapter::Ours,
+                    marker: None,
                 },
             };
             assert_eq!(
@@ -1765,6 +1766,7 @@ mod tests {
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
+                    marker: None,
                     phase,
                     layout: Layout::Members(Inventories {
                         old_shipped: vec!["folio.exe".to_owned()],
@@ -1877,6 +1879,7 @@ mod tests {
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
+                    marker: None,
                     phase: Phase::TrialStarting {
                         nonce: nonce(),
                         began_ms: 42,
@@ -2057,6 +2060,7 @@ mod tests {
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
+                    marker: None,
                     phase: Phase::Stuck {
                         trial: None,
                         trial_started: false,
@@ -2455,6 +2459,7 @@ mod tests {
                         new: Vec::new(),
                     }),
                     adapter: Adapter::Ours,
+                    marker: None,
                 },
             }
             .encode();

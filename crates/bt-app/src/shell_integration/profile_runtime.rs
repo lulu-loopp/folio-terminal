@@ -182,7 +182,7 @@ fn observe_profile_lines(
             }
         }
     }
-    let answers = profile_answers(data, POWERSHELL_PROBE_DEADLINE, environment);
+    let answers = profile_answers(data, POWERSHELL_PROBE_PATIENCE, environment);
     let (marks, files) = match Marks::read(data).and_then(|marks| {
         let files = ProfileFiles::read(data)?;
         Ok((marks, files))
@@ -283,7 +283,7 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
     // already refused if a Folio is running. Only a run that will ask the machine
     // where its profiles are pays for asking.
     let answers = match profiles {
-        None => profile_answers(data, REMOVAL_PROBE_DEADLINE, &ProbeEnvironment::Inherited),
+        None => profile_answers(data, REMOVAL_PROBE_PATIENCE, &ProbeEnvironment::Inherited),
         Some(_) => Vec::new(),
     };
     operate_with(
@@ -309,11 +309,11 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
 /// be asked to make on a window thread. An edition the record locates
 /// ([`ProfileFiles::located`], written when Folio wrote its line) is not asked: the probe is the
 /// fallback for a line an older Folio wrote without that record (release read M1). `patience` is
-/// the asker's ([`POWERSHELL_PROBE_DEADLINE`], [`REMOVAL_PROBE_DEADLINE`]). The record is read here without
+/// the asker's ([`POWERSHELL_PROBE_PATIENCE`], [`REMOVAL_PROBE_PATIENCE`]). The record is read here without
 /// the lock — to decide only which editions to ask; the removal reads it again under the lock.
 fn profile_answers(
     data: &Path,
-    patience: std::time::Duration,
+    patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
 ) -> PathAnswers {
     // The sandbox door replaces the whole candidate set, so no shell is asked.
@@ -345,7 +345,7 @@ fn answers_for(
 }
 
 fn operate(data: &Path, asker: Asker, action: Action, environment: &ProbeEnvironment) -> Report {
-    let answers = profile_answers(data, REMOVAL_PROBE_DEADLINE, environment);
+    let answers = profile_answers(data, REMOVAL_PROBE_PATIENCE, environment);
     operate_with(data, asker, action, Ok(MANAGED_LINE), |marks, files| {
         candidates(marks, files, answers)
     })

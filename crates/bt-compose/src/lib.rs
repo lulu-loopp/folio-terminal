@@ -9,11 +9,17 @@
 //! 2. [`advance`] — a synchronized update or a live formula whose deadline has
 //!    passed is released ([`deadlines`] says when to wake for it);
 //! 3. [`project`] — the frame is projected; it is **not** scheduled;
-//! 4. if the frame is not held: [`schedule`], then the decoration work runs;
+//! 4. if the frame is not held: [`schedule`], then the decoration work runs —
+//!    on the host's own lane, or a budget at a time through [`pump`] and the
+//!    host's [`Executor`];
 //! 5. if the frame changed: [`acknowledge`], and the frame enters the host's
 //!    pending slot;
 //! 6. the pending slot is presented — through [`seat_frames`], under the
 //!    host's own admission.
+//!
+//! **Composition owns math execution** (design §3.4 D-15): [`typeset`] is the
+//! one place a terminal formula is turned into a raster, whichever thread or
+//! host runs it.
 //!
 //! **A borrowing coordinator.** The host owns every session (`DualPlaneSession`)
 //! and every view (`ViewportProjection`, the cell metrics it was drawn at, the
@@ -26,6 +32,12 @@
 //! guard holds it to that. The instants it is handed come from the host.
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+
+mod pump;
+mod typeset;
+
+pub use pump::{Budget, Executor, Outcome, PumpReport, pump};
+pub use typeset::{render_detection_task, render_live_detection_task, typeset};
 
 use bt_render::{CellMetrics, SeatFrame, SeatViewport};
 use bt_term::{DualPlaneSession, SessionError};

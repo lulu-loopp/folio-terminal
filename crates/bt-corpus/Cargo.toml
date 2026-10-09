@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# The math execution the replaying tools answer a session's formulas with (`render_*_detection_task`).
+bt-compose = { path = "../bt-compose" }
 bt-detect = { path = "../bt-detect" }
 bt-math = { path = "../bt-math" }
 # The answers `bt-term` asks its host for (`install_host_answers`) and the door-ready resolver the

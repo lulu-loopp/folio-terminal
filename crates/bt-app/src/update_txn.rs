@@ -1007,6 +1007,27 @@ impl Adapter {
     }
 }
 
+/// **What a managed copy's update carries from the old set to the new one**
+/// (managed-update §4, M1–M5; 0.4.8 ticket D1, U-41b): the bytes the manager
+/// wrote on the copy, read before `Allocated`, recorded here, written only
+/// onto the staged set and read back equal, and found again on the live side
+/// after `Activate`. Folio composes none of them (`docs/RULES.md` §41: the
+/// marker is composed by the package manager; Folio carries those exact
+/// bytes across an update it performs).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Carried {
+    /// The install marker, exactly as the manager wrote it
+    /// (`install_channel::MARKER_ATTRIBUTE` on a macOS bundle).
+    pub(crate) install: Vec<u8>,
+    /// **Where Homebrew keeps its record of the copy**: the bytes of the
+    /// attribute the cask writes beside the marker
+    /// (`install_channel::CASKROOM_ATTRIBUTE`), which the next update reads
+    /// the recorded app target from (§2.2 R-H2). Absent for a manager that
+    /// writes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) caskroom: Option<Vec<u8>>,
+}
+
 /// The journal's body, owned by the rescue build's version (F-8).
 ///
 /// **`adapter`** (0.4.7 ticket U-41a1) follows the receipt's rule for a field
@@ -1014,13 +1035,18 @@ impl Adapter {
 /// [`Adapter::Ours`], so an ordinary copy's journal is written byte for byte
 /// as 0.4.6 wrote it; a body without it (0.4.6's) reads as `Ours`; and a
 /// reader ignores a field it does not know (no `deny_unknown_fields`, 0.4.6's
-/// reader included).
+/// reader included). **`marker`** (0.4.8 D1) follows the same rule: absent
+/// when nothing is carried — every journal of Folio's own road — and written
+/// by the press of a managed copy's road ([`Carried`]); every later phase
+/// carries it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Body {
     pub(crate) phase: Phase,
     pub(crate) layout: Layout,
     #[serde(default, skip_serializing_if = "Adapter::is_ours")]
     pub(crate) adapter: Adapter,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) marker: Option<Carried>,
 }
 
 /// **`H\journal.json`**: the frozen header's `txn` and `rescue`, and the body.
@@ -1057,6 +1083,7 @@ impl Journal {
                 phase: Phase::Allocated,
                 layout,
                 adapter: Adapter::Ours,
+                marker: None,
             },
         }
     }
@@ -1066,6 +1093,15 @@ impl Journal {
     #[must_use]
     pub(crate) fn naming(mut self, adapter: Adapter) -> Self {
         self.body.adapter = adapter;
+        self
+    }
+
+    /// **The journal carrying `marker`** — what the press of a managed
+    /// copy's road records at `Allocated` (managed-update M1); every later
+    /// phase carries it.
+    #[must_use]
+    pub(crate) fn carrying(mut self, marker: Option<Carried>) -> Self {
+        self.body.marker = marker;
         self
     }
 
@@ -1133,6 +1169,7 @@ impl Journal {
                 phase,
                 layout: self.body.layout.clone(),
                 adapter: self.body.adapter,
+                marker: self.body.marker.clone(),
             },
             ..self.clone()
         })
@@ -3669,6 +3706,19 @@ mod tests {
         }
     }
 
+    /// What a Homebrew copy's press records (D1): the cask's marker and a
+    /// Caskroom under a folder named in two scripts.
+    fn carried() -> Carried {
+        Carried {
+            install: br#"{"v":1,"manager":"homebrew","uninstall_hook":false}"#.to_vec(),
+            caskroom: Some(
+                "/Users/测试 tester/homebrew/Caskroom/folio"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        }
+    }
+
     fn journal(phase: Phase, layout: Layout) -> Journal {
         Journal {
             txn: txn(),
@@ -3677,6 +3727,7 @@ mod tests {
                 phase,
                 layout,
                 adapter: Adapter::Ours,
+                marker: None,
             },
         }
     }
@@ -3926,6 +3977,44 @@ mod tests {
             Ok(ours),
             "a field this build does not know is not a refusal"
         );
+    }
+
+    /// RED (D1, managed-update M1) — **the marker the press records is read
+    /// back byte for byte and carried by every later phase, and 0.4.6's and
+    /// 0.4.7's body readers read such a journal's phase and layout as they
+    /// always did.** An ordinary journal carries none, and writes no key for
+    /// it (the 0.4.6 pin above, whose bytes would gain `"marker":null`).
+    ///
+    /// The applier, the recovery and the trial's own commit read the marker
+    /// from the journal to check the live side after `Activate` (M1) and to
+    /// re-encode the body (U-35): a phase that dropped it would leave a
+    /// committed copy whose next update has nothing recorded to compare.
+    ///
+    /// MUTATION: `advance` writes `marker: None` — the advanced journal has
+    /// lost it.
+    #[test]
+    fn a_carried_marker_is_read_back_whole_and_every_later_phase_carries_it() {
+        let carried = carried();
+        let recorded = journal(Phase::Allocated, bundle_layout())
+            .naming(Adapter::Homebrew)
+            .carrying(Some(carried.clone()));
+        let bytes = recorded.encode();
+        assert_eq!(Journal::parse(&bytes), Ok(recorded.clone()));
+        let BodyOnly046 { body } = serde_json::from_slice(&bytes).expect("0.4.6 reads it");
+        assert_eq!(
+            body,
+            Body046 {
+                phase: Phase::Allocated,
+                layout: bundle_layout(),
+            }
+        );
+        let mut at = recorded;
+        for event in [Event::Prepared, Event::Discarded] {
+            at = at.advance(&event).unwrap();
+            assert_eq!(at.body.marker.as_ref(), Some(&carried), "{event:?}");
+        }
+        let ordinary = journal(Phase::Moving, members_layout());
+        assert_eq!(Journal::parse(&ordinary.encode()), Ok(ordinary));
     }
 
     /// The four folders a Windows member lives in, as the file system keeps
@@ -6960,12 +7049,13 @@ mod tests {
     /// `TrialStarting` — from the bytes it read, as `commit_last_trial_as`
     /// reads them — is those bytes with three things changed and nothing
     /// else: the phase, the header's outcome, and the writer's version. Every
-    /// other byte, the layout and an adapter that is not `Ours` included, is
-    /// the byte O wrote, and N adds no field an O-image reader does not know.
+    /// other byte, the layout, an adapter that is not `Ours` and a carried
+    /// marker included (0.4.8 D1), is the byte O wrote, and N adds no field
+    /// an O-image reader does not know.
     ///
     /// MUTATION: give `Phase::Committed` a field written by default, or record
-    /// `LastTrialReady` with a fresh layout or the default adapter: the bytes
-    /// N writes differ from O's outside the three.
+    /// `LastTrialReady` with a fresh layout, the default adapter or no marker:
+    /// the bytes N writes differ from O's outside the three.
     #[test]
     fn the_reserved_trials_commit_re_encodes_the_body_it_read_losslessly() {
         const OLDER: &str = "0.4.6";
@@ -6979,12 +7069,15 @@ mod tests {
             began_ms: BEGAN,
         };
         let phase_bytes = |phase: &Phase| String::from_utf8(serde_json::to_vec(phase).unwrap());
-        for (layout, adapter) in [
-            (members_layout(), Adapter::Ours),
-            (members_layout(), Adapter::Scoop),
-            (bundle_layout(), Adapter::Homebrew),
+        for (layout, adapter, marker) in [
+            (members_layout(), Adapter::Ours, None),
+            (members_layout(), Adapter::Scoop, None),
+            (bundle_layout(), Adapter::Homebrew, None),
+            (bundle_layout(), Adapter::Homebrew, Some(carried())),
         ] {
-            let ours = journal(starting.clone(), layout).naming(adapter);
+            let ours = journal(starting.clone(), layout)
+                .naming(adapter)
+                .carrying(marker);
             // What O wrote: this build's bytes, as an older build signs them.
             let written_by = |version: &str| format!("\"written_by\":\"{version}\"");
             let o_bytes = String::from_utf8(ours.encode()).unwrap().replacen(
@@ -7037,6 +7130,8 @@ mod tests {
         RetiredOutcome,
         Layout,
         Adapter,
+        /// The body's carried marker and its keys (0.4.8 D1).
+        Carried,
         ReceiptVersion,
     }
 
@@ -7050,7 +7145,8 @@ mod tests {
                 Vocabulary::Phase
                 | Vocabulary::RetiredOutcome
                 | Vocabulary::Layout
-                | Vocabulary::Adapter => Document::Body,
+                | Vocabulary::Adapter
+                | Vocabulary::Carried => Document::Body,
                 Vocabulary::ReceiptVersion => Document::Receipt,
             }
         }
@@ -7135,6 +7231,31 @@ mod tests {
         }
     }
 
+    /// The words of the body's carried marker (0.4.8 D1): the body's key
+    /// `marker` and the keys of [`Carried`] — an exhaustive projection, so a
+    /// key added to `Carried` has no word until it has one here.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CarriedWord {
+        Marker,
+        Install,
+        Caskroom,
+    }
+
+    impl CarriedWord {
+        /// The words a body carrying `carried` writes.
+        fn of(carried: &Carried) -> Vec<Self> {
+            let Carried {
+                install: _,
+                caskroom,
+            } = carried;
+            let mut words = vec![CarriedWord::Marker, CarriedWord::Install];
+            if caskroom.is_some() {
+                words.push(CarriedWord::Caskroom);
+            }
+            words
+        }
+    }
+
     /// **One word of the grammar, as its type's value.**
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Of {
@@ -7146,6 +7267,7 @@ mod tests {
         Retired(Outcome),
         Layout(LayoutWord),
         Adapter(Adapter),
+        Carried(CarriedWord),
         ReceiptVersion,
     }
 
@@ -7160,6 +7282,7 @@ mod tests {
                 Of::Retired(_) => Vocabulary::RetiredOutcome,
                 Of::Layout(_) => Vocabulary::Layout,
                 Of::Adapter(_) => Vocabulary::Adapter,
+                Of::Carried(_) => Vocabulary::Carried,
                 Of::ReceiptVersion => Vocabulary::ReceiptVersion,
             }
         }
@@ -7251,12 +7374,20 @@ mod tests {
             Of::Adapter(Adapter::Ours) => additive(of, "Ours", "0.4.7", EVERY),
             // A 0.4.6 reader takes these for `Ours` (design §3(d)): breaking
             // for it alone, met only by a downgrade to 0.4.6 with the macOS
-            // rescue clone missing. Their roads are off, so nobody writes them
-            // yet; the press would record one (O) and every later writer
-            // carry it.
+            // rescue clone missing. The press records one (O) and every later
+            // writer carries it: Homebrew's since 0.4.8 (D1); scoop's and
+            // winget's roads are off, so nobody writes them yet.
             Of::Adapter(Adapter::Homebrew) => breaking(of, "Homebrew", "0.4.7", EVERY),
             Of::Adapter(Adapter::Scoop) => breaking(of, "Scoop", "0.4.7", EVERY),
             Of::Adapter(Adapter::Winget) => breaking(of, "Winget", "0.4.7", EVERY),
+            // Absent when nothing is carried, so every journal of Folio's own
+            // road is the bytes it was; a reader that does not know the key
+            // ignores it (0.4.6's and 0.4.7's included). The press records
+            // it (O), and every later writer carries it, N's re-encoding
+            // included.
+            Of::Carried(CarriedWord::Marker) => additive(of, "marker", "0.4.8", EVERY),
+            Of::Carried(CarriedWord::Install) => additive(of, "install", "0.4.8", EVERY),
+            Of::Carried(CarriedWord::Caskroom) => additive(of, "caskroom", "0.4.8", EVERY),
             Of::ReceiptVersion => additive(of, "1", "0.4.6", Writers::N),
         }
     }
@@ -7286,6 +7417,11 @@ mod tests {
         Adapter::Scoop,
         Adapter::Winget,
     ];
+    const CARRIED: [CarriedWord; 3] = [
+        CarriedWord::Marker,
+        CarriedWord::Install,
+        CarriedWord::Caskroom,
+    ];
 
     /// **The journal's and the receipt's grammar** — every word's row
     /// ([`row`]): its document and vocabulary, the word, the release it
@@ -7298,6 +7434,7 @@ mod tests {
         words.extend(RETIREMENTS.map(|outcome| row(Of::Retired(outcome))));
         words.extend(LAYOUTS.map(|layout| row(Of::Layout(layout))));
         words.extend(ADAPTERS.map(|adapter| row(Of::Adapter(adapter))));
+        words.extend(CARRIED.map(|word| row(Of::Carried(word))));
         words.push(row(Of::ReceiptVersion));
         words
     }
@@ -7310,19 +7447,21 @@ mod tests {
     ///
     /// Each row comes from one exhaustive match ([`row`]), so a variant added
     /// to `Class`, `HeaderOutcome`, `PhaseKind` (and so `Phase`), `Outcome`,
-    /// `Layout` or `Adapter` does not compile until it has its row; and each
-    /// vocabulary's count is pinned here — 4 classes, 3 outcomes (design
-    /// §3(c): a fifth class or a fourth outcome is read by every 0.4.6 and
-    /// 0.4.7 start as a journal it cannot read, for ever), 13 phases, 2
-    /// retirements, 3 layouts, 4 adapters: design §1.1's 29 words. Each row's
-    /// word is the word this build's own serialiser and parser use. The
-    /// writers of a phase are [`JOURNAL_WRITERS`]'s, and a class's or an
-    /// outcome's are those of the phases that project to it.
+    /// `Layout`, `Adapter` or the carried marker's words does not compile
+    /// until it has its row (a key added to `Carried` does not compile until
+    /// its projection names it); and each vocabulary's count is pinned here —
+    /// 4 classes, 3 outcomes (design §3(c): a fifth class or a fourth outcome
+    /// is read by every 0.4.6 and 0.4.7 start as a journal it cannot read, for
+    /// ever), 13 phases, 2 retirements, 3 layouts, 4 adapters: design §1.1's
+    /// 29 words; and the carried marker's 3 keys (0.4.8 D1). Each row's word
+    /// is the word this build's own serialiser and parser use. The writers of
+    /// a phase are [`JOURNAL_WRITERS`]'s, and a class's or an outcome's are
+    /// those of the phases that project to it.
     ///
-    /// MUTATION: add a variant `Class::Paused` (or `Adapter::Nix`): the build
-    /// fails at `row` (and at `Class::word`); add `LastTrialReady`'s writer N
-    /// to `Prepared` in `JOURNAL_WRITERS`: the `Prepared` row's writers
-    /// differ.
+    /// MUTATION: add a variant `Class::Paused` (or `Adapter::Nix`, or
+    /// `CarriedWord::Pinned`): the build fails at `row` (and at
+    /// `Class::word`); add `LastTrialReady`'s writer N to `Prepared` in
+    /// `JOURNAL_WRITERS`: the `Prepared` row's writers differ.
     #[test]
     fn every_grammar_word_has_its_row_and_the_header_vocabularies_are_closed() {
         let grammar = grammar();
@@ -7341,6 +7480,7 @@ mod tests {
             (Vocabulary::RetiredOutcome, 2),
             (Vocabulary::Layout, 3),
             (Vocabulary::Adapter, 4),
+            (Vocabulary::Carried, 3),
             (Vocabulary::ReceiptVersion, 1),
         ] {
             assert_eq!(words(vocabulary).len(), count, "{vocabulary:?}");
@@ -7437,6 +7577,31 @@ mod tests {
                 row(Of::Adapter(adapter)).word
             );
         }
+        // The carried marker's keys: the body's `marker`, then `Carried`'s
+        // own, exactly the words its projection names.
+        let carried = carried();
+        let body = serde_json::to_value(
+            &journal(Phase::Moving, bundle_layout())
+                .carrying(Some(carried.clone()))
+                .body,
+        )
+        .unwrap();
+        let marker_word = row(Of::Carried(CarriedWord::Marker)).word;
+        let mut on_the_wire: Vec<&str> = vec![marker_word];
+        on_the_wire.extend(
+            body[marker_word]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str),
+        );
+        on_the_wire.sort_unstable();
+        let mut rows: Vec<&str> = CarriedWord::of(&carried)
+            .into_iter()
+            .map(|word| row(Of::Carried(word)).word)
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(on_the_wire, rows);
         assert_eq!(HEADER_VERSION.to_string(), row(Of::HeaderVersion).word);
         assert_eq!(RECEIPT_VERSION.to_string(), row(Of::ReceiptVersion).word);
         let header: serde_json::Value =
