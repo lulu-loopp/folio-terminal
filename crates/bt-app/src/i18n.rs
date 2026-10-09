@@ -2871,6 +2871,9 @@ text_entries! {
     ShellProfileHardLink,
     ShellProfileReadOnly,
     ShellProfileChanged,
+    /// A one-click edit of `$PROFILE` refused because the file is not what the check, or the
+    /// write being undone, saw (0.4.8 G7).
+    ShellProfileChangedElsewhere,
     ShellProfileNothing,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
@@ -5720,6 +5723,11 @@ impl Text {
                 "The profile is read-only or is not a regular file.",
                 "$PROFILE 为只读，或不是普通文件。",
             ),
+            Self::ShellProfileChangedElsewhere => pick(
+                lang,
+                "$PROFILE was changed elsewhere. Reload this page and try again.",
+                "$PROFILE was changed elsewhere. Reload this page and try again.", // zh: pending G7-SWEEP-048
+            ),
             Self::ShellProfileChanged => pick(
                 lang,
                 "The profile changed during the operation; retry when the editor is finished.",
@@ -6154,6 +6162,9 @@ impl Text {
         // 0.4.8 G7-SWEEP-048: the uninstall's row for an update trial's folder.
         (Self::CleanupMarkTrialFolder, HostPlatform::Windows),
         (Self::CleanupMarkTrialFolder, HostPlatform::MacOs),
+        // 0.4.8 G7-SWEEP-048: a one-click `$PROFILE` edit against a file changed elsewhere.
+        (Self::ShellProfileChangedElsewhere, HostPlatform::Windows),
+        (Self::ShellProfileChangedElsewhere, HostPlatform::MacOs),
     ];
 }
 

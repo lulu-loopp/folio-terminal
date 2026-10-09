@@ -2598,7 +2598,10 @@ struct ProfileObservation {
     /// Folio's environment, which no other session shares. `None` when the fresh block could not
     /// be read: then what an ordinary session does is not known ([`PolicyCause::Undetermined`]).
     ordinary_process: Option<crate::psreadline::ExecutionPolicy>,
-    line_present: bool,
+    /// **The profile's bytes as this observation read them** — whether a Folio line is in it
+    /// ([`ProfileRevision::carries_the_line`]), and the revision a one-click Enable from the row
+    /// drawn from it is made against.
+    seen: ProfileRevision,
     /// **Whether the edition runs `-Command` text in `FullLanguage`** ([`PROFILE_COMMAND`]'s
     /// `Language=`). Anything else — Constrained Language Mode under an application-control
     /// policy — is a session the loader cannot integrate.
@@ -2648,7 +2651,7 @@ impl ProfileObservation {
                 marked: false,
             },
             ordinary_process: None,
-            line_present: false,
+            seen: ProfileRevision::default(),
             full_language: false,
         }
     }
@@ -2817,7 +2820,7 @@ pub fn powershell_profile_fallback(
             Heard::Failed => Heard::Failed,
             Heard::Answer(observed) => Heard::Answer((
                 edition_cause(&observed, row),
-                observed.line_present,
+                observed.seen.carries_the_line(),
                 observed.full_language,
             )),
         },
@@ -3918,7 +3921,7 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
         edition_says,
         location,
         ordinary_process: None,
-        line_present: false,
+        seen: ProfileRevision::default(),
     })
 }
 
@@ -4168,6 +4171,77 @@ pub struct ProfileWrite {
     pub profile: PathBuf,
     /// The copy taken first, or `None` when there was no file to copy.
     pub backup: Option<PathBuf>,
+    /// **The edit this write made** — the file before it and after it — or `None` when the
+    /// file already carried a line in a form Folio owns and nothing was written. Its Undo is
+    /// made against `after` ([`ProfileEdit`]).
+    pub edit: Option<ProfileEdit>,
+}
+
+/// **A profile's bytes at one moment** (0.4.8 G7): the file's content, or `None` where there
+/// was no file. The revision every edit of the integration line is made against: the writer
+/// reads the file again under the marks lock, immediately before its edit, and refuses when
+/// the bytes differ from the revision its caller saw — an Enable against what the row's check
+/// read, an Undo against what the Enable wrote.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileRevision(Option<Vec<u8>>);
+
+impl ProfileRevision {
+    /// The file at `path` as it stands, read on the settings lane; a file that cannot be read
+    /// is no file to this revision, and an edit against it meets the writer's own read.
+    pub(crate) fn read(path: &Path) -> Self {
+        Self(bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path).ok())
+    }
+
+    /// The file as the writer reads it for an edit ([`read_profile_for_edit`]'s answer).
+    fn of(bytes: Option<Vec<u8>>) -> Self {
+        Self(bytes)
+    }
+
+    /// The file at `profile` read as the writer reads it for an edit — the read a precondition
+    /// compares, made under the marks lock immediately before the edit.
+    fn of_edit(profile: &Path) -> std::io::Result<Self> {
+        read_profile_for_edit(profile).map(Self)
+    }
+
+    /// The bytes, or nothing for no file.
+    fn bytes(&self) -> &[u8] {
+        self.0.as_deref().unwrap_or_default()
+    }
+
+    /// Whether the bytes, decoded as PowerShell decodes them, carry a Folio line — the
+    /// observation's "present", which keeps the one-click Enable away.
+    pub(crate) fn carries_the_line(&self) -> bool {
+        self.0.as_deref().is_some_and(|bytes| {
+            profile_marks::Decoded::read(bytes)
+                .is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text))
+        })
+    }
+}
+
+/// **One click's write into a profile, as its Undo takes it back** (0.4.8 G7): the file, and
+/// its revisions before and after the write. The Undo restores `before` only while the file is
+/// still exactly `after` — so it takes out the line this click wrote, with the separator it
+/// added, and never a line the person wrote or edited since.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileEdit {
+    pub profile: PathBuf,
+    before: ProfileRevision,
+    after: ProfileRevision,
+}
+
+/// **The revision the newest observation of `program`'s edition read**, the one its row is
+/// drawn from — what a click on that row's Enable is made against. `None` before any
+/// observation of the edition answered.
+pub(crate) fn powershell_profile_seen(program: &Path) -> Option<ProfileRevision> {
+    match PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&powershell_edition(program))
+    {
+        Some((_, Heard::Answer(observed))) => Some(observed.seen.clone()),
+        _ => None,
+    }
 }
 
 /// Low-level injected-path writer. Production uses install_recorded, which
@@ -4205,6 +4279,7 @@ fn add_profile_with_forms(
         return Ok(ProfileWrite {
             profile: profile.to_path_buf(),
             backup: None,
+            edit: None,
         });
     } else {
         let newline = if decoded.text.contains("\r\n") {
@@ -4231,6 +4306,11 @@ fn add_profile_with_forms(
     Ok(ProfileWrite {
         profile: profile.to_path_buf(),
         backup,
+        edit: Some(ProfileEdit {
+            profile: profile.to_path_buf(),
+            before: ProfileRevision::of(existing),
+            after: ProfileRevision::of(Some(bytes)),
+        }),
     })
 }
 
@@ -4657,7 +4737,7 @@ mod tests {
                 marked: false,
             },
             ordinary_process: Some(Undefined),
-            line_present: false,
+            seen: ProfileRevision::default(),
         };
         let older = r"C:\Users\me\Documents\PowerShell\profile.ps1";
         let newer = r"C:\Users\me\OneDrive\文档\PowerShell\profile.ps1";
@@ -5575,7 +5655,10 @@ mod tests {
                 marked: true
             }
         );
-        assert!(!observed.line_present, "presence is read from the file");
+        assert!(
+            !observed.seen.carries_the_line(),
+            "presence is read from the file"
+        );
         for (zone, path, expected) in [
             ("Internet", local, Some(false)),
             ("Untrusted", share, Some(false)),
@@ -6004,7 +6087,7 @@ mod tests {
                 marked: false,
             },
             ordinary_process: Some(Undefined),
-            line_present: false,
+            seen: ProfileRevision::default(),
         };
         publish_profile_observation(program, next_observation(), observed(Restricted));
         let before = powershell_profile_fallback(program, &row, true);
@@ -6196,7 +6279,7 @@ mod tests {
                 marked: false,
             },
             ordinary_process: ordinary,
-            line_present: false,
+            seen: ProfileRevision::default(),
         };
         // The probe's own Process scope is Folio's: Bypass here, which no ordinary session has.
         let with_probe_bypass = |scopes: PolicyScopes| PolicyScopes {
@@ -6490,17 +6573,19 @@ mod tests {
         );
         std::fs::remove_dir_all(root.join("文档")).unwrap();
 
-        profile_runtime::install_recorded(
+        let wrote = profile_runtime::install_recorded(
             &profile,
             &data,
             &script,
             profile_marks::MANAGED_LINE,
             std::time::UNIX_EPOCH,
             Some(PowerShellEdition::WindowsPowerShell),
+            &ProfileRevision::read(&profile),
         )
         .expect("Enable writes the line");
         assert!(profile.is_file());
-        profile_runtime::undo_profile_install(&profile, &data).expect("Undo");
+        profile_runtime::undo_profile_install(wrote.edit.as_ref().expect("a write"), &data)
+            .expect("Undo");
         let (stdout, stderr) = ordinary(&profile);
         assert_eq!(
             stderr.trim(),

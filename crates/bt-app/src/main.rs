@@ -13621,7 +13621,7 @@ struct WindowRuntime {
     /// offered to undo is no longer the thing that would come back.
     profile_undo: Option<(toast::ToastId, profiles::Profile, usize)>,
     /// The one managed `$PROFILE` line a standing toast can remove again.
-    powershell_profile_undo: Option<(toast::ToastId, PathBuf, PathBuf)>,
+    powershell_profile_undo: Option<(toast::ToastId, PathBuf, shell_integration::ProfileEdit)>,
     /// **Where a checkout came from**, while it is in flight (user ruling,
     /// 2026-08-19): the repository, and the branch `HEAD` was on before.
     ///
@@ -66527,7 +66527,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         match outcome.clone() {
                             shell_integration::ProfileInstallOutcome::Installed {
                                 program,
-                                profile,
+                                edit,
                             } => {
                                 let id = runtime.toast_with_verb(
                                     toast::ToastKind::Info,
@@ -66535,8 +66535,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                                     i18n::Text::ShellProfileAddedToast.text(),
                                     i18n::Text::ProfilesUndo.text(),
                                 )?;
-                                runtime.window.powershell_profile_undo =
-                                    Some((id, program, profile));
+                                runtime.window.powershell_profile_undo = Some((id, program, edit));
                             }
                             shell_integration::ProfileInstallOutcome::Refused(reason)
                             | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
@@ -66547,7 +66546,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                                     reason,
                                 )?;
                             }
-                            shell_integration::ProfileInstallOutcome::Undone => {}
+                            shell_integration::ProfileInstallOutcome::Present
+                            | shell_integration::ProfileInstallOutcome::Undone => {}
                         }
                     }
                     Ok(())

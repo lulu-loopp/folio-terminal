@@ -112,7 +112,14 @@ creating the file and its folders, and the one copy it takes of a file that was
 there before its first write; Undo, the Settings remover, `--remove-shell-integration`
 and both uninstall verbs remove the managed line, then the copy, then — only when
 Folio created it and nothing but whitespace is left — the file and each empty
-folder it created. A removal takes no copy. A PowerShell that does not say where
+folder it created. A removal takes no copy. **A one-click edit is made against one
+revision** (0.4.8 G7): Enable against the profile's bytes as the check its row is drawn
+from read them, its Undo against the bytes that Enable wrote; the writer reads the file
+again under the marks lock immediately before the edit and, when the bytes differ,
+writes nothing and refuses with "changed elsewhere, reload". Undo puts the file back to
+the bytes it held before that Enable — Folio's line and the separator it added, byte for
+byte — so it never takes out a line the person wrote or edited; an Enable that finds a
+line in a form Folio owns already there writes nothing and offers no Undo. A PowerShell that does not say where
 its `$PROFILE` is, and that the record does not locate, is reported with what is
 left there and refuses nothing. The Settings remover is offered only for a line in
 a form Folio owns. The PowerShell script returns outside `TERM_PROGRAM=Folio`, so
@@ -132,7 +139,8 @@ prompt string; `B` is still refused where there is no `C`.
 patch); §7.57 *`cmd.exe` finally has a scale on its command rail*; superseded
 §7.1.6j (the old opt-in `$PROFILE` offer and backup; only its shell-owned
 profile-path discovery remains); `docs/shell-integration.md`, which states it is the authority for the
-protocol; trailing entry 2026-09-21 *Folio's own writers wait their turn for the
+protocol; trailing entry 2026-10-09 *Enable and Undo of the `$PROFILE` line are made against one
+revision of the file*; trailing entry 2026-09-21 *Folio's own writers wait their turn for the
 marks record*; trailing entry 2026-09-21 *a removal that found nothing says
 nothing in the window*; trailing entry 2026-09-23 *a writer of Folio's waits
 behind another of Folio's writers for as long as that one takes; the two-second

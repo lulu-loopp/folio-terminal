@@ -8,6 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Enabling and undoing the PowerShell integration from two windows never removes your own line from your PowerShell profile: if the profile changed since the page looked at it, Folio changes nothing and asks you to reload the page. <!-- zh: pending G7-SWEEP-048 -->
 - Uninstalling Folio while an update's new version is still being tried no longer leaves a `folio-trial-…` folder behind in your temporary folder. <!-- zh: pending G7-SWEEP-048 -->
 - An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
 - The card after an unfinished update says what happened — that the update stopped before the new version started, or that it did not finish while the new version is already running — instead of always saying the new version did not start. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
