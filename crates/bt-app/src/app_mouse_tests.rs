@@ -4,10 +4,11 @@
 //! from [`crate::test_support`].
 
 use super::*;
+use crate::runtime::pointer::touch::pan_on_the_wheel_road;
 use crate::test_support::{
     CARDS_AT_200, PtyPresentationHarness, TARGET, a_local_file, a_local_folder, a_shell, at,
     calls_of, cards_column, centre, every_wheel_situation, flush_test_wheel, found, hand_leaves,
-    host_file_uri, hyperlink_hit, in_product, method_body, no_directories, on_this_host, peek_open,
+    host_file_uri, hyperlink_hit, method_body, no_directories, on_this_host, peek_open,
     reader_names, source, squeezed_body, wheel_pane_at_top,
 };
 use bt_source::{Needle, Pattern, View};
@@ -3525,9 +3526,9 @@ fn the_press_and_the_hover_ask_one_router() {
              that part with a name, read off the router like everything else"
     );
     assert_eq!(
-        in_product(&calls_of("Runtime", "docked_chrome_target_at")),
-        1,
-        "and the docked ladder is reached through the router and nowhere else"
+        reader_names(&calls_of("Runtime", "docked_chrome_target_at")),
+        ["plane_at", "pointer_target_at"],
+        "and the docked ladder is reached through the routers and nowhere else: today's, and the docked plane of the pointer module's walk (T-POINTER-CAPTURE cut 1)"
     );
     assert!(
         method_body("Runtime", "pointer_target_at")

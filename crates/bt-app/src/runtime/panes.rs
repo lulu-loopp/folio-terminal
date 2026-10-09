@@ -729,7 +729,10 @@ impl Runtime<'_> {
     /// tested against must be the band that was drawn, and one derivation is the
     /// only way to say that. A seat whose rail has not been built this session has
     /// no band and answers nothing.
-    fn command_rail_at(&self, position: PhysicalPosition<f64>) -> Option<(SeatId, usize)> {
+    pub(in crate::runtime) fn command_rail_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(SeatId, usize)> {
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
         self.command_rail_body(seat)?;
         let cache = self.window.command_rails.get(&seat)?;

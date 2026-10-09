@@ -14005,8 +14005,8 @@ struct WindowRuntime {
     /// **The system's pan gestures this window's touch door has answered and
     /// the loop has not yet read** (0.4.4 ticket 11). Written by the door from
     /// inside message dispatch, emptied by [`Runtime::spend_parked_pans`] on
-    /// the wake the door sent; see [`ParkedPans`].
-    parked_pans: ParkedPans,
+    /// the wake the door sent; see [`runtime::pointer::touch::ParkedPans`].
+    parked_pans: runtime::pointer::touch::ParkedPans,
     /// **The drop this window is holding, waiting for the turn boundary**
     /// (GitHub issue #1 ②).
     ///
@@ -14206,6 +14206,13 @@ struct WindowRuntime {
     /// exactly one caller, the release. It is never a substitute for the live
     /// answer: a hover asked of a hand that has gone is a hover that lies.
     pointer_last_seen: Option<PhysicalPosition<f64>>,
+    /// **What the frame measured for the pointer router** (T-POINTER-CAPTURE
+    /// §2.1): rebuilt where the overlay is built, read by every walk until the
+    /// next frame. See [`runtime::pointer::PointerFacts`].
+    pointer_facts: runtime::pointer::PointerFacts,
+    /// **The router's answer for the event being handled**, walked once at the
+    /// event's door (R-4). See [`runtime::pointer::PointerMemo`].
+    pointer_memo: runtime::pointer::PointerMemo,
     mouse_route: Option<MouseRoute>,
     click_tracker: ClickTracker,
     line_wheel_remainder: f64,
@@ -31899,7 +31906,27 @@ impl OverlayStack {
             + self.layout_peek.len()
     }
 
+    /// The whole overlay, bottom to top, **as one list** — what
+    /// [`Self::bands_bottom_first`] names, folded.
     fn flattened(self) -> marks::Band {
+        self.bands_bottom_first().into_iter().fold(
+            marks::Band::default(),
+            |mut stack, (_, band)| {
+                stack.append(band);
+                stack
+            },
+        )
+    }
+
+    /// **Every band of the overlay, bottom to top, each with its name** — the
+    /// z-order as a value (T-POINTER-CAPTURE cut 1).
+    ///
+    /// The order is the paint's ([`Self::flattened`] folds this list and
+    /// nothing else) and, read top first, the pointer's: the router's layer
+    /// list ([`runtime::pointer::POINTER_LAYERS_TOP_FIRST`]) names the bands it
+    /// stands for, and `every_band_is_a_pointer_layer_or_takes_no_pointer`
+    /// requires the two to agree band for band.
+    fn bands_bottom_first(self) -> [(OverlayBand, marks::Band); OVERLAY_BANDS] {
         let Self {
             preview_bars,
             video_bars,
@@ -31946,39 +31973,70 @@ impl OverlayStack {
             },
         );
         [
-            preview_bars,
-            video_bars,
-            terminal_bars,
-            command_rail,
-            formula_tools,
-            rail,
-            flight,
-            ground,
-            in_pane,
-            web_sheet,
-            layout_peek,
-            float,
-            modal,
-            file_menu,
-            pane_menu,
-            git_menu,
-            term_menu,
-            tab_menu,
-            palette,
-            toast,
-            key_hint,
-            card_hint,
-            tooltip,
-            file_peek,
-            drag_ghost,
-            window_ring,
+            (OverlayBand::PreviewBars, preview_bars),
+            (OverlayBand::VideoBars, video_bars),
+            (OverlayBand::TerminalBars, terminal_bars),
+            (OverlayBand::CommandRail, command_rail),
+            (OverlayBand::FormulaTools, formula_tools),
+            (OverlayBand::Rail, rail),
+            (OverlayBand::Flight, flight),
+            (OverlayBand::Ground, ground),
+            (OverlayBand::InPane, in_pane),
+            (OverlayBand::WebSheet, web_sheet),
+            (OverlayBand::LayoutPeek, layout_peek),
+            (OverlayBand::Float, float),
+            (OverlayBand::Modal, modal),
+            (OverlayBand::FileMenu, file_menu),
+            (OverlayBand::PaneMenu, pane_menu),
+            (OverlayBand::GitMenu, git_menu),
+            (OverlayBand::TermMenu, term_menu),
+            (OverlayBand::TabMenu, tab_menu),
+            (OverlayBand::Palette, palette),
+            (OverlayBand::Toast, toast),
+            (OverlayBand::KeyHint, key_hint),
+            (OverlayBand::CardHint, card_hint),
+            (OverlayBand::Tooltip, tooltip),
+            (OverlayBand::FilePeek, file_peek),
+            (OverlayBand::DragGhost, drag_ghost),
+            (OverlayBand::WindowRing, window_ring),
         ]
-        .into_iter()
-        .fold(marks::Band::default(), |mut stack, band| {
-            stack.append(band);
-            stack
-        })
     }
+}
+
+/// How many bands [`OverlayStack::bands_bottom_first`] names.
+const OVERLAY_BANDS: usize = 26;
+
+/// **One band of the overlay, by name** — a field of [`OverlayStack`], with
+/// `InPane` standing for the search capsule and the notice strips, which are
+/// painted as one band in the order [`IN_PANE_SURFACES_TOP_FIRST`] states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverlayBand {
+    PreviewBars,
+    VideoBars,
+    TerminalBars,
+    CommandRail,
+    FormulaTools,
+    Rail,
+    Flight,
+    Ground,
+    InPane,
+    WebSheet,
+    LayoutPeek,
+    Float,
+    Modal,
+    FileMenu,
+    PaneMenu,
+    GitMenu,
+    TermMenu,
+    TabMenu,
+    Palette,
+    Toast,
+    KeyHint,
+    CardHint,
+    Tooltip,
+    FilePeek,
+    DragGhost,
+    WindowRing,
 }
 
 /// K115 — how far from its slot a grabbed tab is drawn, given where the hand
@@ -34597,20 +34655,20 @@ impl OverInPane {
 
 #[cfg(test)]
 impl OverInPane {
-    /// The [`OverlayStack`] field this family is painted in.
-    const fn band(self) -> &'static str {
+    /// The [`OverlayStack`] band this family is painted in.
+    const fn band(self) -> OverlayBand {
         match self {
-            Self::FilePeek => "file_peek",
-            Self::Toast => "toast",
-            Self::Palette => "palette",
-            Self::TabMenu => "tab_menu",
-            Self::TermMenu => "term_menu",
-            Self::GitMenu => "git_menu",
-            Self::PaneMenu => "pane_menu",
-            Self::FileMenu => "file_menu",
-            Self::Modal => "modal",
-            Self::Float => "float",
-            Self::WebSheet => "web_sheet",
+            Self::FilePeek => OverlayBand::FilePeek,
+            Self::Toast => OverlayBand::Toast,
+            Self::Palette => OverlayBand::Palette,
+            Self::TabMenu => OverlayBand::TabMenu,
+            Self::TermMenu => OverlayBand::TermMenu,
+            Self::GitMenu => OverlayBand::GitMenu,
+            Self::PaneMenu => OverlayBand::PaneMenu,
+            Self::FileMenu => OverlayBand::FileMenu,
+            Self::Modal => OverlayBand::Modal,
+            Self::Float => OverlayBand::Float,
+            Self::WebSheet => OverlayBand::WebSheet,
         }
     }
 }
@@ -34629,18 +34687,6 @@ const OVER_IN_PANE_TOP_FIRST: [OverInPane; 11] = [
     OverInPane::Modal,
     OverInPane::Float,
     OverInPane::WebSheet,
-];
-
-/// The bands painted above the in-pane surfaces that never take the pointer:
-/// pictures that follow it or explain it, which a hand points *through*.
-#[cfg(test)]
-const BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER: [&str; 6] = [
-    "layout_peek",
-    "key_hint",
-    "card_hint",
-    "tooltip",
-    "drag_ghost",
-    "window_ring",
 ];
 
 /// Which surface a files tree is drawn on — the two hosts P81 asks to be wired.
@@ -42891,7 +42937,7 @@ struct NewWindowParts {
     /// Where this window's touch door parks the pans the system recognised —
     /// see [`WindowRuntime::parked_pans`]. Made where the door is opened,
     /// because the door is opened before there is a window runtime to hold it.
-    parked_pans: ParkedPans,
+    parked_pans: runtime::pointer::touch::ParkedPans,
     /// The application's favicon store, handed to this window's mark rasterizer
     /// so that a page drawn here wears what any window in the process learned
     /// about its site — see [`App::favicons`].
@@ -43160,6 +43206,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         ime_system_caret,
         pointer_position: None,
         pointer_last_seen: None,
+        pointer_facts: runtime::pointer::PointerFacts::default(),
+        pointer_memo: runtime::pointer::PointerMemo::default(),
         mouse_route: None,
         click_tracker: ClickTracker::default(),
         line_wheel_remainder: 0.0,
@@ -44199,7 +44247,7 @@ impl Runtime<'_> {
         // winit made the registration this undoes when it built the window.
         // Reported and never propagated: a window that answers nothing to a
         // finger is a window, and a launch that died instead is not.
-        let parked_pans = let_the_system_translate_touch(native, &proxy);
+        let parked_pans = runtime::pointer::touch::let_the_system_translate_touch(native, &proxy);
         // **This window's own chrome, read where it was measured** (M3-3;
         // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
         // where the platform is asked what it still draws in this bar, and the
@@ -59403,7 +59451,7 @@ mod page_under_a_laden_hand_tests {
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
         let scan = web_page_at
-            .find("self.window.web")
+            .find("self.web_page_shown_at(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
@@ -59519,7 +59567,7 @@ mod page_under_the_tab_list_tests {
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");
         let scan = web_page_at
-            .find("self.window.web")
+            .find("self.web_page_shown_at(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
@@ -67252,7 +67300,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // costs one frame instead of one frame each, and this is the line that
             // keeps that from being a reordering — whatever arrives next answers the
             // window the wheel has already moved.
-            if !matches!(event, WindowEvent::MouseWheel { .. })
+            if !runtime::pointer::is_wheel_event(&event)
                 && let Err(error) = runtime.flush_wheel()
             {
                 self.fail(event_loop, error);
@@ -67378,10 +67426,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     // after it is written.
                     runtime.note_key_hint(Instant::now())
                 }
-                WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
-                WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
-                WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
-                WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
+                // **Every pointer event goes through one door** (T-POINTER-CAPTURE
+                // cut 1): the pointer module names the kinds and owns their
+                // answers, so this dispatcher reads no pointer field.
+                event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event),
                 // **A file let go of over this window** (GitHub issue #1 ②). One
                 // event per file and no marker between drops, so the path is
                 // written down here and the batch is spent at the turn boundary —
@@ -67736,7 +67784,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
 /// gates, early returns, the match, and application follow-up work alike.
 fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
     use hang_watch::Station;
-    match event {
+    // **The pointer kinds are the pointer module's to name** (T-POINTER-CAPTURE
+    // cut 1). Its answer is exhaustive over every kind winit has, so a kind added
+    // to winit stops that match compiling, and every kind it does not claim is
+    // one of the rows below.
+    runtime::pointer::station_of(event).unwrap_or_else(|| match event {
         WindowEvent::CloseRequested => Station::EventClose,
         WindowEvent::KeyboardInput { .. } => Station::EventKey,
         WindowEvent::Ime(Ime::Enabled) => Station::ImeEnabled,
@@ -67744,10 +67796,6 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         WindowEvent::Ime(Ime::Commit(_)) => Station::ImeCommit,
         WindowEvent::Ime(Ime::Disabled) => Station::ImeDisabled,
         WindowEvent::ModifiersChanged(_) => Station::EventModifiers,
-        WindowEvent::CursorMoved { .. } => Station::EventPointer,
-        WindowEvent::CursorLeft { .. } => Station::EventCursorLeft,
-        WindowEvent::MouseInput { .. } => Station::EventMouse,
-        WindowEvent::MouseWheel { .. } => Station::EventWheel,
         WindowEvent::Resized(_) => Station::EventResize,
         WindowEvent::ScaleFactorChanged { .. } => Station::EventScale,
         WindowEvent::Moved(_) => Station::EventMoved,
@@ -67760,7 +67808,6 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         WindowEvent::Destroyed => Station::EventDestroyed,
         WindowEvent::HoveredFile(_) => Station::EventHoveredFile,
         WindowEvent::HoveredFileCancelled => Station::EventHoverCancelled,
-        WindowEvent::CursorEntered { .. } => Station::EventCursorEntered,
         WindowEvent::PinchGesture { .. } => Station::EventPinch,
         WindowEvent::PanGesture { .. } => Station::EventPan,
         WindowEvent::DoubleTapGesture { .. } => Station::EventDoubleTap,
@@ -67768,9 +67815,9 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         WindowEvent::TouchpadPressure { .. } => Station::EventPressure,
         WindowEvent::AxisMotion { .. } => Station::EventAxis,
         WindowEvent::Touch(_) => Station::EventTouch,
-    }
+        pointer => unreachable!("the pointer module names every pointer kind: {pointer:?}"),
+    })
 }
-
 /// One of this window's mouse buttons, in the vocabulary `SendMouseInput`
 /// speaks.
 ///
@@ -72602,97 +72649,6 @@ fn press_owned_title_bar(frame: &bt_platform::CustomWindowFrame) -> Result<(), S
     frame.press_title_bar()
 }
 
-/// **Hand this window's touch input to the system that already knows what to do
-/// with it** (owner ruling 2026-09-21), and say so once when a finger arrives.
-///
-/// Folio writes no translation from touch to anything. Tap becomes click, drag
-/// becomes scroll and press-and-hold becomes the menu because Windows makes
-/// them so, with the system's own inertia and timings, the way every ordinary
-/// program gets them — and `bt_platform::let_the_system_translate_touch` is the
-/// one door that says it. On macOS the door does nothing, because a trackpad's
-/// gestures already arrive as mouse and scroll events.
-///
-/// **The line is the self-report** (`docs/CONVENTIONS.md` §十 rule 2). Touch
-/// reaches this program from a touch screen or from a remote-desktop tool, both
-/// of which are somebody else's machine as far as this session is concerned, so
-/// the road says once per window that it was walked: what is in
-/// `diagnostics.log` afterwards separates "the finger never reached Folio" from
-/// "it reached Folio and the system did something else with it". Once per
-/// window, no position, nothing about what was touched.
-///
-/// Both window constructors call it, and neither lets it decide whether a
-/// window opens: a refusal is a window that answers nothing to a finger, which
-/// is precisely what it did before this door existed.
-///
-/// **And the one gesture the window answers** (0.4.4 ticket 11): a slide the
-/// system recognised as a pan. The door hands each step of it to the closure
-/// below from inside the window's message dispatch, where no `Runtime` can be
-/// reached, so the closure parks the step and wakes the loop — one value and
-/// one wake per `WM_GESTURE`, and nothing at all while no finger is down — and
-/// [`Runtime::spend_parked_pans`] puts it on the wheel's road on the turn that
-/// wake buys. The slot it parks in is returned, for the window runtime to own.
-fn let_the_system_translate_touch(
-    native: bt_platform::NativeWindow,
-    proxy: &EventLoopProxy<AppEvent>,
-) -> ParkedPans {
-    let parked = ParkedPans::default();
-    let panned = {
-        let parked = Rc::clone(&parked);
-        let proxy = proxy.clone();
-        Box::new(move |step| {
-            parked.borrow_mut().push(step);
-            let _ = proxy.send_event(AppEvent::TouchPanned);
-        })
-    };
-    if let Err(error) = bt_platform::let_the_system_translate_touch(
-        native,
-        Box::new(|| diagnostics::note("touch arrived; handed to the system")),
-        panned,
-    ) {
-        diagnostics::note(&format!("touch door: {error}"));
-    }
-    parked
-}
-
-/// **The pans a window's touch door has answered, waiting for the loop**
-/// (0.4.4 ticket 11).
-///
-/// `Rc<RefCell<_>>` and not a lock: the writer is the door's subclass and the
-/// reader is [`Runtime::spend_parked_pans`], and both run on the window's own
-/// thread — the subclass inside message dispatch, the reader on the turn after
-/// it. A `Vec` rather than a sum, because a pan's opening step carries a point
-/// and two pans in one turn would otherwise have one point between them.
-type ParkedPans = Rc<RefCell<Vec<bt_platform::PanStep>>>;
-
-/// **What one answered pan step is on the wheel's road** (0.4.4 ticket 11):
-/// where the pointer is to be before the wheel turns, if the step opens a
-/// pan, and the wheel report it makes, if it moved.
-///
-/// A pan is answered as a wheel turned under a still pointer. The pointer is
-/// put where the pan went down because the wheel routes by where the pointer
-/// is and a recognised pan is not promoted to mouse input — nothing else says
-/// where the finger is — and it is put there **once**, so the pane under the
-/// finger when it went down keeps the whole pan, the system's inertia
-/// included, the way a pane under a still mouse keeps a spun wheel.
-///
-/// The report is **pixels, one for one**: the travel is physical pixels, which
-/// is `PixelDelta`'s currency, and the sign is already the wheel's — a finger
-/// moving down is positive `y`, which the wheel road reads as travel back up
-/// the document, so the content follows the finger. It is the currency a
-/// precision touchpad speaks, so every scroller that already answers a
-/// trackpad answers a finger without learning anything.
-fn pan_on_the_wheel_road(
-    step: bt_platform::PanStep,
-) -> (Option<PhysicalPosition<f64>>, Option<MouseScrollDelta>) {
-    let pointer = step
-        .began_at
-        .map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y)));
-    let (x, y) = step.travel;
-    let wheel = ((x, y) != (0, 0))
-        .then(|| MouseScrollDelta::PixelDelta(PhysicalPosition::new(f64::from(x), f64::from(y))));
-    (pointer, wheel)
-}
-
 fn cell_width_subpixels(metrics: bt_render::CellMetrics) -> NonZeroI64 {
     let value = (metrics.cell_width_px * bt_viewport::SUBPIXELS_PER_PX as f32).round() as i64;
     NonZeroI64::new(value.max(1)).expect("cell width is clamped above zero")
@@ -74975,6 +74931,8 @@ mod pace_app_tests;
 mod palette_app_tests;
 #[cfg(test)]
 mod persist_app_tests;
+#[cfg(test)]
+mod pointer_app_tests;
 #[cfg(test)]
 mod preview_app_tests;
 #[cfg(test)]
@@ -81119,7 +81077,9 @@ mod printed_path_provenance_tests {
             .find("WindowEvent::ModifiersChanged(modifiers) => {")
             .expect("the one door every modifier state comes through");
         let arm = &loop_body[at..];
-        let arm = &arm[..arm.find("WindowEvent::CursorMoved").unwrap_or(arm.len())];
+        let arm = &arm[..arm
+            .find("event if runtime::pointer::is_pointer_event")
+            .unwrap_or(arm.len())];
         assert!(
             arm.contains(pointer_door.as_str()),
             "the hand-over modifier going down is a gesture that meets a reference"

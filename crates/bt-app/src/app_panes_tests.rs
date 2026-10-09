@@ -2769,7 +2769,10 @@ fn the_capsule_is_above_the_strip_for_the_paint_the_hover_and_the_press() {
         [0.5, 0.25],
         "paint: the strip, then the capsule over it"
     );
-    let paint = squeezed(item_body(&ItemQuery::method("OverlayStack", "flattened")));
+    let paint = squeezed(item_body(&ItemQuery::method(
+        "OverlayStack",
+        "bands_bottom_first",
+    )));
     assert!(
         paint.contains("IN_PANE_SURFACES_TOP_FIRST.iter().rev()"),
         "paint: the two bands are placed by the one list, bottom first"

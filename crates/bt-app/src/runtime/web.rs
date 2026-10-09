@@ -1753,6 +1753,16 @@ impl Runtime<'_> {
         {
             return None;
         }
+        self.web_page_shown_at(position)
+    }
+
+    /// **The page whose shown bounds hold this point**, asking nothing about
+    /// what stands over it — [`Self::web_page_at`] subtracts that, and the
+    /// pointer router asks the layers above the page first.
+    pub(in crate::runtime) fn web_page_shown_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<LeafId> {
         self.window.web.iter().find_map(|(leaf, web)| {
             let bounds = web.shown_at()?;
             (position.x >= f64::from(bounds.x)

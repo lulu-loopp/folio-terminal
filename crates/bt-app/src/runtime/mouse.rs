@@ -14,9 +14,9 @@ use crate::{
     drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
     formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
     live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
-    pan_on_the_wheel_road, platform_pointer_of, pointer_cursor, press_after_blur, press_files_node,
-    press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
-    profiles, protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
+    platform_pointer_of, pointer_cursor, press_after_blur, press_files_node, press_pins_a_peek,
+    press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity, profiles,
+    protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
     right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
     route_forwarded_mouse_motion, seats, settings, settling, toast, tooltip, update, upright_wheel,
     web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
@@ -1574,6 +1574,8 @@ impl Runtime<'_> {
         // about it** (audit 3 C-2). Emptied here and filled by the first of them — see
         // [`WindowRuntime::pointer_reference`] for why this line is the whole of its lifetime.
         self.window.pointer_reference.get_mut().take();
+        // **And the router walks once for this move** (T-POINTER-CAPTURE R-4).
+        self.open_pointer_event(position);
         // **The hosted page, before anything returns**, for the reason the two
         // chevron clocks below are told: a page's own hover ends when the
         // pointer is somewhere else, and every branch under this one consumes
@@ -4429,6 +4431,15 @@ impl Runtime<'_> {
                 format!("secondary_click state={state:?} reported={reported:?} taken_as={button:?}")
             });
         }
+        // **The router walks once for this button** (T-POINTER-CAPTURE R-4), at the
+        // point the chrome router answers it from.
+        if let Some(position) = button_router_position(
+            state,
+            self.window.pointer_position,
+            self.window.pointer_last_seen,
+        ) {
+            self.open_pointer_event(position);
+        }
         // M142, and ahead of everything: any press at all takes the tip down.
         // Unconditional — not "a press that hits something", not "a left press" —
         // because a tooltip answers "what is this?" and the act of pressing is
@@ -5630,33 +5641,6 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// **The pans the touch door parked, put on the wheel's road** (0.4.4
-    /// ticket 11).
-    ///
-    /// Each step enters by the doors a mouse would use: a pan's opening point
-    /// is [`Self::pointer_moved`] — after the wheel held so far is spent, as
-    /// the dispatcher spends it before any pointer move — and its travel is
-    /// [`Self::queue_wheel`], the wheel's own entrance, so the routing, the
-    /// merging into one burst per turn, the scroll-back rules and every
-    /// scroller that already answers a trackpad apply unchanged. There is no
-    /// second scroll road, and nothing here recognises anything: the system
-    /// said it was a pan, and [`pan_on_the_wheel_road`] only changes its
-    /// currency.
-    pub(crate) fn spend_parked_pans(&mut self) -> Result<()> {
-        let steps = std::mem::take(&mut *self.window.parked_pans.borrow_mut());
-        for step in steps {
-            let (pointer, wheel) = pan_on_the_wheel_road(step);
-            if let Some(position) = pointer {
-                self.flush_wheel()?;
-                self.pointer_moved(position)?;
-            }
-            if let Some(delta) = wheel {
-                self.queue_wheel(delta)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Spend whatever the wheel has accumulated, if anything.
     ///
     /// Called from every door that must not run ahead of a notch: the top of
@@ -5677,6 +5661,10 @@ impl Runtime<'_> {
         let Some(burst) = self.window.wheel_burst.take() else {
             return Ok(());
         };
+        // **The router walks once for this burst** (T-POINTER-CAPTURE R-4).
+        if let Some(position) = self.window.pointer_position {
+            self.open_pointer_event(position);
+        }
         let leaving = hang_watch::enter(hang_watch::Station::Wheel);
         self.window.wheel_routings = self.window.wheel_routings.saturating_add(1);
         let spent = self.mouse_wheel(burst.delta());
