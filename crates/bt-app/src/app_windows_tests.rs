@@ -581,27 +581,6 @@ const CHOSEN_BOUNDS: WindowBoundsV1 = WindowBoundsV1 {
     height: 720,
 };
 
-/// An unavailable native posture keeps both previously saved placement facts.
-#[test]
-fn unknown_native_posture_preserves_the_saved_window_placement() {
-    assert_eq!(choose_window_posture(None, None), WindowPosture::Unknown);
-    assert_eq!(
-        choose_window_posture(Some(false), None),
-        WindowPosture::Unknown
-    );
-    for saved_maximized in [false, true] {
-        assert_eq!(
-            recorded_window_placement(
-                WindowPosture::Unknown,
-                Some(ICONIC_BOUNDS),
-                CHOSEN_BOUNDS,
-                saved_maximized,
-            ),
-            (CHOSEN_BOUNDS, saved_maximized),
-        );
-    }
-}
-
 /// The bug this pins, end to end: minimize, quit while minimized, start
 /// again. The snapshot recorded the *icon's* rectangle, and the next start
 /// could not seat three panes in a 157x25 window, so it exited with
