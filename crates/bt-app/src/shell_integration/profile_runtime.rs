@@ -171,15 +171,17 @@ fn observe_profile_lines(
     programs: &[PathBuf],
     environment: &ProbeEnvironment,
 ) -> Report {
+    // Numbered as it starts: a run that overlaps a later one never files over it.
+    let observation = next_observation();
     if !profile_sandboxed() {
         for program in programs {
             match probe_profile_observation(program, environment) {
                 Some(mut observed) => {
                     observed.line_present = profile_line_is_present(&observed.path);
-                    file_profile_answer(program, observed.path.clone(), environment);
-                    publish_profile_observation(program, observed);
+                    file_profile_answer(program, observed.path.clone(), observation, environment);
+                    publish_profile_observation(program, observation, observed);
                 }
-                None => publish_profile_observation_failed(program),
+                None => publish_profile_observation_failed(program, observation),
             }
         }
     }
@@ -503,13 +505,14 @@ fn install_for_program(
     arguments: &[OsString],
 ) -> io::Result<PathBuf> {
     let environment = ProbeEnvironment::current(worker, "PowerShell profile install");
+    let observation = next_observation();
     let Some(mut observed) = probe_profile_observation(program, &environment) else {
-        publish_profile_observation_failed(program);
+        publish_profile_observation_failed(program, observation);
         return Err(io::Error::other(Text::ShellProfileProbeFailed.text()));
     };
     observed.line_present = profile_line_is_present(&observed.path);
-    file_profile_answer(program, observed.path.clone(), &environment);
-    publish_profile_observation(program, observed.clone());
+    file_profile_answer(program, observed.path.clone(), observation, &environment);
+    publish_profile_observation(program, observation, observed.clone());
     // A line in a Constrained Language Mode session loads the script into that mode, where it
     // does nothing: refused with the row's own sentence.
     if !observed.full_language {
@@ -532,7 +535,7 @@ fn install_for_program(
         Some(powershell_edition(program)),
     )?;
     observed.line_present = true;
-    publish_profile_observation(program, observed.clone());
+    publish_profile_observation(program, observation, observed.clone());
     publish_powershell_profile_line_present(true);
     Ok(observed.path)
 }

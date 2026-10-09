@@ -2533,7 +2533,29 @@ fn row_process_scope(program: &Path, arguments: &[OsString]) -> RowProcessScope 
 /// answer about the file, and keeping it would drop that edition from every later removal for the
 /// life of the process. The slot is held while its one question is asked, so concurrent askers
 /// share an answer that arrives; after a failure the next asker asks again.
-type ProfileAnswer = std::sync::Arc<Mutex<Option<PathBuf>>>;
+type ProfileAnswer = std::sync::Arc<ProfileSlot>;
+
+/// **One program's `$PROFILE` answer, and the observation that heard it last**.
+#[derive(Default)]
+struct ProfileSlot {
+    /// The answer; the lock is held while a question is asked ([`answer_once`]).
+    path: Mutex<Option<PathBuf>>,
+    /// The number of the newest observation whose path was filed here ([`next_observation`]);
+    /// `0` before any. Written only with `path`'s lock held, so the two never disagree.
+    heard: std::sync::atomic::AtomicU64,
+}
+
+/// **The number an edition observation run takes when it starts** (T-PROBE-NO-CACHED-FAILURE,
+/// round 2): observation workers can overlap — every Profiles-page open starts one, and a
+/// one-click install observes again — so what each publishes carries the number its run took,
+/// and an answer from a run older than the one already filed is refused (the
+/// `psreadline::PsReadLineProbe` rule). Counted from `1`.
+static OBSERVATION_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number an observation run.
+fn next_observation() -> u64 {
+    OBSERVATION_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
 type ProfileAnswers = std::collections::BTreeMap<PathBuf, ProfileAnswer>;
 static PROFILE_ANSWERS: OnceLock<std::sync::Mutex<ProfileAnswers>> = OnceLock::new();
 
@@ -2672,9 +2694,29 @@ impl FallbackNotices {
 
 static FALLBACK_NOTICES: OnceLock<FallbackNotices> = OnceLock::new();
 
-static PROFILE_OBSERVATIONS: OnceLock<
-    Mutex<BTreeMap<PowerShellEdition, Heard<ProfileObservation>>>,
-> = OnceLock::new();
+/// Each edition's newest observation, with the number of the run that made it.
+type Observations = BTreeMap<PowerShellEdition, (u64, Heard<ProfileObservation>)>;
+
+static PROFILE_OBSERVATIONS: OnceLock<Mutex<Observations>> = OnceLock::new();
+
+/// **File what run `observation` heard about `edition` unless a newer run's answer is held** —
+/// a slow run that started first never replaces what a later one published. Answers whether it
+/// was filed.
+fn file_observation(
+    held: &mut Observations,
+    edition: PowerShellEdition,
+    observation: u64,
+    heard: Heard<ProfileObservation>,
+) -> bool {
+    if held
+        .get(&edition)
+        .is_some_and(|(newest, _)| *newest > observation)
+    {
+        return false;
+    }
+    held.insert(edition, (observation, heard));
+    true
+}
 
 /// **What has been heard from a question asked in the background**: nothing yet, a failure (the
 /// question was asked and got no answer), or the answer. A failure is not an answer about the
@@ -2761,7 +2803,7 @@ pub fn powershell_profile_fallback(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .get(&powershell_edition(program))
-        .cloned()
+        .map(|(_, heard)| heard.clone())
         .unwrap_or(Heard::NotYet);
     let row = row_process_scope(program, arguments);
     profile_fallback_from_parts(
@@ -2837,7 +2879,7 @@ fn profile_fallback_from_parts(
     }
 }
 
-fn publish_profile_observation(program: &Path, observed: ProfileObservation) {
+fn publish_profile_observation(program: &Path, observation: u64, observed: ProfileObservation) {
     if observed.edition_says.is_none()
         && let Some(line) = FALLBACK_NOTICES
             .get_or_init(Default::default)
@@ -2845,21 +2887,29 @@ fn publish_profile_observation(program: &Path, observed: ProfileObservation) {
     {
         eprintln!("{line}");
     }
-    PROFILE_OBSERVATIONS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(powershell_edition(program), Heard::Answer(observed));
+    file_observation(
+        &mut PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        powershell_edition(program),
+        observation,
+        Heard::Answer(observed),
+    );
 }
 
 /// **The edition was asked and did not answer** (release read m2): its row says so instead of
 /// keeping an older answer or reading as a refusal, until the next visit asks again.
-fn publish_profile_observation_failed(program: &Path) {
-    PROFILE_OBSERVATIONS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(powershell_edition(program), Heard::Failed);
+fn publish_profile_observation_failed(program: &Path, observation: u64) {
+    file_observation(
+        &mut PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        powershell_edition(program),
+        observation,
+        Heard::Failed,
+    );
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -3313,11 +3363,12 @@ fn profile_key(program: &Path) -> PathBuf {
 /// [`REMOVAL_PROBE_DEADLINE`] for a removal somebody asked for), or an answer heard elsewhere.
 enum ProfileQuestion {
     Ask(std::time::Duration),
-    /// **A newer answer**, heard by the edition observation (which asks the same edition the same
-    /// question at every Profiles-page open, T-PROBE-NO-CACHED-FAILURE): it replaces the slot's,
-    /// so a removal reads the newest any probe heard — a `Documents` folder moved while Folio
-    /// runs is followed — and asks no shell of its own.
-    Heard(PathBuf),
+    /// **A newer answer**, heard by edition observation run number `.1` (which asks the same
+    /// edition the same question at every Profiles-page open, T-PROBE-NO-CACHED-FAILURE): it
+    /// replaces the slot's unless a newer run's is held, so a removal reads the newest any probe
+    /// heard — a `Documents` folder moved while Folio runs is followed — and asks no shell of its
+    /// own.
+    Heard(PathBuf, u64),
 }
 
 /// Resolving executable aliases can touch disk, so it happens only on workers.
@@ -3345,19 +3396,34 @@ fn cached_profile_answer(
         slot
     };
     match question {
-        ProfileQuestion::Ask(deadline) => answer_once(&slot, || {
+        ProfileQuestion::Ask(deadline) => answer_once(&slot.path, || {
             run_profile_path_probe(&resolved, deadline, environment)
         }),
-        ProfileQuestion::Heard(path) => {
-            *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(path.clone());
-            Some(path)
+        ProfileQuestion::Heard(path, observation) => {
+            let mut held = slot.path.lock().unwrap_or_else(|error| error.into_inner());
+            if slot.heard.load(std::sync::atomic::Ordering::Relaxed) <= observation {
+                slot.heard
+                    .store(observation, std::sync::atomic::Ordering::Relaxed);
+                *held = Some(path);
+            }
+            held.clone()
         }
     }
 }
 
-/// [`ProfileQuestion::Heard`]: `path` becomes `program`'s answer.
-fn file_profile_answer(program: &Path, path: PathBuf, environment: &ProbeEnvironment) {
-    let _ = cached_profile_answer(program, environment, ProfileQuestion::Heard(path));
+/// [`ProfileQuestion::Heard`]: `path`, heard by observation run `observation`, becomes
+/// `program`'s answer unless a newer run's is held.
+fn file_profile_answer(
+    program: &Path,
+    path: PathBuf,
+    observation: u64,
+    environment: &ProbeEnvironment,
+) {
+    let _ = cached_profile_answer(
+        program,
+        environment,
+        ProfileQuestion::Heard(path, observation),
+    );
 }
 
 /// The slot's answer, asking for it only when there is none: an answer is kept, a failure is
@@ -4575,10 +4641,77 @@ mod tests {
                 ProfileQuestion::Ask(POWERSHELL_PROBE_DEADLINE),
             )
         };
-        file_profile_answer(&program, old.clone(), &environment);
+        file_profile_answer(&program, old.clone(), 1, &environment);
         assert_eq!(ask(), Some(old), "a held answer asks no shell");
-        file_profile_answer(&program, moved.clone(), &environment);
+        file_profile_answer(&program, moved.clone(), 2, &environment);
         assert_eq!(ask(), Some(moved));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (T-PROBE-NO-CACHED-FAILURE, round 2) — **two overlapping observations: the older
+    /// lands last and is refused**, for the edition's row and for the `$PROFILE` path a removal
+    /// reads. Run 7 started first and was slow; run 8 started later and published first.
+    ///
+    /// MUTATION (observed red): no ordering key — `file_observation` files every answer and the
+    /// slot's `Heard` replaces whatever it holds — run 7's stale answer wins both.
+    #[test]
+    fn an_older_observation_that_lands_last_is_refused() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted, Undefined};
+        let observed = |current_user, path: &str| ProfileObservation {
+            full_language: true,
+            path: PathBuf::from(path),
+            scopes: scopes(Undefined, Undefined, Undefined, current_user, Undefined),
+            edition_says: Some(true),
+            location: ProfileLocation {
+                local_fixed: true,
+                marked: false,
+            },
+            ordinary_process: Some(Undefined),
+            line_present: false,
+        };
+        let older = r"C:\Users\me\Documents\PowerShell\profile.ps1";
+        let newer = r"C:\Users\me\OneDrive\文档\PowerShell\profile.ps1";
+        let mut held = Observations::new();
+        let edition = PowerShellEdition::PowerShellSeven;
+        assert!(file_observation(
+            &mut held,
+            edition,
+            8,
+            Heard::Answer(observed(RemoteSigned, newer))
+        ));
+        assert!(
+            !file_observation(
+                &mut held,
+                edition,
+                7,
+                Heard::Answer(observed(Restricted, older))
+            ),
+            "the older run's answer is refused"
+        );
+        assert!(!file_observation(&mut held, edition, 7, Heard::Failed));
+        match &held[&edition] {
+            (8, Heard::Answer(kept)) => {
+                assert_eq!(kept.path, PathBuf::from(newer));
+                assert_eq!(kept.scopes.current_user, RemoteSigned);
+            }
+            other => panic!("run 8's answer is held, not {other:?}"),
+        }
+        assert!(file_observation(&mut held, edition, 9, Heard::Failed));
+
+        let directory = temp_dir("b4-overlapping-observations");
+        let program = directory.join("pwsh.exe");
+        let environment = ProbeEnvironment::Inherited;
+        file_profile_answer(&program, PathBuf::from(newer), 8, &environment);
+        file_profile_answer(&program, PathBuf::from(older), 7, &environment);
+        assert_eq!(
+            cached_profile_answer(
+                &program,
+                &environment,
+                ProfileQuestion::Ask(POWERSHELL_PROBE_DEADLINE)
+            ),
+            Some(PathBuf::from(newer)),
+            "a removal reads the newer run's path"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -5871,9 +6004,9 @@ mod tests {
             ordinary_process: Some(Undefined),
             line_present: false,
         };
-        publish_profile_observation(program, observed(Restricted));
+        publish_profile_observation(program, next_observation(), observed(Restricted));
         let before = powershell_profile_fallback(program, &row, true);
-        publish_profile_observation(program, observed(RemoteSigned));
+        publish_profile_observation(program, next_observation(), observed(RemoteSigned));
         let after = powershell_profile_fallback(program, &row, true);
         PROFILE_OBSERVATIONS
             .get_or_init(Default::default)
