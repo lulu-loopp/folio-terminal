@@ -1297,8 +1297,7 @@ mod tests {
         engine.shutdown();
         wait_for_retirement(&engine.shared);
 
-        let bad_path =
-            std::env::temp_dir().join(format!("folio-video-invalid-{}.mp4", std::process::id()));
+        let bad_path = bt_testpath::temp_path("folio-video-invalid").with_extension("mp4");
         std::fs::write(&bad_path, b"not a media container").expect("write a local invalid fixture");
         let mut failed = Engine::open_with_output(&bad_path, AudioOutput::Silent)
             .expect("failure is reported through the engine state");

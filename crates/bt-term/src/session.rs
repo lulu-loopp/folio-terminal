@@ -10,8 +10,10 @@ use std::{
     ops::{Bound, RangeInclusive},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
+
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
@@ -25,10 +27,10 @@ use bt_detect::{
 use bt_doc::{
     AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
     DetectionRevision, GridGeneration, GridPoint, HistoryDocument, InlineRunPlacement,
-    InvalidSourceTransition, LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId,
+    InvalidSourceTransition, LayoutKey, LiveRowRemoval, MathMode, SUBPIXELS_PER_PX, ScreenId,
     SourceLifecycle, VersionStamp, ViewGeneration, compare_anchors, content_anchor_between,
+    math::{MathFailureStage, MathRaster, MathRenderError},
 };
-use bt_math::{MathEngine, MathFailureStage, MathMode, MathRaster, MathRenderError, MathRenderKey};
 use bt_transcript::{
     CaptureResult, CapturedRow, CellFlags, DEFAULT_STAGING_QUOTA, FinalizedLine, FrozenLine,
     GraphemeOffset, SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId,
@@ -49,12 +51,12 @@ use crate::{
     },
     cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
     command_marks::{CommandMark, CommandMarkId, CommandMarkLedger},
+    host::local_host_names,
     inline_image::{
         DecodedInlineImage, ImageReferenceShape, InlineImageDecodeError, InlineImageScaleTask,
         InlineImageSource, InlineImageTask, ScaledInlineImage, ShellIntegrationMarker,
         decode_inline_image, detect_peek_image_candidates, file_uri_to_local_image_path,
-        file_uri_to_local_path, local_host_names, normalized_local_image_path_key,
-        scale_inline_image,
+        file_uri_to_local_path, normalized_local_image_path_key, scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     palette::TerminalPalette,
@@ -78,6 +80,16 @@ const MAX_OFFSCREEN_RECORDS: usize = 128;
 /// about the same kind of producer. Split reads of one repaint arrive one or two milliseconds apart,
 /// two orders of magnitude inside it.
 const REPAINT_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// **The statuses a shell reports for a job that was stopped, not ended**: 128 + the stop signal,
+/// as bash (`jobs.c`, `128 + WSTOPSIG`) and zsh (`jobs.c`, `0200 | WSTOPSIG`) write `$?` and
+/// `folio.bash`/`folio.zsh` carry it in `OSC 133;D`. The signal numbers differ by system and the
+/// shell may be on another one (ssh), so both sets are here: Linux `SIGSTOP` 19, `SIGTSTP` 20,
+/// `SIGTTIN` 21, `SIGTTOU` 22 (147–150); macOS and the BSDs `SIGSTOP` 17, `SIGTSTP` 18, `SIGTTIN`
+/// 21, `SIGTTOU` 22 (145, 146, 149, 150). None of these is 128 + a signal that ends a process on
+/// the other system (Linux 17/18 are `SIGCHLD`/`SIGCONT`, macOS 19/20 are `SIGCONT`/`SIGCHLD`, all
+/// of which a process survives by default). The stranded-screen rule does not fire on these.
+const JOB_STOPPED_EXIT_CODES: [i32; 6] = [145, 146, 147, 148, 149, 150];
 /// **What the disk said about one path the terminal named** — the ledger's value, and the one
 /// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
 ///
@@ -94,10 +106,11 @@ pub struct PathVerdict {
     /// Its size, off that same call — what the glance card prints, so the card costs the window
     /// thread nothing either (§7.29 ⑬).
     pub bytes: Option<u64>,
-    /// **The finished name a hand-off door gives the operating system** —
-    /// [`bt_platform::resolved_for_a_door`], which is the doors' own transform and not a second
-    /// reading of it: `..` folded, the spelling settled, and the verbatim prefix `canonicalize`
-    /// writes on Windows taken back off.
+    /// **The finished name a hand-off door gives the operating system** — the answer of the
+    /// resolver [`verify_path`]'s caller hands it, which on the desktop is the doors' own
+    /// transform (`bt_platform::resolved_for_a_door`) and not a second reading of it: `..`
+    /// folded, the spelling settled, and the verbatim prefix `canonicalize` writes on Windows
+    /// taken back off.
     ///
     /// `None` when the platform would not resolve it. A door handed `None` uses the printed
     /// spelling, which is what it had before this existed.
@@ -157,8 +170,13 @@ impl PathVerdict {
 /// settle the longer one, which is precisely what let a sentence's full stop into the reference the
 /// demo rehearsal photographed. The honest answer is the one below: no Win32 filesystem holds a
 /// name whose last component ends in a dot or a space, so no such name is there.
+///
+/// **`resolve` is the host's door-ready transform** (`docs/ARCHITECTURE.md` §3.2): the platform
+/// layer's answer to "which name would a hand-off door open", asked only of a name that is there.
+/// Every desktop caller hands it `bt_platform::resolved_for_a_door`; this crate does not name the
+/// platform layer.
 #[must_use]
-pub fn verify_path(path: &Path) -> PathVerdict {
+pub fn verify_path(path: &Path, resolve: &dyn Fn(&Path) -> Option<PathBuf>) -> PathVerdict {
     // **Literally `main`'s question**, and it is the same function rather than the same lines
     // written twice: [`path_exists`] is what stood on the window thread, unchanged.
     if !path_exists(path) {
@@ -167,7 +185,7 @@ pub fn verify_path(path: &Path) -> PathVerdict {
     let Ok(metadata) = std::fs::metadata(path) else {
         return PathVerdict::absent();
     };
-    let door_ready = bt_platform::resolved_for_a_door(path);
+    let door_ready = resolve(path);
     // Asked of the name the door opens, not the one that was printed: a link called `editor`
     // that lands on `Thing.app` is a bundle, and `main`'s door judged the resolved name.
     let executable = opening_it_would_run_it(door_ready.as_deref().unwrap_or(path), &metadata);
@@ -175,13 +193,20 @@ pub fn verify_path(path: &Path) -> PathVerdict {
         exists: true,
         directory: metadata.is_dir(),
         bytes: (!metadata.is_dir()).then_some(metadata.len()),
-        // **The finished name a hand-off door hands over**, produced by the doors' own function
-        // rather than by a second reading of what they do — `canonicalize` *and* the verbatim
+        // **The finished name a hand-off door hands over**, produced by the host's door transform
+        // rather than by a second reading of what the doors do — `canonicalize` *and* the verbatim
         // prefix taken off, which is the pair `reveal_arguments` has always spent together. A raw
         // canonical is a name Explorer, the shape gate and the argument builder all refuse.
         door_ready,
         executable,
     }
+}
+
+/// The resolver this crate's tests hand [`verify_path`]: no door is in play, so the name resolves
+/// to nothing and the verdict carries the printed spelling (`door_ready: None`).
+#[cfg(test)]
+pub(crate) fn no_door(_: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// **Whether opening it would run it** — `macos_handoff::opening_it_would_run_it`'s rule, asked
@@ -344,6 +369,39 @@ pub enum SessionDecorationTask {
     VerifyPath(PathBuf),
 }
 
+/// One piece of decoration work a worker holds, named by what its completion carries back.
+///
+/// Keys, not tasks: a second task for the same key handed out while the first is still held is
+/// one entry, and the first answer for it clears the entry. A path question is not one of these;
+/// `path_verify_in_flight` holds it.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DecorationWorkOut {
+    FrozenMath(TranscriptId),
+    /// Screen, grid generation and candidate row: the three a live task keeps unchanged from
+    /// scheduling to completion (resolution may rewrite its pane).
+    LiveMath(ScreenId, u64, u32),
+    Decode(u64),
+    Scale(u64),
+}
+
+impl DecorationWorkOut {
+    fn of(task: &SessionDecorationTask) -> Option<Self> {
+        match task {
+            SessionDecorationTask::Math(task) => Some(match task.as_ref() {
+                SessionMathTask::Frozen(task) => Self::FrozenMath(task.candidate_id),
+                SessionMathTask::Live(task) => Self::live(task),
+            }),
+            SessionDecorationTask::InlineImage(task) => Some(Self::Decode(task.occurrence_id)),
+            SessionDecorationTask::ScaleInlineImage(task) => Some(Self::Scale(task.occurrence_id)),
+            SessionDecorationTask::VerifyPath(_) => None,
+        }
+    }
+
+    fn live(task: &LiveDetectionTask) -> Self {
+        Self::LiveMath(task.screen, task.grid_generation.0, task.candidate_row)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineImageRecordView {
     pub occurrence_id: u64,
@@ -357,6 +415,10 @@ pub struct InlineImageRecordView {
     pub display_height_px: Option<u32>,
     pub display_rows: Option<u32>,
     pub failed: bool,
+    /// The failure is the host's refusal to decode pictures
+    /// ([`InlineImageDecodeError::HostDeclined`]), not anything about the file: `failed` is also
+    /// set, and the reference stays text either way.
+    pub declined_by_host: bool,
     pub local_path: Option<PathBuf>,
 }
 
@@ -443,7 +505,13 @@ struct InlineImageRecord {
     /// Display size of an outstanding resample request, so a layout that has not moved does not
     /// re-ask the worker the same question every frame.
     display_pending: Option<(u32, u32)>,
+    /// A display size the host declined to resample to
+    /// ([`DualPlaneSession::decline_inline_image_scale`]): that size is not asked for again; a
+    /// layout that needs another size asks for that one.
+    display_declined: Option<(u32, u32)>,
     failed: bool,
+    /// See [`InlineImageRecordView::declined_by_host`].
+    declined_by_host: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1491,6 +1559,27 @@ pub struct DualPlaneSession {
     /// this pane" is answered by any marker at all, which is what an offer to install it retracts
     /// itself on.
     shell_region_screens: BTreeSet<ScreenId>,
+    /// **What carries this pane's bytes** — the fact the app-side reset needs to know which modes
+    /// the carrier itself keeps on (focus reporting under ConPTY). Told once by the owner of the
+    /// pane's pty ([`Self::set_pty_transport`]); a session with no pty behind it is
+    /// [`PtyTransport::Unix`], which that variant's own definition covers.
+    pty_transport: PtyTransport,
+    /// **A shell's command end heard on an alternate screen it does not own, waiting for the
+    /// segment it arrived in to settle** — the exit code it carried. Written by the `OSC 133;D`
+    /// handler when it recognises a stranded alternate screen, taken by [`Self::feed_at`] before
+    /// the stream is resumed past that marker, so the return to the primary screen lands between
+    /// the `D` and the bytes after it. `None` at rest, which is every feed but that one.
+    stranded_command_end: Option<Option<i32>>,
+    /// **How many `OSC 133;C` markers the current alternate-screen canvas has carried that no `D`
+    /// there has answered** — every one written, whether or not the phase machine accepted it as
+    /// a command start (a `C` with no prompt before it is refused there, and is still a program on
+    /// that canvas pairing its own `D`). A repeated `C` inside an output region re-stamps the same
+    /// command and is not counted, as [`Self::shell_commands_running`] does not count it.
+    ///
+    /// The other half of the stranded-screen evidence: a `D` on the alternate screen is the
+    /// shell's own only while this is zero. Back to zero whenever the canvas changes hands — the
+    /// primary screen parked or restored.
+    alternate_command_starts: u32,
     /// The last working directory the shell reported over OSC 7, and the *only* authority relative
     /// image path text is ever resolved against (user ruling 2026-08-03). `None` — never reported,
     /// or reported as something unresolvable — means relative text yields no candidates at all;
@@ -1643,6 +1732,17 @@ pub struct DualPlaneSession {
     /// while a question is in flight do not ask it again — an unanswered path is re-detected on
     /// every one of them, and without this a slow drive would collect one task per frame.
     path_verify_in_flight: BTreeSet<PathBuf>,
+    /// Paths the host that answers this pane's work declined to look at
+    /// ([`Self::decline_path_verification`]), with their insertion order so the ledger is held to
+    /// [`PATH_VERDICT_LEDGER_CAP`] like the verdicts. A name in it is never asked about again:
+    /// nothing a host that does not look at disks could be asked would change its answer.
+    path_declined: BTreeSet<PathBuf>,
+    path_declined_order: VecDeque<PathBuf>,
+    /// **Decoration work handed out and not answered yet** — what
+    /// [`Self::take_decoration_worker_task`] gave a worker, until the completion or the decline for
+    /// it arrives, whatever its verdict. Path questions are `path_verify_in_flight`'s. Only
+    /// [`Self::outstanding_decoration_work`] reads it.
+    decoration_work_out: BTreeSet<DecorationWorkOut>,
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
@@ -2159,6 +2259,9 @@ impl DualPlaneSession {
             shell_commands_running: BTreeMap::new(),
             shell_prompt_cycle_in_order: BTreeSet::new(),
             shell_region_screens: BTreeSet::new(),
+            pty_transport: PtyTransport::Unix,
+            stranded_command_end: None,
+            alternate_command_starts: 0,
             working_directory: None,
             window_title: None,
             progress: None,
@@ -2195,6 +2298,9 @@ impl DualPlaneSession {
             path_verdict_order: VecDeque::new(),
             path_verify_tasks: VecDeque::new(),
             path_verify_in_flight: BTreeSet::new(),
+            path_declined: BTreeSet::new(),
+            path_declined_order: VecDeque::new(),
+            decoration_work_out: BTreeSet::new(),
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             image_placeholders: bt_transcript::paths::ImagePlaceholderTargets::default(),
@@ -2416,7 +2522,26 @@ impl DualPlaneSession {
     /// visible or a mode that changes what the pane draws is a changed picture
     /// that arrived without a byte ([`Self::screen_revision`]).
     pub fn reset_program_modes(&mut self, transport: PtyTransport) -> Result<(), SessionError> {
-        let observed_at = Instant::now();
+        self.reset_program_modes_at(transport, Instant::now())
+    }
+
+    /// Say what carries this pane's bytes. The owner of the pane's pty calls it once, where the
+    /// pty is attached; see the field.
+    pub fn set_pty_transport(&mut self, transport: PtyTransport) {
+        self.pty_transport = transport;
+    }
+
+    /// What carries this pane's bytes, as [`Self::set_pty_transport`] was told.
+    #[must_use]
+    pub fn pty_transport(&self) -> PtyTransport {
+        self.pty_transport
+    }
+
+    fn reset_program_modes_at(
+        &mut self,
+        transport: PtyTransport,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
         let events = self.terminal.reset_program_modes(transport);
         let damage = self.terminal.take_damage();
         self.screen_revision = self.screen_revision.wrapping_add(1);
@@ -2923,6 +3048,7 @@ impl DualPlaneSession {
                     display_height_px: record.display.as_ref().map(|display| display.height_px),
                     display_rows,
                     failed: record.failed,
+                    declined_by_host: record.declined_by_host,
                     local_path: match &record.kind {
                         InlineImageRecordKind::Osc1337 { .. } => None,
                         InlineImageRecordKind::LocalPath { path, .. } => Some(path.clone()),
@@ -3249,12 +3375,34 @@ impl DualPlaneSession {
         }
         let live_rows = &self.live_rows;
         let ledger = &self.reprinted_path_links;
+        let input_area_from = self.input_area_first_live_row();
+        // The previous logical line, while it stands in the input area: the upper half of a
+        // placeholder the agent's own word wrap split (T-IMAGE-N-GAPS).
+        let mut upper: Option<(String, bool)> = None;
         self.for_each_live_logical_line(|text, segments| {
             let freshly_printed = segments.iter().any(|segment| {
                 live_rows
                     .get(segment.row as usize)
                     .is_some_and(|row| row.revision != row.path_pass_revision)
             });
+            let in_input_area = input_area_from
+                .zip(segments.first())
+                .is_some_and(|(from, first)| first.row >= from);
+            // T-IMAGE-N-GAPS. A placeholder the agent draws again on its input line is the program
+            // naming that picture again, and a "no" for one of its candidates — asked, say, before
+            // the agent's own asynchronous write landed — is asked once more, as a printed name's
+            // is. Read under the frame's own row rule: the input area and nowhere else.
+            if in_input_area {
+                if let Some((above, above_fresh)) = upper.take()
+                    && (above_fresh || freshly_printed)
+                {
+                    ledger.image_placeholder_link_across(&above, text, &mut named);
+                }
+                if freshly_printed {
+                    ledger.image_placeholder_links_in(text, &mut named);
+                }
+                upper = Some((text.to_owned(), freshly_printed));
+            }
             if !freshly_printed {
                 return;
             }
@@ -3331,7 +3479,10 @@ impl DualPlaneSession {
     /// which is what holds a re-ask to one question however fast the row that carries the name is
     /// being rewritten: the second printing finds the first one's question still out.
     fn queue_path_question(&mut self, path: PathBuf) {
-        if self.path_verify_in_flight.contains(&path) || self.path_verify_tasks.contains(&path) {
+        if self.path_verify_in_flight.contains(&path)
+            || self.path_verify_tasks.contains(&path)
+            || self.path_declined.contains(&path)
+        {
             return;
         }
         if self.path_verify_tasks.len() == PATH_VERIFY_QUEUE_CAP {
@@ -3372,6 +3523,31 @@ impl DualPlaneSession {
         // them, and on a crowded screen it is the whole of how the scan reaches the bottom.
         self.rebuild_printed_path_links();
         exists || self.printed_path_budget_full
+    }
+
+    /// **The host will not look at this path** — the declined answer to a
+    /// [`SessionDecorationTask::VerifyPath`] (a host with no disk to ask, design T-COMPOSE-CRATE
+    /// §3.2). The question leaves the in-flight set and the name is recorded as declined, which
+    /// is final: it is never queued again, by a reprint or a link target either. No verdict is
+    /// written, so the name stays what an unanswered name is — text, not a link — and stays
+    /// distinct from a name the disk said is absent ([`Self::path_declined_by_host`] against
+    /// [`Self::path_verdict`]).
+    pub fn decline_path_verification(&mut self, path: PathBuf) {
+        self.path_verify_in_flight.remove(&path);
+        self.path_verify_tasks.retain(|queued| *queued != path);
+        if self.path_declined.insert(path.clone()) {
+            self.path_declined_order.push_back(path);
+        }
+        while self.path_declined_order.len() > PATH_VERDICT_LEDGER_CAP {
+            if let Some(evicted) = self.path_declined_order.pop_front() {
+                self.path_declined.remove(&evicted);
+            }
+        }
+    }
+
+    /// Whether the host declined to verify `path` ([`Self::decline_path_verification`]).
+    pub fn path_declined_by_host(&self, path: &Path) -> bool {
+        self.path_declined.contains(path)
     }
 
     /// Whether the disk has told this pane that a printed path is real — the `verified` bit of
@@ -3484,14 +3660,14 @@ impl DualPlaneSession {
                 .collect(),
             &namespace,
         )
-        // The placeholders travel with the verdicts they are read against (T-IMAGE-N), and only in
-        // the frame's ledger: the re-ask pass below reads printed names, and a placeholder is not
-        // one.
+        // The placeholders travel with the verdicts they are read against (T-IMAGE-N).
         .with_image_placeholders(&self.image_placeholders);
         // And the same ledger for text this pane has **just printed**, which is the one reading in
         // which a standing "no" is not an answer (owner ruling 2026-09-20). Built here, beside its
         // twin and from the same three inputs, so neither can drift from the other about a
         // directory, a namespace or a yes.
+        // The placeholders travel here too (T-IMAGE-N-GAPS): an agent drawing `[Image #k]` again on
+        // its input line names that picture again, so its candidates' "no"s are asked once more.
         self.reprinted_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
             directory,
             self.path_verdicts
@@ -3500,7 +3676,8 @@ impl DualPlaneSession {
                 .map(|(path, verdict)| (path.clone(), verdict.exists))
                 .collect(),
             &namespace,
-        );
+        )
+        .with_image_placeholders(&self.image_placeholders);
     }
 
     /// Whether the decoration worker has **verified** this file: opened it, size-checked it,
@@ -3911,6 +4088,9 @@ impl DualPlaneSession {
                     self.apply_events(events, observed_at)?;
                     self.observe_live_damage(damage, observed_at);
                     self.sync_staging_tail();
+                    if let Some(exit_code) = self.stranded_command_end.take() {
+                        self.return_from_stranded_alternate_screen(exit_code, observed_at)?;
+                    }
                     if !self.terminal.stream_paused() {
                         break;
                     }
@@ -3922,6 +4102,7 @@ impl DualPlaneSession {
         })();
         if result.is_err() {
             self.terminal.discard_paused_stream();
+            self.stranded_command_end = None;
             self.cursor_logical_line_memory = None;
             self.repaint_transaction_deadline = None;
             self.alternate_repaint_snapshot = None;
@@ -5537,6 +5718,11 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
             ShellIntegrationMarker::CommandExecuted => {
+                if screen == ScreenId::Alternate
+                    && !matches!(phase, Some(ShellIntegrationPhase::Output(_)))
+                {
+                    self.alternate_command_starts = self.alternate_command_starts.saturating_add(1);
+                }
                 // **A `C` is heard only inside a prompt cycle this session watched open.**
                 //
                 // OSC 133 is in band and unauthenticated: these bytes are a claim by whoever wrote
@@ -5614,6 +5800,54 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Output(region));
             }
             ShellIntegrationMarker::CommandFinished { exit_code } => {
+                // **A shell's command end on an alternate screen it does not own is the shell
+                // speaking through a dead program's canvas** (T-RESET-MODES, coordinator ruling
+                // 2026-10-08 (2)). A full-screen program that dies without its own teardown leaves
+                // the alternate screen up — on a Unix pty nothing leaves it on the program's behalf,
+                // and ConPTY does not either (measured: after the program is ended, the next bytes
+                // are the shell's `D`, `OSC 7`, `A` and prompt, all on the alternate screen) — and
+                // then the shell's markers and prompt land there, over mouse reports and key
+                // encodings nobody is reading.
+                //
+                // The evidence is the marker order, not the screen: this `D` answers no `C` written
+                // on the alternate screen (see [`Self::alternate_command_starts`]) while a command
+                // started on the primary screen is still running. A full-screen program running its
+                // own cycle on its own canvas pairs its `D` with its own `C` and is not this; one
+                // that writes `133;A` alone is not this either. What the order cannot tell apart,
+                // and what is accepted: a full-screen host that passes OSC 133 through unchanged and
+                // starts a child shell that inherited Folio's integration and writes a `D` with no
+                // `C` — a cmd-shaped child, whose `PROMPT` writes `D` at every prompt (a bash or zsh
+                // child writes `D` only for a command it ran, after that command's own `C` on the
+                // same canvas). The host's screen is then left, which the person can re-enter (tmux
+                // does not pass 133 through).
+                //
+                // **A stopped program is not a dead one** (T-RESET-MODES round 2, coordinator ruling
+                // 2026-10-08, after Kimi's review). Ctrl+Z on a full-screen program with no suspend
+                // handler leaves it alive and stopped with its alternate screen up, and the shell's
+                // `D` for that command arrives here exactly as a dead program's would; leaving the
+                // screen and resetting its modes would have `fg` resume it on the primary screen
+                // with its mouse and key encodings gone. bash and zsh report a stopped job's status as
+                // 128 + the stop signal, so a `D` carrying one of [`JOB_STOPPED_EXIT_CODES`] keeps
+                // the program's screen, as before this rule. fish and nushell cannot be told apart
+                // this way: fish leaves `$status` at the previous command's value when a job stops,
+                // and nushell reports a frozen job as 0.
+                //
+                // So the command end is held, the segment that carried it settles on the screen it
+                // was written to, and [`Self::return_from_stranded_alternate_screen`] does the rest
+                // before a byte after it is parsed.
+                if screen == ScreenId::Alternate {
+                    if self.alternate_command_starts == 0
+                        && !exit_code.is_some_and(|code| JOB_STOPPED_EXIT_CODES.contains(&code))
+                        && self
+                            .shell_commands_running
+                            .get(&ScreenId::Primary)
+                            .is_some_and(|running| *running > 0)
+                    {
+                        self.stranded_command_end = Some(exit_code);
+                        return;
+                    }
+                    self.alternate_command_starts = self.alternate_command_starts.saturating_sub(1);
+                }
                 // **`D` is only accepted on the primary screen, and that is a choice with a cost
                 // worth naming.** The symmetric case to `C` above is easy — a TUI must not be able
                 // to start the session running. This one is not: a command handed to a full-screen
@@ -5643,6 +5877,28 @@ impl DualPlaneSession {
                 if let Some(running) = self.shell_commands_running.get_mut(&screen) {
                     *running = running.saturating_sub(1);
                 }
+                // **And whatever input modes the command's program left on go with it** — once no
+                // command this session watched start on the primary screen is still running.
+                //
+                // The shell's own command end is the one moment no line editor's keyboard modes
+                // are on: see `TerminalAdapter::retire_dead_program_modes` for the shells read.
+                // The count is what keeps a live program's modes out of it: a primary-screen
+                // program that pushed kitty flags and then started a nested shell is still
+                // running when that nested shell's commands end, because its own `C` has had no
+                // `D` (the keyboard-protocol design note's §2.4 negative trace,
+                // `a_nested_shells_command_end_leaves_a_live_programs_keyboard_flags_alone`).
+                // A shell that writes `D` with no `C` at all — `cmd.exe`'s `PROMPT` — has nothing
+                // running and is heard at every prompt, which is how a program that died under
+                // cmd is covered; the same unpaired `D` from a nested shell of that kind inside a
+                // live program is the case the bytes cannot tell apart, and it is accepted.
+                if screen == ScreenId::Primary
+                    && self
+                        .shell_commands_running
+                        .get(&ScreenId::Primary)
+                        .is_none_or(|running| *running == 0)
+                {
+                    self.terminal.retire_dead_program_modes();
+                }
                 if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
                     self.failure_exit_code = Some(exit_code);
                 }
@@ -5664,6 +5920,36 @@ impl DualPlaneSession {
         }
         self.release_retired_mark_anchors();
         self.reconcile_decorations_against_semantic_input();
+    }
+
+    /// **The shell is back, on a screen a dead program left up: put the pane back under it.**
+    ///
+    /// Called by [`Self::feed_at`] with the exit code of the shell's `D` that the `OSC 133;D`
+    /// handler recognised as stranded, after the segment it arrived in has settled and before any
+    /// byte after it is parsed. The whole app-side reset runs — the same
+    /// [`Self::reset_program_modes`] the person's verb runs, for this pane's own transport, with
+    /// nothing written to the child — which returns from the alternate screen through the same
+    /// screen switch an in-stream `?1049l` takes. Then the command end is applied where it belongs,
+    /// to the command started on the primary screen (which would otherwise stay running for ever),
+    /// at the cursor the primary screen comes back with. The shell's `A` that follows is parsed on
+    /// the primary screen and opens an ordinary prompt there.
+    fn return_from_stranded_alternate_screen(
+        &mut self,
+        exit_code: Option<i32>,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
+        self.reset_program_modes_at(self.pty_transport, observed_at)?;
+        let cursor = self.terminal.cursor();
+        self.handle_shell_integration_marker(
+            ScreenId::Primary,
+            GridPoint {
+                row: cursor.row,
+                column: cursor.column,
+            },
+            ShellIntegrationMarker::CommandFinished { exit_code },
+            observed_at,
+        );
+        Ok(())
     }
 
     /// Register one of a command mark's own coordinates in the document's anchor registry.
@@ -5907,6 +6193,7 @@ impl DualPlaneSession {
     /// deleted, and an unmarked program's first screenful of drawing wore the last program's
     /// command (review 2026-09-17 second pass, F3 P2).
     fn retire_alternate_semantic_regions(&mut self) {
+        self.alternate_command_starts = 0;
         self.shell_phases.remove(&ScreenId::Alternate);
         self.shell_commands_running.remove(&ScreenId::Alternate);
         self.shell_prompt_cycle_in_order
@@ -8803,7 +9090,9 @@ impl DualPlaneSession {
         EnqueueOutcome::Queued
     }
 
-    pub fn run_workers(&mut self) {
+    /// Every outstanding decoration task, answered on this thread — math by the session's own
+    /// stand-ins, pictures by the real decoder, printed paths by [`verify_path`] with `resolve`.
+    pub fn run_workers(&mut self, resolve: &dyn Fn(&Path) -> Option<PathBuf>) {
         loop {
             while let Some(task) = self.take_decoration_worker_task() {
                 match task {
@@ -8812,6 +9101,8 @@ impl DualPlaneSession {
                             self.complete_worker_task(task);
                         }
                         SessionMathTask::Live(mut task) => {
+                            self.decoration_work_out
+                                .remove(&DecorationWorkOut::live(&task));
                             if resolve_live_detection_task(&mut task) {
                                 let artifact = live_placeholder(&task);
                                 size_resolved_live_task_band(&mut task);
@@ -8829,7 +9120,7 @@ impl DualPlaneSession {
                         self.complete_inline_image_scale(scaled);
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let verdict = verify_path(&path);
+                        let verdict = verify_path(&path, resolve);
                         self.complete_path_verification(path, verdict);
                     }
                 }
@@ -8888,6 +9179,7 @@ impl DualPlaneSession {
     /// its own — a change to the lane rather than to the move.
     pub fn forget_work_in_flight(&mut self) {
         self.path_verify_in_flight.clear();
+        self.decoration_work_out.clear();
         for record in self.inline_images.values_mut() {
             record.display_pending = None;
         }
@@ -8918,7 +9210,8 @@ impl DualPlaneSession {
         if self.inline_image_bands {
             self.request_inline_image_displays();
         }
-        self.take_math_worker_task()
+        let task = self
+            .take_math_worker_task()
             .map(|task| SessionDecorationTask::Math(Box::new(task)))
             // Finishing a band the user is already waiting on outranks starting another decode.
             .or_else(|| {
@@ -8943,7 +9236,32 @@ impl DualPlaneSession {
                 let path = self.path_verify_tasks.pop_front()?;
                 self.path_verify_in_flight.insert(path.clone());
                 Some(SessionDecorationTask::VerifyPath(path))
-            })
+            });
+        if let Some(out) = task.as_ref().and_then(DecorationWorkOut::of) {
+            self.decoration_work_out.insert(out);
+        }
+        task
+    }
+
+    /// **How much decoration work this session is still owed an answer for**: every task queued
+    /// for a worker (frozen and live math, the frozen retries a full queue turned away, decodes,
+    /// resamples, path questions) and every task handed out by
+    /// [`Self::take_decoration_worker_task`] that no completion or decline has answered. A host
+    /// that answers everything it takes brings it to zero once the queues are drained; one that
+    /// drops a task leaves it above zero.
+    ///
+    /// Resamples are requested where work is handed out, so a display size the layout has just
+    /// started to need is counted from the next take on.
+    pub fn outstanding_decoration_work(&self) -> usize {
+        self.scheduler.pending_len()
+            + self.scheduler.retry_len()
+            + self.live_tasks.len()
+            + self.inline_image_scale_tasks.len()
+            + self.inline_image_tasks.len()
+            + self.local_image_path_tasks.len()
+            + self.path_verify_tasks.len()
+            + self.path_verify_in_flight.len()
+            + self.decoration_work_out.len()
     }
 
     pub fn complete_inline_image_result(
@@ -8951,6 +9269,8 @@ impl DualPlaneSession {
         task: InlineImageTask,
         result: Result<DecodedInlineImage, InlineImageDecodeError>,
     ) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::Decode(task.occurrence_id));
         // The late half of the input-region gate, and a band gate like the early one: a decode that
         // lands on a span the shell has since declared to be the command the user typed must not
         // inject a row there. It says nothing about verification, so with bands retired the record
@@ -8986,17 +9306,20 @@ impl DualPlaneSession {
                     .is_none_or(|previous| previous.key != artifact.key);
                 record.artifact = Some(artifact);
                 record.failed = false;
+                record.declined_by_host = false;
                 if content_changed {
                     record.display = None;
                     record.display_pending = None;
+                    record.display_declined = None;
                 }
             }
             Ok(_) => return false,
-            Err(_) => {
+            Err(error) => {
                 record.artifact = None;
                 record.display = None;
                 record.display_pending = None;
                 record.failed = true;
+                record.declined_by_host = error == InlineImageDecodeError::HostDeclined;
             }
         }
         self.bump_view_generation();
@@ -9006,6 +9329,8 @@ impl DualPlaneSession {
     /// Accept a display raster. A resample of content the record no longer holds is a stale answer
     /// to a superseded question and is dropped.
     pub fn complete_inline_image_scale(&mut self, scaled: ScaledInlineImage) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::Scale(scaled.occurrence_id));
         let Some(record) = self.inline_images.get_mut(&scaled.occurrence_id) else {
             return false;
         };
@@ -9024,7 +9349,26 @@ impl DualPlaneSession {
         true
     }
 
+    /// **The host will not resample this picture** — the declined answer to a
+    /// [`SessionDecorationTask::ScaleInlineImage`]. The request is no longer outstanding and its
+    /// size is not asked for again; the record keeps whatever display raster it had (none, for a
+    /// first size), so nothing new is drawn for it.
+    pub fn decline_inline_image_scale(&mut self, task: &InlineImageScaleTask) {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::Scale(task.occurrence_id));
+        let Some(record) = self.inline_images.get_mut(&task.occurrence_id) else {
+            return;
+        };
+        let size = (task.display_width_px, task.display_height_px);
+        if record.display_pending == Some(size) {
+            record.display_pending = None;
+        }
+        record.display_declined = Some(size);
+    }
+
     pub fn complete_worker_task(&mut self, task: DetectionTask) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::FrozenMath(task.candidate_id));
         if !self.worker_task_is_current(&task) {
             self.stale_results += 1;
             return false;
@@ -9049,6 +9393,8 @@ impl DualPlaneSession {
         task: DetectionTask,
         result: Result<MathRaster, MathRenderError>,
     ) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::FrozenMath(task.candidate_id));
         let render_error = result.as_ref().err().cloned();
         let failure_reason = render_error
             .as_ref()
@@ -9087,6 +9433,8 @@ impl DualPlaneSession {
         mut task: LiveDetectionTask,
         result: Result<MathRaster, MathRenderError>,
     ) -> bool {
+        self.decoration_work_out
+            .remove(&DecorationWorkOut::live(&task));
         let render_time = result.as_ref().ok().map(|raster| raster.render_time);
         let render_error = result.as_ref().err().cloned();
         let failure_reason = render_error
@@ -10720,7 +11068,10 @@ impl DualPlaneSession {
                 .display
                 .as_ref()
                 .map(|display| (display.width_px, display.height_px));
-            if resident == Some(target) || record.display_pending == Some(target) {
+            if resident == Some(target)
+                || record.display_pending == Some(target)
+                || record.display_declined == Some(target)
+            {
                 continue;
             }
             requests.push(InlineImageScaleTask {
@@ -11634,6 +11985,7 @@ impl DualPlaneSession {
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
                     self.live_screen = ScreenId::Alternate;
+                    self.alternate_command_starts = 0;
                     self.alternate_detection_context = DetectionContext::default();
                     for row in &mut self.live_rows {
                         *row = LiveRowStability::default();
@@ -11832,6 +12184,23 @@ impl DualPlaneSession {
             .or(self.spawn_directory.as_deref())
     }
 
+    /// **The folder this pane is standing in, as a folder this side can open** — what a files card
+    /// or a files column taken from this pane is rooted at (issue #28).
+    ///
+    /// [`Self::reference_directory`]'s ladder, with its second rung read one way narrower: a spawn
+    /// directory that is the shell's own home *mark* ([`Self::set_spawn_at_shell_home`], the `~`
+    /// handed to `wsl.exe --cd`) is a word for a launcher and names no folder here, so it is not
+    /// offered. Every other spawn directory is the folder the pane was opened in — the profile's
+    /// fixed folder, a carried or named one, or the account's home — and it answers until the
+    /// shell's first report replaces it.
+    pub fn standing_folder(&self) -> Option<&Path> {
+        self.working_directory.as_deref().or_else(|| {
+            self.spawn_directory
+                .as_deref()
+                .filter(|_| !self.spawn_at_shell_home)
+        })
+    }
+
     /// Take delivery of an OSC 1337 payload the adapter already consumed.
     ///
     /// With image bands retired (`INLINE_IMAGE_BANDS`) this record is no longer a band: it is a
@@ -11894,7 +12263,9 @@ impl DualPlaneSession {
                 artifact: None,
                 display: None,
                 display_pending: None,
+                display_declined: None,
                 failed: false,
+                declined_by_host: false,
             },
         );
         if self.inline_image_tasks.len() == INLINE_IMAGE_WORKER_QUEUE_CAP {
@@ -12353,7 +12724,9 @@ impl DualPlaneSession {
                 artifact: None,
                 display: None,
                 display_pending: None,
+                display_declined: None,
                 failed: false,
+                declined_by_host: false,
             },
         );
         if self.local_image_path_tasks.len() == LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP
@@ -13821,416 +14194,6 @@ fn copy_row_from_cells(
     }
 }
 
-pub fn render_detection_task(
-    engine: &MathEngine,
-    task: &mut DetectionTask,
-    foreground_rgb: [u8; 3],
-) -> Result<MathRaster, MathRenderError> {
-    if !resolve_detection_task(task) {
-        return Err(MathRenderError::NotDetected);
-    }
-    if task.span.kind == BlockKind::Table {
-        return Ok(unrendered_table_raster());
-    }
-    let line = task
-        .inputs
-        .iter()
-        .find(|input| input.id == task.transcript_id)
-        .map_or("", |input| input.text.as_str());
-    render_task_math(
-        engine,
-        &task.span,
-        line,
-        InlineGridGeometry {
-            pane_columns: task.versions.layout.width_cells.get(),
-            cell_width_subpixels: task.cell_width_subpixels,
-            cell_height_subpixels: task.cell_height_subpixels,
-            ascii_baseline_subpixels: task.ascii_baseline_subpixels,
-        },
-        terminal_math_render_key(task.versions.layout, foreground_rgb, task.span.mode)?,
-    )
-}
-
-pub fn render_live_detection_task(
-    engine: &MathEngine,
-    task: &mut LiveDetectionTask,
-    foreground_rgb: [u8; 3],
-) -> Result<MathRaster, MathRenderError> {
-    if !resolve_live_detection_task(task) {
-        return Err(MathRenderError::NotDetected);
-    }
-    if task.span.kind == BlockKind::Table {
-        if task.screen == ScreenId::Primary {
-            extend_live_task_band(task);
-        } else {
-            task.band_start_row = task.start.row;
-            task.band_end_row = task.end.row;
-        }
-        return Ok(unrendered_table_raster());
-    }
-    if task.screen == ScreenId::Primary {
-        extend_live_task_band(task);
-    } else {
-        task.band_start_row = task.start.row;
-        task.band_end_row = task.end.row;
-    }
-    // The **logical** line, not the row the run starts on: a run's byte offsets are offsets into
-    // the string the detector proved it on, and the fold is free to have put the rest of it — or
-    // all of it — on a later row (§4.6c). The line as the block's own pane reads it (R7), because
-    // those are the bytes the offsets count.
-    let pane_inputs = task
-        .capture
-        .pane_inputs(task.pane)
-        .ok_or(MathRenderError::NotDetected)?;
-    let line = live_snapshot_logical_line_text(pane_inputs, task.start.row);
-    render_task_math(
-        engine,
-        &task.span,
-        &line,
-        InlineGridGeometry {
-            // The width the producer of this line had to work in: its pane's (R10), which is the
-            // grid's on every screen no frame cuts.
-            pane_columns: task.pane.width().max(1),
-            cell_width_subpixels: task.cell_width_subpixels,
-            cell_height_subpixels: task.cell_height_subpixels,
-            ascii_baseline_subpixels: task.ascii_baseline_subpixels,
-        },
-        terminal_math_render_key(task.layout, foreground_rgb, task.span.mode)?,
-    )
-}
-
-/// Inline mathematics shares the pane's physical em. Display keeps its band-scaled 12 pt.
-fn terminal_math_render_key(
-    layout: LayoutKey,
-    foreground_rgb: [u8; 3],
-    mode: MathMode,
-) -> Result<MathRenderKey, MathRenderError> {
-    if mode == MathMode::Inline {
-        bt_math::key_for_em_px(
-            layout.font_size_subpixels as f32 / SUBPIXELS_PER_PX as f32,
-            foreground_rgb,
-            mode,
-        )
-        .ok_or(MathRenderError::InlineGeometry)
-    } else {
-        Ok(MathRenderKey {
-            dpi_milli: layout.dpi_milli,
-            font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
-            foreground_rgb,
-            mode,
-        })
-    }
-}
-
-/// A proven table's answer from the worker: the block, and no picture.
-///
-/// **The worker's half of a table is the proof, not the paint.** Everything expensive about
-/// deciding that a header row stands over a delimiter row belongs off the presentation thread, and
-/// it has just been done by `resolve_detection_task` above. What is left — how wide each column
-/// has to be to hold its widest cell — is a question only the window's own shaper can answer, and
-/// that shaper is on the thread this one exists to keep free. So the raster comes back empty and
-/// `bt-app` measures the block before handing it to the session; see
-/// `bt_render::TableBlockPaint`.
-///
-/// A zero extent rather than a guess: a size invented here would be the size the record kept if
-/// the measuring step were ever skipped, and a wrong height is rows of transcript covered by
-/// nothing.
-fn unrendered_table_raster() -> MathRaster {
-    MathRaster {
-        rgba: Vec::new(),
-        width_px: 0,
-        height_px: 0,
-        content_height_px: 0,
-        ascent_px: 0.0,
-        descent_px: 0.0,
-        baseline_px: 0.0,
-        render_time: Duration::ZERO,
-        inline_runs: Vec::new(),
-    }
-}
-
-/// The grid a run is being typeset into: the width its line folds at, and the box one cell is.
-///
-/// One value because they are one fact and are always read together: the row owns the ink box,
-/// and its ASCII baseline supplies the preferred alignment and the composite anchor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct InlineGridGeometry {
-    pane_columns: u32,
-    cell_width_subpixels: i64,
-    cell_height_subpixels: i64,
-    ascii_baseline_subpixels: i64,
-}
-
-fn render_task_math(
-    engine: &MathEngine,
-    span: &MathSpan,
-    line: &str,
-    grid: InlineGridGeometry,
-    key: MathRenderKey,
-) -> Result<MathRaster, MathRenderError> {
-    let InlineGridGeometry {
-        pane_columns,
-        cell_width_subpixels,
-        cell_height_subpixels,
-        ascii_baseline_subpixels,
-    } = grid;
-    if span.mode == MathMode::Display {
-        return engine.render(&span.render_source, key);
-    }
-    if ascii_baseline_subpixels <= 0 {
-        // Inline placement is baseline-anchored. Without the renderer's measured ASCII baseline,
-        // retaining source is the only geometry-safe outcome.
-        return Err(MathRenderError::InlineGeometry);
-    }
-    let Some(first) = span.inline_runs.first() else {
-        return Err(MathRenderError::NotDetected);
-    };
-    let first_byte =
-        usize::try_from(first.byte_start).map_err(|_| MathRenderError::InlineGeometry)?;
-    let Some(prefix) = line.get(..first_byte) else {
-        return Err(MathRenderError::InlineGeometry);
-    };
-    let base_column = UnicodeWidthStr::width(prefix);
-    let cell_width_px = (cell_width_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32).max(1.0);
-    let terminal_baseline_subpixels =
-        ascii_baseline_subpixels.clamp(1, cell_height_subpixels.max(1));
-    let terminal_descent_subpixels = cell_height_subpixels
-        .max(1)
-        .saturating_sub(terminal_baseline_subpixels);
-    // Per-run geometry verdict. A run renders in place when its raster fits the cells its own
-    // source occupies, and falls back to its source text when it does not — by itself, whole. The
-    // rule was always right; applying it to the whole line was not, because one wide formula then
-    // dragged every other formula on that row back to source with it. A rejected run contributes
-    // nothing to the composite and its cells are never cleared, so what stands there is the
-    // terminal text that was already correct.
-    //
-    // An *engine* error is deliberately not per-run: a source that does not compile is a fact
-    // worth telling the user about, and it surfaces as this record's failure reason.
-    let mut rendered = Vec::with_capacity(span.inline_runs.len());
-    let baseline_px = (terminal_baseline_subpixels / SUBPIXELS_PER_PX) as u32;
-    let row_height_px = baseline_px + (terminal_descent_subpixels / SUBPIXELS_PER_PX) as u32;
-    let mut render_time = Duration::ZERO;
-    let pane_columns = pane_columns.max(1) as usize;
-    for (index, run) in span.inline_runs.iter().enumerate() {
-        let start = usize::try_from(run.byte_start).map_err(|_| MathRenderError::InlineGeometry)?;
-        let end = usize::try_from(run.byte_end).map_err(|_| MathRenderError::InlineGeometry)?;
-        let (Some(before), Some(delimited)) = (line.get(..start), line.get(start..end)) else {
-            return Err(MathRenderError::InlineGeometry);
-        };
-        let column_in_line = UnicodeWidthStr::width(before);
-        let column = column_in_line.saturating_sub(base_column);
-        // **The cells its own source occupies, on the row the picture is drawn on.** A logical
-        // line is folded at the pane width, and a run the fold split owns cells on two rows while
-        // its picture is one box drawn where the run begins — so the box it has to fit in ends at
-        // that row's edge. Unfolded, the whole run is on one row and this is the source width
-        // exactly, which is what it has always been.
-        let available_cells = UnicodeWidthStr::width(delimited)
-            .min(pane_columns.saturating_sub(column_in_line % pane_columns));
-        let available_px = (available_cells as f32 * cell_width_px).floor() as u32;
-        let fitted = render_inline_run_fitted(
-            engine,
-            &run.source,
-            key,
-            terminal_baseline_subpixels,
-            terminal_descent_subpixels,
-        )?;
-        let Some(raster) = fitted else {
-            continue;
-        };
-        if raster.width_px > available_px.max(1) {
-            continue;
-        }
-
-        render_time = render_time.saturating_add(raster.render_time);
-        let x = (column as f32 * cell_width_px).round().max(0.0) as u32;
-        let run_index = u32::try_from(index).map_err(|_| MathRenderError::InlineGeometry)?;
-        rendered.push((run_index, x, raster));
-    }
-    // `max` over an empty set is how "every run fell back" arrives here: the line keeps its source
-    // in full, which is exactly the old whole-line outcome, now reached only when it is true.
-    let width_px = rendered
-        .iter()
-        .map(|(_, x, raster)| x.saturating_add(raster.width_px))
-        .max()
-        .ok_or(MathRenderError::InlineGeometry)?;
-    let height_px = rendered
-        .iter()
-        .map(|(_, _, raster)| {
-            inline_run_top(raster, baseline_px, row_height_px).saturating_add(raster.height_px)
-        })
-        .max()
-        .ok_or(MathRenderError::InlineGeometry)?;
-    if !baseline_box_fits(
-        height_px,
-        baseline_px as f32,
-        terminal_baseline_subpixels,
-        terminal_descent_subpixels,
-    ) {
-        return Err(MathRenderError::InlineGeometry);
-    }
-    let len = (width_px as usize)
-        .checked_mul(height_px as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or(MathRenderError::InvalidDimensions)?;
-    let mut rgba = vec![0_u8; len];
-    let mut inline_runs = Vec::with_capacity(rendered.len());
-    for (run, x, raster) in rendered {
-        let y = inline_run_top(&raster, baseline_px, row_height_px);
-        for row in 0..raster.height_px {
-            let source_start = row as usize * raster.width_px as usize * 4;
-            let source_end = source_start + raster.width_px as usize * 4;
-            let target_start = ((y + row) as usize * width_px as usize + x as usize) * 4;
-            let target_end = target_start + raster.width_px as usize * 4;
-            rgba[target_start..target_end].copy_from_slice(&raster.rgba[source_start..source_end]);
-        }
-        inline_runs.push(InlineRunPlacement {
-            run,
-            x_px: x,
-            width_px: raster.width_px,
-        });
-    }
-    Ok(MathRaster {
-        rgba,
-        width_px,
-        height_px,
-        content_height_px: height_px,
-        ascent_px: baseline_px as f32,
-        descent_px: height_px.saturating_sub(baseline_px) as f32,
-        baseline_px: baseline_px as f32,
-        render_time,
-        inline_runs,
-    })
-}
-
-/// How far an inline run may shrink from the pane em to fit its row before readability is lost.
-///
-/// The same half-size floor display math stops at, and for the same reason: past it the formula is
-/// no longer being made to fit, it is being made unreadable, and unreadable typesetting is worth
-/// less than the honest source text the run falls back to.
-const INLINE_READABLE_FLOOR_MILLI: u32 = 500;
-
-/// The whole-pixel ascent and descent of an already positioned composite.
-///
-/// The renderer aligns this anchor with its measured ASCII baseline. Round ascent upward here
-/// so accepting the box cannot later place a fractional pixel outside the row. Individual runs
-/// are positioned within that box by `inline_run_top` before this final containment check.
-fn inline_run_box(height_px: u32, baseline_px: f32) -> (u32, u32) {
-    let ascent_px = baseline_px.ceil().max(0.0) as u32;
-    (ascent_px, height_px.saturating_sub(ascent_px))
-}
-
-/// Keep the ASCII baseline when possible, otherwise move the ink just enough to stay in its row.
-fn inline_run_top(raster: &MathRaster, baseline_px: u32, row_height_px: u32) -> u32 {
-    baseline_px
-        .saturating_sub(raster.baseline_px.ceil().max(0.0) as u32)
-        .min(row_height_px.saturating_sub(raster.height_px))
-}
-
-/// Fit the complete ink height into the row. The baseline split is a placement preference,
-/// not a reason to shrink: a subscript may borrow unused ascent without crossing a row boundary.
-/// Whole-pixel budgets match the compositor, including fractional ASCII baseline measurements.
-fn inline_fit_milli(
-    raster: &MathRaster,
-    terminal_ascent_subpixels: i64,
-    terminal_descent_subpixels: i64,
-) -> u32 {
-    let height_px = terminal_ascent_subpixels.max(0) / SUBPIXELS_PER_PX
-        + terminal_descent_subpixels.max(0) / SUBPIXELS_PER_PX;
-    (height_px.saturating_mul(1000) / i64::from(raster.height_px.max(1))).clamp(0, 1000) as u32
-}
-
-/// Render one inline run at the largest size that fits the full row, down to half the pane em.
-///
-/// Shrinking rather than rejecting is the whole point. The gate this replaces was a straight
-/// accept-or-fall-back on the natural size, which meant every construction taller than a line box —
-/// `\frac`, `\sum_i`, `\hat{m}_t`, anything with a subscript under a descender — silently stayed
-/// source text no matter how nearly it fit. Shrinking to the line box is the inline sibling of the
-/// readable scaling display math already does to fit its band; the only difference is what the
-/// budget is made of, a width there and the row's full height here.
-///
-/// The size is re-rendered rather than the raster resampled, because a formula scaled by the
-/// rasterizer is a formula whose stems and fraction bars land between pixels. Typst is asked for
-/// the smaller size and lays it out properly.
-///
-/// It iterates because glyph layout is not linear in font size — hinting, rule thicknesses and
-/// script sizes all step — so the scale computed from one measurement may still overshoot by a
-/// pixel. Each pass measures what it actually got and compounds the correction, which converges in
-/// one or two passes and is bounded so a pathological source cannot spin. Falling through the floor
-/// or running out of passes returns `None`: this run keeps its source text, alone, and the other
-/// runs on the line are unaffected.
-fn render_inline_run_fitted(
-    engine: &MathEngine,
-    source: &str,
-    key: MathRenderKey,
-    terminal_ascent_subpixels: i64,
-    terminal_descent_subpixels: i64,
-) -> Result<Option<MathRaster>, MathRenderError> {
-    const MAX_ATTEMPTS: usize = 6;
-    /// Every pass must shrink the raster by at least this much, so `MAX_ATTEMPTS` is a real bound
-    /// rather than a hopeful one.
-    ///
-    /// The estimate is strictly decreasing on its own, so the loop cannot spin; what it cannot
-    /// promise is *speed*. An estimate that stops a hair on the wrong side of an integer asks next
-    /// time for a shrink of a fraction of a percent, and a run needing to lose most of a pixel can
-    /// then use up every attempt it has going nowhere. Measured against the real 192-DPI budgets,
-    /// either this floor or the integer-budget targeting in `inline_fit_milli` is enough to make
-    /// the corpus converge and removing both together is what makes it fall back to source; they
-    /// are kept together because one bounds the work and the other aims it.
-    const MIN_STEP_MILLI: u32 = 20;
-    let fits = |raster: &MathRaster| {
-        inline_fit_milli(
-            raster,
-            terminal_ascent_subpixels,
-            terminal_descent_subpixels,
-        ) == 1000
-    };
-    let mut raster = engine.render(source, key)?;
-    let mut applied_milli = 1000_u32;
-    for _ in 0..MAX_ATTEMPTS {
-        if fits(&raster) {
-            return Ok(Some(raster));
-        }
-        let step_milli = inline_fit_milli(
-            &raster,
-            terminal_ascent_subpixels,
-            terminal_descent_subpixels,
-        );
-        let estimate_milli =
-            u32::try_from(u64::from(applied_milli) * u64::from(step_milli) / 1000).unwrap_or(0);
-        let next_milli = estimate_milli.min(applied_milli.saturating_sub(MIN_STEP_MILLI));
-        if next_milli < INLINE_READABLE_FLOOR_MILLI {
-            return Ok(None);
-        }
-        applied_milli = next_milli;
-        let Some(font_milli_pt) =
-            u32::try_from(u64::from(key.font_milli_pt.get()) * u64::from(applied_milli) / 1000)
-                .ok()
-                .and_then(NonZeroU32::new)
-        else {
-            return Ok(None);
-        };
-        raster = engine.render(
-            source,
-            MathRenderKey {
-                font_milli_pt,
-                ..key
-            },
-        )?;
-    }
-    Ok(fits(&raster).then_some(raster))
-}
-
-fn baseline_box_fits(
-    height_px: u32,
-    baseline_px: f32,
-    terminal_ascent_subpixels: i64,
-    terminal_descent_subpixels: i64,
-) -> bool {
-    let (ascent_px, descent_px) = inline_run_box(height_px, baseline_px);
-    i64::from(ascent_px).saturating_mul(SUBPIXELS_PER_PX) <= terminal_ascent_subpixels
-        && i64::from(descent_px).saturating_mul(SUBPIXELS_PER_PX) <= terminal_descent_subpixels
-}
-
 fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> PlaceholderArtifact {
     let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
     PlaceholderArtifact {
@@ -14907,7 +14870,11 @@ fn exact_live_source_match(
     ))
 }
 
-fn extend_live_task_band(task: &mut LiveDetectionTask) {
+/// **The rows a live task's picture may stand on**: its own source rows, and for a display
+/// block on the primary screen up to two blank rows of its own pane borrowed above and below.
+/// Set on the task before it is typeset (`bt_compose::render_live_detection_task`), because the
+/// band is part of the answer the session judges.
+pub fn extend_live_task_band(task: &mut LiveDetectionTask) {
     task.band_start_row = task.start.row;
     task.band_end_row = task.end.row;
     if task.span.mode == MathMode::Inline {
@@ -16760,7 +16727,7 @@ fn live_logical_line_rows(inputs: &[LiveDetectionInput], row: u32) -> Vec<(u32, 
 /// The snapshot's own rows and not the terminal's: a worker holds the grid as it stood when the
 /// task was built, which is the grid the run's offsets were measured against.
 /// [`DualPlaneSession::live_logical_line_text`] answers the same question of the live terminal.
-fn live_snapshot_logical_line_text(inputs: &[LiveDetectionInput], row: u32) -> String {
+pub fn live_snapshot_logical_line_text(inputs: &[LiveDetectionInput], row: u32) -> String {
     live_logical_line_rows(inputs, row)
         .into_iter()
         .filter_map(|(grid_row, _)| live_grid_input(inputs, grid_row))
@@ -17317,7 +17284,9 @@ mod publication_revision_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_compose::MathEngine;
     use bt_doc::DecorationLifecycle;
+    use bt_doc::math::MathRenderKey;
     use bt_transcript::TerminalColor;
     use proptest::prelude::*;
 
@@ -18155,7 +18124,7 @@ mod tests {
         session.feed(&bytes).unwrap();
         assert_eq!(session.pending_tasks(), crate::WORKER_QUEUE_CAP);
         assert!(session.retry_on_idle() > 0);
-        session.run_workers();
+        session.run_workers(&no_door);
         assert_eq!(session.pending_tasks(), 0);
         assert_eq!(session.retry_on_idle(), 0);
         assert!(session.document().entries().iter().all(|(id, _)| {
@@ -18867,26 +18836,6 @@ mod tests {
             ),
             "two renderers reading the same bytes are two artifacts, not one cache entry"
         );
-    }
-
-    #[test]
-    fn an_inline_composite_anchor_must_fit_the_terminal_baseline_split() {
-        let height_px = 18;
-        let math_baseline_px = 14.0;
-        // Once composited, the anchor is fixed: a height-only check cannot validate it.
-        // Individual runs may shift before assembly; the assembled picture may not overflow.
-        assert!(!baseline_box_fits(
-            height_px,
-            math_baseline_px,
-            10 * SUBPIXELS_PER_PX,
-            8 * SUBPIXELS_PER_PX,
-        ));
-        assert!(baseline_box_fits(
-            height_px,
-            math_baseline_px,
-            14 * SUBPIXELS_PER_PX,
-            4 * SUBPIXELS_PER_PX,
-        ));
     }
 
     #[test]
@@ -23902,7 +23851,7 @@ mod tests {
         // Whatever the scheduler still holds for these lines runs now, so a raster that only
         // survived because nothing else had a chance to land is not mistaken for a handoff.
         let frozen_detections = session.frozen_detection_count;
-        session.run_workers();
+        session.run_workers(&no_door);
         let frozen_artifact = session.decorations.values().find_map(|record| {
             record
                 .artifact
@@ -25766,6 +25715,152 @@ mod tests {
         }
     }
 
+    /// RED — **a resample the host declined is answered, and that size is not asked for again**
+    /// (CC-6b; design T-COMPOSE-CRATE §3.2, the bt-term additions). There was no failure
+    /// completion for a resample: a host that cannot resample would have left it in flight, and
+    /// the next hand-out would have asked for the same size again.
+    ///
+    /// MUTATION: drop `record.display_declined = Some(size)` from `decline_inline_image_scale` —
+    /// the next hand-out asks for the same resample again.
+    #[test]
+    fn a_declined_resample_is_answered_and_not_asked_again() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
+        session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 200, 300, false)),
+        ));
+        let Some(SessionDecorationTask::ScaleInlineImage(scale)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("a decoded picture is resampled to its display box");
+        };
+        assert_eq!(
+            session.outstanding_decoration_work(),
+            1,
+            "the resample is out"
+        );
+
+        session.decline_inline_image_scale(&scale);
+        assert_eq!(session.outstanding_decoration_work(), 0, "and answered");
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "the declined size is not asked for again"
+        );
+        let record = &session.inline_image_records()[0];
+        assert_eq!(record.display_width_px, None, "nothing new is drawn for it");
+        assert!(!record.failed, "the decode itself stands");
+    }
+
+    /// RED — **a picture the host declined is a failed record that says so; a missing file is a
+    /// failed record that does not** (CC-6b, `InlineImageDecodeError::HostDeclined`).
+    ///
+    /// MUTATION: set `declined_by_host` from `error != InlineImageDecodeError::HostDeclined` — both
+    /// halves go red.
+    #[test]
+    fn a_declined_picture_is_told_apart_from_a_missing_file() {
+        for (error, declined) in [
+            (InlineImageDecodeError::HostDeclined, true),
+            (
+                InlineImageDecodeError::Io("\u{627e}\u{4e0d}\u{5230} not found".into()),
+                false,
+            ),
+        ] {
+            let mut session = DualPlaneSession::new(nz(20), nz(6));
+            session
+                .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+                .unwrap();
+            let Some(SessionDecorationTask::InlineImage(task)) =
+                session.take_decoration_worker_task()
+            else {
+                panic!("OSC 1337 files a decode");
+            };
+            assert_eq!(session.outstanding_decoration_work(), 1);
+            session.complete_inline_image_result(task, Err(error));
+            assert_eq!(session.outstanding_decoration_work(), 0);
+            let record = &session.inline_image_records()[0];
+            assert!(record.failed);
+            assert_eq!(record.declined_by_host, declined, "{record:?}");
+        }
+    }
+
+    /// RED — **a path the host declined to verify is out of flight, has no verdict, and is never
+    /// asked about again** — not when the frame is drawn again, not when the program prints it
+    /// again, not when a link target re-asks it (CC-6b, `decline_path_verification`).
+    ///
+    /// MUTATION: take `|| self.path_declined.contains(&path)` out of `queue_path_question` — the
+    /// reprint files the question again.
+    #[test]
+    fn a_declined_path_is_answered_and_never_asked_again() {
+        let path = bt_testpath::temp_path("bt-term-declined").join("\u{7b14}\u{8bb0}.md");
+        let printed = format!("{}\r\n", path.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let Some(SessionDecorationTask::VerifyPath(asked)) = session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        assert_eq!(asked, path);
+        assert_eq!(session.outstanding_decoration_work(), 1, "in flight");
+
+        session.decline_path_verification(asked);
+        assert_eq!(session.outstanding_decoration_work(), 0);
+        assert!(session.path_declined_by_host(&path));
+        assert_eq!(session.path_verdict(&path), None, "declined is not absent");
+
+        session.feed(printed.as_bytes()).unwrap();
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        session.re_ask_about_link_target(path.clone());
+        session.ask_about_link_target(path);
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "a declined name is not asked about again"
+        );
+    }
+
+    /// RED — **a task handed out and never answered stays outstanding** (CC-6b; the design's
+    /// bypass shape: a task taken directly and dropped). `forget_work_in_flight`, which gives up
+    /// every answer owed to an old address, is what lets it go.
+    ///
+    /// MUTATION: do not record the handed-out task in `take_decoration_worker_task` — the
+    /// dropped formula is no longer outstanding.
+    #[test]
+    fn a_task_taken_and_dropped_stays_outstanding() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        session
+            .feed_at("\u{516c}\u{5f0f}\r\n$$x^2$$\r\n".as_bytes(), start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(session.outstanding_decoration_work(), 1, "queued");
+        let Some(SessionDecorationTask::Math(task)) = session.take_decoration_worker_task() else {
+            panic!("the formula is filed");
+        };
+        drop(task);
+        assert_eq!(
+            session.outstanding_decoration_work(),
+            1,
+            "taken, dropped, still owed"
+        );
+        session.forget_work_in_flight();
+        assert_eq!(session.outstanding_decoration_work(), 0);
+    }
+
     /// The band's texture is display-resolution, so `render_scale_milli` is 1000 and the band is
     /// exactly as tall as its own raster. 20x12 grid, 10px square cells, dpi 1000, image 200x300:
     ///   - `one_third_height_px` = floor(12*10240/3/1024) = 40
@@ -25916,7 +26011,7 @@ mod tests {
                     assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -26402,7 +26497,7 @@ mod tests {
     /// grid; before the fix its band measured 10x4 against the unwrapped line's 340x114.
     #[test]
     fn a_wrapped_history_reference_gets_the_display_box_of_its_own_screen_column() {
-        let path = r"C:\a\b.png";
+        let path = rooted("a/b.png");
         let (unwrapped_offset, unwrapped) =
             frozen_reference_band(40, &format!("yyyyy {path}"), (1200, 400));
         let (wrapped_offset, wrapped) =
@@ -26443,7 +26538,7 @@ mod tests {
     /// its cells gives 37. Only the projection's own arithmetic gives 35.
     #[test]
     fn a_wrapped_reference_behind_wide_characters_measures_cells_not_graphemes() {
-        let path = r"C:\a\b.png";
+        let path = rooted("a/b.png");
         let (unwrapped_offset, unwrapped) =
             frozen_reference_band(40, &format!("中中 {path}"), (1200, 400));
         let (wrapped_offset, wrapped) =
@@ -26870,14 +26965,7 @@ mod tests {
     /// A real directory holding one real file with a name no image scan would ever admit, so the
     /// pins below can only be answered by the printed-path line and never by the image one.
     fn temporary_ordinary_file() -> (PathBuf, PathBuf) {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-printed-path-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-printed-path");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("notes.md");
         std::fs::write(&path, b"# notes\n").unwrap();
@@ -27027,14 +27115,7 @@ mod tests {
 
     /// A fresh folder under the temp directory holding `present` as small files, and the folder.
     fn temporary_pictures(present: &[&str]) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-image-placeholder-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-image-placeholder");
         std::fs::create_dir(&directory).unwrap();
         for name in present {
             std::fs::write(directory.join(name), b"not decoded here").unwrap();
@@ -27195,7 +27276,7 @@ mod tests {
         let mut asked = Vec::new();
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let verdict = verify_path(&path);
+                let verdict = verify_path(&path, &no_door);
                 asked.push(path.clone());
                 session.complete_path_verification(path, verdict);
             }
@@ -27255,14 +27336,20 @@ mod tests {
         let mut asked = Vec::new();
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let verdict = verify_path(&path);
+                let verdict = verify_path(&path, &no_door);
                 asked.push(path.clone());
                 session.complete_path_verification(path, verdict);
             }
         }
         asked.sort();
-        let mut expected = vec![learned.clone(), inferred.clone(), absent.clone()];
+        let mut expected = vec![learned.clone()];
+        for number in [4, 5] {
+            expected.extend(
+                bt_transcript::paths::ImagePlaceholderTargets::inferred_targets(&learned, number),
+            );
+        }
         expected.sort();
+        assert!(expected.contains(&inferred) && expected.contains(&absent));
         assert_eq!(asked, expected, "every candidate went to the worker");
         let after = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(
@@ -27401,15 +27488,7 @@ mod tests {
         // whatever directory the runner calls `%TEMP%`.
         let mut session = DualPlaneSession::new(nz(120), nz(6));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         session.feed(b"see sub/notes.md. \r\n").unwrap();
         let mut projection = session.new_projection(session.layout_key());
         let frame = frame_after_path_verification(&mut session, &mut projection);
@@ -27515,7 +27594,10 @@ mod tests {
         let (other, other_spare) = temporary_ordinary_file();
         let only_short = other.join("a");
         std::fs::write(&only_short, b"a\n").unwrap();
-        let reversed = format!("see {}\\a b\\c d.md for details", other.to_string_lossy());
+        let reversed = format!(
+            "see {} for details",
+            other.join("a b").join("c d.md").to_string_lossy()
+        );
         let mut session = DualPlaneSession::new(nz(240), nz(6));
         enable_path_detection(&mut session);
         session.feed(format!("{reversed}\r\n").as_bytes()).unwrap();
@@ -27612,15 +27694,7 @@ mod tests {
         ];
         let mut session = DualPlaneSession::new(nz(75), nz(8));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         for line in printed {
             assert!(
                 bt_unicode::text_width(line) < 75,
@@ -27696,19 +27770,29 @@ mod tests {
     /// MUTATION: drop `!character.is_ascii() ||` from `prose_seam_ends` and the row goes dark.
     #[test]
     fn a_printed_path_behind_a_full_width_stop_and_a_digit_is_a_link() {
-        /// The reference's text and its target, read off one frame row.
-        fn linked_on(frame: &ViewportFrame, row: u32) -> Option<(String, String)> {
+        /// Every reference on one frame row, in order: each one's text and its target. A run of
+        /// linked cells with one target is one reference.
+        fn links_on(frame: &ViewportFrame, row: u32) -> Vec<(String, String)> {
             let columns = frame.columns.get() as usize;
             let start = row as usize * columns;
-            let mut text = String::new();
-            let mut uri = None;
+            let mut links: Vec<(String, String)> = Vec::new();
+            let mut previous_linked = false;
             for cell in &frame.cells[start..start + columns] {
-                if let Some(link) = &cell.hyperlink {
-                    uri.get_or_insert_with(|| link.uri.to_string());
-                    text.push_str(&cell.text);
+                match &cell.hyperlink {
+                    Some(link) => {
+                        let uri = link.uri.to_string();
+                        match links.last_mut() {
+                            Some((text, last)) if previous_linked && *last == uri => {
+                                text.push_str(&cell.text);
+                            }
+                            _ => links.push((cell.text.to_string(), uri)),
+                        }
+                        previous_linked = true;
+                    }
+                    None => previous_linked = false,
                 }
             }
-            uri.map(|uri| (text, uri))
+            links
         }
 
         let (directory, spare) = temporary_ordinary_file();
@@ -27718,15 +27802,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(8));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         // Byte for byte as Claude Code emits it: the code span's truecolour around the name, the
         // default foreground back, and the prose glued on behind.
         let prose = "。18 条,每条三段:规则 /";
@@ -27741,12 +27817,21 @@ mod tests {
         let frame = frame_after_path_verification(&mut session, &mut projection);
 
         assert!(session.path_is_verified(&draft));
+        let mut expected = vec![(
+            name.clone(),
+            bt_transcript::paths::local_path_to_file_uri(&draft),
+        )];
+        // The prose ends in ` /`: no name on Windows, and this machine's own root everywhere
+        // else, which is on the disk and so is a second reference of its own.
+        if !cfg!(windows) {
+            expected.push((
+                "/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(Path::new("/")),
+            ));
+        }
         assert_eq!(
-            linked_on(&frame, 0),
-            Some((
-                name.clone(),
-                bt_transcript::paths::local_path_to_file_uri(&draft)
-            )),
+            links_on(&frame, 0),
+            expected,
             "the link is the name without the full-width stop, and it opens the file"
         );
 
@@ -28027,6 +28112,7 @@ mod tests {
 
     /// One Windows path said the two ways the shells on this machine that are not Windows
     /// processes say it: `C:\a\b.md` as a Git Bash prints it, and as a WSL bash does.
+    #[cfg(windows)]
     fn foreign_spellings(path: &Path) -> (String, String) {
         let text = path.to_string_lossy().replace('\\', "/");
         let (drive, tail) = text.split_at(2);
@@ -28045,6 +28131,10 @@ mod tests {
     /// MUTATION: drop `detect_foreign_path_candidates` from `PrintedPathLinks::candidates_in` and
     /// the first two go red — the file is on the disk, the pane knows which shell it is, and the
     /// name on the screen is still dark.
+    ///
+    /// Windows only: the MSYS and WSL spellings name a Windows drive, and only a Windows build
+    /// translates a foreign spelling back to a local file.
+    #[cfg(windows)]
     #[test]
     fn a_pane_reads_the_absolute_spelling_its_own_shell_prints() {
         let (directory, path) = temporary_ordinary_file();
@@ -28101,6 +28191,7 @@ mod tests {
 
     /// Every name this session put in front of a worker for one line of text, answered "no" so the
     /// ledger does not carry it into the next line — the app's own rhythm, run by hand.
+    #[cfg(windows)]
     fn names_asked_about(session: &mut DualPlaneSession, printed: &str) -> Vec<PathBuf> {
         session.feed(printed.as_bytes()).unwrap();
         let mut projection = session.new_projection(session.layout_key());
@@ -28128,6 +28219,9 @@ mod tests {
     /// MUTATIONS: fill the home from *every* report and a `cd /etc` makes `~/notes.md` name
     /// `\\wsl.localhost\Ubuntu\etc\notes.md`; drop the `spawn_at_shell_home` gate and a pane that
     /// inherited `/mnt/d/Demo` calls that folder its home.
+    ///
+    /// Windows only: a WSL pane and its `\\wsl.localhost` share exist on Windows alone.
+    #[cfg(windows)]
     #[test]
     fn a_wsl_panes_tilde_is_the_home_its_own_shell_reported() {
         /// One WSL pane, told what its spawn would have told it, with `reports` already fed.
@@ -28250,7 +28344,7 @@ mod tests {
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
                     this_frame += 1;
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
             }
@@ -28296,11 +28390,8 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        let cwd = format!(
-            "\x1b]7;file:///{}\x07",
-            directory.to_string_lossy().replace('\\', "/")
-        );
-        session.feed(cwd.as_bytes()).unwrap();
+        let cwd = osc7_report(&directory);
+        session.feed(&cwd).unwrap();
         let mut projection = session.new_projection(session.layout_key());
 
         // Fifty-eight rows of path-shaped words that name nothing, then the one file that is real.
@@ -28324,7 +28415,7 @@ mod tests {
             session.absorb_printed_path_probes(&mut projection);
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
             }
@@ -28339,6 +28430,71 @@ mod tests {
         std::fs::remove_dir(&nested).unwrap();
         std::fs::remove_file(directory.join("notes.md")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (issue #28) — **a pane stands in the folder it was opened in until its shell says
+    /// otherwise, and an unreadable report leaves it there rather than anywhere else.**
+    ///
+    /// `standing_folder` is what a files card and a files column are rooted at. Before the first
+    /// report it is the spawn directory (a profile's fixed folder here); a report replaces it; a
+    /// report this terminal cannot read forgets the reported folder (the standing OSC 7 rule) and
+    /// the pane is back in the folder it was opened in — never in the account's home. A spawn
+    /// directory that is the shell's home *mark* (`~`, handed to a launcher) names no folder on
+    /// this side and is not offered, though the pane's name still reads it.
+    ///
+    /// MUTATIONS, each observed red: answer `working_directory` alone (the birth and the
+    /// unreadable-report rows go `None`); drop the home-mark filter (the `~` row answers `~`).
+    #[test]
+    fn a_pane_stands_in_the_folder_it_was_opened_in_until_its_shell_reports_one() {
+        let opened_in = std::env::temp_dir().join("沙盒 sandbox");
+        let reported = opened_in.join("子 sub");
+        let mut session = DualPlaneSession::new(nz(80), nz(24));
+        session.set_spawn_directory(Some(opened_in.clone()));
+        assert_eq!(
+            session.standing_folder(),
+            Some(opened_in.as_path()),
+            "birth"
+        );
+
+        let uri = bt_transcript::paths::local_path_to_file_uri(&reported);
+        let expected = file_uri_to_local_path(&uri, &[]).expect("a local report");
+        session
+            .feed(format!("\x1b]7;{uri}\x07").as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.standing_folder(),
+            Some(expected.as_path()),
+            "reported"
+        );
+
+        // `%2F` decodes to a separator inside a segment, which the decoder refuses.
+        session
+            .feed("\x1b]7;file:///%E6%B2%99%2F%E7%9B%92\x07".as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.working_directory(),
+            None,
+            "the unreadable report is no folder"
+        );
+        assert_eq!(
+            session.standing_folder(),
+            Some(opened_in.as_path()),
+            "back in the folder it was opened in"
+        );
+
+        let mut wsl = DualPlaneSession::new(nz(80), nz(24));
+        wsl.set_spawn_directory(Some(std::path::PathBuf::from("~")));
+        wsl.set_spawn_at_shell_home(true);
+        assert_eq!(
+            wsl.standing_folder(),
+            None,
+            "a launcher's home mark is not a folder here"
+        );
+        assert_eq!(
+            wsl.reference_directory(),
+            Some(std::path::Path::new("~")),
+            "the pane's name still reads it"
+        );
     }
 
     /// RED (B-AUDIT-046 TRM-3) — **a working-directory report that names this machine is this
@@ -28358,12 +28514,14 @@ mod tests {
     ///
     /// The host they print is `gethostname`'s answer. The reader used to know this machine's name
     /// only from `COMPUTERNAME`, which a Mac does not have, so every one of these was read as a
-    /// remote share and the pane forgot its directory. It now asks
-    /// [`bt_platform::host_names`] — the real producer, not a name handed in by the test — and the
-    /// comparison is case-insensitive, because host names are.
+    /// remote share and the pane forgot its directory. It now reads the names the host installed
+    /// ([`local_host_names`]; this crate's tests install [`crate::TEST_HOST_NAMES`] there), and
+    /// the comparison is case-insensitive, because host names are. That the desktop installs the
+    /// operating system's own answer is `bt-app`'s pin
+    /// (`host_answers::tests::the_names_installed_are_the_machines_and_a_report_naming_it_is_accepted`).
     ///
-    /// MUTATION: make `local_host_names` answer the `COMPUTERNAME` variable again — every host
-    /// row goes red on macOS and Linux, where it is unset.
+    /// MUTATION: hand `file_uri_to_local_path` an empty list in
+    /// `set_reported_working_directory` — every host row goes red.
     #[test]
     fn a_cwd_message_naming_this_host_is_accepted_and_a_foreign_one_ignored() {
         let directory = std::env::temp_dir();
@@ -28372,10 +28530,10 @@ mod tests {
             .strip_prefix("file://")
             .expect("a local file URI opens with the scheme and an empty authority");
         let expected = file_uri_to_local_path(&bare, &[]).expect("the bare form is this machine's");
-        let host = bt_platform::host_names()
-            .into_iter()
-            .next()
-            .expect("this machine has a name to ask for");
+        let host = local_host_names()
+            .first()
+            .cloned()
+            .expect("the installed names hold one to ask for");
 
         let reported = |payload: String| {
             let mut session = DualPlaneSession::new(nz(80), nz(24));
@@ -28435,11 +28593,8 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        let cwd = format!(
-            "\x1b]7;file:///{}\x07",
-            directory.to_string_lossy().replace('\\', "/")
-        );
-        session.feed(cwd.as_bytes()).unwrap();
+        let cwd = osc7_report(&directory);
+        session.feed(&cwd).unwrap();
         let mut projection = session.new_projection(session.layout_key());
 
         let noise = (0..58u32)
@@ -28465,7 +28620,7 @@ mod tests {
             owed = false;
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     owed |= session.complete_path_verification(path, verdict);
                 }
             }
@@ -28486,14 +28641,7 @@ mod tests {
     fn temporary_path_image_named(file_name: &str) -> (PathBuf, PathBuf) {
         use base64::Engine as _;
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-session-path-image-{}-{unique}",
-            std::process::id()
-        ));
+        let directory = bt_testpath::temp_path("betterterminal-session-path-image");
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join(file_name);
         let png = base64::engine::general_purpose::STANDARD
@@ -28510,7 +28658,7 @@ mod tests {
         session.absorb_printed_path_probes(projection);
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let verdict = verify_path(&path);
+                let verdict = verify_path(&path, &no_door);
                 session.complete_path_verification(path, verdict);
             }
         }
@@ -28539,15 +28687,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         let mut projection = session.new_projection(session.layout_key());
 
         // A command that prints where it is about to write, and has not finished.
@@ -28604,15 +28744,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         let mut projection = session.new_projection(session.layout_key());
         session
             .feed(format!("{} {}\r\n", real.display(), absent.display()).as_bytes())
@@ -28671,15 +28803,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(200), nz(60));
         enable_path_detection(&mut session);
-        session
-            .feed(
-                format!(
-                    "\x1b]7;file:///{}\x07",
-                    directory.to_string_lossy().replace('\\', "/")
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        session.feed(&osc7_report(&directory)).unwrap();
         let mut projection = session.new_projection(session.layout_key());
         session
             .feed(format!("writing {}\r\n", built.display()).as_bytes())
@@ -28707,14 +28831,7 @@ mod tests {
     /// it is a spelling and not a file: the tests below state every answer themselves through
     /// [`settle_printed_paths_against`], so no disk is read and no clock is waited on.
     fn unwritten_directory(tag: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "betterterminal-{tag}-{}-{unique}",
-            std::process::id()
-        ))
+        bt_testpath::temp_path(&format!("betterterminal-{tag}"))
     }
 
     /// One frame of the app's own loop with the **disk replaced by what the test says is on it**:
@@ -29028,7 +29145,7 @@ mod tests {
                     session.complete_inline_image_scale(scale_inline_image(&task));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let verdict = verify_path(&path);
+                    let verdict = verify_path(&path, &no_door);
                     session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -29771,7 +29888,11 @@ mod tests {
     /// detector blind to a path it had already proven.
     fn application_overlay_line(line: &str) -> String {
         const OVERLAY: &str = "Localized overlay status!";
-        let overlay_start = line.find('"').expect("path line is quoted") + 3;
+        let path_start = line.find('"').expect("path line is quoted") + 1;
+        let overlay_start = path_start
+            + line[path_start..]
+                .find(['\\', '/'])
+                .expect("an absolute path has a root separator");
         let overlay_end = overlay_start + OVERLAY.len();
         assert!(
             overlay_end < line.len(),
@@ -29991,9 +30112,8 @@ mod tests {
         session.restore_retired_image_bands();
         let started = Instant::now();
         let missing = std::env::temp_dir().join(format!(
-            "betterterminal-missing-{}-{}.png",
-            std::process::id(),
-            started.elapsed().as_nanos()
+            "{}.png",
+            bt_testpath::unique_name("betterterminal-missing")
         ));
         let line = format!("[Image: source: \"{}\"]", missing.display());
         session
@@ -30041,16 +30161,19 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(60), nz(4));
         enable_path_detection(&mut session);
         let started = Instant::now();
+        let printed = rooted("pictures/wallpaper.png");
         session
-            .feed_at(br"type C:\pictures\wallpaper.png here", started)
+            .feed_at(format!("type {printed} here").as_bytes(), started)
             .unwrap();
         let frame = current_frame(&mut session);
-        let wallpaper = PathBuf::from(r"C:\pictures\wallpaper.png");
+        let wallpaper = PathBuf::from(&printed);
+        // The reference spans the columns from 5 to `last`; the space after it is not in it.
+        let last = 5 + printed.len() as u32 - 1;
         assert_eq!(peek_at(&session, &frame, 0, 5), Some(wallpaper.clone()));
         assert_eq!(peek_at(&session, &frame, 0, 10), Some(wallpaper.clone()));
-        assert_eq!(peek_at(&session, &frame, 0, 28), Some(wallpaper));
+        assert_eq!(peek_at(&session, &frame, 0, last - 1), Some(wallpaper));
         assert_eq!(peek_at(&session, &frame, 0, 2), None);
-        assert_eq!(peek_at(&session, &frame, 0, 30), None);
+        assert_eq!(peek_at(&session, &frame, 0, last + 1), None);
         assert!(
             session.inline_images.is_empty(),
             "reading a frame registers nothing",
@@ -30069,11 +30192,11 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(20), nz(4));
         enable_path_detection(&mut session);
         let started = Instant::now();
-        session
-            .feed_at(br"C:\a\b\c\verylongname.png", started)
-            .unwrap();
+        let printed = rooted("a/b/c/verylongname.png");
+        session.feed_at(printed.as_bytes(), started).unwrap();
         let frame = current_frame(&mut session);
-        let expected = PathBuf::from(r"C:\a\b\c\verylongname.png");
+        let expected = PathBuf::from(&printed);
+        // Twenty columns, so the continuation row holds the last three characters or more.
         assert_eq!(peek_at(&session, &frame, 0, 0), Some(expected.clone()));
         assert_eq!(
             peek_at(&session, &frame, 1, 2),
@@ -30092,8 +30215,12 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(60), nz(3));
         enable_path_detection(&mut session);
         let started = Instant::now();
+        let printed = rooted("img/shot.png");
         session
-            .feed_at(b"C:\\img\\shot.png done\r\nb\r\nc\r\nd\r\ne\r\nf", started)
+            .feed_at(
+                format!("{printed} done\r\nb\r\nc\r\nd\r\ne\r\nf").as_bytes(),
+                started,
+            )
             .unwrap();
         let (id, _) = session
             .document
@@ -30117,9 +30244,13 @@ mod tests {
             .expect("scrolling to the top must put the frozen line on screen");
         assert_eq!(
             peek_at(&session, &frame, row, 3),
-            Some(PathBuf::from(r"C:\img\shot.png")),
+            Some(PathBuf::from(&printed))
         );
-        assert_eq!(peek_at(&session, &frame, row, 17), None);
+        // Inside the word after it.
+        assert_eq!(
+            peek_at(&session, &frame, row, printed.len() as u32 + 2),
+            None
+        );
     }
 
     #[test]
@@ -30703,9 +30834,8 @@ mod tests {
         enable_path_detection(&mut session);
         let started = Instant::now();
         let missing = std::env::temp_dir().join(format!(
-            "betterterminal-missing-{}-{}.png",
-            std::process::id(),
-            started.elapsed().as_nanos()
+            "{}.png",
+            bt_testpath::unique_name("betterterminal-missing")
         ));
         let line = format!("[Image: source: \"{}\"]", missing.display());
         session
@@ -31039,7 +31169,7 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let verdict = verify_path(&path);
+                        let verdict = verify_path(&path, &no_door);
                         session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -31147,7 +31277,7 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let verdict = verify_path(&path);
+                        let verdict = verify_path(&path, &no_door);
                         session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
@@ -31210,7 +31340,7 @@ mod tests {
     fn underline_coverage_equals_peek_coverage_for_every_reference_shape() {
         // The user's own file name: no space, so the unquoted native shape is the one they saw.
         let (directory, path) = temporary_path_image_named("layout-preview.png");
-        let uri = format!("file:///{}", path.display().to_string().replace('\\', "/"));
+        let uri = bt_transcript::paths::local_path_to_file_uri(&path);
         let text_uri = uri.replace("layout-preview.png", "notes.txt");
         let mut session = DualPlaneSession::new(nz(240), nz(8));
         enable_path_detection(&mut session);
@@ -31304,20 +31434,24 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// `below` (written with `/`) as this platform spells an absolute path: under the drive `C:`
+    /// with `\` on Windows, under `/` elsewhere — for a reference whose fact is about where it
+    /// stands on a line, not about which file it names.
+    fn rooted(below: &str) -> String {
+        if cfg!(windows) {
+            format!(r"C:\{}", below.replace('/', r"\"))
+        } else {
+            format!("/{below}")
+        }
+    }
+
     /// A temporary tree whose root name carries both a space and CJK — the OSC 7 report must
     /// percent-encode them and this terminal must decode them back — holding one 1x1 PNG beside a
     /// working directory that reaches it through `../`.
     fn temporary_relative_image_tree() -> (PathBuf, PathBuf, PathBuf) {
         use base64::Engine as _;
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "betterterminal 图 片-{}-{unique}",
-            std::process::id()
-        ));
+        let root = bt_testpath::temp_path("betterterminal 图 片");
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let image = root.join("shot.png");
@@ -31330,12 +31464,18 @@ mod tests {
 
     /// The exact bytes `scripts/shell-integration/folio.ps1` puts on the wire for one
     /// directory: an empty authority and a minimally percent-encoded path. The script's own
-    /// emission is pinned end to end in `tests/shell_integration_script.rs`; this is the same
-    /// shape, written where a unit test can reach it.
+    /// emission is pinned end to end in `bt-pty`'s `tests/shell_integration_script.rs`; this is
+    /// the same shape, written where a unit test can reach it.
     fn osc7_report(directory: &Path) -> Vec<u8> {
         const SAFE: &str = "-._~!$&'()*+,;=:@/";
-        let mut uri = String::from("file:///");
-        for byte in directory.to_string_lossy().replace('\\', "/").bytes() {
+        // The URI's path opens with `/`: before a drive letter it is the one the URI adds, and a
+        // POSIX path already begins with its own.
+        let path = directory.to_string_lossy().replace('\\', "/");
+        let mut uri = String::from("file://");
+        if !path.starts_with('/') {
+            uri.push('/');
+        }
+        for byte in path.bytes() {
             if byte.is_ascii_alphanumeric() || SAFE.contains(char::from(byte)) {
                 uri.push(char::from(byte));
             } else {
@@ -31579,21 +31719,15 @@ mod tests {
 
         // A report this terminal cannot resolve leaves it in the same state, and retracts a
         // directory it had already been given rather than letting a stale one answer.
-        session
-            .feed_at(b"\x1b]7;file:///D:/somewhere\x07", started)
-            .unwrap();
-        assert_eq!(
-            session.working_directory(),
-            Some(Path::new(r"D:\somewhere"))
-        );
+        let somewhere = root.join("somewhere");
+        session.feed_at(&osc7_report(&somewhere), started).unwrap();
+        assert_eq!(session.working_directory(), Some(somewhere.as_path()));
         for retraction in [
             "\u{1b}]7;\u{7}",
             "\u{1b}]7;file://server/share\u{7}",
             "\u{1b}]7;not a uri\u{7}",
         ] {
-            session
-                .feed_at(b"\x1b]7;file:///D:/somewhere\x07", started)
-                .unwrap();
+            session.feed_at(&osc7_report(&somewhere), started).unwrap();
             session.feed_at(retraction.as_bytes(), started).unwrap();
             assert_eq!(
                 session.working_directory(),
@@ -31871,10 +32005,19 @@ mod tests {
     }
 
     const OSC133_ACCEPT2_PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
-    const OSC133_ACCEPT2_IMAGE: &str =
-        "[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]";
-    const OSC133_ACCEPT2_COMMAND: &str =
-        "echo \"[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]\"";
+
+    /// The recorded output line, its picture spelled the way this platform roots one.
+    fn osc133_accept2_image() -> String {
+        format!(
+            "[Image: source: {}]",
+            rooted("Windows/Web/Wallpaper/Windows/img0.jpg")
+        )
+    }
+
+    /// The recorded command, which echoes the output line.
+    fn osc133_accept2_command() -> String {
+        format!("echo \"{}\"", osc133_accept2_image())
+    }
 
     #[derive(Clone, Copy, Debug)]
     enum Osc133ZoomStage {
@@ -31901,10 +32044,10 @@ mod tests {
 
         at += Duration::from_millis(10);
         session
-            .feed_at(OSC133_ACCEPT2_COMMAND.as_bytes(), at)
+            .feed_at(osc133_accept2_command().as_bytes(), at)
             .unwrap();
         // PSReadLine's repaint leaves the cursor at the next physical row when the command fills
-        // the 104th cell. Force that real recorded shape while keeping the row empty.
+        // the last cell. Force that real recorded shape while keeping the row empty.
         session.feed_at(b" \r\x1b[K", at).unwrap();
         if matches!(zoom_stage, Some(Osc133ZoomStage::WrappedCommand)) {
             resize_osc133_fixture(session, at);
@@ -31917,7 +32060,7 @@ mod tests {
 
         at += Duration::from_millis(10);
         session
-            .feed_at(OSC133_ACCEPT2_IMAGE.as_bytes(), at)
+            .feed_at(osc133_accept2_image().as_bytes(), at)
             .unwrap();
 
         at += Duration::from_millis(10);
@@ -31936,7 +32079,7 @@ mod tests {
             session
                 .semantic_input_regions
                 .values()
-                .all(|region| region.witness.trim_end_matches('\n') == OSC133_ACCEPT2_COMMAND),
+                .all(|region| region.witness.trim_end_matches('\n') == osc133_accept2_command()),
             "every B..C region must retain the recorded logical command witness: {:?}",
             session
                 .semantic_input_regions
@@ -31968,13 +32111,16 @@ mod tests {
 
     #[test]
     fn osc133_accept2_wrapped_command_regions_survive_zoom_without_decorating_input() {
+        // The recorded prompt plus command lands exactly on the wrap boundary: 104 columns as
+        // recorded on Windows, two fewer where the picture's root is `/` rather than `C:\`.
+        let columns = (OSC133_ACCEPT2_PROMPT.len() + osc133_accept2_command().len()) as u32;
         assert_eq!(
-            OSC133_ACCEPT2_PROMPT.len() + OSC133_ACCEPT2_COMMAND.len(),
-            104,
-            "the recorded prompt plus command lands exactly on the 104-column wrap boundary"
+            columns,
+            if cfg!(windows) { 104 } else { 102 },
+            "the recorded prompt plus command lands exactly on the recorded wrap boundary"
         );
         let started = Instant::now();
-        let mut session = DualPlaneSession::new(nz(104), nz(26));
+        let mut session = DualPlaneSession::new(nz(columns), nz(26));
         enable_path_detection(&mut session);
         session.restore_retired_image_bands();
         let mut at = started;
@@ -32869,7 +33015,8 @@ mod tests {
         let engine = MathEngine::new();
         let mut completed = 0;
         while let Some(mut task) = session.take_live_worker_task() {
-            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            let result =
+                bt_compose::render_live_detection_task(&engine, &mut task, [220, 220, 220]);
             if session.complete_live_worker_result(task, result) {
                 completed += 1;
             }
@@ -32881,7 +33028,7 @@ mod tests {
         let engine = MathEngine::new();
         let mut completed = 0;
         while let Some(mut task) = session.take_worker_task() {
-            let result = render_detection_task(&engine, &mut task, [220, 220, 220]);
+            let result = bt_compose::render_detection_task(&engine, &mut task, [220, 220, 220]);
             if session.complete_worker_result(task, result) {
                 completed += 1;
             }
@@ -34392,7 +34539,8 @@ mod tests {
         let engine = MathEngine::new();
         let mut accepted = 0;
         for mut task in tasks {
-            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            let result =
+                bt_compose::render_live_detection_task(&engine, &mut task, [220, 220, 220]);
             if session.complete_live_worker_result(task, result) {
                 accepted += 1;
             }
@@ -34444,7 +34592,8 @@ mod tests {
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         let engine = MathEngine::new();
         for mut task in take_live_worker_tasks(&mut session) {
-            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            let result =
+                bt_compose::render_live_detection_task(&engine, &mut task, [220, 220, 220]);
             session.complete_live_worker_result(task, result);
         }
 
@@ -34473,7 +34622,8 @@ mod tests {
         );
         session.advance_live_stability(finished_at + LIVE_MATH_STABLE_INTERVAL);
         for mut task in take_live_worker_tasks(&mut session) {
-            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            let result =
+                bt_compose::render_live_detection_task(&engine, &mut task, [220, 220, 220]);
             session.complete_live_worker_result(task, result);
         }
 
@@ -35840,26 +35990,6 @@ mod tests {
         );
     }
 
-    /// Physical em is independent of DPI metadata; display math retains its band key.
-    #[test]
-    fn terminal_inline_keys_use_physical_em_and_display_keys_keep_twelve_points() {
-        let session = DualPlaneSession::new(nz(80), nz(8));
-        for dpi in [1000, 1250, 2000] {
-            let layout = LayoutKey {
-                dpi_milli: nz(dpi),
-                font_size_subpixels: 26 * SUBPIXELS_PER_PX,
-                ..session.layout_key()
-            };
-            assert_eq!(
-                terminal_math_render_key(layout, [220; 3], MathMode::Inline).unwrap(),
-                bt_math::key_for_em_px(26.0, [220; 3], MathMode::Inline).unwrap()
-            );
-            let display = terminal_math_render_key(layout, [220; 3], MathMode::Display).unwrap();
-            assert_eq!(display.dpi_milli.get(), dpi);
-            assert_eq!(display.font_milli_pt.get(), 12_000);
-        }
-    }
-
     /// An em change alone must queue a new raster and reject an answer for the previous em.
     /// Cell dimensions, DPI, source bytes and font_rev stay fixed, so none can mask this test.
     #[test]
@@ -35884,7 +36014,7 @@ mod tests {
             .take_live_worker_task()
             .expect("em change queues live relayout");
         assert_eq!(stale.layout.font_size_subpixels, 26 * SUBPIXELS_PER_PX);
-        let stale_result = render_live_detection_task(&engine, &mut stale, [220; 3]);
+        let stale_result = bt_compose::render_live_detection_task(&engine, &mut stale, [220; 3]);
         session.set_font_size_subpixels(NonZeroI64::new(20 * SUBPIXELS_PER_PX).unwrap());
         assert!(!session.complete_live_worker_result(stale, stale_result));
         assert_eq!(session.layout_key(), base_layout);
@@ -35898,7 +36028,7 @@ mod tests {
         let at_26 = engine
             .render(
                 "x",
-                bt_math::key_for_em_px(26.0, [220; 3], MathMode::Inline).unwrap(),
+                bt_compose::key_for_em_px(26.0, [220; 3], MathMode::Inline).unwrap(),
             )
             .unwrap();
         assert_eq!(blocks[0].artifact.width_px, at_26.width_px);
@@ -35919,7 +36049,7 @@ mod tests {
         let at_20 = engine
             .render(
                 "x",
-                bt_math::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
+                bt_compose::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
             )
             .unwrap();
         assert_eq!(blocks[0].artifact.width_px, at_20.width_px);
@@ -35952,7 +36082,8 @@ mod tests {
                     mode: MathMode::Inline,
                 };
                 let em_key =
-                    bt_math::key_for_em_px(em as f32, [220, 220, 220], MathMode::Inline).unwrap();
+                    bt_compose::key_for_em_px(em as f32, [220, 220, 220], MathMode::Inline)
+                        .unwrap();
                 for (label, key) in [("12pt", old_key), ("pane-em", em_key)] {
                     let raster = engine.render(source, key).unwrap();
                     let split = ((baseline as f32 / raster.baseline_px)
@@ -36036,86 +36167,6 @@ mod tests {
         assert!(failures.is_empty(), "refused: {failures:?}");
     }
 
-    /// A triple-decker denominator needs more than twice the row at the pane's own em.
-    #[test]
-    fn an_unreadable_triple_decker_inline_fraction_keeps_source() {
-        let engine = MathEngine::new();
-        for (em, height, baseline) in [(26, 32, 25), (20, 27, 21)] {
-            let key = bt_math::key_for_em_px(em as f32, [220, 220, 220], MathMode::Inline).unwrap();
-            assert!(render_inline_run_fitted(&engine,
-                r"\dfrac{\dfrac{\dfrac{a}{b}}{\dfrac{c}{d}}}{\dfrac{\dfrac{e}{f}}{\dfrac{g}{h}}}", key,
-                baseline * SUBPIXELS_PER_PX, (height - baseline) * SUBPIXELS_PER_PX).unwrap().is_none());
-        }
-    }
-
-    /// PIN: fitting converges against the measured 44px high-DPI row and fractional baseline.
-    ///
-    /// Retuned for T-MATH-INLINE-EM: a 52px stress em replaces the implicit 12pt/2x size so tall
-    /// members still need shrink under the full-row rule. The measured 30480/14576 subpixel split
-    /// stays exact: flooring the two budgets reserves the fractional placement remainder. Assert
-    /// that shrinking really occurred and that every final run can be composited within the row.
-    #[test]
-    fn the_inline_fit_converges_for_tall_constructions_at_high_dpi() {
-        let engine = MathEngine::new();
-        let key = bt_math::key_for_em_px(52.0, [220, 220, 220], MathMode::Inline).unwrap();
-        // Measured off a 192-DPI window: a 44px row whose ASCII baseline is 29.766px down it.
-        let ascent_budget = 30_480;
-        let descent_budget = 14_576;
-        assert_eq!(
-            ascent_budget + descent_budget,
-            44 * SUBPIXELS_PER_PX,
-            "the two halves must be the row, or the fixture is not a line box"
-        );
-        let mut shrunk = 0;
-        for source in [
-            "x",
-            "y",
-            "E = mc^2",
-            "x^2",
-            r"\rho",
-            r"\alpha+\beta",
-            r"\frac{a}{b}",
-            r"\sum_i",
-            r"\hat{m}_t",
-            r"\int_0^1",
-        ] {
-            let natural = engine.render(source, key).unwrap();
-            let fitted =
-                render_inline_run_fitted(&engine, source, key, ascent_budget, descent_budget)
-                    .expect("the engine renders every one of these")
-                    .unwrap_or_else(|| {
-                        panic!("{source} found no size that sits on a 44px/29px/14px line box")
-                    });
-            let baseline_px = (ascent_budget / SUBPIXELS_PER_PX) as u32;
-            let row_height_px = baseline_px + (descent_budget / SUBPIXELS_PER_PX) as u32;
-            let top = inline_run_top(&fitted, baseline_px, row_height_px);
-            assert!(
-                top + fitted.height_px <= row_height_px,
-                "{source} overflows its composite"
-            );
-            assert!(
-                baseline_box_fits(
-                    top + fitted.height_px,
-                    baseline_px as f32,
-                    ascent_budget,
-                    descent_budget
-                ),
-                "{source} cannot be assembled"
-            );
-            if natural.height_px > row_height_px {
-                shrunk += 1;
-                assert!(
-                    fitted.height_px < natural.height_px,
-                    "{source} must really shrink"
-                );
-            }
-        }
-        assert!(
-            shrunk > 0,
-            "the fixture must exercise convergence, not only the no-shrink path"
-        );
-    }
-
     /// PIN: a construction taller than the line box is shrunk onto the baseline, not abandoned.
     ///
     /// Retuned for T-MATH-INLINE-EM: explicit `\dfrac` at a 20px pane em is taller than the
@@ -36164,7 +36215,7 @@ mod tests {
         let natural = MathEngine::new()
             .render(
                 r"\dfrac{a}{b}",
-                bt_math::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
+                bt_compose::key_for_em_px(20.0, [220; 3], MathMode::Inline).unwrap(),
             )
             .unwrap();
         assert!(
@@ -38379,18 +38430,14 @@ mod tests {
         assert!(session.application_cursor_mode());
     }
 
-    /// **Only `A`.** `B` is the command line being typed, `C` is a command
-    /// starting — the instant a program is most likely to be turning tracking
-    /// *on* — and `D` is one finishing, which says nothing about what the next
-    /// thing wants. Retiring at any of them would be a terminal that switches the
-    /// mouse off underneath a program that just asked for it.
+    /// **Not `B`, not `C`.** `B` is the command line being typed and `C` is a
+    /// command starting — the instant a program is most likely to be turning
+    /// tracking *on*. Retiring at either would be a terminal that switches the
+    /// mouse off underneath a program that just asked for it. (`D`, a command
+    /// ending, is the other road and has its own tests below.)
     #[test]
-    fn only_the_prompt_start_marker_retires_program_input_modes() {
-        for marker in [
-            &b"\x1b]133;B\x1b\\"[..],
-            &b"\x1b]133;C\x1b\\"[..],
-            &b"\x1b]133;D;0\x1b\\"[..],
-        ] {
+    fn neither_command_start_nor_execution_retires_program_input_modes() {
+        for marker in [&b"\x1b]133;B\x1b\\"[..], &b"\x1b]133;C\x1b\\"[..]] {
             let mut session = DualPlaneSession::new(nz(80), nz(8));
             session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
             session.feed(marker).unwrap();
@@ -38492,6 +38539,348 @@ mod tests {
         session.reset_program_modes(PtyTransport::ConPty).unwrap();
         assert!(session.screen_revision() > held);
         assert!(session.terminal.cursor().visible);
+    }
+
+    /// The program of the T-RESET-MODES tests: it asks for any-motion tracking, SGR reports, the
+    /// kitty disambiguate flag and modifyOtherKeys 2, and dies without undoing any of it.
+    const DEAD_PROGRAM_MODES: &str = "\x1b[?1003h\x1b[?1006h\x1b[>1u\x1b[>4;2m";
+
+    /// A prompt, a command line and the command starting, as a shell with the integration
+    /// writes them on the primary screen.
+    fn a_command_started(session: &mut DualPlaneSession) {
+        session
+            .feed(format!("{PROMPT_A}主屏 $ {PROMPT_B}agent{OUTPUT_C}\r\n").as_bytes())
+            .unwrap();
+        assert_eq!(
+            session.shell_commands_running.get(&ScreenId::Primary),
+            Some(&1)
+        );
+    }
+
+    fn assert_no_program_modes(session: &DualPlaneSession, case: &str) {
+        let modes = session.terminal_modes();
+        assert_eq!(
+            modes.mouse_tracking,
+            crate::adapter::MouseTracking::Off,
+            "{case}: mouse tracking"
+        );
+        assert!(!modes.sgr_mouse, "{case}: SGR reports");
+        assert_eq!(modes.keyboard.kitty, 0, "{case}: kitty flags");
+        assert_eq!(
+            modes.keyboard.modify_other_keys,
+            crate::adapter::ModifyOtherKeys::Off,
+            "{case}: modifyOtherKeys"
+        );
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (1)) — **the shell's command end on the primary
+    /// screen retires the mouse modes and the key encodings the command's program left on**, the
+    /// pushed kitty flag and the one fish's `CSI = … u` form sets without a push alike.
+    ///
+    /// Ledger #19: a program killed with the kitty protocol on left `Ctrl+C` typing `[99;5u` at the
+    /// prompt (the encoder half is `bt-app`'s
+    /// `a_shells_command_end_gives_ctrl_c_back_to_the_prompt`).
+    ///
+    /// MUTATION: drop the `retire_dead_program_modes` call from the `D` arm — every mode is still
+    /// on after the prompt.
+    #[test]
+    fn a_shells_command_end_retires_the_modes_a_dead_program_left_on() {
+        for program in [
+            DEAD_PROGRAM_MODES,
+            "\x1b[?1003h\x1b[?1006h\x1b[=1u\x1b[>4;2m",
+        ] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("{program}画面 frame").as_bytes())
+                .unwrap();
+            assert_eq!(session.terminal_modes().keyboard.kitty, 1, "{program:?}");
+            // The program is killed; the shell says so and draws its next prompt.
+            session
+                .feed(format!("\x1b]133;D;137\x07{PROMPT_A}主屏 $ {PROMPT_B}").as_bytes())
+                .unwrap();
+            assert_no_program_modes(&session, &format!("{program:?}"));
+            assert!(!session.working);
+        }
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (1)) — **a line editor that turns its own keyboard
+    /// modes on after the command end and before its prompt start keeps them**, through that
+    /// prompt start and through a prompt redraw after it.
+    ///
+    /// fish 4.9's order, read from its source: `133;D` after the command, then
+    /// `enable_tty_protocols` (`CSI = 5 u`, or modifyOtherKeys `CSI > 4;1 m` where kitty is not
+    /// answered) at the top of its read loop, then the prompt paint that writes `133;A` — and
+    /// `133;A` again on every repaint. This is why the keyboard modes are not retired at `A`.
+    ///
+    /// MUTATION: call `retire_dead_program_modes` in the `A` arm on the primary screen instead of
+    /// `retire_program_input_modes` — the flags read 0 after the prompt.
+    #[test]
+    fn a_line_editors_own_keyboard_modes_survive_its_prompt_and_its_redraws() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        a_command_started(&mut session);
+        session.feed(DEAD_PROGRAM_MODES.as_bytes()).unwrap();
+        session
+            .feed(
+                format!("\x1b]133;D;0\x07\x1b[=5u\x1b[>4;1m{PROMPT_A}主屏 $ {PROMPT_B}").as_bytes(),
+            )
+            .unwrap();
+        let keyboard = session.terminal_modes().keyboard;
+        assert_eq!(keyboard.kitty, 1, "fish's own flags, honoured to flag 1");
+        assert_eq!(
+            keyboard.modify_other_keys,
+            crate::adapter::ModifyOtherKeys::One
+        );
+        assert_eq!(
+            session.terminal_modes().mouse_tracking,
+            crate::adapter::MouseTracking::Off,
+            "the dead program's mouse is gone all the same"
+        );
+        // A resize: the prompt is drawn again, `A` and all.
+        session
+            .feed(format!("\r{PROMPT_A}主屏 $ {PROMPT_B}ls").as_bytes())
+            .unwrap();
+        assert_eq!(session.terminal_modes().keyboard, keyboard);
+    }
+
+    /// RED (T-RESET-MODES; the keyboard-protocol design note's §2.4 negative trace) — **a nested
+    /// shell's command end inside a live primary-screen program leaves that program's keyboard
+    /// flags alone.** The outer command's `C` has had no `D`, so a command is still running when
+    /// the nested shell's own command ends, and the program that pushed the flag is that command.
+    ///
+    /// MUTATION: retire at every primary `D`, without the "no command still running" condition —
+    /// the flag reads 0 after the nested command.
+    #[test]
+    fn a_nested_shells_command_end_leaves_a_live_programs_keyboard_flags_alone() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        a_command_started(&mut session);
+        session.feed(b"\x1b[>1u").unwrap();
+        session
+            .feed(
+                format!(
+                    "{PROMPT_A}sub$ {PROMPT_B}ls{OUTPUT_C}\r\n文件\r\n\x1b]133;D;0\x07\
+                     {PROMPT_A}sub$ {PROMPT_B}"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.terminal_modes().keyboard.kitty,
+            1,
+            "the nested shell's command ended; the program that pushed the flag did not"
+        );
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (2)) — **a full-screen program that died on the
+    /// alternate screen: the shell's `D` arriving there for the command started on the primary
+    /// screen puts the pane back on the primary screen, resets what the program left, ends that
+    /// command, and the `A` after it is an ordinary prompt on the primary screen.**
+    ///
+    /// The bytes after the kill are the shape both real-shell probes recorded (PowerShell over
+    /// ConPTY, zsh over a Unix pty): `D` with the exit code, `OSC 7`, `A`, the prompt, `B` — all
+    /// written while the alternate screen is still up, in one read.
+    ///
+    /// MUTATIONS: (1) drop the stranded-screen arm from the `D` handler — the pane stays on the
+    /// alternate screen with every mode on; (2) skip the replayed `D` in
+    /// `return_from_stranded_alternate_screen` — the command is left running and unfinished;
+    /// (3) skip the `stranded_command_end` hand-off in `feed_at` — the pane stays on the alternate
+    /// screen.
+    #[test]
+    fn a_shell_speaking_through_a_dead_programs_alternate_screen_gets_the_primary_back() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        a_command_started(&mut session);
+        session
+            .feed(format!("\x1b[?1049h\x1b[?25l{DEAD_PROGRAM_MODES}全屏 tui").as_bytes())
+            .unwrap();
+        assert_eq!(session.live_screen, ScreenId::Alternate);
+
+        session
+            .feed(
+                format!("\x1b]133;D;137\x07\x1b]7;file:///tmp\x07{PROMPT_A}主屏 $ {PROMPT_B}")
+                    .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(session.live_screen, ScreenId::Primary);
+        assert!(!session.terminal_modes().alternate_screen);
+        assert_no_program_modes(&session, "stranded");
+        assert!(session.terminal.cursor().visible, "the whole reset ran");
+        assert!(!session.working, "the command the program was is over");
+        let mark = session
+            .command_marks()
+            .iter()
+            .find(|mark| mark.command_text == "agent")
+            .expect("the command's mark");
+        assert_eq!(mark.exit_code, Some(137));
+        assert!(mark.finished.is_some());
+        assert!(
+            matches!(
+                session.shell_phases.get(&ScreenId::Primary),
+                Some(ShellIntegrationPhase::Input(_))
+            ),
+            "the prompt opened on the primary screen"
+        );
+        let screen = session.terminal.visible_text();
+        assert!(
+            screen.iter().any(|row| row.contains("agent"))
+                && screen
+                    .iter()
+                    .filter(|row| row.replace(' ', "").contains("主屏$"))
+                    .count()
+                    == 2,
+            "the primary grid, with the old command and the new prompt on it: {screen:?}"
+        );
+        assert!(session.take_pty_writes().is_empty(), "nothing to the child");
+    }
+
+    /// RED (T-RESET-MODES) — **the return from a stranded alternate screen is the person's reset
+    /// for this pane's own transport**: under ConPTY, focus reporting (on since the session's head)
+    /// stays on; on a Unix pty a dead program's focus reporting goes.
+    ///
+    /// MUTATION: run the reset for `PtyTransport::Unix` whatever the session was told — the ConPTY
+    /// row loses focus reporting.
+    #[test]
+    fn a_stranded_return_keeps_what_the_transport_keeps() {
+        for (transport, focus) in [(PtyTransport::ConPty, true), (PtyTransport::Unix, false)] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            session.set_pty_transport(transport);
+            session.feed(b"\x1b[?1004h").unwrap();
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}").as_bytes())
+                .unwrap();
+            session
+                .feed(format!("\x1b]133;D;1\x07{PROMPT_A}$ {PROMPT_B}").as_bytes())
+                .unwrap();
+            assert_eq!(session.live_screen, ScreenId::Primary, "{transport:?}");
+            assert_eq!(
+                session.terminal_modes().focus_reporting,
+                focus,
+                "{transport:?}"
+            );
+        }
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (2)) — **a full-screen program that is alive and
+    /// speaks OSC 133 on its own canvas is left where it is**: its `133;A` alone, and its own
+    /// `C`…`D` cycle, while the shell's command (the program itself) runs on the primary screen.
+    /// The evidence is the order — a `D` that answers no alternate-screen `C` — and neither of
+    /// these has it.
+    ///
+    /// MUTATION: drop the `alternate_command_starts == 0` condition from the stranded arm — the
+    /// program's own `D` evicts it (the second and third rows).
+    #[test]
+    fn a_live_full_screen_programs_own_marks_retire_nothing() {
+        for marks in [
+            format!("{PROMPT_A}tui> "),
+            format!(
+                "{PROMPT_A}tui> {PROMPT_B}run{OUTPUT_C}\r\n结果\r\n\x1b]133;D;0\x07{PROMPT_A}tui> "
+            ),
+            // A `C` with no prompt before it, which the phase machine refuses, and its `D`.
+            format!("{OUTPUT_C}结果\x1b]133;D;0\x07"),
+        ] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}").as_bytes())
+                .unwrap();
+            session.feed(marks.as_bytes()).unwrap();
+            let modes = session.terminal_modes();
+            assert_eq!(session.live_screen, ScreenId::Alternate, "{marks:?}");
+            assert!(modes.alternate_screen, "{marks:?}");
+            assert_eq!(
+                modes.mouse_tracking,
+                crate::adapter::MouseTracking::Motion,
+                "{marks:?}"
+            );
+            assert_eq!(modes.keyboard.kitty, 1, "{marks:?}");
+            assert!(session.working, "{marks:?}");
+        }
+    }
+
+    /// RED (T-RESET-MODES, ruling 2026-10-08 (2)) — **a bare `D` on the alternate screen with no
+    /// command started on the primary screen retires nothing**: there is no shell command for it
+    /// to be the end of. A pane without the integration, or a full-screen program started some way
+    /// the shell did not mark, stays exactly as it is, and the verb is the road there. (The shape
+    /// the order cannot tell apart — a host passing OSC 133 through to a child shell that
+    /// inherited the integration, inside a marked command — is accepted and written at the `D`
+    /// handler.)
+    ///
+    /// MUTATION: drop the "a command is running on the primary screen" condition from the
+    /// stranded arm — the bare `D` evicts the program.
+    #[test]
+    fn a_bare_command_end_on_the_alternate_screen_with_no_primary_command_retires_nothing() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        session.feed("主屏 primary\r\n".as_bytes()).unwrap();
+        session
+            .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}全屏").as_bytes())
+            .unwrap();
+        session
+            .feed(format!("\x1b]133;D\x07{PROMPT_A}> ").as_bytes())
+            .unwrap();
+        let modes = session.terminal_modes();
+        assert_eq!(session.live_screen, ScreenId::Alternate);
+        assert!(modes.alternate_screen);
+        assert_eq!(modes.mouse_tracking, crate::adapter::MouseTracking::Motion);
+        assert_eq!(modes.keyboard.kitty, 1);
+        assert_eq!(
+            modes.keyboard.modify_other_keys,
+            crate::adapter::ModifyOtherKeys::Two
+        );
+    }
+
+    /// RED (T-RESET-MODES round 2, coordinator ruling 2026-10-08) — **a stopped full-screen program
+    /// keeps its screen**: Ctrl+Z on a program with no suspend handler leaves it alive with its
+    /// alternate screen up, and the shell's `D` for it carries 128 + the stop signal. No return, no
+    /// reset — `fg` resumes the program on its own screen with its own modes — for every stop
+    /// signal on Linux (147–150) and on macOS (145, 146, 149, 150). A killed program's codes
+    /// (137, 143, 130, 1) are the stranded tests' and still return.
+    ///
+    /// MUTATION: drop the `JOB_STOPPED_EXIT_CODES` check from the stranded arm — the pane leaves
+    /// the alternate screen and the program's modes are reset.
+    #[test]
+    fn a_stopped_full_screen_program_keeps_its_screen() {
+        for code in JOB_STOPPED_EXIT_CODES {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}全屏 tui").as_bytes())
+                .unwrap();
+            session
+                .feed(
+                    format!("\r\nzsh: suspended  tui\r\n\x1b]133;D;{code}\x07{PROMPT_A}主屏 $ {PROMPT_B}")
+                        .as_bytes(),
+                )
+                .unwrap();
+            let modes = session.terminal_modes();
+            assert_eq!(session.live_screen, ScreenId::Alternate, "{code}");
+            assert!(modes.alternate_screen, "{code}");
+            assert_eq!(
+                modes.mouse_tracking,
+                crate::adapter::MouseTracking::Motion,
+                "{code}"
+            );
+            assert_eq!(modes.keyboard.kitty, 1, "{code}");
+            assert_eq!(
+                modes.keyboard.modify_other_keys,
+                crate::adapter::ModifyOtherKeys::Two,
+                "{code}"
+            );
+        }
+        for code in [130, 137, 143, 1] {
+            let mut session = DualPlaneSession::new(nz(40), nz(6));
+            a_command_started(&mut session);
+            session
+                .feed(format!("\x1b[?1049h{DEAD_PROGRAM_MODES}").as_bytes())
+                .unwrap();
+            session
+                .feed(format!("\x1b]133;D;{code}\x07{PROMPT_A}$ {PROMPT_B}").as_bytes())
+                .unwrap();
+            assert_eq!(
+                session.live_screen,
+                ScreenId::Primary,
+                "{code}: a killed program"
+            );
+        }
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **the first time a session is asked for a keyboard flag it does

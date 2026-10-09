@@ -405,11 +405,7 @@ mod tests {
     /// file leaves the table that was already in force alone.
     #[test]
     fn the_store_round_trips_and_a_damaged_file_keeps_the_table_in_force() {
-        let dir = std::env::temp_dir().join(format!(
-            "folio-pins-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = bt_testpath::temp_path("folio-pins");
         std::fs::create_dir_all(&dir).expect("a scratch folder");
         let path = dir.join("pins.json");
         let _ = std::fs::remove_file(&path);
@@ -531,11 +527,7 @@ mod tests {
     /// second when none is.
     #[test]
     fn a_store_writes_the_folder_it_holds_and_not_the_one_somebody_else_does() {
-        let root = std::env::temp_dir().join(format!(
-            "folio-pins-claim-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let root = bt_testpath::temp_path("folio-pins-claim");
         let held = root.join("held");
         let free = root.join("free");
         let _ = std::fs::remove_dir_all(&root);

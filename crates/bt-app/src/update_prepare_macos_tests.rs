@@ -73,11 +73,7 @@ pub(crate) mod fixture {
 
     impl Scratch {
         pub(crate) fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "bt-u27-{tag}-{}-{}",
-                std::process::id(),
-                bt_platform::attention_pipe::unguessable_bits() % 1_000_000
-            ));
+            let root = bt_testpath::temp_path(&format!("bt-u27-{tag}"));
             std::fs::create_dir_all(&root).unwrap();
             // The real path: `/var` is `/private/var`, and a mount point is
             // reported by its real path.
@@ -143,6 +139,23 @@ pub(crate) mod fixture {
         notice: &str,
         needs: &str,
     ) -> PathBuf {
+        let protocol = bt_winres::release_manifest::PROTOCOL.to_string();
+        bundle_sealing(parent, name, version, notice, needs, Some(&protocol))
+    }
+
+    /// [`bundle_needing`], whose sealed `FolioUpdateProtocol` is `protocol`,
+    /// or which seals none (E1-a2).
+    pub(crate) fn bundle_sealing(
+        parent: &Path,
+        name: &str,
+        version: &str,
+        notice: &str,
+        needs: &str,
+        protocol: Option<&str>,
+    ) -> PathBuf {
+        let protocol = protocol.map_or_else(String::new, |protocol| {
+            format!("<key>FolioUpdateProtocol</key><integer>{protocol}</integer>")
+        });
         let bundle = parent.join(name);
         let macos = bundle.join("Contents").join("MacOS");
         std::fs::create_dir_all(&macos).unwrap();
@@ -172,6 +185,7 @@ pub(crate) mod fixture {
                  <key>CFBundlePackageType</key><string>APPL</string>\
                  <key>CFBundleShortVersionString</key><string>{version}</string>\
                  <key>FolioMinUpdater</key><string>{needs}</string>\
+                 {protocol}\
                  </dict></plist>\n"
             ),
         )
@@ -297,11 +311,104 @@ pub(crate) mod fixture {
         out.sort();
         out
     }
+
+    /// The marker the cask's `postflight_steps` write (`packaging/homebrew/folio.rb`).
+    pub(crate) const HOMEBREW_MARKER: &str =
+        r#"{"v":1,"manager":"homebrew","uninstall_hook":false}"#;
+
+    /// **What `brew install --cask --appdir=<app's folder>` leaves for `app`**
+    /// (Homebrew 7.0.6–7.0.8; 0.4.8 D1): under `<prefix>/Caskroom/folio`, the
+    /// installed caskfile `.metadata/<version>/<timestamp>/Casks/folio.json`,
+    /// `.metadata/config.json` naming the app folder, and `<version>/Folio.app`
+    /// linking to the app (`Moved#post_move`); and the cask's two marks on
+    /// `app`. Answers the Caskroom.
+    pub(crate) fn homebrew_install(prefix: &Path, version: &str, app: &Path) -> PathBuf {
+        let caskroom = prefix.join("Caskroom").join("folio");
+        let metadata = caskroom.join(".metadata");
+        record_version(&caskroom, version, "20261009120000.000", app);
+        std::fs::write(
+            metadata.join("config.json"),
+            format!(
+                r#"{{"default":{{"appdir":"/Applications"}},"env":{{}},"explicit":{{"appdir":"{}"}}}}"#,
+                app.parent().unwrap().display()
+            ),
+        )
+        .unwrap();
+        mark(app, &caskroom);
+        caskroom
+    }
+
+    /// One installed version in the Caskroom `caskroom`: its caskfile under
+    /// the timestamp `stamp`, and its link to `app`.
+    pub(crate) fn record_version(caskroom: &Path, version: &str, stamp: &str, app: &Path) {
+        let casks = caskroom
+            .join(".metadata")
+            .join(version)
+            .join(stamp)
+            .join("Casks");
+        std::fs::create_dir_all(&casks).unwrap();
+        std::fs::write(casks.join("folio.json"), br#"{"token":"folio"}"#).unwrap();
+        std::fs::create_dir_all(caskroom.join(version)).unwrap();
+        run(
+            "/bin/ln",
+            &[
+                OsStr::new("-s"),
+                app.as_os_str(),
+                caskroom.join(version).join("Folio.app").as_os_str(),
+            ],
+        );
+    }
+
+    /// The cask's two marks on `bundle`, the second naming `caskroom`.
+    pub(crate) fn mark(bundle: &Path, caskroom: &Path) {
+        for (name, value) in [
+            (
+                crate::install_channel::MARKER_ATTRIBUTE,
+                OsStr::new(HOMEBREW_MARKER),
+            ),
+            (
+                crate::install_channel::CASKROOM_ATTRIBUTE,
+                caskroom.as_os_str(),
+            ),
+        ] {
+            run(
+                "/usr/bin/xattr",
+                &[
+                    OsStr::new("-w"),
+                    OsStr::new(name),
+                    value,
+                    bundle.as_os_str(),
+                ],
+            );
+        }
+    }
+
+    /// **A stand-in `brew` where Homebrew keeps it, `<prefix>/bin/brew`**,
+    /// scripted to refuse (exit 1) after recording each argument line in
+    /// `<prefix>/brew-calls` — the manager Folio's road never runs
+    /// (managed-update R3, §3.1). Answers the record's path, which a road
+    /// that ran it would have made.
+    pub(crate) fn fake_brew(prefix: &Path) -> PathBuf {
+        let calls = prefix.join("brew-calls");
+        let bin = prefix.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let brew = bin.join("brew");
+        std::fs::write(
+            &brew,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 1\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        run("/bin/chmod", &[OsStr::new("+x"), brew.as_os_str()]);
+        calls
+    }
 }
 
 use fixture::{
-    Scratch, answer, attach, blank_image, bundle, bundle_needing, image_of, listing, mounted,
-    on_macos,
+    HOMEBREW_MARKER, Scratch, answer, attach, blank_image, bundle, bundle_needing, bundle_sealing,
+    fake_brew, homebrew_install, image_of, listing, mark, mounted, on_macos, record_version,
 };
 
 /// The offer every test presses: `v0.4.7`, for macOS.
@@ -336,6 +443,9 @@ struct TestTools {
     fail_copy: bool,
     alter_copy: bool,
     fail_rescue: bool,
+    /// Between `Allocated` and the carry: the running bundle's marker is
+    /// written over with other bytes (managed-update M2).
+    remark: bool,
 }
 
 impl TestTools {
@@ -347,6 +457,7 @@ impl TestTools {
             fail_copy: false,
             alter_copy: false,
             fail_rescue: false,
+            remark: false,
         }
     }
 
@@ -393,6 +504,18 @@ impl Tools for TestTools {
     fn rescue(&self, worker: &WorkerCtx, old: &Path, clone: &Path) -> Result<(), String> {
         if self.fail_rescue {
             return Err("the stand-in clone refuses".to_owned());
+        }
+        if self.remark {
+            let other = HOMEBREW_MARKER.replace("false", "true");
+            fixture::run(
+                "/usr/bin/xattr",
+                &[
+                    OsStr::new("-w"),
+                    OsStr::new(crate::install_channel::MARKER_ATTRIBUTE),
+                    OsStr::new(&other),
+                    old.as_os_str(),
+                ],
+            );
         }
         System.rescue(worker, old, clone)
     }
@@ -501,6 +624,18 @@ impl Scene {
 /// the job to reach `Verified` or `Failed` — reading the reports the way the
 /// window thread does (`Job::drain_progress`).
 fn press(driver: &MacPrepare, transport: SharedTransport, txn: u8) -> Job<u32> {
+    press_as(driver, transport, txn, Channel::Ours, false)
+}
+
+/// [`press`] for a copy installed as `channel`, whose manager's record names
+/// it or not (`recorded`) — the evidence the card was offered on.
+fn press_as(
+    driver: &MacPrepare,
+    transport: SharedTransport,
+    txn: u8,
+    channel: Channel,
+    recorded: bool,
+) -> Job<u32> {
     let mut job = Job::with_offers(true);
     job.consider(
         Gathered {
@@ -508,9 +643,10 @@ fn press(driver: &MacPrepare, transport: SharedTransport, txn: u8) -> Job<u32> {
                 latest_tag: Some("v0.4.7".to_owned()),
                 ..UpdateCheckV1::default()
             }),
-            channel: Some(Channel::Ours),
+            channel: Some(channel),
             running: "0.4.6",
             capable: true,
+            recorded,
             trial: false,
             platform: HostPlatform::MacOs,
         },
@@ -674,7 +810,8 @@ fn renamed_bundle_updates_only_itself() {
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(journal.header().outcome, HeaderOutcome::None);
@@ -843,6 +980,99 @@ fn a_bundle_that_needs_a_newer_updater_says_this_version_is_too_old() {
     assert!(mounted(home.root()).is_empty());
 }
 
+/// RED (E1-a2) — **a bundle that seals another update protocol, or none, is
+/// refused as not verified, and leaves nothing.**
+///
+/// The Windows Prepare refuses a release whose manifest speaks another
+/// protocol, and one whose manifest has no `protocol` line (a malformed
+/// manifest), both as *not verified*; the macOS Prepare read only
+/// `FolioMinUpdater` and never the `FolioUpdateProtocol` beside it. Each
+/// bundle here is the scene's, signed after its `Info.plist` says protocol 2
+/// or names no protocol.
+///
+/// MUTATION: in `check`, drop the `spoken(..)` line: both jobs verify.
+#[test]
+fn a_bundle_that_speaks_another_update_protocol_or_none_is_refused() {
+    if !on_macos() {
+        return;
+    }
+    for (case, protocol, seed) in [("protocol 2", Some("2"), 0x2d), ("no protocol", None, 0x2e)] {
+        let scene = Scene::new("protocol", "Folio.app", |new| {
+            let parent = new.parent().expect("the source folder");
+            std::fs::remove_dir_all(new).unwrap();
+            bundle_sealing(
+                parent,
+                IMAGE_BUNDLE,
+                "0.4.7",
+                "the new build",
+                bt_winres::release_manifest::MIN_UPDATER,
+                protocol,
+            );
+        });
+        let tools = Arc::new(TestTools::new(&scene.scratch));
+        let job = press(&driver(&scene, &tools), scene.release(), seed);
+        assert!(
+            matches!(
+                job.state(),
+                State::Failed(_, Failure::Stopped(Stop::Identity))
+            ),
+            "{case}: {:?}",
+            job.state()
+        );
+        let home = scene.home();
+        assert!(!home.transaction(TxnId::new([seed; 16])).exists(), "{case}");
+        assert!(!home.journal().exists(), "{case}");
+        assert!(mounted(home.root()).is_empty(), "{case}");
+    }
+}
+
+/// RED (E1-a2) — **the protocol a bundle seals is held to this build's by the
+/// Windows archive reader's rule and words, and every refusal says why in one
+/// line**: this build's protocol passes and says nothing; another one is
+/// *not verified* with the archive reader's own words
+/// (`update_archive::Reason::Protocol`); a key that is missing or unreadable,
+/// or a value that is no number, is *not verified* in the words of a
+/// malformed manifest (`update_archive::Reason::Manifest`), as every archive
+/// refusal is a line on Windows. Pure, so it runs everywhere.
+///
+/// MUTATION: make `spoken` answer `Ok(())` for every number: protocol 2
+/// passes. Drop its `note(..)`: no refusal leaves a line.
+#[test]
+fn the_sealed_protocol_is_held_to_this_builds_as_the_archive_reader_holds_it() {
+    let this = bt_winres::release_manifest::PROTOCOL;
+    let said = |sealed: Result<String, String>| {
+        let mut lines = Vec::new();
+        let answer = spoken(sealed, &mut |line| lines.push(line.to_owned()));
+        (answer, lines)
+    };
+    assert_eq!(said(Ok(this.to_string())), (Ok(()), Vec::new()));
+    let refused = |line: String| (Err(Stop::Identity), vec![line]);
+    assert_eq!(
+        said(Ok((this + 1).to_string())),
+        refused(format!(
+            "Folio: update job — the new bundle is refused: the release speaks update protocol {}, \
+             this build {this}",
+            this + 1
+        ))
+    );
+    assert_eq!(
+        said(Ok("one".to_owned())),
+        refused(
+            "Folio: update job — the new bundle is refused: the release manifest: its \
+             FolioUpdateProtocol `one` is not a number"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        said(Err("plutil: no such key (中文 Ω)".to_owned())),
+        refused(
+            "Folio: update job — the new bundle is refused: the release manifest: its \
+             FolioUpdateProtocol could not be read: plutil: no such key (中文 Ω)"
+                .to_owned()
+        )
+    );
+}
+
 /// RED (U-27) — **the copy is verified again where it lies**: a copy altered
 /// between the two checks is refused, and the transaction leaves nothing.
 ///
@@ -976,15 +1206,18 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
 
     let first = on_a_worker({
         let home = home.clone();
-        move |worker| match at_launch(worker, &home).unwrap() {
-            AtLaunch::Counted(staged) => staged.journal.body.phase,
+        move |worker| match at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly)
+            .unwrap()
+        {
+            AtLaunch::Kept(staged) => staged.journal.body.phase,
             _ => panic!("the first launch counts"),
         }
     });
     assert_eq!(
         first,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         }
     );
     assert_eq!(journal_on_disk(&home).body.phase, first);
@@ -993,7 +1226,12 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
     attach(&blank, &home.mount_point(txn).unwrap());
     let second = on_a_worker({
         let home = home.clone();
-        move |worker| matches!(at_launch(worker, &home).unwrap(), AtLaunch::Discarded)
+        move |worker| {
+            matches!(
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap(),
+                AtLaunch::Discarded
+            )
+        }
     });
     assert!(second, "the second launch discards");
     assert!(mounted(home.root()).is_empty(), "the image is detached");
@@ -1020,7 +1258,12 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
     attach(&blank, &home.mount_point(dead).unwrap());
     let swept = on_a_worker({
         let home = home.clone();
-        move |worker| matches!(at_launch(worker, &home).unwrap(), AtLaunch::Swept)
+        move |worker| {
+            matches!(
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap(),
+                AtLaunch::Swept
+            )
+        }
     });
     assert!(swept);
     assert!(mounted(home.root()).is_empty());
@@ -1098,19 +1341,21 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
             argv: &[],
             trial: None,
             failed: None,
+            journal_held: None,
         },
         &mut quiet,
     ) else {
         panic!("a start with a waiting transaction continues");
     };
     assert!(quiet.0.is_empty(), "the start said {:?}", quiet.0);
-    assert_eq!(waiting.as_ref(), Some(&home), "left for the job owner");
+    assert_eq!(waiting.as_deref(), Some(&home), "left for the job owner");
 
     let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bundle = scene.running.clone();
     let resumer_tools = Arc::clone(&tools);
     let mut job: Job<u32> = Job::with_offers(true).after_start(
-        waiting,
+        waiting.map(|home| *home),
+        crate::update_txn::PreviousRun::Orderly,
         Box::new(move |worker, staged, channel| {
             resume(worker, staged, &bundle, &*resumer_tools, channel)
         }),
@@ -1129,6 +1374,7 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
         channel: Some(Channel::Ours),
         running: "0.4.6",
         capable: true,
+        recorded: false,
         trial: false,
         platform: HostPlatform::MacOs,
     };
@@ -1174,7 +1420,8 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
     assert_eq!(
         journal_on_disk(&home).body.phase,
         Phase::Prepared {
-            deferred_launches: 1
+            deferred_launches: 1,
+            restart_missed: false
         },
         "the launch is counted"
     );
@@ -1225,7 +1472,9 @@ fn revalidation_before_resume_refuses_a_changed_image() {
     let answers = on_a_worker({
         let (home, tools) = (home.clone(), Arc::clone(&tools));
         move |worker| {
-            let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() else {
+            let AtLaunch::Kept(staged) =
+                at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
+            else {
                 panic!("the launch counts the prepared transaction");
             };
             let unchanged = revalidate(
@@ -1285,6 +1534,10 @@ impl PrepareRecorder {
 }
 
 impl PreparePoint for PrepareRecorder {
+    fn carried(&self, road: &Road<'_>) -> Result<Option<crate::update_txn::Carried>, Stop> {
+        Ours.carried(road)
+    }
+
     fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout {
         self.calls.lock().unwrap().push(("allocated", None));
         Ours.allocated(road, old)
@@ -1295,9 +1548,9 @@ impl PreparePoint for PrepareRecorder {
         worker: &WorkerCtx,
         road: &Road<'_>,
         home: &Home,
-        txn: TxnId,
         places: [&Path; 3],
         old: BundleIdentity,
+        carried: Option<&crate::update_txn::Carried>,
     ) -> Result<Layout, Stop> {
         let on_disk = std::fs::read(home.journal()).ok().map(|bytes| {
             let journal = Journal::parse(&bytes).unwrap();
@@ -1306,7 +1559,7 @@ impl PreparePoint for PrepareRecorder {
         self.calls.lock().unwrap().push(("prepare", on_disk));
         match &self.refuse {
             Some(stop) => Err(*stop),
-            None => Ours.prepare(worker, road, home, txn, places, old),
+            None => Ours.prepare(worker, road, home, places, old, carried),
         }
     }
 }
@@ -1356,7 +1609,8 @@ fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_aba
     assert_eq!(
         journal.body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: false
         }
     );
     assert_eq!(journal.body.adapter, crate::update_txn::Adapter::Ours);
@@ -1388,5 +1642,260 @@ fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_aba
             "prepare",
             Some((PhaseKind::Allocated, crate::update_txn::Adapter::Ours))
         ))
+    );
+}
+
+// ── Homebrew's layout (0.4.8 D1, U-41b) ─────────────────────────────────────
+
+/// A copy the cask's marker says Homebrew installed, with no uninstall hook.
+fn homebrew() -> Channel {
+    Channel::Managed {
+        manager: crate::install_channel::Manager::Homebrew,
+        uninstall_hook: false,
+    }
+}
+
+/// The marks a Homebrew copy whose Caskroom is `caskroom` carries.
+fn marks(caskroom: &Path) -> crate::update_txn::Carried {
+    crate::update_txn::Carried {
+        install: HOMEBREW_MARKER.as_bytes().to_vec(),
+        caskroom: Some(caskroom.to_str().unwrap().as_bytes().to_vec()),
+    }
+}
+
+/// RED (D1, managed-update M1, §2.2 `Prepare`, R3) — **a Homebrew copy at
+/// the app target its Caskroom records takes the road: its press records
+/// the adapter and the cask's two marks byte for byte at `Allocated`, and
+/// carries them onto the staged bundle, which still passes its signature
+/// check — and Homebrew is never run.**
+///
+/// The marks belong to the bundle directory, which the exchange replaces:
+/// carried, they make the new bundle the copy Homebrew installed for the
+/// next start's channel, the next update's R-H2 and the uninstall row. The
+/// stand-in `brew` sits where Homebrew keeps it beside the Caskroom, refusing
+/// whatever it is asked; the road leaves no call of it.
+///
+/// MUTATION: in `Homebrew::prepare`, drop `carry(stage, carried)?` — the
+/// staged bundle has no marks.
+#[test]
+fn a_homebrew_copys_press_records_its_marks_and_carries_them_onto_the_staged_bundle() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("hb-carry", "Folio.app", |_| {});
+    let prefix = scene.scratch.root.join("homebrew 前缀");
+    let caskroom = homebrew_install(&prefix, "0.4.6", &scene.running);
+    let calls = fake_brew(&prefix);
+    let tools = Arc::new(TestTools::new(&scene.scratch));
+    let driver = MacPrepare::with(
+        scene.running.clone(),
+        Arc::clone(&tools) as Arc<dyn Tools>,
+        Some(homebrew()),
+    );
+    let job = press_as(&driver, scene.release(), 0x41, homebrew(), true);
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    let home = scene.home();
+    let journal = journal_on_disk(&home);
+    assert_eq!(journal.body.adapter, Adapter::Homebrew);
+    assert_eq!(journal.body.marker, Some(marks(&caskroom)), "M1: recorded");
+    let stage = home.stage_bundle(TxnId::new([0x41; 16])).unwrap();
+    let carried = crate::install_channel::homebrew_marks(&stage).expect("the staged marks");
+    assert_eq!(
+        (carried.marker.as_slice(), carried.caskroom.as_slice()),
+        (
+            HOMEBREW_MARKER.as_bytes(),
+            caskroom.to_str().unwrap().as_bytes()
+        ),
+        "M1: carried byte for byte"
+    );
+    let Layout::Bundle { new, .. } = &journal.body.layout else {
+        panic!("{:?}", journal.body.layout);
+    };
+    let (verifier, staged, recorded) = (Arc::clone(&tools), stage.clone(), new.clone());
+    on_a_worker(move |worker| {
+        assert_eq!(
+            verifier.verify(worker, &staged),
+            Ok(()),
+            "the marks are outside the seal"
+        );
+        assert_eq!(identity(worker, &staged).unwrap(), recorded);
+    });
+    assert!(!calls.exists(), "Homebrew is never run");
+}
+
+/// RED (D1, managed-update M2, §3.2 F12) — **a marker that changed on the
+/// running bundle after `Allocated` abandons the Prepare before anything is
+/// armed: *Nothing changed.*, no journal, no `H/<txn>`, no mount.**
+///
+/// The journal recorded the bytes the manager wrote; carrying other bytes
+/// would make Folio the composer of the marker (`docs/RULES.md` §41). The
+/// stand-in rescue clone, which runs after `Allocated`, writes the running
+/// bundle's marker over.
+///
+/// MUTATION: in `Homebrew::prepare`, drop the `still != *carried` refusal —
+/// the press reaches `Verified`.
+#[test]
+fn a_marker_that_changed_since_allocation_abandons_before_armed() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("hb-remark", "Folio.app", |_| {});
+    let prefix = scene.scratch.root.join("homebrew 前缀");
+    homebrew_install(&prefix, "0.4.6", &scene.running);
+    let tools = Arc::new(TestTools {
+        remark: true,
+        ..TestTools::new(&scene.scratch)
+    });
+    let driver = MacPrepare::with(
+        scene.running.clone(),
+        Arc::clone(&tools) as Arc<dyn Tools>,
+        Some(homebrew()),
+    );
+    let job = press_as(&driver, scene.release(), 0x43, homebrew(), true);
+    assert_eq!(
+        job.state(),
+        &State::Failed(Some(offer(0x43)), Failure::Stopped(Stop::Copy))
+    );
+    let home = scene.home();
+    assert!(!home.journal().exists(), "abandoned and cleared");
+    assert!(!home.transaction(TxnId::new([0x43; 16])).exists());
+    assert!(mounted(home.root()).is_empty());
+    assert_eq!(fixture::version_of(&scene.running), "0.4.6");
+}
+
+/// RED (D1, managed-update §2.2 R-H2, §3.2 F11, E-M6) — **a marked bundle
+/// that is not the app Homebrew's Caskroom records — a copy moved elsewhere
+/// — is refused before anything is written, and each copy has a home of its
+/// own: the recorded one takes the road in its own home, the other's stays
+/// absent.**
+///
+/// The marker travels with a copy made by hand; the Caskroom's link is what
+/// says which path is Homebrew's live app. A road run at the copy would
+/// replace a bundle Homebrew does not track while its own app stays old.
+///
+/// MUTATION: in `install_channel::recorded_target`, answer `Ok(())` without
+/// comparing the link's target with the bundle — the copy's press is taken.
+#[test]
+fn a_moved_or_second_marked_bundle_keeps_the_command() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("hb-moved", "Folio.app", |_| {});
+    let prefix = scene.scratch.root.join("homebrew 前缀");
+    let caskroom = homebrew_install(&prefix, "0.4.6", &scene.running);
+    let elsewhere = scene.scratch.root.join("搬走 moved");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let copy = elsewhere.join("Folio.app");
+    fixture::run(
+        "/usr/bin/ditto",
+        &[scene.running.as_os_str(), copy.as_os_str()],
+    );
+    mark(&copy, &caskroom);
+    assert!(crate::install_channel::homebrew_record(&scene.running).is_ok());
+    assert_eq!(
+        crate::install_channel::homebrew_record(&copy).map(drop),
+        Err("the Caskroom records another app")
+    );
+
+    let tools = Arc::new(TestTools::new(&scene.scratch));
+    let at_copy = MacPrepare::with(
+        copy.clone(),
+        Arc::clone(&tools) as Arc<dyn Tools>,
+        Some(homebrew()),
+    );
+    let job = press_as(&at_copy, scene.release(), 0x44, homebrew(), true);
+    assert_eq!(
+        job.state(),
+        &State::Failed(Some(offer(0x44)), Failure::Stopped(Stop::NotOurs))
+    );
+    let copy_home = Home::for_bundle(&copy).unwrap();
+    assert_ne!(copy_home, scene.home(), "each copy its own home");
+    assert!(!copy_home.root().exists(), "nothing written for the copy");
+
+    let at_target = MacPrepare::with(
+        scene.running.clone(),
+        Arc::clone(&tools) as Arc<dyn Tools>,
+        Some(homebrew()),
+    );
+    let job = press_as(&at_target, scene.release(), 0x45, homebrew(), true);
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    assert!(scene.home().journal().exists());
+    assert!(!copy_home.root().exists());
+}
+
+/// RED (D1, managed-update §2.2 R-H2, HB7) — **Homebrew's record is read as
+/// Homebrew reads it**: the installed version is the one whose
+/// `.metadata/<version>/<timestamp>` has the greatest timestamp and holds
+/// the caskfile; its `Folio.app` link — relative or absolute — names the
+/// app; a custom app folder is honoured because the link records it; and a
+/// missing Caskroom attribute, a version with no caskfile or a link to
+/// another app is no record of this one.
+///
+/// MUTATION: in `install_channel::installed_version`, keep the *least*
+/// timestamp (`stamp.name < *name`) — the older version's link is read.
+#[test]
+fn homebrews_record_is_read_as_homebrew_reads_it() {
+    if !on_macos() {
+        return;
+    }
+    let scratch = Scratch::new("hb-record");
+    let apps = scratch.root.join("自定义 Apps");
+    std::fs::create_dir_all(&apps).unwrap();
+    let app = bundle(&apps, "Folio.app", "0.4.6", "the installed build");
+    let other = bundle(&scratch.root, "Folio.app", "0.4.5", "another app");
+    let prefix = scratch.root.join("prefix");
+    let caskroom = homebrew_install(&prefix, "0.4.6", &app);
+    assert!(crate::install_channel::homebrew_record(&app).is_ok());
+
+    // An older version whose timestamp is earlier does not count, and one
+    // whose timestamp is later does.
+    record_version(&caskroom, "0.4.5", "20260901120000.000", &other);
+    assert!(crate::install_channel::homebrew_record(&app).is_ok());
+    record_version(&caskroom, "0.4.4", "20261010120000.000", &other);
+    assert_eq!(
+        crate::install_channel::homebrew_record(&app).map(drop),
+        Err("the Caskroom records another app")
+    );
+    std::fs::remove_file(caskroom.join(".metadata/0.4.4/20261010120000.000/Casks/folio.json"))
+        .unwrap();
+    assert_eq!(
+        crate::install_channel::homebrew_record(&app).map(drop),
+        Err("the Caskroom records no installed version"),
+        "the greatest timestamp holds no caskfile: Homebrew counts nothing installed"
+    );
+    std::fs::remove_dir_all(caskroom.join(".metadata/0.4.4")).unwrap();
+
+    // A relative link is joined to its folder, as `Moved#move_back` joins it.
+    let link = caskroom.join("0.4.6").join("Folio.app");
+    std::fs::remove_file(&link).unwrap();
+    fixture::run(
+        "/bin/ln",
+        &[
+            OsStr::new("-s"),
+            OsStr::new("../../../../自定义 Apps/Folio.app"),
+            link.as_os_str(),
+        ],
+    );
+    assert!(crate::install_channel::homebrew_record(&app).is_ok());
+
+    fixture::run(
+        "/usr/bin/xattr",
+        &[
+            OsStr::new("-d"),
+            OsStr::new(crate::install_channel::CASKROOM_ATTRIBUTE),
+            app.as_os_str(),
+        ],
+    );
+    assert_eq!(
+        crate::install_channel::homebrew_record(&app).map(drop),
+        Err("an attribute the cask writes is missing")
     );
 }

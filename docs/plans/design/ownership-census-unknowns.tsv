@@ -30,7 +30,6 @@ site	module	function	reason	sites
 ?.pinned	crate::profiles	apply_pins	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.preview_panes	crate::runtime::panes	Runtime::seats_wearing_a_play_button	call `get` through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.preview_panes	crate::runtime::preview	Runtime::request_revived_previews	call `iter` through a receiver that does not resolve: a closure parameter without a type	1
-?.profile	crate::runtime::profiles	Runtime::add_to_profile	call `display` through a receiver that does not resolve: `shell_integration::install_into_profile`	2
 ?.program	crate::profiles	compose_on	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.pty	crate	create_tab_state	call `as_ref` through a receiver that does not resolve: a type argument that is not written	1
 ?.quake	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `is_showing` through a receiver that does not resolve: `hang_watch::during`	2
@@ -39,8 +38,6 @@ site	module	function	reason	sites
 ?.renderer	crate	<TheDeviceAndItsWindows as LostDevice>::rebuild	a `&mut` lend through a receiver that does not resolve: a closure parameter without a type	1
 ?.row_press	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
 ?.seats	crate::runtime::panes	Runtime::seats_wearing_a_play_button	call `preview_seats` through a receiver that does not resolve: the value of a block, a branch or a loop	1
-?.session	crate	Runtime::root_choices	call `working_directory` through a receiver that does not resolve: what `filter_map` returns	1
-?.session	crate	Runtime::trigger_root	call `working_directory` through a receiver that does not resolve: a closure parameter without a type	1
 ?.session	crate::runtime::frame	Runtime::turn	call `resize_finish_deadline` through a receiver that does not resolve: what `flat_map` returns	1
 ?.session	crate::runtime::frame	Runtime::turn	call `synchronized_update_deadline` through a receiver that does not resolve: what `flat_map` returns	1
 ?.session	crate::runtime::preview	Runtime::advance_strip_animation	call `status` through a receiver that does not resolve: what `flat_map` returns	1

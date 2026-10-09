@@ -350,10 +350,7 @@ mod tests {
     /// `frame` for a cause that moved, and the comparison goes red.
     #[test]
     fn a_reflow_line_names_the_flip_and_what_it_cost() {
-        let path = std::env::temp_dir().join(format!(
-            "bt-preview-trace-{}-reflow.log",
-            std::process::id()
-        ));
+        let path = bt_testpath::temp_path("bt-preview-trace-reflow").with_extension("log");
         let _ = std::fs::remove_file(&path);
         let trace = Trace::create(&path, "# BT_PREVIEW_TRACE_V1 elapsed_ms event field=value…");
         let micros = std::time::Duration::from_micros;

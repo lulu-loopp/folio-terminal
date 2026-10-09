@@ -190,34 +190,34 @@ fn load_conpty() -> LoadedConPty {
     // the supported choices strict: the packaged pair or the operating-system implementation.
     // Folio: every way of ending up on the operating system's implementation is named, so a pane
     // that runs on it can say why (`conpty_fallback_reason`).
+    // Folio: the folder is the application's to name (`use_sidecars_in`), never guessed from the
+    // path the process was started by — through a link that folder holds none of its files.
     let fallback = if std::env::var_os("BT_CONPTY_FORCE_SYSTEM").is_some() {
         "BT_CONPTY_FORCE_SYSTEM is set".to_owned()
     } else {
-        match std::env::current_exe() {
-            Err(error) => format!("the running executable's path is unknown ({error})"),
-            Ok(application) => match application.parent() {
-                None => "the running executable has no directory".to_owned(),
-                Some(directory) => {
-                    let dll = directory.join("conpty.dll");
-                    let host = directory.join("OpenConsole.exe");
-                    if !dll.is_file() {
-                        format!("{} is missing", dll.display())
-                    } else if !host.is_file() {
-                        format!("{} is missing", host.display())
-                    } else {
-                        match SidecarConPtyFuncs::open(&dll) {
-                            Ok(funcs) => {
-                                return LoadedConPty {
-                                    funcs: ConPtyFuncs::Sidecar(funcs),
-                                    source: ConPtySource::Sidecar { dll },
-                                    fallback: None,
-                                };
-                            }
-                            Err(error) => format!("{} did not load ({error:?})", dll.display()),
+        match SIDECAR_FOLDER.get() {
+            None => "the application named no folder for its ConPTY sidecar".to_owned(),
+            Some(Err(why)) => why.clone(),
+            Some(Ok(directory)) => {
+                let dll = directory.join("conpty.dll");
+                let host = directory.join("OpenConsole.exe");
+                if !dll.is_file() {
+                    format!("{} is missing", dll.display())
+                } else if !host.is_file() {
+                    format!("{} is missing", host.display())
+                } else {
+                    match SidecarConPtyFuncs::open(&dll) {
+                        Ok(funcs) => {
+                            return LoadedConPty {
+                                funcs: ConPtyFuncs::Sidecar(funcs),
+                                source: ConPtySource::Sidecar { dll },
+                                fallback: None,
+                            };
                         }
+                        Err(error) => format!("{} did not load ({error:?})", dll.display()),
                     }
                 }
-            },
+            }
         }
     };
 
@@ -226,6 +226,17 @@ fn load_conpty() -> LoadedConPty {
         source: ConPtySource::System,
         fallback: Some(fallback),
     }
+}
+
+/// Folio: the folder the application's own files are in, named by the application before its
+/// first pseudoconsole — `Err` with why it could not be named.
+static SIDECAR_FOLDER: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+
+/// Folio: name the folder the packaged `conpty.dll` and `OpenConsole.exe` are looked for in, once,
+/// before the first pseudoconsole (the loader reads it then and never again). `false` when a folder
+/// was already named.
+pub fn use_sidecars_in(folder: Result<PathBuf, String>) -> bool {
+    SIDECAR_FOLDER.set(folder).is_ok()
 }
 
 /// Folio: why the process runs on the operating system's ConPTY rather than the packaged pair, or

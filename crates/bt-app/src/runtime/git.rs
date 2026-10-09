@@ -7,9 +7,10 @@ use crate::{
     MarkdownCaretSeat, MenuPaint, Popup, PreviewDocument, PreviewSurface, ProseParagraph,
     RenameExit, Runtime, TextFieldSeat, TransferRefusal, answers_for, cli, float, float_git_hover,
     float_git_page_shown, float_graph_hover, git, git_answer_notice, git_document_answer,
-    git_document_question, git_full_path, git_graph, git_panel, git_surfaces_wanting_reread,
-    graph_key_of, i18n, input, markdown_gap_paragraph, marks, native_window, preview, profiles,
-    restore, seats, settling, text_field, toast, web_thumb,
+    git_document_question, git_full_path, git_graph, git_panel, git_roots_on_glass,
+    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of, i18n, input,
+    markdown_gap_paragraph, marks, native_window, preview, profiles, restore, seats, settling,
+    text_field, toast, web_thumb,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -22,6 +23,25 @@ use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
 impl Runtime<'_> {
+    /// **Git is somewhere else now** (T-PROGRAMS-REFRESH): a program walk found git where there
+    /// was none, or found another one. Every Git page this window holds was answered about the git
+    /// that was there — "not found" included — so its columns' and its floating pages' readings
+    /// are forgotten and asked again on their next draw, and its graphs re-read what they show.
+    pub(crate) fn reask_git_pages(&mut self) {
+        for tab in &mut self.window.tabs {
+            tab.git_trees.clear();
+            for state in tab.git_graphs.values_mut() {
+                state.cache.refresh();
+                state.invalidate();
+            }
+        }
+        for win in self.window.float.live_windows_mut() {
+            if let Some(files) = win.files_mut() {
+                files.git = git::GitCache::default();
+            }
+        }
+    }
+
     /// One card per thing a second launch asked for and did not get — the same
     /// door and the same cap [`Self::honour_command_line`] uses, because they are
     /// the same event arriving through two front doors.
@@ -630,6 +650,18 @@ impl Runtime<'_> {
             .is_some_and(git_panel::GitRow::seats_the_keyboard)
         {
             self.select_git_row(seat, index);
+        }
+        // **A row that is its own button is pressed as that button** — `Load more commits`, which
+        // `Enter` reaches through here and the pointer through its act box
+        // (`git_panel::row_is_its_act`): one verb on both roads.
+        if let Some(act) = self
+            .window
+            .git_pages_shown
+            .get(&seat)
+            .and_then(|page| page.rows.get(index))
+            .and_then(git_panel::row_is_its_act)
+        {
+            return self.press_git_act(seat, index, act);
         }
         let active = self.window.active_tab;
         // The rows as they are **on screen**, and the root as the *cache* has
@@ -3892,49 +3924,46 @@ impl Runtime<'_> {
         surfaces
     }
 
-    /// **Keep the kernel's subscriptions level with what is on screen, and act
-    /// on anything it has said** (R31's D).
+    /// **Say which repositories this window's drawn Git pages are showing, and
+    /// act on the kernel's news about them** (R31's D) — this window's seat in
+    /// the application's [`crate::git_watch::GitWatch`].
     ///
     /// Both halves in one step because they are one question asked at one
     /// moment: which repositories is this window looking at, and which of those
-    /// have news that has ripened. The set is derived from
+    /// it has been told moved. The set is derived from
     /// [`Self::git_surfaces_on_screen`] and the master switch — the same two
     /// conditions the first reading is gated on — so a page that is left, a tab
-    /// that is switched away from and a switch that is turned off all drop their
-    /// handles here, by the set no longer containing them.
+    /// that is switched away from and a switch that is turned off all take the
+    /// root out of this window's seat here, and its handles go once no other
+    /// window's seat holds it. The news itself was ripened for every window at
+    /// once, before the turns (`FolioApp::ripen_git_news`), so each window takes
+    /// its own on the same pass.
     ///
     /// **A subscription costs nothing while nothing happens.** No timer is armed
     /// unless a notification has already arrived, which is why this can be called
-    /// on every turn of the loop beside every other clock in this window without
-    /// being the polling R31 forbids.
-    pub(in crate::runtime) fn advance_git_watch(&mut self, now: Instant) -> Result<()> {
+    /// on every turn of every window without being the polling R31 forbids.
+    pub(in crate::runtime) fn advance_git_watch(&mut self) -> Result<()> {
         // Asked on every turn of the loop, so the switch is read before the list
         // is built rather than used to filter one: with the panel off there is
-        // nothing to enumerate and `sync` is handed an empty set, which drops
-        // every handle and then costs nothing on every turn after that.
+        // nothing to enumerate and the seat is handed an empty set.
         let on_screen = if self.git_panel_on() {
             self.git_surfaces_on_screen()
         } else {
             Vec::new()
         };
-        let wanted: std::collections::BTreeSet<PathBuf> = on_screen
-            .iter()
-            .filter(|(_, _, showing)| *showing)
-            .map(|(_, root, _)| root.clone())
-            .collect();
-        self.app.git_watch.sync(&wanted, &self.app.event_proxy);
-        let due = self.app.git_watch.due(now);
-        if due.is_empty() {
+        let window = self.window_id();
+        self.app.git_watch.want(
+            window,
+            git_roots_on_glass(&on_screen),
+            &self.app.event_proxy,
+        );
+        let moved = self.app.git_watch.take(window);
+        if moved.is_empty() {
             return Ok(());
         }
-        // Every surface showing one of those repositories, which is not the same
-        // list as the roots: two columns and a graph can be looking at one
-        // repository, and all three are about to be out of date together.
         let mut asked = false;
-        for (origin, root, showing) in &on_screen {
-            if *showing && due.contains(root) {
-                asked |= self.reread_git_origin(origin, Ask::Settled);
-            }
+        for origin in git_surfaces_the_kernel_moved(&on_screen, &moved) {
+            asked |= self.reread_git_origin(&origin, Ask::Settled);
         }
         if asked && self.refresh_chrome() {
             self.present_chrome_change()?;

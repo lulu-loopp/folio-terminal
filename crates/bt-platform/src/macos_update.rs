@@ -131,6 +131,9 @@ pub enum Refusal {
     NotMachO { path: PathBuf, detail: String },
     /// The system gave no item-replacement directory, and said why.
     ItemReplacement(String),
+    /// An extended attribute could not be carried onto a bundle: not
+    /// written, not read back, read back different, or not flushed.
+    Attribute { name: String, detail: String },
 }
 
 impl fmt::Display for Refusal {
@@ -193,6 +196,12 @@ impl fmt::Display for Refusal {
             ),
             Self::ItemReplacement(detail) => {
                 write!(f, "macos_update: no item-replacement directory: {detail}")
+            }
+            Self::Attribute { name, detail } => {
+                write!(
+                    f,
+                    "macos_update: the attribute {name} was not carried: {detail}"
+                )
             }
         }
     }
@@ -957,6 +966,20 @@ pub fn min_updater(worker: &crate::admission::WorkerCtx, bundle: &Path) -> Resul
     plist_string(worker, bundle, "FolioMinUpdater")
 }
 
+/// **`FolioUpdateProtocol` of the bundle at `bundle`** — the update protocol
+/// it speaks, sealed in its `Info.plist` beside [`min_updater`] (0.4.6 ticket
+/// U-9; read by the macOS Prepare since 0.4.8 ticket E1-a2), as `plutil`
+/// prints the integer.
+///
+/// # Errors
+/// As [`short_version`]'s.
+pub fn update_protocol(
+    worker: &crate::admission::WorkerCtx,
+    bundle: &Path,
+) -> Result<String, Refusal> {
+    plist_string(worker, bundle, "FolioUpdateProtocol")
+}
+
 /// **One string of the bundle's `Info.plist`** — `plutil -extract <key> raw
 /// -o - <bundle>/Contents/Info.plist`, within [`PLIST_WITHIN`].
 fn plist_string(
@@ -1153,6 +1176,125 @@ fn item_replacement_near(_near: &Path) -> Result<PathBuf, String> {
     Err("macos_update has no item-replacement directory on this platform".to_owned())
 }
 
+/// **Carry extended attributes onto a staged bundle** (0.4.8 ticket D1;
+/// `docs/plans/design/managed-update-2026-09-29.md` §4, M1): each `(name,
+/// value)` is written on the directory `bundle` itself — never through a link
+/// at it (`XATTR_NOFOLLOW`) — and read back and compared byte for byte; then
+/// the directory is flushed (`F_FULLFSYNC`), so a power cut after the answer
+/// keeps them. The attributes belong to the directory: they travel with it
+/// through [`crate::install_flip::exchange`]'s `RENAME_SWAP`, and outside the
+/// code signature's seal. The values are the bytes a package manager wrote
+/// on the running bundle; this door composes none.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::Attribute`] naming the first
+/// attribute that was not written, not read back equal, or not flushed.
+pub fn carry_attributes(bundle: &Path, attributes: &[(&str, &[u8])]) -> Result<(), Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    for (name, value) in attributes {
+        let refused = |detail: String| Refusal::Attribute {
+            name: (*name).to_owned(),
+            detail,
+        };
+        write_attribute(bundle, name, value).map_err(|error| refused(error.to_string()))?;
+        match read_attribute(bundle, name) {
+            Ok(read) if read == *value => {}
+            Ok(_) => return Err(refused("read back different".to_owned())),
+            Err(error) => return Err(refused(format!("not read back: {error}"))),
+        }
+    }
+    flush_directory(bundle).map_err(|error| Refusal::Attribute {
+        name: String::new(),
+        detail: format!("the bundle was not flushed: {error}"),
+    })
+}
+
+/// `setxattr(XATTR_NOFOLLOW)`, creating or replacing the value.
+#[cfg(target_os = "macos")]
+fn write_attribute(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let c_name = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: both strings are NUL-terminated and outlive the call; the value
+    // is `value.len()` bytes; position 0 is the only one a non-resource-fork
+    // attribute takes.
+    let written = unsafe {
+        libc::setxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if written == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `getxattr(XATTR_NOFOLLOW)`: the whole value, or the error.
+#[cfg(target_os = "macos")]
+fn read_attribute(path: &Path, name: &str) -> io::Result<Vec<u8>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let c_name = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut buffer = vec![0u8; crate::install_evidence::ATTRIBUTE_MAX_BYTES];
+    // SAFETY: both strings are NUL-terminated and outlive the call; the
+    // buffer is `buffer.len()` bytes.
+    let read = unsafe {
+        libc::getxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    let Ok(read) = usize::try_from(read) else {
+        return Err(io::Error::last_os_error());
+    };
+    buffer.truncate(read);
+    Ok(buffer)
+}
+
+/// `F_FULLFSYNC` on a read-only descriptor of the directory `path`.
+#[cfg(target_os = "macos")]
+fn flush_directory(path: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let directory = std::fs::OpenOptions::new().read(true).open(path)?;
+    // SAFETY: the descriptor is live for the call and owned by `directory`.
+    if unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Off macOS [`carry_attributes`] refuses before these would be asked.
+#[cfg(not(target_os = "macos"))]
+fn write_attribute(_path: &Path, _name: &str, _value: &[u8]) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_attribute(_path: &Path, _name: &str) -> io::Result<Vec<u8>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn flush_directory(_path: &Path) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 #[cfg(test)]
 #[path = "macos_update_mount_tests.rs"]
 mod mount_tests;
@@ -1318,8 +1460,7 @@ mod tests {
         use super::*;
 
         fn scratch(tag: &str) -> PathBuf {
-            let path =
-                std::env::temp_dir().join(format!("bt-macos-update-{tag}-{}", std::process::id()));
+            let path = bt_testpath::temp_path(&format!("bt-macos-update-{tag}"));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             path

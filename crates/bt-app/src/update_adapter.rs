@@ -16,13 +16,14 @@
 //! on macOS; each road's `Ours` is Folio's own layout, and a road finds the
 //! adapter a journal names through [`Layouts`].
 //!
-//! **Only `Ours` is built.** Homebrew and scoop are named so a journal can
-//! record them, and their roads stay off until their tickets turn them on
-//! (U-41b, U-41c); winget's is off by design in 0.4.7 (design (a), U-41d). A
-//! copy whose adapter is not built is never offered the road — the update
-//! job's eligibility asks [`built_on`] before the card, and each Prepare's
-//! road check asks it again before `Allocated` — so it keeps the row with its
-//! manager's command and **Copy**, and has no journal.
+//! **`Ours` and Homebrew are built** (Homebrew since 0.4.8 D1, U-41b: the
+//! bundle's swap at the app target Homebrew recorded, with the cask's marks
+//! carried). scoop is named so a journal can record it, and its road stays
+//! off until its ticket turns it on (U-41c); winget's is off by design
+//! (design (a), U-41d). A copy whose adapter is not built is never offered
+//! the road — the update job's eligibility asks [`built_on`] before the card,
+//! and each Prepare's road check asks it again before `Allocated` — so it
+//! keeps the row with its manager's command and **Copy**, and has no journal.
 
 use std::fmt;
 use std::sync::Arc;
@@ -32,9 +33,10 @@ use bt_platform::HostPlatform;
 use crate::install_channel::{Channel, Manager};
 use crate::update_txn::Adapter;
 
-/// **Homebrew's road** (U-41b turns it on with the recorded target and the
-/// carried marker; until then a Homebrew copy keeps `brew upgrade`'s row).
-pub(crate) const HOMEBREW_ROAD: bool = false;
+/// **Homebrew's road** (U-41b, 0.4.8 D1): on, at the app target Homebrew
+/// recorded and with the cask's marks carried (managed-update §2.2); a
+/// Homebrew copy anywhere else keeps `brew upgrade`'s row.
+pub(crate) const HOMEBREW_ROAD: bool = true;
 
 /// **scoop's road** (U-41c turns it on with the version folder and the
 /// junction; until then a scoop copy keeps `scoop update`'s row).
@@ -96,28 +98,42 @@ impl fmt::Display for NotBuilt {
 
 /// **The layouts one road can call, by the adapter a journal names** — the
 /// road's points `L` (one of the four traits the module header names).
-/// Each road holds one; the product's has the road's own `Ours`, and a test
-/// hands the road a layout of its own in its place (the harness U-41b and
-/// U-41c build theirs on).
+/// Each road holds one; the product's has the road's own `Ours` and, on the
+/// macOS road, its Homebrew layout; a test hands the road a layout of its own
+/// in either place.
 pub(crate) struct Layouts<L: ?Sized> {
     ours: Arc<L>,
+    homebrew: Option<Arc<L>>,
 }
 
 impl<L: ?Sized> Layouts<L> {
-    /// The layouts of a road whose own layout is `ours`.
+    /// The layouts of a road whose own layout is `ours`, and no other.
     #[must_use]
     pub(crate) fn of(ours: Arc<L>) -> Self {
-        Self { ours }
+        Self {
+            ours,
+            homebrew: None,
+        }
+    }
+
+    /// These layouts with `homebrew` as the Homebrew adapter's.
+    #[must_use]
+    pub(crate) fn with_homebrew(self, homebrew: Arc<L>) -> Self {
+        Self {
+            homebrew: Some(homebrew),
+            ..self
+        }
     }
 
     /// **The layout `adapter` names.**
     ///
     /// # Errors
-    /// [`NotBuilt`] for every adapter but `Ours`: no other road is built.
+    /// [`NotBuilt`] for an adapter this road holds no layout for.
     pub(crate) fn named(&self, adapter: Adapter) -> Result<Arc<L>, NotBuilt> {
-        match adapter {
-            Adapter::Ours => Ok(Arc::clone(&self.ours)),
-            other => Err(NotBuilt(other)),
+        match (adapter, &self.homebrew) {
+            (Adapter::Ours, _) => Ok(Arc::clone(&self.ours)),
+            (Adapter::Homebrew, Some(homebrew)) => Ok(Arc::clone(homebrew)),
+            (other, _) => Err(NotBuilt(other)),
         }
     }
 }
@@ -126,6 +142,7 @@ impl<L: ?Sized> Clone for Layouts<L> {
     fn clone(&self) -> Self {
         Self {
             ours: Arc::clone(&self.ours),
+            homebrew: self.homebrew.as_ref().map(Arc::clone),
         }
     }
 }

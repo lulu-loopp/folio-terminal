@@ -725,7 +725,8 @@ impl Seats {
     /// shell for: a Terminal seat with no session behind it is a black rectangle,
     /// so the two happen together or not at all.
     ///
-    /// `None` when the solver refuses — the run cannot be divided at this size —
+    /// `None` when `target` is not a seat of this tree — since the 2026-08-08 ruling
+    /// the edit no longer refuses a split for size (`bt_layout::EditError::Refused`) —
     /// and refusing leaves the tree untouched, so the caller has nothing to undo.
     /// The names are spent only on success, for the reason `adopt_drop` gives at
     /// length: an id handed out twice is a `find_seat` answering about the wrong
@@ -737,6 +738,32 @@ impl Seats {
         dir: Axis,
         leading: bool,
     ) -> Option<SeatId> {
+        self.split_as(metrics, target, dir, leading, SeatKind::Terminal)
+    }
+
+    /// **Split a pane with a preview arriving beside it** — where a page's request for a window of
+    /// its own opens (F-SWEEP-048, #27): the page that asked keeps its pane, and the new page gets
+    /// one of its own after it, the side every direction-less split puts a new pane on.
+    ///
+    /// [`Self::split_terminal`]'s edit with the other kind of leaf, and its answers: `None` when
+    /// `target` is not a seat of this tree, with the tree untouched and no name spent.
+    pub fn split_preview(
+        &mut self,
+        metrics: &SeatMetrics,
+        target: SeatId,
+        dir: Axis,
+    ) -> Option<SeatId> {
+        self.split_as(metrics, target, dir, false, SeatKind::Preview)
+    }
+
+    fn split_as(
+        &mut self,
+        metrics: &SeatMetrics,
+        target: SeatId,
+        dir: Axis,
+        leading: bool,
+        kind: SeatKind,
+    ) -> Option<SeatId> {
         let arriving = SeatId(self.next_seat);
         match apply(
             &self.tree,
@@ -745,7 +772,7 @@ impl Seats {
                 target,
                 dir,
                 leading,
-                arriving: LayoutNode::seat(Seat::new(arriving, SeatKind::Terminal)),
+                arriving: LayoutNode::seat(Seat::new(arriving, kind)),
                 split_id: SplitId(self.next_split),
             },
         ) {
@@ -16361,6 +16388,74 @@ pub const PREVIEW_CRUMB_SEPARATOR: &str = "\u{203a}";
 
 /// `…` — what the folded middle of a long path is drawn as.
 pub const PREVIEW_CRUMB_FOLD: &str = "\u{2026}";
+
+/// **A long address, folded to the room it is drawn in** (T-WEB-PANE-ADDRESS, owner's ruling
+/// 2026-10-09; DESIGN §7.7 ⑩).
+///
+/// The crumb row's own law — the middle is what folds — said of an address: the host says which
+/// site and the last segment says which page, so the path between them goes first, one segment at
+/// a time from the host's side, and the fold is drawn where it happened
+/// (`github.com/…/runtime/builder.rs#L1240`). Then the scheme goes, then the last segment
+/// (`github.com/…`), and only when the host alone does not fit is the host cut, at its end. An
+/// address with no host and no path ([`crate::webnav::address_parts`] answers `None`: an
+/// `about:` or a `mailto:`) is cut at its end.
+///
+/// `measure` is the face the text will be drawn in; every candidate is measured whole, the `…`
+/// included. The address row and the failure card both fold with this.
+#[must_use]
+pub fn fold_address(address: &str, room: f32, mut measure: impl FnMut(&str) -> f32) -> String {
+    if measure(address) <= room {
+        return address.to_owned();
+    }
+    let Some(parts) = crate::webnav::address_parts(address) else {
+        return crate::tooltip::ellipsize(address, room, measure);
+    };
+    let count = parts.segments.len();
+    // The host, then what the address wrote after it: `lead` before the first piece (the
+    // separator, or nothing before a bare `?query`/`#fragment`), the separator between the rest,
+    // and the fold mark where pieces were taken.
+    let build = |scheme: &str, kept: &[&str]| {
+        let mut text = format!("{scheme}{}{}", parts.host, parts.lead);
+        if kept.len() < count {
+            text.push_str(PREVIEW_CRUMB_FOLD);
+            for segment in kept {
+                text.push(parts.separator);
+                text.push_str(segment);
+            }
+        } else {
+            text.push_str(&kept.join(&parts.separator.to_string()));
+        }
+        text
+    };
+    // The middle, nearest the host first; the last segment stays.
+    for kept in (1..count).rev() {
+        let candidate = build(parts.scheme, &parts.segments[count - kept..]);
+        if measure(&candidate) <= room {
+            return candidate;
+        }
+    }
+    // Then the scheme.
+    if !parts.scheme.is_empty() {
+        let candidate = build("", &parts.segments[count.saturating_sub(1)..]);
+        if measure(&candidate) <= room {
+            return candidate;
+        }
+    }
+    // Then the last segment.
+    if count > 0 {
+        let candidate = build("", &[]);
+        if measure(&candidate) <= room {
+            return candidate;
+        }
+    }
+    // And only then the host, at its end — or, when there is no host to cut (`https:///x`, a
+    // path rooted at `/`), the address itself: a fold is never an empty line.
+    if parts.host.is_empty() {
+        return crate::tooltip::ellipsize(address, room, measure);
+    }
+    crate::tooltip::ellipsize(parts.host, room, measure)
+}
+
 /// `~` — **the first crumb of a path that lies under the reader's own home**,
 /// on the platforms whose paths are rooted at a slash (owner ruling 2026-09-12,
 /// §13.32 ③).
@@ -19795,7 +19890,11 @@ pub(crate) fn push_preview_rail(
                 letter_spacing_em: 0.0,
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
-                clip: Some(text_box),
+                // **Folded at rest, scrolled while typed in** (owner's ruling 2026-10-09). At rest
+                // the text is `fold_address`'s, cut to this very box by the face it is drawn in,
+                // so there is nothing to clip; a draft is the whole address, scrolled to the
+                // caret, and the box is its window.
+                clip: editing.then_some(text_box),
             });
             if let Some(caret) = marks.and_then(|marks| marks.caret) {
                 sprites.push(ChromeSprite::new(
@@ -20834,6 +20933,10 @@ const PREVIEW_CARD_BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 pub struct PreviewCardGeometry {
     pub icon: [f32; 4],
     pub notice: [f32; 4],
+    /// **The address the card is about**, one line under the sentence in the fact's face
+    /// (owner's ruling 2026-10-09), as wide as the fact's column — `None` on a card that names
+    /// none.
+    pub address: Option<[f32; 4]>,
     /// **The fact under the sentence** (§7.7 ④, W2 slice ④) — an error code, a
     /// host, a file name. Zero height when there is none, which is the state
     /// every card that is not a page's failure is in; as many lines tall as the
@@ -20861,6 +20964,10 @@ pub struct PreviewCardContent<'a> {
     /// The sentence — the mock-up's single "No preview for this file type", or
     /// the more specific one a binary, a network path or a failed read earns.
     pub notice: &'a str,
+    /// **The address a page's card is about** (owner's ruling 2026-10-09), already folded by
+    /// [`fold_address`] to [`preview_card_detail_width`] in the fact's face; `None` on every
+    /// card that is not about an address.
+    pub address: Option<&'a str>,
     /// **The fact, and never a second sentence of prose** (§7.7 ④). A host name,
     /// an error string, a version — the thing worth copying into a bug report.
     /// Empty for every card that has none.
@@ -20929,6 +21036,7 @@ pub fn preview_card_detail_width(body: [f32; 4], scale: f32) -> f32 {
 pub fn preview_card_geometry(
     body: [f32; 4],
     button_text_px: Option<f32>,
+    address: bool,
     detail_lines: usize,
     scale: f32,
 ) -> PreviewCardGeometry {
@@ -20966,12 +21074,15 @@ pub fn preview_card_geometry(
     } else {
         gap + detail_height
     };
-    let total = icon + gap + notice_height + detail_run + button_run;
+    // The address is one line of the fact's face, a gap under the sentence.
+    let address_run = if address { gap + detail_line } else { 0.0 };
+    let total = icon + gap + notice_height + address_run + detail_run + button_run;
     let centre_x = (body[0] + body[2]) / 2.0;
     let top = (body[1] + (body[3] - body[1] - total) / 2.0).max(body[1]);
     let notice_top = top + icon + gap;
-    let detail_top = notice_top + notice_height + gap;
-    let button_top = notice_top + notice_height + detail_run + gap;
+    let address_top = notice_top + notice_height + gap;
+    let detail_top = notice_top + notice_height + address_run + gap;
+    let button_top = notice_top + notice_height + address_run + detail_run + gap;
     // The fact's column is the seat less the card's padding — the width it was
     // wrapped to, so the box the lines are centred in is the box they were
     // measured against.
@@ -20988,6 +21099,12 @@ pub fn preview_card_geometry(
         // The sentence is centred by the label itself, so its box is the body's
         // width and its height is the one line it gets.
         notice: [body[0], notice_top, body[2], notice_top + notice_height],
+        address: address.then_some([
+            detail_left,
+            address_top,
+            detail_right,
+            address_top + detail_line,
+        ]),
         detail: [
             detail_left,
             detail_top,
@@ -21031,6 +21148,7 @@ pub fn push_preview_card(
     let geometry = preview_card_geometry(
         body,
         card.button.map(|_| card.button_text_px),
+        card.address.is_some(),
         card.detail.len(),
         scale,
     );
@@ -21052,6 +21170,23 @@ pub fn push_preview_card(
         tabular_numerals: false,
         clip: None,
     });
+    // **The address, in the fact's face, on its own line** (owner's ruling 2026-10-09):
+    // already folded to this column, so nothing is clipped.
+    if let (Some(address), Some(rect)) = (card.address, geometry.address) {
+        labels.push(ChromeLabel {
+            mono: true,
+            text: address.to_owned(),
+            rect,
+            font_size_px: geometry.detail_font,
+            color: palette.files_row_muted,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
     // **The fact, in the face facts are written in everywhere else in this
     // window** (§7.7 ④), and never a second sentence of prose: what goes here is
     // the thing a reader can copy into a bug report. One label per wrapped line,
@@ -21350,6 +21485,7 @@ pub fn hit_preview_card_button(
     let box_ = preview_card_geometry(
         body,
         button.offers.then_some(button.text_px),
+        button.address,
         button.detail_lines,
         scale,
     )
@@ -21378,6 +21514,8 @@ pub struct PreviewCardButton {
     /// about where a file is draws none, so there is none to press.
     pub offers: bool,
     pub text_px: f32,
+    /// Whether the card names an address — a line above the fact, which moves the button.
+    pub address: bool,
     /// How many lines the card's fact wrapped to this frame — zero when it has
     /// none. A count and no longer a `bool` since §7.43: a fact that wraps
     /// pushes the button down by a line for each, and a hit test that still
@@ -23157,6 +23295,47 @@ mod tests {
         );
     }
 
+    /// RED (F-SWEEP-048, #27) — **a page's new window is a new preview pane beside the page that
+    /// asked, and the asking pane stays as it was.**
+    ///
+    /// The page is on the tab's reusable preview, which is exactly the pane the landing rule would
+    /// have handed a newly opened page — over the page that asked. The split leaves it where it is
+    /// and mints a second preview after it.
+    ///
+    /// MUTATION: seat a `Terminal` in `split_preview` (the arriving pane is not a preview), or
+    /// split with `leading: true` (it lands before the page that asked).
+    #[test]
+    fn a_pages_new_window_is_a_preview_pane_beside_it() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let page = seats
+            .add_preview(&metrics)
+            .expect("a 1600x900 window has room for a preview");
+        assert_eq!(
+            seats.landing_preview(),
+            Some(page),
+            "the page is the reusable preview"
+        );
+
+        let arriving = seats
+            .split_preview(&metrics, page, Axis::Row)
+            .expect("and room for a second one beside it");
+        assert_ne!(arriving, page, "a new pane, not the page that asked");
+        assert_eq!(
+            seats.preview_seats(),
+            vec![page, arriving],
+            "both are previews, the new one after the page that asked"
+        );
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+        let asked = seat_viewport(&layout, page).expect("the page that asked is still drawn");
+        let opened = seat_viewport(&layout, arriving).expect("the new page has a box");
+        assert!(
+            asked.x + asked.width <= opened.x,
+            "beside it, to its right: {asked:?} then {opened:?}"
+        );
+    }
+
     /// A pointer in the second pane resolves to the second pane, and to
     /// coordinates measured from *its* body.
     ///
@@ -23911,6 +24090,7 @@ mod tests {
         // And a card on the *first* pane leaves the second pane's sentence
         // standing — the card replaces a body, and only its own.
         let card = PreviewCardContent {
+            address: None,
             notice: "No preview for this file type",
             detail: &[],
             mark: ChromeMark::File,
@@ -26979,7 +27159,7 @@ mod tests {",
             }],
             ..SessionV1::default()
         };
-        let dir = std::env::temp_dir().join(format!("bt-app-seats-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-app-seats");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
         write_session_atomic(&path, &session).unwrap();
@@ -30927,7 +31107,7 @@ mod tests {",
     #[test]
     fn the_cards_button_answers_for_exactly_the_box_it_is_drawn_in() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let geometry = preview_card_geometry(body, Some(120.0), 0, 1.0);
+        let geometry = preview_card_geometry(body, Some(120.0), false, 0, 1.0);
         let button = geometry.button.expect("a card with a button");
         assert!(
             geometry.icon[3] < geometry.notice[1] && geometry.notice[3] < button[1],
@@ -51739,8 +51919,8 @@ mod tests {",
     #[test]
     fn the_card_stacks_a_fact_between_the_sentence_and_the_verb() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let plain = preview_card_geometry(body, Some(120.0), 0, 1.0);
-        let detailed = preview_card_geometry(body, Some(120.0), 1, 1.0);
+        let plain = preview_card_geometry(body, Some(120.0), false, 0, 1.0);
+        let detailed = preview_card_geometry(body, Some(120.0), false, 1, 1.0);
         let (plain_button, detailed_button) = (
             plain.button.expect("a card with a button"),
             detailed.button.expect("a card with a button"),
@@ -51775,8 +51955,8 @@ mod tests {",
     #[test]
     fn a_card_with_no_button_is_shorter_by_the_button_and_still_centred() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let with = preview_card_geometry(body, Some(120.0), 0, 1.0);
-        let without = preview_card_geometry(body, None, 0, 1.0);
+        let with = preview_card_geometry(body, Some(120.0), false, 0, 1.0);
+        let without = preview_card_geometry(body, None, false, 0, 1.0);
         assert!(without.button.is_none(), "there is no rectangle to press");
         let with_button = with.button.expect("a card with a button");
         let with_height = with_button[3] - with.icon[1];
@@ -51796,6 +51976,7 @@ mod tests {",
         push_preview_card(
             body,
             &PreviewCardContent {
+                address: None,
                 notice: "This file is on another machine.",
                 detail: &[],
                 mark: ChromeMark::File,
@@ -51814,6 +51995,168 @@ mod tests {",
             1,
             "the sentence and nothing else: {:?}",
             labels.iter().map(|label| &label.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// A stand-in for the chrome face: every character 7 px, an ideograph 14 — what matters to
+    /// the fold is that widths add up, and that a CJK address is not measured as Latin.
+    fn seven_and_fourteen(text: &str) -> f32 {
+        text.chars()
+            .map(|c| if c as u32 >= 0x2E80 { 14.0 } else { 7.0 })
+            .sum()
+    }
+
+    /// RED (T-WEB-PANE-ADDRESS, owner's ruling 2026-10-09, Q1) — **a long address folds its
+    /// middle after the host and keeps the last segment; then the scheme goes, then the last
+    /// segment, and the host is cut at its end only when nothing else is left.**
+    ///
+    /// A table of addresses × rooms → the folded text. Every answer fits its room.
+    ///
+    /// MUTATIONS: fold with an end cut (`tooltip::ellipsize` of the whole address) — the 420
+    /// row loses the page (`https://github.com/tokio-rs/tokio/blob/mas…`); fold with a start cut
+    /// (`…` + the tail) — the 420 row loses the host; join a bare query or fragment to the host
+    /// with `/` (the old join) — the `example.com?q=中文` row reads `example.com/?q=中文`; accept an
+    /// empty fold — the `https:///x` row is an empty line.
+    #[test]
+    fn a_long_address_folds_its_middle_and_keeps_the_host_and_the_page() {
+        const LONG: &str =
+            "https://github.com/tokio-rs/tokio/blob/master/tokio/src/runtime/builder.rs#L1240";
+        const CJK: &str = "https://例子.com/文档/2026/报告/最终版.html?q=中文";
+        let path = [
+            "C:",
+            "Users",
+            "someone",
+            "Documents",
+            "项目",
+            "notes",
+            "report.html#ch3",
+        ]
+        .join("\\");
+        let rows: [(&str, f32, String); 22] = [
+            (LONG, 560.0, LONG.to_owned()),
+            (
+                LONG,
+                420.0,
+                "https://github.com/…/tokio/src/runtime/builder.rs#L1240".to_owned(),
+            ),
+            (
+                LONG,
+                300.0,
+                "https://github.com/…/builder.rs#L1240".to_owned(),
+            ),
+            (LONG, 250.0, "github.com/…/builder.rs#L1240".to_owned()),
+            // The 320 px pane of the mock: 140 px of text room.
+            (LONG, 140.0, "github.com/…".to_owned()),
+            (LONG, 80.0, "github.com".to_owned()),
+            (LONG, 40.0, "gith…".to_owned()),
+            (CJK, 420.0, CJK.to_owned()),
+            (
+                CJK,
+                300.0,
+                "https://例子.com/…/报告/最终版.html?q=中文".to_owned(),
+            ),
+            (CJK, 250.0, "例子.com/…/最终版.html?q=中文".to_owned()),
+            (CJK, 80.0, "例子.com/…".to_owned()),
+            (CJK, 40.0, "例子…".to_owned()),
+            (&path, 400.0, path.clone()),
+            (
+                &path,
+                200.0,
+                ["C:", "…", "notes", "report.html#ch3"].join("\\"),
+            ),
+            (&path, 140.0, ["C:", "…", "report.html#ch3"].join("\\")),
+            (&path, 30.0, ["C:", "…"].join("\\")),
+            // A query or fragment straight after the host keeps its own spelling: no `/`.
+            (
+                "https://example.com?q=中文",
+                150.0,
+                "example.com?q=中文".to_owned(),
+            ),
+            (
+                "https://example.com#frag",
+                120.0,
+                "example.com#frag".to_owned(),
+            ),
+            ("https://example.com#frag", 90.0, "example.com…".to_owned()),
+            // An empty host never folds to an empty line.
+            ("https:///x", 13.0, "…".to_owned()),
+            // No host and no path: cut at the end.
+            (
+                "mailto:someone@example.com",
+                100.0,
+                "mailto:someon…".to_owned(),
+            ),
+            (
+                "mailto:someone@example.com",
+                400.0,
+                "mailto:someone@example.com".to_owned(),
+            ),
+        ];
+        for (address, room, expected) in rows {
+            let folded = fold_address(address, room, seven_and_fourteen);
+            assert_eq!(folded, expected, "{address} in {room} px");
+            assert!(
+                seven_and_fourteen(&folded) <= room,
+                "{folded} does not fit {room} px"
+            );
+        }
+    }
+
+    /// RED (T-WEB-PANE-ADDRESS, owner's ruling 2026-10-09, Q3) — **a page's card names the
+    /// address on its own line between the headline and the fact, and draws no button.**
+    ///
+    /// MUTATION: drop the address label from `push_preview_card` (three labels become two), or
+    /// lay the fact out ignoring `address` (the fact is drawn over the address line).
+    #[test]
+    fn a_pages_card_names_the_address_between_the_headline_and_the_fact() {
+        let body = [0.0, 0.0, 560.0, 400.0];
+        let fact = vec!["HostNameNotResolved".to_owned()];
+        let card = PreviewCardContent {
+            address: Some("https://例子.invalid/…/报告"),
+            notice: "Cannot open",
+            detail: &fact,
+            mark: ChromeMark::Globe { favicon: None },
+            fault: true,
+            button: None,
+            button_text_px: 0.0,
+            button_hovered: false,
+        };
+        let (mut sprites, mut labels) = (Vec::new(), Vec::new());
+        push_preview_card(
+            body,
+            &card,
+            1.0,
+            &chrome_palette(),
+            &mut sprites,
+            &mut labels,
+        );
+        let texts: Vec<&str> = labels.iter().map(|label| label.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Cannot open",
+                "https://例子.invalid/…/报告",
+                "HostNameNotResolved"
+            ],
+            "the headline, the address, the fact, and nothing else"
+        );
+        assert!(labels[1].mono && labels[2].mono, "both in the fact's face");
+        assert!(
+            labels[0].rect[3] <= labels[1].rect[1] && labels[1].rect[3] <= labels[2].rect[1],
+            "stacked, none over another: {:?}",
+            labels.iter().map(|label| label.rect).collect::<Vec<_>>()
+        );
+        assert!(
+            !sprites
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::ControlPillRing { .. })),
+            "no button ring is drawn"
+        );
+        assert!(
+            preview_card_geometry(body, None, true, 1, 1.0)
+                .button
+                .is_none(),
+            "and none can be pressed"
         );
     }
 
@@ -51850,6 +52193,7 @@ mod tests {",
                 "a {seat_width}px seat drew no fact at all"
             );
             let card = PreviewCardContent {
+                address: None,
                 notice: "Folio could not start a browser engine here.",
                 detail: &lines,
                 mark: ChromeMark::Globe { favicon: None },
@@ -51898,7 +52242,7 @@ mod tests {",
                 "the fact lost characters on its way onto the card"
             );
             // And the card grew: the button is below the last line, not under it.
-            let geometry = preview_card_geometry(body, Some(60.0), lines.len(), 1.0);
+            let geometry = preview_card_geometry(body, Some(60.0), false, lines.len(), 1.0);
             assert!(
                 geometry.detail[3] <= geometry.button.expect("a card with a button")[1],
                 "the fact and the verb share pixels at {seat_width}px: {geometry:?}"

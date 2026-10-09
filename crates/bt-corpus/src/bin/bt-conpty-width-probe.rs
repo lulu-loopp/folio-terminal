@@ -13,6 +13,9 @@ const ROWS: u16 = 24;
 const FAMILY: &str = "👨\u{200d}👩\u{200d}👧\u{200d}👦";
 
 fn main() -> Result<(), Box<dyn Error>> {
+    bt_corpus::install_host_answers();
+    // The ConPTY pair is looked for where this program's own file is (G-SWEEP-048).
+    bt_pty::use_sidecars_in(bt_platform::own_files_folder());
     let width_script = r#"
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8

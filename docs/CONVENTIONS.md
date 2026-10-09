@@ -138,8 +138,7 @@ A same-layer or upward edge needs a row in
 `scripts/ci/crate-edge-exemptions.tsv` (from, to, kind, ledger row, reason).
 Dev-dependencies are not layer edges and are listed, not judged: they are
 not in the shipped graph, and Cargo allows them in both directions —
-`bt-term` and `bt-pty` each name the other as one, and so do `bt-platform`
-and `bt-pty`.
+`bt-platform` and `bt-pty` each name the other as one.
 It also fails on a first-party crate with no layer row, a layer row naming no
 crate, an exemption whose edge is gone or now goes down, an exemption that is
 not at the merge base, and zero crates read. A new crate gets its layer row in
@@ -147,6 +146,26 @@ the change that adds it. `gates-can-fail` plants an upward edge, a stale
 exemption and a crate with no layer and checks that each refusal names the
 crate and the reason. `scripts/ci/check-crate-edges-tests.ps1` plants an added
 exemption in a scratch repository.
+The wasm floor (gate G1, job `wasm-lib-check`): `scripts/ci/check-wasm-lib.ps1`
+runs `cargo check --locked --lib --target wasm32-unknown-unknown` over the
+library crates a browser build will reference — the list is in the script and
+nowhere else — and names every crate that reports a compile error; it refuses a
+run that checked fewer libraries than the list holds. A crate joins the list in
+the ticket that makes it pass. Its `gates-can-fail` canary plants a call of a
+`cfg(unix)`-only function in `bt-doc` and requires the refusal to name `bt-doc`.
+
+The clock guard (gate G3, `clock-guard` in `logic`): `scripts/ci/check-clock-guard.ps1`
+runs `crates/bt-source/tests/clock_guard.rs`, which refuses `std::time::Instant`
+and `std::time::SystemTime` in every spelling (qualified, flat or nested `use`,
+glob, alias) in the product code of an explicit source set — the library crates
+G1 checks, `vendor/vte`, and
+`vendor/alacritty_terminal` without `event_loop` and `tty`.
+Those crates read time through `web_time`, which is `std::time` on every native
+target. The script's header names the set and what is out of it; it refuses a
+run that read no file. Five canaries: a qualified clock in `bt-doc` and in
+`bt-compose`, a nested import in `bt-layout` and a crate-root nested import
+(`use ::std::{time::Instant}`) in `bt-viewport` are refused by file, and a clock planted in
+`bt-platform`'s `http` module (out of scope by name) is not.
 
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 
@@ -167,6 +186,33 @@ exemption in a scratch repository.
 的测试一一对应，整行只能相对合并基线减少，不能新增。经由被调函数才碰到时钟的
 测试，这道扫描看不见，由审查负责发现。去掉一行的办法是换成受控时钟、受控
 sleeper、完成信号或接收事件，不是改大数字。
+
+**Wait on the signal, not the clock** (T-VIDEO-SEAT-SETTLING-FLAKE). A test, or a helper it
+calls, that waits for something another thread does — an engine counted on the ledger, an answer
+published, a lane woken — waits on that thing's own signal: the condition variable the movement is
+announced on, the lane's wake. The only number beside it is the suite's patience for something
+that must happen (`crate::lane::PATIENCE` in `bt-app`), and running out of it is a red, never a
+pass. Polling a value until a fixed number of seconds has gone by is a wall clock whatever the
+loop around it looks like: under load the movement arrives later and the test is called wrong.
+The shapes are `bt_platform::video::engine::engines_outstanding_reaching` (the engine ledger's
+`Condvar`) and `crate::lane::{wake_channel, wait_for_a_wake}`.
+
+**A red that only load produces is a test defect with a cause, and the cause is fixed where it
+lives** (H-SWEEP-048). Three such reds and their fixes: a fixture's write that another program
+holds for a moment (the trust harness's resource update, refused while a scanner reads the file
+it just wrote) is made again on exactly that refusal, with the pause handed in so the test of the
+retry lets its own hold go without a clock; a budget on one window's cost does not read the
+process's facts while it counts (the Settings pointer budget), and its twin that moves those facts
+on purpose runs alone in a process of its own; and a deadline that is not the test's subject is
+put out of the reach of any working run, while the waits the test does assert end on the phase
+they wait for (the applier's trial test). A retry with a bounded count and a growing pause is a
+fixture's answer to a hold, never to a slow machine.
+
+**A test ends every process it starts, on every path** (H-SWEEP-048). A child that the product
+does not end on drop — an uncontained probe, a helper that starts its own children — is guarded
+by a local made right after the start that ends it and its descendants when the test's scope
+ends, a panic included (`probe_child_tests::HelperTree`). A red run that leaves a helper up holds
+the test executable open and keeps the worktree from being removed.
 
 ### 【事故】A/B 必须在同一段时间里交替，先跑完一组再跑另一组等于把负载当结论
 
@@ -205,6 +251,78 @@ sleeper、完成信号或接收事件，不是改大数字。
 2. **门要有源码钉。** 光靠"大家记得用 helper"守不住:一个绕过去的调用点在自己那台机器上可以绿几个星期，然后在某天调度器把它和别人排到一起时掐掉合并门。`every_headless_device_in_a_test_is_taken_through_the_lock` 扫本 crate `src` 下每个文件的 `#[cfg(test)]` 模块，`headless(` / `headless_fallback(` / `headless_on(` 出现在那扇门以外即红（needle 用 `concat!` 拼两半，免得门自己成为反例）。
 3. **锁中毒不连坐。** 它守的是 `()`，前一条测试 panic 把锁毒了不代表设备脏了——`unwrap_or_else(std::sync::PoisonError::into_inner)`,否则一条真红会把后面每一条都变成第二条假红。
 4. **锁只管本二进制。** `cargo` 让每个测试二进制各自是一个进程，进程之间不共享这把锁;上面那支六进程的脚本同时也是这件事的证据——每个进程内部串行之后,六个进程并行是干净的。真到了两个 crate 都要建无头设备的那天，先量跨进程会不会崩，别默认这把锁保得住。
+
+### A test's scratch path is named by `bt_testpath`, and nowhere else (incident, 2026-10-05)
+
+A test that needs a file, a directory, a registry key or a socket of its own takes its name from
+`bt_testpath::temp_path(tag)`, or `root.join(bt_testpath::unique_name(tag))` under a root of its
+own: `{tag}-{process id}-{ordinal}`, where the ordinal is one process-wide counter. The process id
+keeps two test processes apart; the ordinal keeps two calls of one process apart. The wall clock
+is in neither: a name made of the process id and `SystemTime::now()` nanoseconds is shared by two
+threads that sample the clock inside one tick (`shell_integration_script.rs`, a `remove_file`
+that found `NotFound` on main), and a name made of the process id alone is shared by every call
+of the helper in one binary. A test that needs the *same* path twice computes it once and passes
+it on. `bt-source`'s `temp_paths` guard refuses, in test code, a body that calls
+`process::id` beside `temp_dir()` or a wall-clock read. Product code names its own temporary
+files and is not covered.
+
+### A test pins behaviour by running it, not by reading the source (T-TEST-HYGIENE-048)
+
+A test that matches the program's own text to claim it *does* something (an order of calls, a
+worker nobody joins, a value) goes green on a rename and red on a refactor that changes nothing,
+and says nothing about what runs. Drive the behaviour through the door the product uses, with the
+machine effects handed in as stand-ins where they would touch the machine (the shell-integration
+preparation worker's `PreparationEffects` is the shape). Reading source is allowed only for a
+**guard**, whose subject is how the code is written — a door census, "no X outside door Y", the
+window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
+guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
+
+### A test never prints an environment (T-TEST-ENV-LEAK)
+
+A test never prints an environment map, and never prints the value of a secret-shaped variable (one
+whose name holds `KEY`, `TOKEN`, `SECRET` or `PASS`); a give-up message may quote one named, non-secret
+variable it depends on (`PATH`, `ComSpec`, `PSModulePath`, `WSLENV`, `HOME`), and a test that compares
+environments names the differing keys only, a secret-shaped key as `<redacted>`.
+
+### Where a test lives (K1)
+
+A test lives beside what it tests. A test written in a module's own scope is in that module's
+`mod tests` — inline, or a `#[path]` sibling `<module>_tests.rs`. A test written in the crate
+root's scope (it drives `App`, `Runtime`, `TabState` and the root's fixtures) is in a root-declared
+file in `src/` named for what it tests: `app_<theme>_tests.rs` for an item `main.rs` owns, by the
+theme sort of `docs/plans/bt-app-split-inventory-2026-09-15.md` §0.3, and `<module>_app_tests.rs`
+when its first assertion is about another module. A fixture two of those files use is in
+`test_support.rs`, `pub(crate)`. `tests.rs` holds only the tests something outside their body
+names as `tests::<name>`; a new test does not go there.
+
+### A test that is not limited to one platform asserts a fact of every platform (H1)
+
+Every test runs on Windows and on macOS (CI's `core-macos` runs `bt-term`, `bt-pty` and the portable
+crates). A test whose fixture is spelled the Windows way — a drive letter, a `\`, a shipped `pwsh` row,
+`Ctrl` as the command modifier — is red on the Mac for a reason that is not a defect, and a suite with
+reds nobody reads hides the one that is. Each test is exactly one of three things:
+
+1. **Platform-neutral.** The fact holds everywhere once the fixture is spelled through the platform's
+   own paths, shells and modifiers. Either the product's door takes the platform as a value
+   (`…_on(platform)`, `defaults_for(platform)`, `shipped_for(SeedPlatform::Windows, …)`) and the test
+   names the platform whose table it pins, or the fixture is built the host's way (`std::path` joins
+   on a host-rooted base, `bt_testpath::temp_path`, the host seed's rows by role, the host's command
+   modifier) and the expected value is computed from the same fixture. A platform branch may choose
+   an expected value; it never chooses the assertion's structure.
+2. **Windows-only by nature.** The fact exists only on Windows (ConPTY, `cmd`, PowerShell 5.1, the
+   MSIX, `%APPDATA%`, WebView2, the Explorer verb, WSL and MSYS namespaces, drive letters as a
+   grammar). The test carries `#[cfg(windows)]`, and when the feature has a macOS arm a macOS twin
+   test pins that arm — a Windows-only test of a cross-platform feature without its twin is a miss.
+3. **A real macOS defect.** The test is right and the product is wrong: the product is fixed by its
+   own ticket, never by changing the test, and the ledger names the test, the expected and actual
+   values and the ticket. The ignored-tests gate (`scripts/ci/check-ignored-tests.ps1`) asks the
+   harness on Windows only, so a `#[cfg_attr(target_os = "macos", ignore = "T-<NAME>: …")]` cannot
+   stand on its list today; until the gate learns a platform column such a test stays red on
+   macOS, which is why `bt-app`'s suite is not yet a `core-macos` step.
+
+A test whose subject refuses links among a path's ancestors (the uninstall door, the profile writer)
+stands under `bt_testpath::link_free_temp_dir()`: on macOS the temporary directory itself is reached
+through `/var`, a link.
 
 ### 【预防】产品代码不留占位符
 

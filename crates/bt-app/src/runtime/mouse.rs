@@ -1,6 +1,7 @@
 //! `mouse` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::PtyTarget;
 use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
@@ -211,7 +212,7 @@ impl Runtime<'_> {
                     kind,
                     tab.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
+                        .map(|leaf| profiles::identity_mark(&leaf.profile)),
                     palette,
                 );
                 // The dragged seat's own name, by id — the ghost and the
@@ -599,6 +600,7 @@ impl Runtime<'_> {
         let mut changed = menu.submenu_open != was_open;
         if !held && menu.hover != hovered {
             menu.hover = hovered;
+            menu.lit_by = profiles::LitBy::Pointer;
             changed = true;
         }
         // Resting on the heading opens the child, on the same 250ms every `⌄` in
@@ -1563,7 +1565,7 @@ impl Runtime<'_> {
         let pty = self.window.tabs[active]
             .sessions
             .get(&seat)
-            .and_then(|leaf| leaf.pty.as_ref());
+            .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target());
         write_pty_input(pty, bytes, context)
     }
 

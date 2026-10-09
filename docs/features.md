@@ -363,6 +363,19 @@ On macOS that setting names an application rather than a command, so there is no
 `folio-here` for it to run. Finder's **Open in Folio** above is the way to put a
 folder in front of a shell.
 
+## From a terminal
+
+`folio <folder>` opens a pane in that folder; `--profile <id>`, `--new-window` and
+`--tab` choose its shell and where it lands (`folio --help` lists them). A pane
+starts from your account's environment as it is now, not from the shell you typed
+the command in, so an activated Python virtual environment, a conda environment or
+a Visual Studio developer prompt does not follow it. **`folio --with-environment .`**
+opens a tab that keeps the environment of the terminal you started it from — every
+variable, laid over your account's — also when Folio is already running. The
+environment belongs to that tab: a pane split in it, a restarted shell and a duplicate
+of the tab keep it. It is never saved, so a session restored later starts from your
+account's environment again.
+
 ## Settings in one file
 
 **Settings > About** has three doors at the foot of the page.

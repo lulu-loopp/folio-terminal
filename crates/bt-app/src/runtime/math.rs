@@ -2,17 +2,16 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AnimationEntry, AnimationFillOutcome, AnswerOwner, ClipboardWriteEffect,
-    DecorationWorkerCompletion, DocumentMath, Layered, MathHoverExit, MathWorkerRequest,
-    MathWorkerResult, ModalBand, Motion, OverlayStack, PasteTarget, Popup, PreviewDocument,
-    PreviewMathArtifact, PreviewMathKey, PreviewMathPicture, PreviewSurface, PreviewTextCommand,
-    Runtime, TabState, adopt_animation_fill, answer_one_formula, answers_for,
-    dispatch_tab_decoration_tasks, document_formulas, dump_overlay_frame, first_run,
-    float_trigger_tip, foreground_program, formula_tools, ground_overlay_layers, hang_watch, i18n,
-    leaf_session_mut, marks, math_copy_window, math_em_milli, new_tab_tip, nonzero_u32, preview,
-    preview_select, preview_text_command, preview_trace, profiles, quit, rail_overlay_layer,
-    restore, retire_spent_math_copy, search, seats, settings, tooltip, trace_sink,
-    window_layout_key,
+    AnimationEntry, AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
+    Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
+    PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
+    PreviewSurface, PreviewTextCommand, Runtime, TabState, adopt_animation_fill,
+    answer_one_formula, answers_for, dispatch_tab_decoration_tasks, document_formulas,
+    dump_overlay_frame, first_run, float_trigger_tip, foreground_program, formula_tools,
+    ground_overlay_layers, hang_watch, i18n, leaf_session_mut, marks, math_copy_window,
+    math_em_milli, new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command,
+    preview_trace, profiles, quit, rail_overlay_layer, restore, retire_spent_math_copy, search,
+    seats, settings, tooltip, trace_sink, window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -86,7 +85,7 @@ impl Runtime<'_> {
                 .get(index)
                 .map(TabState::tooltip_text)
                 .unwrap_or_default(),
-            tooltip::TooltipAnchorId::NewTab => new_tab_tip(self.default_profile()),
+            tooltip::TooltipAnchorId::NewTab => new_tab_tip(&self.default_profile_id()),
             tooltip::TooltipAnchorId::NewTabMenu => i18n::Text::ChooseProfile.text().to_owned(),
             _ => String::new(),
         }
@@ -305,7 +304,7 @@ impl Runtime<'_> {
                 restore::update_card_build(
                     &layout,
                     self.window.update_card.hover(),
-                    crate::update_card::paint(self.app.update_job.state())
+                    crate::update_card::paint_of(&self.app.update_job)
                         .and_then(|paint| self.window.update_card.ring(&paint.verbs)),
                 ),
                 ModalBand::Fixed,
@@ -1294,14 +1293,7 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let mut settled = false;
         for (_, leaf) in self.window.tabs[active].leaves_mut() {
-            if leaf
-                .session
-                .live_stability_deadline()
-                .is_some_and(|deadline| now >= deadline)
-            {
-                leaf.session.advance_live_stability(now);
-                settled = true;
-            }
+            settled |= bt_compose::advance_live_stability(&mut leaf.session, now);
         }
         if !settled {
             return Ok(());
@@ -2612,15 +2604,5 @@ impl Runtime<'_> {
                 ));
             }
         }
-    }
-
-    /// Put one string on the clipboard, through the door every other copy in
-    /// this window uses.
-    pub(in crate::runtime) fn copy_text_to_clipboard(&mut self, text: &str) {
-        let _ = self.submit_clipboard_write(
-            text.to_owned(),
-            "web address copy",
-            ClipboardWriteEffect::None,
-        );
     }
 }
