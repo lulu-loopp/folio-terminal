@@ -947,7 +947,6 @@ bt-pty = { path = "../bt-pty", features = ["test-shell"] }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 winit.workspace = true
 
-
 [target.'cfg(windows)'.dependencies]
 # The web preview's engine (`src/webview.rs`). It is a thin, generated binding
 # over the WebView2 SDK's COM interfaces on top of the same `windows` 0.62 this

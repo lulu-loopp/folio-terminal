@@ -3395,7 +3395,25 @@ impl ProbeWatch {
     }
 }
 
+/// How many of the owner's rests lie between the two reads that call a silent probe suspended
+/// ([`ProbeChild::held_suspended`]): ten 20 ms looks, a fifth of a second.
+const SUSPENSION_CONFIRM_RESTS: u32 = 10;
+
 impl ProbeChild {
+    /// **Whether the probe is held suspended, read twice with `pause` between** (G-SWEEP-048
+    /// review): a security product may suspend a new process for a moment while it inspects it,
+    /// and one read that caught that moment would name another program in `diagnostics.log` for
+    /// a probe that was only slow. Only a probe suspended at both reads is held; a read that
+    /// cannot be answered is not a hold. The probe is ended either way — this decides only what
+    /// the answer says.
+    fn held_suspended(&self, pause: &mut dyn FnMut()) -> bool {
+        if !self.suspended().unwrap_or(false) {
+            return false;
+        }
+        pause();
+        self.suspended().unwrap_or(false)
+    }
+
     /// **Wait for the immediate child within `patience`** — the one owner of a probe's deadline.
     /// `rest` is how the caller waits between two looks (a worker's sleep). A probe that runs out
     /// of patience is ended with everything it started, and the answer says why
@@ -3416,7 +3434,15 @@ impl ProbeChild {
                     rest();
                     continue;
                 }
-                ProbeLook::Silent if self.suspended().unwrap_or(false) => ProbeOverdue::Suspended,
+                ProbeLook::Silent
+                    if self.held_suspended(&mut || {
+                        for _ in 0..SUSPENSION_CONFIRM_RESTS {
+                            rest();
+                        }
+                    }) =>
+                {
+                    ProbeOverdue::Suspended
+                }
                 ProbeLook::Silent => ProbeOverdue::Silent,
                 ProbeLook::OverBudget => ProbeOverdue::OverBudget,
             };
@@ -5654,6 +5680,77 @@ mod probe_child_tests {
         }
     }
 
+    /// Resume every thread of process `pid` — the harness letting go of a suspension it holds.
+    fn resume_threads_of(pid: u32) {
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+        // SAFETY: a thread snapshot; its handle moves to `OwnedHandle` at once.
+        let snapshot = unsafe {
+            OwnedHandle::from_raw_handle(
+                CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+                    .expect("a thread snapshot")
+                    .0,
+            )
+        };
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>()).expect("fits"),
+            ..THREADENTRY32::default()
+        };
+        // SAFETY: the snapshot is live; `entry` carries its own size.
+        let mut more =
+            unsafe { Thread32First(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: a thread of this test's own suspended helper; the handle is owned and
+                // closed at once.
+                unsafe {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                        .expect("open the helper's thread");
+                    let thread = OwnedHandle::from_raw_handle(thread.0);
+                    assert_ne!(ResumeThread(HANDLE(thread.as_raw_handle())), u32::MAX);
+                }
+            }
+            // SAFETY: as above.
+            more =
+                unsafe { Thread32Next(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+        }
+    }
+
+    /// RED (mutation: one sample — `held_suspended` answers its first read) — **a probe suspended
+    /// for a moment only is not called suspended** (G-SWEEP-048 review): the helper is held at
+    /// the first read and let go during the pause, so the second read finds it running and the
+    /// answer names no other program; one held through the pause is.
+    #[test]
+    fn a_probe_suspended_only_for_a_moment_is_not_held() {
+        let born = || {
+            spawn_probe_born(
+                &helper_command(),
+                HELPER_STDIO,
+                None,
+                probe_job(),
+                ProbeBirthSeam {
+                    suspended: true,
+                    ..ProbeBirthSeam::default()
+                },
+            )
+            .expect("start a suspended helper")
+        };
+        let mut held = born();
+        assert!(held.held_suspended(&mut || {}), "held through the pause");
+        held.kill().expect("end the held helper");
+        let mut moment = born();
+        let pid = moment.id();
+        assert!(
+            !moment.held_suspended(&mut || resume_threads_of(pid)),
+            "let go between the two reads"
+        );
+        moment.kill().expect("end the helper");
+        drop(moment.take_stdout());
+        drop(held.take_stdout());
+    }
     /// A probe that is running is not held suspended.
     #[test]
     fn a_running_probe_is_not_suspended() {
