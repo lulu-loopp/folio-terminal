@@ -19,18 +19,25 @@
 //! either half turns this file red rather than leaving it quietly testing a
 //! string nothing ships.
 
+#![cfg(windows)]
 #![allow(clippy::disallowed_methods)]
 
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bt_term::DualPlaneSession;
 
 fn nz(value: u32) -> std::num::NonZeroU32 {
     std::num::NonZeroU32::new(value).unwrap()
+}
+
+/// **A session of this file**, made after the test host names are installed: the shell's OSC 7
+/// report reads them (`bt_term::local_host_names`, which panics before an installation).
+fn new_session(columns: u32, rows: u32) -> DualPlaneSession {
+    bt_term::install_test_host_names();
+    DualPlaneSession::new(nz(columns), nz(rows))
 }
 
 /// What Folio puts in a Command Prompt child's environment.
@@ -41,20 +48,26 @@ fn nz(value: u32) -> std::num::NonZeroU32 {
 /// code that produces a `BEL` byte.
 const PROMPT: &str = r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$P$G";
 
-/// The product's own source, so that the copy above cannot drift away from it.
-fn shell_integration_source() -> String {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bt-app/src/shell_integration.rs");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{} is in the repository: {error}", path.display()))
+/// Whether `bt-app`'s product code in `crate::shell_integration` spells `text` — comments
+/// masked, literals kept, test items left out (`bt_source`) — so that the copy above cannot drift
+/// away from the product's own declaration.
+fn the_product_spells(text: &str) -> bool {
+    let index = bt_source::Index::of_package("bt-app");
+    let search = bt_source::Search::new(
+        bt_source::needle!(bt_source::Pattern::text(text)),
+        bt_source::View::CodeKeepingLiterals,
+    )
+    .in_scope(bt_source::Scope::Module(
+        "crate::shell_integration".to_owned(),
+    ));
+    let found = index
+        .search(&search)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    !found.in_the_product(index).is_empty()
 }
 
 fn temporary_directory() -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!("folio-cmd-{}-{unique}", std::process::id()));
+    let directory = bt_testpath::temp_path("folio-cmd");
     std::fs::create_dir(&directory).unwrap();
     directory
 }
@@ -97,14 +110,13 @@ fn session_bytes(directory: &Path, commands: &str) -> Vec<u8> {
 /// assertion below passing about a prompt no pane is ever given.
 #[test]
 fn the_prompt_this_test_runs_is_the_prompt_the_product_sets() {
-    let source = shell_integration_source();
     for piece in [
         r#"const CMD_MARKS_BEFORE_REPORT: &str = r"$e]133;D$e\";"#,
         r#"const CMD_MARKS_AFTER_REPORT: &str = r"$e]133;A$e\";"#,
         r#"const CMD_OSC7: &str = r"$e]7;file:///$P$e\";"#,
     ] {
         assert!(
-            source.contains(piece),
+            the_product_spells(piece),
             "bt-app must still declare {piece:?} — this file's copy of the prompt is stale"
         );
     }
@@ -138,7 +150,7 @@ fn command_prompt_marks_every_prompt_and_reports_its_working_directory() {
         "and neither of the two that would open a region cmd can never close: {text:?}"
     );
 
-    let mut session = DualPlaneSession::new(nz(120), nz(24));
+    let mut session = new_session(120, 24);
     session.feed(&bytes).unwrap();
     assert_eq!(
         session.working_directory(),

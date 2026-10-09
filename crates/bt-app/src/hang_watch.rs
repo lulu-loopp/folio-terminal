@@ -503,7 +503,7 @@ pub enum Station {
     FileIndex = 21,
     /// The probe and settings family — `PsReadLineProbed`,
     /// `PowerShellProfileProbed`, `CopilotProbed`, `UpdateChecked`,
-    /// `ExplorerPackageChanged`, `FontsScanned`, `SchemesChanged`,
+    /// `ExplorerPackageChanged`, `FontsScanned`, `ProgramsAnswered`, `SchemesChanged`,
     /// `StorageChanged`, `SystemPreferencesChanged`, `NotificationClicked`.
     ///
     /// **One station for nine arms**, because what they have in common is what a
@@ -1015,10 +1015,11 @@ pub enum Station {
     /// parked controller to the page's window, in place of `request_environment`,
     /// `request_controller` and a pump dispatch on the gesture's turn.
     WebAdopt = 209,
-    /// **A shell's pseudoconsole and process being made** — the join of `bt-pty-birth`, from
-    /// `create_leaf_session` (§5.3 row 11; admission door `PtyBirth`). Its own name for the day
-    /// the call is admitted (A1d): the registry's lines each name the station their meter enters,
-    /// and this one had none.
+    /// **The panes whose shells have answered, landing** — `Runtime::land_births`, at the
+    /// head of every drain: each pane's birth finished from its `bt-pty-birth` worker's answer, a
+    /// resize it missed told to it, its held input written (T-BIRTH-OFF-WINDOW). Nothing here
+    /// waits for a shell to be made; until that ticket this slot was the window thread's join of
+    /// the worker that makes it (§5.3 row 11, retired).
     PtyBirth = 210,
     /// **The quit's bounded wait for the panes being taken apart** —
     /// `bt_pty::wait_for_retirements` in `settle_quit`'s `Retire` step (§5.3 row 15; door
@@ -1277,7 +1278,7 @@ impl Station {
             Self::WebWarmup => "warm_web_engine",
             Self::WebSpare => "make_spare_web_controller",
             Self::WebAdopt => "adopt_spare_web_controller",
-            Self::PtyBirth => "join bt-pty-birth",
+            Self::PtyBirth => "land pty births",
             Self::PaneRetirementWait => "bt_pty::wait_for_retirements",
             Self::SessionWriteWait => "SessionWriter::wait_for",
             Self::SessionWriterRetire => "SessionWriter::close",
@@ -3518,11 +3519,20 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
     let mut open_report: Option<PathBuf> = None;
     // The question, bound to the thread it is about. Not called unless the
     // arithmetic has already run out of innocent explanations.
+    #[cfg(target_os = "linux")]
+    let mut ask = || crate::linux_hang_probe::ask(ANSWER_WITHIN);
+    #[cfg(not(target_os = "linux"))]
     let mut ask = move || bt_platform::hang::ask_thread_to_answer(ui_thread_id, ANSWER_WITHIN);
     // The budget lines lost as of the last one printed; the next line printed says how many more.
     let mut lost_printed = 0;
+    #[cfg(target_os = "linux")]
+    let mut trace_probe_asked = !trace_perf;
     loop {
         std::thread::sleep(WATCH_INTERVAL);
+        #[cfg(target_os = "linux")]
+        if !trace_probe_asked {
+            trace_probe_asked = !matches!(ask(), Answer::NoWindow);
+        }
         let heart = heartbeat();
         // **The other instrument, drained first and said last** (X-7): a hold
         // that ran long and then healed is exactly what the poll below is about
@@ -5065,11 +5075,7 @@ mod tests {
     /// written and the deadline expires.
     #[test]
     fn a_report_and_its_line_do_not_wait_for_the_console() {
-        let private = std::env::temp_dir().join(format!(
-            "folio-hang-stalled-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let private = bt_testpath::temp_path("folio-hang-stalled");
         let _ = std::fs::remove_dir_all(&private);
         std::fs::create_dir_all(&private).expect("a private directory for this test");
         let reports = private.join("hang-reports");
@@ -5148,11 +5154,7 @@ mod tests {
     /// person put beside its output.
     #[test]
     fn pruning_keeps_the_newest_and_touches_nothing_that_is_not_ours() {
-        let directory = std::env::temp_dir().join(format!(
-            "folio-hang-prune-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let directory = bt_testpath::temp_path("folio-hang-prune");
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a private directory for this test");
         for index in 0..5 {

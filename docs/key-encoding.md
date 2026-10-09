@@ -28,12 +28,12 @@ On Windows, a program that never asks reads the *Windows records* column instead
 | Tab | standard | SAC | off | `CSI Z` | `CSI 9;8u` | `CSI 27;8;9~` | `CSI 27;8;9~` | `CSI 9;15;0;1;26;1_CSI 9;15;0;0;26;1_` |
 | Backspace | standard | - | off | `\x7f` | `\x7f` | `\x7f` | `\x7f` | `\x7f` |
 | Backspace | standard | S | off | `\x7f` | `CSI 127;2u` | `\x7f` | `CSI 27;2;127~` | `CSI 8;14;8;1;16;1_CSI 8;14;8;0;16;1_` |
-| Backspace | standard | A | off | `\x7f` | `CSI 127;3u` | `\x7f` | `CSI 27;3;127~` | `CSI 8;14;8;1;2;1_CSI 8;14;8;0;2;1_` |
-| Backspace | standard | SA | off | `\x7f` | `CSI 127;4u` | `\x7f` | `CSI 27;4;127~` | `CSI 8;14;8;1;18;1_CSI 8;14;8;0;18;1_` |
+| Backspace | standard | A | off | `\e\x7f` | `CSI 127;3u` | `\e\x7f` | `CSI 27;3;127~` | `CSI 8;14;8;1;2;1_CSI 8;14;8;0;2;1_` |
+| Backspace | standard | SA | off | `\e\x7f` | `CSI 127;4u` | `\e\x7f` | `CSI 27;4;127~` | `CSI 8;14;8;1;18;1_CSI 8;14;8;0;18;1_` |
 | Backspace | standard | C | off | `\x7f` | `CSI 127;5u` | `\x7f` | `\x7f` | `CSI 8;14;127;1;8;1_CSI 8;14;127;0;8;1_` |
 | Backspace | standard | SC | off | `\x7f` | `CSI 127;6u` | `\x7f` | `CSI 27;6;127~` | `CSI 8;14;0;1;24;1_CSI 8;14;0;0;24;1_` |
-| Backspace | standard | AC | off | `\x7f` | `CSI 127;7u` | `\x7f` | `CSI 27;7;127~` | `CSI 8;14;0;1;10;1_CSI 8;14;0;0;10;1_` |
-| Backspace | standard | SAC | off | `\x7f` | `CSI 127;8u` | `\x7f` | `CSI 27;8;127~` | `CSI 8;14;0;1;26;1_CSI 8;14;0;0;26;1_` |
+| Backspace | standard | AC | off | `\e\x7f` | `CSI 127;7u` | `\e\x7f` | `CSI 27;7;127~` | `CSI 8;14;0;1;10;1_CSI 8;14;0;0;10;1_` |
+| Backspace | standard | SAC | off | `\e\x7f` | `CSI 127;8u` | `\e\x7f` | `CSI 27;8;127~` | `CSI 8;14;0;1;26;1_CSI 8;14;0;0;26;1_` |
 | Escape | standard | - | off | `\e` | `CSI 27u` | `\e` | `\e` | `\e` |
 | Escape | standard | S | off | `\e` | `CSI 27;2u` | `\e` | `CSI 27;2;27~` | `CSI 27;1;27;1;16;1_CSI 27;1;27;0;16;1_` |
 | Escape | standard | A | off | `\e` | `CSI 27;3u` | `CSI 27;3;27~` | `CSI 27;3;27~` | `\e` |
@@ -46,10 +46,10 @@ On Windows, a program that never asks reads the *Windows records* column instead
 | Space | standard | S | off | `\x20` | `\x20` | `\x20` | `CSI 27;2;32~` | `CSI 32;57;32;1;16;1_CSI 32;57;32;0;16;1_` |
 | Space | standard | A | off | `\e ` | `CSI 32;3u` | `CSI 27;3;32~` | `CSI 27;3;32~` | `CSI 32;57;32;1;2;1_CSI 32;57;32;0;2;1_` |
 | Space | standard | SA | off | `\e ` | `CSI 32;4u` | `CSI 27;4;32~` | `CSI 27;4;32~` | `CSI 32;57;32;1;18;1_CSI 32;57;32;0;18;1_` |
-| Space | standard | C | off | — | `CSI 32;5u` | — | `CSI 27;5;32~` | `CSI 32;57;32;1;8;1_CSI 32;57;32;0;8;1_` |
-| Space | standard | SC | off | — | `CSI 32;6u` | — | `CSI 27;6;32~` | `CSI 32;57;0;1;24;1_CSI 32;57;0;0;24;1_` |
-| Space | standard | AC | off | — | `CSI 32;7u` | `CSI 27;7;32~` | `CSI 27;7;32~` | `CSI 32;57;0;1;10;1_CSI 32;57;0;0;10;1_` |
-| Space | standard | SAC | off | — | `CSI 32;8u` | `CSI 27;8;32~` | `CSI 27;8;32~` | `CSI 32;57;0;1;26;1_CSI 32;57;0;0;26;1_` |
+| Space | standard | C | off | `\x00` | `CSI 32;5u` | `\x00` | `CSI 27;5;32~` | `CSI 32;57;32;1;8;1_CSI 32;57;32;0;8;1_` |
+| Space | standard | SC | off | `\x00` | `CSI 32;6u` | `\x00` | `CSI 27;6;32~` | `CSI 32;57;0;1;24;1_CSI 32;57;0;0;24;1_` |
+| Space | standard | AC | off | `\e\x00` | `CSI 32;7u` | `CSI 27;7;32~` | `CSI 27;7;32~` | `CSI 32;57;0;1;10;1_CSI 32;57;0;0;10;1_` |
+| Space | standard | SAC | off | `\e\x00` | `CSI 32;8u` | `CSI 27;8;32~` | `CSI 27;8;32~` | `CSI 32;57;0;1;26;1_CSI 32;57;0;0;26;1_` |
 | e | standard | - | off | `e` | `e` | `e` | `e` | `e` |
 | e | standard | S | off | `E` | `E` | `E` | `CSI 27;2;69~` | `E` |
 | e | standard | A | off | `\ee` | `CSI 101;3u` | `CSI 27;3;101~` | `CSI 27;3;101~` | `\ee` |

@@ -68,6 +68,9 @@ enum Remover {
     UpdateEntrances,
     /// macOS: this bundle's installation home beside it (`update_txn::Home`).
     UpdateHome,
+    /// The temporary folder of the update transaction this copy's journal
+    /// names (`update_trial::temp_folder`).
+    TrialFolder,
     Data(HostPlatform, Base, &'static str),
     /// The native remover's per-user folder, `Scope::remover_home`.
     Staging,
@@ -292,6 +295,16 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::RecoverySnapshots,
         writer: "shell_integration.rs:replace_profile;attention_hooks.rs:Config::land",
+    },
+    // The folder an update's trial stages in the system's temporary directory, named
+    // by its transaction (0.4.8 G7). Before the update home's row, which removes the
+    // journal on macOS that names the transaction.
+    Mark {
+        name: "Update trial folder",
+        says: Text::CleanupMarkTrialFolder,
+        kind: Kind::PerCopy,
+        remover: Remover::TrialFolder,
+        writer: "shell_integration.rs:trial_script_directory",
     },
     // The updater's two marks outside the bundle on macOS (0.4.6 U-26;
     // self-update design revision (b), §(b).3). The Windows home and entrance
@@ -560,6 +573,11 @@ struct Scope {
     launch_agents: Option<PathBuf>,
     /// macOS: this bundle's installation home, `<parent>/.<Bundle>.folio-update`.
     update_home: Option<PathBuf>,
+    /// This copy's update journal (`update_txn::Home::journal`), where this build
+    /// has an updater home.
+    journal: Option<PathBuf>,
+    /// The system's temporary directory (`Base::Temp`'s head).
+    temp: PathBuf,
     /// A private random child directory is made below this per-user root for
     /// the native remover ([`REMOVER_HOME`]). It is inside no purge root: the
     /// remover is running from it when the purge runs. In a sandbox the
@@ -703,10 +721,12 @@ impl Scope {
         } else {
             "HOME"
         })?;
+        let updater = crate::update_txn::Home::of(platform, &exe);
+        let journal = updater.as_ref().map(crate::update_txn::Home::journal);
         let (launch_agents, update_home) = if platform == HostPlatform::MacOs {
             (
                 Some(home.join("Library/LaunchAgents")),
-                crate::update_txn::Home::of(platform, &exe).map(|h| h.root().to_path_buf()),
+                updater.map(|h| h.root().to_path_buf()),
             )
         } else {
             (None, None)
@@ -739,8 +759,10 @@ impl Scope {
             purge_roots,
             launch_agents,
             update_home,
+            journal,
             remover_home,
             sandbox: sandbox.then(|| temp.clone()),
+            temp,
             lang: Lang::English,
         })
     }
@@ -1035,6 +1057,7 @@ fn execute_with_claim<T>(
             Remover::UpdateHome => {
                 entries.push(update_home(&label, scope.update_home.as_deref()));
             }
+            Remover::TrialFolder => entries.push(trial_folder(&label, scope)),
             Remover::Absent => entries.push(Entry::new(label, Fate::Absent)),
             Remover::RecoverySnapshots if purge => {
                 entries.push(Entry::new(label, Fate::Kept(Text::CleanupRecovery)));
@@ -1139,6 +1162,50 @@ fn update_home(label: &str, home: Option<&Path>) -> Entry {
         Ok(()) => Entry::new(label, Fate::Removed),
         Err(e) => Entry::new(label, Fate::Refused(Why::Other(e.to_string()))),
     }
+}
+
+/// **The update trial's folder row** (0.4.8 G7): `<temp>/folio-trial-<txn>`, where a
+/// trial of this copy's update — or a start holding its writes — stages what it
+/// may not write durably (`update_trial::temp_folder`). The transaction is the one
+/// this copy's journal names, read through the journal's one reading as
+/// [`Role::Uninstall`](crate::update_txn::Role::Uninstall), whose answer to what it
+/// cannot read whole is the header it can: any journal that names a transaction
+/// names its folder. A journal of which nothing reads names none, and the row says
+/// so with the journal's path. The folder is removed like the door's temporary data
+/// roots — its head resolved, a link inside it refused ([`prepare_tree`]) — and on
+/// both verbs, since it belongs to this copy's transaction and not to the data. A
+/// trial still running when `--uninstall` starts is the asker the door already waits
+/// for; `--uninstall-cleanup` refuses while any Folio holds the data.
+fn trial_folder(label: &str, scope: &Scope) -> Entry {
+    use crate::update_txn::Role;
+    use bt_platform::file_reads::{self, Lane};
+    let Some(journal) = scope.journal.as_deref() else {
+        return Entry::new(label, Fate::Absent);
+    };
+    let Some(seen) = Role::Uninstall.sight_of_read(file_reads::read(Lane::UpdateJournal, journal))
+    else {
+        return Entry::new(label, Fate::Absent);
+    };
+    let Some(header) = seen.acting_header() else {
+        return Entry::new(
+            format!("{label}: {}", journal.display()),
+            Fate::Kept(Text::UpdateFailedUnreadable),
+        );
+    };
+    let folder = purge_root(
+        &scope.temp,
+        Path::new(&crate::update_trial::temp_folder_name(header.txn)),
+    );
+    let fate = prepare_tree(&folder, &scope.exe).and_then(|present| {
+        if present {
+            remove_tree(&folder)?;
+        }
+        Ok(if present { Fate::Removed } else { Fate::Absent })
+    });
+    Entry::new(
+        format!("{label}: {}", folder.display()),
+        fate.unwrap_or_else(|e| Fate::Refused(Why::of(&e))),
+    )
 }
 
 /// **Every update image still mounted under the home, detached before the home

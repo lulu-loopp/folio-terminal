@@ -44,6 +44,9 @@ $repo = Split-Path -Parent $PSScriptRoot
 # or it is not part of the promise.
 $portable = @(
     "bt-source",
+    "bt-testpath",
+    "bt-effects",
+    "bt-compose",
     "bt-unicode",
     "bt-doc",
     "bt-detect",

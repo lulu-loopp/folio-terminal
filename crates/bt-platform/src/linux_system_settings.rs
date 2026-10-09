@@ -16,7 +16,7 @@ use zbus::zvariant::OwnedValue;
 use zbus::{Connection, MatchRule, Message, MessageStream};
 
 use crate::admission::WorkerCtx;
-use crate::{NativeWindow, ThreadPriority};
+use crate::{NativeWindow, SystemNews, ThreadPriority};
 
 const SETTINGS_WORKER: &str = "folio-system-settings";
 const PORTAL_SERVICE: &str = "org.freedesktop.portal.Desktop";
@@ -36,7 +36,7 @@ const CACHE_LIGHT: u64 = 3;
 const CACHE_VALUE_MASK: u64 = 0b11;
 const CACHE_GENERATION_MASK: u64 = u64::MAX >> 2;
 
-type Wake = Arc<dyn Fn() + Send + Sync + 'static>;
+type Wake = Arc<dyn Fn(SystemNews) + Send + Sync + 'static>;
 
 struct Subscriber {
     generation: u64,
@@ -93,7 +93,7 @@ impl Shared {
                             .map(|subscriber| Arc::clone(&subscriber.wake))
                             .collect();
                         for wake in wakes {
-                            wake();
+                            wake(SystemNews::Preferences);
                         }
                     }
                     return;
@@ -165,7 +165,7 @@ impl SystemSettingsWatch {
     /// backends; the portal setting belongs to the session, not a surface.
     pub fn install(
         window: NativeWindow,
-        wake: Box<dyn Fn() + Send + Sync + 'static>,
+        wake: Box<dyn Fn(SystemNews) + Send + Sync + 'static>,
     ) -> Result<Self, String> {
         subscribe(window, wake, None)
     }
@@ -173,7 +173,7 @@ impl SystemSettingsWatch {
     #[cfg(test)]
     fn install_at_address(
         window: NativeWindow,
-        wake: Box<dyn Fn() + Send + Sync + 'static>,
+        wake: Box<dyn Fn(SystemNews) + Send + Sync + 'static>,
         address: String,
     ) -> Result<Self, String> {
         subscribe(window, wake, Some(address))
@@ -182,7 +182,7 @@ impl SystemSettingsWatch {
 
 fn subscribe(
     window: NativeWindow,
-    wake: Box<dyn Fn() + Send + Sync + 'static>,
+    wake: Box<dyn Fn(SystemNews) + Send + Sync + 'static>,
     address: Option<String>,
 ) -> Result<SystemSettingsWatch, String> {
     let _ = window;
@@ -931,9 +931,10 @@ const fn cache_value_code(cache: u64) -> u64 {
 mod tests {
     use super::{
         APPEARANCE_NAMESPACE, COLOR_SCHEME_KEY, Message, MessageStream, NativeWindow,
-        PORTAL_INTERFACE, PORTAL_PATH, PORTAL_SERVICE, PortalEvent, SystemSettingsWatch,
-        appearance_signal, light_apps_for_portal_value, light_apps_from_settings, lock,
-        portal_signal_rule, shutdown_system_settings, system_uses_light_apps,
+        PORTAL_INTERFACE, PORTAL_PATH, PORTAL_SERVICE, PortalEvent, SystemNews,
+        SystemSettingsWatch, appearance_signal, light_apps_for_portal_value,
+        light_apps_from_settings, lock, portal_signal_rule, shutdown_system_settings,
+        system_uses_light_apps,
     };
     use futures_util::TryStreamExt;
     use std::collections::HashMap;
@@ -1104,10 +1105,15 @@ mod tests {
         (connection, stream)
     }
 
-    fn wait_for_wake(receiver: &mpsc::Receiver<()>, what: &str) {
-        receiver
+    fn wait_for_wake(receiver: &mpsc::Receiver<SystemNews>, what: &str) {
+        let news = receiver
             .recv()
             .unwrap_or_else(|error| panic!("{what} was not delivered: {error}"));
+        assert_eq!(
+            news,
+            SystemNews::Preferences,
+            "{what} must wake for preferences"
+        );
     }
 
     fn reap_provider() -> Result<(), String> {
@@ -1142,8 +1148,8 @@ mod tests {
         let (wake_first, first_wakes) = mpsc::channel();
         let first = SystemSettingsWatch::install_at_address(
             native_window(),
-            Box::new(move || {
-                let _ = wake_first.send(());
+            Box::new(move |news| {
+                let _ = wake_first.send(news);
             }),
             bus.address.clone(),
         )
@@ -1170,8 +1176,8 @@ mod tests {
         let (wake_second_window, second_window_wakes) = mpsc::channel();
         let second_window = SystemSettingsWatch::install_at_address(
             native_window(),
-            Box::new(move || {
-                let _ = wake_second_window.send(());
+            Box::new(move |news| {
+                let _ = wake_second_window.send(news);
             }),
             bus.address.clone(),
         )
@@ -1217,8 +1223,8 @@ mod tests {
         let (wake_second, second_wakes) = mpsc::channel();
         let second = SystemSettingsWatch::install_at_address(
             native_window(),
-            Box::new(move || {
-                let _ = wake_second.send(());
+            Box::new(move |news| {
+                let _ = wake_second.send(news);
             }),
             bus.address.clone(),
         )
@@ -1249,8 +1255,8 @@ mod tests {
         let (wake, wakes) = mpsc::channel();
         let watch = SystemSettingsWatch::install_at_address(
             native_window(),
-            Box::new(move || {
-                let _ = wake.send(());
+            Box::new(move |news| {
+                let _ = wake.send(news);
             }),
             bus.address.clone(),
         )

@@ -169,7 +169,7 @@ mod tests {
     /// red, which is the stderr line coming back with it.
     #[test]
     fn a_schemes_folder_that_is_not_there_is_not_a_line_on_stderr() {
-        let missing = std::env::temp_dir().join("folio-schemes-that-were-never-customised");
+        let missing = bt_testpath::temp_path("folio-schemes-that-were-never-customised");
         let _ = std::fs::remove_dir_all(&missing);
         #[cfg(target_os = "linux")]
         let error = {

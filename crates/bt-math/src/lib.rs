@@ -4,9 +4,10 @@
 
 use std::{collections::BTreeSet, num::NonZeroU32, sync::OnceLock, time::Duration};
 
+pub use bt_doc::math::{MathFailureStage, MathRaster, MathRenderError, MathRenderKey};
+pub use bt_doc::svg::{SvgRaster, SvgRasterError};
 pub use bt_doc::{InlineRunPlacement, MathMode};
 use mitex_spec_gen::DEFAULT_SPEC;
-use thiserror::Error;
 use typst_as_lib::{TypstEngine, typst_kit_options::TypstKitFontOptions};
 use typst_layout::PagedDocument;
 use typst_library::{
@@ -16,6 +17,8 @@ use typst_library::{
     text::{FontBook, FontInfo, FontStyle},
 };
 
+#[cfg(target_os = "linux")]
+mod linux_svg_fonts;
 mod macro_budget;
 
 /// **Test-only: make one stage of a render panic on purpose.**
@@ -294,144 +297,6 @@ pub fn key_for_em_px(
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct MathRenderKey {
-    pub dpi_milli: NonZeroU32,
-    pub font_milli_pt: NonZeroU32,
-    pub foreground_rgb: [u8; 3],
-    pub mode: MathMode,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MathRaster {
-    pub rgba: Vec<u8>,
-    pub width_px: u32,
-    pub height_px: u32,
-    pub content_height_px: u32,
-    pub ascent_px: f32,
-    pub descent_px: f32,
-    /// Math baseline measured from the top of the alpha-tight raster.
-    pub baseline_px: f32,
-    pub render_time: Duration,
-    /// For an inline composite: the runs this image actually contains, and where. Empty for a
-    /// display block and for a single-run engine raster — the compositor fills it in.
-    pub inline_runs: Vec<InlineRunPlacement>,
-}
-
-impl MathRaster {
-    pub fn resident_bytes(&self) -> usize {
-        self.rgba.len()
-    }
-}
-
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum MathRenderError {
-    #[error("worker scan found no conservative block-math match")]
-    NotDetected,
-    #[error("math source exceeds the 8 KiB block limit")]
-    SourceTooLong,
-    #[error("math source contains a disabled file or network command")]
-    UnsafeCommand,
-    #[error("math source nesting exceeds {MAX_NESTING_DEPTH}")]
-    NestingTooDeep,
-    /// The formula asked to have Typst *code* run, rather than mathematics drawn.
-    ///
-    /// **A formula is not a program, and this is the sentence that makes that true.** MiTeX has
-    /// three ways to copy source text into its output without mapping it — `\iftypst … \fi`'s body
-    /// goes through whole, `\includegraphics`'s path lands inside a Typst string literal, and
-    /// `\label`'s name lands in markup after a `<` — and Typst reads code at every one of them. A
-    /// line of text a program printed could therefore have carried a loop that never ends (the
-    /// math worker is one thread and cannot be interrupted), or one that builds content nested
-    /// past what anything downstream will survive. The formula stays as the text that was printed.
-    #[error("math source carries Typst code rather than mathematics")]
-    RawTypstCode,
-    /// The formula asked for a laid-out rectangle bigger than a formula may be.
-    ///
-    /// **The third budget, beside the bytes and the depth, and not implied by either.** An
-    /// environment with rows is laid out as a rectangle: every row is padded out to the widest one
-    /// and every cell of the result becomes an element. So a source that writes one wide row and a
-    /// column of empty ones asks for their product — `\begin{array}{l}x` with N `&` and N `\\` is
-    /// 3N+29 bytes at constant nesting and (N+1)² cells, which at the 8 KiB budget is more than
-    /// seven million. The cost is linear in cells and measured, so [`mitex::MAX_LAYOUT_CELLS`]
-    /// bounds the time and the memory of the whole formula rather than of one environment.
-    #[error(
-        "math source asks for more than {} laid-out cells",
-        mitex::MAX_LAYOUT_CELLS
-    )]
-    TooManyLayoutCells,
-    #[error("math macro definitions contain a cycle")]
-    MacroCycle,
-    #[error("math macro expansion exceeds the work limit")]
-    MacroExpansionLimit,
-    #[error("math macro definition cannot be bounded safely")]
-    UnboundedMacro,
-    #[error("math conversion could not complete")]
-    ConversionPanic,
-    /// A panic anywhere else in the render — the Typst compile, the SVG, the rasterizer.
-    ///
-    /// One formula's render is one unit of work over owned inputs, so a fault inside it is that
-    /// formula's failure and not the program's. Without this the process panic hook reached its
-    /// fatal path and took every pane down with the formula.
-    #[error("math rendering could not complete")]
-    Aborted,
-    #[error("MiTeX conversion failed: {0}")]
-    Convert(String),
-    #[error("Typst compilation failed: {0}")]
-    Compile(String),
-    #[error("Typst returned no page")]
-    NoPage,
-    #[error("SVG parsing failed: {0}")]
-    Svg(String),
-    #[error("raster dimensions are invalid or too large")]
-    InvalidDimensions,
-    #[error("inline math does not fit its terminal line box")]
-    InlineGeometry,
-    #[error("no installed font provides every requested CJK glyph")]
-    MissingCjkGlyph,
-    /// A character the formula asked to see drawn came back `.notdef` — the
-    /// page drew a blank or a box where a symbol belongs.
-    ///
-    /// This is [`Self::MissingCjkGlyph`]'s rule applied to the characters that
-    /// rule used to walk past. A formula whose minus sign is not drawn is not a
-    /// formula with a cosmetic flaw in it; it is a *different* formula, and
-    /// showing the reader the source is the only honest answer left.
-    #[error("no installed font provides a glyph for {0:?}")]
-    MissingGlyph(char),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MathFailureStage {
-    Validate,
-    Convert,
-    Compile,
-}
-
-impl MathRenderError {
-    pub fn failure_stage(&self) -> Option<MathFailureStage> {
-        match self {
-            Self::SourceTooLong
-            | Self::UnsafeCommand
-            | Self::NestingTooDeep
-            | Self::MacroCycle
-            | Self::MacroExpansionLimit
-            | Self::UnboundedMacro => Some(MathFailureStage::Validate),
-            Self::Convert(_)
-            | Self::ConversionPanic
-            | Self::RawTypstCode
-            | Self::TooManyLayoutCells => Some(MathFailureStage::Convert),
-            Self::Compile(_)
-            | Self::NoPage
-            | Self::Svg(_)
-            | Self::InvalidDimensions
-            | Self::Aborted => Some(MathFailureStage::Compile),
-            Self::NotDetected
-            | Self::InlineGeometry
-            | Self::MissingCjkGlyph
-            | Self::MissingGlyph(_) => None,
-        }
-    }
-}
-
 pub struct MathEngine {
     engine: TypstEngine<typst_as_lib::TypstTemplateMainFile>,
 }
@@ -450,7 +315,7 @@ impl MathEngine {
     /// [`convert_math`] are about *computation* rather than about reading files. A formula still
     /// may not carry code, because a loop nobody can interrupt is its own kind of harm.
     fn with_system_fonts(include_system_fonts: bool) -> Self {
-        let engine = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+        let engine = bt_effects::file_reads::opaque(bt_effects::file_reads::Lane::Fonts, || {
             TypstEngine::builder()
                 .main_file(TYPST_TEMPLATE)
                 .with_static_source_file_resolver([
@@ -486,7 +351,7 @@ impl MathEngine {
         source: &str,
         key: MathRenderKey,
     ) -> Result<MathRaster, MathRenderError> {
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         let document = self.typeset(source, key)?;
         let page = document.pages().first().ok_or(MathRenderError::NoPage)?;
         if let Some(character) = frame_undrawn_character(&page.frame) {
@@ -797,6 +662,10 @@ fn validate_source(source: &str) -> Result<(), MathRenderError> {
 /// constant rather than keeping a second copy of the number that could drift from it.
 /// `the_limit_and_the_worker_stack_are_one_pair` pins the pair.
 pub const MAX_NESTING_DEPTH: usize = mitex::MAX_TREE_DEPTH;
+
+// The two limits the error messages of `bt_doc::math` name are the limits enforced here.
+const _: () = assert!(bt_doc::math::MAX_NESTING_DEPTH == MAX_NESTING_DEPTH);
+const _: () = assert!(bt_doc::math::MAX_LAYOUT_CELLS == mitex::MAX_LAYOUT_CELLS);
 
 /// Walk a source once and refuse it past [`MAX_NESTING_DEPTH`] levels of whatever `opens` calls a
 /// level. `Some(true)` opens one, `Some(false)` closes one, `None` is neither.
@@ -1117,23 +986,6 @@ fn vertical_alpha_bounds(rgba: &[u8], width_px: u32) -> Option<(u32, u32)> {
     Some((first as u32, last as u32))
 }
 
-/// A standalone SVG document rasterized at its intrinsic size, in straight (unpremultiplied)
-/// sRGB RGBA — the same byte contract the math rasters and decoded images share.
-pub struct SvgRaster {
-    pub rgba: Vec<u8>,
-    pub width_px: u32,
-    pub height_px: u32,
-}
-
-/// The two ways an SVG payload fails, kept apart so callers can classify honestly: bytes that do
-/// not parse are simply not an SVG (an unsupported payload), while a valid document with an
-/// absurd intrinsic size is a dimensions problem.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SvgRasterError {
-    Parse(String),
-    Dimensions(String),
-}
-
 /// The base parse options every SVG this crate reads is parsed under.
 ///
 /// **An `<image href>` is not a door onto this machine.** usvg's stock string
@@ -1175,9 +1027,9 @@ fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
         // enumerating the installed faces costs of the order of a hundred
         // milliseconds, and it is paid on the lane that exists to keep tens of
         // milliseconds of typesetting off the window's thread.
-        bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+        bt_effects::file_reads::opaque(bt_effects::file_reads::Lane::Fonts, || {
             #[cfg(target_os = "linux")]
-            bt_platform::load_svg_fonts(options.fontdb_mut());
+            linux_svg_fonts::load_svg_fonts(options.fontdb_mut());
             #[cfg(not(target_os = "linux"))]
             options.fontdb_mut().load_system_fonts()
         });
@@ -1188,7 +1040,8 @@ fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
 /// Rasterize a standalone SVG document at its intrinsic size (one user unit per pixel). Serves
 /// the inline-image pipeline's SVG admission (M2 preview matrix §2: SVG displays as a static
 /// raster); this crate owns the resvg dependency, so image decoding borrows the rasterizer
-/// instead of growing its own.
+/// instead of growing its own. The terminal crate names no rasterizer: the host installs this
+/// function as its SVG codec (`bt_term::install_svg_rasterizer`).
 pub fn rasterize_svg_document(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
     let options = svg_document_options();
     let tree = resvg::usvg::Tree::from_data(bytes, options)
@@ -1684,6 +1537,44 @@ mod tests {
     fn the_limit_and_the_worker_stack_are_one_pair() {
         assert_eq!(MAX_NESTING_DEPTH, 256);
         assert_eq!(MATH_WORKER_STACK_BYTES / MAX_NESTING_DEPTH, 64 * 1024);
+    }
+
+    /// **This crate's public math data types are `bt_doc::math`'s, at the paths they always had.**
+    /// Each function takes a value by its `crate::` path and returns it as `bt_doc::math`'s type, so
+    /// this compiles only while every re-export is there and names the very same type: removing one,
+    /// or defining a second type of that name here, does not compile.
+    #[test]
+    fn the_math_data_types_are_bt_docs_at_their_old_paths() {
+        fn doc_key(value: crate::MathRenderKey) -> bt_doc::math::MathRenderKey {
+            value
+        }
+        fn doc_raster(value: crate::MathRaster) -> bt_doc::math::MathRaster {
+            value
+        }
+        fn doc_error(value: crate::MathRenderError) -> bt_doc::math::MathRenderError {
+            value
+        }
+        fn doc_stage(value: crate::MathFailureStage) -> bt_doc::math::MathFailureStage {
+            value
+        }
+        let key = key_for_em_px(26.0, [220; 3], MathMode::Display).unwrap();
+        assert_eq!(doc_key(key), key);
+        let raster = crate::MathRaster {
+            rgba: vec![255; 4],
+            width_px: 1,
+            height_px: 1,
+            content_height_px: 1,
+            ascent_px: 1.0,
+            descent_px: 0.0,
+            baseline_px: 1.0,
+            render_time: Duration::ZERO,
+            inline_runs: Vec::new(),
+        };
+        assert_eq!(doc_raster(raster.clone()), raster);
+        assert_eq!(
+            doc_error(crate::MathRenderError::NestingTooDeep).failure_stage(),
+            Some(doc_stage(crate::MathFailureStage::Validate))
+        );
     }
 
     /// A formula is refused for its *depth* and never for its length.
@@ -2800,7 +2691,7 @@ mod tests {
     /// the bytes of both files.
     #[test]
     fn an_svg_cannot_make_folio_open_a_file_it_names() {
-        let dir = std::env::temp_dir().join(format!("bt-math-svg-href-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-math-svg-href");
         std::fs::create_dir_all(&dir).unwrap();
 
         // Each file is nothing but the one colour, so a single pixel of it in

@@ -417,6 +417,32 @@ fn authority_host(authority: &str) -> Option<&str> {
     Some(host)
 }
 
+/// **Whether the host of a web address parses** — the one host-validity check, shared by the
+/// declared-link road ([`CapturedRow::trim_program_url_hyperlink_spans`]) and the address door
+/// (`webnav` in the application), so that a target the door would refuse is never shown as a
+/// program's link.
+///
+/// `authority` is what an `http`/`https` address carries between its `//` and the first `/`, `?`
+/// or `#`. Userinfo and a port are the address's and are set aside; what is left is read by the
+/// WHATWG host parser (`url::Host::parse`), the parser a browser reads it with, IDNA mapping
+/// included. So `例子.测试`, `localhost`, `127.0.0.1` and `[::1]` are hosts, and
+/// `www.glancepc.com：` is not: UTS 46 maps the full-width colon to `:`, which no domain may hold.
+pub fn web_host_parses(authority: &str) -> bool {
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, rest)| rest);
+    let host = if host_and_port.starts_with('[') {
+        host_and_port
+            .find(']')
+            .map_or(host_and_port, |close| &host_and_port[..=close])
+    } else {
+        host_and_port
+            .rsplit_once(':')
+            .map_or(host_and_port, |(host, _)| host)
+    };
+    url::Host::parse(host).is_ok()
+}
+
 fn valid_port(port: &str) -> bool {
     !port.is_empty()
         && port.bytes().all(|byte| byte.is_ascii_digit())
@@ -1001,6 +1027,23 @@ impl CapturedRow {
                 first = end;
                 continue;
             };
+            // **A declared web target whose host does not parse is no declaration** (owner
+            // ruling 2026-10-06). An autolinker that trims only ASCII punctuation declares
+            // `http://www.glancepc.com：` for the text `http://www.glancepc.com：`; the address
+            // door would refuse that target, so the span is handed back as plain text and the
+            // recogniser reads it — the visible address becomes the link and the full-width mark
+            // stays prose.
+            let after_scheme = &uri[scheme_len..];
+            let authority = &after_scheme[..after_scheme
+                .find(['/', '?', '#'])
+                .unwrap_or(after_scheme.len())];
+            if !web_host_parses(authority) {
+                for cell in &mut self.cells[first..end] {
+                    cell.hyperlink = None;
+                }
+                first = end;
+                continue;
+            }
             let matched_prefix = if span_starts_with(&self.cells[first..end], uri) {
                 uri
             } else if scheme_len < uri.len()
@@ -1989,6 +2032,70 @@ mod tests {
     fn osc_8_url_keeps_a_program_chosen_label() {
         for label in ["文档", "[1]", "English 中文", "https://other.test/a。文档"] {
             assert_osc_8_span(label, "https://x.test/a", label);
+        }
+    }
+
+    /// RED (F-SWEEP-2-048) — **a declared web target whose host does not parse is no
+    /// declaration**: every cell of the span is handed back as plain text, label and all, so the
+    /// recogniser reads it.
+    ///
+    /// MUTATION: trust every declaration (drop the `web_host_parses` arm in
+    /// `trim_program_url_hyperlink_spans`) and the first rows keep a link to a target with a
+    /// full-width colon in its host.
+    #[test]
+    fn a_declared_target_whose_host_does_not_parse_is_no_declaration() {
+        for (label, target) in [
+            ("http://www.glancepc.com：", "http://www.glancepc.com："),
+            ("http://www.glancepc.com：官网", "http://www.glancepc.com："),
+            ("官网", "https://例子.测试：/文档"),
+            ("https://a b.test/", "https://a b.test/"),
+        ] {
+            let row = osc_8_row(label, target);
+            assert!(
+                row.cells.iter().all(|cell| cell.hyperlink.is_none()),
+                "{label:?} declared {target:?}, whose host does not parse"
+            );
+        }
+    }
+
+    /// RED (F-SWEEP-2-048) — **a declared target with a host keeps its declaration**, exactly as
+    /// before: a program-chosen label, an internationalised host, a port, a loopback address.
+    ///
+    /// MUTATION: refuse every non-ASCII host in `web_host_parses` and the IDN rows go red.
+    #[test]
+    fn a_declared_target_whose_host_parses_is_kept() {
+        for (label, target) in [
+            ("官网", "http://www.glancepc.com/"),
+            ("https://例子.测试/文档", "https://例子.测试/文档"),
+            ("文档", "https://例子.测试/文档"),
+            ("http://localhost:5173/", "http://localhost:5173/"),
+            ("[::1]", "http://[::1]:8080/"),
+        ] {
+            assert_osc_8_span(label, target, label);
+        }
+    }
+
+    /// RED (F-SWEEP-2-048) — **the one host check reads a host the way a browser does.**
+    ///
+    /// MUTATION: return `true` for any non-empty host and the full-width colon passes; read the
+    /// whole authority without setting the port aside and `localhost:5173` fails.
+    #[test]
+    fn the_host_check_reads_a_host_the_way_a_browser_does() {
+        for (authority, parses) in [
+            ("www.glancepc.com", true),
+            ("www.glancepc.com：", false),
+            ("www.glancepc.com。", true),
+            ("例子.测试", true),
+            ("例子.测试：8080", false),
+            ("localhost:5173", true),
+            ("127.0.0.1", true),
+            ("[::1]:8080", true),
+            ("user@example.com", true),
+            ("a b.test", false),
+            ("[::1", false),
+            ("", false),
+        ] {
+            assert_eq!(web_host_parses(authority), parses, "{authority:?}");
         }
     }
 

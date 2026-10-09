@@ -1,0 +1,23 @@
+[package]
+name = "bt-effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# **The effect vocabulary every layer shares** (`src/lib.rs`): which kind of thread
+# this is and whether the window thread may wait here now (`admission`), and the
+# process-wide file-read ledger (`file_reads`). Standard library code with no
+# platform `cfg`; it depends on no first-party crate, so the crates that name the
+# vocabulary in their own APIs (`bt-render`'s `WaitToken`) or charge the ledger
+# (`bt-math`, `bt-term`) need no edge to `bt-platform`. `bt-platform` re-exports
+# both modules and keeps the thread door, which sets a platform scheduling band.
+[dependencies]
+# `admission`'s meter is handed the instants around an admitted call; on every
+# native target `web_time::Instant` is `std::time::Instant`, and in a browser it
+# reads `performance.now()` (the clock guard, gate G3).
+web-time.workspace = true
+
+[lints]
+workspace = true

@@ -1829,7 +1829,7 @@ mod tests {
 
     #[test]
     fn a_real_directory_reads_sorted_and_without_the_platforms_hidden_names() {
-        let dir = std::env::temp_dir().join(format!("bt-files-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-files");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("b.txt"), b"b").unwrap();
@@ -1860,7 +1860,7 @@ mod tests {
         const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
         const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 
-        let dir = std::env::temp_dir().join(format!("bt-files-hidden-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-files-hidden");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("visible.txt"), b"v").unwrap();
@@ -1913,7 +1913,7 @@ mod tests {
     /// back to the directory's own size.
     #[test]
     fn a_directory_far_past_the_cap_is_read_at_the_cap() {
-        let dir = std::env::temp_dir().join(format!("bt-files-many-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-files-many");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Ten thousand names, written so that sort order and creation order
@@ -1947,7 +1947,7 @@ mod tests {
 
     #[test]
     fn a_directory_that_is_not_there_faults_rather_than_reads_empty() {
-        let missing = std::env::temp_dir().join("bt-files-no-such-directory-ever");
+        let missing = bt_testpath::temp_path("bt-files-no-such-directory-ever");
         let _ = std::fs::remove_dir_all(&missing);
         assert_eq!(
             read_directory(&missing),
@@ -2663,11 +2663,7 @@ mod tests {
     /// assertion goes red with `notes` standing where `notes.` was asked for.
     #[test]
     fn the_names_this_judge_admits_are_the_names_the_disk_keeps() {
-        let folder = std::env::temp_dir().join(format!(
-            "folio-new-name-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let folder = bt_testpath::temp_path("folio-new-name");
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).expect("a temp folder can be made");
 

@@ -15,8 +15,10 @@
 //!    holds nothing; the mover finds such copies by listing processes.
 //! 2. **One look at the journal.** One attempt to read `H\journal.json`; no
 //!    journal is the whole of an ordinary start's cost.
-//! 3. **The frozen header only** (`update_txn::Header::parse`), and the
-//!    ordinary start's rule (`update_txn::at_start`):
+//! 3. **The header it acts on** (`update_txn::sight`, `Sight::acting_header`:
+//!    the frozen header, or for a header this build cannot read the
+//!    envelope's transaction and rescue build as `destructive` with nothing
+//!    decided), and the ordinary start's rule (`update_txn::at_start`):
 //!    - `terminal` → the entrance (on Windows its `Run` value, removed and
 //!      flushed through `bt_platform::logon_hook`, U-22), then on macOS any
 //!      image still mounted under `H/<txn>` (detached on a worker of its own,
@@ -33,10 +35,12 @@
 //!      start as R (U-29b: recovery runs whatever build can run it) — and only
 //!      when that cannot be started either does the start continue, with one
 //!      line and the *Update incomplete.* card; elsewhere a missing rescue
-//!      build is named in one line and the start continues untouched
-//!      (coordinator ruling, 2026-09-27) — except over U-35's
-//!      `TrialStarting`, where it continues as that transaction's reserved
-//!      trial, its writes held (U-35 round 2);
+//!      build is named in one line and the start continues with its writes
+//!      held for the life of the process ([`is_held`]; 0.4.8 E1, the owner's
+//!      ruling E5), with that card and its sentence that this session's
+//!      changes are not kept — except over U-35's `TrialStarting`, where it
+//!      continues as that transaction's reserved trial, its writes held
+//!      (U-35 round 2);
 //!    - `TrialStarting` (U-35) and this start names its reserved trial —
 //!      `--update-trial` with that exact nonce, with or without
 //!      `--update-failed` → run as that trial; any other nonce is no trial of
@@ -59,9 +63,13 @@
 //!      job's pass sweeps, counts, resumes or discards it on its worker
 //!      (`update_job::Job::after_start`, U-33) — the start itself never does.
 //!
-//! A journal this build cannot read, a lock somebody else holds, and a file
-//! that cannot be measured all leave everything as it is and continue.
-//! **Nothing durable is written by an ordinary start except a retirement.**
+//! **A journal this build cannot read whole** (0.4.8 E1) is acted on by its
+//! header alone, as above, and its cards are a newer Folio's
+//! (`update_job::Failure::Newer`); one of which not even the envelope reads is
+//! left as it is, and the start continues with the card that says its record
+//! cannot be read. A lock somebody else holds, and a file that cannot be
+//! measured, leave everything as it is and continue. **Nothing durable is
+//! written by an ordinary start except a retirement.**
 //!
 //! # Where it runs, and its doors
 //!
@@ -84,8 +92,9 @@ use bt_platform::install_txn::{self, Held, Hold};
 use crate::cli;
 use crate::update_job::Failure;
 use crate::update_txn::{
-    AfterRollback, Class, Digest, Effect, Header, Home, Journal, JournalRead, Nonce, StartAction,
-    StartView, TxnId, after_rollback, at_start, rolled_back_untried,
+    AfterRollback, Class, Clearing, Digest, Header, Home, JournalRead, Nonce, Outcome, Phase,
+    Removal, Role, Sight, StartAction, StartView, TxnId, after_rollback, at_start,
+    rolled_back_untried,
 };
 
 /// **The pass has run.** Only [`pass`] makes one, and `launch_wire::hand_over`
@@ -116,6 +125,25 @@ static TRIAL: OnceLock<Trial> = OnceLock::new();
 /// (`update_apply::commit_last_trial`). Set only by [`pass`], with [`TRIAL`].
 static LAST_TRIAL: OnceLock<()> = OnceLock::new();
 
+/// **This process continues past a transaction its rescue build could not
+/// take, with its writes held** (0.4.8 E1, the owner's ruling E5): the
+/// transaction, set only by [`pass`]. The trial's gate holds every durable
+/// write of such a process and never releases one (`update_trial::defer`).
+static HELD: OnceLock<TxnId> = OnceLock::new();
+
+/// **This start stands in for U-35's reserved trial** (0.4.8 E3): a
+/// person's start that [`pass`] continued as that trial because no rescue
+/// build could be started, with [`TRIAL`] and [`LAST_TRIAL`]. Which of the two
+/// processes that may then both be admitted as that trial is it, is the data
+/// directory's claim's to say (`update_trial::take_the_claim`).
+static STAND_IN: OnceLock<()> = OnceLock::new();
+
+/// **This stand-in found the reserved trial already running and stood down**
+/// (0.4.8 E3, [`stand_down`]): it is no trial from here — no watch, no
+/// receipt, no commit — and continues with its writes held for the life of
+/// the process, as a held start does ([`is_held`]).
+static STOOD_DOWN: OnceLock<()> = OnceLock::new();
+
 /// What [`TRIAL`] holds.
 struct Trial {
     txn: TxnId,
@@ -145,25 +173,83 @@ pub(crate) fn waiting() -> Option<Home> {
 /// `rolled_back` — the job starts at `Failed` with it
 /// (`update_job::Job::after_rollback`). `None` for every other start.
 pub(crate) fn failed() -> Option<Failure> {
+    if stood_down() {
+        return trial_home_as_set().map(|home| Failure::BesideTheTrial {
+            folder: home.root().to_path_buf(),
+        });
+    }
     FAILED.get().cloned()
 }
 
 /// **Whether this start is an update's trial, and its nonce** — the fact the
 /// trial's write gate and its receipt read (`update_trial`, U-13).
 pub(crate) fn trial() -> Option<(TxnId, Nonce)> {
-    TRIAL.get().map(|trial| (trial.txn, trial.nonce))
+    TRIAL
+        .get()
+        .filter(|_| !stood_down())
+        .map(|trial| (trial.txn, trial.nonce))
 }
 
 /// **The installation home of this start's trial**: where its journal is read
 /// and its receipt written (`update_trial`, U-13). `None` exactly when
 /// [`trial`] is.
 pub(crate) fn trial_home() -> Option<&'static Home> {
+    trial_home_as_set().filter(|_| !stood_down())
+}
+
+/// [`TRIAL`]'s home as [`pass`] set it, stood down or not.
+fn trial_home_as_set() -> Option<&'static Home> {
     TRIAL.get().map(|trial| &trial.home)
 }
 
 /// Whether this start is U-35's reserved trial ([`LAST_TRIAL`]).
 pub(crate) fn is_last_trial() -> bool {
-    LAST_TRIAL.get().is_some()
+    LAST_TRIAL.get().is_some() && !stood_down()
+}
+
+/// **Whether this start continues with its writes held** ([`HELD`], or a
+/// stand-in that stood down, [`STOOD_DOWN`]): every durable write is held back
+/// for the life of the process, as a trial's are before its commit, and none
+/// is ever released.
+pub(crate) fn is_held() -> bool {
+    HELD.get().is_some() || stood_down()
+}
+
+/// The transaction a held start continued past ([`is_held`]).
+pub(crate) fn held() -> Option<TxnId> {
+    HELD.get()
+        .copied()
+        .or_else(|| TRIAL.get().filter(|_| stood_down()).map(|trial| trial.txn))
+}
+
+/// **Whether this start stands in for U-35's reserved trial** and has not
+/// stood down ([`STAND_IN`]).
+pub(crate) fn stands_in() -> bool {
+    STAND_IN.get().is_some() && !stood_down()
+}
+
+/// Whether this stand-in stood down ([`STOOD_DOWN`]).
+fn stood_down() -> bool {
+    STOOD_DOWN.get().is_some()
+}
+
+/// **This stand-in stands down** (0.4.8 E3): the reserved trial already holds
+/// the data directory's claim and did not take this launch within the claim's
+/// wait (`update_trial::take_the_claim`). From here this process is no trial
+/// ([`trial`] is `None`), its writes are held for its life ([`is_held`]), and
+/// its card says the update did not finish and that this session's changes are
+/// not kept (`Failure::BesideTheTrial`). Answers whether this call stood it
+/// down: only a stand-in can, once.
+pub(crate) fn stand_down() -> bool {
+    stands_in() && STOOD_DOWN.set(()).is_ok()
+}
+
+/// **Make this test process a held start** — what [`pass`] records when a
+/// rescue build could not be started, for a test that runs a start's writers
+/// in a process of its own (`update_trial`'s tests). Once per process.
+#[cfg(test)]
+pub(crate) fn become_held(txn: TxnId) -> bool {
+    HELD.set(txn).is_ok()
 }
 
 /// **Make this test process an update's trial** — what [`pass`] records when
@@ -173,6 +259,19 @@ pub(crate) fn is_last_trial() -> bool {
 #[cfg(test)]
 pub(crate) fn become_trial(txn: TxnId, nonce: Nonce, home: Home) -> bool {
     TRIAL.set(Trial { txn, nonce, home }).is_ok()
+}
+
+/// **Make this test process a person's start standing in for U-35's reserved
+/// trial** — what [`pass`] records when no rescue build could be started over
+/// `TrialStarting` ([`STAND_IN`]), for a test that runs it in a process of its
+/// own (`update_trial`'s tests). Once per process.
+#[cfg(test)]
+pub(crate) fn become_stand_in(txn: TxnId, nonce: Nonce, home: Home) -> bool {
+    let folder = home.root().to_path_buf();
+    TRIAL.set(Trial { txn, nonce, home }).is_ok()
+        && LAST_TRIAL.set(()).is_ok()
+        && STAND_IN.set(()).is_ok()
+        && FAILED.set(Failure::TrialIncomplete { folder }).is_ok()
 }
 
 /// **The start's effects that are not files in the home**: its one line, the
@@ -210,6 +309,11 @@ pub(crate) struct Start<'a> {
     pub(crate) argv: &'a [OsString],
     pub(crate) trial: Option<&'a cli::UpdateTrialArg>,
     pub(crate) failed: Option<&'a Path>,
+    /// **The operating system's refusal of a journal write that outlasted its
+    /// holder's window** (`--update-journal-held`, 0.4.8 E4): the lock holder
+    /// that started this build with `--update-failed` names it, and the card
+    /// says it.
+    pub(crate) journal_held: Option<&'a str>,
 }
 
 /// What the pass decided.
@@ -223,7 +327,16 @@ pub(crate) enum Verdict {
         trial: Option<(TxnId, Nonce)>,
         last_trial: bool,
         failed: Option<Failure>,
-        waiting: Option<Home>,
+        /// Boxed: the home is the variant's largest field, and `Exit` is an
+        /// exit code.
+        waiting: Option<Box<Home>>,
+        /// The transaction this start continues past with its writes held
+        /// ([`is_held`]): its rescue build could not be started.
+        held: Option<TxnId>,
+        /// **This start stands in for U-35's reserved trial** — a person's
+        /// start continued as that trial because no rescue build could be
+        /// started ([`stands_in`]); `trial` and `last_trial` say which.
+        stands_in: bool,
     },
     /// Leave now, with this exit code: the rescue build has this start.
     Exit(i32),
@@ -246,6 +359,7 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
         argv: &argv,
         trial: request.update_trial.as_ref(),
         failed: request.update_failed.as_deref(),
+        journal_held: request.update_journal_held.as_deref(),
     };
     match run(&start, &mut Machine) {
         Verdict::Exit(code) => bt_platform::leave_process(code),
@@ -255,17 +369,25 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
             last_trial,
             failed,
             waiting,
+            held,
+            stands_in,
         } => {
             if let Some(held) = admission {
                 let _ = ADMISSION.set(held);
             }
+            if let Some(txn) = held {
+                let _ = HELD.set(txn);
+            }
             if let Some(home) = waiting {
-                let _ = WAITING.set(home);
+                let _ = WAITING.set(*home);
             }
             if let Some((txn, nonce)) = trial {
                 let _ = TRIAL.set(Trial { txn, nonce, home });
                 if last_trial {
                     let _ = LAST_TRIAL.set(());
+                }
+                if stands_in {
+                    let _ = STAND_IN.set(());
                 }
             }
             if let Some(failure) = failed {
@@ -280,59 +402,57 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
 pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     let admission = admit(start.home, world);
     let journal_path = start.home.journal();
-    let mut untried = false;
-    let mut trial_starting = None;
-    let journal = match file_reads::read(Lane::Install, &journal_path) {
-        Ok(bytes) => match Header::parse(&bytes) {
-            Ok(header) => {
-                if start.failed.is_some() {
-                    untried = rolled_back_untried(&bytes);
-                }
-                // Read whatever words this start carries (U-35 round 2, the
-                // review's m2): the reservation decides admission, not the
-                // card's word.
-                trial_starting = Journal::parse(&bytes).ok().and_then(|journal| {
-                    journal
-                        .body
-                        .phase
-                        .reserved_trial()
-                        .map(|nonce| (journal.txn, nonce))
-                });
-                JournalRead::Read(header)
-            }
-            Err(refusal) => {
-                world.say(&format!(
-                    "BT_UPDATE_START {} is left as it is: {refusal}",
-                    journal_path.display()
-                ));
-                JournalRead::Unreadable(refusal)
-            }
-        },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => JournalRead::Absent,
-        Err(error) => {
-            world.say(&format!(
-                "BT_UPDATE_START {} could not be read: {error}",
-                journal_path.display()
-            ));
-            return Verdict::Continue {
-                admission,
-                trial: None,
-                last_trial: false,
-                failed: None,
-                waiting: None,
-            };
-        }
-    };
-    let JournalRead::Read(header) = &journal else {
+    // A journal that could not be read is never taken for none (E1 round
+    // 2): it is unreadable, with the card that says so.
+    let Some(seen) = Role::Start.sight_of_read(file_reads::read(Lane::Install, &journal_path))
+    else {
         return Verdict::Continue {
             admission,
             trial: None,
             last_trial: false,
             failed: None,
             waiting: None,
+            held: None,
+            stands_in: false,
         };
     };
-    let header = header.clone();
+    // Nothing of the journal reads, not even the transaction or its rescue
+    // build: it is left exactly as it is, and the card says so (E1).
+    let Some(header) = seen.acting_header() else {
+        world.say(&format!(
+            "BT_UPDATE_START {} is left as it is: {}",
+            journal_path.display(),
+            seen.said(Role::Start)
+        ));
+        return Verdict::Continue {
+            admission,
+            trial: None,
+            last_trial: false,
+            failed: Some(unfinished(&seen, start.home, false)),
+            waiting: None,
+            held: None,
+            stands_in: false,
+        };
+    };
+    if !matches!(seen, Sight::Known(_)) {
+        world.say(&format!(
+            "BT_UPDATE_START {}: {}",
+            journal_path.display(),
+            seen.said(Role::Start)
+        ));
+    }
+    let untried = start.failed.is_some() && rolled_back_untried(&seen);
+    // Read whatever words this start carries (U-35 round 2, the review's m2):
+    // the reservation decides admission, not the card's word.
+    let trial_starting = match &seen {
+        Sight::Known(journal) => journal
+            .body
+            .phase
+            .reserved_trial()
+            .map(|nonce| (journal.txn, nonce)),
+        Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_) => None,
+    };
+    let journal = JournalRead::Read(header.clone());
     let trial = trial_of(start.trial, world);
     let is_last_trial = trial
         .zip(trial_starting)
@@ -349,18 +469,36 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     // from. The word's value is not read (U-32, U-29's open point 6): the
     // card is this home's header, so the folder it names is this home's —
     // the folder of the journal just read — whatever path the word carried.
+    //
+    // One heading per cause (0.4.8 E4), from the journal's facts, never from
+    // timing: over a destructive journal, a start that is itself a trial of
+    // the transaction is the new version running now (`TrialIncomplete`:
+    // U-35's reserved trial, or the trial an exit guard starts over a live new
+    // set); any other start reads whether a trial was ever begun
+    // ([`unfinished`]). A hold of the journal that outlasted its holder's
+    // window, named on the command line by that holder, is said over
+    // whichever of them the journal shows.
+    // Over a journal this build cannot read whole the card stays E1's (an
+    // unfinished update by a newer Folio): its facts are not this build's to read.
+    let is_the_trial =
+        matches!(seen, Sight::Known(_)) && trial_for_view.is_some_and(|(txn, _)| txn == header.txn);
     let failed = start
         .failed
         .and_then(|_| after_rollback(&header))
         .map(|after| match after {
             AfterRollback::Restored if untried => Failure::Interrupted,
             AfterRollback::Restored => Failure::RolledBack,
-            AfterRollback::Incomplete if is_last_trial => Failure::TrialIncomplete {
+            AfterRollback::Incomplete if is_the_trial => Failure::TrialIncomplete {
                 folder: start.home.root().to_path_buf(),
             },
-            AfterRollback::Incomplete => Failure::Incomplete {
-                folder: Some(start.home.root().to_path_buf()),
+            AfterRollback::Incomplete => unfinished(&seen, start.home, false),
+        })
+        .map(|failure| match start.journal_held {
+            Some(error) => Failure::JournalHeld {
+                error: error.to_owned(),
+                then: Box::new(failure),
             },
+            None => failure,
         });
     // The transaction lock is asked for only where its answer decides
     // something: a retirement or a discard needs it; a destructive class is
@@ -386,8 +524,8 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     };
     // The start's lock is let go before the job owner asks for it: a
     // transaction continued past is the job's, at this launch (U-33).
-    let waiting =
-        matches!(header.class, Class::Preparing | Class::Deferred).then(|| start.home.clone());
+    let waiting = matches!(header.class, Class::Preparing | Class::Deferred)
+        .then(|| Box::new(start.home.clone()));
     match at_start(&view) {
         StartAction::Continue => Verdict::Continue {
             admission,
@@ -395,6 +533,8 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             last_trial: false,
             failed,
             waiting,
+            held: None,
+            stands_in: false,
         },
         StartAction::RunAsTrial => Verdict::Continue {
             admission,
@@ -402,8 +542,19 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             last_trial: is_last_trial,
             failed,
             waiting: None,
+            held: None,
+            stands_in: false,
         },
         action @ (StartAction::Retire | StartAction::Discard) => {
+            // Read by the start that retires the transaction, before the
+            // retirement removes its folder: once, never by a start that
+            // leaves it to a lock holder.
+            let failed = match action {
+                StartAction::Retire => {
+                    failed.or_else(|| changes_not_kept(&seen, start.home, world))
+                }
+                _ => failed,
+            };
             retire(action, &header, start.home, lock, world);
             Verdict::Continue {
                 admission,
@@ -411,10 +562,79 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
                 last_trial: false,
                 failed,
                 waiting: None,
+                held: None,
+                stands_in: false,
             }
         }
         StartAction::HandToRescue => {
-            hand_to_rescue(start, &header, trial_starting, admission, world)
+            hand_to_rescue(start, &header, &seen, trial_starting, admission, world)
+        }
+    }
+}
+
+/// **The card of a transaction this start continues past unfinished**, with
+/// `home`'s folder: *Update incomplete.* over a journal this build reads
+/// whole — under the heading that says the update stopped before the new
+/// version started when the journal records no trial ever begun (0.4.8 E4,
+/// R7) — and over one it does not, the card that says a newer Folio's
+/// update is not finished — or, when no later build is named, that the
+/// update's record cannot be read (E1). `held`: this session's changes are
+/// not kept (the held-writes continue, [`hand_to_rescue`]).
+fn unfinished(seen: &Sight, home: &Home, held: bool) -> Failure {
+    let folder = Some(home.root().to_path_buf());
+    match seen {
+        Sight::Known(journal) => Failure::Incomplete {
+            folder,
+            held,
+            untried: !journal.body.phase.trial_begun(),
+        },
+        Sight::Header { .. } | Sight::Envelope { .. } | Sight::Unreadable(_) => Failure::Newer {
+            folder,
+            version: seen.newer().map(str::to_owned),
+            held,
+        },
+    }
+}
+
+/// **The card of a transaction committed after its trial ended holding a
+/// person's change** (0.4.8 E4, R3): the journal is retired `committed` and
+/// the transaction's folder holds the trial's mark (`Home::unkept`,
+/// `update_trial`), read by the start that retires it, before the retirement
+/// removes the folder. `None` for every other journal, and when the mark
+/// cannot be read.
+fn changes_not_kept(seen: &Sight, home: &Home, world: &mut impl World) -> Option<Failure> {
+    let Sight::Known(journal) = seen else {
+        return None;
+    };
+    if !matches!(
+        journal.body.phase,
+        Phase::Retired {
+            outcome: Outcome::Committed,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let mark = home.unkept(journal.txn);
+    match file_reads::read(Lane::Install, &mark) {
+        Ok(_) => {
+            world.say(&format!(
+                "BT_UPDATE_START transaction {} was committed after its trial ended; {} says the trial's changes were not kept",
+                journal.txn,
+                mark.display()
+            ));
+            Some(Failure::ChangesNotKept {
+                version: crate::version::VERSION.to_owned(),
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            world.say(&format!(
+                "BT_UPDATE_START transaction {}: {} could not be read ({error}); no card",
+                journal.txn,
+                mark.display()
+            ));
+            None
         }
     }
 }
@@ -466,8 +686,8 @@ fn image(program: &Path) -> Option<Digest> {
     Some(Digest::new(bt_winres::digest::sha256(&bytes)))
 }
 
-/// A retirement or a discard: the action's effects, in the protocol's order,
-/// stopping at the first that fails — the journal is removed only once
+/// A retirement or a discard: the action's steps ([`StartAction::steps`]), in
+/// the protocol's order, stopping at the first that fails — the journal is removed only once
 /// `H\<txn>` is gone, so a start that is stopped halfway leaves a journal that
 /// still names what is left (U-10, "journal deleted last").
 ///
@@ -475,7 +695,7 @@ fn image(program: &Path) -> Option<Digest> {
 /// deleted** (U-17's debt 7, the coordinator's ruling in U-27): a read-only
 /// volume inside the folder would stop the deletion halfway and keep the
 /// transaction for ever. The mount table is read here, which waits on nothing;
-/// when it lists a mount, the detach and every effect after it — holding the
+/// when it lists a mount, the detach and every step after it — holding the
 /// transaction lock — go to a worker ([`World::on_a_worker`]), because a
 /// detach waits on `hdiutil` and this is the window thread. The start goes on
 /// without waiting for it.
@@ -486,22 +706,33 @@ fn retire(
     mut lock: Option<Held>,
     world: &mut impl World,
 ) {
-    let effects = action.effects();
+    let steps = action.steps();
+    let kept = |failure: String| {
+        format!(
+            "BT_UPDATE_START transaction {} is kept for the next start: {failure}",
+            header.txn
+        )
+    };
+    if steps.remove_entrance
+        && let Err(failure) = world.retire_entrance(header.txn)
+    {
+        world.say(&kept(failure));
+        return;
+    }
     let folder = home.transaction(header.txn);
-    for (at, effect) in effects.iter().enumerate() {
-        let done = match effect {
-            Effect::RemoveEntrance => world.retire_entrance(header.txn),
-            Effect::DetachMount => match world.mounts_under(&folder) {
+    for (at, step) in steps.clearing.iter().enumerate() {
+        let done = match step {
+            Clearing::DetachMount => match world.mounts_under(&folder) {
                 Ok(points) if points.is_empty() => Ok(()),
                 Ok(_) => {
-                    let rest = effects[at..].to_vec();
+                    let rest = steps.clearing[at..].to_vec();
                     let (txn, home, held) = (header.txn, home.clone(), lock.take());
                     let job: OffThread = Box::new(move |worker| {
-                        // The lock goes with the effects it guards, and is
+                        // The lock goes with the steps it guards, and is
                         // let go when they are done.
                         let _held = held;
-                        for effect in rest {
-                            perform(worker, effect, txn, &home).map_err(|failure| {
+                        for step in rest {
+                            perform(worker, step, txn, &home).map_err(|failure| {
                                 format!(
                                     "BT_UPDATE_START transaction {txn} is kept for the next start: {failure}"
                                 )
@@ -516,50 +747,45 @@ fn retire(
                 }
                 Err(error) => Err(error),
             },
-            Effect::DeleteTxnDir | Effect::DeleteJournal => {
-                delete(*effect, header.txn, home).map_err(|failure| failure.to_string())
+            Clearing::Delete(removal) => {
+                delete(*removal, header.txn, home).map_err(|failure| failure.to_string())
             }
-            other => unreachable!("a start's action has no {other:?}"),
         };
         if let Err(failure) = done {
-            world.say(&format!(
-                "BT_UPDATE_START transaction {} is kept for the next start: {failure}",
-                header.txn
-            ));
+            world.say(&kept(failure));
             return;
         }
     }
 }
 
-/// One of a retirement's effects on a worker: the detach of every image under
+/// One of a retirement's steps on a worker: the detach of every image under
 /// `H/<txn>` (`bt_platform::macos_update::detach_all_under`), or a deletion.
 fn perform(
     worker: &bt_platform::admission::WorkerCtx,
-    effect: Effect,
+    step: Clearing,
     txn: TxnId,
     home: &Home,
 ) -> Result<(), String> {
-    match effect {
-        Effect::DetachMount => {
+    match step {
+        Clearing::DetachMount => {
             bt_platform::macos_update::detach_all_under(worker, &home.transaction(txn))
                 .map_err(|refusal| refusal.to_string())
         }
-        Effect::DeleteTxnDir | Effect::DeleteJournal => {
-            delete(effect, txn, home).map_err(|failure| failure.to_string())
+        Clearing::Delete(removal) => {
+            delete(removal, txn, home).map_err(|failure| failure.to_string())
         }
-        other => unreachable!("a start's action has no {other:?} after its detach"),
     }
 }
 
 /// `H\<txn>` or the journal, removed durably.
-fn delete(effect: Effect, txn: TxnId, home: &Home) -> Result<(), install_txn::Failure> {
-    match effect {
-        Effect::DeleteTxnDir => {
+fn delete(removal: Removal, txn: TxnId, home: &Home) -> Result<(), install_txn::Failure> {
+    match removal {
+        Removal::TxnDir => {
             install_txn::durable_remove(&home.transaction(txn))?;
             crate::shell_integration::remove_trial_script(txn);
             Ok(())
         }
-        _ => install_txn::durable_remove(&home.journal()),
+        Removal::Journal => install_txn::durable_remove(&home.journal()),
     }
 }
 
@@ -571,22 +797,31 @@ fn delete(effect: Effect, txn: TxnId, home: &Home) -> Result<(), install_txn::Fa
 /// own program runs the recovery instead (U-29b: the recovery door takes the
 /// home from the line, and the installed build is a build of the same
 /// publisher), so every phase is still finished and exactly one start
-/// follows. Where that cannot be started either — or on Windows, until U-24 —
-/// one line names the program and the transaction, and the start continues as
-/// a waiting transaction's does — no journal write, no deletion — on a macOS
-/// bundle with the *Update incomplete.* card and the home's folder. An app
-/// that never opens again is not an answer.
+/// follows. Where that cannot be started either, one line names the program
+/// and the transaction, and the start continues as a waiting transaction's
+/// does — no journal write, no deletion — with the *Update incomplete.* card
+/// and the home's folder (the newer Folio's card over a journal this build
+/// cannot read whole, [`unfinished`]).
 ///
 /// **Over U-35's `TrialStarting` it continues as that transaction's reserved
 /// trial instead** (`reserved`, U-35 round 2): the new build is live and not
 /// committed, so it runs only as the trial the journal reserved — its writes
 /// held, its card the last trial's, and its own receipt able to commit it
-/// (`update_apply::commit_last_trial`) — never plainly. Over every other
-/// destructive phase a refused rescue still continues plainly, as before
-/// (the open hole the U-35 round 2 report names for the owner).
+/// (`update_apply::commit_last_trial`) — never plainly.
+///
+/// **Over every other destructive phase on Windows it continues with its
+/// writes held** (0.4.8 E1, the owner's ruling E5 of 2026-10-08): which set is
+/// installed is not known, so nothing this session changes is written — the
+/// trial's gate shut for the life of the process ([`is_held`],
+/// `update_trial::defer`), with no trial, no receipt, no watch and no release,
+/// and nothing recorded in the journal. The card says the update is not
+/// finished and that this session's changes are not kept. The rollback the
+/// next logon or start makes may put back what the new build wrote; with
+/// nothing written here, nothing of this session is lost to it unannounced.
 fn hand_to_rescue(
     start: &Start<'_>,
     header: &Header,
+    seen: &Sight,
     reserved: Option<(TxnId, Nonce)>,
     admission: Option<Held>,
     world: &mut impl World,
@@ -637,6 +872,23 @@ fn hand_to_rescue(
                 folder: start.home.root().to_path_buf(),
             }),
             waiting: None,
+            held: None,
+            stands_in: true,
+        };
+    }
+    if named.is_none() {
+        world.say(&format!(
+            "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts with its writes held, and nothing this session changes is kept",
+            header.txn,
+        ));
+        return Verdict::Continue {
+            admission,
+            trial: None,
+            last_trial: false,
+            failed: Some(unfinished(seen, start.home, true)),
+            waiting: None,
+            held: Some(header.txn),
+            stands_in: false,
         };
     }
     world.say(&format!(
@@ -647,10 +899,10 @@ fn hand_to_rescue(
         admission,
         trial: None,
         last_trial: false,
-        failed: named.map(|home| Failure::Incomplete {
-            folder: Some(home.to_path_buf()),
-        }),
+        failed: Some(unfinished(seen, start.home, false)),
         waiting: None,
+        held: None,
+        stands_in: false,
     }
 }
 
@@ -774,6 +1026,7 @@ mod tests {
     /// answer at once on such a platform.
     mod on_disk {
         use super::super::*;
+        use crate::update_txn::Journal;
         use std::path::PathBuf;
 
         /// What the pass asked of its world.
@@ -842,6 +1095,65 @@ mod tests {
             TxnId::new([0x7a; 16])
         }
 
+        /// **A whole journal whose header says `class` and `outcome`**, in a
+        /// phase that writes them, as every writer writes one: the start reads
+        /// the header, and a journal this build reads whole is what every
+        /// conforming writer leaves (a header with no body is a journal this
+        /// build cannot read whole, E1).
+        fn whole(
+            rescue: &Path,
+            class: Class,
+            outcome: crate::update_txn::HeaderOutcome,
+        ) -> Vec<u8> {
+            use crate::update_txn::{
+                Adapter, Body, HeaderOutcome, Inventories, Layout, Outcome, Phase,
+            };
+            let phase = match (class, outcome) {
+                (Class::Preparing, _) => Phase::Allocated,
+                (Class::Deferred, _) => Phase::Prepared {
+                    deferred_launches: 0,
+                    restart_missed: false,
+                },
+                (Class::Destructive, HeaderOutcome::None) => Phase::Moving,
+                (Class::Destructive, HeaderOutcome::Committed) => Phase::Committed,
+                (Class::Destructive, HeaderOutcome::RolledBack) => Phase::Stuck {
+                    trial: None,
+                    trial_started: false,
+                    last_error: "the move of `folio.exe` failed".to_owned(),
+                    attempts: 1,
+                    retrial: None,
+                },
+                (Class::Terminal, HeaderOutcome::None) => Phase::Abandoned,
+                (Class::Terminal, HeaderOutcome::Committed) => Phase::Retired {
+                    outcome: Outcome::Committed,
+                    untried: false,
+                },
+                (Class::Terminal, HeaderOutcome::RolledBack) => Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried: false,
+                },
+            };
+            let journal = Journal {
+                txn: txn(),
+                rescue: rescue.to_string_lossy().into_owned(),
+                body: Body {
+                    phase,
+                    layout: Layout::Members(Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                    adapter: Adapter::Ours,
+                    marker: None,
+                },
+            };
+            assert_eq!(
+                (journal.header().class, journal.header().outcome),
+                (class, outcome)
+            );
+            journal.encode()
+        }
+
         fn nonce() -> Nonce {
             Nonce::new([0x5c; 32])
         }
@@ -865,8 +1177,7 @@ mod tests {
                 if bt_platform::host_platform() == bt_platform::HostPlatform::OtherUnix {
                     return None;
                 }
-                let root = std::env::temp_dir()
-                    .join(format!("bt-update-startup-{tag}-{}", std::process::id()));
+                let root = bt_testpath::temp_path(&format!("bt-update-startup-{tag}"));
                 let _ = std::fs::remove_dir_all(&root);
                 let install = root.join("Folio");
                 let home_root = install.join(crate::update_txn::WINDOWS_HOME);
@@ -897,13 +1208,7 @@ mod tests {
                 class: Class,
                 outcome: crate::update_txn::HeaderOutcome,
             ) -> Vec<u8> {
-                let bytes = Header {
-                    txn: txn(),
-                    rescue: self.rescue.to_string_lossy().into_owned(),
-                    class,
-                    outcome,
-                }
-                .encode();
+                let bytes = whole(&self.rescue, class, outcome);
                 std::fs::write(self.home.journal(), &bytes).unwrap();
                 bytes
             }
@@ -922,6 +1227,7 @@ mod tests {
                         argv: &argv,
                         trial: None,
                         failed: Some(journal),
+                        journal_held: None,
                     },
                     world,
                 )
@@ -942,6 +1248,7 @@ mod tests {
                         argv: &argv,
                         trial,
                         failed: None,
+                        journal_held: None,
                     },
                     world,
                 )
@@ -1052,7 +1359,9 @@ mod tests {
         /// Exiting would leave a Folio that never opens again for as long as
         /// the journal says `destructive`. The journal and the transaction's
         /// folder stay exactly as they were, for the recovery's `Stuck`
-        /// handling (U-22, U-24) to read.
+        /// handling (U-22, U-24) to read. Since E1 the start continues with
+        /// its writes held
+        /// (`a_start_whose_rescue_cannot_start_continues_with_its_writes_held`).
         ///
         /// MUTATION: in `hand_to_rescue`, answer `Verdict::Exit(1)` when the
         /// spawn fails.
@@ -1089,8 +1398,8 @@ mod tests {
         /// (U-10 decision 13), with the journal last (decision 14). This is the
         /// one durable thing an ordinary start ever does.
         ///
-        /// MUTATION: in `retire`, answer `Ok(())` for `Effect::DeleteJournal`
-        /// without removing it.
+        /// MUTATION: in `retire`, answer `Ok(())` for
+        /// `Clearing::Delete(Removal::Journal)` without removing it.
         #[test]
         fn a_terminal_journal_is_retired_at_start() {
             let Some(scene) = Scene::new("terminal") else {
@@ -1143,8 +1452,8 @@ mod tests {
         /// at every start for ever. The image is attached here the way a dead
         /// Prepare leaves it — no record, just a mount point under the folder.
         ///
-        /// MUTATION: drop `Effect::DetachMount` from `StartAction::Retire`'s and
-        /// `StartAction::Discard`'s effects in `update_txn`.
+        /// MUTATION: drop `Clearing::DetachMount` from the steps of
+        /// `StartAction::Retire` and `StartAction::Discard` in `update_txn`.
         #[test]
         fn retire_and_discard_detach_before_deleting() {
             use crate::update_prepare_macos::tests::fixture;
@@ -1397,7 +1706,9 @@ mod tests {
             assert_eq!(
                 failed,
                 Some(Failure::Incomplete {
-                    folder: Some(scene.home.root().to_path_buf())
+                    folder: Some(scene.home.root().to_path_buf()),
+                    held: false,
+                    untried: true,
                 })
             );
             assert!(world.spawned.is_empty(), "{:?}", world.spawned);
@@ -1455,6 +1766,7 @@ mod tests {
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
+                    marker: None,
                     phase,
                     layout: Layout::Members(Inventories {
                         old_shipped: vec!["folio.exe".to_owned()],
@@ -1534,7 +1846,9 @@ mod tests {
             assert_eq!(
                 failed,
                 Some(Failure::Incomplete {
-                    folder: Some(scene.home.root().to_path_buf())
+                    folder: Some(scene.home.root().to_path_buf()),
+                    held: false,
+                    untried: true,
                 }),
                 "the folder of the journal the card was read from"
             );
@@ -1565,6 +1879,7 @@ mod tests {
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
+                    marker: None,
                     phase: Phase::TrialStarting {
                         nonce: nonce(),
                         began_ms: 42,
@@ -1599,6 +1914,7 @@ mod tests {
                     argv: &argv,
                     trial: Some(&asked),
                     failed: Some(&scene.home.journal()),
+                    journal_held: None,
                 },
                 &mut world,
             ) else {
@@ -1631,6 +1947,7 @@ mod tests {
                     argv: &argv_without_card,
                     trial: Some(&asked),
                     failed: None,
+                    journal_held: None,
                 },
                 &mut world,
             )
@@ -1655,6 +1972,7 @@ mod tests {
                         argv: &argv,
                         trial: Some(&another),
                         failed: Some(&scene.home.journal()),
+                        journal_held: None,
                     },
                     &mut world,
                 )),
@@ -1683,6 +2001,7 @@ mod tests {
                         argv: &[],
                         trial: None,
                         failed: None,
+                        journal_held: None,
                     },
                     &mut world,
                 )
@@ -1702,9 +2021,10 @@ mod tests {
         }
 
         /// RED (U-32) — **a trial started over `Stuck` that commits forward
-        /// says the update is done: its card, *Update incomplete.* at launch,
-        /// becomes the updated card once its watch reads `Committed`, and a
-        /// card the reader closed comes back once to say so.**
+        /// says the update is done: its card at launch — *The update did not
+        /// finish.*, this session being the trial (0.4.8 E4) — becomes the
+        /// updated card once its watch reads `Committed`, and a card the
+        /// reader closed comes back once to say so.**
         ///
         /// U-29b's open point 3 and the coordinator's ruling 2: a lock holder
         /// that finds `Stuck` with the new build live starts it as a trial —
@@ -1740,6 +2060,7 @@ mod tests {
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
+                    marker: None,
                     phase: Phase::Stuck {
                         trial: None,
                         trial_started: false,
@@ -1792,6 +2113,7 @@ mod tests {
                     argv: &argv,
                     trial: Some(&trial),
                     failed: Some(&journal),
+                    journal_held: None,
                 },
                 &mut world,
             )
@@ -1808,9 +2130,12 @@ mod tests {
             job.hand_over(&presenters);
             let at_launch = update_card::paint(job.state()).expect("a card at launch");
             assert_eq!(
-                at_launch.detail.as_deref(),
-                Some(crate::i18n::Text::UpdateCardIncomplete.text()),
-                "at launch the header said the update was incomplete"
+                (at_launch.heading.as_deref(), at_launch.detail.as_deref()),
+                (
+                    Some(crate::i18n::Text::UpdateFailedTrialRunning.text()),
+                    Some(crate::i18n::Text::UpdateCardTrial.text())
+                ),
+                "at launch the header said the update was incomplete, and this start is its trial"
             );
 
             // Its receipt commits it forward; the trial's watch reads that.
@@ -1829,7 +2154,10 @@ mod tests {
             let woke = std::cell::Cell::new(false);
             crate::update_trial::watch(
                 &gate,
-                &journal,
+                (
+                    &journal,
+                    &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                ),
                 txn(),
                 std::time::Duration::from_millis(5),
                 &|| woke.set(true),
@@ -1839,7 +2167,10 @@ mod tests {
             assert!(woke.get(), "the watch read the commit and woke the window");
 
             assert!(job.after_commit("0.4.7"), "the card follows the commit");
-            assert_eq!(job.state(), &State::Updated("0.4.7".to_owned()));
+            assert_eq!(
+                job.state(),
+                &State::Updated("0.4.7".to_owned(), crate::update_job::TrialChanges::Kept)
+            );
             assert_eq!(job.card_window(), Some(1), "in the window the card was in");
             let done = update_card::paint(job.state()).expect("a card after the commit");
             assert_eq!(done.heading.as_deref(), Some("Folio 0.4.7"));
@@ -1864,6 +2195,8 @@ mod tests {
             let mut closed: Job<u32> =
                 Job::with_offers(true).after_rollback(Some(Failure::Incomplete {
                     folder: Some(scene.home.root().to_path_buf()),
+                    held: false,
+                    untried: false,
                 }));
             closed.hand_over(&presenters);
             closed
@@ -1931,13 +2264,11 @@ mod tests {
             std::fs::write(&program, RUNNING_BUILD).unwrap();
             std::fs::write(
                 home.journal(),
-                Header {
-                    txn: txn(),
-                    rescue: rescue.to_string_lossy().into_owned(),
-                    class: Class::Destructive,
-                    outcome: crate::update_txn::HeaderOutcome::None,
-                }
-                .encode(),
+                whole(
+                    &rescue,
+                    Class::Destructive,
+                    crate::update_txn::HeaderOutcome::None,
+                ),
             )
             .unwrap();
             let argv = [OsString::from("--tab")];
@@ -1949,6 +2280,7 @@ mod tests {
                     argv: &argv,
                     trial: None,
                     failed: None,
+                    journal_held: None,
                 },
                 &mut world,
             );
@@ -1993,13 +2325,11 @@ mod tests {
             let home = Home::of(bt_platform::HostPlatform::MacOs, &exe).unwrap();
             let rescue = home.rescue_bundle(txn()).unwrap();
             std::fs::create_dir_all(home.root()).unwrap();
-            let journal = Header {
-                txn: txn(),
-                rescue: rescue.to_string_lossy().into_owned(),
-                class: Class::Destructive,
-                outcome: crate::update_txn::HeaderOutcome::None,
-            }
-            .encode();
+            let journal = whole(
+                &rescue,
+                Class::Destructive,
+                crate::update_txn::HeaderOutcome::None,
+            );
             std::fs::write(home.journal(), &journal).unwrap();
             let argv = [OsString::from("--tab")];
             let start = Start {
@@ -2008,6 +2338,7 @@ mod tests {
                 argv: &argv,
                 trial: None,
                 failed: None,
+                journal_held: None,
             };
             let line = cli::recover_command_line(Some(home.root()), &argv);
             let program = home.rescue_executable(txn()).unwrap();
@@ -2030,7 +2361,9 @@ mod tests {
             assert_eq!(
                 failed,
                 Some(Failure::Incomplete {
-                    folder: Some(home.root().to_path_buf())
+                    folder: Some(home.root().to_path_buf()),
+                    held: false,
+                    untried: true,
                 })
             );
             assert_eq!(world.said.len(), 1, "{:?}", world.said);
@@ -2038,15 +2371,53 @@ mod tests {
             assert!(world.entrances.is_empty());
         }
 
-        /// RED (U-12) — **a journal this build cannot read is left exactly as it
-        /// is, and the start continues with one line.**
+        /// RED (U-12; E1) — **a journal of which this build reads nothing is
+        /// left exactly as it is, and the start continues with one line and
+        /// the card that says the update's record cannot be read.**
         ///
         /// U-10 decision 12: nothing is deleted on the strength of bytes nobody
         /// understood — a later version's header is not this build's to judge.
+        /// Here not even the envelope reads (its transaction id is cut short),
+        /// so no rescue build can be named. Until E1 the start said one line
+        /// and nothing else; the card is the escape hatch's (the owner's
+        /// invariant: a start that continues past an unsettled journal says
+        /// so).
         ///
-        /// MUTATION: drop the `world.say` in `run`'s unreadable-header arm.
+        /// MUTATION: drop the `world.say` in `run`'s unreadable arm, or its
+        /// card (`failed: None`).
         #[test]
         fn an_unreadable_journal_is_left_alone() {
+            a_journal_file_that_cannot_be_read_is_left_alone_with_its_card();
+            an_unreadable_journal_is_left_alone_as_bytes();
+        }
+
+        /// E1 round 2: a journal file that cannot be read at all is no absent
+        /// journal — the start continues with the card that says the update's
+        /// record cannot be read (MUTATION: map that read back to no journal).
+        fn a_journal_file_that_cannot_be_read_is_left_alone_with_its_card() {
+            let Some(scene) = Scene::new("unread-file") else {
+                return;
+            };
+            let kind = crate::update_txn::a_journal_that_cannot_be_read(&scene.home.journal());
+            let mut world = Recorded::default();
+            let Verdict::Continue { failed, held, .. } = scene.run(&[], None, &mut world) else {
+                panic!("the start continues");
+            };
+            assert_eq!(
+                failed,
+                Some(Failure::Newer {
+                    folder: Some(scene.home.root().to_path_buf()),
+                    version: None,
+                    held: false,
+                }),
+                "{kind:?}"
+            );
+            assert_eq!(held, None);
+            assert!(world.spawned.is_empty());
+            assert!(scene.home.journal().is_dir(), "left as it is");
+        }
+
+        fn an_unreadable_journal_is_left_alone_as_bytes() {
             let Some(scene) = Scene::new("unreadable") else {
                 return;
             };
@@ -2054,11 +2425,580 @@ mod tests {
             std::fs::write(scene.home.journal(), bytes).unwrap();
             let before = scene.listing();
             let mut world = Recorded::default();
-            continued(scene.run(&[], None, &mut world));
+            let Verdict::Continue { failed, held, .. } = scene.run(&[], None, &mut world) else {
+                panic!("the start continues");
+            };
+            assert_eq!(
+                failed,
+                Some(Failure::Newer {
+                    folder: Some(scene.home.root().to_path_buf()),
+                    version: None,
+                    held: false,
+                })
+            );
+            assert_eq!(held, None);
             assert_eq!(std::fs::read(scene.home.journal()).unwrap(), bytes);
             assert_eq!(scene.listing(), before);
             assert_eq!(world.said.len(), 1, "{:?}", world.said);
             assert!(world.spawned.is_empty() && world.entrances.is_empty());
+        }
+
+        // ───────────────────── the escape hatch (0.4.8 E1) ─────────────────────
+
+        /// The journal of this scene's transaction in `phase`, written whole.
+        fn write_phase(scene: &Scene, phase: crate::update_txn::Phase) -> Vec<u8> {
+            use crate::update_txn::{Adapter, Body, Inventories, Layout};
+            let bytes = Journal {
+                txn: txn(),
+                rescue: scene.rescue.to_string_lossy().into_owned(),
+                body: Body {
+                    phase,
+                    layout: Layout::Members(Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                    adapter: Adapter::Ours,
+                    marker: None,
+                },
+            }
+            .encode();
+            std::fs::write(scene.home.journal(), &bytes).unwrap();
+            bytes
+        }
+
+        fn continued_with(
+            verdict: Verdict,
+        ) -> (Option<Failure>, Option<TxnId>, Option<(TxnId, Nonce)>) {
+            match verdict {
+                Verdict::Continue {
+                    failed,
+                    held,
+                    trial,
+                    ..
+                } => (failed, held, trial),
+                Verdict::Exit(code) => panic!("the start left with {code} instead of continuing"),
+            }
+        }
+
+        /// RED (E1; role #1, the ordinary start, sites H1 `run`'s read, J1 the
+        /// U-35 reservation, J2 `rolled_back_untried`) — **a start acts on the
+        /// header of a journal it cannot read whole and never on its unknown
+        /// body**: an unknown header word is a `destructive` transaction with
+        /// nothing decided, handed to the rescue build its envelope names; an
+        /// unknown body word is handed over by the header's own class; with
+        /// `--update-failed` both continue with the card that says another
+        /// Folio's update is not finished — naming the later build when the
+        /// journal names one; and a journal of which nothing reads is left as
+        /// it is, the start continuing with the card that says the update's
+        /// record cannot be read. The journal is byte for byte as it was in
+        /// every case; the frozen header's own actions are the exceptions,
+        /// asserted here as such — a `terminal` header over an unknown body is
+        /// retired, a `deferred` one over an install replaced by hand
+        /// discarded.
+        ///
+        /// MUTATION: in `run`, answer a journal of which nothing reads with a
+        /// plain `Verdict::Continue` and no card (`failed: None`) — the
+        /// pre-E1 start.
+        #[test]
+        fn the_start_acts_on_the_header_of_what_it_cannot_read_whole() {
+            use crate::update_txn::{LATER_BUILD, beyond_inputs};
+            let Some(scene) = Scene::new("beyond-start") else {
+                return;
+            };
+            let folder = Some(scene.home.root().to_path_buf());
+            let known = scene.journal(Class::Destructive);
+            for (index, (what, bytes)) in beyond_inputs(&known).into_iter().enumerate() {
+                std::fs::write(scene.home.journal(), &bytes).unwrap();
+                let before = scene.listing();
+                let mut world = Recorded::default();
+                let verdict = scene.run(&["--tab"], None, &mut world);
+                if index < 2 {
+                    assert_eq!(exited(verdict), 0, "{what}");
+                    assert_eq!(
+                        world.spawned,
+                        vec![(
+                            scene.rescue.clone(),
+                            cli::recover_command_line(None, &[OsString::from("--tab")])
+                        )],
+                        "{what}: handed to the rescue build it names"
+                    );
+                } else {
+                    let (failed, held, trial) = continued_with(verdict);
+                    assert_eq!(
+                        failed,
+                        Some(Failure::Newer {
+                            folder: folder.clone(),
+                            version: None,
+                            held: false,
+                        }),
+                        "{what}"
+                    );
+                    assert_eq!((held, trial), (None, None), "{what}");
+                    assert!(world.spawned.is_empty(), "{what}: {:?}", world.spawned);
+                }
+                assert_eq!(
+                    std::fs::read(scene.home.journal()).unwrap(),
+                    bytes,
+                    "{what}"
+                );
+                assert_eq!(scene.listing(), before, "{what}");
+                assert!(world.entrances.is_empty(), "{what}");
+
+                let mut world = Recorded::default();
+                let (failed, held, trial) =
+                    continued_with(scene.run_sent(&scene.home.journal(), &mut world));
+                assert_eq!(
+                    failed,
+                    Some(Failure::Newer {
+                        folder: folder.clone(),
+                        version: (index == 0).then(|| LATER_BUILD.to_owned()),
+                        held: false,
+                    }),
+                    "{what}"
+                );
+                assert_eq!((held, trial), (None, None), "{what}");
+                assert!(world.spawned.is_empty(), "{what}");
+                assert_eq!(
+                    std::fs::read(scene.home.journal()).unwrap(),
+                    bytes,
+                    "{what}"
+                );
+            }
+
+            // The frozen header's own actions: a terminal header over an
+            // unknown body is retired; a deferred one over an install
+            // replaced by hand is discarded.
+            let terminal = scene.journal(Class::Terminal);
+            let [_, (what, unknown_body), _] = beyond_inputs(&terminal);
+            std::fs::write(scene.home.journal(), &unknown_body).unwrap();
+            continued(scene.run(&[], None, &mut Recorded::default()));
+            assert!(
+                !scene.home.journal().exists(),
+                "{what}: terminal is retired"
+            );
+
+            std::fs::create_dir_all(scene.rescue.parent().unwrap()).unwrap();
+            std::fs::write(&scene.rescue, b"the build that began it").unwrap();
+            let deferred = scene.journal(Class::Deferred);
+            let [_, (what, unknown_body), _] = beyond_inputs(&deferred);
+            std::fs::write(scene.home.journal(), &unknown_body).unwrap();
+            continued(scene.run(&[], None, &mut Recorded::default()));
+            assert!(
+                !scene.home.journal().exists(),
+                "{what}: a deferred transaction over a replaced install is discarded"
+            );
+        }
+
+        /// RED (E1; the owner's ruling E5 of 2026-10-08) — **a start whose
+        /// rescue build cannot be started continues with its writes held,
+        /// over every `destructive` phase, with the card that says the update
+        /// is not finished and this session's changes are not kept**; nothing
+        /// is recorded or removed. Over a journal this build cannot read whole
+        /// the card is the newer Folio's, held the same way; over one of
+        /// which nothing reads there is no transaction to hold for, and the
+        /// start continues with its card. U-35's `TrialStarting` keeps its
+        /// own road: the reserved trial.
+        ///
+        /// A start on a macOS bundle asks its own program first (U-29b); this
+        /// is the road of a home whose rescue is an executable — Windows'.
+        ///
+        /// MUTATION: in `hand_to_rescue`, continue plainly — `held: None` and
+        /// the card without `held` (the pre-E1 continue, which writes the
+        /// new build's data over).
+        #[test]
+        fn a_start_whose_rescue_cannot_start_continues_with_its_writes_held() {
+            use crate::update_txn::{LATER_BUILD, Phase, TrialProcess, beyond_inputs};
+            let Some(scene) = Scene::new("held") else {
+                return;
+            };
+            std::fs::remove_file(&scene.rescue).unwrap();
+            let folder = Some(scene.home.root().to_path_buf());
+            let trial = TrialProcess {
+                pid: 4242,
+                started: 7,
+            };
+            let destructive = [
+                Phase::Handoff { applier: nonce() },
+                Phase::Armed,
+                Phase::Moving,
+                Phase::Trial {
+                    nonce: nonce(),
+                    process: trial,
+                    began_ms: 42,
+                },
+                Phase::Committed,
+                Phase::RollbackIntent {
+                    trial: Some(trial),
+                    trial_started: false,
+                },
+                Phase::Stuck {
+                    trial: None,
+                    trial_started: false,
+                    last_error: "the move of `folio.exe` failed".to_owned(),
+                    attempts: 1,
+                    retrial: None,
+                },
+                Phase::RolledBack { untried: true },
+            ];
+            let kinds: Vec<_> = destructive.iter().map(Phase::kind).collect();
+            for kind in crate::update_txn::PhaseKind::ALL {
+                assert!(
+                    kinds.contains(&kind)
+                        || kind.class() != Class::Destructive
+                        || kind == crate::update_txn::PhaseKind::TrialStarting,
+                    "{kind:?} is a destructive phase this test does not start over"
+                );
+            }
+            for phase in destructive {
+                let bytes = write_phase(&scene, phase.clone());
+                let before = scene.listing();
+                let mut world = Recorded::default();
+                let (failed, held, trial) = continued_with(scene.run(&["--tab"], None, &mut world));
+                assert_eq!(held, Some(txn()), "{phase:?}");
+                assert_eq!(trial, None, "{phase:?}: no trial");
+                assert_eq!(
+                    failed,
+                    Some(Failure::Incomplete {
+                        folder: folder.clone(),
+                        held: true,
+                        untried: !phase.trial_begun(),
+                    }),
+                    "{phase:?}"
+                );
+                assert_eq!(world.spawned.len(), 1, "{phase:?}: the rescue was asked");
+                assert_eq!(world.said.len(), 1, "{phase:?}: {:?}", world.said);
+                assert_eq!(std::fs::read(scene.home.journal()).unwrap(), bytes);
+                assert_eq!(scene.listing(), before, "{phase:?}: nothing is written");
+            }
+
+            let known = write_phase(&scene, Phase::Moving);
+            for (index, (what, bytes)) in beyond_inputs(&known).into_iter().enumerate() {
+                std::fs::write(scene.home.journal(), &bytes).unwrap();
+                let (failed, held, _) =
+                    continued_with(scene.run(&[], None, &mut Recorded::default()));
+                let unreadable = index == 2;
+                assert_eq!(held, (!unreadable).then_some(txn()), "{what}");
+                assert_eq!(
+                    failed,
+                    Some(Failure::Newer {
+                        folder: folder.clone(),
+                        version: (index == 0).then(|| LATER_BUILD.to_owned()),
+                        held: !unreadable,
+                    }),
+                    "{what}"
+                );
+                assert_eq!(
+                    std::fs::read(scene.home.journal()).unwrap(),
+                    bytes,
+                    "{what}"
+                );
+            }
+
+            write_phase(
+                &scene,
+                Phase::TrialStarting {
+                    nonce: nonce(),
+                    began_ms: 42,
+                },
+            );
+            let (failed, held, trial) =
+                continued_with(scene.run(&[], None, &mut Recorded::default()));
+            assert_eq!(held, None, "the reserved trial keeps U-35's road");
+            assert_eq!(trial, Some((txn(), nonce())));
+            assert_eq!(
+                failed,
+                Some(Failure::TrialIncomplete {
+                    folder: scene.home.root().to_path_buf()
+                })
+            );
+        }
+
+        /// **The pass for a start with `--update-failed <journal>`, its
+        /// `--update-trial` words if any, and `--update-journal-held` if any**
+        /// (0.4.8 E4).
+        fn run_reporting(
+            scene: &Scene,
+            trial: Option<&cli::UpdateTrialArg>,
+            journal_held: Option<&str>,
+            world: &mut Recorded,
+        ) -> Verdict {
+            let journal = scene.home.journal();
+            let argv = [
+                OsString::from(cli::UPDATE_FAILED_FLAG),
+                journal.clone().into_os_string(),
+            ];
+            world.admission = Some(scene.home.admission());
+            run(
+                &Start {
+                    own_exe: &scene.own_exe,
+                    home: &scene.home,
+                    argv: &argv,
+                    trial,
+                    failed: Some(&journal),
+                    journal_held,
+                },
+                world,
+            )
+        }
+
+        /// The failed card's heading for what the pass decided.
+        fn heading_of(failed: Option<Failure>) -> String {
+            use crate::update_card;
+            use crate::update_job::Job;
+            let job: Job<u32> = Job::with_offers(true).after_rollback(failed);
+            update_card::paint(job.state())
+                .and_then(|paint| paint.heading)
+                .expect("a card with a heading")
+        }
+
+        /// RED (0.4.8 E4: R7 and W14long) — **one heading per cause, from the
+        /// journal's facts**: a start sent past an unfinished transaction whose
+        /// journal records no trial ever begun (R7: the old build held the
+        /// lock, the journal stayed at `Handoff`; also `Armed`, `Moving`, a
+        /// rollback declared from `Moving`) says the update stopped before the
+        /// new version started; a start that is itself the transaction's trial
+        /// (W14long: the exit guard started the live new set as a trial over
+        /// `Moving`) says the update did not finish, this session being the
+        /// trial; and only a transaction whose trial was begun says the new
+        /// version did not start. Never by timing: the same start words over
+        /// each phase.
+        ///
+        /// MUTATIONS: (1) `unfinished` answers `untried: false` whatever the
+        /// journal (one heading for R7) — the never-tried rows read *did not
+        /// start*; (2) `run` takes only U-35's reserved trial as the trial
+        /// (`is_last_trial` for `is_the_trial`) — the W14long row reads *did
+        /// not start*; (3) `is_the_trial` without its `Sight::Known` — a
+        /// journal this build cannot read whole reads *did not finish*.
+        #[test]
+        fn one_heading_per_cause_from_the_journals_facts() {
+            use crate::i18n::Text;
+            use crate::update_txn::{Phase, TrialProcess};
+            let Some(scene) = Scene::new("heading-per-cause") else {
+                return;
+            };
+            let process = TrialProcess {
+                pid: 4216,
+                started: 133_000_000_000,
+            };
+            let untried = Text::UpdateFailedUntried.text();
+            let tried = Text::UpdateFailedTrial.text();
+            let rows = [
+                (Phase::Handoff { applier: nonce() }, untried),
+                (Phase::Armed, untried),
+                (Phase::Moving, untried),
+                (
+                    Phase::RollbackIntent {
+                        trial: None,
+                        trial_started: false,
+                    },
+                    untried,
+                ),
+                (
+                    Phase::Trial {
+                        nonce: nonce(),
+                        process,
+                        began_ms: 1,
+                    },
+                    tried,
+                ),
+                (
+                    Phase::RollbackIntent {
+                        trial: Some(process),
+                        trial_started: false,
+                    },
+                    tried,
+                ),
+                (
+                    Phase::Stuck {
+                        trial: None,
+                        trial_started: true,
+                        last_error: "移动 `folio.exe` 失败 the move failed".to_owned(),
+                        attempts: 1,
+                        retrial: None,
+                    },
+                    tried,
+                ),
+            ];
+            for (phase, heading) in rows {
+                write_phase(&scene, phase.clone());
+                let mut world = Recorded::default();
+                let (failed, _, trial) =
+                    continued_with(run_reporting(&scene, None, None, &mut world));
+                assert_eq!(trial, None, "{phase:?}");
+                assert_eq!(heading_of(failed), heading, "{phase:?}");
+            }
+
+            // W14long: the new set live over `Moving`, started as the trial of
+            // this transaction with a nonce no journal records.
+            write_phase(&scene, Phase::Moving);
+            let fresh = Nonce::new([0x3e; 32]);
+            let as_trial = trial_arg(txn(), fresh);
+            let mut world = Recorded::default();
+            let (failed, _, trial) =
+                continued_with(run_reporting(&scene, Some(&as_trial), None, &mut world));
+            assert_eq!(trial, Some((txn(), fresh)), "it runs as the trial");
+            assert_eq!(
+                failed,
+                Some(Failure::TrialIncomplete {
+                    folder: scene.home.root().to_path_buf(),
+                })
+            );
+            assert_eq!(
+                heading_of(failed),
+                Text::UpdateFailedTrialRunning.text(),
+                "the new version runs here: never *did not start*"
+            );
+
+            // The same start over a journal this build cannot read whole keeps
+            // E1's card: its facts are not this build's to read.
+            let known = write_phase(&scene, Phase::Moving);
+            for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
+                std::fs::write(scene.home.journal(), &bytes).unwrap();
+                let mut world = Recorded::default();
+                let (failed, ..) =
+                    continued_with(run_reporting(&scene, Some(&as_trial), None, &mut world));
+                assert!(
+                    matches!(failed, Some(Failure::Newer { .. })),
+                    "{what}: {failed:?}"
+                );
+            }
+        }
+
+        /// RED (0.4.8 E4, W14) — **a start told that another program held the
+        /// journal past its holder's window says so, with the system's
+        /// refusal, over what the journal shows** — the rollback's card or the
+        /// unfinished one — and never that the new version did not start.
+        ///
+        /// MUTATION: `run` ignores `start.journal_held` — the card reads the
+        /// journal's heading alone.
+        #[test]
+        fn a_journal_held_past_the_window_is_named_on_the_card_with_its_refusal() {
+            use crate::update_card;
+            use crate::update_job::Job;
+            use crate::update_txn::{Outcome, Phase};
+            let Some(scene) = Scene::new("journal-held") else {
+                return;
+            };
+            let refusal = "拒绝访问。 (os error 5)";
+            // W14 after the rollback: retired, the trial never recorded.
+            write_phase(
+                &scene,
+                Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried: true,
+                },
+            );
+            let mut world = Recorded::default();
+            let (failed, ..) =
+                continued_with(run_reporting(&scene, None, Some(refusal), &mut world));
+            assert_eq!(
+                failed,
+                Some(Failure::JournalHeld {
+                    error: refusal.to_owned(),
+                    then: Box::new(Failure::Interrupted),
+                })
+            );
+            let job: Job<u32> = Job::with_offers(true).after_rollback(failed);
+            let card = update_card::paint(job.state()).expect("a card");
+            assert_eq!(
+                card.heading.as_deref(),
+                Some("Another program held the update record open: 拒绝访问。 (os error 5)")
+            );
+            assert_eq!(
+                card.detail.as_deref(),
+                Some(crate::i18n::Text::UpdateCardRestored.text())
+            );
+
+            // A hold that left the journal unfinished (`Armed`).
+            write_phase(&scene, Phase::Armed);
+            let mut world = Recorded::default();
+            let (failed, ..) =
+                continued_with(run_reporting(&scene, None, Some(refusal), &mut world));
+            let job: Job<u32> = Job::with_offers(true).after_rollback(failed.clone());
+            let card = update_card::paint(job.state()).expect("a card");
+            assert_eq!(
+                (card.heading.as_deref(), card.detail.as_deref()),
+                (
+                    Some("Another program held the update record open: 拒绝访问。 (os error 5)"),
+                    Some(crate::i18n::Text::UpdateCardIncomplete.text())
+                ),
+                "{failed:?}"
+            );
+            assert_eq!(card.folder.as_deref(), Some(scene.home.root()));
+        }
+
+        /// RED (0.4.8 E4, R3) — **the start that retires a transaction
+        /// committed after its trial ended says that the changes made before
+        /// the commit were not kept, when the trial left its mark** — once:
+        /// the retirement removes the transaction's folder with the mark — and
+        /// says nothing without the mark, or over a rollback.
+        ///
+        /// MUTATION: `changes_not_kept` answers `None` (the silent loss of the
+        /// clean VM's R3).
+        #[test]
+        fn a_commit_after_the_trial_ended_says_its_changes_were_not_kept() {
+            use crate::update_card;
+            use crate::update_job::{Job, State};
+            use crate::update_txn::{Outcome, Phase};
+            let Some(scene) = Scene::new("not-kept") else {
+                return;
+            };
+            let committed = Phase::Retired {
+                outcome: Outcome::Committed,
+                untried: false,
+            };
+            // No mark: the trial saw its commit, or held no person's change.
+            write_phase(&scene, committed.clone());
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(failed, None);
+
+            // The mark: a person's change held past the trial's end.
+            write_phase(&scene, committed.clone());
+            std::fs::create_dir_all(scene.home.transaction(txn())).unwrap();
+            std::fs::write(scene.home.unkept(txn()), b"").unwrap();
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(
+                failed,
+                Some(Failure::ChangesNotKept {
+                    version: crate::version::VERSION.to_owned(),
+                })
+            );
+            assert!(
+                !scene.home.transaction(txn()).exists(),
+                "retired: the folder and its mark are gone"
+            );
+            let job: Job<u32> = Job::with_offers(true).after_rollback(failed);
+            assert_eq!(
+                job.state(),
+                &State::Updated(
+                    crate::version::VERSION.to_owned(),
+                    crate::update_job::TrialChanges::NotKept
+                )
+            );
+            let card = update_card::paint(job.state()).expect("a card");
+            assert_eq!(
+                card.detail.as_deref(),
+                Some("Updated. Changes made before Folio confirmed the update were not kept.")
+            );
+            assert!(job.last_failure().is_none(), "About names no failure");
+
+            // A rollback's mark goes with its folder, unsaid: the rollback's
+            // own card speaks for it.
+            write_phase(
+                &scene,
+                Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried: false,
+                },
+            );
+            std::fs::create_dir_all(scene.home.transaction(txn())).unwrap();
+            std::fs::write(scene.home.unkept(txn()), b"").unwrap();
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(failed, None);
         }
     }
 }

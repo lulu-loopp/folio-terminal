@@ -8,6 +8,13 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# The math execution the replaying tools answer a session's formulas with (`render_*_detection_task`).
+bt-compose = { path = "../bt-compose" }
+bt-detect = { path = "../bt-detect" }
+bt-math = { path = "../bt-math" }
+# The answers `bt-term` asks its host for (`install_host_answers`) and the door-ready resolver the
+# replaying tools hand `bt_term::verify_path`: the desktop build's own, from the platform layer.
+bt-platform = { path = "../bt-platform" }
 bt-pty = { path = "../bt-pty" }
 bt-render = { path = "../bt-render" }
 bt-term = { path = "../bt-term" }
@@ -17,6 +24,7 @@ portable-pty.workspace = true
 pollster.workspace = true
 thiserror.workspace = true
 vte.workspace = true
+web-time.workspace = true
 
 [dev-dependencies]
 serde_json = "1"
@@ -27,6 +35,12 @@ serde_json = "1"
 [[bin]]
 name = "bt-conpty-width-probe"
 path = "src/bin/bt-conpty-width-probe.rs"
+
+# The headless frame-by-frame replay of the formula pipeline: a session, its projection and the
+# math and image lanes answered on one thread, printed per published frame.
+[[bin]]
+name = "bt-repaint-oracle"
+path = "src/bin/bt-repaint-oracle.rs"
 
 [[bin]]
 name = "bt-record"

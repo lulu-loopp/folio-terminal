@@ -59,10 +59,9 @@ row	status	call	where	disposition
 5	done	`bt_platform::monospace_font_families()` — the machine's whole font collection, enumerated inline; the traced cause of the frozen gear	`settings::monospace_family_files` ← `apply_stored_terminal_font`	**done** — *the font list is walked only on its lane, by a numbered request; the face in settings.json is found by its name* (`DESIGN.md`, 2026-09-24); what is left on the window thread is `bt_platform::monospace_family_named`, one family asked of the system collection (station `font family lookup`), measured at 2.6–3.4 ms cold against the walk's 71–80 ms on the development machine
 6	done	`search::scan_history` / `scan_volatile` — the pattern re-run over every frozen line on every keystroke in the find box	`Runtime::refresh_search`, from the keystroke roads (`search_field_key`, `toggle_search_flag`, `search_ime`, `open_search`) and from `publish_frame_inner`	**done** — *a changed search scans one slice of history on the keystroke's frame and the rest on the following turns* (`DESIGN.md`, 2026-09-24; ticket 51). Not the observation lane: the frozen plane is the session's and mutable, so a worker needs a copy per question or an ownership change in `bt-transcript`; the bounded walk stays on this thread, one `search::SEARCH_HISTORY_SLICE` per keystroke and per turn (`Runtime::advance_search_scan`)
 7	open	macOS `defaults read -g AppleLocale` and `locale -a`, blocking, no timeout, on the pane-birth road	`bt_platform::read_system_locale_declaration`	**0.4.4** — observation lane
-8	open	`bt-platform::macos_watch::DirWatch::start_scoped` and, on Windows, `windows_impl::DirWatch::start_scoped` wait on `listening.recv()` with no deadline and join the watcher on their refusal arm; each `Drop` does `SetEvent` then an unbounded `join()`	the watch subscriptions: `DirNews::arm` (the scheme and storage watches, from `Runtime::create`; the scheme watch again from `Runtime::add_scheme`), and the `subscribe` roads of `files_watch`, `git_watch` and `preview_watch` (from `Runtime::advance_files_watch`, `advance_git_watch`, `advance_preview_watch` and `ask_the_unwatched_preview_files`); both platforms by the thread-door note's revision (l)	**0.4.4** — make watcher start and retirement asynchronous
+8	open	`bt-platform::macos_watch::DirWatch::start_scoped` and, on Windows, `windows_impl::DirWatch::start_scoped` wait on `listening.recv()` with no deadline and join the watcher on their refusal arm; each `Drop` does `SetEvent` then an unbounded `join()`	the watch subscriptions: `DirNews::arm` (the scheme and storage watches, from `Runtime::create`; the scheme watch again from `Runtime::add_scheme`), and the `subscribe` roads of `files_watch`, `git_watch` and `preview_watch` (from `Runtime::advance_files_watch`, `advance_git_watch`, `advance_preview_watch` and `ask_the_unwatched_preview_files`; `git_watch`'s also from `FolioApp::publish_window_directory`, whose walk releases a closed window's seat and the subscriptions only it wanted); both platforms by the thread-door note's revision (l)	**0.4.4** — make watcher start and retirement asynchronous
 9	open	surface acquire, queue submit, swapchain present, surface configure, DirectComposition size and commit	`Runtime::present_seats_and_commit`	**0.5** — presentation lane; the present mode itself comes from `get_default_config` and has no owner
 10	open	device recovery's `pollster::block_on(rebuild_after_device_loss)` plus deliberate 150 ms and 450 ms sleeps across three attempts	`FolioApp::recovered_from_a_lost_device`	**0.5** — an explicit asynchronous state machine
-11	open	joining the `bt-pty-birth` worker, which owns `CreatePseudoConsole` + `CreateProcessW`, the working-directory `stat`, and the fresh-logon environment read	`create_leaf_session` → `pty_door::spawn_shell`	**0.5→0.6** — process birth is off the window thread; the admitted synchronous join remains until the session lane preserves input and resize ordering
 12	open	the synchronous `ResizePseudoConsole` round trip	`Runtime::flush_pending_pty_resize`	**0.5→0.6** — session lane; moving it must preserve the ordering this function represents
 13	done	`sample_window_place` — 4 to 8 syscalls, at three call sites for one instant	`drain_pty`, `advance_strip_animation`, `FolioApp::user_event`	**done** — *where the window is gets asked once per turn, at the turn's head; the drain and the strip tick read that answer* (`DESIGN.md`, 2026-09-24); one writer, `Runtime::observe_window_place`, also called at a window's birth and by an attention delivery between turns; each probe has its own station
 14	done	`Window::set_title` at five call sites with no throttle	`drain_pty`, `activate_tab`, `dress_new_window`, `finish_synchronized_update_if_due`, `finish_rename`	**done** — *the window's title is one wanted value, written to the system only when it changes and at most once a frame* (`DESIGN.md`, 2026-09-24); the one remaining call is `Runtime::flush_title`, on this thread by §5.2
@@ -94,7 +93,6 @@ CompositorCommit	9	CompositorCommit	Running, Exiting	`bt_platform::Compositor::c
 CompositorBirth	9	CompositorBirth	Running	`bt_platform::Compositor::new`, `bt_platform::spare_parent`	`Runtime::create`, `Runtime::open_window`, `Runtime::make_spare_web_controller`	the tree and its commit
 CompositorWindowSize	9	CompositorWindowSize	Running, Exiting	`bt_platform::Compositor::set_window_size`	`Runtime::resize`	the ground and its commit
 SurfaceBirth	9	SurfaceConfigure	Running	`WindowRenderer::new`	`Runtime::open_window`	the surface and its configure
-PtyBirth	11	PtyBirth	Running, Exiting	`pty_door::spawn_shell` (join of `bt-pty-birth`)	`create_leaf_session`	one call
 PtyResize	12	PtyResize	Running, Exiting	`pty_door::resize` (`PtySession::resize`)	`commit_leaf_resize`	one call per leaf
 PlaceHidden	13	PlaceHidden	Running, Exiting	`window_is_hidden`	`sample_window_place`	one call
 PlaceExposure	13	PlaceExposure	Running, Exiting	`window_is_exposed`	`sample_window_place`	one call
@@ -148,6 +146,7 @@ bt_pty::PtySession::resize	all	a cross-crate entrance that waits inside
 bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
 bt_platform::keyboard_layout_shift_table	windows	the worker-only keyboard-layout-table door: one registry read and one System32 DLL load, copied and freed before return
 windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
+windows::Win32::UI::Shell::ShellExecuteExW	windows	waits for the shell and its UAC surface
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
 libc::write	macos	counted by call site, does not wait
@@ -170,6 +169,7 @@ bt-app::retire_linux_desktop	DesktopRetire
 crate	arm	item	effects	kind	authority	door
 bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::git::GitLocation::located	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::handoff_lane::run_handoff_lane	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
 bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
@@ -179,9 +179,10 @@ bt-app	-	crate::run_decoration_worker	std::sync::mpsc::Receiver::recv 1	worker-d
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	[target_os = "linux"]	crate::persist::install_config_bytes_if_missing	std::fs::File::sync_all 2	worker-door-body	WorkerCtx	
+bt-app	-	crate::pty_door::bear	bt_pty::PtySession::spawn_refreshed 1, bt_pty::PtySession::spawn_shell_in 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
-bt-app	-	crate::pty_door::spawn_shell	std::thread::JoinHandle::join 1, bt_pty::PtySession::spawn_shell_in 1, bt_pty::PtySession::spawn_refreshed 1	owner-door-body	WaitToken	PtyBirth
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
+bt-app	-	crate::programs_lane::ProgramsLane::serve	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
@@ -197,6 +198,7 @@ bt-platform	-	crate::deferred_removal::finish_with	std::fs::write 2	worker-door-
 bt-platform	-	crate::deferred_removal::removal_from_environment	std::fs::canonicalize 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::UI::Shell::ShellExecuteExW 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	

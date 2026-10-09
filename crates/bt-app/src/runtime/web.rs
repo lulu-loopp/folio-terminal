@@ -216,14 +216,15 @@ impl Runtime<'_> {
             .into_iter()
             .filter_map(|seat| {
                 let fault = self.web_on(seat)?.fault()?;
-                fault.stands_over_the_page().then(|| {
-                    (
-                        seat,
-                        fault.say(),
-                        fault.detail().unwrap_or_default().to_owned(),
-                        fault.verb_text().text().to_owned(),
-                    )
-                })
+                if !fault.stands_over_the_page() {
+                    return None;
+                }
+                Some((
+                    seat,
+                    fault.say(),
+                    fault.detail().unwrap_or_default(),
+                    fault.verb_text()?.text().to_owned(),
+                ))
             })
             .collect();
         let scale = self.window.renderer.scale_factor() as f32;
@@ -743,6 +744,17 @@ impl Runtime<'_> {
                 // went and came back" is not otherwise visible from outside the
                 // process.
                 webhost::WebOutcome::Refused(uri) => eprintln!("BT_WEB refused {uri}"),
+                // **A window the page asked for** (F-SWEEP-048, #27): a new web pane, or the
+                // refusal said where the page is — the line a refused link in a document gets.
+                webhost::WebOutcome::NewWindow(webhost::NewWindow::Open(url)) => {
+                    self.open_web_page_beside(leaf, &url)?;
+                }
+                webhost::WebOutcome::NewWindow(webhost::NewWindow::Refused(uri)) => {
+                    eprintln!("BT_WEB refused a new window for {uri}");
+                    let surface = self.surface_of_page(leaf);
+                    let refusal = crate::LinkRefusal::of_address(&uri);
+                    self.say_address_refused(surface, &uri, refusal)?;
+                }
                 // What no card covers. The five §7.7 ④ states are drawn by the
                 // seat itself; this is the residue, and it goes where `BT_DPI`
                 // goes for its reason — a fact with nowhere to be drawn is still
@@ -896,6 +908,49 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **A page's request for a window of its own, opened as a new web pane** (F-SWEEP-048,
+    /// issue #27) — `url` is already the address bar's answer (`webhost::new_window_verdict`).
+    ///
+    /// **Beside the page that asked**, on the road the pane menu's splits take: the asking pane
+    /// is split in the direction a split with no direction of its own takes
+    /// (`Self::settings_split_axis`), the new pane is a preview, and the page opens on it with
+    /// nothing minted — so `NavigationStarting` asks the same rule again when it loads — and takes
+    /// the keyboard, as a page opened by any door that chose its pane does. The asking page stays
+    /// where it is: a link that opens elsewhere never replaces the page it was on, which the
+    /// landing rule would do when that page is the tab's reusable preview.
+    ///
+    /// A page that is not a pane of the tab in front — one carried in a float — has nothing to
+    /// split (the split answers `None` for a seat its tree does not hold; it no longer refuses
+    /// one for size), and its new page goes where any newly opened page goes
+    /// (`Self::open_web_page`), which is never into a float.
+    pub(crate) fn open_web_page_beside(&mut self, opener: LeafId, url: &str) -> Result<()> {
+        let arriving = if opener.tab == self.id {
+            let metrics = self.seat_metrics();
+            let dir = self.settings_split_axis(opener.seat);
+            self.seats.split_preview(&metrics, opener.seat, dir)
+        } else {
+            None
+        };
+        let Some(arriving) = arriving else {
+            return self.open_web_page(url);
+        };
+        self.settle_seat_set_change()?;
+        self.open_web_page_on(self.leaf_here(arriving), url, webnav::Mint::Nothing)?;
+        self.focus_seat(arriving)
+    }
+
+    /// **The surface a page is drawn on** — its pane, or the float carrying it — so that what is
+    /// said about the page is said where it is.
+    fn surface_of_page(&self, leaf: LeafId) -> PreviewSurface {
+        self.window
+            .float
+            .drawn()
+            .find(|win| win.preview().and_then(|preview| preview.page) == Some(leaf))
+            .map_or(PreviewSurface::Seat(leaf), |win| {
+                PreviewSurface::Float(win.epoch)
+            })
     }
 
     /// `BT_WEB_DEV=<url>` — open a preview seat and put that page on it.
@@ -1199,11 +1254,11 @@ impl Runtime<'_> {
     /// Asked by [`Self::adopt_new_palette`], which every window runs for every palette change and
     /// for the `Web pages` row, so no door that moves the answer can leave a page behind. A seat
     /// already holding the answer is not told again — see
-    /// [`webhost::tell_every_seat_its_color_scheme`].
+    /// [`webhost::tell_all_seat_its_color_scheme`].
     pub(crate) fn tell_web_pages_their_color_scheme(&mut self) {
         let scheme = self.web_color_scheme_in_force();
         let (_, failure) =
-            webhost::tell_every_seat_its_color_scheme(self.window.web.values_mut(), scheme);
+            webhost::tell_all_seat_its_color_scheme(self.window.web.values_mut(), scheme);
         if let Some(error) = failure {
             eprintln!("BT_WEB {error}");
         }
@@ -1313,24 +1368,17 @@ impl Runtime<'_> {
         // two orders: what the box is seeded with is what the pane is showing
         // now.
         self.finish_rename(RenameExit::Blur)?;
-        let Some(url) = self.window.web.get(&leaf).map(|web| web.page().url.clone()) else {
+        // **Seeded with what the row is showing** (found on a real window, 2026-08-24; the
+        // address asked for since T-WEB-PANE-ADDRESS): one string, `WebSeat::row_address`, read
+        // by the row and by this box, so the reader never has to retype what is in front of them
+        // to correct one character of it.
+        let Some(url) = self
+            .window
+            .web
+            .get(&leaf)
+            .map(webhost::WebSeat::row_address)
+        else {
             return Ok(());
-        };
-        // **Seeded with what the row is showing** (found on a real window,
-        // 2026-08-24). A seat whose one navigation was refused has no committed
-        // URL, so this used to open an empty box over a row printing the address
-        // in full — the reader would have had to retype what was in front of
-        // them to correct one character of it. The two strings are now the same
-        // pair read in the same order, which is `dress_preview_rail`'s own.
-        let url = if url.is_empty() {
-            self.window
-                .web
-                .get(&leaf)
-                .and_then(webhost::WebSeat::fault)
-                .and_then(webhost::WebFault::refused_address)
-                .unwrap_or_default()
-        } else {
-            url
         };
         // **Seeded in the spelling the row is showing** (user ruling
         // 2026-08-25): a local file is a path here too, and `WebSeat::go_to`
@@ -1415,7 +1463,7 @@ impl Runtime<'_> {
         let Some(verb) = self
             .web_on(seat)
             .and_then(|web| web.fault())
-            .map(webhost::WebFault::verb)
+            .and_then(webhost::WebFault::verb)
         else {
             return Ok(());
         };
@@ -1444,10 +1492,6 @@ impl Runtime<'_> {
             webhost::WebFaultVerb::Reload => {
                 let surface = self.preview_here(seat);
                 self.run_web_head_verb(surface, WebHeadVerb::Reload)
-            }
-            webhost::WebFaultVerb::CopyAddress(address) => {
-                self.copy_text_to_clipboard(&address);
-                Ok(())
             }
             // The page is still there — that is the whole reason this card is a
             // sheet — so what is handed over is the address it is standing on.

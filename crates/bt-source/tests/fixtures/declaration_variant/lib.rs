@@ -14,7 +14,7 @@
 //! ways, so the two spellings have to answer alike; `plain.rs` is reached both
 //! ways at once, which is where they have to answer differently.
 //!
-//! One needle, the string `at_the_root` returns to nobody, is written seven
+//! One needle, the string `at_the_root` returns to nobody, is written eight
 //! times and spelled nowhere else — not even here: in every place a build of
 //! the shipped program either does or does not reach. Inside an item and
 //! outside every item, in a file a product build compiles and in one it does
@@ -49,6 +49,10 @@ pub fn only_in_tests() -> u8 {
 
 #[cfg(test)]
 mod inline_gate {
+    // Outside every item, inside an inline gate: the file says yes, there is no
+    // item to ask, and only the module's own gate says no.
+    pub const OUTSIDE_EVERY_ITEM_INSIDE_THE_GATE: &str = "the_needle_this_fixture_counts";
+
     pub fn inside_the_braces() -> u8 {
         let _ = "the_needle_this_fixture_counts";
         1

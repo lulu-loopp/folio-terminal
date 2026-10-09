@@ -26,6 +26,9 @@ pub const HANDOVER_BUDGET: Duration = Duration::from_secs(2);
 /// The one word the client sends to commit. Wire policy, unchanged.
 pub const CONFIRM: &str = "ok";
 
+/// The most bytes one frame may carry. Wire policy, unchanged (see the two real arms).
+pub const MAX_FRAME_BYTES: usize = 256 * 1024;
+
 /// **What the first process decided about the second's request.**
 ///
 /// The semantics §7.59 fixes, and they are the product's rather than the

@@ -389,6 +389,11 @@ pub(crate) struct Quake {
     /// for*, and a reconciliation that forgot it would re-ask Windows for a key
     /// it has already said no to, once per turn of the loop, for ever.
     claimed_for: Option<Chord>,
+    /// **The key the claim was asked on** — [`hotkey_for`]'s answer for
+    /// [`Self::claimed_for`] at the moment of the claim, `None` when the layout had
+    /// no key for it. The layout is asked again when it moves
+    /// ([`Self::layout_changed`]) and the chord re-claimed only if this changed.
+    claimed_key: Option<Hotkey>,
     /// Why the last claim failed, or `None` when there was nothing to claim or
     /// the claim stands. Read by the settings page — see
     /// `settings::SettingsValues::quake_hotkey_taken`.
@@ -751,12 +756,14 @@ impl Quake {
         // considers the same key would otherwise be refused their own claim.
         self.claim = None;
         self.claimed_for = wanted.cloned();
+        self.claimed_key = None;
         self.fault = None;
         self.capability_refusal_reported = false;
         let Some(chord) = wanted else {
             return;
         };
-        let Some(hotkey) = hotkey_for(chord) else {
+        self.claimed_key = hotkey_for(chord);
+        let Some(hotkey) = self.claimed_key else {
             self.fault = Some(HotkeyFault::NoSuchKey);
             return;
         };
@@ -771,6 +778,33 @@ impl Quake {
                 self.registration_failed(fault);
             }
         }
+    }
+}
+
+impl Quake {
+    /// **The keyboard layout moved: ask it for the chord's key again** (T-FRESH-FACTS).
+    ///
+    /// On Windows a character's virtual key is the installed layout's answer
+    /// (`VkKeyScanW`), asked when the chord was claimed; [`Self::reconcile`] compares
+    /// chords, so a layout switched afterwards left the claim on the key the old
+    /// layout typed the character on. One layout question, and a re-claim only when
+    /// the key moved — a layout that types the character where the old one did
+    /// leaves the claim, and its fault, exactly as they were.
+    pub(crate) fn layout_changed(&mut self) {
+        let Some(chord) = self.claimed_for.clone() else {
+            return;
+        };
+        if hotkey_for(&chord) == self.claimed_key {
+            return;
+        }
+        bt_platform::hotkey::trace(|| {
+            format!(
+                "layout moved the key of {}",
+                crate::shortcuts::format_chord(&chord)
+            )
+        });
+        self.claimed_for = None;
+        self.reconcile(Some(&chord));
     }
 }
 
@@ -1255,6 +1289,53 @@ mod tests {
         );
         quake.reconcile(Some(&chord));
         assert_eq!(quake.fault, Some(fault));
+    }
+
+    /// RED (T-FRESH-FACTS) — **a layout that moved the chord's key re-claims it; one
+    /// that did not leaves the claim alone.**
+    ///
+    /// The fixture's character is one no layout has a key for, so the "new layout"
+    /// answers no key without asking Windows for anything, while the claim was made
+    /// when an older layout answered `VK_OEM_3`.
+    ///
+    /// MUTATION (observed red): `layout_changed` returning at once — the claim keeps
+    /// the key the old layout gave and the first assertion reads the old refusal.
+    #[test]
+    fn a_layout_change_asks_the_summon_key_again() {
+        use crate::shortcuts::{Chord, ChordKey};
+        use bt_platform::hotkey::Hotkey;
+        use std::borrow::Cow;
+        use winit::keyboard::ModifiersState;
+
+        let chord = Chord {
+            modifiers: ModifiersState::CONTROL,
+            key: ChordKey::Character(Cow::Borrowed("\u{1f5dd}")),
+        };
+        let mut quake = Quake {
+            claimed_for: Some(chord.clone()),
+            claimed_key: Some(Hotkey {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                win: false,
+                virtual_key: 0xc0,
+            }),
+            fault: Some(HotkeyFault::AlreadyRegistered),
+            ..Quake::default()
+        };
+        quake.layout_changed();
+        assert_eq!(
+            (quake.fault, quake.claimed_key),
+            (Some(HotkeyFault::NoSuchKey), None),
+            "the layout was asked again and its answer, no key, is the claim's now"
+        );
+        quake.fault = Some(HotkeyFault::AlreadyRegistered);
+        quake.layout_changed();
+        assert_eq!(
+            quake.fault,
+            Some(HotkeyFault::AlreadyRegistered),
+            "a layout whose answer did not move re-claims nothing"
+        );
     }
 
     /// RED (§7.54) — **the window a summon shows over is remembered once and

@@ -23,6 +23,7 @@ const HEADLESS_WIDTH: u32 = 1_200;
 const HEADLESS_HEIGHT: u32 = 1_200;
 
 fn main() -> Result<()> {
+    bt_corpus::install_host_answers();
     let mut args = env::args().skip(1);
     let first = args.next().context(
         "usage: bt-replay CORPUS.btcr [CHUNK_SIZE] [--render] | \
