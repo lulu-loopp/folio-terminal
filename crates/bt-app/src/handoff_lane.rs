@@ -302,19 +302,21 @@ impl Refusal {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     use super::*;
 
     /// A lane whose executor writes down what it was handed and answers `answer`, so the lane's
-    /// own queue, thread and wake are the real ones and only the door is a stand-in.
+    /// own queue, thread and wake are the real ones and only the door is a stand-in; its wakes
+    /// come back on a channel.
     fn recording_lane(
         answer: impl Fn(&Handoff) -> Result<(), String> + Send + 'static,
         delay: impl Fn(usize) -> Duration + Send + 'static,
-    ) -> (HandoffLane, Arc<Mutex<Vec<Handoff>>>) {
+    ) -> (HandoffLane, Arc<Mutex<Vec<Handoff>>>, mpsc::Receiver<()>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
+        let (wake, wakes) = crate::lane::wake_channel();
         let lane = HandoffLane::start(
             move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
@@ -327,20 +329,23 @@ mod tests {
                     answer(handoff)
                 }
             },
-            || {},
+            wake,
         )
         .expect("the lane starts");
-        (lane, seen)
+        (lane, seen, wakes)
     }
 
-    /// Every answer to `count` requests, waited for with a deadline rather than forever.
-    fn answers(lane: &mut HandoffLane, count: usize) -> Vec<Completion> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut all = Vec::new();
+    /// Every answer to `count` requests, each awaited on the lane's own wake — which follows its
+    /// answer's publication — within the lane suite's patience.
+    fn answers(
+        lane: &mut HandoffLane,
+        wakes: &mpsc::Receiver<()>,
+        count: usize,
+    ) -> Vec<Completion> {
+        let mut all = lane.answers();
         while all.len() < count {
+            crate::lane::wait_for_a_wake(wakes, &format!("answer {} of {count}", all.len() + 1));
             all.extend(lane.answers());
-            assert!(Instant::now() < deadline, "the lane answered {all:?}");
-            std::thread::sleep(Duration::from_millis(2));
         }
         all
     }
@@ -360,7 +365,7 @@ mod tests {
     /// `execute`), and the answers arrive shortest-first.
     #[test]
     fn handoffs_complete_in_press_order() {
-        let (mut lane, seen) = recording_lane(
+        let (mut lane, seen, wakes) = recording_lane(
             |_| Ok(()),
             |count| Duration::from_millis(if count == 1 { 60 } else { 1 }),
         );
@@ -371,7 +376,7 @@ mod tests {
             .iter()
             .map(|request| lane.submit(window(), request.clone()))
             .collect();
-        let answered: Vec<HandoffId> = answers(&mut lane, ids.len())
+        let answered: Vec<HandoffId> = answers(&mut lane, &wakes, ids.len())
             .into_iter()
             .map(|completion| completion.id)
             .collect();
@@ -396,7 +401,7 @@ mod tests {
     /// window's answer.
     #[test]
     fn a_completion_for_a_closed_window_is_dropped() {
-        let (mut lane, _) = recording_lane(|_| Ok(()), |_| Duration::ZERO);
+        let (mut lane, _, wakes) = recording_lane(|_| Ok(()), |_| Duration::ZERO);
         let mut first: Pending<&str> = Pending::default();
         let mut second: Pending<&str> = Pending::default();
         let asked = lane.submit(window(), Handoff::FontsPage);
@@ -407,7 +412,7 @@ mod tests {
         drop(first);
         let mut third: Pending<&str> = Pending::default();
 
-        let all = answers(&mut lane, 2);
+        let all = answers(&mut lane, &wakes, 2);
         let theirs = all
             .iter()
             .find(|completion| completion.id == asked)
@@ -438,7 +443,7 @@ mod tests {
         let gate = Arc::new(Mutex::new(()));
         let held = gate.lock().expect("the gate");
         let inside = Arc::clone(&gate);
-        let (mut lane, _) = recording_lane(
+        let (mut lane, _, _) = recording_lane(
             move |_| {
                 drop(inside.lock().expect("the gate"));
                 Ok(())
@@ -502,7 +507,8 @@ mod tests {
         )));
         assert!(facts.exists, "the verifier saw the fixture");
 
-        let mut lane = HandoffLane::spawn(|| {}).expect("the lane starts");
+        let (wake, wakes) = crate::lane::wake_channel();
+        let mut lane = HandoffLane::spawn(wake).expect("the lane starts");
         let requests = [
             Handoff::OpenVerified(program.clone(), facts.clone()),
             Handoff::OpenVerified(missing.clone(), bt_platform::VerifiedTarget::absent()),
@@ -510,7 +516,7 @@ mod tests {
         for request in &requests {
             lane.submit(window(), request.clone());
         }
-        let answered = answers(&mut lane, requests.len());
+        let answered = answers(&mut lane, &wakes, requests.len());
 
         // The old surface: `Runtime::open_local_path_verified` as it stood on the window thread.
         let refusal = Refusal {

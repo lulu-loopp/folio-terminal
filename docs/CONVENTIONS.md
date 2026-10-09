@@ -187,6 +187,16 @@ in `bt-viewport` are refused by file, and a clock planted in
 测试，这道扫描看不见，由审查负责发现。去掉一行的办法是换成受控时钟、受控
 sleeper、完成信号或接收事件，不是改大数字。
 
+**Wait on the signal, not the clock** (T-VIDEO-SEAT-SETTLING-FLAKE). A test, or a helper it
+calls, that waits for something another thread does — an engine counted on the ledger, an answer
+published, a lane woken — waits on that thing's own signal: the condition variable the movement is
+announced on, the lane's wake. The only number beside it is the suite's patience for something
+that must happen (`crate::lane::PATIENCE` in `bt-app`), and running out of it is a red, never a
+pass. Polling a value until a fixed number of seconds has gone by is a wall clock whatever the
+loop around it looks like: under load the movement arrives later and the test is called wrong.
+The shapes are `bt_platform::video::engine::engines_outstanding_reaching` (the engine ledger's
+`Condvar`) and `crate::lane::{wake_channel, wait_for_a_wake}`.
+
 ### 【事故】A/B 必须在同一段时间里交替，先跑完一组再跑另一组等于把负载当结论
 
 同上一条的同一天。"带 `export` 跑全量会挂、单独不带 `export` 重跑就绿"这句观察里，`export` 与"全量 vs 单跑"两个变量是**捆在一起**的，而后者意味着 1856 个测试用 24 条线程一起抢机器。交替 A/B（两臂在同一窗口内轮流、每 rep 互换先后手）当场判 `export` 无罪：闲时两臂各 16 次 0 失败、时长不可分辨；加载后**两臂一起塌**。
