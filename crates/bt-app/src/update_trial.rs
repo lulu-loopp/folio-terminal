@@ -688,8 +688,9 @@ enum Read {
 /// no holder can adopt — every holder runs the rescue copy the operating
 /// system refused — so without it a healthy trial would keep nothing. **And
 /// the mark** (0.4.8 E4): after step 1, while a person's change is held and
-/// the transaction undecided, `unkept` is written once (asked again each
-/// turn while the write fails); a commit read takes it back.
+/// the transaction undecided, `unkept` is written once, naming this build's
+/// version (0.4.8 E5: what a rollback's card names), asked again each turn
+/// while the write fails; a commit read takes it back.
 pub(crate) fn watch(
     gate: &Gate,
     (journal, unkept): (&Path, &Path),
@@ -748,7 +749,10 @@ pub(crate) fn watch(
             }
             // The mark that a person's change is held until the commit.
             if gate.owes_unkept_mark() {
-                match bt_platform::install_txn::durable_write(unkept, b"") {
+                match bt_platform::install_txn::durable_write(
+                    unkept,
+                    crate::version::VERSION.as_bytes(),
+                ) {
                     Ok(()) => {
                         gate.unkept_marked();
                         eprintln!(
@@ -1289,6 +1293,7 @@ mod tests {
             body: Body {
                 adapter: crate::update_txn::Adapter::Ours,
                 marker: None,
+                unkept: None,
                 phase,
                 layout: Layout::Members(Inventories {
                     old_shipped: Vec::new(),
