@@ -1,27 +1,52 @@
 # Pointer ownership as one model: one router over the whole stack, one capture per latched gesture — design note, 2026-10-09
 
-T-POINTER-CAPTURE, step 1 (design only; no product code in this step). Base: main `5c4a08b0`. Follows T-STRIP-HOVER-THROUGH (four commits and three review rounds of 2026-10-04, DESIGN entries of that day from *A pane's notice strip owns the points it is drawn on* to *Third follow-up: a latched gesture records its shell and its button*). Every claim about today's behaviour carries a `file:line` on that base (paths under `crates/bt-app/src/` unless another crate is named). Every proposed rule names the cells of §3 behind it.
+T-POINTER-CAPTURE, step 1 (design only; no product code in this step). Base: main `5c4a08b0`. **Revision (b), 2026-10-09**, answers Codex's review of revision (a) at `d871b43e` (verdict REWORK: nine HOLD items, seven NITs; `reports/F3-design.review-codex.md`); what changed is listed at the end, and the sections below are the current text. Follows T-STRIP-HOVER-THROUGH (four commits and three review rounds of 2026-10-04, DESIGN entries of that day from *A pane's notice strip owns the points it is drawn on* to *Third follow-up: a latched gesture records its shell and its button*). Every claim about today's behaviour carries a `file:line` on that base (paths under `crates/bt-app/src/` unless another crate is named). Every proposed rule names the cells of §3 behind it. Companion file: `pointer-capture-2026-10-09.readers.tsv` (the census of §1.0).
 
-Rulings that bind this note: the capsule and the strip stay where they are (owner, 2026-10-04: "do not move things now"); the capsule is above the strip for paint, hover and press (same day); the `⌄` grammar — a peek on a 250 ms rest, a pin on a click, Esc / a click elsewhere / a second click to close (2026-08-16, amended 2026-09-23); a minimum is law to the program and advice to the hand (2026-08-10), so a divider drag keeps ignoring minima; Folio does not nanny (2026-09-21): no refusal, prompt or confirmation is added anywhere.
+Rulings that bind this note: the capsule and the strip stay where they are (owner, 2026-10-04: "do not move things now"); the capsule is above the strip for paint, hover and press (same day); the `⌄` grammar — a peek on a 250 ms rest, a pin on a click, Esc / a click elsewhere / a second click to close (2026-08-16, amended 2026-09-23); a minimum is law to the program and advice to the hand (2026-08-10), so a divider drag keeps ignoring minima. The 2026-09-21 not-a-nanny ruling, as recorded (`DESIGN.md:11603`), is about modified-click link hand-off; this note relies on nothing in it — it simply adds no refusal, prompt or confirmation.
 
 ---
 
 ## 0. The decisions, in one screen
 
-1. **Today there are 164 pointer readers** (§1: 13 doors and router functions, 22 latched gestures, 129 hit tests, hover instruments, forwarders and re-ask sites). They agree about the glass only where a hand-written rung order happens to match the paint order. The ticket's eight known gaps all map to readers (§1.4 K1–K8); reading the bodies found **twenty-four more** (G-1–G-24). The largest class: **every latched gesture except a `MouseRoute` is ended in `chrome_mouse_input`'s release ladder, which the arms above it in `mouse_input` can pre-empt**, so a release that lands on a menu, a card, the palette, the settings sheet or (for some latches) a hosted page leaves the gesture attached to the bare pointer (G-1).
-2. **The router.** One function, `pointer_layer_at`, walks one list — the overlay's paint list read top first, plus the pane's own planes under it — and answers every event kind: move, press, a release no capture owns, wheel, tip, cursor, the `⌄` rest clocks and the hosted page's hover. Paint order is pointer order by construction (R-1–R-4).
-3. **The capture.** One `Option<PointerCapture>` per window replaces the twenty latch fields behind the 22 gestures (`mouse_route` alone carries three). It records the owner (with the owner's own payload, its tab included), the button, the router's answer at the press, the OS capture at the press, and, for the two owners that must tell somebody, a release snapshot (R-5–R-9).
-4. **The release goes to the owner** before any layer is asked, wherever the pointer is (R-6). This is the general form of the 2026-10-04 rule "the surfaces decide where a gesture starts, not where it ends", which today holds only for `MouseRoute`.
-5. **A second button during a gesture goes nowhere** (R-8; owner question Q1). **Every capture answers four endings** — its release, a cancel (blur, OS capture lost), its owner gone, its owner off the glass — by an exhaustive match (R-9; Q2 for the forwarded press whose tab is switched away).
-6. **The hosted page is not opaque to the router on Windows**: it is composition-hosted and hears only what Folio forwards (`webhost.rs:4067`). So the mechanism for "a divider release over a page reaches its owner" is the capture record itself: no overlay window, no second `SetCapture` (§5). A press inside a page becomes a capture owned by the page, so a page selection dragged out of its rectangle keeps the page (R-13; Q3).
-7. **The behaviour table** (§3) has 256 decided cells: **141 change, 115 stay**, plus 4 not applicable.
-8. **Migration** is ten cuts, each a green commit with its own red-under-mutation test. Cut 1 lands the guard: a `bt-source` index test that fails when a pointer field or a layer hit test is read outside the router or a capture owner, with today's readers on a debt list that may only shrink (§4).
-9. **No new window-thread wait**: the model uses the same `GetCapture` sample the divider already takes, and the same `SendMouseInput` door the page already uses; `window_waits.tsv` does not change (§4.4).
-10. **Three questions for the owner** (§6): refuse a second button (recommended), tell a program whose tab was switched away that its button came up (recommended), let a page keep a drag that leaves its rectangle (recommended).
+1. **The census** (§1.0, mechanical and reproducible): **323 functions in `bt-app` read the pointer directly** — 52 read the pointer fields, 159 take a pointer position, 49 name a button or wheel event, 135 are hit tests (classes overlap) — and **71 more call one of them** (an over-approximation). §1.1–§1.3 explain the ones that decide routing. The ticket's eight known gaps all map to readers (§1.4 K1–K8); reading the bodies found **twenty-six more** (G-1–G-26). The largest class: **every latched gesture except a `MouseRoute` is ended in `chrome_mouse_input`'s release ladder, which the arms above it in `mouse_input` can pre-empt**, so a release that lands on a menu, a card, the palette, the settings sheet or (for some latches) a hosted page leaves the gesture attached to the bare pointer (G-1).
+2. **The router.** One function, `pointer_layer_at`, walks one list — the overlay's paint list read top first, plus the pane's own planes under it — over a per-frame `PointerFacts`, and answers every event kind: move, press, a release no capture owns, wheel, tip, cursor, the `⌄` rest clocks, the hosted page's hover. Paint order is pointer order by construction; the walk neither shapes text nor allocates, and both are tested (R-1–R-4).
+3. **The capture.** **One application slot**, `App::pointer_capture: Option<PointerCapture>`, replaces the twenty latch fields behind the 22 gestures (`mouse_route` alone carries three). It records the window, the owner (with its payload, its tab included), the button, the router's answer at the press, the OS capture at the press, and, for the two owners that must tell somebody, a release snapshot (R-5–R-9, R-14).
+4. **The release goes to the owner** before any layer is asked, wherever the pointer is (R-6) — the general form of the 2026-10-04 rule "the surfaces decide where a gesture starts, not where it ends", which today holds only for `MouseRoute`.
+5. **A second button during a gesture goes nowhere** (R-8; Q1; it supersedes one 2026-10-04 sentence). **Every capture answers its endings** — its release, a cancel (blur, OS capture lost, window hidden, a scale change, an OS drag hand-off), its owner gone, and, for tab-bound owners, its owner off the glass — by an exhaustive match, called from a lifecycle-door matrix (R-9). A drag is outside "off the glass": its spring switching tabs is its own aim.
+6. **The hosted page on Windows is a layer like any other**: it is composition-hosted and hears only what Folio forwards. The mechanism for "a divider release over a page reaches its owner" is the capture slot: no overlay window, no second `SetCapture`. A press inside a page is a view-level capture owned by that page; a page seat never leaves the glass with a button down, and a scale change releases it in the old space first (R-13, §2.4). **macOS pages are out of this ticket**, with a consequence table (§2.5).
+7. **The behaviour table** (§3) has **270 decided cells: 150 change, 120 stay**, plus 4 not applicable — counted from the tables by the rule stated in §3. Wheel-while-held is a column of its own.
+8. **Migration** is **ten cuts in fourteen commits** (cut 8 is five). Cut 1 is dead-path scaffolding plus the guard: a `bt-source` index test whose needles and debt are **derived** from the census, with no allowlist to grow (§4.2). Cut 2 only mirrors. Cut 5 carries a lifecycle-door matrix enforced by index pins and behavioural tests. Cut 7 tests a real `WebSeat`'s presence order.
+9. **No new window-thread wait**: the same `GetCapture` sample the divider already takes, the same `SendMouseInput` door the page already uses. `window_waits.tsv` (231 physical lines at base) does not change (§4.4).
+10. **Three questions for the owner** (§6), each with the reviewer's agreement: refuse a second button; tell a program whose tab was switched away that its button came up (with its last modifiers); let a page keep a drag that leaves its rectangle (Windows).
+11. **Boundaries** (§7): touch pans under a capture are discarded; pointer-less activation never builds a capture; the summoned window is one more lifecycle door; an 8 kHz mouse has an absolute and tail budget; a future OLE drag-out ends the capture synchronously (`OsDragHandoff`).
 
 ---
 
 ## 1. Inventory
+
+### 1.0 The census — what "every pointer reader" means, and how it is counted
+
+The first revision counted 164 readers by hand, and the review found eight it missed (`file_peek_card_layers`, `file_peek_foot_grasp`, `file_peek_head_grasp`, `pane_menu_row_under_pointer`, the close-time re-ask in `toggle_settings_panel`, the three re-asks in `settings_mouse_input`, `aim_focus_card_window`, `scroll_settings`). The count is now mechanical. **A pointer reader is a product function of `bt-app`** (every `crates/bt-app/src` file except `*_tests.rs`, `tests.rs`, `test_support.rs`, and every `#[cfg(test)]` item) **in one of four classes**:
+
+- **P** — it reads `pointer_position` or `pointer_last_seen`;
+- **E** — it takes or holds a `PhysicalPosition<f64>` (a window pointer position; window positions are `PhysicalPosition<i32>` and are not counted);
+- **B** — it names `MouseButton`, `ElementState` or `MouseScrollDelta`;
+- **H** — a hit test: its name says so (`hit`, `_at`, `contains`, `covers`, `under`, `_holds`, `_part`, `claim`, `_point`) and its signature takes an `x`/`y` pair, a `[f32; 2]` or a `PhysicalPosition`;
+
+plus **R** — a function that calls a P/E/B/H function by a name of ten characters or more (one level; an over-approximation, because a long name can be shared by an unrelated function). The two awk programs are Appendix A; their output, one row per function, is `pointer-capture-2026-10-09.readers.tsv`.
+
+| class | functions |
+|---|---|
+| P | 52 |
+| E | 159 |
+| B | 49 |
+| H | 135 |
+| distinct P ∪ E ∪ B ∪ H | **323** |
+| R only (calls a reader, is not one) | 71 |
+
+The eight the review named are in it (P: `peek.rs:1539`, `2108`, `2897`; `panes.rs:2656`; `main.rs:46102`; PEB: `main.rs:47451`; PB: `main.rs:52570`, `52821`). Limits, written down: the program reads text, not the index, so a raw string with braces inside a test item can end a skip early (over-counting, the safe direction), and a hit test whose name says nothing about hitting is only caught through E or R. **The guard of §4.2 does not use this program**: it asks the `bt-source` index for the same four classes, and the census is the design-time snapshot it will be compared with at cut 1.
+
+§1.1–§1.3 below are the readers that decide **routing**, explained one by one; the census is the complete list the guard holds.
 
 The columns: **reader** → **file:line** → **what it decides** → **what it latches** → **how that ends** → **what it ignores**. Paint order, bottom to top, is `OverlayStack::flattened` (`main.rs:31902-31975`): preview bars, video bars, terminal bars, command rail, formula tools, rail, flight, ground, in-pane (strip under capsule), web sheet, layout peek, float, modal, file menu, pane menu, git menu, term menu, tab menu, palette, toast, key hint, card hint, tooltip, file peek, drag ghost, window ring. The hosted page is under all of it (the DirectComposition visual below the wgpu overlay, DESIGN §7.8 ②).
 
@@ -72,7 +97,7 @@ The columns: **reader** → **file:line** → **what it decides** → **what it 
 | C21 | a press inside a hosted page | none in Folio; the page's own `WebSeat::buttons` mask (`webhost.rs:4078-4085`) | `runtime/web.rs:1852` | `web.rs:1808`, **only while inside the page's bounds** | the release is forwarded only if it lands on a page (`mouse.rs:5270`) | — | **no** | — |
 | C22 | settings slider / menu bar | `settings_slider_drag`, `settings_menu_bar_drag` (window, `main.rs:13628`, `13670`) | `main.rs:47557`, `47488` | `settings_geometry.rs:185` (from `mouse.rs:1775`) | **any** button's release while the sheet is up (`main.rs:47462-47464`) | no | **no** | survives the sheet closing (G-15) |
 
-### 1.3 Hit tests, hover instruments, forwarders and re-ask sites (129)
+### 1.3 Hit tests, hover instruments, forwarders and re-ask sites (129 routing readers, a curated subset of §1.0)
 
 Counted one per function named below that reads a pointer position or a pointer event, and one per re-ask site. Functions named only for context — the tip-anchor builders, the popup closers, `send_to_web_page`, `WebSeat::send_mouse` — are not counted.
 
@@ -99,6 +124,8 @@ Counted one per function named below that reads a pointer position or a pointer 
 **Re-ask sites** — "the answer changed without the pointer moving", each reading `pointer_position` and asking a hit test or the chrome hover again: `mouse.rs:755` (autoscroll), `panes.rs:1498` (pane closed), `2633`/`2657` (pane menu), `3967` (divider cancelled), `5059` (rail state), `5131` (rail scroll), `tabs.rs:1150` (tab menu), `3397` (strip scroll), `main.rs:52287` (focus mode), `keyboard.rs:1309`, `1328` (settings walked by keys), `git.rs:4546`, `4632`, `palette.rs:291`, `preview.rs:212`, `4569`, `4920`, `13632`, `profiles.rs:545`, `attention.rs:48`, `math.rs:2022`. Each reads `chrome_target_at` or a layer's own test, so none of them knows about a menu or the palette standing over the point (G-8).
 
 **Outside the window's pointer.** `platform_pointer_now` (`mouse.rs:5763`, a drop's point, asked of the system on purpose) and `quake.rs:238` (which monitor the summoned window opens on) read the system cursor, not the window's pointer, and are not router questions; they stay as they are.
+
+**Paint-time and modal readers (the first revision missed them).** Seven functions read the pointer while a frame is being **built** and decide what lights with their own hit test, not the router: `file_peek_card_layers` (`runtime/peek.rs:1539`, the glance card's lit parts), `file_peek_foot_grasp` (`peek.rs:2108`) and `file_peek_head_grasp` (`peek.rs:2897`, the hand shapes over the card), `toast_pointer` (`runtime/attention.rs:182`), `video_play_mark_layer` (`preview.rs:4912`), `image_grasp` (`preview.rs:13628`), `preview_neighbour_buttons` (`preview.rs:202`) (G-25). Four read it inside the modal band: `toggle_settings_panel` (`main.rs:46102`, re-asks the chrome hover on close), `settings_mouse_input` (`main.rs:47451`, three re-asks of `settings::hit`), `scroll_settings` (`main.rs:52821`, the sheet's wheel) and `aim_focus_card_window` (`main.rs:52570`, `Alt`+wheel aiming a card's window) (G-26). `pane_menu_row_under_pointer` (`panes.rs:2656`) is the re-ask site listed above at `2657`.
 
 ### 1.4 Gaps
 
@@ -139,6 +166,8 @@ Counted one per function named below that reads a pointer position or a pointer 
 - **G-22. The router runs three to seven times per move** (`drive_web_pointer` through `in_pane_surface_at`, `note_video_hover`, the `free` gate, `update_chrome_hover`, `drive_search_hover`, `drive_notice_hover`, `owned_tooltip_anchor_at`), each with two caption measurements when a float is up (§5).
 - **G-23. Stale comments**: `mouse.rs:6545-6552` (a forwarded route's release "does not always clear" — it does since `release_owned_gesture`), `mouse.rs:931-938` (G-11).
 - **G-24. `preview_surface_at` uses inclusive edges** (`preview.rs:2467`) where every other test is half-open, so a shared border has two owners.
+- **G-25. Paint-time hover reads ignore the layers above them** (§1.3's seven): each tests the pointer against its own surface while the frame is built, so the glance card's foot, a toast's `×`, a video's play mark or a picture's hand can light under a menu, the palette or a float that covers them. They become readers of the router's memo (cut 8d).
+- **G-26. Readers in the modal band outside the doors** (§1.3's four): they read the pointer fields directly. Their behaviour is not wrong today (the sheet covers the window), but they are readers the router and the guard must own; they move behind the router in cut 8d and are debt rows until then.
 
 **Census #22** (paste while the files column holds the keyboard) is not a pointer defect: `a_surface_above_the_clipboard_rung_holds_the_keyboard` (`runtime/keyboard.rs:2101-2117`) does not list the files column, so `clipboard_seat`/`paste_seat` (`menubar.rs:699-725`) fall to the terminal. The pointer's only part is that a press is one way the column gets the keyboard (`focus_pane_at`). It stays with T-HARDCODE-047 slice 2.
 
@@ -150,7 +179,7 @@ Two objects. **The router** answers "what is under the pointer". **The capture**
 
 ### 2.1 The router — one walk over the whole stack, in paint order
 
-`Runtime::pointer_layer_at(position) -> Option<PointerHit>` walks **one list**, `POINTER_LAYERS_TOP_FIRST`. The list is `OverlayStack::flattened`'s bands read top first, minus the bands that take no pointer, with the pane's own planes appended beneath the overlay:
+`Runtime::pointer_layer_at(&self, facts: &PointerFacts, position) -> Option<PointerHit>` walks **one list**, `POINTER_LAYERS_TOP_FIRST`. The list is `OverlayStack::flattened`'s bands read top first, minus the bands that take no pointer, with the pane's own planes appended beneath the overlay:
 
 | # | layer | claims | hit test it calls (kept, moved behind the router) |
 |---|---|---|---|
@@ -158,28 +187,31 @@ Two objects. **The router** answers "what is under the pointer". **The capture**
 | 2 | toasts | each card's frame | `toast::at` |
 | 3 | palette | its frame (list, field, padding) | `palette::hit`, `palette::wheel_part` |
 | 4–8 | tab, term, git, pane, file menu | each menu's frame, child list included | `profiles::*_menu_hit` |
-| 9 | modal band | the whole window while a full-window card or the settings sheet is up; otherwise the frames of the profile, root, graph-filter and preview menus | `a_modal_covers_the_window`, the four menus' hit tests |
-| 10 | floats, front first | each risen frame, whole, its pill included | `float_hit_at` (+ the pill's `notice::claim`) |
+| 9 | modal band | the whole window while a full-window card or the settings sheet is up; otherwise the frames of the profile, root, graph-filter and preview menus | `a_modal_covers_the_window`, the four menus' hit tests, `settings::hit` |
+| 10 | floats, front first | each risen frame, whole, its pill included | `float::float_hit` (+ the pill's `notice::claim`) |
 | 11 | download sheet | scrim and card, per page | `websheet::covers`, `websheet::hit` |
-| 12 | in-pane surfaces, `IN_PANE_SURFACES_TOP_FIRST` | the capsule's frame; a strip's frame when it has something to press | `search_part_at`, `docked_notice_at` |
-| 13 | docked chrome | tab list, rail body, heads and their controls, dividers, files rows, Git page, caption buttons, the title-bar handle | `docked_chrome_target_at`, `title_bar_drag_point` |
-| 14 | pane furniture | formula tools, command rail, terminal thumb lane and foot mark, preview body and block bars, video bar | their own tests (`command_rail_at`, `terminal_column_bar_under`, …) |
-| 15 | hosted page | the page's shown bounds | `WebSeat::shown_at` |
-| 16 | pane body | preview body ladder (`PreviewBodyRung`), else terminal cells (formula band first) | `preview_surface_at`, `pane_hit_context`, `math_hit` |
+| 12 | in-pane surfaces, `IN_PANE_SURFACES_TOP_FIRST` | the capsule's frame; a strip's frame when it has something to press | `search::hit`, `notice::claim` |
+| 13 | docked chrome | tab list, rail body, heads and their controls, dividers, files rows, Git page, caption buttons, the title-bar handle | the `seats::hit_*` ladder, `seats::title_bar_drag_point` |
+| 14 | pane furniture | formula tools, command rail, terminal thumb lane and foot mark, preview body and block bars, video bar | their own tests (`termscroll::thumb_holds`, `lane_holds`, `video_seat::slot_at`, …) |
+| 15 | hosted page | the page's shown bounds (Windows; macOS see §2.5) | `WebSeat::shown_at` |
+| 16 | pane body | preview body ladder (`PreviewBodyRung`), else terminal cells (formula band first) | `preview_surface_at`'s rectangles, the grid's `hit_test_frame`, the renderer's math hit |
 
 Never asked: layout peek, key hint, card hint, tooltip, drag ghost, window ring (today's `BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER`, `main.rs:34637`).
 
 `PointerHit` names the layer and its part (`Float(id, FloatPart)`, `Menu(Popup, hit)`, `InPane(InPaneSurface, part)`, `Chrome(ChromeTarget)`, `Page(LeafId)`, `Body(…)`, …). Today's `PointerTarget` (`main.rs:34489`) is its lower half.
 
-- **R-1 (one router).** Every reader that asks where the pointer is takes the answer from `pointer_layer_at`: hover, press, a release no capture owns, wheel, tip, cursor shape, the flyout, glance and layout-peek intents, the `⌄` rest clocks, the hosted page's hover, every re-ask site. No reader walks a list of its own and none calls a layer's hit test directly. *Cells: B1–B5, B9–B12, B14, B16, B17.*
+**`PointerFacts` — what the walk reads.** A value built once per frame where the overlay is built (the same pass that already measures every caption the walk needs, so measuring moves rather than multiplies): per layer the rectangles the paint used, with clip and motion applied; per float its risen frame, its part geometry and its two caption widths (today measured inside every `float_hit_at` call, `floats.rs:2495-2507`); the Git and graph geometry a float shows, **borrowed** by index rather than cloned (today cloned per call, `floats.rs:2536`, `2552`). Its vectors are cleared and refilled, never dropped, so a steady window reallocates nothing. The walk takes `&self` and `&PointerFacts` and nothing else — no `&mut` renderer, so it **cannot** shape text — and iterates `hit_order` in place (no `Vec` of ids, today `floats.rs:2513`).
+
+- **R-1 (one router).** Every reader that asks where the pointer is takes the answer from `pointer_layer_at`: hover, press, a release no capture owns, wheel, tip, cursor shape, the flyout, glance and layout-peek intents, the `⌄` rest clocks, the hosted page's hover, every re-ask site and every paint-time hover read (§1.3's last paragraph). No reader walks a list of its own and none calls a layer's hit test directly. *Cells: B1–B5, B9–B12, B14, B16, B17.*
 - **R-2 (paint order is pointer order).** `POINTER_LAYERS_TOP_FIRST` is derived from the list `OverlayStack::flattened` paints; reordering the paint reorders the router. The first claim is the whole answer. Where today's press order stands a layer above one painted over it (the seven cards above the menus, G-9), the disagreement is removed by making it unreachable: raising a full-window card closes every popup (`close_every_popup`), as a tab switch already does. *Cells: B1, B12, B13.*
 - **R-3 (a layer claims what it paints).** A layer claims exactly the pixels it painted on the frame on the glass, with its clip and its motion: the docked ladder and the pane-body tests take `pane_transforms` as `hit_chrome_in_motion` does, a control is hit only inside both its drawn box and its clip, and a pane on its resize card is hit on the card. Edges are half-open everywhere. *Cells: B15, B18.*
-- **R-4 (one answer per event).** The walk runs at most once per pointer event; every reader of that event reads the memoised answer, emptied at the top of the event (the precedent is `pointer_reference`, `mouse.rs:529-537`). Caption widths a hit test needs are frame facts measured when the layer is built, never inside the walk. *Cells: none (cost only, §5).*
+- **R-4 (one walk per event, no shaping, no allocation).** The walk runs at most once per pointer event; every reader of that event reads the memoised answer, emptied at the top of the event (precedent: `pointer_reference`, `mouse.rs:529-537`). The walk allocates nothing and shapes nothing; both are pinned by tests (§4.1 cut 1). *Cells: none (cost only, §5).*
 
-### 2.2 The capture — one record per latched gesture
+### 2.2 The capture — one record per latched gesture, one slot per process
 
 ```text
 struct PointerCapture {
+    window:  WindowId,                // the window whose press latched it
     owner:   CaptureOwner,            // which gesture, carrying its own payload (one variant per row of §1.2)
     button:  MouseButton,             // the button that latched it, after the macOS secondary-click translation
     started: PointerHit,              // the router's answer at the press
@@ -188,72 +220,100 @@ struct PointerCapture {
 }
 ```
 
-`WindowRuntime::capture: Option<PointerCapture>` replaces `divider_drag`, `tab_press`, `pane_press`, `row_press`, `drag`, `float_head_press`, `float_drag`, `file_peek_press`, `thumb_grab`, `video_bar_drag`, `preview_body_drag`, `preview_block_drag`, `preview_image_drag`, `preview_selecting`, `preview_text_drag`, `terminal_thumb_drag`, `terminal_column_drag`, `mouse_route`, `math_tool_pressed`'s route half, and the two settings drags. Their payloads become `CaptureOwner`'s variants, and each payload that names a pane names it by `LeafId` or `PasteTarget` (tab included), so a per-tab latch can no longer be stranded on a tab nobody is looking at and a pane press cannot change tabs (G-14, G-17). One field instead of twenty-two is the argument `DividerGrip`'s own doc makes for one field instead of two (`main.rs:19646-19651`): "two at once" and "a latch nobody owns" stop being representable. A six-pixel press that becomes a drag is one capture whose variant changes in place.
+**Storage: `App::pointer_capture: Option<PointerCapture>` — one slot for the application, not one per window.** A window's runtime reaches it through `self.app` (as it already reaches `app.drag_broker`). The slot replaces `divider_drag`, `tab_press`, `pane_press`, `row_press`, `drag`, `float_head_press`, `float_drag`, `file_peek_press`, `thumb_grab`, `video_bar_drag`, `preview_body_drag`, `preview_block_drag`, `preview_image_drag`, `preview_selecting`, `preview_text_drag`, `terminal_thumb_drag`, `terminal_column_drag`, `mouse_route`, `math_tool_pressed`'s route half, and the two settings drags. Their payloads become `CaptureOwner`'s variants, and each payload that names a pane names it by `LeafId` or `PasteTarget` (tab included), so a per-tab latch can no longer be stranded on a tab nobody is looking at and a pane press cannot change tabs (G-14, G-17). One slot is the argument `DividerGrip`'s own doc makes for one field instead of two (`main.rs:19646-19651`): "two at once", "two windows at once" and "a latch nobody owns" stop being representable. A six-pixel press that becomes a drag is one capture whose variant changes in place. `DragBroker` (`main.rs:34088`) stays the drag's cross-window state; its `guard` becomes the capture's `os` field plus the screen sample.
 
-`ReleaseSnapshot` exists for the two owners whose release is a message to somebody else: the forwarded press (`{target: PasteTarget, cell: GridHit, sgr, button}`, the last cell a press or motion was reported at) and the page press (`{leaf, point}`, the last point forwarded). Every other owner's release is a state change of Folio's own that needs no geometry.
+`ReleaseSnapshot` exists for the two owners whose release is a message to somebody else:
+- the forwarded press: `{target: PasteTarget, cell: GridHit, sgr: bool, button, modifiers}` — the cell and **the modifiers of the last mouse report actually sent** (press or motion). A synthetic release carries those modifiers, never the keys held when the ending happened: a release caused by `Ctrl+Tab` must not report `Ctrl` (Q2).
+- the page press: `{leaf, point_in_page: (i32, i32), buttons}` — the last forwarded point **relative to the page's own bounds** (the coordinate `WebSeat::send_mouse` already computes, `webhost.rs:4076`), which is the engine's coordinate space and does not depend on where the page sits in the window.
 
-- **R-5 (one capture).** A press that a layer takes and whose gesture needs its release latches exactly one `PointerCapture`. There is at most one per process: the OS capture is per thread, and every window runs on one thread. *Cells: A·0 (unchanged) for every row.*
-- **R-6 (the release goes to the owner).** While a capture is held, the release of its button is delivered to the owner, wherever the pointer is, before any layer is asked; the router's answer at that point is passed to the owner as information (a tab press asks where it was let go, a drag lands, a rendered selection opens its link only on a still click) and no layer acts on the release. The capture ends. *Cells: A·a.*
-- **R-7 (the moves go to the owner).** While a capture is held, each move drives the owner. Hover affordances neither arm nor light: chrome hover, tips, the glance, flyout and layout-peek intents, the `⌄` rest clocks, the hosted page's hover. Two position facts still run because owners need them: the rail zone (a carried pane opens the icon rail, `mouse.rs:1588-1612`) and the drag survey. *Cells: A·h.*
-- **R-8 (other buttons go nowhere).** While a capture is held, a press of any other button, and that button's release, are delivered to nothing: no layer, no menu, no child program, no page. The gesture ends by its own release or by a cancel. (Owner question Q1.) *Cells: A·b.*
-- **R-9 (every capture can end without its release).** Each owner answers, by an exhaustive match: **cancel** — window blur, the OS capture no longer the one taken at the press (sampled each turn while a capture is held, as `end_a_divider_drag_that_lost_its_pointer` does for the divider today, `panes.rs:3922`), and, for an owner whose payload is a pixel offset taken at the press, `ScaleFactorChanged`; **owner gone** — the tab, pane, float, surface, page or settings sheet it names is closed or replaced; **owner off the glass** — its tab is no longer in front, or its pane is zoomed out of view, while it still exists. Esc keeps exactly today's meaning (it cancels a drag and a divider, `keyboard.rs:1124-1126`); the model adds no keyboard route. What each ending does is the owner's: a divider puts its ratio back (on every cancel and when its tab goes off the glass, before the tab's seats are swapped out), a drag goes home, a six-pixel press is dropped, a thumb, scrub, pan, carry or selection keeps what it already wrote and drops the release's verb (a rendered selection's link, as `cancel_preview_text_drag` already does), and a forwarded press or a page press **sends its release from `last`** when its target still exists (Q2). *Cells: A·d, A·e, A·f, A·g.*
+Every other owner's release is a state change of Folio's own that needs no geometry.
+
+- **R-5 (one capture per process).** A press that a layer takes and whose gesture needs its release latches the application's one `PointerCapture`. A press that arrives while the slot is held — by another window, or by this window with the slot's button not held any more (the `os` sample no longer matches) — first ends the held capture with *cancel*, then is routed. On Windows that state is unreachable while the OS capture stands (all mouse input goes to the capturing window); the rule exists so that a stale slot can never outlive the press that proves it stale. *Cells: A·0 for every row (unchanged).*
+- **R-6 (the release goes to the owner).** While a capture is held, the release of its button is delivered to the owner, wherever the pointer is and in whichever window it arrives, before any layer is asked; the router's answer at that point is passed to the owner as information (a tab press asks where it was let go, a drag lands, a rendered selection opens its link only on a still click) and no layer acts on the release. The capture ends. *Cells: A·a.*
+- **R-7 (moves go to the owner; non-owner hover is frozen).** While a capture is held, each move drives the owner — and for a page owner the move **is** forwarded to that page (its DOM hover and its own element capture are the page's business). Every *other* hover affordance neither arms nor lights: chrome hover, tips, the glance, flyout and layout-peek intents, the `⌄` rest clocks, every non-owner page's hover (each hears only the off-page move). Two position facts still run because owners need them: the rail zone (a carried pane opens the icon rail, `mouse.rs:1588-1612`) and the drag survey. *Cells: A·h.*
+- **R-8 (other buttons go nowhere).** While a capture is held, a press of any other button, and that button's release, are delivered to nothing: no layer, no menu, no child program, no page. The gesture ends by its own release or by an ending of R-9. This **supersedes** the 2026-10-04 rule that a non-matching release under a forwarded press "is handed back to `mouse_input`'s ordinary road" (`DESIGN.md:13766`); it needs the owner's yes (Q1) and lands with a dated DESIGN entry saying so. *Cells: A·b.*
+- **R-9 (every capture can end without its release).** Each owner answers, by an exhaustive match, these endings:
+  - **cancel** — the capturing window's blur; the OS capture no longer the one taken at the press (sampled each turn while a capture is held, the divider's sample at `dpi.rs:183` generalised); the capturing window hidden or closed (the summoned window's `hide_quake_window`, `runtime/quake.rs:107`, included); `ScaleFactorChanged` for the owners whose payload is a pixel quantity taken at the press (the float's grab, the thumbs' grab, the picture's anchor) and for a page press (§2.4); and **`OsDragHandoff`**, a synchronous cancel taken before Folio enters any OS drag-out loop (§7).
+  - **owner gone** — the tab, pane, float, surface, page or settings sheet it names is closed or replaced.
+  - **owner off the glass** — applies only to owners whose payload names a **tab-bound surface** (C1, C3, C4, C10–C21; a tab press, C2, names a tab of the strip, which is the window's): its tab is no longer in front, or its pane is zoomed out of view, while it still exists. **It does not apply to a drag (C5)**: a drag's owner is the payload in the hand, drawn as the ghost over whichever tab is in front, and the spring that switches tabs (`advance_drag_spring`, `mouse.rs:632-647`) is the gesture's own aim, not its owner leaving. Nor to the window-level owners C2, C6–C9 and C22, whose surfaces (a peek, a float, the glance card, the settings sheet) end by *owner gone*.
+  - Esc keeps exactly today's meaning (it cancels a drag and a divider, `keyboard.rs:1124-1126`); the model adds no keyboard route.
+
+  What each ending does is the owner's: a divider puts its ratio back (taken **before** the active tab changes, because `cancel_divider_drag` reads the active tab's seats, `panes.rs:3936-3940`); a drag goes home; a six-pixel press is dropped; a thumb, scrub, pan, carry or selection keeps what it already wrote and drops the release's verb (a rendered selection's link, as `cancel_preview_text_drag` does); a forwarded press or a page press **sends its release from `last`** when its target still exists — before the tab's seats change, and for a page before its presence turns hidden (§2.4). *Cells: A·c, A·d, A·e, A·f, A·g.*
+- **R-14 (keyboard focus is orthogonal).** A capture neither grants nor keeps keyboard focus. The press that latches it moves focus exactly as today (`focus_pane_at`, `press_web_page`'s `focus_page`, `web.rs:1912`, which ends at `MoveFocus(PROGRAMMATIC)`, `bt-platform/src/webview.rs:3180`), and no ending moves focus. Focus and tab-switch logic stay authoritative.
 
 ### 2.3 Wheel, tips and cursor by the same router
 
-- **R-10 (the wheel).** A notch goes to the layer the router names, whether or not a capture is held. Each layer declares, by an exhaustive match, a station of its own or *swallow* (today's `OverInPane::wheel`, `main.rs:34582-34598`, extended to every layer). A floating window is one layer over its whole frame: its body scrolls its tenant (tree, Git page, graph, document, picture, page), and its head, foot, rail and grip swallow. Nothing beneath a claimed point scrolls. *Cells: B4 (wheel), B6–B8.*
+- **R-10 (the wheel).** A notch goes to the layer the router names, with two rules for a held capture: while a capture **not** owned by a page is held, the page layer answers nothing (a notch over a page is swallowed — today's subtraction, `web.rs:1734`, made to cover every capture); while a **page** owns the capture, the notch goes to that page. Each layer declares, by an exhaustive match, a station of its own or *swallow* (today's `OverInPane::wheel`, `main.rs:34582-34598`, extended to every layer). A floating window is one layer over its whole frame: its body scrolls its tenant (tree, Git page, graph, document, picture, page), and its head, foot, rail and grip swallow. Nothing beneath a claimed point scrolls. *Cells: A·w, B4 (wheel), B6–B8.*
 - **R-11 (tips).** A tip anchor is registered under the layer it belongs to. The tip under the pointer is the anchor whose layer is the router's answer and whose box holds the point; today's in-pane filter (`owned_tooltip_anchor_at`) is the in-pane case of this rule. *Cells: B9, B10, B11 (tip).*
-- **R-12 (cursor).** The shape is the capture owner's while a capture is held (today's "one shape for the whole drag", pinned by `the_pointer_keeps_one_shape_for_the_whole_drag`), and the router layer's otherwise; a hosted page's own cursor applies only when the router names the page. *Cells: B4, B5, B11 (cursor).*
+- **R-12 (cursor).** The shape is the capture owner's while a capture is held (pinned today by `the_pointer_keeps_one_shape_for_the_whole_drag`), and the router layer's otherwise; a hosted page's own cursor applies only when the router names the page or the page owns the capture. *Cells: B4, B5, B11 (cursor).*
 
-### 2.4 The hosted page is a layer, and a press in it is a capture
+### 2.4 The hosted page on Windows: a layer, and a press in it is a capture
 
-On Windows the page is composition-hosted (`CreateCoreWebView2CompositionController`, `bt-platform/src/webview.rs:1819`): it receives no window messages, and every move, press and release it hears is forwarded by `WebSeat::send_mouse` (`webhost.rs:4067`). The router therefore sees it like any other layer.
+The page is composition-hosted (`CreateCoreWebView2CompositionController`, `bt-platform/src/webview.rs:1796-1819`): it receives no window messages, and every move, press and release it hears is forwarded by `WebSeat::send_mouse` (`webhost.rs:4067`) through `SendMouseInput` (`webview.rs:3204`). The router sees it like any other layer.
 
-- **R-13 (a page owns the gesture it began).** A press the router gives to the page latches `CaptureOwner::Page(leaf)`. Its moves and its release are forwarded to that page wherever the pointer is, unclamped (a point outside the bounds is accepted, `webhost.rs:4061-4066`), as a browser does with pointer capture. While any other capture is held, every page hears only "the pointer left" (`drive_web_pointer`'s off-page move). (Owner question Q3.) *Cells: row C21.*
+- **R-13 (a page owns the gesture it began).** A press the router gives to the page latches `CaptureOwner::Page(leaf)`. Its moves and its release are forwarded to that page wherever the pointer is, unclamped (a point outside the bounds is accepted, `webhost.rs:4061-4066`). This is a **view-level** capture: Folio keeps feeding the one view, and the engine applies its own element-level `setPointerCapture`/`releasePointerCapture` inside it, which Folio neither sees nor needs to; a script's `releasePointerCapture` does not end Folio's capture — only the button's release or an R-9 ending does. While any other capture is held, every page hears only "the pointer left". (Q3.) *Cells: row C21.*
+- **Ordering, part 1 — a page is never hidden with a button down.** `WebSeat::send_mouse` sends nothing once the seat is not `Shown` (`webhost.rs:4073`), so a synthetic release after the page is hidden is lost. The rule is the seat's own, so no caller can get the order wrong: **the transition of a seat from `Shown` to anything else first sends a button-up for every bit still set in its `buttons` mask (`webhost.rs:4078-4085`), at `point_in_page`, through the bounds still in force**, then hides. The capture's *off the glass* and *owner gone* endings for a page are therefore "clear the slot" — the seat has already spoken, or speaks in the same call. The transition is decided in `sync_web_page` (`runtime/web.rs:318`) from `webhost::web_presence` (`webhost.rs:962-980`), which is the one door a page leaves the glass by (tab switch, a modal, a zero rectangle, a fit step that drops the seat).
+- **Ordering, part 2 — DPI.** `point_in_page` is page-local, so a move of the page inside the window does not stale it. A **scale** change does: the engine's coordinate space is the controller's raster at the old scale. So `scale_factor_changed` (`runtime/dpi.rs:424`) ends a page capture with *cancel* as its **first** statement — before `resize` re-lays the seats and the controller's bounds and rasterization scale change — and the seat's button-up goes out in the old space. A forwarded press's `last` is a cell, so it needs no rebasing.
 
-### 2.5 The rules as RULES row 28 would carry them
+### 2.5 macOS pages are out of this ticket
+
+`WKWebView` is a real `NSView` that AppKit delivers to directly; `send_mouse` is a no-op there (`bt-platform/src/macos_webview.rs:2016-2031`), and whether a press over a page reaches the page or Folio's surface view — the page's slot stands **under** that view (§13.24) — is the open hit-testing question of DESIGN §13.29 (`DESIGN.md:9705`). This ticket does not settle it. Consequences, cell by cell:
+
+| cell(s) | Windows (this ticket) | macOS (this ticket) |
+|---|---|---|
+| C21·a, b, d, e, g, h, w (the page owns its gesture) | → per Table A | **not built**: `CaptureOwner::Page` is never latched; whatever AppKit and §13.29 decide stays as it is today |
+| B4 hover, right/middle press, wheel, cursor (a float over a page) | → per Table B | **as today**: if events reach the surface view the router answers them like Windows; if they reach the `WKWebView`, AppKit does |
+| B5 hover, cursor (a menu, palette, toast or glance card over a page) | → per Table B | as the row above |
+| every Folio-owned capture crossing a page (C1–C20, C22) | R-6 by the capture slot | **holds by the platform**: AppKit sends `mouseDragged:`/`mouseUp:` to the view that took `mouseDown:` (Folio's surface view), wherever the pointer goes |
+| router layer 15 | press, hover, wheel, cursor | hover and cursor only; no press is routed to it |
+
+Of §3's 150 changed cells, these 13 (C21 ×7, B4 ×4, B5 ×2) are Windows-only. The page tests of cut 7 are `cfg(windows)`. The macOS page press path is a follow-up owned by §13.29's ticket; it inherits this model's R-13 if that ticket routes page presses through Folio's view.
+
+### 2.6 The rules as RULES row 28 would carry them
 
 Row 28 says the press half is "not yet folded" because the rung order of `mouse_input` is unwritten (`docs/RULES.md:775-779`). The model is that order written down. When the last cut lands, row 28 gains:
 
-> **Pointer ownership (T-POINTER-CAPTURE).** (1) One router, `pointer_layer_at`, answers every pointer question by walking `POINTER_LAYERS_TOP_FIRST`, which is the overlay's paint list read top first plus the pane's planes; the first claim is the whole answer, and a layer claims exactly the pixels it painted, motion and clip included. (2) A press whose gesture needs its release latches one `PointerCapture` (owner, button, the router's answer, the OS capture); at most one per process. (3) While captured, the release of that button goes to the owner wherever the pointer is, before any layer; moves go to the owner; hover affordances are frozen except the rail zone and the drag survey; any other button goes nowhere. (4) Every capture answers cancel (blur, OS capture lost, a scale change for pixel-offset owners), owner gone and owner off the glass; a forwarded press and a page press send their release from the last point they were told about. (5) The wheel, the tip and the cursor take the router's layer; every layer either scrolls a notch or swallows it. (6) A press inside a hosted page is a capture owned by that page. (7) A pointer field or a layer hit test read outside the router or a capture owner fails `every_pointer_read_is_the_routers_or_a_captures`.
+> **Pointer ownership (T-POINTER-CAPTURE).** (1) One router, `pointer_layer_at`, answers every pointer question by walking `POINTER_LAYERS_TOP_FIRST`, the overlay's paint list read top first plus the pane's planes, over the frame's `PointerFacts`; the first claim is the whole answer, a layer claims exactly the pixels it painted, motion and clip included, and the walk neither shapes text nor allocates. (2) A press whose gesture needs its release latches the application's one `PointerCapture` (window, owner, button, the router's answer, the OS capture). (3) While captured, the release of that button goes to the owner wherever the pointer is, before any layer; moves go to the owner; every other hover is frozen except the rail zone and the drag survey; any other button goes nowhere. (4) Every capture answers cancel (blur, OS capture lost, window hidden, a scale change for pixel-quantity owners, an OS drag hand-off), owner gone and, for tab-bound owners, owner off the glass; a forwarded press sends its release from its last cell with its last modifiers; a page seat never leaves the glass with a button down. (5) The wheel, the tip and the cursor take the router's layer; every layer either scrolls a notch or swallows it; under a capture no page but the owner hears the wheel. (6) A press inside a hosted page on Windows is a view-level capture owned by that page. (7) Keyboard focus is not the capture's. (8) A pointer field, a pointer-position parameter, a button or wheel event, or a layer hit test used outside `crate::runtime::pointer` fails `every_pointer_read_is_the_routers_or_a_captures`.
 
 ---
 
 ## 3. Behaviour table
 
-Notation: **=** the cell is unchanged; **→** the model's answer, after today's; **—** not applicable. The *cut* is the §4 commit that flips the cell.
+Notation: **=** the cell is unchanged; **→** the model's answer, after today's; **—** not applicable. The *cut* is the §4 cut that flips the cell. **How the totals are computed:** every cell of Tables A and B is exactly one of `=`, `→`, `—`; the Σ column of Table A is that row's count (changed / unchanged / n/a), and the totals are the column sums; Table B counts its rows the same way; each Table C row is one unchanged cell. A behaviour that is already a cell of Table A or B is **not** repeated in Table C — it is written as that cell's pin (§3.1's pin list). Table C therefore holds only cells no A or B row covers.
 
-### 3.1 Table A — a held gesture (22 rows × 9 events = 198 cells)
+### 3.1 Table A — a held gesture (22 rows × 10 events = 220 cells)
 
-Events: **0** the release of its own button where nothing eats it; **a** the release of its own button over a layer that eats releases today (a full-window card, the settings sheet, a menu's frame, a palette row, the glance head, a float carry's release arm, a hosted page); **b** another button pressed and released; **c** Esc; **d** blur; **e** OS capture lost without a blur; **f** owner gone; **g** owner off the glass; **h** a hover affordance under the held gesture (`⌄` rest, tip, flyout, page hover).
+Events: **0** the release of its own button where nothing eats it; **a** the release of its own button over a layer that eats releases today (a full-window card, the settings sheet, a menu's frame, a palette row, the glance head, a float carry's release arm, a hosted page); **b** another button pressed and released; **c** Esc; **d** blur; **e** OS capture lost without a blur; **f** owner gone; **g** owner off the glass (R-9 scope); **h** a non-owner hover affordance under the held gesture (`⌄` rest, tip, flyout, page hover); **w** a wheel notch while held (pointer over a hosted page; elsewhere every row is `=` and Table B's float/wheel cells apply).
 
-| # | gesture | 0 | a | b | c | d | e | f | g | h |
-|---|---|---|---|---|---|---|---|---|---|---|
-| C1 | divider | = commits | eaten, then cancelled by the next turn's capture sample (ratio jumps back) → commits (cut 3) | right press opens a menu or reaches the shell → nothing (cut 4) | = cancel | = cancel | = cancel | = dropped | dropped keeping the half-dragged ratio → cancelled, ratio restored before the swap (cut 5) | `⌄` rest opens its menu mid-drag → frozen (cut 6) |
-| C2 | tab press | = click / activation | eaten; next move > 6 px drags the tab with no button → the click lands (cut 3) | right press raises the tab menu under the held press → nothing (cut 4) | = (no-op; the release is still a click) | = cleared | stale → dropped (cut 5) | = cleared | — | tip and `⌄` clocks re-arm under the held press → frozen (cut 6) |
-| C3 | pane press | = focus / double-click zoom | eaten (e.g. 2 px into a page below the head); phantom pane drag → the release lands (cut 3) | right press opens the pane menu → nothing (cut 4) | = | = cleared | stale → dropped (cut 5) | stale; the next move begins a drag of a dead seat (side effects run before it is dropped) → dropped (cut 5) | carries the same seat number in the new tab → dropped (cut 2 records the leaf; cut 5 drops) | → frozen (cut 6) |
-| C4 | row press | = select / fold / double-click open | eaten; phantom row drag → lands (cut 3) | right press opens the file menu → nothing (cut 4) | = | = cleared | stale → dropped (cut 5) | = (payload resolves to nothing) | survives; the payload is resolved against the new tab's column → dropped (cut 5) | → frozen (cut 6) |
-| C5 | tab / pane / row drag | = lands per the release table | eaten, then the broker's guard cancels it home → lands where released (cut 3) | right press opens menus under the carry → nothing (cut 4) | = home | = home | = home (broker guard) | = dropped | = (the spring keeps a pane across tabs) | = (already frozen) |
-| C6 | peek header press | = nothing (cleared) | eaten above `mouse.rs:5007`; next move promotes and carries the window → nothing (cut 3) | the second press clears it → nothing; the press stays (cut 4) | = | not cleared → dropped (cut 5) | stale → dropped (cut 5) | = refused | = | → frozen (cut 6) |
-| C7 | float move / resize | = ends where it is | eaten by a card or menu above 5012; the window follows the hand → ends (cut 3) | right press opens menus → nothing (cut 4) | = (no-op) | not cleared; follows the hand after Alt+Tab → ends where it is (cut 5) | stale → ends (cut 5) | = dropped | = (floats are the window's) | = (already frozen) |
-| C8 | glance head press | = opens the card's door | eaten by a card; next move pins the card into a float → opens (cut 3) | the right button's release opens the door with left still down → nothing (cut 4) | = (Esc hides the card) | = cleared | stale → dropped (cut 5) | = cleared | — | `⌄` clock runs at the top of the move → frozen (cut 6) |
-| C9 | glance thumb | = ends | eaten by a card → ends (cut 3) | the right release ends the left drag → nothing (cut 4) | = | = cleared | stale → dropped (cut 5) | = cleared | — | → frozen (cut 6) |
-| C10 | video scrub / volume | = ends, dwell restarts | eaten; the scrub follows the hand → ends (cut 3) | → nothing (cut 4) | = (no-op) | not ended → ends keeping the fraction (cut 5) | → ends (cut 5) | silent stale latch that eats the next left release → dropped (cut 5) | stale on the old tab's surface → dropped (cut 5) | → frozen (cut 6) |
-| C11 | preview body thumb | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | = healed | stranded on the old tab → ends (cut 2/5) | → frozen (cut 6) |
-| C12 | block thumb | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended (docked) → ends (cut 5) | → ends (cut 5) | = healed | stranded → ends (cut 2/5) | → frozen (cut 6) |
-| C13 | picture pan | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | never healed; swallows or pans another picture → dropped (cut 5) | stranded → ends (cut 2/5) | → frozen (cut 6) |
-| C14 | edit-surface selection | = ends | eaten, **a page included** (not in `a_gesture_holds_the_pointer`); selection extends with no button → ends (cut 3) | → nothing (cut 4) | = | not ended → ends keeping the selection (cut 5) | → ends (cut 5) | = healed | stranded → ends (cut 2/5) | → frozen (cut 6) |
-| C15 | rendered-text selection | = ends; a still click opens its link | eaten by a card or menu (a page is subtracted) → ends (cut 3) | → nothing (cut 4) | = | = cancel | → cancel (cut 5) | = healed | stranded, the page holds its span → cancel (cut 2/5) | → frozen (cut 6) |
-| C16 | terminal thumb | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | swallows every move until a release → dropped (cut 5) | stranded → ends (cut 2/5) | → frozen (cut 6) |
-| C17 | terminal foot mark | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | as C16 → dropped (cut 5) | stranded → ends (cut 2/5) | → frozen (cut 6) |
-| C18 | terminal selection | = finished in its pane | = (owned release runs first) | right press raises the terminal menu; a formula press overwrites the route → nothing (cut 4) | = (Esc goes to the shell) | not ended; moves extend it after Alt+Tab → ends keeping the selection (cut 5) | → ends (cut 5) | = dropped | = dropped | tips and `⌄` clocks run under it (`mouse.rs:2175`, 1587) → frozen (cut 6) |
-| C19 | forwarded press | = released in its encoding | = (owned release runs first) | other roads (menus, the formula block) take it; the formula press overwrites the route → nothing (cut 4) | = (Esc goes to the program) | latched; the child stays pressed → release from `last` (cut 5) | → release from `last` (cut 5) | = dropped, nothing sent | dropped, the child stays pressed → release from `last` (cut 5, Q2) | tips and `⌄` clocks run under it → frozen (cut 6) |
-| C20 | formula block | = ink off | = | any other button's release ends it; a second press replaces it → nothing (cut 4) | = | not ended → ink off (cut 5) | → ink off (cut 5) | = (no owner today; the record now names the leaf) | = dropped | `⌄` clock runs → frozen (cut 6) |
-| C21 | press inside a page | = forwarded | released outside: never forwarded, the page's button stays down → forwarded to the page (cut 7) | forwarded to whatever page is under the pointer → nothing (cut 7) | = (the page has the keyboard) | not told → button-up from `last` (cut 7) | → button-up from `last` (cut 7) | = nothing | page hidden, not told → button-up from `last` (cut 7) | moves outside the page are not forwarded → forwarded unclamped; nothing else hovers (cut 7) |
-| C22 | settings slider / bar | = ends | = (the sheet is modal) | a right release ends the left drag → nothing (cut 4) | Esc closes the sheet and the latch survives, switching every page off → dropped (cut 5) | not ended → dropped (cut 5) | → dropped (cut 5) | sheet closed: survives → dropped (cut 5) | — | = |
+| # | gesture | 0 | a | b | c | d | e | f | g | h | w | Σ →/=/— |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C1 | divider | = commits | eaten, then cancelled by the next turn's capture sample (ratio jumps back) → commits (cut 3) | right press opens a menu or reaches the shell → nothing (cut 4) | = cancel | = cancel | = cancel | = dropped | dropped keeping the half-dragged ratio → cancelled, ratio restored before the tab changes (cut 5) | `⌄` rest opens its menu mid-drag → frozen (cut 6) | = (page subtracted today) | 4/6/0 |
+| C2 | tab press | = click / activation | eaten; next move > 6 px drags the tab with no button → the click lands (cut 3) | right press raises the tab menu under the held press → nothing (cut 4) | = (no-op; the release is still a click) | = cleared | stale → dropped (cut 5) | = cleared | — | tip and `⌄` clocks re-arm under the held press → frozen (cut 6) | a page under the pointer scrolls → swallowed (cut 6) | 5/4/1 |
+| C3 | pane press | = focus / double-click zoom | eaten (e.g. 2 px into a page below the head); phantom pane drag → the release lands (cut 3) | right press opens the pane menu → nothing (cut 4) | = | = cleared | stale → dropped (cut 5) | stale; the next move begins a drag of a dead seat (side effects run first) → dropped (cut 5) | carries the same seat number in the new tab → dropped (cuts 3, 5) | → frozen (cut 6) | page scrolls → swallowed (cut 6) | 7/3/0 |
+| C4 | row press | = select / fold / double-click open | eaten; phantom row drag → lands (cut 3) | right press opens the file menu → nothing (cut 4) | = | = cleared | stale → dropped (cut 5) | = (payload resolves to nothing) | survives; payload resolved against the new tab's column → dropped (cut 5) | → frozen (cut 6) | page scrolls → swallowed (cut 6) | 6/4/0 |
+| C5 | tab / pane / row drag | = lands per the release table | eaten, then the broker's guard cancels it home → lands where released (cut 3) | right press opens menus under the carry → nothing (cut 4) | = home | = home | = home (broker guard) | = dropped | = (not in R-9's off-glass scope: the spring is the drag's own aim) | = (already frozen; the rail zone runs) | = (page subtracted) | 2/8/0 |
+| C6 | peek header press | = nothing (cleared) | eaten above `mouse.rs:5007`; next move promotes and carries the window → nothing (cut 3) | the second press clears it → refused, the press stays (cut 4) | = | not cleared → dropped (cut 5) | stale → dropped (cut 5) | = refused | = (window-level) | → frozen (cut 6) | page scrolls → swallowed (cut 6) | 6/4/0 |
+| C7 | float move / resize | = ends where it is | eaten by a card or menu above 5012; the window follows the hand → ends (cut 3) | right press opens menus → nothing (cut 4) | = (no-op) | not cleared; follows the hand after Alt+Tab → ends where it is (cut 5) | stale → ends (cut 5) | = dropped | = (window-level) | = (already frozen) | = (page subtracted) | 4/6/0 |
+| C8 | glance head press | = opens the card's door | eaten by a card; next move pins the card into a float → opens (cut 3) | the right button's release opens the door with left still down → nothing (cut 4) | = (Esc hides the card) | = cleared | stale → dropped (cut 5) | = cleared | — | `⌄` clock runs at the top of the move → frozen (cut 6) | page scrolls → swallowed (cut 6) | 5/4/1 |
+| C9 | glance thumb | = ends | eaten by a card → ends (cut 3) | the right release ends the left drag → nothing (cut 4) | = | = cleared | stale → dropped (cut 5) | = cleared | — | → frozen (cut 6) | = (page subtracted) | 4/5/1 |
+| C10 | video scrub / volume | = ends, dwell restarts | eaten; the scrub follows the hand → ends (cut 3) | → nothing (cut 4) | = (no-op) | not ended → ends keeping the fraction (cut 5) | → ends (cut 5) | silent stale latch that eats the next left release → dropped (cut 5) | stale on the old tab's surface → dropped (cut 5) | → frozen (cut 6) | = | 7/3/0 |
+| C11 | preview body thumb | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | = healed | stranded on the old tab → ends (cuts 3, 5) | → frozen (cut 6) | = | 6/4/0 |
+| C12 | block thumb | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended (docked) → ends (cut 5) | → ends (cut 5) | = healed | stranded → ends (cuts 3, 5) | → frozen (cut 6) | = | 6/4/0 |
+| C13 | picture pan | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | never healed; swallows or pans another picture → dropped (cut 5) | stranded → ends (cuts 3, 5) | → frozen (cut 6) | = | 7/3/0 |
+| C14 | edit-surface selection | = ends | eaten, a page included (not in `a_gesture_holds_the_pointer`); extends with no button → ends (cut 3) | → nothing (cut 4) | = | not ended → ends keeping the selection (cut 5) | → ends (cut 5) | = healed | stranded → ends (cuts 3, 5) | → frozen (cut 6) | page scrolls → swallowed (cut 6) | 7/3/0 |
+| C15 | rendered-text selection | = ends; a still click opens its link | eaten by a card or menu (a page is subtracted) → ends (cut 3) | → nothing (cut 4) | = | = cancel | → cancel (cut 5) | = healed | stranded, the page holds its span → cancel (cuts 3, 5) | → frozen (cut 6) | = | 5/5/0 |
+| C16 | terminal thumb | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | swallows every move until a release → dropped (cut 5) | stranded → ends (cuts 3, 5) | → frozen (cut 6) | = | 7/3/0 |
+| C17 | terminal foot mark | = ends | eaten → ends (cut 3) | → nothing (cut 4) | = | not ended → ends (cut 5) | → ends (cut 5) | as C16 → dropped (cut 5) | stranded → ends (cuts 3, 5) | → frozen (cut 6) | = | 7/3/0 |
+| C18 | terminal selection | = finished in its pane | = (owned release runs first) | right press raises the terminal menu; a formula press overwrites the route → nothing (cut 4) | = (Esc goes to the shell) | not ended; moves extend it after Alt+Tab → ends keeping the selection (cut 5) | → ends (cut 5) | = dropped | = dropped | tips and `⌄` clocks run under it (`mouse.rs:2175`, `1587`) → frozen (cut 6) | = | 4/6/0 |
+| C19 | forwarded press | = released in its encoding | = (owned release runs first) | other roads (menus, the formula block) take it; the formula press overwrites the route → nothing (cut 4) | = (Esc goes to the program) | latched; the child stays pressed → release from `last`, last modifiers (cut 5) | → release from `last` (cut 5) | = dropped, nothing sent | dropped, the child stays pressed → release from `last` before the seats change (cut 5, Q2) | tips and `⌄` clocks run under it → frozen (cut 6) | page scrolls (Forward is not in the subtraction) → swallowed (cut 6) | 6/4/0 |
+| C20 | formula block | = ink off | = | any other button's release ends it; a second press replaces it → nothing (cut 4) | = | not ended → ink off (cut 5) | → ink off (cut 5) | = (the record now names the leaf) | = dropped | `⌄` clock runs → frozen (cut 6) | = | 4/6/0 |
+| C21 | press inside a page (Windows) | = forwarded | released outside: never forwarded, the page's button stays down → forwarded to the owning page (cut 7) | forwarded to whatever page is under the pointer → nothing (cut 7) | = (the page has the keyboard) | not told → button-up at `point_in_page` (cut 7) | → button-up (cut 7) | = nothing | page hidden, not told → the seat sends its button-up before hiding (cut 7) | moves outside the page are not forwarded → forwarded unclamped; no other layer hovers (cut 7) | notch over another page scrolls that page → goes to the owning page (cut 7) | 7/3/0 |
+| C22 | settings slider / bar | = ends | = (the sheet is modal) | a right release ends the left drag → nothing (cut 4) | Esc closes the sheet and the latch survives, switching every page off → dropped (cut 5) | not ended → dropped (cut 5) | → dropped (cut 5) | sheet closed: survives → dropped (cut 5) | — | the `⌄` rest clock runs under the scrim (`mouse.rs:1587` is asked before the sheet's arm at `1775`) → frozen (cut 6) | = (the sheet takes the notch) | 6/3/1 |
+| | **Σ** | | | | | | | | | | | **122 / 94 / 4** |
 
-Count: **113 changed, 81 unchanged, 4 not applicable.**
+**Pins of Table A cells** (what were Table C rows in the first revision, kept as pins, not counted twice): C1·0 — the divider-drag tests of `app_panes_tests.rs:977-1813` drive the release into `chrome_mouse_input` directly, so they pin the commit and **not** full dispatch; cut 3 adds the full-dispatch pin. C1·0 also carries minimum-size sovereignty (`panes.rs:3870-3891`, `SizePolicy::Sovereign`; `app_dpi_tests.rs:18-67`). C5·0 — `app_mouse_tests.rs:2962-3229`. C5·e — `main.rs:76171` `one_guard_answers_every_way_a_cross_window_gesture_is_taken_away`. C5·h (the rail zone runs) — `app_mouse_tests.rs:1599`. C19·0 over the capsule and the strip — `notice_app_tests.rs:208`. C19·b on the cell road — `app_mouse_tests.rs:3789` `a_chord_under_a_forwarded_gesture_leaves_it_whole` (kept as written; R-8 is stricter). C19·f — `app_mouse_tests.rs:3689` (its tab-not-on-top half moves to C19·g).
 
-### 3.2 Table B — no gesture held (32 cells)
+### 3.2 Table B — no gesture held, and one boundary under a held gesture (32 cells)
 
 | # | point | event | today | model | cut |
 |---|---|---|---|---|---|
@@ -261,12 +321,12 @@ Count: **113 changed, 81 unchanged, 4 not applicable.**
 | | | hover | = the row lights | = | — |
 | B2 | a tab-menu row, the palette, or any menu over a pane head's `⌄` or a float rail's `Open ⌄` | rest 250 ms | the pane menu opens and the menu under the hand closes | nothing | 8e |
 | B3 | a menu or the palette over chrome or a float | re-ask sites, `rearm_hover_intents`, layout peek | chrome hover, flyout or peek armed under the menu | nothing | 8d |
-| B4 | a float over a docked page | hover | the page hears the moves | it does not | 8d |
+| B4 | a float over a docked page (Windows; §2.5) | hover | the page hears the moves | it does not | 8d |
 | | | right / middle press | the page | the float (swallowed, as its body) | 8a |
 | | | wheel | the page scrolls | the float's tenant scrolls, or swallowed | 8b |
 | | | cursor | the page's | the float's | 8d |
 | | | left press | = the float | = | — |
-| B5 | a menu, the palette, a toast or the glance card over a page | hover | the page hears the moves | it does not | 8d |
+| B5 | a menu, the palette, a toast or the glance card over a page (Windows; §2.5) | hover | the page hears the moves | it does not | 8d |
 | | | cursor | the page's | the layer's | 8d |
 | | | press | = the layer | = | — |
 | | | wheel | = the layer | = | — |
@@ -288,126 +348,263 @@ Count: **113 changed, 81 unchanged, 4 not applicable.**
 | B17 | the ghost `⌄`/folder, the text-size pill or an open rail over printed text | glance arming | arms for the path under it | nothing | 8d |
 | | | link underline | underlines under it | nothing | 8d |
 | B18 | the border shared by two preview surfaces | hover / press / wheel | both claim it | the upper one (half-open edges) | 9 |
+| B19 | a touch pan (`GID_PAN`) while any capture is held | the parked pan is spent | its opening point is a `pointer_moved` that drives the held owner to the finger (`mouse.rs:5645-5658`), then its travel scrolls | discarded while a capture is held (§7) | 6 |
 
-Count: **28 changed, 4 unchanged.**
+Count: **28 changed, 4 unchanged.** (The first revision printed 28 for a table of 27 changed cells; the sum was wrong, not a cell.)
 
-### 3.3 Table C — kept as they are (the regression surface, 30 cells)
+### 3.3 Table C — kept as they are, not covered by A or B (22 cells)
 
-Each is pinned by the test named, which must stay green through every cut (rewritten where §4.3 says its *text* has to move, never weakened in what it asserts).
+Each must stay green through every cut (rewritten where §4.3 says its *text* has to move, never weakened in what it asserts). Cells with **no named pin today** get one in the cut named.
 
 | # | cell | pinned by |
 |---|---|---|
-| U1 | a forwarded release over the capsule or the strip reaches its pane | `notice_app_tests.rs:208` `a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip` |
-| U2 | a chord under a forwarded gesture leaves it whole on the cell road | `app_mouse_tests.rs:3789` `a_chord_under_a_forwarded_gesture_leaves_it_whole` |
-| U3 | a forwarded gesture keeps its shell across a focus move; dropped when the pane closed or the shell restarted | `app_mouse_tests.rs:3689` (the tab-not-on-top half changes with Q2) |
-| U4 | a release after the pointer left the window is routed at the last-seen point | `app_mouse_tests.rs:1434` |
-| U5 | a divider released anywhere commits | the divider-drag tests of `app_panes_tests.rs:977-1813` |
-| U6 | the drag release table, the ghost, the landings | `app_mouse_tests.rs:2962-3229` |
-| U7 | a cross-window drag ends on capture or screen change | `main.rs:76171` `one_guard_answers_every_way_a_cross_window_gesture_is_taken_away` |
-| U8 | the rail zone is asked before a gesture can swallow the move | `app_mouse_tests.rs:1599` |
-| U9 | an in-pane surface: left is its verb, every other button swallowed | `app_mouse_tests.rs:3609` |
-| U10 | an in-pane surface swallows a notch; a `Saved` pill claims nothing | `app_mouse_tests.rs:3609`, `notice::tests::a_strip_claims_its_frame_unless_it_has_nothing_to_press` |
-| U11 | any press takes the tip down | `mouse.rs:4437-4445` — **no named pin today**; cut 8a adds one |
-| U12 | a press outside the capsule hands the caret back | `mouse.rs:4463-4471` — **no named pin today**; cut 8a adds one |
-| U13 | a press outside a menu closes it and goes on; a press on its own trigger is spent closing it | `main.rs:53825` `a_press_on_a_popovers_own_trigger_is_spent_closing_it` |
-| U14 | the `⌄` peek / pin grammar | `app_mouse_tests.rs:4047`, `4129` |
-| U15 | the palette's list scrolls and its field swallows | `app_mouse_tests.rs:3874` |
-| U16 | a full-window card swallows every press, its scrim included | `seats.rs:27347` `a_modal_swallows_the_divider_the_seat_and_the_terminal_under_it` (seat level); the arms `mouse.rs:4487-4617` |
-| U17 | a toast takes its press before the modal family | `mouse.rs:4571-4592` — **no named pin today**; cut 8a adds one |
-| U18 | the wheel's stations, in order, where nothing overlaps | `app_mouse_tests.rs:161-1467`, `3275` |
-| U19 | `Ctrl`/`⌘` + wheel over a terminal steps its text size; over a page zooms it | `text_size_tests.rs:1117` `ctrl_wheel_over_a_formula_steps_the_pane_and_does_not_pan_the_formula`; the page half `web.rs:1960-1991` — **no named pin**; cut 8b adds one |
-| U20 | a right press on a tab raises its menu and leaves the active tab alone | `app_mouse_tests.rs:1515` |
-| U21 | a middle press on a tab closes it | `mouse.rs:3205-3214` — **no named pin today**; cut 8a adds one |
-| U22 | `Shift` takes a tracked press back; only the left button can be taken from a tracking program | `app_mouse_tests.rs:2484-2557` |
-| U23 | Control+click is the secondary click on a Mac | `main.rs:58940` |
-| U24 | a press on the title-bar handle is the platform's | `seats.rs:27716` `the_drag_boundary_follows_the_tabs_off_the_title_bar` |
-| U25 | one cursor shape for the whole drag; the grip's arrow | `app_mouse_tests.rs:2681`, `2849`; `app_floats_tests.rs:337` |
-| U26 | a link opens only if the hand held still | `app_mouse_tests.rs:3310` |
-| U27 | a float is opaque to the hover and the press of docked rows | `app_mouse_tests.rs:3398-3472` |
-| U28 | one hover panel on the glass at a time | `app_mouse_tests.rs:4271` |
-| U29 | a press inside a pane moves the focus there (outside B16) | `seats.rs:23418` `a_press_anywhere_in_a_pane_head_included_moves_focus_to_it` |
-| U30 | a divider drag ignores minimum sizes | `panes.rs:3870-3891` (`SizePolicy::Sovereign`); `app_dpi_tests.rs:18-67` (the policy) — the hand-level drag has **no named pin**; cut 3 adds one |
+| U1 | a release after the pointer left the window is routed at the last-seen point | `app_mouse_tests.rs:1434` |
+| U2 | an in-pane surface: left is its verb, every other button swallowed | `app_mouse_tests.rs:3609` |
+| U3 | an in-pane surface swallows a notch; a `Saved` pill claims nothing | `app_mouse_tests.rs:3609`; `notice::tests::a_strip_claims_its_frame_unless_it_has_nothing_to_press` |
+| U4 | any press takes the tip down | `mouse.rs:4437-4445` — no named pin; cut 8a adds one |
+| U5 | a press outside the capsule hands the caret back | `mouse.rs:4463-4471` — no named pin; cut 8a adds one |
+| U6 | a press outside a menu closes it and goes on; a press on its own trigger is spent closing it | `main.rs:53825` `a_press_on_a_popovers_own_trigger_is_spent_closing_it` |
+| U7 | the `⌄` peek / pin grammar | `app_mouse_tests.rs:4047`, `4129` |
+| U8 | the palette's list scrolls and its field swallows | `app_mouse_tests.rs:3874` |
+| U9 | a full-window card swallows every press, its scrim included | `seats.rs:27347` `a_modal_swallows_the_divider_the_seat_and_the_terminal_under_it` (seat level); the arms `mouse.rs:4487-4617` |
+| U10 | a toast takes its press before the modal family | `mouse.rs:4571-4592` — no named pin; cut 8a adds one |
+| U11 | the wheel's stations, in order, where nothing overlaps and nothing is held | `app_mouse_tests.rs:161-1467`, `3275` |
+| U12 | `Ctrl`/`⌘` + wheel over a terminal steps its text size; over a page zooms it | `text_size_tests.rs:1117`; the page half `web.rs:1960-1991` — no named pin; cut 8b adds one |
+| U13 | a right press on a tab raises its menu and leaves the active tab alone | `app_mouse_tests.rs:1515` |
+| U14 | a middle press on a tab closes it | `mouse.rs:3205-3214` — no named pin; cut 8a adds one |
+| U15 | `Shift` takes a tracked press back; only the left button can be taken from a tracking program | `app_mouse_tests.rs:2484-2557` |
+| U16 | Control+click is the secondary click on a Mac | `main.rs:58940` |
+| U17 | a press on the title-bar handle is the platform's | `seats.rs:27716` `the_drag_boundary_follows_the_tabs_off_the_title_bar` |
+| U18 | one cursor shape for the whole drag; the grip's arrow | `app_mouse_tests.rs:2681`, `2849`; `app_floats_tests.rs:337` |
+| U19 | a link opens only if the hand held still | `app_mouse_tests.rs:3310` |
+| U20 | a float is opaque to the hover and the press of docked rows | `app_mouse_tests.rs:3398-3472` |
+| U21 | one hover panel on the glass at a time | `app_mouse_tests.rs:4271` |
+| U22 | a press inside a pane moves the focus there (outside B16) | `seats.rs:23418` `a_press_anywhere_in_a_pane_head_included_moves_focus_to_it` |
 
-**Totals: 256 decided cells — 141 changed (A 113, B 28), 115 unchanged (A 81, B 4, C 30) — and 4 not applicable.**
+**Totals, from the tables: 270 decided cells — 150 changed (A 122, B 28), 120 unchanged (A 94, B 4, C 22) — and 4 not applicable.** Of the 151, 13 are Windows-only (§2.5).
 
 ---
 
 ## 4. Migration
 
-### 4.1 The cuts
+### 4.1 The cuts — ten cuts, fourteen commits
 
-Ten commits. Each is green on the guard set every `bt-app` change runs (`hang_watch::`, `cross_window_drag_tests::`, `every_bare_site_is_a_row`, the three `bt-source` tests, clippy `-D warnings`, every `scripts/ci/check-*.ps1`); each carries its own test observed red under the named mutation (CONVENTIONS §三); each flips only the §3 cells marked with its number.
+Each commit is green on the guard set every `bt-app` change runs (`hang_watch::`, `cross_window_drag_tests::`, `every_bare_site_is_a_row`, the three `bt-source` tests, clippy `-D warnings`, every `scripts/ci/check-*.ps1`); each carries its own test observed red under the named mutation (CONVENTIONS §三); each flips only the §3 cells marked with its cut. **All legacy routing tests stay as they are until the cut that flips their cells** (§4.3).
 
-1. **The guard and the router, no behaviour change.** `PointerHit`, `POINTER_LAYERS_TOP_FIRST` (built from the band list `OverlayStack::flattened` folds), `pointer_layer_at` delegating to today's hit tests in that order, the per-event memo (R-4), and caption widths moved out of `float_hit_at` into the float layer's build. Nobody reads it yet except the tests. *Tests:* `every_band_is_a_pointer_layer_or_takes_no_pointer` (replaces `cmdrail_app_tests.rs:27` `the_in_pane_surfaces_yield_to_every_band_painted_above_them`; mutation: swap two bands in `flattened`); `the_router_agrees_with_the_old_router_where_no_band_overlaps_a_float` (mutation: drop the in-pane step). The guard of §4.2 lands here with today's readers as its debt list.
-2. **The capture record, no behaviour change.** `PointerCapture`, `CaptureOwner` (22 variants, payloads keyed by `LeafId`/`PasteTarget`), `capture_begin`/`capture_end` the only writers; `a_gesture_holds_the_pointer` becomes a method on `CaptureOwner` with **exactly today's membership** (so cut 3 is the commit that changes it). The per-tab fields leave `TabState`. *Test:* `every_capture_owner_is_begun_and_ended_by_the_one_door` (replaces `main.rs:59425` `every_carry_this_window_can_hold_is_named_by_the_one_predicate`, which matched field names and missed `preview_selecting`; mutation: set a payload without `capture_begin`). Flips C3·g's identity half.
-3. **R-6: the release goes to the owner.** One `release_capture(button, position)` at the place `release_owned_gesture` stands (`mouse.rs:4481`), replacing it, the ladder's latched half (`mouse.rs:3225-3366`), the float carry's arm (5012), the glance releases (4906-4913) and the settings release (`main.rs:47462`). *Test:* `a_release_reaches_its_owner_over_every_layer_that_eats_releases` — table-driven over `CaptureOwner` × {card, settings, each menu, palette row, glance head, page}; mutation: put the page arm back above the release. Flips A·a.
-4. **R-8: other buttons go nowhere.** The capture refuses a non-matching press and its release at the same door. *Test:* `a_second_button_under_any_capture_reaches_nothing` (each owner; mutation: let the press through). Flips A·b. `a_chord_under_a_forwarded_gesture_leaves_it_whole` stays as written.
-5. **R-9: every capture's four endings.** Blur and the per-turn capture sample (`end_a_divider_drag_that_lost_its_pointer` generalised to `end_a_capture_that_lost_its_pointer`, same site `dpi.rs:183`, same `GetCapture`); owner gone and off the glass at the doors that already end things (`activate_tab`, `close_pane`, the preview sweep, `leave_preview_buffer_in`, closing settings, a float dismissed); `ReleaseSnapshot` for the forwarded press. *Tests:* `every_capture_answers_blur_capture_loss_owner_gone_and_off_the_glass` (exhaustive over owners; mutation: an arm that does nothing); `a_program_whose_tab_was_switched_away_hears_its_release` (Q2; mutation: drop the snapshot send). `app_panes_tests.rs` `a_divider_drag_that_loses_its_pointer_stops_holding_the_resize` is kept and generalised. Flips A·d, A·e, A·f, A·g.
-6. **R-7: hover frozen under a capture.** `observe_chevrons`, the tip, the flyout and glance intents and `drive_web_pointer` ask `capture.is_none()`; the rail zone and the survey do not. *Test:* `a_held_gesture_resting_on_a_chevron_opens_nothing` (mutation: drop the gate). Flips A·h.
-7. **R-13: a page press is a capture** (Windows; on macOS the variant is never latched, §5). *Tests:* `a_page_selection_dragged_out_of_the_page_keeps_the_page` and `a_page_press_is_released_on_blur_and_on_a_tab_switch`, over the `WebSeat` mock that records `send_mouse` (mutation: forward only inside the bounds). Flips row C21.
-8. **Every reader onto the router**, in five commits so each flips one family: **8a** the press road (`mouse_input`'s arms become one dispatch on `PointerHit`; the full-window card closes popups at raise; the float's pill; `focus_pane_at` asks the router) — B1, B4 (press), B12 (press), B13, B14, B16; **8b** the wheel (stations keyed by layer; floats own their frame) — B4 (wheel), B6–B8; **8c** tips — B9, B10, B11 (tip); **8d** hover, cursor and the page's hover (`web_page_at` becomes the router's `Page` answer; the command rail, `row_under`, `pane_hit_context` and the re-ask sites read the router) — B3, B4, B5, B11, B12 (hover), B17; **8e** the `⌄` clocks — B2. Each commit's test is the B rows it flips, driven at the points named (mutation: restore the old reader).
-9. **R-3: motion-aware hit tests.** The five census-#21 rungs and the seven others take `pane_transforms` and the card rectangle, through `pane_chrome_box` as `hit_chrome_in_motion` does; `preview_surface_at` half-open. *Test:* `a_control_is_hit_where_it_is_drawn_while_its_pane_moves` (per rung, at the solved and the drawn spot, mid-animation; mutation: drop the transform). Flips B15, B18.
-10. **The rules and the debt at zero.** The guard's debt list is empty and the list file is deleted with the check that it only shrinks; RULES row 28 gains §2.5's text; `docs/ARCHITECTURE.md` §8's sentence "the rung order is the de-facto specification and nobody wrote it down" is answered for the pointer by a pointer to `POINTER_LAYERS_TOP_FIRST`; one DESIGN entry per cut, as every merged change does.
+1. **The guard, `PointerFacts` and the router — dead-path scaffolding, not an equivalent router.** `PointerFacts` built per frame (§2.1), `POINTER_LAYERS_TOP_FIRST` from the band list `OverlayStack::flattened` folds, `pointer_layer_at` as a pure walk over the facts, the per-event memo. Nothing in the product reads it yet; its overlap answers *intentionally differ* from today's first-handler order, which keeps answering every event until cut 8. The guard of §4.2 lands here with its generated debt list. *Tests:* `every_band_is_a_pointer_layer_or_takes_no_pointer` (supersedes `cmdrail_app_tests.rs:27`; mutation: swap two bands in `flattened`); `the_walk_allocates_nothing_at_the_maximum_stack` — a `#[cfg(test)]` counting global allocator whose counter is thread-local, armed around one walk over the maximum-stack fixture (below) and required to read 0 (mutation: reintroduce the id `Vec`); `the_walk_visits_a_bounded_number_of_rectangles` — a visit counter on `PointerFacts` (test-only) required ≤ the fixture's layer + part count (mutation: walk every float's parts unconditionally); `the_walk_cannot_shape` is by type (the walk has no `&mut` renderer), so it needs no test. **The maximum-stack fixture**: the glance card, three toasts, the palette, a pane menu with its child list, the profile menu, eight floats (two files trees, a Git page, a graph, a document, a picture, a page, a peek), two download sheets, the capsule over a strip, a sixteen-pane layout with an open icon rail, one pane mid-animation.
+2. **The capture record, mirrored and unread — behaviour-neutral by construction.** `PointerCapture`, `CaptureOwner`, and the application slot, written beside the legacy fields by `capture_mirror_begin`/`_end` at every site that sets or clears a legacy latch. Because today's latches *can* overlap (a stale latch beside a new one, a settings drag beside anything, a formula route over a forwarded one), the mirror in this cut is a `Vec<PointerCapture>` that records every overlap rather than resolving it; nothing reads it, so no behaviour changes. *Test:* `the_mirror_names_every_live_legacy_latch` across scripted scenarios, including the three overlaps above (mutation: drop the mirror call from one set site). The test also counts overlaps; cut 3 must bring that count to zero.
+3. **The slot becomes the authority; R-6.** The legacy fields go; their payloads move into the variants (leaf-keyed: C3·g's identity half, C11–C17·g's stranding); the `Vec` becomes `Option`. **Precedence, stated because the representation now forbids overlap:** a press that would latch while the slot is held ends the held capture with *cancel* first (R-5) — after cut 4 the only such press is one whose `os` sample proves the held capture stale. One `release_capture(button, position)` replaces `release_owned_gesture`, the ladder's latched half (`mouse.rs:3225-3366`), the float carry's arm (5012), the glance releases (4906-4913) and the settings release (`main.rs:47462`). *Test:* `a_release_reaches_its_owner_over_every_layer_that_eats_releases` — table-driven over `CaptureOwner` × {each card, settings, each menu, palette row, glance head, page} (mutation: put the page arm back above the release). Flips A·a.
+4. **R-8.** The slot refuses a non-matching press and its release at the same door. DESIGN entry superseding the 2026-10-04 "non-matching release returns to the ordinary road". *Test:* `a_second_button_under_any_capture_reaches_nothing` (each owner; mutation: let the press through). Flips A·b.
+5. **R-9 — the endings, with a lifecycle-door matrix.** Every door below calls `end_capture(Ending::…)` for the owners it can end, **before** it changes the state the owner names:
+
+   | door | file:line | ending |
+   |---|---|---|
+   | blur | `main.rs:67427` | cancel |
+   | the per-turn capture sample | `runtime/dpi.rs:183` (generalising `panes.rs:3922`) | cancel |
+   | scale change | `runtime/dpi.rs:424` (first statement) | cancel (pixel-quantity owners, page) |
+   | the summoned window hidden | `runtime/quake.rs:107` | cancel |
+   | a window closed | `request_window_close` / the close arm of the dispatcher | cancel |
+   | tab switch | `runtime/tabs.rs:160-196` (before `active_tab` changes) | off the glass |
+   | tab closed | `runtime/tabs.rs:289-306` | owner gone |
+   | pane closed | `runtime/panes.rs:1396` | owner gone |
+   | pane zoomed out of view | `toggle_pane_zoom` | off the glass |
+   | preview surface swept / buffer left / document rebuilt | `preview.rs:2307-2342`, `3112-3145`, `8686` | owner gone |
+   | float dismissed | `runtime/floats.rs:3472` | owner gone |
+   | glance card hidden | `hide_file_peek` (`runtime/peek.rs`, the `file_peek = None` site) | owner gone |
+   | settings closed | `toggle_settings_panel` (`main.rs:46102`) and the Esc close | owner gone |
+   | a page seat leaves the glass | `WebSeat`'s presence transition (cut 7) | the seat's own button-up |
+
+   *Enforcement, two halves:* (i) `every_lifecycle_door_ends_the_capture` — a `bt-source` index pin, one row per door above, that the door's item calls `end_capture` (the `hardcode_owners.rs` pattern: it asks the index about a call inside a named item, it does not read source text as a behaviour oracle); a door added to the matrix without the call, or the call removed, names the door (mutation: remove the call from `hide_quake_window`); (ii) `each_door_ends_a_held_capture` — behavioural, one scenario per row with a capture of every owner the door can end held (mutation: an exhaustive-match arm that does nothing). The exhaustive match on `CaptureOwner` proves every variant has an answer; the two halves prove every door asks. `a_divider_drag_that_loses_its_pointer_stops_holding_the_resize` is kept and generalised. Flips A·c (C22), A·d, A·e, A·f, A·g.
+6. **R-7 and R-10's capture half.** `observe_chevrons`, the tip, the flyout and glance intents and non-owner pages' hover ask the slot; the rail zone and the survey do not; a page under a non-page capture answers no notch; parked pans are discarded while held. *Tests:* `a_held_gesture_resting_on_a_chevron_opens_nothing`; `no_page_but_the_owner_hears_the_wheel_under_a_capture`; `a_pan_under_a_held_gesture_moves_nothing` (mutations: drop each gate). Flips A·h, A·w (except C21), B19.
+7. **R-13 (Windows).** `CaptureOwner::Page`, the seat-level "never hidden with a button down" rule, and the scale-change ordering. **Presence-order coverage on a real `WebSeat`:** `WebSeat::send_mouse`'s one call into the platform host (`webhost.rs:4088`) goes through a `PageMouse` sink the seat owns — the platform host in the product, a recorder in tests — so the test drives the **real** seat through its real presence transition (`web_presence` → the seat's wanted/placed state, the path `sync_web_page` takes) and asserts the recorded order: `LeftDown`, moves outside the bounds, then on `Ctrl+Tab` a `LeftUp` at `point_in_page` **while the seat is still `Shown`**, then the hide. *Tests:* `a_page_selection_dragged_out_of_the_page_keeps_the_page`; `a_page_seat_never_hides_with_a_button_down` (mutation: hide before the release, which the recorder shows as a release with no `Shown` bounds, i.e. none sent); `a_scale_change_releases_the_page_in_the_old_space` (mutation: move the cancel after `resize`). `cfg(windows)`. Flips row C21.
+8. **Every reader onto the router**, five commits so each flips one family: **8a** the press road (`mouse_input`'s arms become one dispatch on `PointerHit`; a full-window card closes popups at raise; the float's pill; `focus_pane_at` asks the router; pins for U4, U5, U10, U14) — B1, B4 (press), B12 (press), B13, B14, B16; **8b** the wheel (stations keyed by layer; floats own their frame; pin for U12's page half) — B4 (wheel), B6–B8; **8c** tips — B9, B10, B11 (tip); **8d** hover, cursor, every paint-time hover read and the page's hover (`web_page_at` becomes the router's `Page` answer; the command rail, `row_under`, `pane_hit_context`, the re-ask sites read the router) — B3, B4, B5, B11, B12 (hover), B17; **8e** the `⌄` clocks — B2. Each commit's test is the B rows it flips, driven at the points named (mutation: restore the old reader). The legacy routing tests listed in §4.3 are rewritten in the commit that flips their cells, not before.
+9. **R-3: motion-aware hit tests.** The five census-#21 rungs and the seven others take `pane_transforms` and the card rectangle through `pane_chrome_box`, as `hit_chrome_in_motion` does; `preview_surface_at` becomes half-open. *Test:* `a_control_is_hit_where_it_is_drawn_while_its_pane_moves` (per rung, mid-animation, at the solved and the drawn spot; mutation: drop the transform). Flips B15, B18.
+10. **The rules and the debt at zero.** RULES row 28 gains §2.6's text; ARCHITECTURE §8's "the rung order is the de-facto specification and nobody wrote it down" is answered for the pointer by a pointer to `POINTER_LAYERS_TOP_FIRST`; the debt file is deleted (§4.2). One DESIGN entry per commit, as every merged change does.
 
 ### 4.2 The planted-violation guard
 
-`every_pointer_read_is_the_routers_or_a_captures`, a `bt-app` test on the `bt-source` index — the mechanism `the_press_and_the_hover_ask_one_router` (`app_mouse_tests.rs:3503`) and `hardcode_owners.rs` already use, which asks the index about identifiers and calls rather than reading source text as a behaviour oracle.
+`every_pointer_read_is_the_routers_or_a_captures`, a `bt-app` test on the `bt-source` index (the mechanism `the_press_and_the_hover_ask_one_router`, `app_mouse_tests.rs:3503`, and `hardcode_owners.rs` already use: it asks the index about identifiers, types and calls, never reads source text as a behaviour oracle).
 
-- **Needles:** the identifiers `pointer_position` and `pointer_last_seen`; calls of every layer hit test in §2.1's table (`float_hit_at`, `file_peek_holds`, `toast::at`, `palette::hit`, `palette::wheel_part`, the nine `*_menu_hit`, `websheet::covers`, `websheet::hit`, `search_part_at`, `docked_notice_at`, `docked_chrome_target_at`, `tab_list_target_at`, `seats::pane_at`, `preview_surface_at`, `pane_hit_context`, `web_page_at`, `seats::title_bar_drag_point`, `seats::tab_strip_contains`, `seats::files_body_at`).
-- **The rule:** the product owners of every occurrence (`Found::owners`) are a subset of an allowlist that is a `const` in the test, each entry with its reason: the router's items (`pointer_layer_at` and the layer adapters it calls), the four event doors that write the two fields, and the capture owners' drive functions that measure their **own** owner's geometry (`drag_hit_in_pane`, the drag survey). Test code is exempt by the index's own classification.
-- **The debt list:** at cut 1, every reader of §1 that is not yet behind the router is a row of `docs/plans/POINTER-DEBT.tsv`, and the test accepts an owner on that list too; a CI check compares the list with the merge base and refuses an added row (the shape `scripts/ci/check-migration-debt.ps1` already enforces for `MIGRATION-DEBT.tsv`). Each cut deletes the rows it moves. At cut 10 the file is gone.
-- **What makes it red:** a new function that reads `self.window.pointer_position`, or calls `toast::at` or `seats::pane_at` to answer a pointer question, outside the router — the failure names the owner item, the count, and both lists. *Mutation for its own red:* add a read of `pointer_position` to `scroll_tab_strip`.
-- **What it does not catch,** written down: a reader that is handed a position as an argument by an allowed caller and then answers a layer question on its own. The router's table tests (cut 1, cut 8) are what hold that.
+- **The needles, derived, not hand-written.** Four kinds, matching the census classes of §1.0: **N-P** the identifiers `pointer_position` and `pointer_last_seen`; **N-E** the type `PhysicalPosition` inside a signature of an item under `crate::runtime` (a function that is handed a pointer position); **N-B** `MouseButton`, `ElementState`, `MouseScrollDelta` inside `crate::runtime` (outside it, the wire encoders — `input.rs`, `protocol_mouse_button`, `web_mouse_button`, the `WheelBurst` arithmetic — are not routing and are not needles); **N-H** a call of any **hit test** — the set of functions the census marks H (§1.0: 135 today), **generated** from the index by `scripts/dev/generate-pointer-needles.ps1` into `docs/plans/pointer-needles.tsv` and held equal to a fresh derivation by `the_pointer_needles_are_the_census` (the `the_architecture_table_is_the_registry` pattern for `window_waits.tsv`). A new hit test is therefore a new needle without anyone remembering to add it.
+- **The rule, with no allowlist to grow.** Every product owner of a needle occurrence (`Found::owners`) is an item of the module `crate::runtime::pointer` (the router, `PointerFacts`, the capture slot, the four event doors, the owners' drive and release functions) **or** a row of the debt file. There is no list of allowed names: adding a reader means writing it inside `runtime::pointer`, which a reviewer sees as such. A hit test's own declaration is not an owner (the index's `exempting_declarations_of`).
+- **The debt file, derived.** `docs/plans/POINTER-DEBT.tsv` is written by the same generator from the index: every owner of a needle outside `runtime::pointer`, with its count of occurrences. The test requires the file to **equal** the current violation set, so a reader moved behind the router must leave the file in the same commit, and a new reader fails naming its owner and both files. `scripts/ci/check-pointer-debt.ps1` compares the file with the merge base the way `check-migration-debt.ps1` does (whole rows, multiplicity-preserving) and refuses an added row or a raised count. **At cut 10 the file is deleted**: the check reads a file absent at `HEAD` and present at the merge base as zero rows (a shrink, accepted), a file absent at both as passing, and a file present at `HEAD` and absent at the merge base as all rows added (refused) — so the debt cannot come back. The test, after cut 10, requires the violation set to be empty.
+- **What is still gameable, written down.** (1) An item inside `runtime::pointer` that answers a layer question it should not — review is the guard there, and the module is small. (2) A helper outside the needle set that tests a point against a rectangle it was handed (`contains`-style) by an owner that is itself on the debt list or inside the module — the census's H class catches named hit tests, not every comparison. (3) A position laundered through a non-`PhysicalPosition` type (`[f32; 2]`, two `f64`s) into an item outside `crate::runtime` — N-E is scoped to `crate::runtime`; the census's H class covers the geometry modules by name and signature.
+- **Its own red:** add a read of `pointer_position` to `scroll_tab_strip` after its row has left the debt file.
 
 ### 4.3 Tests that pin today's behaviour and must change
 
-- **Change in what they assert** (the cells they pin flip): `app_mouse_tests.rs:3689` `a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to` (the tab-not-on-top half: dropped → released from `last`, Q2); `main.rs:59425` `every_carry_this_window_can_hold_is_named_by_the_one_predicate` (superseded by the exhaustive capture match, which adds `preview_selecting` and the presses); `main.rs:59400` `the_hand_is_asked_before_any_page_is` and `main.rs:59516` `the_tab_list_is_asked_before_any_page_is` (the page becomes a layer of the router; the subtractions become the walk's order).
-- **Change in their text only** (they read source to pin an order the model moves; each is rewritten against the new item, asserting the same thing): `app_mouse_tests.rs:3503` `the_press_and_the_hover_ask_one_router` (superseded by §4.2), `3553`, `3609`, `3874`, `3984`, `4216`, `1515`, `1599`, `3398`, `3440`, `3472`; `cmdrail_app_tests.rs:27`; `app_panes_tests.rs:2745` `the_capsule_is_above_the_strip_for_the_paint_the_hover_and_the_press`; `main.rs:53792` (`router()` and the tests at 53825-53935), `54560` `the_button_router_is_reached_through_the_one_function_that_knows_the_rule`, `54968` `the_wheel_route_words_are_the_declared_ones` (the wheel trace words gain the float layer's), `56117`, `56171`, `57299`, `57540`, `58940`, `58973`; `app_configuration_tests.rs:82` `a_press_outside_an_open_dropdown_closes_it_and_still_lands`; `app_peek_tests.rs:872`; `app_tabs_tests.rs:3055`, `3610`.
-- **Kept as written** (Table C): everything in §3.3.
+- **Change in what they assert** (their cells flip): `app_mouse_tests.rs:3689` `a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to` (the tab-not-on-top half: dropped → released from `last`, Q2; cut 5); `main.rs:59425` `every_carry_this_window_can_hold_is_named_by_the_one_predicate` (superseded by the slot, which covers `preview_selecting` and the presses; cut 3); `main.rs:59400` `the_hand_is_asked_before_any_page_is` and `main.rs:59516` `the_tab_list_is_asked_before_any_page_is` (the page becomes a router layer; cut 8d).
+- **Change in their text only** (they read source to pin an order the model moves; each rewritten against the new item, asserting the same thing, in the cut that moves the code): `app_mouse_tests.rs:3503` (superseded by §4.2 in cut 1), `3553`, `3609`, `3874`, `3984`, `4216`, `1515`, `1599`, `3398`, `3440`, `3472`; `cmdrail_app_tests.rs:27`; `app_panes_tests.rs:2745`; `main.rs:53792` (`router()` and the tests at 53825-53935), `54560`, `54968`, `56117`, `56171`, `57299`, `57540`, `58940`, `58973`; `app_configuration_tests.rs:82`; `app_peek_tests.rs:872`; `app_tabs_tests.rs:3055`, `3610`.
+- **Kept as written**: Table C and the pins under Table A.
 
-The two tests T-POINTER-CAPTURE's ticket also records as flaky under load (`settings::tests::settings_pointer_complete_operation_layout_budget`, the update-lock election) are not pointer tests; the first is a counter shared between tests and is fixed by scoping the counter to its test, as the ticket says, in its own commit outside this sequence.
+The two tests T-POINTER-CAPTURE's ticket also records as flaky under load (`settings::tests::settings_pointer_complete_operation_layout_budget`, the update-lock election) are not pointer tests; the first's shared counter is scoped to its test in its own commit outside this sequence.
 
 ### 4.4 The window-waits inventory
 
-No new bare site. The capture sample is the `GetCapture` read (`bt_platform::thread_mouse_capture`, `bt-platform/src/lib.rs:13580`) the divider already takes every turn; it is a thread-local query and is not a registry row today. The page's forwarded moves and releases go through the door they already use (`WebSeat::send_mouse` → `SendMouseInput`), which is not a registry row either; R-13 sends more of them only while a page holds a capture. The cursor keeps its one door row (`SetCursor`, §5.2, `owner_door::set_cursor` from `Runtime::apply_pointer_cursor`). `window_waits.tsv` stays at 233 rows and `scripts/ci/check-window-waits.ps1` is unchanged.
+No new bare site and no new door. The capture sample is the `GetCapture` read (`bt_platform::thread_mouse_capture`, `bt-platform/src/lib.rs:13580`) the divider already takes every turn, now taken for whichever capture is held (one call per turn, as today, and none when nothing is held). The page's moves and releases go through the door they already use (`WebSeat::send_mouse` → `SendMouseInput`); R-13 sends more of them only while a page holds a capture. Neither `GetCapture`, `pointer_position_in_window` nor `SendMouseInput` is a row of the registry today, and none becomes one. The cursor keeps its one door row (`SetCursor`, `owner_door::set_cursor` from `Runtime::apply_pointer_cursor`). At base `5c4a08b0`, `crates/bt-app/src/window_waits.tsv` has **231 physical lines** and `docs/plans/window-thread-bare-sites.tsv` sums to **231 bare occurrences**; the "233" in ARCHITECTURE §4.4's T-FRESH-FACTS row (`ARCHITECTURE.md:760`) is stale prose, not the registry. Neither file changes; `scripts/ci/check-window-waits.ps1` is unchanged.
 
 ---
 
 ## 5. Hazards
 
-**Latency on the window thread.** Today one `CursorMoved` evaluates `pointer_target_at` three to seven times (G-22), and with a float on screen each evaluation measures two captions through the font (`floats.rs:2495-2507`) and allocates a `Vec` of ids (2513). The router replaces those with one walk per event (R-4), so the budget is set against today's cost:
-- **Budget:** one walk per pointer event, inside the existing `Station::EventPointer` (`hang_watch.rs:701`) and `Station::EventMouse` meters, with **no text shaping and no allocation inside the walk**. Captions are measured once when the float layer is built (the paint already measures them). The walk is rectangle tests over the layers on the glass: O(layers + floats), all of them cheap except the files tree's row lookup and the formula hit, both of which today's hover already pays once.
-- **How it is held:** cut 1's commit report runs the router tests' pointer sweep (the `pointer_moved` seam the existing router tests drive; no window, no injected input) under `BT_MOUSE_TRACE` and the hang-watch station totals, before and after; a per-event mean that rises makes the cut not green. Nothing was built for this note — the claim is a ratio (one walk instead of three to seven, minus two shapings each), and the absolute number belongs to cut 1.
-- **Not moved:** the drag survey (`survey_drop`, one strip solve per move, `mouse.rs:2822-2826`) is the drag owner's, not the router's, and costs what it costs today.
+**Latency on the window thread.** Today one `CursorMoved` evaluates `pointer_target_at` three to seven times (G-22), each, with a float up, measuring two captions (`floats.rs:2495-2507`), allocating an id `Vec` (2513) and cloning the Git page and graph a float shows (2536, 2552).
+- **What the design guarantees mechanically:** one walk per event (R-4); no shaping (by type); no allocation (cut 1's counting-allocator test); a bounded number of rectangle visits at the maximum-stack fixture (cut 1's visit-count test). These are deterministic tests, not timing tests (CONVENTIONS §三 forbids timing-bound tests).
+- **The absolute budget, measured in cut 1's report and held in every later cut's report:** at the maximum-stack fixture, in a release build on the build desktop, **one walk ≤ 20 µs at p99 and ≤ 50 µs at the maximum** over a 10 000-event sweep; **the whole `pointer_moved` with nothing held ≤ 100 µs at p99**. The number comes from the worst device, not from today's mean: an 8 kHz mouse delivers at most one report every 125 µs, and the window thread must leave room for the frame it is also drawing. The sweep is the router tests' `pointer_moved` seam (no window, no injected input), timed by the hang-watch station totals (`Station::EventPointer`, `hang_watch.rs:701`) under `BT_MOUSE_TRACE`.
+- **Coalescing policy: Folio adds none and processes every delivered event.** Windows does not queue one `WM_MOUSEMOVE` per hardware report: it synthesises a single pending move when the queue is read, so delivery is bounded by how often the loop reads; AppKit coalesces mouse-moved events by default. The budget above holds even if a platform delivered every report. The wheel keeps its own merge (`WheelBurst`, `mouse.rs:5578-5631`).
+- **Not moved:** the drag survey (`survey_drop`, one strip solve per move, `mouse.rs:2822-2826`) is the drag owner's and costs what it costs today.
 
-**The hosted page's press handler.** The brief's premise — WebView2 owns its HWND and the router cannot see inside it — does not hold on Windows. The page is composition-hosted (`bt-platform/src/webview.rs:1796-1819`), hears only what `WebSeat::send_mouse` forwards, and winit already holds the Win32 capture from button-down to button-up on the top-level window (`mouse.rs:1484-1492`). A divider released over a page **already arrives** in `mouse_input`; what loses it is the order of the arms (K1, G-1). **Mechanism proposed: the capture record (R-6) — the release is delivered to the owner before any layer, the page included.** Rejected: a transparent capture overlay window (a second source of truth for "who has the pointer" and one more visual DirectComposition must order); a second `SetCapture` (winit already holds the capture for exactly the gesture's life, and a second holder would compete with it for the button-up); the engine's own mouse events (the engine reports none to the host; it only consumes `SendMouseInput`). Residual: a page script that called `setPointerCapture` expects moves outside its bounds — R-13 gives them.
+**The hosted page's press handler (Windows).** The page is composition-hosted and hears only what Folio forwards; winit holds the Win32 capture from button-down to button-up on the top-level window (`mouse.rs:1484-1492`). A divider released over a page already arrives in `mouse_input`; what loses some releases is the order of the arms (K1, G-1). **Mechanism: the capture slot (R-6) delivers the release before any layer, the page included.** Rejected: a transparent capture overlay (a second source of truth and one more visual DirectComposition must order); a second `SetCapture` (winit already holds the capture for exactly the gesture's life, and a second holder would compete with it for the button-up); the engine's own mouse events (the composition controller reports none to its host). The ordering and DPI rules for a page's own release are §2.4's.
 
-**DPI and scale.** Pointer positions and every layer's geometry are the window's physical pixels. A capture holds no geometry except `last`: a cell (scale-free) or a window point forwarded only to a page of the same window. Owners re-read their geometry from the current solve on each move (the divider, `panes.rs:3818-3830`). A scale change during a capture comes from the system (a monitor detached, a display scale changed), not from the hand; R-9 cancels the owners whose payload is a pixel offset taken at the press (the float's grab, the thumbs' grab, the picture's anchor), because an offset taken at one scale and applied at another moves the thing by the ratio. `DragGuard` already ends a cross-window drag on a virtual-screen change (`main.rs:33941-33962`).
+**DPI and scale.** Pointer positions and every layer's geometry are the window's physical pixels; `PointerFacts` is rebuilt on the frame after a scale change. A capture's payloads that are pixel quantities taken at the press are cancelled on `ScaleFactorChanged` (R-9); a forwarded press's `last` is a cell; a page's `last` is page-local and the page is released in the old space before the change is applied (§2.4). `DragGuard` already ends a cross-window drag on a virtual-screen change (`main.rs:33941-33962`).
 
-**Multi-window drags (tab and pane tear-out).** The capture is per window; the cross-window half stays the application's `DragBroker` (`main.rs:34131`, `FolioApp::drive_drag_broker`, `main.rs:65090-65130`), which samples the OS capture and the screen. Under the model the broker is the capture's application-level extension: the source window holds the `PointerCapture` (owner `Drag`), target windows hold none and get no pointer events while the button is down (they are fed by the broker's clock), and R-5's "one per process" is what lets a target trust that. The release keeps going through `hand_over_across_windows` (`mouse.rs:3060`). One trap: today a release eaten above the ladder is "cancelled home" by the broker's guard a turn later (Table A, C5·a); after cut 3 it lands where it was released — cut 3's test covers a release over a card in the source window while the pointer is over another window's glass.
+**Multi-window drags (tab and pane tear-out).** The slot is the application's, so "one capture" holds across windows by representation (R-5). The cross-window half stays `DragBroker` (`main.rs:34131`, `FolioApp::drive_drag_broker`, `main.rs:65090-65130`): target windows receive no pointer events while the button is down and are fed by the broker's clock; the release keeps going through `hand_over_across_windows` (`mouse.rs:3060`). Today a release eaten above the ladder is cancelled home by the broker's guard a turn later (C5·a); after cut 3 it lands where it was released — cut 3's test covers a release over a card in the source window while the pointer is over another window's glass.
 
-**Tab switch under a divider.** `cancel_divider_drag` reads `self.seats`, which is the active tab's (`panes.rs:3936-3940`). The off-the-glass cancel (C1·g) must run **before** `activate_tab` changes `active_tab`, or it restores a ratio into the wrong tree. Cut 5 puts the capture's ending first in `activate_tab`.
+**Tab switch under a divider or a forwarded press.** Both endings read state the switch replaces (`cancel_divider_drag` reads the active tab's seats, `panes.rs:3936-3940`; a forwarded release needs the owner's seat), so the tab-switch door runs `end_capture` before `active_tab` changes (§4.1 cut 5's matrix).
 
-**macOS twin.** The same router, the same record, the same tests; four seams are the platform's:
-1. *OS capture.* AppKit sends `mouseDragged:` and `mouseUp:` to the view that took `mouseDown:`; there is no per-thread capture, and `thread_mouse_capture` answers `None` at the press and after (`main.rs:19640-19644`), so the capture-lost sample never fires there and blur (the window resigning key) is the cancel.
-2. *The hosted page.* `WKWebView` is a real `NSView` that AppKit delivers to directly, and `send_mouse` is a no-op (`bt-platform/src/macos_webview.rs:2016-2031`). Whether a press reaches the page or Folio's surface view is the open hit-testing question of DESIGN §13.29. Under the model: a Folio-owned capture keeps its drags and its release by AppKit's own rule (the surface view took the press), so R-6 holds by the platform; `CaptureOwner::Page` is never latched on macOS (the web view owns its own gesture), and layer 15 answers only hover and cursor there.
-3. *Secondary click.* Control+click becomes `Right` before every router (`mouse.rs:4419-4431`, `input::pressed_button_of_gesture`, `secondary_press`); the capture records the translated button and the translation pairs the release, so R-6 and R-8 compare like with like.
-4. *The title-bar handle.* A press on it is the platform's (`press_owned_title_bar`, `mouse.rs:3633`): on macOS the move it starts is AppKit's own loop and latches no capture; on Windows the press never arrives (`HTCAPTION`).
+**macOS twin.** The same router and slot; the seams are the platform's: (1) *OS capture* — AppKit sends `mouseDragged:` and `mouseUp:` to the view that took `mouseDown:`, `thread_mouse_capture` answers `None` at the press and after (`main.rs:19640-19644`; `bt-platform/src/portable_impl.rs:995-997`), so the capture sample never fires and blur (the window resigning key) and the window hidden are the cancels; (2) *the hosted page* — out of this ticket, with the consequence table of §2.5; (3) *secondary click* — Control+click becomes `Right` before every router (`mouse.rs:4419-4431`), and the slot records the translated button, so R-6 and R-8 compare like with like; (4) *the title-bar handle* — a press on it is the platform's (`press_owned_title_bar`, `mouse.rs:3633`), latches no capture, and on Windows never arrives (`HTCAPTION`).
 
 ---
 
 ## 6. Open questions for the owner
 
+The review (Codex, 2026-10-09) agrees with all three recommendations; its additions are adopted below.
+
 **Q1. A second button while one is held: refuse it, or let it act?**
-Today a right press during a held left gesture goes down the whole press road and can raise a tab, file-row, pane, git, page or terminal menu, or replace a forwarded press with the formula block's (G-5); the menu it raises then eats the left release and leaves the gesture on the bare pointer (G-1). Only the cell road refuses it under a forwarded press.
-*Recommendation: refuse (R-8).* The other button's press and release go nowhere while a gesture is held; the gesture ends by its own release (or Esc, for the drag and the divider, as today). This is how a scroll bar, a splitter or a browser's text selection treat the other button, and it removes the common road by which a menu opens under a held gesture. *Alternative:* the second button cancels the held gesture and then acts as it would alone — a divider would jump back on a right click.
+Today a right press during a held left gesture goes down the whole press road and can raise a tab, file-row, pane, git, page or terminal menu, or replace a forwarded press with the formula block's (G-5); the menu then eats the left release and leaves the gesture on the bare pointer (G-1).
+*Recommendation: refuse (R-8).* The other button's press and release go nowhere while a gesture is held. This **supersedes** the 2026-10-04 rule that a non-matching release under a forwarded press goes back to the ordinary road (`DESIGN.md:13766`), so it needs the owner's yes and lands with a dated DESIGN entry saying it supersedes that sentence. *Alternative:* the second button cancels the held gesture and then acts — a divider would jump back on a right click.
 
 **Q2. A program's mouse press whose tab is switched away while the button is held: tell the program, or drop the gesture?**
-Today the route is dropped and nothing is sent (`tabs.rs:195`; `clipboard.rs:523-528`), so the program stays logically pressed until its next press (a selection in `vim` or `mc` keeps extending when the hand comes back). The program still runs; only the tab is not in front.
-*Recommendation: tell it (R-9, off the glass).* The release is sent to the recorded shell at the last cell it was told about, in the encoding the press latched, and the route ends. A pane closed or a shell restarted is still owed nothing, as ruled on 2026-10-04. *Alternative:* keep the drop.
+Today the route is dropped and nothing is sent (`tabs.rs:195`; `clipboard.rs:523-528`), so the program stays logically pressed.
+*Recommendation: tell it (R-9, off the glass)* — at the last cell it was told about, in the press's encoding, **with the modifiers of the last mouse report sent** (not the `Ctrl` of the `Ctrl+Tab` that caused the ending), and **before the tab's seats change**. A pane closed or a shell restarted is still owed nothing, as ruled on 2026-10-04. *Alternative:* keep the drop.
 
 **Q3. A drag that starts inside a hosted page and leaves its rectangle: does the page keep it?**
-Today the page stops hearing the pointer at its edge and never hears the release if the hand opens outside (G-2): a text selection in the page stops at the edge and the page's own button stays down, so the next hover over it extends the selection with no button held. Every browser keeps such a drag (pointer capture).
-*Recommendation: yes (R-13).* The page owns the gesture it began; its moves and release are forwarded to it wherever the pointer is, unclamped, and nothing else hovers meanwhile. On macOS this is already AppKit's behaviour for a `WKWebView`. *Alternative:* clamp the moves into the page's bounds, or keep today's edge (and only send the page its button-up when the hand opens outside).
+Today it does not (G-2), and the page's button stays down.
+*Recommendation: yes, on Windows (R-13)*, as a view-level capture that leaves the engine's own element capture to the engine. On macOS the answer waits on §13.29 (§2.5). *Alternative:* clamp the moves into the page's bounds, or keep today's edge and only send the page its button-up.
 
-Not asked, because already ruled: the capsule and the strip stay where they are; the capsule is above the strip; the `⌄` peek/pin grammar (the model only stops its rest clock under a held gesture and under a menu); a divider ignores minima; no refusal, prompt or confirmation is added.
+Not asked, because already ruled or not in reach: the capsule and the strip stay where they are and the capsule is above the strip (owner, 2026-10-04); the `⌄` peek/pin grammar (2026-09-23) is unchanged — the model only stops its rest clock under a held gesture and under a menu; a divider ignores minima (2026-08-10).
+
+---
+
+## 7. Boundaries
+
+- **Touch and pen.** Folio consumes no raw `WindowEvent::Touch`: Windows' own translation sees the touch messages (`bt-platform/src/lib.rs:10265-10290`), taps and presses arrive promoted to the mouse and are covered by this model as mouse input, and a one-finger pan is answered as the wheel — `GID_PAN` parked, then spent by `spend_parked_pans` as a `pointer_moved` to the pan's point plus a `queue_wheel` (`mouse.rs:5645-5658`). **Under a held capture a parked pan is discarded** (B19): its pointer move would otherwise drag the held owner to the finger, and a second pointer is not something this model has. Pen pressure, the eraser and true multi-pointer capture are out of scope.
+- **Accessibility activation.** Folio's own chrome exposes no UI Automation activation road in this code; a page's accessibility is the engine's. A pointer-less activation (keyboard, a command, a future UIA invoke) **never manufactures a `PointerHit` or a capture**: it goes through the keyboard/command doors, and the router is not asked. An invoke that arrives while a capture is held does not end it.
+- **The summoned window.** It is a second top-level window on the same thread, topmost, re-placed on the monitor under the pointer at each summon (`quake.rs:237`, `runtime/quake.rs:33`). Routing is window-local physical pixels, so its geometry needs nothing new. The application slot (R-5) is what keeps a capture taken in one of the two windows from being doubled by the other, and hiding it is a lifecycle door (`hide_quake_window`, `runtime/quake.rs:107`, §4.1 cut 5) that cancels a capture it holds. A summon by hotkey while the main window holds a capture blurs the main window, which cancels it.
+- **8 kHz mice.** The absolute and tail budget and the maximum-stack fixture are §5's; the zero-allocation and visit-count tests are cut 1's. Folio adds no coalescing of its own.
+- **Files dragged out to the system (OLE drag-out).** There is no `DoDragDrop`/`IDropSource` today; only inbound `DroppedFile` is wired (`main.rs:67406`). When a drag-out lands, `DoDragDrop` runs a modal loop that takes the pointer and the capture away synchronously, so the per-turn capture sample would arrive too late. The model reserves the ending now: **`OsDragHandoff`**, taken synchronously by the code that is about to call the OS drag loop — the carried row's capture ends (no landing, no home settle; the payload has been handed to the system), the broker is cleared, and only then is the OS loop entered. Its test lands with the feature: `a_drag_out_hands_the_capture_over_before_the_os_loop`.
+
+---
+
+## Appendix A — the census programs
+
+Run from the repository root (GNU awk 5):
+
+```sh
+files=$(git ls-files 'crates/bt-app/src/*.rs' 'crates/bt-app/src/**/*.rs' | grep -v -E '(_tests|tests|test_support)\.rs$' | sort -u)
+awk -f sweep.awk $files > sweep.tsv                                   # classes P, E, B, H
+awk -F'\t' 'length($3) >= 10 { print $3 }' sweep.tsv | sort -u > names.txt
+awk -v NAMES=names.txt -f calls.awk $files > calls.tsv                # class R (rows already in sweep.tsv are dropped)
+```
+
+`sweep.awk`:
+
+```awk
+# Pointer-reader sweep over one product .rs file.
+# Prints: file<TAB>line<TAB>fn<TAB>classes   (one row per function, classes = union of P/E/B/H)
+# P: reads pointer_position / pointer_last_seen
+# E: takes or holds a PhysicalPosition<f64> (a window pointer position)
+# B: names MouseButton / ElementState / MouseScrollDelta (a button or wheel event)
+# H: a geometry hit test: name matches hit|_at|contains|under and the signature takes an x/y pair or a point
+# #[cfg(test)] items are skipped by brace depth.
+function flush() {
+  if (fn != "" && cls != "") {
+    out = ""
+    if (cls ~ /P/) out = out "P"
+    if (cls ~ /E/) out = out "E"
+    if (cls ~ /B/) out = out "B"
+    if (cls ~ /H/) out = out "H"
+    printf "%s\t%d\t%s\t%s\n", FILENAME, fnline, fn, out
+  }
+  cls = ""
+}
+BEGIN { skip = 0; depth = 0; pending = 0; fn = ""; cls = ""; insig = 0 }
+{
+  line = $0
+  gsub(/"([^"\\]|\\.)*"/, "\"\"", line); gsub(/'(\\.|[^'\\])'/, "'c'", line); sub(/\/\/.*$/, "", line)
+  if (skip) {
+    n = gsub(/\{/, "{", line); m = gsub(/\}/, "}", line)
+    depth += n - m
+    if (depth <= 0) { skip = 0; depth = 0 }
+    next
+  }
+  if (line ~ /^[ \t]*#\[cfg\(test\)\]/) { pending = 1; next }
+  if (pending) {
+    if (line ~ /^[ \t]*#\[/) next
+    pending = 0
+    if (line ~ /\{/) {
+      n = gsub(/\{/, "{", line); m = gsub(/\}/, "}", line)
+      depth = n - m
+      if (depth > 0) { skip = 1 }
+      next
+    }
+    if (line ~ /;[ \t]*$/) next
+    # multi-line signature: skip until the opening brace
+    skip = 1; depth = 0
+    next
+  }
+  if (match(line, /fn [a-z_0-9]+[<(]/)) {
+    flush()
+    fn = substr(line, RSTART + 3, RLENGTH - 4)
+    fnline = FNR
+    sig = line
+    insig = (line !~ /\{/ && line !~ /;[ \t]*$/)
+    name_is_hit = (fn ~ /(^hit|_hit$|_hit_|hit_test|^at$|_at$|contains|covers|_under$|under_|_holds$|_part$|^claim$|_point$)/)
+  } else if (insig) {
+    sig = sig " " line
+    if (line ~ /\{/ || line ~ /;[ \t]*$/) insig = 0
+  }
+  if (fn != "") {
+    if (line ~ /pointer_position|pointer_last_seen/) cls = cls "P"
+    if (line ~ /PhysicalPosition<f64>/) cls = cls "E"
+    if (line ~ /MouseButton|ElementState|MouseScrollDelta/) cls = cls "B"
+    if (name_is_hit && !insig && sig ~ /(\<x: f(32|64).*\<y: f(32|64)|\[f32; 2\]|PhysicalPosition)/) { cls = cls "H"; name_is_hit = 0 }
+  }
+}
+ENDFILE { flush(); fn = ""; skip = 0; depth = 0; pending = 0; insig = 0 }
+```
+
+`calls.awk`:
+
+```awk
+BEGIN { while ((getline n < NAMES) > 0) want[n]=1; skip=0; depth=0; pending=0; fn="" }
+function flush(){ if (fn!="" && hit) printf "%s\t%d\t%s\tR\n", FILENAME, fnline, fn; hit=0 }
+{ line=$0
+  gsub(/"([^"\\]|\\.)*"/, "\"\"", line); gsub(/'(\\.|[^'\\])'/, "'c'", line); sub(/\/\/.*$/, "", line)
+  if (skip) { n=gsub(/\{/,"{",line); m=gsub(/\}/,"}",line); depth+=n-m; if (depth<=0){skip=0;depth=0}; next }
+  if (line ~ /^[ \t]*#\[cfg\(test\)\]/) { pending=1; next }
+  if (pending) { if (line ~ /^[ \t]*#\[/) next; pending=0
+    if (line ~ /\{/) { n=gsub(/\{/,"{",line); m=gsub(/\}/,"}",line); depth=n-m; if(depth>0) skip=1; next }
+    if (line ~ /;[ \t]*$/) next; skip=1; depth=0; next }
+  if (match(line, /fn [a-z_0-9]+[<(]/)) { flush(); fn=substr(line,RSTART+3,RLENGTH-4); fnline=FNR; next }
+  if (fn=="") next
+  s=line
+  while (match(s, /[a-z_][a-z_0-9]*\(/)) { c=substr(s,RSTART,RLENGTH-1); if ((c in want) && c!=fn) hit=1; s=substr(s,RSTART+RLENGTH) }
+}
+ENDFILE { flush(); fn=""; skip=0; depth=0; pending=0 }
+```
+
+---
+
+## Revision (b), 2026-10-09 — what changed after Codex's review (verdict REWORK, `reports/F3-design.review-codex.md`)
+
+- **Inventory** (HOLD 1): §1.0 adds a mechanical census (method and output committed beside this note) — 323 direct readers and 71 one-level callers — of which the Codex-named readers are part; the needle and debt sets of §4.2 are now derived from it by the index, not written by hand.
+- **R-5** (HOLD 2): the capture is one application slot, not one per window; a press proving a held capture stale cancels it first.
+- **R-9 vs C5** (HOLD 3): *off the glass* is scoped to tab-bound owners; a drag is outside it because the spring is its own aim.
+- **Wheel during a capture** (HOLD 4): Table A gains column `w`; R-10 states the capture half.
+- **C22·h and U5** (HOLD 5): C22·h changed; U5 and seven other C rows that restated A cells became pins; totals recomputed from the tables (§3's method) — 270 decided cells, 150 changed, 120 unchanged, 4 n/a (Table B's first-revision sum of 28 was itself an arithmetic slip for 27; it is 28 now with B19).
+- **Windows page ordering and DPI** (HOLD 6): §2.4 — the seat never hides with a button down; the page's `last` is page-local and a scale change releases it first.
+- **macOS pages** (HOLD 7): scoped out with a consequence table (§2.5); 13 changed cells are Windows-only.
+- **No allocation** (HOLD 8): `PointerFacts` per frame, a pure walk with no renderer access, a zero-allocation test, a visit-count test, an absolute and tail budget.
+- **Cuts** (HOLD 9): cut 1 is dead-path scaffolding; cut 2 is a mirror that records overlaps and is read by nothing; cut 5 has a lifecycle-door matrix enforced by index pins and behavioural tests; cut 7 tests a real `WebSeat`'s presence order through a recording sink.
+- **NITs:** the window-waits facts (231/231, "233" stale); ten cuts, fourteen commits; the not-a-nanny citation narrowed; R-7 freezes non-owner hover; synthetic-release modifiers; R-14 keyboard focus; the debt file's deletion at cut 10; R-8 marked as superseding the 2026-10-04 sentence.
+- **§7 Boundaries** added (touch/pen, accessibility activation, the summoned window, 8 kHz mice, `OsDragHandoff`).
