@@ -15,7 +15,6 @@
 ## ticket adds one. At A2e the file is proven empty and deleted, and the lint takes its place.
 crate	arm	item	entry	count
 bt-app	-	crate::<TheDeviceAndItsWindows as LostDevice>::rebuild	pollster::block_on	1
-bt-app	-	crate::App::release_trial_writes	std::fs::create_dir_all	1
 bt-app	-	crate::FolioApp::recovered_from_a_lost_device	std::thread::sleep	1
 bt-app	-	crate::animation::AnimationStamp::of	std::fs::metadata	1
 bt-app	-	crate::append_panic_report	std::io::Write::write_fmt	1
@@ -157,7 +156,6 @@ bt-platform	[unix]	crate::launch_pipe::<LaunchPipe as Drop>::drop	libc::write	1
 bt-platform	[unix]	crate::launch_pipe::<LaunchPipe as Drop>::drop	std::thread::JoinHandle::join	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start	libc::close	2
 bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
-bt-platform	[unix]	crate::launch_pipe::vet_executable	std::fs::metadata	2
 bt-platform	[windows]	crate::attention_pipe::<AttentionPipe as Drop>::drop	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::attention_pipe::<AttentionPipe as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<AttentionPipe as Drop>::drop	windows::Win32::System::Threading::SetEvent	1

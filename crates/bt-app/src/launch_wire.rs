@@ -9,12 +9,16 @@
 //! # No free payload crosses, here either
 //!
 //! The attention wire's founding rule, at the second door and in its strongest form: this channel
-//! carries **six declared fields and nothing else** — a folder, a profile id, whether the launch
-//! asked for a window of its own, whether it asked for a tab, who started it, and what an update's
+//! carries **seven declared fields and nothing else** — a folder, a profile id, whether the launch
+//! asked for a window of its own, whether it asked for a tab, who started it, what an update's
 //! rollback sent the launch to report (0.4.7 U-36: a word from a closed set, and for an unfinished
-//! rollback the folder of its journal). There is no room in it for a command to run, a document to
-//! open or a name to type, because a channel that carried any of those would be a channel worth
-//! attacking: it is answered by a process that has a terminal in it.
+//! rollback the folder of its journal), and the environment `--with-environment` carries
+//! (F-SWEEP-2-048: names and values the launcher's own shell already holds, laid over the
+//! account's environment of the one tab the launch opens). There is no room in it for a command to
+//! run, a document to open or a name to type, because a channel that carried any of those would be
+//! a channel worth attacking: it is answered by a process that has a terminal in it. The
+//! environment is not one of those: it is what a shell started from the launcher's own terminal
+//! would have had anyway, and it reaches a shell and nothing else.
 //!
 //! # The report crosses because nothing else can carry it
 //!
@@ -91,6 +95,27 @@ const REPORT_KEY: &str = "failed";
 /// [`Report::Incomplete`].
 const REPORT_FOLDER_KEY: &str = "failed_folder";
 
+/// The key an unfinished update whose journal records no trial ever begun crosses as — `true`,
+/// beside [`REPORT_KEY`] and only with [`Report::Incomplete`] (0.4.8 E4). A key, never a new value
+/// of a known one ([`WIRE_VERSION`]'s rule): an earlier build ignores it and says *Update
+/// incomplete.* as it always did.
+const REPORT_UNTRIED_KEY: &str = "failed_untried";
+
+/// The key the refusal of a journal write that another program's hold outlasted the window for
+/// crosses as, beside [`REPORT_KEY`] with any report ([`Report::JournalHeld`], 0.4.8 E4); an
+/// earlier build ignores it.
+const REPORT_HELD_KEY: &str = "failed_journal_held";
+
+/// The key `--with-environment`'s environment crosses as: an array of `[name, value]` pairs,
+/// absent when the launch carried none (F-SWEEP-2-048). A key, never a new value of a known one
+/// ([`WIRE_VERSION`]'s rule): an earlier build ignores it and opens the tab without it.
+const ENVIRONMENT_KEY: &str = "env";
+
+/// **The most bytes the refusal of a held journal may cross as** — an operating-system error
+/// message, a sentence: the profile id's bound is too short for a translated one, and a folder's
+/// is generous.
+const MAX_REFUSAL_BYTES: usize = 512;
+
 /// **What a start a rollback sent was told to report**, in the words it crosses the pipe in
 /// (0.4.7 U-36).
 ///
@@ -110,7 +135,15 @@ pub(crate) enum Report {
     /// (`Failure::Incomplete`). A sender always names it — its own pass read the journal there —
     /// and the frame always carries it; it is `None` only once [`accept`] has taken away a
     /// folder that is not a local path, which leaves the report and drops the folder.
-    Incomplete { folder: Option<PathBuf> },
+    /// `untried`: the journal records no trial ever begun ([`REPORT_UNTRIED_KEY`]).
+    Incomplete {
+        folder: Option<PathBuf>,
+        untried: bool,
+    },
+    /// **Another program held the journal open past its holder's window**
+    /// (`Failure::JournalHeld`, 0.4.8 E4): `error`, the system's refusal, over the report the
+    /// journal itself makes ([`REPORT_HELD_KEY`]).
+    JournalHeld { error: String, then: Box<Report> },
 }
 
 impl Report {
@@ -120,10 +153,36 @@ impl Report {
         match failure {
             Failure::RolledBack => Some(Self::RolledBack),
             Failure::Interrupted => Some(Self::Interrupted),
-            Failure::Incomplete { folder } => Some(Self::Incomplete {
-                folder: folder.clone(),
+            Failure::JournalHeld { error, then } => Some(Self::JournalHeld {
+                error: error.clone(),
+                then: Box::new(Self::of(then)?),
             }),
-            Failure::TrialIncomplete { .. } | Failure::Unsupported | Failure::Stopped(_) => None,
+            // A later Folio's unfinished update crosses as *Update
+            // incomplete.* (0.4.8 E1): the key and its words are the ones every
+            // build since 0.4.7 reads, and a new value of a known key would
+            // drop the whole frame there ([`WIRE_VERSION`]'s rule). Whether this
+            // session's writes are held is the sender's own and does not cross.
+            Failure::Incomplete {
+                folder, untried, ..
+            } => Some(Self::Incomplete {
+                folder: folder.clone(),
+                untried: *untried,
+            }),
+            Failure::Newer { folder, .. } => Some(Self::Incomplete {
+                folder: folder.clone(),
+                untried: false,
+            }),
+            // The trial's own card (above), an update committed after its trial
+            // ended (nothing failed), and a driver's own stops: none is a
+            // start's to tell another Folio. A stand-in that stood down
+            // beside the reserved trial reports nothing either: its card is
+            // about this session, and the Folio it would cross to is that
+            // very trial (0.4.8 E3).
+            Failure::TrialIncomplete { .. }
+            | Failure::BesideTheTrial { .. }
+            | Failure::ChangesNotKept { .. }
+            | Failure::Unsupported
+            | Failure::Stopped(_) => None,
         }
     }
 
@@ -133,32 +192,76 @@ impl Report {
         match self {
             Self::RolledBack => Failure::RolledBack,
             Self::Interrupted => Failure::Interrupted,
-            Self::Incomplete { folder } => Failure::Incomplete {
+            Self::Incomplete { folder, untried } => Failure::Incomplete {
                 folder: folder.clone(),
+                held: false,
+                untried: *untried,
+            },
+            Self::JournalHeld { error, then } => Failure::JournalHeld {
+                error: error.clone(),
+                then: Box::new(then.failure()),
             },
         }
     }
 
-    /// The token this report crosses as — short and from a closed set, [`origin_token`]'s rule.
-    const fn token(&self) -> &'static str {
+    /// **The report beneath a held journal's** — the one whose word crosses as [`REPORT_KEY`].
+    fn beneath(&self) -> &Self {
         match self {
-            Self::RolledBack => "rolled-back",
-            Self::Interrupted => "interrupted",
-            Self::Incomplete { .. } => "incomplete",
+            Self::JournalHeld { then, .. } => then.beneath(),
+            other => other,
         }
     }
 
-    /// A token and its folder, read back: the folder comes with `incomplete` and with nothing else,
-    /// and anything else is not a report this build knows.
-    fn from_token(token: &str, folder: Option<String>) -> Option<Self> {
-        match (token, folder) {
-            ("rolled-back", None) => Some(Self::RolledBack),
-            ("interrupted", None) => Some(Self::Interrupted),
-            ("incomplete", Some(folder)) => Some(Self::Incomplete {
-                folder: Some(PathBuf::from(folder)),
-            }),
+    /// [`Self::beneath`], to change.
+    fn beneath_mut(&mut self) -> &mut Self {
+        match self {
+            Self::JournalHeld { then, .. } => then.beneath_mut(),
+            other => other,
+        }
+    }
+
+    /// The refusal of a held journal over this report, if there is one.
+    fn held(&self) -> Option<&str> {
+        match self {
+            Self::JournalHeld { error, .. } => Some(error),
             _ => None,
         }
+    }
+
+    /// The token this report crosses as — short and from a closed set, [`origin_token`]'s rule.
+    fn token(&self) -> &'static str {
+        match self.beneath() {
+            Self::RolledBack => "rolled-back",
+            Self::Interrupted => "interrupted",
+            Self::Incomplete { .. } | Self::JournalHeld { .. } => "incomplete",
+        }
+    }
+
+    /// A token, its folder, whether no trial began and the hold's refusal, read back: the folder
+    /// and `untried` come with `incomplete` and with nothing else, a hold with any word, and
+    /// anything else is not a report this build knows.
+    fn from_token(
+        token: &str,
+        folder: Option<String>,
+        untried: bool,
+        held: Option<String>,
+    ) -> Option<Self> {
+        let report = match (token, folder, untried) {
+            ("rolled-back", None, false) => Self::RolledBack,
+            ("interrupted", None, false) => Self::Interrupted,
+            ("incomplete", Some(folder), untried) => Self::Incomplete {
+                folder: Some(PathBuf::from(folder)),
+                untried,
+            },
+            _ => return None,
+        };
+        Some(match held {
+            Some(error) => Self::JournalHeld {
+                error,
+                then: Box::new(report),
+            },
+            None => report,
+        })
     }
 }
 
@@ -204,6 +307,9 @@ pub(crate) struct LaunchRequest {
     /// (`crate::update_startup::failed`), never the command line's word re-read. The running
     /// Folio's update job is told it where the launch lands ([`Self::told`]).
     pub(crate) report: Option<Report>,
+    /// **The environment `--with-environment` carries into the tab** (owner ruling 2026-10-05) —
+    /// the starting process's own, read by [`hand_over`]; `None` for every other launch.
+    pub(crate) carried_environment: Option<cli::CarriedEnvironment>,
 }
 
 /// **Where one launch lands.**
@@ -316,6 +422,8 @@ impl LaunchRequest {
             tab: request.tab,
             origin: request.origin,
             report: None,
+            // The command line says whether; the process says what — [`hand_over`] reads it.
+            carried_environment: None,
         })
     }
 
@@ -391,15 +499,36 @@ impl LaunchRequest {
         // exactly the frame every earlier build writes (see [`WIRE_VERSION`]).
         if let Some(report) = &self.report {
             value.insert(REPORT_KEY.to_owned(), report.token().into());
-            if let Report::Incomplete {
-                folder: Some(folder),
-            } = report
-            {
-                value.insert(
-                    REPORT_FOLDER_KEY.to_owned(),
-                    folder.to_string_lossy().into_owned().into(),
-                );
+            if let Report::Incomplete { folder, untried } = report.beneath() {
+                if let Some(folder) = folder {
+                    value.insert(
+                        REPORT_FOLDER_KEY.to_owned(),
+                        folder.to_string_lossy().into_owned().into(),
+                    );
+                }
+                if *untried {
+                    value.insert(REPORT_UNTRIED_KEY.to_owned(), true.into());
+                }
             }
+            if let Some(error) = report.held() {
+                value.insert(REPORT_HELD_KEY.to_owned(), error.into());
+            }
+        }
+        // **Only when one was carried**, for the report's reason. A name or value that is not
+        // text is written lossily here and so never reads back as itself: [`Self::is_sayable`]
+        // refuses that launch rather than change what it carries.
+        if let Some(environment) = &self.carried_environment {
+            let pairs = environment
+                .pairs()
+                .iter()
+                .map(|(name, value)| {
+                    serde_json::Value::Array(vec![
+                        name.to_string_lossy().into_owned().into(),
+                        value.to_string_lossy().into_owned().into(),
+                    ])
+                })
+                .collect();
+            value.insert(ENVIRONMENT_KEY.to_owned(), serde_json::Value::Array(pairs));
         }
         serde_json::Value::Object(value).to_string()
     }
@@ -448,10 +577,46 @@ impl LaunchRequest {
             report: match (
                 object.get(REPORT_KEY),
                 bounded(REPORT_FOLDER_KEY, MAX_FOLDER_BYTES)?,
+                object.get(REPORT_UNTRIED_KEY),
+                bounded(REPORT_HELD_KEY, MAX_REFUSAL_BYTES)?,
             ) {
-                (None, None) => None,
-                (None, Some(_)) => return None,
-                (Some(token), folder) => Some(Report::from_token(token.as_str()?, folder)?),
+                (None, None, None, None) => None,
+                (None, ..) => return None,
+                (Some(token), folder, untried, held) => Some(Report::from_token(
+                    token.as_str()?,
+                    folder,
+                    match untried {
+                        None => false,
+                        Some(untried) => untried.as_bool()?,
+                    },
+                    held,
+                )?),
+            },
+            // **Optional, and every pair a variable a process could hold** when present: a name
+            // that is not empty and holds no `=` past its first character (Windows keeps its
+            // per-drive folders as `=C:`), no control character in a name — the rule the text
+            // fields above keep — and no NUL in a value (a value may hold a newline or an escape:
+            // a shell's prompt does). Bounded by the frame
+            // (`bt_platform::launch_pipe::MAX_FRAME_BYTES`), which is the field that can be long.
+            carried_environment: match object.get(ENVIRONMENT_KEY) {
+                None => None,
+                Some(pairs) => Some(cli::CarriedEnvironment::from_pairs(
+                    pairs
+                        .as_array()?
+                        .iter()
+                        .map(|pair| {
+                            let [name, value] = pair.as_array()?.as_slice() else {
+                                return None;
+                            };
+                            let (name, value) = (name.as_str()?, value.as_str()?);
+                            let well_formed = !name.is_empty()
+                                && !name.chars().skip(1).any(|character| character == '=')
+                                && !name.chars().any(char::is_control)
+                                && !value.contains('\0');
+                            well_formed.then(|| (name.into(), value.into()))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )),
             },
         })
     }
@@ -463,6 +628,25 @@ impl LaunchRequest {
     /// word. A launch that fails this opens its own window.
     fn is_sayable(&self) -> bool {
         Self::decode(&self.encode()).as_ref() == Some(self)
+    }
+
+    /// **Why the environment this launch carries cannot cross**, or `None` when it can or none was
+    /// carried: past the endpoint's frame bound, or holding a name or value the wire cannot write
+    /// as itself. Never cut to fit — a pane given half an environment is a pane that is quietly
+    /// wrong ([`offer_start`] refuses the launch instead). Names the count and the sizes, never a
+    /// variable's value.
+    fn environment_refusal(&self) -> Option<String> {
+        let environment = self.carried_environment.as_ref()?;
+        let bytes = self.encode().len();
+        let limit = bt_platform::launch_pipe::MAX_FRAME_BYTES;
+        let why = if bytes > limit {
+            format!("{bytes} bytes on the wire, more than the launch endpoint's {limit}")
+        } else if !self.is_sayable() {
+            "a variable whose name or value the wire cannot write as itself".to_owned()
+        } else {
+            return None;
+        };
+        Some(environment.refusal_line("handed to the running Folio", &why, "nothing was opened"))
     }
 }
 
@@ -529,7 +713,8 @@ pub(crate) fn accept(mut request: LaunchRequest) -> Result<LaunchRequest, Refusa
     {
         return Err(Refusal::NoSuchFolder);
     }
-    if let Some(Report::Incomplete { folder }) = &mut request.report
+    if let Some(Report::Incomplete { folder, .. }) =
+        request.report.as_mut().map(Report::beneath_mut)
         && folder.as_deref().is_some_and(|path| !is_a_local_path(path))
     {
         *folder = None;
@@ -797,6 +982,13 @@ pub(crate) fn take() -> Vec<LaunchRequest> {
 /// Folio had before this channel existed, and it is one branch rather than five so that a new way
 /// of failing cannot arrive with a new way of doing nothing.
 ///
+/// **But the reason is not dropped** (0.4.8 D3): when a conversation was had, or tried, and did not
+/// end in this process leaving, `gave_up` is handed the one line that says why — the OS error,
+/// the running Folio's answer, or an answer this build cannot read ([`gave_up_line`]). The front
+/// door has no log, so the caller keeps the line for `diagnostics.log`, beside the line that says
+/// the window it opens saves nothing. A command line this wire has no field for is not a
+/// hand-over that gave up, and says nothing.
+///
 /// **Only after the update pass** (`crate::update_startup`, 0.4.6 U-12): the
 /// [`crate::update_startup::Admitted`] it asks for is made by that pass alone,
 /// so this launch holds its installation's admission before it can be handed
@@ -810,20 +1002,110 @@ pub(crate) fn hand_over(
     directory: &Path,
     argv: &cli::CliRequest,
     say: impl Fn(&str),
+    gave_up: impl FnOnce(String),
 ) -> Option<i32> {
     let _ = token;
     // **What the pass sent this start to report crosses with it** (U-36): the
     // [`crate::update_startup::Admitted`] is the pass's own word for it.
-    let request = LaunchRequest::of_start(
+    offer_start(
+        directory,
         argv,
         admitted.failed().as_ref(),
-        cli::machine_path_kind,
+        // **`--with-environment` carries this process's environment** — the launcher's, which
+        // this start inherited (owner ruling 2026-10-05).
+        argv.with_environment
+            .then(cli::CarriedEnvironment::of_this_process),
         std::env::current_dir().ok().as_deref(),
-    )?;
+        say,
+        gave_up,
+    )
+}
+
+/// [`hand_over`] past its door and its pass: this start's request — `argv`, what the pass sent it
+/// to report (`failed`), the environment it carries (`environment`), its folder resolved against
+/// `here` — offered to the Folio that holds `directory`, with [`hand_over`]'s answer and its
+/// give-up line.
+///
+/// **An environment that cannot cross refuses the launch** (F-SWEEP-2-048): the line that says so
+/// goes to this start's console and to `diagnostics.log` in `directory`, and the start leaves with
+/// `2`, as a launch whose folder is not there does. It is not cut to fit, and it does not open a
+/// window of its own, which could save nothing while the running Folio holds the data directory.
+fn offer_start(
+    directory: &Path,
+    argv: &cli::CliRequest,
+    failed: Option<&Failure>,
+    environment: Option<cli::CarriedEnvironment>,
+    here: Option<&Path>,
+    say: impl Fn(&str),
+    gave_up: impl FnOnce(String),
+) -> Option<i32> {
+    let request = LaunchRequest {
+        carried_environment: environment,
+        ..LaunchRequest::of_start(argv, failed, cli::machine_path_kind, here)?
+    };
+    if let Some(line) = request.environment_refusal() {
+        say(&line);
+        crate::diagnostics::append_note(&crate::diagnostics::log_path(directory), &line);
+        return Some(2);
+    }
     if !request.is_sayable() {
         return None;
     }
-    let endpoint = bt_platform::launch_pipe::endpoint_for(directory)?;
+    let answer = match converse(directory, &request) {
+        Ok(answer) => answer,
+        Err(why) => {
+            gave_up(gave_up_line(directory, &why));
+            return None;
+        }
+    };
+    let left = after_reply(request, answer, say);
+    if left.is_none() {
+        gave_up(gave_up_line(
+            directory,
+            &format!("it answered {}", answer.encode()),
+        ));
+    }
+    left
+}
+
+/// **The one line a start whose hand-over gave up leaves in `diagnostics.log`** (0.4.8 D3):
+/// which data directory's Folio it asked, and `why` — the OS error, the answer, or the reason no
+/// conversation could be had.
+#[must_use]
+pub(crate) fn gave_up_line(directory: &Path, why: &str) -> String {
+    format!(
+        "Folio: launch hand-over — the Folio that holds {} did not take this launch ({why}); this \
+         start opens a window of its own",
+        directory.display()
+    )
+}
+
+/// **The command line a person's start handed a rescue build, as the request it crosses in**
+/// (0.4.8 E3): `handed` (`--then-launch`'s words) parsed as that start parsed them, its folder
+/// resolved against `here` — the start's working directory, which the rescue build it started
+/// inherits — and nothing to report, since the road decided no failure for it. `None` for a line
+/// this wire cannot carry, as [`LaunchRequest::from_cli`] says (a document), or one that does not
+/// parse.
+#[must_use]
+pub(crate) fn carried(handed: &[std::ffi::OsString], here: Option<&Path>) -> Option<LaunchRequest> {
+    let line = cli::parse(handed.iter().cloned()).ok()?;
+    LaunchRequest::from_cli(&line, cli::machine_path_kind, here).filter(LaunchRequest::is_sayable)
+}
+
+/// **A person's start a recovery carried, handed to the Folio that holds `directory`** (0.4.8
+/// E3, `update_apply::carry_the_start`): one conversation on the launch endpoint, the one
+/// [`hand_over`] has — from a road process's worker, which has no console to say a refusal on, so
+/// the answer itself is returned. `None` when nobody answered.
+pub(crate) fn hand_over_carried(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
+    converse(directory, request).ok()
+}
+
+/// **One conversation with the Folio that holds `directory`**: `request` sent, and its answer —
+/// or why there is none: no endpoint can be named, the wire's own error (nobody listening, the
+/// budget spent, a peer that is not a Folio), or an answer this build cannot read.
+fn converse(directory: &Path, request: &LaunchRequest) -> Result<Reply, String> {
+    let endpoint = bt_platform::launch_pipe::endpoint_for(directory)
+        .ok_or_else(|| "no launch endpoint can be named for it here".to_owned())?;
     let mut answer = None;
     bt_platform::launch_pipe::hand_over(&endpoint, &request.encode(), |server, line| {
         answer = Reply::decode(line);
@@ -843,8 +1125,8 @@ pub(crate) fn hand_over(
             let _ = bt_platform::hotkey::allow_foreground_for(server);
         }
     })
-    .ok()?;
-    after_reply(request, answer?, say)
+    .map_err(|error| format!("{:?}: {error}", error.kind()))?;
+    answer.ok_or_else(|| "it answered in words this build cannot read".to_owned())
 }
 
 /// **What the start does with the running Folio's answer** — `Some(code)` to leave, `None` to carry
@@ -881,6 +1163,7 @@ fn after_reply(request: LaunchRequest, answer: Reply, say: impl Fn(&str)) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{host_path, host_spelling};
 
     fn argv(list: &[&str]) -> cli::CliRequest {
         cli::parse(list.iter().map(std::ffi::OsString::from))
@@ -892,13 +1175,24 @@ mod tests {
         cli::PathKind::Directory
     }
 
+    /// A relative folder, joined with this host's separator.
+    fn relative(names: &[&str]) -> String {
+        names
+            .iter()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// The working directory a test launch was typed in. Named, so that the one test about
     /// resolving a relative folder is the only place it means anything.
-    const HERE: &str = r"D:\Developer\Ledger";
+    fn typed_in() -> PathBuf {
+        host_path(r"D:\Developer\Ledger")
+    }
 
     /// `from_cli` with this module's two fixtures, since every call but one wants both.
     fn from(list: &[&str]) -> Option<LaunchRequest> {
-        LaunchRequest::from_cli(&argv(list), all_folders, Some(Path::new(HERE)))
+        LaunchRequest::from_cli(&argv(list), all_folders, Some(typed_in().as_path()))
     }
 
     /// **RED (§7.59) — the message is built from argv exactly, and it carries three fields.**
@@ -914,24 +1208,25 @@ mod tests {
         let request = LaunchRequest::from_cli(
             &argv(&[
                 "--cwd",
-                r"D:\Developer",
+                host_spelling(r"D:\Developer").as_str(),
                 "--profile",
                 "winps",
                 "--new-window",
             ]),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("a command line with no document is one this wire can carry");
         assert_eq!(
             request,
             LaunchRequest {
-                cwd: Some(PathBuf::from(r"D:\Developer")),
+                cwd: Some(host_path(r"D:\Developer")),
                 profile: Some("winps".to_owned()),
                 new_window: true,
                 tab: false,
                 origin: cli::LaunchOrigin::Plain,
                 report: None,
+                carried_environment: None,
             }
         );
         assert_eq!(
@@ -956,21 +1251,27 @@ mod tests {
     #[test]
     fn a_positional_folder_is_a_cwd_and_a_positional_document_is_not_carried() {
         assert_eq!(
-            from(&[r"D:\Developer"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Developer"))
-        );
-        assert_eq!(
-            from(&["--cwd", r"D:\Developer", r"D:\Other"])
+            from(&[host_spelling(r"D:\Developer").as_str()])
                 .expect("a folder crosses")
                 .cwd,
-            Some(PathBuf::from(r"D:\Developer")),
+            Some(host_path(r"D:\Developer"))
+        );
+        assert_eq!(
+            from(&[
+                "--cwd",
+                host_spelling(r"D:\Developer").as_str(),
+                host_spelling(r"D:\Other").as_str(),
+            ])
+            .expect("a folder crosses")
+            .cwd,
+            Some(host_path(r"D:\Developer")),
             "the flag said where to open, so the positional is not the place"
         );
         assert_eq!(
             LaunchRequest::from_cli(
-                &argv(&[r"D:\a\notes.md"]),
+                &argv(&[host_spelling(r"D:\a\notes.md").as_str()]),
                 |_| cli::PathKind::File,
-                Some(Path::new(HERE))
+                Some(typed_in().as_path())
             ),
             None,
             "a document has no field on this wire"
@@ -990,7 +1291,7 @@ mod tests {
     #[test]
     fn only_a_local_directory_that_exists_is_taken() {
         let here = std::env::temp_dir();
-        let file = here.join(format!("bt-app-launch-wire-{}.txt", std::process::id()));
+        let file = bt_testpath::temp_path("bt-app-launch-wire").with_extension("txt");
         std::fs::write(&file, b"x").expect("write a fixture into the scratch directory");
         let asking = |cwd: Option<PathBuf>| {
             accept(LaunchRequest {
@@ -1003,7 +1304,7 @@ mod tests {
         assert_eq!(asking(None), Ok(()), "a launch that named no folder is one");
         assert_eq!(asking(Some(file.clone())), Err(Refusal::NoSuchFolder));
         assert_eq!(
-            asking(Some(here.join("no-such-folder-at-all"))),
+            asking(Some(bt_testpath::temp_path("no-such-folder-at-all"))),
             Err(Refusal::NoSuchFolder)
         );
         assert_eq!(
@@ -1156,21 +1457,31 @@ mod tests {
     /// is a verbatim path that `is_local_absolute_path` refuses.
     #[test]
     fn a_relative_folder_is_resolved_before_it_goes_on_the_wire() {
-        for spelling in [".", r"crates\..", r".\crates\.."] {
+        for spelling in [
+            relative(&["."]),
+            relative(&["crates", ".."]),
+            relative(&[".", "crates", ".."]),
+        ] {
             assert_eq!(
-                from(&["--cwd", spelling]).expect("a folder crosses").cwd,
-                Some(PathBuf::from(HERE)),
+                from(&["--cwd", spelling.as_str()])
+                    .expect("a folder crosses")
+                    .cwd,
+                Some(typed_in()),
                 "{spelling} is the folder the launch was typed in"
             );
         }
         assert_eq!(
-            from(&[r"..\bt-wt"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Developer\bt-wt")),
+            from(&[relative(&["..", "bt-wt"]).as_str()])
+                .expect("a folder crosses")
+                .cwd,
+            Some(host_path(r"D:\Developer\bt-wt")),
             "a positional goes through the same door as the flag"
         );
         assert_eq!(
-            from(&["--cwd", r"D:\Other"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Other")),
+            from(&["--cwd", host_spelling(r"D:\Other").as_str()])
+                .expect("a folder crosses")
+                .cwd,
+            Some(host_path(r"D:\Other")),
             "a folder that was already absolute is left exactly as it was written"
         );
         assert_eq!(
@@ -1330,6 +1641,185 @@ mod tests {
         let _ = take();
     }
 
+    /// The names of a carried environment — what these tests assert and print, never a value.
+    fn names_of(environment: Option<&cli::CarriedEnvironment>) -> Vec<String> {
+        environment.map_or_else(Vec::new, |environment| {
+            environment
+                .pairs()
+                .iter()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect()
+        })
+    }
+
+    /// A launcher's environment of the test's own making: a unique name, a CJK value, Windows'
+    /// per-drive folder variable, and an empty value.
+    fn a_launchers_environment() -> cli::CarriedEnvironment {
+        cli::CarriedEnvironment::from_pairs(vec![
+            (
+                "FSWEEP2_CARRIED_环境".into(),
+                "D:\\工具\\venv\\Scripts".into(),
+            ),
+            ("=C:".into(), "C:\\Users".into()),
+            ("FSWEEP2_EMPTY".into(), "".into()),
+        ])
+    }
+
+    /// **RED (F-SWEEP-2-048) — `--with-environment` crosses the wire as itself, and a pair that is
+    /// not a variable is not a frame.**
+    ///
+    /// MUTATION: drop the environment on the wire (`encode` writing no `env` key) and the decoded
+    /// request carries none.
+    #[test]
+    fn a_launch_wire_frame_carries_the_environment_and_refuses_one_that_is_not_one() {
+        let request = LaunchRequest {
+            cwd: Some(host_path(r"D:\项目")),
+            carried_environment: Some(a_launchers_environment()),
+            ..LaunchRequest::default()
+        };
+        let back = LaunchRequest::decode(&request.encode()).expect("the frame reads back");
+        assert_eq!(
+            names_of(back.carried_environment.as_ref()),
+            names_of(request.carried_environment.as_ref())
+        );
+        assert!(
+            back == request,
+            "the values crossed changed (not printed: an environment's values stay out of test \
+             output)"
+        );
+        // Absent is none, as every earlier sender writes it.
+        let plain = LaunchRequest::default();
+        assert_eq!(
+            LaunchRequest::decode(&plain.encode()).and_then(|it| it.carried_environment),
+            None
+        );
+        // Each of these is not a variable a process could hold.
+        let frame = |pairs: &str| {
+            format!(r#"{{"v":2,"new":false,"tab":false,"from":"plain","env":{pairs}}}"#)
+        };
+        for pairs in [
+            r#"[["", "x"]]"#,
+            r#"[["A=B", "x"]]"#,
+            r#"[["NAME", "a\u0000b"]]"#,
+            r#"[["NA\u0000ME", "x"]]"#,
+            r#"[["NA\u0001ME", "x"]]"#,
+            r#"[["NA\nME", "x"]]"#,
+            r#"[["NAME\u001b[31m", "x"]]"#,
+            r#"[["NAME"]]"#,
+            r#"[["NAME", "x", "y"]]"#,
+            r#"[["NAME", 1]]"#,
+            r#"{"NAME": "x"}"#,
+        ] {
+            assert_eq!(LaunchRequest::decode(&frame(pairs)), None, "{pairs}");
+        }
+        assert!(LaunchRequest::decode(&frame(r#"[["=D:", "D:\\"]]"#)).is_some());
+    }
+
+    /// **RED (F-SWEEP-2-048) — a launch carrying its environment, handed to a running Folio over
+    /// the real endpoint, lands with it.**
+    ///
+    /// The whole road of [`hand_over`] past its door: [`offer_start`] builds the request from the
+    /// command line and the carried environment, `bt_platform::launch_pipe` carries the frame, and
+    /// the running end decodes it. The running end here takes the decoded request as it is, so the
+    /// shared inbox other tests drain is not touched.
+    ///
+    /// MUTATION: drop it on the wire (`encode` writing no `env` key, or `offer_start` dropping its
+    /// `environment`) and the landed request carries no environment.
+    #[test]
+    fn a_launch_carrying_its_environment_lands_with_it_in_the_running_folio() {
+        let directory = bt_testpath::temp_path("bt-app-launch-wire-环境");
+        std::fs::create_dir_all(&directory).expect("a data directory");
+        // What the running end decoded is kept as it decides, before it answers — so once the
+        // start has read `Taken` it is there, and nothing waits on a clock for it.
+        let (sender, landed) = std::sync::mpsc::channel();
+        let Ok(endpoint) = LaunchPipe::start(
+            &directory,
+            move |line| {
+                LaunchRequest::decode(line).map(|request| {
+                    let _ = sender.send(request.clone());
+                    bt_platform::launch_pipe::Decision {
+                        reply: Reply::Taken.encode(),
+                        admitted: Some(()),
+                    }
+                })
+            },
+            |(): ()| {},
+        ) else {
+            // A platform with no launch endpoint carries nothing to anybody.
+            return;
+        };
+        let carried = a_launchers_environment();
+        let left = offer_start(
+            &directory,
+            &argv(&["--with-environment", "--tab"]),
+            None,
+            Some(carried.clone()),
+            None,
+            |_| panic!("a launch that was taken says nothing"),
+            |why| panic!("the hand-over gave up: {why}"),
+        );
+        drop(endpoint);
+        assert_eq!(left, Some(0), "the running Folio took the launch");
+        let request = landed
+            .try_recv()
+            .expect("the running Folio decoded the launch before it answered");
+        assert_eq!(
+            names_of(request.carried_environment.as_ref()),
+            names_of(Some(&carried))
+        );
+        assert!(
+            request.carried_environment.as_ref() == Some(&carried),
+            "the values landed are not the ones carried (not printed)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **RED (F-SWEEP-2-048) — an environment too large for the wire refuses the launch with a
+    /// line, and is never cut to fit.**
+    ///
+    /// No running Folio is needed: the refusal is decided before a byte is written. The line goes
+    /// to the start's console and to `diagnostics.log` in the data directory, and names the count
+    /// and the sizes, never a value.
+    ///
+    /// MUTATION: send it anyway (drop the `environment_refusal` arm in `offer_start`) and the start
+    /// gives up and opens a window of its own instead (`None`), with no line.
+    #[test]
+    fn a_launch_wire_environment_too_large_for_the_frame_is_refused_with_a_line() {
+        let directory = bt_testpath::temp_path("bt-app-launch-wire-过大");
+        std::fs::create_dir_all(&directory).expect("a data directory");
+        let large = cli::CarriedEnvironment::from_pairs(vec![(
+            "FSWEEP2_LARGE".into(),
+            "路"
+                .repeat(bt_platform::launch_pipe::MAX_FRAME_BYTES / 3 + 1)
+                .into(),
+        )]);
+        let said = std::cell::RefCell::new(Vec::new());
+        let left = offer_start(
+            &directory,
+            &argv(&["--with-environment"]),
+            None,
+            Some(large),
+            None,
+            |line| said.borrow_mut().push(line.to_owned()),
+            |why| panic!("an oversized environment is refused, not given up on: {why}"),
+        );
+        assert_eq!(left, Some(2), "the launch is refused and the start leaves");
+        let said = said.into_inner();
+        assert_eq!(said.len(), 1, "one line on the console");
+        assert!(
+            said[0].contains(cli::WITH_ENVIRONMENT_FLAG)
+                && said[0].contains("1 variables")
+                && said[0].contains(&bt_platform::launch_pipe::MAX_FRAME_BYTES.to_string()),
+            "{}",
+            said[0]
+        );
+        assert!(!said[0].contains('路'), "the line names no value");
+        let log = std::fs::read_to_string(crate::diagnostics::log_path(&directory))
+            .expect("the line is in the data directory's diagnostics.log");
+        assert!(log.contains(&said[0]));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **RED — the reply says yes or says which of the two kinds of no, and it names no process.**
     ///
     /// The process id used to be the load-bearing field. It is gone (review C-7, 2026-09-11): a
@@ -1389,13 +1879,26 @@ mod tests {
         ])
     }
 
-    /// The three reports a start can carry, an unfinished rollback's naming `folder`.
-    fn reports(folder: PathBuf) -> [Failure; 3] {
+    /// The reports a start can carry, an unfinished rollback's naming `folder`.
+    fn reports(folder: PathBuf) -> [Failure; 5] {
         [
             Failure::RolledBack,
             Failure::Interrupted,
             Failure::Incomplete {
+                folder: Some(folder.clone()),
+                held: false,
+                untried: false,
+            },
+            // 0.4.8 E4: the update stopped before the new version started, and
+            // a hold of the journal over the restored one.
+            Failure::Incomplete {
                 folder: Some(folder),
+                held: false,
+                untried: true,
+            },
+            Failure::JournalHeld {
+                error: "拒绝访问。 (os error 5)".to_owned(),
+                then: Box::new(Failure::RolledBack),
             },
         ]
     }
@@ -1420,7 +1923,7 @@ mod tests {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = take();
         // The listener's `accept` asks the disk, so the handed folder is one that exists.
-        let here = std::env::temp_dir().join(format!("bt-app-u36-笔记-{}", std::process::id()));
+        let here = bt_testpath::temp_path("bt-app-u36-笔记");
         std::fs::create_dir_all(&here).expect("a scratch folder");
         let start = argv(&[
             "--update-failed",
@@ -1430,9 +1933,13 @@ mod tests {
         ]);
         // A local path on the platform the test runs on, so [`accept`] keeps it.
         for failure in reports(here.join(".folio-update")) {
-            let request =
-                LaunchRequest::of_start(&start, Some(&failure), all_folders, Some(Path::new(HERE)))
-                    .expect("a start a rollback sent is a launch this wire carries");
+            let request = LaunchRequest::of_start(
+                &start,
+                Some(&failure),
+                all_folders,
+                Some(typed_in().as_path()),
+            )
+            .expect("a start a rollback sent is a launch this wire carries");
             assert!(request.is_sayable(), "{failure:?} can be said");
             let decision = decide(&request.encode(), || true).expect("the line is a request");
             assert_eq!(Reply::decode(&decision.reply), Some(Reply::Taken));
@@ -1515,7 +2022,7 @@ mod tests {
     fn a_report_landing_in_a_window_of_its_own_is_up_there_after_the_settle() {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = take();
-        let root = std::env::temp_dir().join(format!("bt-app-047-u36-card-{}", std::process::id()));
+        let root = bt_testpath::temp_path("bt-app-047-u36-card");
         let receiver = root.join("Folio 终端");
         let other = root.join("其他 copy");
         for home in [&receiver, &other] {
@@ -1583,7 +2090,7 @@ mod tests {
                     assert_eq!(*window, seated, "{label}: {failure:?} {open:?}");
                     // What a window draws from (`Runtime::update_card_is_up`).
                     assert_eq!(job.card_window(), Some(seated), "{label}: {failure:?}");
-                    if let Failure::Incomplete { folder } = &failure {
+                    if let Failure::Incomplete { folder, .. } = &failure {
                         assert_eq!(
                             &paint.folder, folder,
                             "{label}: the folder is named as sent"
@@ -1625,24 +2132,32 @@ mod tests {
 
     /// **RED (U-36) — the start's hand-over builds its request with its pass's report.**
     ///
-    /// The one line no in-process test can run — `hand_over` speaks to a kernel object — read
-    /// from the source: the request goes through [`LaunchRequest::of_start`] with what the
-    /// pass's witness says, and is answered through [`after_reply`].
+    /// The one line no in-process test can run — `hand_over` holds an owner-thread door's token
+    /// and the pass's witness — read from the source: it hands what the pass's witness says to
+    /// [`offer_start`], whose request goes through [`LaunchRequest::of_start`] and is answered
+    /// through [`after_reply`] (0.4.8 D3: [`offer_start`] itself runs in the two-copy tests).
     ///
-    /// MUTATION: build the request with `LaunchRequest::from_cli` in `hand_over`, or pass `None`
-    /// for the report.
+    /// MUTATION: build the request with `LaunchRequest::from_cli` in `offer_start`, or pass
+    /// `None` for the report in `hand_over`.
     #[test]
     fn the_hand_over_sends_what_the_pass_sent_it_to_report() {
-        let body = bt_source::Index::of_package("bt-app")
-            .body_of(&bt_source::ItemQuery::function("hand_over").in_module("crate::launch_wire"))
-            .unwrap_or_else(|failure| panic!("{failure}"));
+        let body_of = |name: &str| {
+            bt_source::Index::of_package("bt-app")
+                .body_of(&bt_source::ItemQuery::function(name).in_module("crate::launch_wire"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+        };
+        let door = body_of("hand_over");
         assert!(
-            body.contains("LaunchRequest::of_start(")
-                && body.contains("admitted.failed().as_ref()"),
+            door.contains("offer_start(") && door.contains("admitted.failed().as_ref()"),
+            "the hand-over no longer offers the pass's report:\n{door}"
+        );
+        let body = body_of("offer_start");
+        assert!(
+            body.contains("LaunchRequest::of_start(argv, failed,"),
             "the hand-over's request no longer carries the pass's report:\n{body}"
         );
         assert!(
-            body.contains("after_reply(request, answer?, say)"),
+            body.contains("after_reply(request, answer, say)"),
             "the answer is read somewhere other than the tested function:\n{body}"
         );
     }
@@ -1663,7 +2178,7 @@ mod tests {
     fn a_report_folder_that_is_not_local_is_taken_away_and_the_report_kept() {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = take();
-        let local = std::env::temp_dir().join("工具").join(".folio-update");
+        let local = bt_testpath::temp_path("工具").join(".folio-update");
         for (sent, kept) in [
             (
                 PathBuf::from(r"\\server\share\Folio 终端\.folio-update"),
@@ -1676,6 +2191,7 @@ mod tests {
             let request = LaunchRequest {
                 report: Some(Report::Incomplete {
                     folder: Some(sent.clone()),
+                    untried: false,
                 }),
                 ..LaunchRequest::default()
             };
@@ -1691,7 +2207,8 @@ mod tests {
             assert_eq!(
                 arrived[0].report,
                 Some(Report::Incomplete {
-                    folder: kept.clone()
+                    folder: kept.clone(),
+                    untried: false,
                 }),
                 "{sent:?}"
             );
@@ -1719,6 +2236,73 @@ mod tests {
         }
     }
 
+    /// **RED (E1) — a newer Folio's unfinished update crosses the hand-over as *Update
+    /// incomplete.*, in the words every build since 0.4.7 reads.**
+    ///
+    /// A start that continued past a journal it cannot read whole, and finds a Folio already
+    /// running, hands its report over like any other. The running Folio may be 0.4.7, whose
+    /// decoder drops the whole frame at a value of `failed` it does not know
+    /// ([`WIRE_VERSION`]'s rule): so the report crosses as `incomplete` with its folder — the
+    /// frame byte for byte the one an unfinished rollback sends — whatever later build the
+    /// journal names, and whether or not the sender's writes are held.
+    ///
+    /// MUTATION: give `Failure::Newer` a report of its own in [`Report::of`] (a new token,
+    /// `newer`): a 0.4.7 Folio drops the frame.
+    #[test]
+    fn a_newer_folios_unfinished_update_crosses_as_update_incomplete() {
+        let folder = journal_folder();
+        let incomplete = LaunchRequest::of_start(
+            &sent_by_a_rollback(),
+            Some(&Failure::Incomplete {
+                folder: Some(folder.clone()),
+                held: false,
+                untried: false,
+            }),
+            all_folders,
+            Some(typed_in().as_path()),
+        )
+        .expect("the launch crosses")
+        .encode();
+        for version in [None, Some("99.0.0".to_owned())] {
+            for held in [false, true] {
+                let failure = Failure::Newer {
+                    folder: Some(folder.clone()),
+                    version: version.clone(),
+                    held,
+                };
+                assert_eq!(
+                    Report::of(&failure),
+                    Some(Report::Incomplete {
+                        folder: Some(folder.clone()),
+                        untried: false,
+                    })
+                );
+                let frame = LaunchRequest::of_start(
+                    &sent_by_a_rollback(),
+                    Some(&failure),
+                    all_folders,
+                    Some(typed_in().as_path()),
+                )
+                .expect("the launch crosses")
+                .encode();
+                assert_eq!(frame, incomplete, "{failure:?}: the same frame as 0.4.7's");
+                let words: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                assert_eq!(words[REPORT_KEY], "incomplete");
+                assert_eq!(
+                    words[REPORT_FOLDER_KEY].as_str().map(PathBuf::from),
+                    Some(folder.clone())
+                );
+                assert_eq!(
+                    LaunchRequest::decode(&frame).and_then(|request| request.report),
+                    Some(Report::Incomplete {
+                        folder: Some(folder.clone()),
+                        untried: false,
+                    })
+                );
+            }
+        }
+    }
+
     /// **RED (U-36) — a trial's report and a driver's failure never cross.**
     ///
     /// `TrialIncomplete`'s card says *this session is the update's trial*, which is false of
@@ -1740,7 +2324,7 @@ mod tests {
                 &sent_by_a_rollback(),
                 Some(&failure),
                 all_folders,
-                Some(Path::new(HERE)),
+                Some(typed_in().as_path()),
             )
             .expect("the launch still crosses");
             assert_eq!(request.report, None, "{failure:?} is not carried");
@@ -1787,10 +2371,76 @@ mod tests {
             ))
             .and_then(|request| request.report),
             Some(Report::Incomplete {
-                folder: Some(journal_folder())
+                folder: Some(journal_folder()),
+                untried: false,
             }),
             "and a well-formed one is"
         );
+    }
+
+    /// **RED (0.4.8 E4) — a report's cause crosses in keys of its own: whether no trial was
+    /// begun, and the refusal of a journal another program held; the receiver tells its job the
+    /// very failure the start had, so its card has the same heading.** The keys come only where
+    /// they mean something — `failed_untried` with `incomplete` alone, as a boolean; the refusal
+    /// with any word, bounded and free of control bytes — and the word itself is the one every
+    /// build since 0.4.7 reads (an earlier receiver says *Update incomplete.* or *Previous
+    /// version restored.* as it always did; `a_0_4_6_receiver_takes_a_reported_launch_as_the_same_launch`
+    /// holds the version's frozen reader to these frames too).
+    ///
+    /// MUTATIONS: leave `REPORT_UNTRIED_KEY` out of `encode` — the untried report comes back
+    /// tried; leave `REPORT_HELD_KEY` out — the held report comes back without its hold.
+    #[test]
+    fn a_reports_cause_crosses_in_keys_of_its_own() {
+        let refusal = "拒绝访问。 (os error 5)".to_owned();
+        let untried = Failure::Incomplete {
+            folder: Some(journal_folder()),
+            held: false,
+            untried: true,
+        };
+        for failure in [
+            untried.clone(),
+            Failure::JournalHeld {
+                error: refusal.clone(),
+                then: Box::new(untried.clone()),
+            },
+            Failure::JournalHeld {
+                error: refusal.clone(),
+                then: Box::new(Failure::Interrupted),
+            },
+        ] {
+            let request =
+                LaunchRequest::of_start(&sent_by_a_rollback(), Some(&failure), all_folders, None)
+                    .expect("it crosses");
+            let frame = request.encode();
+            let words: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_ne!(
+                words[REPORT_KEY], "journal-held",
+                "never a new word: {frame}"
+            );
+            let arrived = LaunchRequest::decode(&frame).expect("this build reads it");
+            assert_eq!(
+                arrived.report.map(|report| report.failure()),
+                Some(failure.clone()),
+                "{frame}"
+            );
+        }
+        let base = r#""v":2,"new":false,"tab":false,"from":"plain""#;
+        for line in [
+            format!(r#"{{{base},"failed":"rolled-back","failed_untried":true}}"#),
+            format!(
+                r#"{{{base},"failed":"incomplete","failed_folder":"C:\\x","failed_untried":"yes"}}"#
+            ),
+            format!(r#"{{{base},"failed_untried":true}}"#),
+            format!(r#"{{{base},"failed_journal_held":"拒绝访问。"}}"#),
+            format!(r#"{{{base},"failed":"interrupted","failed_journal_held":""}}"#),
+            format!(r#"{{{base},"failed":"interrupted","failed_journal_held":"a\nb"}}"#),
+        ] {
+            assert_eq!(
+                LaunchRequest::decode(&line),
+                None,
+                "{line} is not a request this build understands"
+            );
+        }
     }
 
     /// **RED (U-36) — a launch with a report is never refused into nothing.**
@@ -1809,7 +2459,7 @@ mod tests {
             &sent_by_a_rollback(),
             Some(&Failure::RolledBack),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("it crosses");
         assert_eq!(
@@ -1938,7 +2588,7 @@ mod tests {
                 &sent_by_a_rollback(),
                 Some(&failure),
                 all_folders,
-                Some(Path::new(HERE)),
+                Some(typed_in().as_path()),
             )
             .expect("it crosses");
             assert!(request.report.is_some(), "{failure:?} is carried");
@@ -1962,5 +2612,485 @@ mod tests {
                 "the frozen reader reads its own build's frames: {frame}"
             );
         }
+    }
+
+    /// **RED (0.4.8 E3, #12) — a person's start a recovery deferred reaches the Folio that opens
+    /// the window: its folder, over the real launch endpoint.**
+    ///
+    /// A recovery handed `--then-launch --cwd <folder>` that started nothing, because another
+    /// process opens the window, carries that start ([`carried`], `update_apply::carry_the_start`):
+    /// once a Folio holds the data directory, the request crosses the endpoint that Folio listens
+    /// on, folder and origin intact, and no report rides with it. The far end here is a listener
+    /// of the test's own on a private directory whose claim the test holds.
+    ///
+    /// MUTATION: in [`hand_over_carried`], converse with `&LaunchRequest::default()` (the folder
+    /// dropped on the way to the window).
+    #[test]
+    fn a_carried_start_reaches_the_folio_that_holds_the_data_directory() {
+        let directory = bt_testpath::temp_path("launch-wire-carried-数据");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let folder = bt_testpath::temp_path("工作 文件夹 carried");
+        std::fs::create_dir_all(&folder).unwrap();
+        if bt_platform::launch_pipe::endpoint_for(&directory).is_none() {
+            return;
+        }
+        let _holder = crate::persist::try_claim(&directory).expect("the window's Folio holds it");
+        let (sender, landed) = std::sync::mpsc::channel();
+        let Ok(_endpoint) = bt_platform::launch_pipe::LaunchPipe::start(
+            &directory,
+            |line: &str| {
+                let request = LaunchRequest::decode(line)?;
+                Some(bt_platform::launch_pipe::Decision {
+                    reply: Reply::Taken.encode(),
+                    admitted: Some(request),
+                })
+            },
+            move |request: LaunchRequest| {
+                let _ = sender.send(request);
+            },
+        ) else {
+            return;
+        };
+        let handed: Vec<std::ffi::OsString> = ["--from-explorer", "--cwd"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .chain([folder.clone().into_os_string()])
+            .collect();
+        let request = carried(&handed, None).expect("a folder crosses");
+        assert_eq!(request.cwd.as_deref(), Some(folder.as_path()));
+        assert_eq!(request.origin, cli::LaunchOrigin::Explorer);
+        assert_eq!(request.report, None, "a carried start reports nothing");
+        let sent = request.clone();
+        let carried = bt_platform::spawn_at_priority(
+            "bt-launch-wire-carry-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                crate::update_apply::carry_the_start(
+                    worker,
+                    &directory,
+                    &crate::update_apply::Ahead::DataHolder,
+                    &sent,
+                    std::time::Duration::from_secs(1),
+                )
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(carried, crate::update_apply::Carried::Taken);
+        assert_eq!(
+            // The listener commits once this end has confirmed `Taken`: its one
+            // message is the completion signal.
+            landed
+                .recv()
+                .expect("the window's Folio was handed the start"),
+            request
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    // -----------------------------------------------------------------------
+    // Two installed copies of Folio sharing one data directory (0.4.8 D3)
+    // -----------------------------------------------------------------------
+
+    /// The test and the half of it a copy of this binary runs ([`two_copies`]): `<test> serve`
+    /// or `<test> start`.
+    const COPY_CHILD: &str = "BT_LAUNCH_WIRE_COPY_CHILD";
+
+    /// The private folder of that run: the data directory, the folder handed over, and the
+    /// second start's command line.
+    const COPY_ROOT: &str = "BT_LAUNCH_WIRE_COPY_ROOT";
+
+    /// The data directory both copies share, inside a run's folder.
+    fn shared_data(root: &Path) -> PathBuf {
+        root.join("数据 data")
+    }
+
+    /// The second start's command line, one word a line, inside a run's folder.
+    fn start_words(root: &Path) -> PathBuf {
+        root.join("start.argv")
+    }
+
+    /// Present when the second start was sent by a rollback (it reports
+    /// [`Failure::RolledBack`], the pass's verdict for `--update-failed`).
+    fn start_report(root: &Path) -> PathBuf {
+        root.join("start.report")
+    }
+
+    /// **This process's half of a [`two_copies`] run of `selector`**, when it is one: `true`
+    /// once the half is done.
+    ///
+    /// * `serve` — the first copy: it holds the data directory's claim, listens on its launch
+    ///   endpoint with this module's own [`decide`] and [`park`] (a window thread that can
+    ///   serve), says `D3 SERVING`, and when its standard input closes stops listening — which
+    ///   finishes a conversation in flight — and says `D3 LANDED <line>` for every launch it
+    ///   was handed.
+    /// * `start` — the second copy: a start whose claim is refused, offering its command line
+    ///   exactly as `main`'s hand-over does ([`offer_start`]); it says `D3 LEFT <code>` when it
+    ///   leaves, or `D3 OPENS <line>` with the give-up line when it opens a window of its own.
+    fn copy_half(selector: &str) -> bool {
+        use std::io::Write;
+        let Ok(role) = std::env::var(COPY_CHILD) else {
+            return false;
+        };
+        let Some(role) = role.strip_prefix(selector).map(str::trim) else {
+            return false;
+        };
+        let root = PathBuf::from(std::env::var_os(COPY_ROOT).expect("the run's folder"));
+        let data = shared_data(&root);
+        let mut out = std::io::stdout();
+        match role {
+            "serve" => {
+                let _claim = crate::persist::try_claim(&data).expect("the first copy holds it");
+                let endpoint = LaunchPipe::start(&data, |line| decide(line, || true), park)
+                    .expect("the first copy listens on the data directory's endpoint");
+                writeln!(out, "D3 SERVING").unwrap();
+                out.flush().unwrap();
+                let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
+                drop(endpoint);
+                for request in take() {
+                    writeln!(out, "D3 LANDED {}", request.encode()).unwrap();
+                }
+            }
+            "start" => {
+                assert!(
+                    crate::persist::try_claim(&data).is_err(),
+                    "the second copy finds the data directory held"
+                );
+                let words = std::fs::read_to_string(start_words(&root)).unwrap();
+                let words: Vec<&str> = words.lines().collect();
+                let failed = start_report(&root).exists().then_some(Failure::RolledBack);
+                let mut why = None;
+                let left = offer_start(
+                    &data,
+                    &argv(&words),
+                    failed.as_ref(),
+                    None,
+                    None,
+                    |said| println!("D3 SAID {said}"),
+                    |line| why = Some(line),
+                );
+                match left {
+                    Some(code) => writeln!(out, "D3 LEFT {code}").unwrap(),
+                    None => writeln!(out, "D3 OPENS {}", why.unwrap_or_default()).unwrap(),
+                }
+            }
+            other => panic!("no half of the run is called {other}"),
+        }
+        out.flush().unwrap();
+        true
+    }
+
+    /// **A half's own words in one line of its output**, from its `D3 ` on: the harness writes
+    /// `test <name> ... ` before the test's first line, on the same line.
+    fn marked(line: &str) -> Option<&str> {
+        line.find("D3 ").map(|at| &line[at..])
+    }
+
+    /// What one [`two_copies`] run came to: the second start's own words (`D3 LEFT 0`, or
+    /// `D3 OPENS <why>`) and every launch the first copy was handed.
+    struct TwoCopies {
+        second: String,
+        landed: Vec<LaunchRequest>,
+    }
+
+    /// **Two copies of this program, at two paths, sharing one data directory**: `first` holds
+    /// it and listens, `second` starts with `words` (a rollback's start when `report`), and the
+    /// run's folder is removed after. Each is a real process; nothing opens a window. `None`
+    /// where this platform's wire cannot name the data directory's endpoint.
+    fn two_copies(
+        selector: &str,
+        first: &Path,
+        second: &Path,
+        words: &[String],
+        report: bool,
+    ) -> Option<TwoCopies> {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let root = bt_testpath::temp_path("launch-wire-two-copies");
+        std::fs::create_dir_all(shared_data(&root)).unwrap();
+        if bt_platform::launch_pipe::endpoint_for(&shared_data(&root)).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return None;
+        }
+        std::fs::write(start_words(&root), words.join("\n")).unwrap();
+        if report {
+            std::fs::write(start_report(&root), b"rolled back").unwrap();
+        }
+        let half = |program: &Path, role: &str| {
+            let mut command = bt_platform::quiet_command(program);
+            command
+                .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+                .env(COPY_CHILD, format!("{selector} {role}"))
+                .env(COPY_ROOT, &root)
+                .env("APPDATA", root.join("roaming"))
+                .env("LOCALAPPDATA", root.join("local"))
+                .env("HOME", root.join("home"))
+                .env("XDG_DATA_HOME", root.join("xdg"))
+                .stderr(Stdio::inherit());
+            command
+        };
+        let mut serving = half(first, "serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start the first copy");
+        let mut said = std::io::BufReader::new(serving.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("D3 SERVING") {
+            line.clear();
+            assert!(
+                said.read_line(&mut line).unwrap() > 0,
+                "the first copy ended before it listened"
+            );
+        }
+        let second = half(second, "start")
+            .output()
+            .expect("start the second copy");
+        assert!(second.status.success(), "the second copy's half failed");
+        drop(serving.stdin.take());
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut said, &mut rest).unwrap();
+        assert!(
+            serving.wait().unwrap().success(),
+            "the first copy's half failed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let said_by_second = String::from_utf8_lossy(&second.stdout).into_owned();
+        let second = said_by_second
+            .lines()
+            .filter_map(marked)
+            .find(|line| line.starts_with("D3 LEFT") || line.starts_with("D3 OPENS"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the second copy says how its start ended:
+{said_by_second}"
+                )
+            })
+            .to_owned();
+        let landed = rest
+            .lines()
+            .filter_map(marked)
+            .filter_map(|line| line.strip_prefix("D3 LANDED "))
+            .map(|line| LaunchRequest::decode(line).expect("a landed launch is a request"))
+            .collect();
+        Some(TwoCopies { second, landed })
+    }
+
+    /// **A copy of this binary at `place` under `copies`, named as this one is** — another
+    /// installation of the same program: another file, the same name. Beside this binary's own
+    /// folder, so the copy stands on the volume the build does.
+    fn another_copy(copies: &Path, place: &str) -> PathBuf {
+        let this = std::env::current_exe().unwrap();
+        let folder = copies
+            .join(place)
+            .join("Folio.app")
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&folder).unwrap();
+        let copy = folder.join(this.file_name().unwrap());
+        std::fs::copy(&this, &copy).expect("copy this program to another installation");
+        copy
+    }
+
+    /// **The folder the copies of one test stand in**, beside this binary's own: emptied when it
+    /// is made and removed when it is dropped — after the run, and on a panic too — so a build
+    /// folder (a CI runner's among them) keeps no copy of the test binary.
+    ///
+    /// One name per test and not a unique one: on Windows a copy that has just been run can
+    /// still be held for a moment after its process has been waited for, so the removal at the
+    /// end of a run may not land; the next run of the same test clears what it left, and a
+    /// build folder holds at most one copy per test.
+    struct Copies(PathBuf);
+
+    impl std::ops::Deref for Copies {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Copies {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// [`Copies`] for one test, named by `tag`.
+    fn copies_folder(tag: &str) -> Copies {
+        let this = std::env::current_exe().unwrap();
+        let folder = this.parent().unwrap().join(format!("launch-wire-{tag}"));
+        let _ = std::fs::remove_dir_all(&folder);
+        Copies(folder)
+    }
+
+    /// The folder a launch hands over, named in two scripts, made for one test.
+    fn handed_folder() -> PathBuf {
+        let folder = bt_testpath::temp_path("工作 文件夹 copy");
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// **RED (0.4.8 D3) — a start of a second installed copy, which finds the first copy holding
+    /// the data directory, hands its launch over and leaves: its folder lands in the first.**
+    ///
+    /// The macOS rehearsal's twin (2026-10-07): two copies at two paths, one data directory,
+    /// two real processes. The second copy's start is refused the claim, offers its command line
+    /// as `main`'s hand-over does, the first copy's own [`decide`] and [`park`] take it, and the
+    /// second leaves with 0 — no window of its own. On Windows the same pair is
+    /// `…\folio-0.4.6\folio.exe` beside `…\folio-0.4.7\folio.exe`.
+    ///
+    /// MUTATION (refuse foreign copies): `bt_platform`'s Unix `vet_executable` compares device
+    /// and inode again (this bundle, not a Folio); on Windows `vetted_server` compares the whole
+    /// image path. The second copy opens its own window: `D3 OPENS … PermissionDenied …`.
+    #[test]
+    fn a_second_installed_copy_hands_its_launch_to_the_copy_that_holds_the_data_directory() {
+        const SELECTOR: &str = "launch_wire::tests::a_second_installed_copy_hands_its_launch_to_the_copy_that_holds_the_data_directory";
+        if copy_half(SELECTOR) {
+            return;
+        }
+        let copies = copies_folder("second-copy");
+        let second = another_copy(&copies, "other copy");
+        let folder = handed_folder();
+        let words = vec!["--cwd".to_owned(), folder.to_string_lossy().into_owned()];
+        let run = two_copies(
+            SELECTOR,
+            &std::env::current_exe().unwrap(),
+            &second,
+            &words,
+            false,
+        );
+        drop(copies);
+        let _ = std::fs::remove_dir_all(&folder);
+        let Some(run) = run else {
+            return;
+        };
+        assert_eq!(
+            run.second, "D3 LEFT 0",
+            "the second copy handed its launch over"
+        );
+        let expected = LaunchRequest::from_cli(
+            &argv(&["--cwd", &folder.to_string_lossy()]),
+            cli::machine_path_kind,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            run.landed,
+            vec![expected],
+            "its folder landed in the first copy"
+        );
+    }
+
+    /// **RED (0.4.8 D3) — the restored version's start after a failed update, from a second
+    /// copy, hands its launch and its report to the copy that kept running.**
+    ///
+    /// The rehearsal's other half: the start a rollback sent (`--update-failed <journal>`, the
+    /// pass's verdict `RolledBack`) is the same road with a report in the request (U-36), so it
+    /// crosses the same way — folder and report — and leaves with 0, and the running copy's
+    /// update card is told where the launch lands (`LaunchRequest::told`, U-36's own test).
+    ///
+    /// MUTATION (refuse foreign copies), as above: `D3 OPENS … PermissionDenied …`, nothing
+    /// landed.
+    #[test]
+    fn a_second_copys_restored_start_after_a_failed_update_hands_over_with_its_report() {
+        const SELECTOR: &str = "launch_wire::tests::a_second_copys_restored_start_after_a_failed_update_hands_over_with_its_report";
+        if copy_half(SELECTOR) {
+            return;
+        }
+        let copies = copies_folder("restored-copy");
+        let second = another_copy(&copies, "restored copy");
+        let folder = handed_folder();
+        let journal = copies.join(".folio-update").join("journal.json");
+        let words = vec![
+            cli::UPDATE_FAILED_FLAG.to_owned(),
+            journal.to_string_lossy().into_owned(),
+            "--cwd".to_owned(),
+            folder.to_string_lossy().into_owned(),
+        ];
+        let run = two_copies(
+            SELECTOR,
+            &std::env::current_exe().unwrap(),
+            &second,
+            &words,
+            true,
+        );
+        drop(copies);
+        let _ = std::fs::remove_dir_all(&folder);
+        let Some(run) = run else {
+            return;
+        };
+        assert_eq!(
+            run.second, "D3 LEFT 0",
+            "the restored start handed its launch over"
+        );
+        let line: Vec<&str> = words.iter().map(String::as_str).collect();
+        let expected = LaunchRequest::of_start(
+            &argv(&line),
+            Some(&Failure::RolledBack),
+            cli::machine_path_kind,
+            None,
+        )
+        .unwrap();
+        assert_eq!(expected.report, Some(Report::RolledBack));
+        assert_eq!(
+            run.landed,
+            vec![expected],
+            "its folder and its report landed in the copy that kept running"
+        );
+    }
+
+    /// **RED (0.4.8 D3) — a launch endpoint held by a program that is not a Folio is a true
+    /// refusal: nothing is written to it, the start opens its own window, and the log line says
+    /// why.**
+    ///
+    /// The other side of the narrowed identity: a Folio is this program's name, and a program
+    /// of another name holding the door — here a copy of this binary under another name,
+    /// listening as a Folio would — is not handed the folder. The start carries on to its own
+    /// window (whose card is the second-instance notice, unchanged) and its give-up line names
+    /// the OS's refusal. A copy and not a hard link: macOS names a hard-linked image by
+    /// whichever of its links it cached, so the program's name would not be the one it ran as.
+    ///
+    /// MUTATION (accept any peer): `bt_platform`'s Unix `vet_executable` answers `Ok` whatever
+    /// the peer, or Windows' `vetted_server` its pid whatever the image — the start leaves with
+    /// 0 and the folder lands in the impostor.
+    #[test]
+    fn a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why() {
+        const SELECTOR: &str = "launch_wire::tests::a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why";
+        if copy_half(SELECTOR) {
+            return;
+        }
+        let this = std::env::current_exe().unwrap();
+        let copies = copies_folder("not-a-folio");
+        let folder_of_it = copies.join("another program");
+        std::fs::create_dir_all(&folder_of_it).unwrap();
+        let impostor =
+            folder_of_it.join(format!("another-program{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(&this, &impostor)
+            .expect("stand a copy of this program there under another name");
+        let folder = handed_folder();
+        let words = vec!["--cwd".to_owned(), folder.to_string_lossy().into_owned()];
+        let run = two_copies(SELECTOR, &impostor, &this, &words, false);
+        drop(copies);
+        let _ = std::fs::remove_dir_all(&folder);
+        let Some(run) = run else {
+            return;
+        };
+        assert!(
+            run.second
+                .starts_with("D3 OPENS Folio: launch hand-over — the Folio that holds ")
+                && run
+                    .second
+                    .contains("did not take this launch (PermissionDenied: "),
+            "the start opens its own window and its log line names the refusal: {}",
+            run.second
+        );
+        assert_eq!(
+            run.landed,
+            Vec::new(),
+            "nothing was handed to a program that is not a Folio"
+        );
     }
 }

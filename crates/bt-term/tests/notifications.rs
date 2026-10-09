@@ -14,7 +14,10 @@ fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
 }
 
+/// Every session of this file: the test host names installed first, because an OSC 7 report
+/// reads them (`bt_term::local_host_names`).
 fn session() -> DualPlaneSession {
+    bt_term::install_test_host_names();
     DualPlaneSession::new(nz(80), nz(8))
 }
 
@@ -159,9 +162,15 @@ fn osc_777_notify_splits_once_and_ignores_every_other_verb() {
 /// swallows the other.
 #[test]
 fn osc_7_and_osc_777_do_not_take_each_others_bytes() {
+    // Two directories as a shell on this platform reports them, the second the one that stands.
+    let (first, last, standing) = if cfg!(windows) {
+        ("file:///D:/Developer", "file:///C:/", "C:\\")
+    } else {
+        ("file:///Developer", "file:///tmp/", "/tmp")
+    };
     let mut session = session();
     session
-        .feed(b"\x1b]7;file:///D:/Developer\x07\x1b]777;notify;t;b\x07\x1b]7;file:///C:/\x07")
+        .feed(format!("\x1b]7;{first}\x07\x1b]777;notify;t;b\x07\x1b]7;{last}\x07").as_bytes())
         .unwrap();
     assert_eq!(
         session.take_notifications(),
@@ -175,7 +184,7 @@ fn osc_7_and_osc_777_do_not_take_each_others_bytes() {
         session
             .working_directory()
             .map(std::path::Path::to_path_buf),
-        Some(std::path::PathBuf::from("C:\\"))
+        Some(std::path::PathBuf::from(standing))
     );
 }
 

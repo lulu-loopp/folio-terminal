@@ -19,35 +19,21 @@
 //!   and `cmd /c` look in the process's working directory before they look at
 //!   `PATH`.
 //!
-//! So this module is the whole of the hand-off: it **normalises the target the
-//! way Windows will**, refuses the shapes a real target never has, names every
-//! program by an absolute path found somewhere an administrator put it, gives
-//! every launch an explicit working directory, and holds the only
-//! `ShellExecuteW` call sites in the workspace. The pure half — what a name
-//! resolves to, what may be handed to Explorer, where a program is looked for —
-//! is a set of ordinary functions with ordinary tests, because the one thing
-//! that can be wrong here is a string and a string can be shot at without
+//! This module owns handoff dispatch and the shared target policy. The Windows
+//! backend normalizes Windows names and keeps the sole `ShellExecuteW` calls;
+//! macOS uses `NSWorkspace`, and Linux delegates file and address operations to
+//! `linux_files` on the worker lane. Each backend applies its own path grammar
+//! and refusal rules.
+//!
+//! Windows target checks and reveal arguments are also exposed as pure
+//! functions with tests, so those string and path rules can be checked without
 //! launching anything.
 //!
-//! **And on macOS it is the same module with a second shell behind it** (M2-2).
-//! `macos_handoff` holds the only `NSWorkspace` hand-off in the workspace for
-//! the same reason `windows_handoff` holds the only `ShellExecuteW`: the four
-//! verbs are one decision about what a real target is, and the decision does
-//! not become four decisions because there are two machines. What it does
-//! become is **two readings of a path**, and that is the one thing the crossing
-//! genuinely changes — Win32's grammar (drive letters, `PATHEXT`, the
-//! trailing-dot trim) versus POSIX's (bytes, a leading `/`, the execute bit) —
-//! so each arm states its own and neither borrows the other's.
-//!
-//! **And none of it runs on the window thread** (`docs/DESIGN.md`, 2026-09-22 —
-//! *a hand-off to the system runs on its own lane*). Every door here is still
-//! synchronous and still answers a real `Result`; what moved is who waits for
-//! it. `bt-app`'s OS hand-off lane is one below-normal thread that enters a
-//! [`ShellThread`] once and hands each [`Handoff`] to the door it names, in the
-//! order the reader pressed, and the window hears the answer later through its
-//! event loop. The doors themselves did not move and did not change what they
-//! decide: [`ShellThread::hand_over`] is a `match` onto the same functions the
-//! window thread used to call.
+//! **None of the system handoffs runs on the window thread** (`docs/DESIGN.md`,
+//! 2026-09-22 — *a hand-off to the system runs on its own lane*). The lane
+//! enters a [`ShellThread`] once; the window hears each result later through its
+//! event loop. Linux passes the worker context to `hand_over_on_worker`, where
+//! child-process supervision needs it. Other platforms use `hand_over`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -137,15 +123,16 @@ pub enum Handoff {
 ///
 /// On macOS it is an autorelease pool per hand-off (`NSWorkspace` answers with
 /// autoreleased objects, and a thread of our own has no pool that drains
-/// between requests); on a third platform it is nothing, and every door there
-/// already refuses.
+/// between requests). Linux needs no extra setup here; its process doors receive
+/// the lane's worker context through `hand_over_on_worker`. Unsupported
+/// platforms have no shell backend and their doors refuse.
 ///
 /// **And it is a worker's** (A1b). [`ShellThread::enter`] takes the
 /// [`WorkerCtx`] the thread door lends the body of every thread it starts, so a
 /// hand-off can be prepared only on a thread the door started — never on the
 /// window thread, which has no such value, and never on a callback thread. The
-/// seven verbs behind [`ShellThread::hand_over`] are private to this module, so
-/// the value is the only road to them (the proofs are on `hand_over`).
+/// verb implementations are private to this module; the platform entry method
+/// is the only road to them.
 ///
 /// It stays on the thread that entered it — its auto traits, each probed alone:
 ///
@@ -168,6 +155,7 @@ pub enum Handoff {
 /// is_send::<u8>();
 /// is_sync::<u8>();
 /// ```
+///
 ///
 /// — and it cannot be carried to another thread, with no `'static` bound in the
 /// way (a scoped thread):
@@ -332,6 +320,7 @@ impl ShellThread {
     ///     },
     /// );
     /// ```
+    #[cfg(not(target_os = "linux"))]
     pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
@@ -343,7 +332,42 @@ impl ShellThread {
         }
     }
 
-    fn door(window: NativeWindow, request: &Handoff) -> Result<(), String> {
+    /// Hand a Linux request through the worker lane that owns its process calls.
+    #[cfg(target_os = "linux")]
+    pub fn hand_over_on_worker(
+        &self,
+        worker: &WorkerCtx,
+        window: NativeWindow,
+        request: &Handoff,
+    ) -> Result<(), String> {
+        Self::door(worker, window, request)
+    }
+
+    fn door(
+        #[cfg(target_os = "linux")] worker: &WorkerCtx,
+        window: NativeWindow,
+        request: &Handoff,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        let open_local_file =
+            |window, path: &Path| crate::linux_files::open_local_file(worker, window, path);
+        #[cfg(target_os = "linux")]
+        let open_local_path =
+            |window, path: &Path| crate::linux_files::open_local_path(worker, window, path);
+        #[cfg(target_os = "linux")]
+        let open_local_path_verified = |window, path: &Path, target| {
+            crate::linux_files::open_local_path_verified(worker, window, path, target)
+        };
+        #[cfg(target_os = "linux")]
+        let reveal_in_explorer =
+            |window, path: &Path| crate::linux_files::reveal_in_explorer(worker, window, path);
+        #[cfg(target_os = "linux")]
+        let reveal_verified = |window, path: &Path, target| {
+            crate::linux_files::reveal_verified(worker, window, path, target)
+        };
+        #[cfg(target_os = "linux")]
+        let shell_execute =
+            |window, target: &str| crate::linux_files::shell_execute(worker, window, target);
         match request {
             Handoff::Open(path) => open_local_path(window, path),
             Handoff::OpenVerified(path, target) => {
@@ -809,28 +833,28 @@ mod portable_handoff {
     }
 
     /// Open one already-policy-checked address with the system's handler.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
         let _ = (window, target);
         Err(not_here("opening an address"))
     }
 
     /// Open one worker-validated local image with its default handler.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
 
     /// Open one file a person picked out of a directory listing.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
 
     /// The same, for a path a worker has already answered for.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn open_local_path_verified(
         window: NativeWindow,
         path: &Path,
@@ -841,14 +865,14 @@ mod portable_handoff {
     }
 
     /// Show a file in the file manager.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("showing a file in the file manager"))
     }
 
     /// The same, for a path a worker has already answered for.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn reveal_verified(
         window: NativeWindow,
         path: &Path,
@@ -871,12 +895,14 @@ mod portable_handoff {
 #[cfg(not(windows))]
 pub use portable_handoff::program_on_path;
 
-/// The other seven, on a platform with neither a Win32 shell nor a `NSWorkspace` —
-/// private to this module, reached only through [`ShellThread::hand_over`].
+/// The system-font page fallback for Linux and other platforms without a native font settings door.
 #[cfg(all(not(windows), not(target_os = "macos")))]
+use portable_handoff::open_system_fonts_page;
+
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 use portable_handoff::{
-    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
-    reveal_in_explorer, reveal_verified, shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, reveal_in_explorer,
+    reveal_verified, shell_execute,
 };
 
 /// **The seven verbs that leave this window, over `NSWorkspace`** (M2-2) —
@@ -903,7 +929,7 @@ use macos_handoff::{
 /// reason: what a relative path resolves against is this process's working
 /// directory, which is whatever folder the shell that started Folio was
 /// standing in — not something a reader pointed at.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn openable_unix_path(path: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
@@ -1419,10 +1445,9 @@ mod macos_handoff {
         }
 
         /// A directory of this test's own, under the system's temporary
-        /// directory and named for this process, removed however the case ends.
+        /// directory and named by `bt_testpath`, removed however the case ends.
         fn scratch(name: &str) -> PathBuf {
-            let directory =
-                std::env::temp_dir().join(format!("folio-handoff-{}-{name}", std::process::id()));
+            let directory = bt_testpath::temp_path(&format!("folio-handoff-{name}"));
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             directory
         }
@@ -1619,7 +1644,8 @@ mod macos_handoff {
         #[test]
         fn a_refusal_carries_its_own_reason_and_never_the_products() {
             let window = crate::NativeWindow::stand_in(0);
-            let missing = scratch("refusals").join("not-here.txt");
+            let directory = scratch("refusals");
+            let missing = directory.join("not-here.txt");
             let refusals = [
                 open_local_path(window, std::path::Path::new("notes/a.txt")),
                 open_local_path(window, &missing),
@@ -1635,7 +1661,7 @@ mod macos_handoff {
                     "a refusal about the machine wears the product's sentence: {reason:?}"
                 );
             }
-            let _ = std::fs::remove_dir_all(scratch("refusals"));
+            let _ = std::fs::remove_dir_all(&directory);
         }
 
         /// RED — **a reveal asks the disk before it asks Finder**, because
@@ -2619,7 +2645,7 @@ mod tests {
     ///
     /// MUTATION: make the portable arm answer `Ok(())` and the first assertion
     /// goes red, which is a reveal that reports success and shows nothing.
-    #[cfg(all(not(windows), not(target_os = "macos")))]
+    #[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
     #[test]
     fn the_posix_reveal_hands_over_a_path_and_not_a_command_line() {
         let window = crate::NativeWindow::stand_in(0);
@@ -2648,8 +2674,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_reveal_names_a_path_that_is_really_there() {
-        let scratch =
-            std::env::temp_dir().join(format!("folio-reveal-argument-{}", std::process::id()));
+        let scratch = bt_testpath::temp_path("folio-reveal-argument");
         std::fs::create_dir_all(&scratch).expect("a scratch directory");
         let file = scratch.join("a,b .txt");
         std::fs::write(&file, b"x").expect("a scratch file");
@@ -2844,8 +2869,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_reveal_grants_the_foreground_before_it_hands_over() {
-        let scratch =
-            std::env::temp_dir().join(format!("folio-handoff-front-{}", std::process::id()));
+        let scratch = bt_testpath::temp_path("folio-handoff-front");
         std::fs::create_dir_all(&scratch).expect("a scratch directory");
         let file = scratch.join("notes.md");
         std::fs::write(&file, b"x").expect("a scratch file");
@@ -2908,22 +2932,32 @@ mod tests {
     #[test]
     fn a_boxed_closure_and_a_function_pointer_reach_the_hand_off_only_with_the_capability() {
         type HandOver = dyn Fn(&WorkerCtx) -> Result<(), String>;
+        fn hand_over_from_worker(ctx: &WorkerCtx) -> Result<(), String> {
+            let shell = ShellThread::enter(ctx);
+            #[cfg(target_os = "linux")]
+            {
+                shell.hand_over_on_worker(
+                    ctx,
+                    crate::NativeWindow::stand_in(0),
+                    &Handoff::Open(PathBuf::from("relative-name.md")),
+                )
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                shell.hand_over(
+                    crate::NativeWindow::stand_in(0),
+                    &Handoff::Open(PathBuf::from("relative-name.md")),
+                )
+            }
+        }
         fn through_a_pointer(ctx: &WorkerCtx) -> Result<(), String> {
-            ShellThread::enter(ctx).hand_over(
-                crate::NativeWindow::stand_in(0),
-                &Handoff::Open(PathBuf::from("relative-name.md")),
-            )
+            hand_over_from_worker(ctx)
         }
         let worker = crate::spawn_at_priority(
             "bt-test-indirect-handoff",
             crate::ThreadPriority::BelowNormal,
             |ctx| {
-                let boxed: Box<HandOver> = Box::new(|ctx| {
-                    ShellThread::enter(ctx).hand_over(
-                        crate::NativeWindow::stand_in(0),
-                        &Handoff::Open(PathBuf::from("relative-name.md")),
-                    )
-                });
+                let boxed: Box<HandOver> = Box::new(hand_over_from_worker);
                 let pointer: fn(&WorkerCtx) -> Result<(), String> = through_a_pointer;
                 (crate::admission::role(), boxed(ctx), pointer(ctx))
             },

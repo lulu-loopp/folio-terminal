@@ -11,9 +11,11 @@
 //! 1. **The road** ([`eligible`]): the running bundle's installation home
 //!    (`update_txn::Home::for_bundle`, beside the bundle — its own name, so a
 //!    `Folio Beta.app` updates only itself), how this copy was installed
-//!    (only `Channel::Ours`), and whether the folder the bundle stands in may
-//!    be written: a translocated bundle, run from its read-only randomized
-//!    mount, or a folder this account may not write, is
+//!    (`Channel::Ours`, or a Homebrew copy at the app target its Caskroom
+//!    records, whose marks the layout reads here: [`PreparePoint::carried`]),
+//!    and whether the folder the bundle stands in may be written: a
+//!    translocated bundle, run from its read-only randomized mount, or a
+//!    folder this account may not write, is
 //!    [`NotEligible::NotWritable`] → [`Stop::NotWritable`], the releases page.
 //!    Nothing is written before this answer.
 //! 2. **Allocate**: the home is made if it is not there, its transaction lock
@@ -79,6 +81,7 @@ use bt_platform::macos_update::{self, Failed};
 
 use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
+use crate::update_archive;
 use crate::update_handoff::Staged;
 use crate::update_job::{
     Driver, MACOS_ARCHITECTURE, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop,
@@ -87,7 +90,9 @@ use crate::update_job::{
 #[cfg(test)]
 pub(crate) use crate::update_prepare::{AtLaunch, at_launch, sum_for};
 use crate::update_prepare::{WORKER, abandon, discard, fetching, finish, matches_its_sum};
-use crate::update_txn::{Adapter, BundleIdentity, Cdhash, Event, Home, Journal, Layout, TxnId};
+use crate::update_txn::{
+    Adapter, BundleIdentity, Carried, Cdhash, Event, Home, Journal, Layout, TxnId,
+};
 
 /// **The bundle's name on the release image** (`scripts/release/macos/dmg.sh`
 /// stages `Folio.app` beside a link to `/Applications`).
@@ -188,7 +193,7 @@ impl MacPrepare {
                 bundle,
                 tools: Arc::new(System),
                 channel: crate::install_channel::channel(),
-                layouts: Layouts::of(Arc::new(Ours)),
+                layouts: own_layouts(),
             }),
             None => Box::new(Unsupported),
         }
@@ -201,7 +206,7 @@ impl MacPrepare {
             bundle,
             tools,
             channel,
-            layouts: Layouts::of(Arc::new(Ours)),
+            layouts: own_layouts(),
         }
     }
 
@@ -278,12 +283,23 @@ pub(crate) struct Road<'a> {
 /// the abandonment of a Prepare that refused (`Abandoned`, then cleared:
 /// *Nothing changed.*).
 pub(crate) trait PreparePoint: Send + Sync {
+    /// **What travels with the copy** (managed-update §1.1's "what
+    /// bookkeeping travels with it", M1), read from the running bundle
+    /// before anything is written: the manager's marks `Allocated` records,
+    /// or none. A precondition of the layout's road that does not hold
+    /// (§1.5) is refused here, before the journal exists.
+    ///
+    /// # Errors
+    /// The [`Stop`] the card names; nothing was written.
+    fn carried(&self, road: &Road<'_>) -> Result<Option<Carried>, Stop>;
+
     /// What `Allocated` records: the running bundle's identity `old`, and
     /// what the offer names.
     fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout;
 
-    /// Everything the transaction acquires, into `rescue`, `stage` and
-    /// `mount`; the layout `Prepared` records.
+    /// Everything the offer's transaction acquires, into `rescue`, `stage`
+    /// and `mount`, with what [`PreparePoint::carried`] answered carried
+    /// onto the staged set; the layout `Prepared` records.
     ///
     /// # Errors
     /// The [`Stop`] the card names; the road abandons the transaction.
@@ -292,9 +308,9 @@ pub(crate) trait PreparePoint: Send + Sync {
         worker: &WorkerCtx,
         road: &Road<'_>,
         home: &Home,
-        txn: TxnId,
         places: [&Path; 3],
         old: BundleIdentity,
+        carried: Option<&Carried>,
     ) -> Result<Layout, Stop>;
 }
 
@@ -304,6 +320,10 @@ pub(crate) trait PreparePoint: Send + Sync {
 pub(crate) struct Ours;
 
 impl PreparePoint for Ours {
+    fn carried(&self, _road: &Road<'_>) -> Result<Option<Carried>, Stop> {
+        Ok(None)
+    }
+
     fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout {
         Layout::BundleIntent {
             old: old.clone(),
@@ -316,12 +336,117 @@ impl PreparePoint for Ours {
         worker: &WorkerCtx,
         road: &Road<'_>,
         home: &Home,
-        txn: TxnId,
         places: [&Path; 3],
         old: BundleIdentity,
+        _carried: Option<&Carried>,
     ) -> Result<Layout, Stop> {
-        acquire(worker, road, home, txn, places).map(|new| Layout::Bundle { old, new })
+        acquire(worker, road, home, road.offer.txn(), places).map(|new| Layout::Bundle { old, new })
     }
+}
+
+/// **Homebrew's layout** (0.4.8 ticket D1, U-41b; managed-update §2.2, §4):
+/// [`Ours`] at the app target Homebrew recorded, with the cask's marks
+/// carried. Before anything is written, the running bundle must be the app
+/// Homebrew's record names (R-H2, `install_channel::homebrew_record`) and
+/// both of its marks are read (M1); a copy that fails is refused as one the
+/// road does not update ([`Stop::NotOurs`]). After the staged bundle's
+/// second identity check and the rescue clone, the running bundle's marks
+/// are read again and must still be the recorded bytes (M2), and they are
+/// written onto `stage/` and read back equal
+/// (`bt_platform::macos_update::carry_attributes`); either failing is
+/// [`Stop::Copy`], and the road abandons: *Nothing changed.*
+pub(crate) struct Homebrew;
+
+impl PreparePoint for Homebrew {
+    fn carried(&self, road: &Road<'_>) -> Result<Option<Carried>, Stop> {
+        let marks = crate::install_channel::homebrew_record(road.bundle).map_err(|why| {
+            crate::diagnostics::note(&format!(
+                "Folio: update job — this Homebrew copy is not updated here: {why}"
+            ));
+            Stop::NotOurs
+        })?;
+        Ok(Some(carried_of(marks)))
+    }
+
+    fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout {
+        Ours.allocated(road, old)
+    }
+
+    fn prepare(
+        &self,
+        worker: &WorkerCtx,
+        road: &Road<'_>,
+        home: &Home,
+        places: [&Path; 3],
+        old: BundleIdentity,
+        carried: Option<&Carried>,
+    ) -> Result<Layout, Stop> {
+        let layout = Ours.prepare(worker, road, home, places, old, None)?;
+        if let Some(carried) = carried {
+            let [_, stage, _] = places;
+            let still = crate::install_channel::homebrew_marks(road.bundle)
+                .map(carried_of)
+                .map_err(|_| Stop::Copy)?;
+            if still != *carried {
+                return Err(Stop::Copy);
+            }
+            carry(stage, carried)?;
+        }
+        road.go_on()?;
+        Ok(layout)
+    }
+}
+
+/// The journal's record of a Homebrew copy's marks.
+fn carried_of(marks: crate::install_channel::HomebrewMarks) -> Carried {
+    Carried {
+        install: marks.marker,
+        caskroom: Some(marks.caskroom),
+    }
+}
+
+/// **The recorded marks written onto the bundle at `bundle`** and read back
+/// equal (M1).
+///
+/// # Errors
+/// [`Stop::Copy`]: one was not written, not read back equal, or not flushed.
+fn carry(bundle: &Path, carried: &Carried) -> Result<(), Stop> {
+    let mut attributes = vec![(
+        crate::install_channel::MARKER_ATTRIBUTE,
+        carried.install.as_slice(),
+    )];
+    if let Some(caskroom) = &carried.caskroom {
+        attributes.push((
+            crate::install_channel::CASKROOM_ATTRIBUTE,
+            caskroom.as_slice(),
+        ));
+    }
+    macos_update::carry_attributes(bundle, &attributes).map_err(|refusal| {
+        crate::diagnostics::note(&format!(
+            "Folio: update job — the staged bundle did not take the copy's marks: {refusal}"
+        ));
+        Stop::Copy
+    })
+}
+
+/// **Whether the marks `recorded` are still on the running bundle and on
+/// the staged one** (M2, at a later launch's revalidation).
+fn still_carried(bundle: &Path, stage: &Path, recorded: &Carried) -> Result<(), Stop> {
+    for side in [bundle, stage] {
+        let found = crate::install_channel::homebrew_marks(side)
+            .map(carried_of)
+            .map_err(|_| Stop::Copy)?;
+        if found != *recorded {
+            return Err(Stop::Copy);
+        }
+    }
+    Ok(())
+}
+
+/// **The layouts of this road** as the product has them: [`Ours`], and
+/// [`Homebrew`]'s.
+fn own_layouts() -> Layouts<dyn PreparePoint> {
+    Layouts::of(Arc::new(Ours) as Arc<dyn PreparePoint>).with_homebrew(Arc::new(Homebrew))
 }
 
 impl Road<'_> {
@@ -340,7 +465,8 @@ impl Road<'_> {
 /// **Whether `bundle` may take the macOS road, its home, and the adapter it
 /// takes**: an `.app` with a parent, installed as a channel whose adapter's
 /// road is built on macOS (`update_adapter::built_on`; managed-update §1.5 —
-/// in this build only [`Channel::Ours`]), standing in a folder this process
+/// [`Channel::Ours`] and Homebrew's, whose own precondition is its
+/// layout's [`PreparePoint::carried`]), standing in a folder this process
 /// may write that is not on a read-only mount (a translocated bundle is: C7).
 ///
 /// # Errors
@@ -383,6 +509,9 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     let (home, adapter) = eligible(road.bundle, road.channel).map_err(|why| stop_for(&why))?;
     let layout = road.layouts.named(adapter).map_err(|_| Stop::NotOurs)?;
     road.go_on()?;
+    // What travels with the copy, and the layout's own precondition, before
+    // anything is written (managed-update §1.5, M1).
+    let carried = layout.carried(road)?;
     // The running bundle's identity is read before anything is written: a
     // bundle with none cannot be cloned, and so cannot be updated.
     let old = identity(worker, road.bundle).map_err(|_| Stop::Clone)?;
@@ -406,16 +535,24 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
         .map_err(|_| Stop::Journal)?
         .ok_or(Stop::Busy)?;
     if std::fs::symlink_metadata(home.journal()).is_ok() {
-        return Err(Stop::Busy);
+        return Err(crate::update_prepare::journal_there(&home));
     }
-    let allocated =
-        Journal::allocate(txn, rescue_text, layout.allocated(road, &old)).naming(adapter);
+    let allocated = Journal::allocate(txn, rescue_text, layout.allocated(road, &old))
+        .naming(adapter)
+        .carrying(carried);
     install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;
 
     // From here a refusal abandons the transaction and leaves nothing.
     let places = [rescue.as_path(), stage.as_path(), mount.as_path()];
     let staged = layout
-        .prepare(worker, road, &home, txn, places, old)
+        .prepare(
+            worker,
+            road,
+            &home,
+            places,
+            old,
+            allocated.body.marker.as_ref(),
+        )
         .and_then(|recorded| {
             let prepared = allocated
                 .prepare_with(recorded)
@@ -534,14 +671,17 @@ fn copy_verified(
 /// **A bundle is the offered Folio**: [`Tools::verify`], its
 /// `CFBundleShortVersionString` equal to `version`, and its main executable
 /// carrying the offer's architecture ([`MACOS_ARCHITECTURE`]); and **this
-/// build may update itself to it** — its sealed `FolioMinUpdater` no newer
-/// than this build (0.4.7 U-42c, the Windows archive reader's `min_updater`
-/// rule). Answers its identity — cdhash and version — for the journal.
+/// build may update itself to it** — its sealed `FolioUpdateProtocol` this
+/// build's ([`spoken`], 0.4.8 E1-a2) and its sealed `FolioMinUpdater` no
+/// newer than this build (0.4.7 U-42c): the Windows archive reader's
+/// `protocol` and `min_updater` rules, in that order. Answers its identity —
+/// cdhash and version — for the journal.
 ///
 /// # Errors
 /// [`Stop::TooOld`] when the bundle needs a newer updater (with one line in
-/// `diagnostics.log`); [`Stop::Identity`] for every other check, a missing
-/// or unreadable `FolioMinUpdater` included.
+/// `diagnostics.log`); [`Stop::Identity`] for every other check — another
+/// protocol (with one line), a missing or unreadable `FolioUpdateProtocol`
+/// or `FolioMinUpdater` included.
 pub(crate) fn check(
     worker: &WorkerCtx,
     tools: &dyn Tools,
@@ -559,6 +699,10 @@ pub(crate) fn check(
     if !architectures.iter().any(|name| name == MACOS_ARCHITECTURE) {
         return Err(Stop::Identity);
     }
+    spoken(
+        macos_update::update_protocol(worker, bundle).map_err(|refusal| refusal.to_string()),
+        &mut crate::diagnostics::note,
+    )?;
     let needs = macos_update::min_updater(worker, bundle).map_err(|_| Stop::Identity)?;
     let needed = crate::update::Version::parse(&needs).ok_or(Stop::Identity)?;
     let this = crate::update::Version::parse(crate::version::VERSION).ok_or(Stop::Identity)?;
@@ -573,6 +717,42 @@ pub(crate) fn check(
         cdhash: Cdhash::parse(&code.cdhash).map_err(|_| Stop::Identity)?,
         version: found,
     })
+}
+
+/// **The bundle speaks this build's update protocol**: its sealed
+/// `FolioUpdateProtocol` — `sealed`, or why it could not be read — is
+/// [`release_manifest::PROTOCOL`]: the rule and the words of the Windows
+/// archive reader's `protocol` check (`update_archive`'s `offered`,
+/// [`update_archive::Reason::Protocol`]). A key that is missing or
+/// unreadable, or a value that is not a number, is refused as a malformed
+/// manifest is there ([`update_archive::Reason::Manifest`]). Every refusal is
+/// one line, handed to `note` (`diagnostics.log` in the product), as every
+/// archive refusal is on Windows.
+///
+/// Defence in depth for a hop, which the frozen surfaces already keep: it
+/// runs in Prepare, so it protects no downgrade, and no journal read.
+///
+/// # Errors
+/// [`Stop::Identity`], after its line.
+///
+/// [`release_manifest::PROTOCOL`]: bt_winres::release_manifest::PROTOCOL
+fn spoken(sealed: Result<String, String>, note: &mut dyn FnMut(&str)) -> Result<(), Stop> {
+    let reason = match sealed {
+        Err(why) => update_archive::Reason::Manifest(format!(
+            "its FolioUpdateProtocol could not be read: {why}"
+        )),
+        Ok(sealed) => match sealed.parse::<u32>() {
+            Ok(protocol) if protocol == bt_winres::release_manifest::PROTOCOL => return Ok(()),
+            Ok(protocol) => update_archive::Reason::Protocol(protocol),
+            Err(_) => update_archive::Reason::Manifest(format!(
+                "its FolioUpdateProtocol `{sealed}` is not a number"
+            )),
+        },
+    };
+    note(&format!(
+        "Folio: update job — the new bundle is refused: {reason}"
+    ));
+    Err(Stop::Identity)
 }
 
 /// A signed bundle's identity as the journal records it: its main
@@ -680,6 +860,14 @@ fn still_valid(
         .ok_or(Stop::Journal)?;
     if check(worker, tools, &stage, &new.version)? != *new {
         return Err(Stop::Identity);
+    }
+    // Homebrew's record still names this bundle (R-H2), and the marks the
+    // press recorded are still on both bundles (M2).
+    if adapter == Adapter::Homebrew {
+        crate::install_channel::homebrew_record(bundle).map_err(|_| Stop::NotOurs)?;
+    }
+    if let Some(recorded) = &staged.journal.body.marker {
+        still_carried(bundle, &stage, recorded)?;
     }
     Ok(())
 }

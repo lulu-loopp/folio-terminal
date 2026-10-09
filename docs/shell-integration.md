@@ -145,6 +145,7 @@ other:
 | PowerShell / Windows PowerShell | Windows | `file:///D:/src` | `$PWD.ProviderPath` |
 | Git Bash | Windows | `file:///D:/src` | `pwd -W`, the MSYS builtin for the Win32 spelling |
 | WSL | WSL | `file:///mnt/d/src`, `file:///home/weiyi` | `$PWD` |
+| Bash / zsh on Linux | POSIX | `file:///home/alice/src` | `$PWD` |
 | Command Prompt | Windows | `file:///D:\src`, `file:///C:\Program Files` | `$P`, in the `PROMPT` variable |
 
 Command Prompt's report is spelled with **backslashes and unencoded spaces**, and that is forced
@@ -220,7 +221,12 @@ When a PowerShell row must instead be spawned as written (`File`, `CommandWithAr
 `NonInteractive`, or an unknown/invalid host line), Settings > Profiles offers one **Enable via
 profile** button for that edition. One click uses the existing managed-line writer to add Folio's
 guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation is interposed, and the success
-toast offers Undo. The line takes effect in panes started after it; the pane that showed the
+toast offers Undo. The click is made against the file as the check its row is drawn from read it,
+and the Undo against the file as the click wrote it: the writer reads the file again immediately
+before the edit and, when it differs, writes nothing and says the profile was changed elsewhere and
+the page should be reloaded. Undo puts back the bytes the file held before the click, so it never
+takes out a line the person wrote or edited; a click that finds a line Folio owns already there
+writes nothing and offers no Undo. The line takes effect in panes started after it; the pane that showed the
 button keeps running without it. The installed fact is per edition, so every such row for that
 edition changes to the ordinary capability sentence together. The one existing **PowerShell
 `$PROFILE` line** row remains the only lasting removal surface, and it stands only while a line in
@@ -283,11 +289,13 @@ Folio records — in `integration-profile-files.json` beside its marks record, u
 which edition named the file, whether it is creating the file and which folders it is creating for
 it, and, for a file that was there, the one copy it takes before its first write into that file
 (`<profile>.bak-YYYYMMDD[-n]`), with the SHA-256 of the bytes it will hold. A later write while
-the line is installed takes no further copy, and a removal takes none: it takes out the managed
-line and its own line ending and keeps every other byte, including any edit made since. It does not
-take out the blank line Enable put in front of the managed line when the file already held text, so
-a file that was there before keeps one more blank line than it had — inert to PowerShell, and the
-one byte-level difference a removal leaves. When the line is taken out — by Undo, by the Settings
+the line is installed takes no further copy, and a removal takes none. The Settings row, the
+command-line remover and the uninstall verbs take out the managed line and its own line ending and
+keep every other byte, including any edit made since. They do not take out the blank line Enable
+put in front of the managed line when the file already held text, so a file that was there before
+keeps one more blank line than it had — inert to PowerShell, and the one byte-level difference such
+a removal leaves. Undo, made only while the file is exactly what its click wrote, puts back every
+byte, that blank line included. When the line is taken out — by Undo, by the Settings
 row, by `--remove-shell-integration` or by either uninstall verb — the copy is deleted, since the
 write it guarded is undone, but only while it still holds the recorded bytes: a file of that name
 Folio did not write stays; a file Folio
@@ -392,6 +400,22 @@ session read your own directory with no trace of the arrangement left in the env
 keep your startup files somewhere other than `$HOME`, that directory reaches the script in
 `BT_USER_ZDOTDIR`, because `ZDOTDIR` itself has already been taken by the time zsh reads a line.
 
+**Linux Bash and zsh use those same doors.** Bash gets `--init-file` and
+`BT_SHELL_INTEGRATION=interactive` or `login`; the script sources the matching user startup chain.
+Zsh gets `ZDOTDIR` and `BT_USER_ZDOTDIR`, so it runs the user's files from their existing
+`ZDOTDIR` or `$HOME`. Folio does not edit those files. The scripts are stored in
+`$XDG_DATA_HOME/Folio/shell-integration/`, or `~/.local/share/Folio/shell-integration/` when
+`XDG_DATA_HOME` is unset. A fish profile keeps its own startup behavior and receives no OSC 133 or
+OSC 7 hooks.
+
+Run `python3 scripts/shell-integration/tests/linux-pty.py` from the repository to exercise the
+installed Bash and zsh hooks, plus the plain-shell boundary for `/bin/sh`, `dash` and fish, on real
+PTYs with isolated `HOME`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. It checks startup-file
+preservation, command execution, exit status, cwd reports and that shells without a Folio hook do
+not receive OSC 7/133. A raw PTY cannot answer fish's terminal capability queries, so its plain-shell
+probe uses `TERM=dumb`; the native-window input check uses Folio's normal terminal type. The probe
+skips a shell whose binary is not installed.
+
 **`sh` and `dash` get no door at all.** They accept `--init-file` and ignore it in silence, which is
 the one failure indistinguishable from a shell that has no integration, so the profile says so
 outright and the capability row reads `No shell integration`.
@@ -413,8 +437,11 @@ quotes, `$`, `|` and `;` comes apart on the way in. `wsl.exe -e` executes the pr
 argv for argv, which is also what makes handing the init file over as an argument work. Measured on
 Ubuntu-24.04, 2026-09-07.
 
-The script is written out to `%APPDATA%\Folio\shell-integration\` from a
-copy compiled into the binary, so the two halves of the OSC 133 agreement always ship together.
+The script is written from a copy compiled into the binary, so the two halves of the OSC 133
+agreement always ship together. Folio uses `%APPDATA%\Folio\shell-integration\` on Windows,
+`~/Library/Application Support/Folio/shell-integration/` on macOS, and
+`$XDG_DATA_HOME/Folio/shell-integration/` on Linux (defaulting to
+`~/.local/share/Folio/shell-integration/`).
 
 **What `--init-file` costs, and how it is paid back.** It replaces `~/.bashrc`, and because bash
 consults it only for a shell that is *not* a login shell, Folio also drops the `--login`
@@ -425,7 +452,7 @@ order for a login shell: `/etc/profile`, then the first of `~/.bash_profile`, `~
 `~/.bashrc` and nothing else. Which is which is a fact about the profile's own arguments, and only
 the Windows side can read them. This is not cosmetic on Git for Windows:
 `/etc/profile` is what puts `/mingw64/bin` on the path, so a shell that skipped it is a Git Bash
-that cannot find git. The chain is a pinned test (`crates/bt-term/tests/shell_integration_bash.rs`),
+that cannot find git. The chain is a pinned test (`crates/bt-pty/tests/shell_integration_bash.rs`),
 and `PATH`, `MSYSTEM` and `command -v git` were verified byte-identical to a plain `--login` shell.
 
 Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced — as a
@@ -491,11 +518,14 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **Windows PowerShell** (5.1, script installed) | yes | yes | yes | yes | yes | `Windows PowerShell` | script | PSReadLine |
 | **either PowerShell** (script not installed or argv declined, profile fallback off) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
+| **Bash on Linux** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
+| **zsh on Linux** | yes | yes | yes | yes | yes | none, deliberately | yes | zsh's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
 | **WSL** (zsh login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | zsh's own |
 | **zsh** (on Windows, MSYS2 or similar) | yes | yes | yes | yes | yes | none, deliberately | yes | zsh's own |
 | **WSL** (fish or another login shell) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
 | **`sh` or `dash`** | no | no | no | no | no | — | yes | that shell's own |
+| **fish on Linux** | no | no | no | no | no | — | yes | fish's own |
 | **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
 
@@ -561,7 +591,7 @@ markers that build the region (`B`, `C`) and by no others, so a screen carrying 
 keeps the heuristic it always had. The old measurement named this as its own exit — "if that test
 ever goes red the reason has expired" — and the new one is
 `a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic`, beside a round trip through a
-real `cmd.exe` in `crates/bt-term/tests/shell_integration_cmd.rs`.
+real `cmd.exe` in `crates/bt-pty/tests/shell_integration_cmd.rs`.
 
 What it buys is the capability this profile's reader has no other way to get. Every other profile
 can be handed a script; `cmd` cannot, and until now its command rail was empty however many commands

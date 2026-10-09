@@ -93,7 +93,17 @@ impl HandoffLane {
         Self::start(
             |ctx| {
                 let shell = bt_platform::ShellThread::enter(ctx);
-                move |window: NativeWindow, handoff: &Handoff| shell.hand_over(window, handoff)
+                move |worker: &WorkerCtx, window: NativeWindow, handoff: &Handoff| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        shell.hand_over_on_worker(worker, window, handoff)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let _ = worker;
+                        shell.hand_over(window, handoff)
+                    }
+                }
             },
             wake,
         )
@@ -104,7 +114,7 @@ impl HandoffLane {
     fn start<M, E, W>(make_executor: M, wake: W) -> Result<Self>
     where
         M: FnOnce(&WorkerCtx) -> E + Send + 'static,
-        E: FnMut(NativeWindow, &Handoff) -> Result<(), String>,
+        E: FnMut(&WorkerCtx, NativeWindow, &Handoff) -> Result<(), String>,
         W: Fn() + Clone + Send + 'static,
     {
         let (request_tx, request_rx) = mpsc::sync_channel::<Request>(CAPACITY);
@@ -182,7 +192,7 @@ fn run_handoff_lane(
     worker: &WorkerCtx,
     requests: mpsc::Receiver<Request>,
     answers: mpsc::Sender<Completion>,
-    mut execute: impl FnMut(NativeWindow, &Handoff) -> Result<(), String>,
+    mut execute: impl FnMut(&WorkerCtx, NativeWindow, &Handoff) -> Result<(), String>,
     wake: impl Fn(),
 ) {
     let _ = worker;
@@ -192,7 +202,7 @@ fn run_handoff_lane(
         handoff,
     }) = requests.recv()
     {
-        let outcome = execute(window, &handoff);
+        let outcome = execute(worker, window, &handoff);
         if answers.send(Completion { id, outcome }).is_err() {
             return;
         }
@@ -255,7 +265,7 @@ pub(crate) enum OnAccepted {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OnRefused {
     /// The hover line under the address a `Ctrl`+click was on.
-    HyperlinkBlocked(bt_viewport::HyperlinkHit),
+    HyperlinkRefused(bt_viewport::HyperlinkHit),
     /// The settings dialog's card under `Install fonts…`, holding the door's words.
     FontsToast,
     /// The notice a refused address raises on the preview surface a link was pressed on — a
@@ -302,22 +312,26 @@ impl Refusal {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     use super::*;
 
     /// A lane whose executor writes down what it was handed and answers `answer`, so the lane's
-    /// own queue, thread and wake are the real ones and only the door is a stand-in.
+    /// own queue, thread and wake are the real ones and only the door is a stand-in; its wakes
+    /// come back on a channel.
     fn recording_lane(
         answer: impl Fn(&Handoff) -> Result<(), String> + Send + 'static,
         delay: impl Fn(usize) -> Duration + Send + 'static,
-    ) -> (HandoffLane, Arc<Mutex<Vec<Handoff>>>) {
+    ) -> (HandoffLane, Arc<Mutex<Vec<Handoff>>>, mpsc::Receiver<()>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
+        let (wake, wakes) = crate::lane::wake_channel();
         let lane = HandoffLane::start(
             move |_ctx| {
-                move |_window: NativeWindow, handoff: &Handoff| {
+                move |_worker: &bt_platform::admission::WorkerCtx,
+                      _window: NativeWindow,
+                      handoff: &Handoff| {
                     let count = {
                         let mut log = log.lock().expect("the log");
                         log.push(handoff.clone());
@@ -327,20 +341,23 @@ mod tests {
                     answer(handoff)
                 }
             },
-            || {},
+            wake,
         )
         .expect("the lane starts");
-        (lane, seen)
+        (lane, seen, wakes)
     }
 
-    /// Every answer to `count` requests, waited for with a deadline rather than forever.
-    fn answers(lane: &mut HandoffLane, count: usize) -> Vec<Completion> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut all = Vec::new();
+    /// Every answer to `count` requests, each awaited on the lane's own wake — which follows its
+    /// answer's publication — within the lane suite's patience.
+    fn answers(
+        lane: &mut HandoffLane,
+        wakes: &mpsc::Receiver<()>,
+        count: usize,
+    ) -> Vec<Completion> {
+        let mut all = lane.answers();
         while all.len() < count {
+            crate::lane::wait_for_a_wake(wakes, &format!("answer {} of {count}", all.len() + 1));
             all.extend(lane.answers());
-            assert!(Instant::now() < deadline, "the lane answered {all:?}");
-            std::thread::sleep(Duration::from_millis(2));
         }
         all
     }
@@ -360,7 +377,7 @@ mod tests {
     /// `execute`), and the answers arrive shortest-first.
     #[test]
     fn handoffs_complete_in_press_order() {
-        let (mut lane, seen) = recording_lane(
+        let (mut lane, seen, wakes) = recording_lane(
             |_| Ok(()),
             |count| Duration::from_millis(if count == 1 { 60 } else { 1 }),
         );
@@ -371,7 +388,7 @@ mod tests {
             .iter()
             .map(|request| lane.submit(window(), request.clone()))
             .collect();
-        let answered: Vec<HandoffId> = answers(&mut lane, ids.len())
+        let answered: Vec<HandoffId> = answers(&mut lane, &wakes, ids.len())
             .into_iter()
             .map(|completion| completion.id)
             .collect();
@@ -396,7 +413,7 @@ mod tests {
     /// window's answer.
     #[test]
     fn a_completion_for_a_closed_window_is_dropped() {
-        let (mut lane, _) = recording_lane(|_| Ok(()), |_| Duration::ZERO);
+        let (mut lane, _, wakes) = recording_lane(|_| Ok(()), |_| Duration::ZERO);
         let mut first: Pending<&str> = Pending::default();
         let mut second: Pending<&str> = Pending::default();
         let asked = lane.submit(window(), Handoff::FontsPage);
@@ -407,7 +424,7 @@ mod tests {
         drop(first);
         let mut third: Pending<&str> = Pending::default();
 
-        let all = answers(&mut lane, 2);
+        let all = answers(&mut lane, &wakes, 2);
         let theirs = all
             .iter()
             .find(|completion| completion.id == asked)
@@ -438,7 +455,7 @@ mod tests {
         let gate = Arc::new(Mutex::new(()));
         let held = gate.lock().expect("the gate");
         let inside = Arc::clone(&gate);
-        let (mut lane, _) = recording_lane(
+        let (mut lane, _, _) = recording_lane(
             move |_| {
                 drop(inside.lock().expect("the gate"));
                 Ok(())
@@ -489,18 +506,21 @@ mod tests {
     /// `contains(PROGRAM_REFUSED)` test, and the words differ.
     #[test]
     fn a_refused_handoff_raises_the_same_words_it_did_before() {
-        let scratch =
-            std::env::temp_dir().join(format!("folio-handoff-refusal-{}", std::process::id()));
+        let scratch = bt_testpath::temp_path("folio-handoff-refusal");
         let program = scratch.join(match bt_platform::host_platform() {
             bt_platform::HostPlatform::MacOs => "Payload.app",
             _ => "payload.exe",
         });
         std::fs::create_dir_all(&program).expect("a scratch program");
         let missing = scratch.join("gone.md");
-        let facts = crate::verified_target_of(Some(&bt_term::verify_path(&program)));
+        let facts = crate::verified_target_of(Some(&bt_term::verify_path(
+            &program,
+            &bt_platform::resolved_for_a_door,
+        )));
         assert!(facts.exists, "the verifier saw the fixture");
 
-        let mut lane = HandoffLane::spawn(|| {}).expect("the lane starts");
+        let (wake, wakes) = crate::lane::wake_channel();
+        let mut lane = HandoffLane::spawn(wake).expect("the lane starts");
         let requests = [
             Handoff::OpenVerified(program.clone(), facts.clone()),
             Handoff::OpenVerified(missing.clone(), bt_platform::VerifiedTarget::absent()),
@@ -508,7 +528,7 @@ mod tests {
         for request in &requests {
             lane.submit(window(), request.clone());
         }
-        let answered = answers(&mut lane, requests.len());
+        let answered = answers(&mut lane, &wakes, requests.len());
 
         // The old surface: `Runtime::open_local_path_verified` as it stood on the window thread.
         let refusal = Refusal {
@@ -536,7 +556,16 @@ mod tests {
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
                 let shell = bt_platform::ShellThread::enter(ctx);
-                requests.map(|request| shell.hand_over(window(), &request))
+                requests.map(|request| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        shell.hand_over_on_worker(ctx, window(), &request)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        shell.hand_over(window(), &request)
+                    }
+                })
             },
         )
         .expect("the door starts a thread")
@@ -671,7 +700,9 @@ pub(crate) mod contract_adapter {
         let wake = Arc::clone(&probe);
         let lane = HandoffLane::start(
             move |_ctx| {
-                move |_window: NativeWindow, handoff: &Handoff| {
+                move |_worker: &bt_platform::admission::WorkerCtx,
+                      _window: NativeWindow,
+                      handoff: &Handoff| {
                     door.pass(question_of(handoff));
                     Ok(())
                 }

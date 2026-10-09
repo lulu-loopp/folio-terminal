@@ -73,7 +73,7 @@ use bt_platform::video::first_frame;
 /// Whether this machine has a playback engine at all. A third platform refuses
 /// everything here, and that is the assertion rather than a skip — a build whose
 /// refusal quietly became a panic is the failure this catches.
-const HAS_ENGINE: bool = cfg!(any(windows, target_os = "macos"));
+const HAS_ENGINE: bool = cfg!(any(windows, target_os = "macos", target_os = "linux"));
 
 /// Both fixtures are this, and it is the pair a layout is solved from.
 const NATIVE: (u32, u32) = (160, 120);
@@ -132,6 +132,12 @@ fn fixture(name: &str) -> PathBuf {
 /// An engine on `name`, opened, muted and waited for. `None` on a platform that
 /// has no decoder, which is the one place in this file that branches.
 fn ready_engine(name: &str) -> Option<Engine> {
+    // Linux exercises the same actor with a fakesink in linux_player.rs tests so
+    // this cross-platform suite never opens the desktop's audio device.
+    if cfg!(target_os = "linux") {
+        let _ = name;
+        return None;
+    }
     let engine = match Engine::open(&fixture(name)) {
         Ok(engine) => engine,
         Err(error) => {
@@ -602,10 +608,7 @@ fn a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play() {
 ///
 /// MUTATION: let a track-less asset through and the error assertion names it.
 fn nothing_that_is_not_a_video_plays() {
-    let dir = std::env::temp_dir().join(format!(
-        "folio-video-playback-refusals-{}",
-        std::process::id()
-    ));
+    let dir = bt_testpath::temp_path("folio-video-playback-refusals");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let text = dir.join("renamed.mp4");
     std::fs::write(&text, b"this is not a video at all, whatever it is called")

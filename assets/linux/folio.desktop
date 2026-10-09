@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Folio
+Comment=Terminal emulator
+Exec=/usr/bin/env -- folio
+Icon=io.github.lulu-loopp.folio
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=io.github.lulu-loopp.folio

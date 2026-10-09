@@ -2235,13 +2235,16 @@ mod tests {
     #[test]
     fn the_foot_shows_the_files_folder() {
         use bt_platform::HostPlatform::{MacOs, Windows};
+        // A folder outside the home is the parent, whole — asked of this machine,
+        // because the parent is read off the path the way this machine reads one.
+        let host_path = crate::test_support::host_path;
         assert_eq!(
             peek_foot_address(
-                Some(std::path::Path::new(r"C:\work\notes\plan.md")),
-                Windows,
-                Some(std::path::Path::new(r"C:\Users\someone")),
+                Some(&host_path(r"C:\work\notes\plan.md")),
+                bt_platform::host_platform(),
+                Some(&host_path(r"C:\Users\someone")),
             ),
-            FOLDER,
+            host_path(FOLDER).display().to_string(),
         );
         assert_eq!(
             peek_foot_address(

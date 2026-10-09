@@ -9,8 +9,9 @@ use crate::{
     ScaleWorkerRequest, ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose, file_peek,
     file_peek_promotion, files, float, git, git_document_question, git_panel, hang_watch, i18n,
     input, mark_opacity, marks, peek_body_kind, peek_cache_key_for_decode, peek_foot_press,
-    peek_page_texture_key, peek_scale_task, peek_strip, preview, preview_body_bar, profiles,
-    ring_arc, risen_frame, scroll_bar_layer, seats, session_is_breathing, tooltip, wait_pulse,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip, preview,
+    preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
+    session_is_breathing, tooltip, wait_pulse,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -260,8 +261,7 @@ impl Runtime<'_> {
                     // This leaf's own shell, off the session that is running in
                     // it — the same map every other per-seat fact in this frame
                     // comes from.
-                    profile_mark: session
-                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
+                    profile_mark: session.map(|leaf| profiles::identity_mark(&leaf.profile)),
                     // The short name, and C28's own two lengths are why. A pane
                     // head has a whole bar and answers "where is this" with the
                     // place entire; this popup is a 210px thumbnail whose names
@@ -2643,7 +2643,7 @@ impl Runtime<'_> {
 
     pub(in crate::runtime) fn activate_peek_if_due(&mut self, now: Instant) -> Result<()> {
         if let Some(candidate) = self.window.peek_hover.activate_if_due(now) {
-            self.show_or_request_peek(&candidate)?;
+            self.show_or_request_peek(&candidate, true)?;
         }
         Ok(())
     }
@@ -2652,9 +2652,14 @@ impl Runtime<'_> {
     /// into the box this viewport will draw it in if that raster is not the one already held, and
     /// present when display-sized pixels are in hand. Each miss is one worker round trip and the
     /// completion re-enters here, so the event thread neither decodes nor resamples.
+    ///
+    /// `settled` is true when a hover has just settled on the subject — a new peek — and false
+    /// on the re-entries of one peek as its decode and its resample land: a `Failed` entry for a
+    /// named file is read again only on a new peek ([`crate::peek_reads_the_file`]).
     pub(in crate::runtime) fn show_or_request_peek(
         &mut self,
         candidate: &PeekCandidate,
+        settled: bool,
     ) -> Result<()> {
         let cache_key = candidate.subject.key.clone();
         let (content_key, native_rgba, native_width_px, native_height_px) =
@@ -2666,13 +2671,14 @@ impl Runtime<'_> {
                     height_px,
                     ..
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-                // A failed decode stays silent: the terminal text is the honest surface, and the
-                // negative entry keeps hovers from re-hitting the disk.
-                Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed(_)) => return Ok(()),
-                None => {
-                    // Nothing to read: a stream payload is cached when its decode lands or never,
-                    // and the session only names one whose decode already succeeded, so a miss
-                    // here is a hover that arrived first. The next one finds it.
+                entry => {
+                    // A failed decode stays silent: the terminal text is the honest surface. A
+                    // stream payload is cached when its decode lands or never, and the session
+                    // only names one whose decode already succeeded, so a miss for one is a hover
+                    // that arrived first; the next one finds it.
+                    if !peek_reads_the_file(entry, candidate.subject.path.is_some(), settled) {
+                        return Ok(());
+                    }
                     let Some(path) = candidate.subject.path.clone() else {
                         return Ok(());
                     };
@@ -2876,7 +2882,7 @@ impl Runtime<'_> {
         }
         self.window.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
         if let Some(active) = self.window.peek_hover.active.clone() {
-            self.show_or_request_peek(&active)?;
+            self.show_or_request_peek(&active, false)?;
         }
         Ok(())
     }

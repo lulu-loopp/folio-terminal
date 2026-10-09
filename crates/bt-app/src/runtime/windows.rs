@@ -4,20 +4,21 @@
 use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
-    PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RevealTween, Runtime, TabSeed,
-    TabState, WindowPosture, WindowRuntime, broker_verdict, create_tab_state, dpi_snapshot,
-    dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
-    first_term_leaf, float, focus_leaf_index, git, hang_watch, i18n, ime_outbound, ime_report,
-    install_page_ground_color, install_theme_class_background, let_the_system_translate_touch,
-    marks, mouse_trace, native_window, new_window_runtime, opening_window_attributes,
-    persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
-    preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
-    render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
-    revive_plan, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
-    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
-    tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
+    PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RestoredPlacement, RevealTween,
+    Runtime, TabSeed, TabState, WindowPosture, WindowRuntime, broker_verdict, create_tab_state,
+    dpi_snapshot, dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale,
+    ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
+    i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
+    let_the_system_translate_touch, marks, mouse_trace, native_window, new_window_runtime,
+    opening_window_attributes, persisted_preview_pages, persisted_window_bounds, plan_launch,
+    presentation_physical_size, preview, preview_source_of_recent, profiles, quit, rail_state_for,
+    recorded_window_placement, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
+    restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
+    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
+    startup_window_rect, tear_out_rect, toast, unsaved_line, window_minimum_changed,
+    window_surface_target,
 };
-use crate::{LeafView, TextScale, owner_door};
+use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{SeatId, SizePolicy, WorkAreaHint};
@@ -25,7 +26,7 @@ use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -34,12 +35,104 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 impl Runtime<'_> {
+    pub(crate) fn client_size(&self) -> winit::dpi::PhysicalSize<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.last_winit_size.unwrap_or_else(|| {
+                presentation_physical_size(self.window.renderer.presentation_geometry())
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.window.window.inner_size()
+    }
+
     pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
         crate::take_owned_keyboard_focus(&self.window.window)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn restore_minimized_window(&self) -> Result<()> {
+        crate::restore_minimized_window(&self.window.window)
+    }
+    pub(crate) fn window_minimized_state(&self) -> Option<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => self.window.native_window_minimized,
+                Ok(bt_platform::linux_window::Backend::Wayland) => {
+                    self.window.window.is_minimized()
+                }
+                Err(_) => None,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            native_window(&self.window.window)
+                .ok()
+                .map(bt_platform::is_window_minimized)
+        }
+    }
+
+    pub(crate) fn window_maximized_state(&self) -> Option<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => {
+                    self.window.maximize_intent.posture_state()
+                }
+                Ok(bt_platform::linux_window::Backend::Wayland) => {
+                    Some(self.window.window.is_maximized())
+                }
+                Err(_) => None,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(self.window.window.is_maximized())
+        }
+    }
+
+    pub(crate) fn toggle_window_maximized(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_window_backend(&self.window.window) {
+                Ok(bt_platform::linux_window::Backend::X11) => {
+                    match self.window.maximize_intent.toggle() {
+                        crate::WindowMaximizeAction::Request(target) => {
+                            self.request_linux_window_maximized(target);
+                        }
+                        crate::WindowMaximizeAction::WaitForObservation => {
+                            if self.window.pending_window_rect.is_none() {
+                                self.queue_linux_window_rect_snapshot();
+                            }
+                        }
+                    }
+                }
+                Ok(bt_platform::linux_window::Backend::Wayland) => self
+                    .window
+                    .window
+                    .set_maximized(!self.window.window.is_maximized()),
+                Err(_) => {}
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.window
+            .window
+            .set_maximized(!self.window.window.is_maximized());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_linux_window_maximized(&mut self, target: bool) {
+        self.window.window.set_maximized(target);
+        if self.window.pending_window_rect.is_some() {
+            self.window.window_rect_refresh_owed = true;
+        } else {
+            self.queue_linux_window_rect_snapshot();
+        }
+    }
+
     pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
-        crate::request_owned_window_close(&self.window.window)
+        crate::request_owned_window_close(&self.window.window, &self.app.event_proxy)
     }
 
     /// **Open a second window on this application** (multiwindow slice C).
@@ -74,13 +167,14 @@ impl Runtime<'_> {
         app: &mut App,
         plan: &NewWindowPlan,
         like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+        _resolved_restore_placement: Option<Option<RestoredPlacement>>,
     ) -> Result<(WindowId, WindowRuntime)> {
-        let default_profile = profiles::default_profile(
+        // The default as a seed spells it — the decided row's id, or the unresolved default while
+        // the program walk has not answered the rows it reads (see `Runtime::default_profile_id`).
+        let default_profile_id = profiles::default_profile_identity(
             &app.settings_store.loaded().default_profile,
             &app.profile_programs,
         );
-        // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::id(default_profile);
         // **Where this window opens** (multiwindow slice D). The saved rectangle
         // when the file asked for the window, and the product's own size when a
         // verb did: a second window opened exactly on top of the first is a
@@ -88,18 +182,28 @@ impl Runtime<'_> {
         // question this slice answers. The judgment is `restore_window_placement`'s
         // in both cases, so a saved rectangle no monitor can see forfeits its
         // corner here exactly as the first window's does.
+        #[cfg(target_os = "linux")]
+        let placement = _resolved_restore_placement.unwrap_or_else(|| {
+            plan.like
+                .is_none()
+                .then_some(plan.saved.as_deref())
+                .flatten()
+                .and_then(|saved| restore_window_placement(event_loop, saved))
+        });
+        #[cfg(not(target_os = "linux"))]
         let placement = plan
             .like
             .is_none()
             .then_some(plan.saved.as_deref())
             .flatten()
             .and_then(|saved| restore_window_placement(event_loop, saved));
+        let requested_size = placement.map_or(
+            LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+            |placement| placement.size,
+        );
         let attributes = opening_window_attributes(
-            profiles::title(default_profile),
-            placement.map_or(
-                LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
-                |placement| placement.size,
-            ),
+            profiles::identity_title(&default_profile_id),
+            requested_size,
         );
         let attributes = match placement.and_then(|placement| placement.position) {
             Some(position) => attributes.with_position(position),
@@ -131,6 +235,17 @@ impl Runtime<'_> {
         // window that opened before or after it was changed is still a window of
         // this program.
         set_option_as_alt(&window, app.settings_store.loaded().option_sends_alt);
+        #[cfg(target_os = "linux")]
+        let restored_quake_as_ordinary = plan.quake
+            && crate::linux_window_backend(&window)? == bt_platform::linux_window::Backend::Wayland;
+        #[cfg(not(target_os = "linux"))]
+        let restored_quake_as_ordinary = false;
+        let is_quake = plan.quake && !restored_quake_as_ordinary;
+        if restored_quake_as_ordinary {
+            crate::diagnostics::note(
+                "native Wayland cannot restore or summon the saved quake window; opened its saved tabs as an ordinary visible window",
+            );
+        }
         let native = native_window(&window)?;
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
@@ -186,7 +301,8 @@ impl Runtime<'_> {
         // this line opens one frame margin larger every time. Slice A1 left a
         // note at the first window's copy because there was nowhere else to put
         // the line; this is that somewhere.
-        let opened_at = dpi_snapshot(&window)?;
+        let opened_at = dpi_snapshot(&window, None)?;
+        let has_saved_position = placement.is_some();
         // **F5, and it is the *opening* rectangle rather than a move afterwards**
         // (user report 2026-08-27). This used to be stated in `settle_tear_out`,
         // after the window had been dressed, shown and presented **twice** — so
@@ -217,17 +333,19 @@ impl Runtime<'_> {
         let standing = plan
             .receives
             .as_ref()
-            .and_then(|errand| errand.at)
-            .map(|(pointer, grip)| {
-                let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
-                let work = bt_platform::work_area_at(pointer.0, pointer.1)
-                    .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
+            .and_then(|errand| {
+                #[cfg(target_os = "linux")]
+                let ((pointer, grip), (work, dpi)) = errand.at.zip(errand.screen)?;
+                #[cfg(not(target_os = "linux"))]
+                let (pointer, grip) = errand.at?;
+                #[cfg(not(target_os = "linux"))]
+                let (work, dpi) = {
+                    let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
+                    let work = bt_platform::work_area_at(pointer.0, pointer.1)
+                        .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
+                    (work, dpi)
+                };
                 let rect = tear_out_rect(pointer, grip, dpi, work);
-                // One line, on the same terms as `BT_DPI`'s: a tear-out's
-                // rectangle is a function of four things read off the machine,
-                // and a photograph of a window in the wrong place cannot say
-                // which of them was wrong. Printed only when a window is actually
-                // being placed, which is once per tear-out.
                 eprintln!(
                     "BT_TEAR_OUT pointer={},{} grab={:?} size={:?} dpi={dpi} work={},{} {}x{} rect={},{} {}x{}",
                     pointer.0,
@@ -243,16 +361,22 @@ impl Runtime<'_> {
                     rect.right - rect.left,
                     rect.bottom - rect.top,
                 );
-                rect
+                Some(rect)
             });
         // Kept, because this rectangle is also the one this window goes into the vault holding —
         // see the `record_window` below.
         let stood_at = standing.unwrap_or_else(|| {
             startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale)
         });
-        stand_the_window_at(native, stood_at, "state the new window's outer rectangle");
-        let physical = window.inner_size();
-        let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
+        let initial_rect = standing.or_else(|| has_saved_position.then_some(stood_at));
+        stand_the_window_at(
+            &window,
+            native,
+            stood_at,
+            "state the new window's outer rectangle",
+        );
+        let physical = crate::opening_client_allocation(&window, requested_size, initial_rect);
+        let scale_factor = dpi_snapshot(&window, initial_rect)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's
         // shape, once per window, because a `Compositor` is parameterised by the
         // HWND it composes above. An owner-thread door (`doors::CompositorBirth`): a refusal is
@@ -406,6 +530,7 @@ impl Runtime<'_> {
                 seed,
                 &app.profile_programs,
                 &default_profile_id,
+                &app.settings_store.loaded().default_profile,
                 // The opening rectangle is this program's, exactly as the first
                 // window's is: nobody has taken hold of a frame that has not been
                 // shown yet.
@@ -446,14 +571,10 @@ impl Runtime<'_> {
         let maximized = placement.is_some_and(|placement| placement.maximized);
         let id = window.id();
         // **Before the window is dressed, because dressing reads it** (§7.54).
-        //
-        // The summoned window's posture is not the `Always on top` row's — it is
-        // above every other window because that is what it is for — and
-        // `dress_new_window` two dozen lines below is where that is said to DWM.
-        // One source of truth for "which window is the summoned one", here, so
-        // that the door, the snapshot, the blur and the row all ask the same
-        // field rather than four copies of a flag.
-        if plan.quake {
+        // `is_quake` was decided from this window's actual native backend: a
+        // saved Wayland summon stays an ordinary visible window because the
+        // compositor cannot provide the restore/focus lifecycle.
+        if is_quake {
             app.quake.adopt(id);
         }
         // **This window's own rectangle is in the vault before anything can ask it for one.**
@@ -475,11 +596,18 @@ impl Runtime<'_> {
         // The tabs are filled in a few lines below, by `mark_session_dirty` on a runtime that has
         // them; an entry with none is momentary and, were a write to catch it, `plan_windows`
         // drops a window with no tabs on the way back in.
+        #[cfg(target_os = "linux")]
+        let opening_bounds = initial_rect
+            .map(|rect| persisted_window_bounds(rect, scale_factor))
+            .or_else(|| plan.saved.as_ref().map(|saved| saved.placement.bounds))
+            .unwrap_or_else(|| WindowStateV1::default().bounds);
+        #[cfg(not(target_os = "linux"))]
+        let opening_bounds = persisted_window_bounds(stood_at, scale_factor);
         app.record_window(
             id,
             SessionWindowV1 {
                 placement: WindowStateV1 {
-                    bounds: persisted_window_bounds(stood_at, scale_factor),
+                    bounds: opening_bounds,
                     dpi: renderer.dpi_milli().get(),
                     maximized,
                     monitor_id: None,
@@ -524,6 +652,7 @@ impl Runtime<'_> {
             // same plan the launch does.
             placeholder_tab,
         });
+        window.restored_quake_as_ordinary = restored_quake_as_ordinary;
         window.focus_mode = app.settings_store.loaded().focus_mode;
         window.focus_reveal =
             RevealTween::resting(f32::from(u8::from(window.focus_mode)), RAIL_TRANSITION);
@@ -554,12 +683,12 @@ impl Runtime<'_> {
         // which is exactly the state `with_visible(false)` opened it in, and a
         // transfer that is *refused* closes it without it ever having been on the
         // glass.
-        // **And a window a key summons is not shown by its door either** (§7.54),
-        // for the receiving door's reason one step further out: this window is
-        // *born hidden* and stays that way until the press that asked for it is
-        // acted on — which on a restore is a press that may never come. See
-        // `FolioApp::settle_quake`.
-        if plan.receives.is_none() && !plan.quake {
+        // **And an X11 window a key summons is not shown by its door either**
+        // (§7.54): it is born hidden and stays that way until the key press. A
+        // saved Wayland summon has `is_quake == false` above, so its saved tabs
+        // are shown as ordinary UI instead of becoming an un-restorable hidden
+        // window. See `FolioApp::settle_quake`.
+        if plan.receives.is_none() && !is_quake {
             // Maximized only if the file said this window was: a window a verb
             // asked for is one nobody has told to be.
             runtime.show_new_window(maximized)?;
@@ -711,6 +840,19 @@ impl Runtime<'_> {
         // normal rectangle set above survives as the placement Windows restores
         // the window to when the user unmaximizes it.
         if maximized {
+            #[cfg(target_os = "linux")]
+            {
+                match crate::linux_window_backend(&self.window.window) {
+                    Ok(bt_platform::linux_window::Backend::X11) => {
+                        self.window.maximize_intent.request_initial(true);
+                        self.request_linux_window_maximized(true);
+                    }
+                    Ok(bt_platform::linux_window::Backend::Wayland) | Err(_) => {
+                        self.window.window.set_maximized(true);
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
             self.window.window.set_maximized(true);
         }
         // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
@@ -723,6 +865,8 @@ impl Runtime<'_> {
             .ime_report
             .trace_order(self.window.window.id(), "shown");
         self.window.window_shown = true;
+        #[cfg(target_os = "linux")]
+        self.queue_linux_window_rect_snapshot();
         // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
         // Query Win32 directly: winit's cached scale can race during initial monitor placement.
         self.reconcile_authoritative_dpi("show")?;
@@ -787,25 +931,22 @@ impl Runtime<'_> {
                 // read for a Recent row: the shell you are asking back is the
                 // shell you had, and "whatever the default is today" is a
                 // different tab wearing this one's folder.
+                // The saved id, or the fallback's when this build has no such row —
+                // `revive_plan`'s own reading, for the same reason.
+                let (profile, unknown_profile_id) = revived_profile(&profile_id);
                 let leaves = BTreeMap::from([(
                     seats.identity(),
                     LeafSeed {
-                        // The saved id, or the fallback's when this build has no
-                        // such row — `revive_plan`'s own line, for the same reason.
-                        profile: if profiles::has_id(&profile_id) {
-                            profile_id.clone()
-                        } else {
-                            profiles::fallback_profile_id().to_owned()
-                        },
-                        cwd: profiles::revived_cwd(
-                            profiles::index_of_id(&profile_id),
-                            Path::new(&cwd),
-                        )
-                        .map(profiles::SeedPlace::Carried),
-                        unknown_profile_id: (!profiles::has_id(&profile_id))
-                            .then(|| profile_id.clone()),
+                        profile,
+                        // Whether the folder still stands is asked by the pane's birth
+                        // (`profiles::BirthPlace`), never this thread.
+                        cwd: Some(cwd)
+                            .filter(|cwd| !cwd.is_empty())
+                            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
+                        unknown_profile_id,
                         card_skip: 0,
                         prefill: None,
+                        carried_environment: None,
                     },
                 )]);
                 (seats, manual_name, leaves, BTreeMap::new())
@@ -928,9 +1069,12 @@ impl Runtime<'_> {
                 // asked for it now, which is not the same as promising to bring
                 // it back every time.
                 pinned: false,
+                // A new tab owns no launch's environment.
+                carried_environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),
+            &self.app.settings_store.loaded().default_profile,
             self.window.size_policy,
             // The posture, for [`Self::resolve_seat_layout`]'s reason.
             self.rail_posture(),
@@ -1011,6 +1155,7 @@ impl Runtime<'_> {
                 seed,
                 &self.app.profile_programs,
                 &self.default_profile_id(),
+                &self.app.settings_store.loaded().default_profile,
                 self.window.size_policy,
                 // The posture, for [`Self::resolve_seat_layout`]'s reason.
                 self.rail_posture(),
@@ -1119,16 +1264,69 @@ impl Runtime<'_> {
     /// succeeded is a different state with a different answer — no minimum at
     /// all, rather than a guess that could lock the user's window.
     pub(in crate::runtime) fn refresh_work_area(&mut self) {
-        let Ok(native) = native_window(&self.window.window) else {
-            return;
+        #[cfg(target_os = "linux")]
+        {
+            if self.window.pending_work_area.is_some() {
+                self.window.work_area_refresh_owed = true;
+                return;
+            }
+            let Ok(native) = native_window(&self.window.window) else {
+                return;
+            };
+            let generation = self.app.next_display_generation();
+            if let Ok(request) = bt_platform::linux_display::request_display(
+                u64::from(self.window.window.id()),
+                generation,
+                bt_platform::linux_display::LinuxDisplayQuery::WindowWorkArea { window: native },
+            ) {
+                self.window.pending_work_area = Some(request);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Ok(native) = native_window(&self.window.window) else {
+                return;
+            };
+            let Ok(rect) = bt_platform::get_work_area(native) else {
+                return;
+            };
+            let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
+            let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
+            let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
+            self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_linux_work_area_ready(
+        &mut self,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<bool> {
+        let matches = self
+            .window
+            .pending_work_area
+            .as_ref()
+            .is_some_and(|request| request.ready() == ready);
+        if !matches {
+            return Ok(false);
+        }
+        let Some(request) = self.window.pending_work_area.take() else {
+            return Ok(false);
         };
-        let Ok(rect) = bt_platform::get_work_area(native) else {
-            return;
-        };
-        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
-        let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
-        self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+        if std::mem::take(&mut self.window.work_area_refresh_owed) {
+            self.refresh_work_area();
+            return Ok(true);
+        }
+        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowWorkArea(Ok(rect))) =
+            request.try_take()
+        {
+            let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
+            let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
+            let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
+            self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+            self.apply_window_min_inner_size()?;
+        }
+        Ok(true)
     }
 
     /// Hand the OS the technical floor — one pane, whatever the tabs contain.
@@ -1176,23 +1374,104 @@ impl Runtime<'_> {
     /// rectangle, the rail's resting shape, the tabs and which one was on top.
     /// The theme, the cursor and the vault are the *process's* and are written by
     /// [`App::session_document`], once, over every window's answer to this.
-    pub(crate) fn window_snapshot(&self) -> SessionWindowV1 {
+    pub(crate) fn window_snapshot(&mut self) -> SessionWindowV1 {
+        #[cfg(target_os = "linux")]
+        {
+            self.queue_linux_window_rect_snapshot();
+            self.window_snapshot_with_rect(|| self.window.last_winit_rect)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.window_snapshot_with_rect(|| {
+                let native = native_window(&self.window.window).ok()?;
+                bt_platform::get_window_rect(native).ok()
+            })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn queue_linux_window_rect_snapshot(&mut self) {
+        if bt_platform::linux_display::active_backend()
+            != Some(bt_platform::linux_window::Backend::X11)
+            || self.window.leaving.is_some()
+        {
+            return;
+        }
+        if self.window.pending_window_rect.is_some() {
+            self.window.window_rect_refresh_owed = true;
+            return;
+        }
+        let Ok(native) = native_window(&self.window.window) else {
+            return;
+        };
+        let generation = self.app.next_display_generation();
+        if let Ok(request) = bt_platform::linux_display::request_display(
+            u64::from(self.window.window.id()),
+            generation,
+            bt_platform::linux_display::LinuxDisplayQuery::WindowRect { window: native },
+        ) {
+            self.window.pending_window_rect = Some(request);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_linux_window_rect_ready(
+        &mut self,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<bool> {
+        let matches = self
+            .window
+            .pending_window_rect
+            .as_ref()
+            .is_some_and(|request| request.ready() == ready);
+        if !matches {
+            return Ok(false);
+        }
+        let Some(request) = self.window.pending_window_rect.take() else {
+            return Ok(false);
+        };
+        if self.window.leaving.is_some() {
+            return Ok(true);
+        }
+        if std::mem::take(&mut self.window.window_rect_refresh_owed) {
+            self.queue_linux_window_rect_snapshot();
+            return Ok(true);
+        }
+        if let Ok(bt_platform::linux_display::LinuxDisplayAnswer::WindowRect(Ok(facts))) =
+            request.try_take()
+        {
+            self.window.last_winit_rect = Some(facts.rect);
+            self.window.native_client_origin = facts.client_origin;
+            self.window.native_window_minimized = facts.minimized;
+            if let Some(crate::WindowMaximizeAction::Request(target)) =
+                self.window.maximize_intent.observe(facts.maximized)
+            {
+                self.request_linux_window_maximized(target);
+            }
+            let snapshot = self.window_snapshot_with_rect(|| Some(facts.rect));
+            self.app
+                .record_window(self.window.window.id(), snapshot, Instant::now());
+        }
+        Ok(true)
+    }
+    fn window_posture(&self) -> WindowPosture {
+        crate::choose_window_posture(self.window_minimized_state(), self.window_maximized_state())
+    }
+
+    fn window_snapshot_with_rect(
+        &self,
+        rect: impl FnOnce() -> Option<bt_platform::WindowRect>,
+    ) -> SessionWindowV1 {
         // **Asked once for the paragraph**, because three things below read it and
         // one of them is a per-tab decision: which caption run this window wears is
         // not the question here, but which *kind* of window this is decides its
         // `quake` flag, its arranged rectangles, and whether a pinned tab writes
         // down the line it last ran (§7.54e ④).
         let is_quake = self.is_quake_window();
+        let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let native = native_window(&self.window.window).ok();
-        let posture = if native.is_some_and(bt_platform::is_window_minimized) {
-            WindowPosture::Minimized
-        } else if self.window.window.is_maximized() {
-            WindowPosture::Maximized
-        } else {
-            WindowPosture::Normal
-        };
+        let posture = self.window_posture();
         // The window's *outer* rect, which the self-drawn frame has made the same
         // rectangle as its client area — the one thing `startup_window_rect` can
         // hand back to Win32 without anything in between adjusting it.
@@ -1200,9 +1479,9 @@ impl Runtime<'_> {
         // Measured only while the window is normal, because that is the only
         // posture whose rectangle is the user's; `recorded_window_placement`
         // states what the other two record instead.
-        let measured = native
-            .filter(|_| posture == WindowPosture::Normal)
-            .and_then(|native| bt_platform::get_window_rect(native).ok())
+        let measured = (posture == WindowPosture::Normal)
+            .then(rect)
+            .flatten()
             .map(|rect| persisted_window_bounds(rect, scale));
         // What this window last said about itself, which is what the two
         // postures that have no rectangle of their own fall back to. A window
@@ -1230,7 +1509,7 @@ impl Runtime<'_> {
                 // document that collected the last line every pane in every window
                 // ran would be keeping a command history nobody asked it to keep.
                 root: tab.seats.to_persisted(
-                    &|seat| tab.term_leaf(seat, is_quake && tab.pinned),
+                    &|seat| tab.term_leaf(seat, persist_quake_record && tab.pinned),
                     &|seat| tab.files_state(seat),
                 ),
                 pinned: tab.pinned,
@@ -1258,12 +1537,12 @@ impl Runtime<'_> {
             // other window's and is deliberately never read back — a summon
             // computes its rectangle from the monitor the pointer is on, every
             // time. See `quake::Quake::placement`.
-            quake: is_quake,
+            quake: persist_quake_record,
             // **And the rectangles a hand made**, which are the one thing about
             // this window that *is* read back — filed under the display they
             // were made on, so that the objection above stays answered. Empty
             // for every other window, because only this one has them.
-            quake_placements: if is_quake {
+            quake_placements: if persist_quake_record {
                 self.app.quake.placements()
             } else {
                 Vec::new()
@@ -1493,31 +1772,22 @@ impl Runtime<'_> {
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
-        if answer == restore::GateAnswer::Cancel {
+        match (request, answer) {
+            // **The two exits answer all three buttons in one place**
+            // ([`Self::answer_exit`]): a window's own shut, and the run's end
+            // asked in the summoned terminal, whose confirmed answer re-runs the
+            // close of the ordinary window that ends it.
+            (restore::GateRequest::Shut, answer) => self.answer_exit(self.window_id(), answer),
+            (restore::GateRequest::ShutWithTheRun(closing), answer) => {
+                self.answer_exit(closing, answer)
+            }
             // "取消不关" — nothing happens, and nothing is lost. The one answer a
             // gate must be able to give.
-            return Ok(());
-        }
-        // **`Save all` writes first and closes only if all of it landed** (B1,
-        // user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
-        // surface down and for its reason: a shut that closed the window after a
-        // half-finished save would take the half that is still only in memory
-        // with it. The failures are already named on their own pane by
-        // `quit_save`; the window stays, so the reader can see them there.
-        //
-        // Only the shut can be answered this way (`GateRequest::offers_save`),
-        // so there is no per-request branch here — the button that would send
-        // any other request down this path is not drawn.
-        if answer == restore::GateAnswer::Save {
-            let report = self.quit_save()?;
-            if !report.is_complete() {
-                return Ok(());
-            }
-            self.window.window_close_requested = true;
-            return Ok(());
-        }
-        match request {
-            restore::GateRequest::ClosePane(seat) => {
+            (_, restore::GateAnswer::Cancel) => Ok(()),
+            // Only an exit offers `Save all` (`GateRequest::offers_save`), so from
+            // here the answer goes through with the request: the button that
+            // would send any of these down a save is not drawn.
+            (restore::GateRequest::ClosePane(seat), _) => {
                 // The pool is the tab's, so emptying it leaves *every* surface
                 // naming a buffer that is gone — the view each of them was on has
                 // to be filed and let go, not only the pane being closed.
@@ -1527,44 +1797,25 @@ impl Runtime<'_> {
                 }
                 self.close_pane(seat)
             }
-            restore::GateRequest::CloseTab(index) => {
+            (restore::GateRequest::CloseTab(index), _) => {
                 if let Some(tab) = self.window.tabs.get_mut(index) {
                     tab.preview_pool.clear();
                 }
                 self.close_tab(index)
-            }
-            restore::GateRequest::Shut => {
-                // **Only the dirty ones.** A shut is the one answer whose pool
-                // has somewhere to go afterwards: every tab is about to be
-                // written to `session.json`, and its pool goes with it as the
-                // list of files the switcher will list next launch
-                // (`TabState::preview_content`). Emptying it here would answer
-                // "discard my unsaved changes" by also throwing away a browsing
-                // history nobody was asked about — measured on the real machine,
-                // where one dirty buffer wrote `"pool": []` and a three-file
-                // history came back empty. The gate raises itself off
-                // `dirty_names`, so dropping the dirty buffers is all it takes
-                // for the re-requested shut not to ask again.
-                for tab in &mut self.window.tabs {
-                    tab.preview_pool.discard_dirty();
-                }
-                // The shut is the one verb this does not own: it is the event
-                // loop's, and it is re-requested rather than performed here so
-                // that everything else `CloseRequested` does still happens in the
-                // order it always did.
-                self.window.window_close_requested = true;
-                Ok(())
             }
             // The one request whose confirmed verb is not a re-run of something
             // that was interrupted: nothing was in flight, because the gate is in
             // front of the write rather than behind it. So this is where the
             // question is actually asked of the repository (R13's pessimism
             // starts one line later, when the row dims).
-            restore::GateRequest::GitDiscard {
-                origin,
-                path,
-                untracked,
-            } => {
+            (
+                restore::GateRequest::GitDiscard {
+                    origin,
+                    path,
+                    untracked,
+                },
+                _,
+            ) => {
                 let verb = if untracked {
                     git::GitWriteVerb::DiscardUntracked
                 } else {
@@ -1577,7 +1828,7 @@ impl Runtime<'_> {
             // and either surface on this repository can carry the write — every
             // cache on it re-reads when the receipt lands
             // ([`git::GitWriteVerb::moves_refs`]).
-            restore::GateRequest::GitDeleteBranch { root, name } => {
+            (restore::GateRequest::GitDeleteBranch { root, name }, _) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1587,7 +1838,7 @@ impl Runtime<'_> {
                     Vec::new(),
                 )
             }
-            restore::GateRequest::GitDeleteTag { root, name } => {
+            (restore::GateRequest::GitDeleteTag { root, name }, _) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1596,9 +1847,12 @@ impl Runtime<'_> {
             // **The detaching checkout**, on the two deletions' own shape: the
             // gate stands in front of the verb rather than behind it, so this is
             // where the repository is actually asked.
-            restore::GateRequest::GitCheckout {
-                root, target, kind, ..
-            } => {
+            (
+                restore::GateRequest::GitCheckout {
+                    root, target, kind, ..
+                },
+                _,
+            ) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1607,8 +1861,39 @@ impl Runtime<'_> {
             // The gate stands *in front of* this one too (`GitDiscard`'s shape),
             // so the confirmed answer is the deletion itself rather than a re-run
             // of something that was interrupted.
-            restore::GateRequest::ClearScrollback(seat) => self.clear_pane_scrollback(seat),
+            (restore::GateRequest::ClearScrollback(seat), _) => self.clear_pane_scrollback(seat),
         }
+    }
+
+    /// **Spend an answer to one of the two exits**, whose confirmed verb is the
+    /// close of `closes` — this window for its own shut, the run's last ordinary
+    /// window for the run's end asked in the summoned terminal
+    /// (T-SUMMON-DIRTY-PREVIEW).
+    ///
+    /// **`Save all` writes first and closes only if all of it landed** (B1,
+    /// user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
+    /// surface down and for its reason: a shut that closed the window after a
+    /// half-finished save would take the half that is still only in memory
+    /// with it. The failures are already named on their own pane by
+    /// `quit_save`; the window stays, so the reader can see them there.
+    ///
+    /// **`Discard` drops only the dirty buffers**: every tab is about to be
+    /// written to `session.json`, and its pool goes with it as the list of files
+    /// the switcher will list next launch (`TabState::preview_content`) —
+    /// measured on the real machine, where emptying it wrote `"pool": []` and a
+    /// three-file history came back empty. See [`crate::answer_an_exit_over`],
+    /// which is the whole of this but the write.
+    ///
+    /// The close is the one verb this does not own: it is the event loop's, and
+    /// it is re-requested ([`crate::WindowRuntime::window_close_requested`]) rather than
+    /// performed here so that everything else a close does still happens in the
+    /// order it always did — and, for the run's end, so that `Cancel` leaves the
+    /// ordinary window open and the summoned terminal never stands alone.
+    fn answer_exit(&mut self, closes: WindowId, answer: restore::GateAnswer) -> Result<()> {
+        let saved_all = answer == restore::GateAnswer::Save && self.quit_save()?.is_complete();
+        self.window.window_close_requested =
+            crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, saved_all);
+        Ok(())
     }
 
     /// **What this window would lose if the process left now**, by name.
@@ -1692,6 +1977,20 @@ impl Runtime<'_> {
         // the disk, and the ones that failed are still dirty and still say so.
         self.repaint_preview()?;
         Ok(report)
+    }
+
+    /// **Keep what this window would lose, on a stop that cannot ask** (D-4,
+    /// 0.4.8 G7): every dirty preview buffer of every tab, through the quit's
+    /// judged write and, where that is refused, into `recovery`
+    /// ([`crate::keep_unsaved_edits_over`]), each said in `diagnostics.log` with
+    /// where its edit is. No card and no repaint: the window is about to be
+    /// closed by a process that is stopping.
+    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
+        for kept in
+            crate::keep_unsaved_edits_over(&mut self.window.tabs, recovery, SystemTime::now())
+        {
+            crate::diagnostics::note(&kept.line());
+        }
     }
 
     /// **Take this window off the screen and let go of everything it holds**
@@ -1798,6 +2097,17 @@ impl Runtime<'_> {
         if broker.source != self.window_id() {
             return Ok(false);
         }
+        #[cfg(target_os = "linux")]
+        let guard_request_pending = self
+            .app
+            .pending_drag_guard_screen
+            .as_ref()
+            .is_some_and(|pending| pending.broker_generation == broker.guard_generation);
+        #[cfg(target_os = "linux")]
+        if !broker.guarded_release_is_current(guard_request_pending, broker.pointer) {
+            self.settle_home(drag);
+            return Ok(true);
+        }
         let verdict = broker_verdict(&broker.cargo, &broker.aim);
         // The road's second station ([`Runtime::foreign_strip_landing`] is the
         // first): **what the release decided, and off which aim**. Formatted
@@ -1880,9 +2190,7 @@ impl Runtime<'_> {
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
     pub(in crate::runtime) fn window_is_iconic(&self) -> bool {
-        let iconic = native_window(&self.window.window)
-            .ok()
-            .is_some_and(bt_platform::is_window_minimized);
+        let iconic = self.window_posture() == WindowPosture::Minimized;
         self.window.diagnostic_minimized.set(iconic);
         iconic
     }
@@ -1911,7 +2219,11 @@ impl Runtime<'_> {
     /// A refusal is said out loud and dropped: a page whose engine would not
     /// take the notice is a page whose context menu opens in the wrong place,
     /// which is not a reason to fail a window move.
-    pub(crate) fn window_moved(&mut self) -> Result<()> {
+    pub(crate) fn window_moved(
+        &mut self,
+        position: winit::dpi::PhysicalPosition<i32>,
+    ) -> Result<()> {
+        self.note_winit_position(position);
         self.remember_summoned_arrangement();
         // **The window may be on another panel now** (owner's report
         // 2026-09-18), and the two displays a window is dragged between are
@@ -1934,6 +2246,45 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    fn note_winit_position(&mut self, position: winit::dpi::PhysicalPosition<i32>) {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.native_client_origin = None;
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+            if width > 0 && height > 0 {
+                self.window.last_winit_rect = Some(bt_platform::WindowRect {
+                    left: position.x,
+                    top: position.y,
+                    right: position.x.saturating_add(width as i32),
+                    bottom: position.y.saturating_add(height as i32),
+                });
+            }
+            self.queue_linux_window_rect_snapshot();
+            if self.window.pending_work_area.is_some() {
+                self.window.work_area_refresh_owed = true;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = position;
+    }
+
+    pub(in crate::runtime) fn note_winit_size(&mut self, size: winit::dpi::PhysicalSize<u32>) {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.native_client_origin = None;
+            self.window.last_winit_size = Some(size);
+            if size.width > 0
+                && size.height > 0
+                && let Some(rect) = self.window.last_winit_rect.as_mut()
+            {
+                rect.right = rect.left.saturating_add(size.width as i32);
+                rect.bottom = rect.top.saturating_add(size.height as i32);
+            }
+            self.queue_linux_window_rect_snapshot();
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = size;
+    }
     /// **Whether a modal card or the settings sheet covers the whole window** — the one reading of
     /// "the window is asking and nothing under it answers". A hosted page is hidden under it, a
     /// wheel notch under it is nobody's once the first-run card and the settings sheet have had

@@ -359,34 +359,122 @@ impl Runtime<'_> {
         let name = path
             .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        match bt_platform::recycle(&path) {
-            Ok(false) => return Ok(()),
-            Ok(true) => {}
-            Err(error) => {
-                return self.toast(
+        #[cfg(target_os = "linux")]
+        {
+            let Some(parent) = path.parent().map(Path::to_path_buf) else {
+                return Ok(());
+            };
+            let target = crate::TrashTarget::File {
+                leaf: LeafId {
+                    tab: self.window.tabs[active].id,
+                    seat,
+                },
+                root,
+                key: key.to_owned(),
+                name: name.clone(),
+                parent,
+            };
+            match self.app.submit_trash(path, target) {
+                Ok(_) => Ok(()),
+                Err(error) => self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::FilesColumn(seat),
                     Some(name),
                     i18n::not_deleted(&error),
-                );
+                ),
             }
         }
-        if let Some(directory) = path.parent() {
-            let directory = directory.to_path_buf();
-            self.refresh_files_dirs_at(&directory);
-        }
-        // The selection cannot stay on a row that has gone. It is dropped rather
-        // than moved to a neighbour: which neighbour is the next row *after the
-        // re-read*, and the re-read has not happened on this frame — a guess made
-        // now would put the accent on whichever row happened to be there before.
-        if let Some(state) = self.window.tabs[active].files.get_mut(&seat)
-            && state.sel.as_deref() == Some(key)
+        #[cfg(not(target_os = "linux"))]
         {
-            state.sel = None;
+            match bt_platform::recycle(&path) {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) => {
+                    return self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::FilesColumn(seat),
+                        Some(name),
+                        i18n::not_deleted(&error),
+                    );
+                }
+            }
+            if let Some(directory) = path.parent() {
+                self.refresh_files_dirs_at(directory);
+            }
+            if let Some(state) = self.window.tabs[active].files.get_mut(&seat)
+                && state.sel.as_deref() == Some(key)
+            {
+                state.sel = None;
+            }
+            self.mark_session_dirty(Instant::now());
+            self.refresh_chrome();
+            self.present_chrome_change()
         }
-        self.mark_session_dirty(Instant::now());
-        self.refresh_chrome();
-        self.present_chrome_change()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn complete_trash_file(
+        &mut self,
+        leaf: LeafId,
+        root: &str,
+        key: &str,
+        name: &str,
+        parent: PathBuf,
+        outcome: std::result::Result<bool, String>,
+    ) -> Result<()> {
+        if self.window.leaving.is_some() {
+            return Ok(());
+        }
+        let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab) else {
+            return Ok(());
+        };
+        let tab = &self.window.tabs[index];
+        if tab
+            .seats
+            .tree()
+            .find_seat(leaf.seat)
+            .is_none_or(|seat| seat.kind != bt_layout::SeatKind::Files)
+            || tab
+                .files
+                .get(&leaf.seat)
+                .is_none_or(|files| files.root != root)
+        {
+            return Ok(());
+        }
+        match outcome {
+            Ok(false) => Ok(()),
+            Err(error) => self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::FilesColumn(leaf.seat),
+                Some(name.to_owned()),
+                i18n::not_deleted(&error),
+            ),
+            Ok(true) => {
+                let parent_key = files::parent_key(key).unwrap_or_default();
+                self.ask_files_dir_at(leaf, parent_key, parent);
+                if let Some(files) = self.window.tabs[index].files.get_mut(&leaf.seat)
+                    && files.sel.as_deref() == Some(key)
+                {
+                    files.sel = None;
+                }
+                self.mark_session_dirty(Instant::now());
+                self.refresh_chrome();
+                self.present_chrome_change()
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ask_files_dir_at(&mut self, leaf: LeafId, key: String, path: PathBuf) {
+        let request = files::DirRequest {
+            window: self.window_id(),
+            host: files::FilesHost::Docked(leaf),
+            key,
+            path,
+        };
+        if !self.app.files_worker.request(request) {
+            self.disable_files_worker();
+        }
     }
 
     /// Ask every files column that is showing this directory to read it again.
@@ -759,21 +847,18 @@ impl Runtime<'_> {
 
     /// Where a files pane opened right now would be rooted (H115).
     ///
-    /// The focused shell's own folder, because that is the place the user is
-    /// standing when they ask for the tree; `HOME` when it has never named one,
-    /// which is the same answer `cwd_for_spawn` gives a new tab in the same
-    /// situation. Read through `sessions` by id rather than through the `Deref`,
-    /// so this is answerable on a tab whose keyboard is somewhere unexpected.
+    /// The folder the focused shell is standing in, because that is the place the
+    /// user is standing when they ask for the tree — `crate::files_root_of`, the
+    /// one reader the folder button's card shares. Read through `sessions` by id
+    /// rather than through the `Deref`, so this is answerable on a tab whose
+    /// keyboard is somewhere unexpected.
     fn files_root_for_new_pane(&self) -> String {
-        self.sessions
-            .get(&self.focused_leaf)
-            .and_then(|leaf| leaf.session.working_directory())
-            .map(|cwd| cwd.display().to_string())
-            .or_else(|| {
-                profiles::home_directory(&bt_pty::SystemShellEnvironment)
-                    .map(|home| home.display().to_string())
-            })
-            .unwrap_or_default()
+        crate::files_root_of(
+            self.sessions
+                .get(&self.focused_leaf)
+                .map(|leaf| &leaf.session),
+            &bt_pty::SystemShellEnvironment,
+        )
     }
 
     pub(crate) fn disable_files_worker(&mut self) -> bool {
@@ -915,6 +1000,11 @@ impl Runtime<'_> {
             return Ok(());
         }
         state.view = view;
+        // A Git page opening asks where git is again, so one installed while Folio runs is found
+        // (T-PROGRAMS-REFRESH); the page's questions wait on the git worker for that answer.
+        if view == seats::FilesView::Git {
+            self.ask_the_program_walk(crate::programs_lane::Trigger::GitPage);
+        }
         // The page is durable (R1), so turning it is a change to the session —
         // and the save is debounced exactly as every other layout change is.
         self.mark_session_dirty(Instant::now());
@@ -2759,6 +2849,24 @@ impl Runtime<'_> {
             .collect()
     }
 
+    /// **The palette opened: every root it lists is walked again** (T-FRESH-FACTS;
+    /// [`palette_index::FileIndexes::reopened`]). An open that a walk already out answers is said
+    /// once in `diagnostics.log`.
+    pub(in crate::runtime) fn ask_for_file_indexes_on_open(&mut self) {
+        for root in self.palette_files_roots() {
+            match self.app.file_indexes.reopened(&root) {
+                palette_index::Reopened::Asked(request) => {
+                    let _ = self.app.file_index_worker.request(request);
+                }
+                palette_index::Reopened::Merged(epoch) => crate::diagnostics::note(&format!(
+                    "palette file index: the palette opened while walk {epoch} of {} was out; \
+                     that walk answers this opening",
+                    root.display()
+                )),
+            }
+        }
+    }
+
     /// Ask for any index the `Files` section needs and does not have.
     pub(in crate::runtime) fn ask_for_file_indexes(&mut self) {
         // **It asks and it does not forget.** Forgetting is `App`'s
@@ -2898,6 +3006,20 @@ impl Runtime<'_> {
     /// stands inside two other functions, and a name it kept would be charged to
     /// the keystroke or the turn that came after it.
     pub(crate) fn flush_dropped_files(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let refused_batch = self
+                .window
+                .pending_external_drop
+                .as_mut()
+                .is_some_and(|pending| {
+                    pending.batch_open = false;
+                    pending.refused
+                });
+            if refused_batch {
+                self.window.pending_external_drop = None;
+            }
+        }
         let Some(batch) = self.window.dropped_files.take() else {
             return Ok(());
         };

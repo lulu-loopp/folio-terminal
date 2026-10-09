@@ -57,7 +57,7 @@ impl Runtime<'_> {
     /// day the seed grows a third field.
     ///
     /// **The pair travels together and is taken from one leaf**, which is the
-    /// rule [`new_tab_cwd`] already states: a profile from one pane and a folder
+    /// rule [`new_tab_leaf_seed`] already states: a profile from one pane and a folder
     /// from another describes a pane that does not exist.
     pub(in crate::runtime) fn new_tab_seeded_from(
         &mut self,
@@ -65,6 +65,7 @@ impl Runtime<'_> {
         place: Option<PathBuf>,
         source_profile: &str,
         source_cwd: Option<profiles::SeedPlace>,
+        environment: Option<crate::cli::CarriedEnvironment>,
     ) -> Result<()> {
         // No assertion that the table still holds this id, and that is the point
         // of the id: `Duplicate tab` names the profile the source pane is
@@ -102,9 +103,15 @@ impl Runtime<'_> {
             // root, so nothing to say about one, and no preview pane either.
             &BTreeMap::new(),
             &PreviewRestore::default(),
-            TabSeed::default(),
+            // What a launch carried, or a duplicated tab had, belongs to the new tab; nothing
+            // for any other new tab.
+            TabSeed {
+                carried_environment: environment,
+                ..TabSeed::default()
+            },
             &self.app.profile_programs,
             &self.default_profile_id(),
+            &self.app.settings_store.loaded().default_profile,
             self.window.size_policy,
             // The posture and not the stored preference, for
             // [`Self::resolve_seat_layout`]'s reason: a tab born while the card
@@ -604,7 +611,7 @@ impl Runtime<'_> {
                     kind,
                     self.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::mark(profiles::index_of_id(&leaf.profile))),
+                        .map(|leaf| profiles::identity_mark(&leaf.profile)),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -1289,7 +1296,10 @@ impl Runtime<'_> {
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the
         // same place — said in the one function that knows how to say it.
-        self.new_tab_seeded_from(&profile, None, &profile, cwd)
+        // A duplicate of a tab a launch carried an environment into carries it too: it is the
+        // tab's (coordinator's ruling 2026-10-09).
+        let environment = state.carried_environment.clone();
+        self.new_tab_seeded_from(&profile, None, &profile, cwd, environment)
     }
 
     /// **`Move tab to new window`** — the row 丙2 exists for.
@@ -1323,6 +1333,8 @@ impl Runtime<'_> {
             // where every other new window opens, because a reader who pressed a
             // *verb* pointed at a verb and not at a rectangle.
             at: None,
+            #[cfg(target_os = "linux")]
+            screen: None,
         };
         let like = self.window_id();
         self.app
@@ -1471,7 +1483,8 @@ impl Runtime<'_> {
     /// a popup nothing can dismiss.
     ///
     /// Where the chooser opens is the same courtesy every other door shows: the
-    /// folder the pane you are looking at last reported (OSC 7), and failing
+    /// folder the pane you are looking at is standing in (`standing_folder`: its
+    /// last OSC 7 report, else the folder it was opened in), and failing
     /// that the place a tab of the default profile would have started in anyway.
     /// The second half is asked of the profile rather than of this process,
     /// because "wherever Folio happens to be running from" is
@@ -1480,7 +1493,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn browse_for_new_tab_root(&mut self) {
         let start = self
             .focused()
-            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf))
+            .and_then(|leaf| leaf.session.standing_folder().map(Path::to_path_buf))
             .or_else(|| {
                 // `working_directory` and not the whole place: this is a Windows
                 // dialog, and that field is by construction the half of a
@@ -1489,10 +1502,11 @@ impl Runtime<'_> {
                 // for it, and `None` there is the honest answer rather than a
                 // path the chooser would reject.
                 profiles::spawn_place(
-                    self.default_profile(),
+                    profiles::index_of_id(&self.default_profile_id()),
                     None,
                     &bt_pty::SystemShellEnvironment,
                 )
+                .place
                 .working_directory
             });
         match self.window.folder_picker.request(start.as_deref()) {
@@ -1588,7 +1602,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn live_stability_deadline(&self) -> Option<Instant> {
         self.window.tabs[self.window.active_tab]
             .leaves()
-            .filter_map(|(_, leaf)| leaf.session.live_stability_deadline())
+            .filter_map(|(_, leaf)| bt_compose::deadlines(&leaf.session).live_stability)
             .min()
     }
 
@@ -2792,9 +2806,12 @@ impl Runtime<'_> {
                 // gesture is not a tab the user has promised to bring back every
                 // time.
                 pinned: false,
+                // A new tab owns no launch's environment.
+                carried_environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),
+            &self.app.settings_store.loaded().default_profile,
             self.window.size_policy,
             self.rail_posture(),
             self.platform_chrome(),
@@ -3424,6 +3441,11 @@ impl Runtime<'_> {
             let mut any_live = false;
             let mut any_pty = false;
             for (_, leaf) in tab.leaves_mut() {
+                // A shell still being born is a shell this tab is about to have: the tab has not
+                // ended while one of its panes is in birth.
+                if leaf.birth.is_some() {
+                    any_live = true;
+                }
                 let Some(pty) = leaf.pty.as_mut() else {
                     continue;
                 };

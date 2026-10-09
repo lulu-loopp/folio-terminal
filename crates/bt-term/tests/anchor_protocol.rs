@@ -168,7 +168,7 @@ fn g3_redetection_rebuilds_document_intent_after_the_worker_accepts_the_revision
             .any(|entry| matches!(entry.decoration, DecorationIntent::Math { .. }))
     );
     assert!(session.pending_tasks() > 0);
-    session.run_workers();
+    session.run_workers(&|_| None);
     assert!(session.document().entries().values().any(|entry| matches!(
         entry.decoration,
         DecorationIntent::Math {

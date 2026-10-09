@@ -513,9 +513,8 @@ impl Runtime<'_> {
         // pane on screen.
         // **The five failure cards, and the one card that was already here**
         // (§7.7 ④, W2 slice ④). One drawing, and the words are owned rather
-        // than borrowed because a fault's sentence is built from a host or a
-        // scheme — `web_fail_did_not_respond`, `web_fail_blocked_scheme` — and
-        // a `&'static str` cannot carry one.
+        // than borrowed because a fault's words carry an address or a scheme
+        // (`web_fail_blocked_scheme`), and a `&'static str` cannot carry one.
         //
         // Four of the five *are* the seat's content and are drawn as pane
         // chrome; the fifth stands over a page that is still there and is an
@@ -537,17 +536,16 @@ impl Runtime<'_> {
                         CardWords {
                             notice: fault.say(),
                             // **Through the one spelling** (user ruling
-                            // 2026-08-25). Three of the four cards carry an
-                            // address on this line, and a card naming a local
-                            // file in the URI form while the row above it names
-                            // the same file as a path is the split the ruling
-                            // came to close — the two screenshots behind it were
-                            // exactly two surfaces disagreeing about one disk.
-                            // Everything that is not a local file this window
-                            // minted goes through untouched.
-                            detail: shown_address(fault.detail().unwrap_or_default()),
+                            // 2026-08-25): a card naming a local file in the
+                            // URI form while the row above it names the same
+                            // file as a path is the split the ruling came to
+                            // close. Everything that is not a local file this
+                            // window minted goes through untouched.
+                            address: fault.address().map(shown_address).unwrap_or_default(),
+                            address_line: String::new(),
+                            detail: fault.detail().unwrap_or_default(),
                             detail_lines: Vec::new(),
-                            verb: Some(fault.verb_text().text().to_owned()),
+                            verb: fault.verb_text().map(|verb| verb.text().to_owned()),
                             // **The class's mark and never the site's**, the
                             // same ruling `websheet` states at length: §7.7 ④
                             // says a failure card wears 「一枚本类的记号」, and
@@ -670,20 +668,30 @@ impl Runtime<'_> {
             // half of the sentence a reader was meant to copy was on screen.
             // `restore::wrap_anywhere` and not a second wrapper, because the
             // fact is one token as often as it is a sentence.
+            //
+            // **Measured in the face it is drawn in**: the fact and the address are set
+            // in the mono face (`seats::push_preview_card`), and a line cut by the
+            // proportional face's widths is a line the mono face runs past.
+            let Some(body) =
+                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, *seat, scale)
+            else {
+                continue;
+            };
+            let font = seats::preview_card_detail_font_px(scale);
+            let width = seats::preview_card_detail_width(body, scale);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str| renderer.measure_chrome_mono_text(gpu, text, font);
             words.detail_lines = if words.detail.is_empty() {
                 Vec::new()
             } else {
-                let Some(body) =
-                    seats::preview_seat_body_rect(&self.seats, &self.seat_layout, *seat, scale)
-                else {
-                    continue;
-                };
-                let font = seats::preview_card_detail_font_px(scale);
-                let width = seats::preview_card_detail_width(body, scale);
-                let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-                restore::wrap_anywhere(&words.detail, width, |text| {
-                    renderer.measure_chrome_text(gpu, text, font)
-                })
+                restore::wrap_anywhere(&words.detail, width, &mut measure)
+            };
+            // **And the address, folded by the row's own law** (owner's ruling
+            // 2026-10-09): one line, the host and the page kept.
+            words.address_line = if words.address.is_empty() {
+                String::new()
+            } else {
+                seats::fold_address(&words.address, width, &mut measure)
             };
         }
         self.window.preview_button_width = self.window.renderer.measure_chrome_text(
@@ -699,6 +707,7 @@ impl Runtime<'_> {
                     seats::PreviewCardButton {
                         offers: words.verb.is_some(),
                         text_px: words.width,
+                        address: !words.address_line.is_empty(),
                         detail_lines: words.detail_lines.len(),
                         fault: words.fault,
                     },
@@ -712,6 +721,8 @@ impl Runtime<'_> {
                     *seat,
                     seats::PreviewCardContent {
                         notice: &words.notice,
+                        address: (!words.address_line.is_empty())
+                            .then_some(words.address_line.as_str()),
                         detail: &words.detail_lines,
                         mark: words.mark,
                         fault: words.fault,
@@ -1395,7 +1406,7 @@ impl Runtime<'_> {
             subject,
             powers,
             crumbs,
-            terminal: profiles::mark(self.default_profile()).in_line(),
+            terminal: profiles::identity_mark(&self.default_profile_id()).in_line(),
         }
     }
 
@@ -1566,7 +1577,11 @@ impl Runtime<'_> {
                 .get(&seat)
                 .and_then(|leaf| leaf.session.selection_text())
                 .is_some_and(|text| !text.is_empty()),
-            restart_in_flight: self.window.restarting == Some(seat),
+            // A successor in birth beside this pane's shell (`LeafSession::successor`).
+            restart_in_flight: self
+                .sessions
+                .get(&seat)
+                .is_some_and(crate::LeafSession::restart_in_flight),
             // The same question `Find…` will ask when it runs, asked of the same
             // function: one door, so a greyed row and a declined verb can never
             // disagree about which panes a search can be addressed to.
@@ -1590,12 +1605,15 @@ impl Runtime<'_> {
         // same predicate the head itself is drawn from, so "the head is here" and
         // "the menu repeats the head" can never be two answers.
         let lone = !self.seats.seat_wears_head(bt_layout::SeatKind::Terminal);
+        // Its `Split with` lists programs: the machine is asked again as it opens.
+        self.ask_the_program_walk(crate::programs_lane::Trigger::ProgramMenu);
         self.window.term_menu = Some(TermMenuState {
             point: [position.x as f32, position.y as f32],
             seat,
             pane: profiles::TermMenuPane::Shell,
             subject: self.term_menu_subject(seat),
             hover: None,
+            lit_by: profiles::LitBy::Pointer,
             lone,
             submenu_open: false,
             pointer_was: None,
@@ -1633,6 +1651,7 @@ impl Runtime<'_> {
                 ..profiles::TermMenuSubject::default()
             },
             hover: None,
+            lit_by: profiles::LitBy::Pointer,
             lone: false,
             submenu_open: false,
             pointer_was: None,
@@ -1842,6 +1861,8 @@ impl Runtime<'_> {
         // The highlight follows the surface it is on: opening lands on the first
         // profile, closing takes it back to the heading it came from, so `←`
         // leaves the keyboard somewhere rather than nowhere.
+        // Placed, not pointed at: it follows its item until a hand moves it.
+        menu.lit_by = profiles::LitBy::Keyboard;
         menu.hover = Some(if open {
             profiles::TermMenuHover::Submenu(0)
         } else {
@@ -2547,8 +2568,14 @@ impl Runtime<'_> {
                 .float_refusal_words(PreviewSurface::Float(id), open_label)
                 .filter(|words| words.verb.is_some())
                 .and_then(|_| {
-                    seats::preview_card_geometry(geometry.body, Some(open_button_px), 0, scale)
-                        .button
+                    seats::preview_card_geometry(
+                        geometry.body,
+                        Some(open_button_px),
+                        false,
+                        0,
+                        scale,
+                    )
+                    .button
                 });
             if let Some(part) = float::float_hit(&geometry, x, y, rail.as_ref(), |x, y| {
                 let (x, y) = (x + geometry.body[0], y + geometry.body[1]);

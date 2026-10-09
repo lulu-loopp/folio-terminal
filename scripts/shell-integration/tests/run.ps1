@@ -46,6 +46,10 @@ function Invoke-Suite {
 
 Invoke-Suite -Name 'folio.bash hooks' -Program 'bash' `
     -Arguments @((Join-Path $here 'bash-hooks.sh'))
+if ($IsLinux) {
+    Invoke-Suite -Name 'native shell integration over Linux PTYs' -Program 'python3' `
+        -Arguments @((Join-Path $here 'linux-pty.py'))
+}
 # There is no zsh on every machine, and the script cannot be measured without one. What can be
 # asked of any machine that has a zsh is whether the file parses, which is the failure that would
 # otherwise reach a reader as a shell that will not start.

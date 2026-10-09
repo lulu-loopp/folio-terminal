@@ -1195,11 +1195,7 @@ mod tests {
     /// over a renamed archive ending the formula lane for the session.
     #[test]
     fn nothing_that_is_not_a_video_is_drawn() {
-        let dir = std::env::temp_dir().join(format!(
-            "folio-video-refusals-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = bt_testpath::temp_path("folio-video-refusals");
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let missing = dir.join("no-such-file.mp4");
         assert_eq!(first_frame(&missing, 280, 160), None);

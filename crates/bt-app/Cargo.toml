@@ -38,6 +38,9 @@ bt-winres = { path = "../bt-winres" }
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+# The order a pane's frame is made in: project, the hold, schedule, the deadlines,
+# the acknowledgment, and the draw list (`docs/ARCHITECTURE.md` §3.1).
+bt-compose = { path = "../bt-compose" }
 bt-detect = { path = "../bt-detect" }
 bt-doc = { path = "../bt-doc" }
 bt-layout = { path = "../bt-layout" }
@@ -137,6 +140,8 @@ toml_edit.workspace = true
 # structs would go on passing through a field rename or a serde attribute that
 # changed the shape.
 [dev-dependencies]
+# Every test's scratch name comes from one place (`bt_testpath`, T-TEST-HYGIENE-048).
+bt-testpath = { path = "../bt-testpath" }
 # **The crate this package's guards ask about itself** — the mechanism of
 # `docs/plans/bt-app-split-prep.md`. A guard that reads `include_str!("main.rs")`
 # is bound to a file, and a fact that moves to a file beside it stops being read
@@ -187,3 +192,6 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { workspace = true, features = ["x11", "wayland", "wayland-dlopen"] }

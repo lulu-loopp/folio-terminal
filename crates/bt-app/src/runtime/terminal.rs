@@ -1,12 +1,13 @@
 //! `terminal` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::PtyTarget;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
     FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
-    TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, cmdrail,
-    coalesce, create_leaf_session, cubic_bezier, deliver_osc_attention,
+    TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, born_in_tab,
+    cmdrail, coalesce, create_leaf_session, cubic_bezier, deliver_osc_attention,
     drain_may_take_another_slice, drain_tab_pty, drain_whole_units, files, hang_watch,
     in_drain_feed_turn, input, input_line_needs_a_space_first, local_image_activation, marks,
     mouse_trace, paste_text, presentation_physical_size, reference_card, reference_run_rect,
@@ -280,7 +281,7 @@ impl Runtime<'_> {
         )?;
         // **The base moved; every pane keeps its rung** (ticket 37) and is re-derived from it.
         self.apply_every_leaf_metrics()?;
-        let physical = self.window.window.inner_size();
+        let physical = self.client_size();
         if physical.width > 0 && physical.height > 0 {
             let render_physical =
                 presentation_physical_size(self.window.renderer.presentation_geometry());
@@ -617,22 +618,14 @@ impl Runtime<'_> {
 
     /// `Reset terminal modes` — restore the program-owned protocol state in one
     /// pane. A session effect only: unlike restarting or clearing, it neither
-    /// writes to the PTY nor replaces the child. The pane's own record of which
-    /// pseudoconsole it runs on, fixed when it was spawned, says which modes the
+    /// writes to the PTY nor replaces the child. The session's record of what
+    /// carries its bytes, told when the pane was spawned, says which modes the
     /// transport keeps (focus reporting under ConPTY).
     pub(in crate::runtime) fn reset_terminal_modes(&mut self, seat: SeatId) -> Result<()> {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
-        let transport = match leaf.pty.as_ref().map_or(
-            bt_pty::ConPtyKind::NotConPty,
-            bt_pty::PtySession::conpty_kind,
-        ) {
-            bt_pty::ConPtyKind::Shipped | bt_pty::ConPtyKind::Inbox => {
-                bt_term::PtyTransport::ConPty
-            }
-            bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
-        };
+        let transport = leaf.session.pty_transport();
         leaf.session.reset_program_modes(transport)?;
         self.apply_pointer_cursor();
         self.refresh_chrome();
@@ -657,9 +650,9 @@ impl Runtime<'_> {
     ///
     /// The old shell dies when its `LeafSession` is dropped — `PtySession::drop`
     /// runs `shutdown`, which kills the child and joins its reader — and the new
-    /// one is spawned **first**, so a ConPTY that cannot be created leaves the
-    /// pane exactly as it was rather than empty. That ordering is `stand_in_terminal`'s
-    /// own and it is the reason this cannot half-succeed.
+    /// one is born **first**, beside it (`LeafSession::successor`), so a ConPTY
+    /// that cannot be created leaves the pane exactly as it was rather than empty.
+    /// That is the reason this cannot half-succeed.
     ///
     /// **What this does not yet do**, and it is written down rather than
     /// forgotten: the transcript is not carried across with a boundary record
@@ -669,13 +662,20 @@ impl Runtime<'_> {
     /// and a confirmation that guessed would be a dialog in front of a fact
     /// nobody measured.
     pub(in crate::runtime) fn restart_shell(&mut self, seat: SeatId) -> Result<()> {
-        if self.window.restarting.is_some() {
-            return Ok(());
-        }
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
-        let seed = restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell());
+        if leaf.successor.is_some() {
+            return Ok(());
+        }
+        // **A Restart shell is born in its tab** (coordinator's ruling 2026-10-09): what a launch
+        // carried into the tab, it is born with again.
+        let seed = born_in_tab(
+            restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell()),
+            self.window.tabs[self.window.active_tab]
+                .carried_environment
+                .as_ref(),
+        );
         // **The replacement is born at the old view's rung** (ticket 37): *Restart shell* keeps
         // the pane, so it keeps its text size, and the constructor is handed the rung rather
         // than the new leaf being repaired to it afterwards. Nothing else of the old view is
@@ -691,7 +691,6 @@ impl Runtime<'_> {
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
         let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
-        self.window.restarting = Some(seat);
         let spawned = create_leaf_session(
             view,
             body,
@@ -703,15 +702,35 @@ impl Runtime<'_> {
             None,
             &seed,
             &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
-        );
-        self.window.restarting = None;
-        // The old leaf is dropped **here**, by the insert: `PtySession::drop`
-        // takes the child with it, and it takes it only once the replacement is
-        // known to exist.
-        self.sessions.insert(seat, spawned?);
+        )?;
+        // **A replacement still being born waits beside the shell it replaces** (T-BIRTH-OFF-WINDOW):
+        // the old shell goes on being the one typed into until the new one lands
+        // (`Runtime::land_births`), and a birth that fails leaves it as it was. A replacement
+        // with no shell to wait for replaces it now.
+        if spawned.birth.is_some() {
+            if let Some(leaf) = self.sessions.get_mut(&seat) {
+                leaf.successor = Some(Box::new(spawned));
+            }
+            self.refresh_chrome();
+            return Ok(());
+        }
+        self.replace_restarted_shell(seat, spawned)
+    }
+
+    /// **The restarted shell takes the pane** — the old leaf is dropped here, by the insert:
+    /// `PtySession::drop` takes the child with it, and it takes it only once the replacement is
+    /// known to exist. From `restart_shell` for a replacement with no shell to wait for, and from
+    /// the landing for one that was being born.
+    pub(crate) fn replace_restarted_shell(
+        &mut self,
+        seat: SeatId,
+        spawned: LeafSession,
+    ) -> Result<()> {
+        self.sessions.insert(seat, spawned);
         // **The window's frame slot held the pane that is gone.** `focus_pane_at`
         // empties it for the same reason when the keyboard moves: leaving a
         // frame there would let the next present assert a grid belonging to a
@@ -818,13 +837,14 @@ impl Runtime<'_> {
 
         let LeafSession {
             pty,
+            birth,
             session,
             projection,
             ..
         } = self.window.tabs[active].shell_mut();
         paste_text(session, projection, &text, |bytes| {
             write_pty_input(
-                pty.as_ref(),
+                PtyTarget::of(pty.as_ref(), birth.as_ref()),
                 bytes,
                 "write an inserted files row path to PTY",
             )
@@ -850,6 +870,10 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::DrainWake, || {
             self.window.pty_wake.accept()
         });
+        // **The panes whose shells have answered land first** (T-BIRTH-OFF-WINDOW), so a shell's
+        // first bytes are drained on the turn it is born: its worker woke this window through the
+        // pane's own wake, after publishing the answer.
+        hang_watch::during(hang_watch::Station::PtyBirth, || self.land_births())?;
         let mut active_changed = false;
         let mut active_uncapped = false;
         let mut active_sync_closed = false;
@@ -1520,14 +1544,20 @@ impl Runtime<'_> {
     /// pointer has to be added to before two windows can talk about it
     /// (multiwindow slice F2).
     ///
-    /// `inner_position` and not the outer rectangle: winit reports every pointer
-    /// in client coordinates, and this window's `WM_NCCALCSIZE` has made client
-    /// and outer the same rectangle anyway ([`bt_platform::CustomWindowFrame`]),
-    /// so the two are one origin here and only one of them stays right if that
-    /// ever stops being true.
+    /// Linux uses the display worker's client translation. Move and resize events
+    /// invalidate it until a current answer arrives. Other platforms use Winit's
+    /// `inner_position`; an outer frame rectangle is not a client origin.
     fn client_origin_on_screen(&self) -> Option<(f64, f64)> {
-        let origin = self.window.window.inner_position().ok()?;
-        Some((f64::from(origin.x), f64::from(origin.y)))
+        #[cfg(target_os = "linux")]
+        {
+            let (x, y) = self.window.native_client_origin?;
+            Some((f64::from(x), f64::from(y)))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let origin = self.window.window.inner_position().ok()?;
+            Some((f64::from(origin.x), f64::from(origin.y)))
+        }
     }
 
     /// A pointer of this window's, in screen physical pixels.

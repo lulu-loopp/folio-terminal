@@ -35,7 +35,6 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
 mod animation;
 mod app_delegate_wire;
 mod arrival;
@@ -56,6 +55,7 @@ mod coalesce;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
+mod elevated_host;
 mod explorer_menu;
 mod favicon;
 mod file_peek;
@@ -79,6 +79,7 @@ mod handoff_lane;
 mod hang_watch;
 mod hex_peek;
 mod highlight;
+mod host_answers;
 mod i18n;
 mod icons;
 mod ime_outbound;
@@ -103,6 +104,10 @@ mod lane_contract_tests;
 mod launch_wire;
 mod layout_tables;
 mod linebreak;
+#[cfg(target_os = "linux")]
+mod linux_clipboard_lane;
+#[cfg(target_os = "linux")]
+mod linux_hang_probe;
 mod marks;
 mod menubar;
 mod mouse_trace;
@@ -134,6 +139,7 @@ mod preview_viewport;
 mod preview_watch;
 mod preview_wrap;
 mod profiles;
+mod programs_lane;
 mod psreadline;
 mod pty_door;
 mod quake;
@@ -168,6 +174,8 @@ mod toast;
 mod tooltip;
 mod trace;
 mod trace_sink;
+#[cfg(target_os = "linux")]
+mod trash_lane;
 mod uninstall;
 mod update;
 // Which adapter a copy's update takes, and whether its road is built (0.4.7 ticket U-41a1).
@@ -215,6 +223,7 @@ mod web_warmup;
 mod webhost;
 mod webnav;
 mod websheet;
+mod window_news;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -232,7 +241,7 @@ use bt_persist::{
 use text_scale::{TextScale, TextStep};
 // Step 2a moved these two names' last non-test users into `runtime/` (the
 // `peek` and `windows` topics), which import them themselves; the root keeps
-// them for `tests.rs`, which reads them through `use super::*`.
+// them for the root's test modules, which read them through `use super::*`.
 #[cfg(test)]
 use bt_doc::Bias;
 #[cfg(test)]
@@ -256,8 +265,7 @@ use bt_render::{
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
     SessionDecorationTask, SessionMathTask, SessionStatus, TerminalCanvas, TerminalModes,
-    TerminalPalette, normalized_local_image_path_key, render_detection_task,
-    render_live_detection_task,
+    TerminalPalette, normalized_local_image_path_key,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -269,7 +277,7 @@ use bt_viewport::{
 // seen" rule under the name this crate has always called it by.
 use bt_workbench::attention;
 use bt_workbench::attention::is_consumed as attention_is_consumed;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
@@ -447,6 +455,29 @@ const PANIC_LOG_FILENAME: &str = "folio-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    #[cfg(target_os = "linux")]
+    HangWatchQuestion(u64),
+    #[cfg(target_os = "linux")]
+    NativeDialogReady,
+    #[cfg(target_os = "linux")]
+    WindowCloseRequested(WindowId),
+    #[cfg(target_os = "linux")]
+    NativeHotkeyReady {
+        id: i32,
+        generation: u64,
+    },
+    #[cfg(target_os = "linux")]
+    NativeHotkeyActivated {
+        id: i32,
+        generation: u64,
+        pointer: (i32, i32),
+    },
+    #[cfg(target_os = "linux")]
+    NativeDisplayReady {
+        owner: u64,
+        request_id: u64,
+        generation: u64,
+    },
     /// A keyboard layout's copied Shift table landed from the worker road.
     /// The answer is in `App::layout_tables`; this event only breaks a parked
     /// loop, and the next key lookup drains the channel too if the wake is lost.
@@ -461,6 +492,15 @@ enum AppEvent {
     /// which is why it carries nothing itself. Windows told this window that
     /// *something* changed; the answer to *what* is the read on the next turn.
     SystemPreferencesChanged,
+    /// **A display changed mode, or one came or went** (T-FRESH-FACTS;
+    /// `bt_platform::SystemNews::Display`). The rate each window paces its frames to
+    /// is read again in every window, which a rate changed on the same panel moves
+    /// without moving the window.
+    DisplayChanged,
+    /// **The keyboard layout moved** (T-FRESH-FACTS; `bt_platform::SystemNews::InputLanguage`).
+    /// The summon's virtual key is the layout's answer for its character, so it is
+    /// asked again and the chord re-claimed when it moved.
+    InputLanguageChanged,
     /// **What the platform draws in a window's title bar has moved**
     /// (`bt_platform::CustomWindowFrame::install`'s wake, `docs/DESIGN.md`
     /// §13.48).
@@ -588,6 +628,10 @@ enum AppEvent {
     /// taskbar flash already running on a desktop whose bar turned out to hide itself
     /// ([`Runtime::replace_contradicted_flash`]), and that window may be sitting idle.
     TaskbarAnswered,
+    /// **The program walk published** (T-PROGRAMS-REFRESH): rows of what this machine can start,
+    /// the WSL and git facts beside them, or a walk's end. All of it waits in `programs_lane`'s
+    /// mailbox; this only breaks the parked loop, and the handler is the one place that adopts it.
+    ProgramsAnswered,
     /// **How this copy was installed has been read** (U-3): the fact is in
     /// `install_channel::channel()`.
     ///
@@ -783,6 +827,12 @@ enum AppEvent {
     /// window's own picture mailbox by the time this is sent, and this says only
     /// that there is one.
     ClipboardPictureReady,
+    /// A native Linux clipboard reader published its one bounded answer.
+    #[cfg(target_os = "linux")]
+    LinuxClipboardReady,
+    /// A native Linux trash transaction published its result.
+    #[cfg(target_os = "linux")]
+    TrashAnswered,
     /// **A hand-off to the system has been answered** (`handoff_lane`, `docs/DESIGN.md`
     /// 2026-09-22 — *a hand-off to the system runs on its own lane*).
     ///
@@ -804,6 +854,17 @@ enum AppEvent {
 }
 
 impl AppEvent {
+    /// **The event a window's system-settings ear sends for what it heard**
+    /// (T-FRESH-FACTS): each news its own wake, so the turn re-reads only the fact it
+    /// is about.
+    const fn of_system_news(news: bt_platform::SystemNews) -> Self {
+        match news {
+            bt_platform::SystemNews::Preferences => Self::SystemPreferencesChanged,
+            bt_platform::SystemNews::Display => Self::DisplayChanged,
+            bt_platform::SystemNews::InputLanguage => Self::InputLanguageChanged,
+        }
+    }
+
     /// **Which station this event's handler is charged to** (2026-09-11).
     ///
     /// The whole of `user_event` used to run under [`hang_watch::Station::Woken`],
@@ -825,6 +886,16 @@ impl AppEvent {
     fn station(&self) -> hang_watch::Station {
         use hang_watch::Station;
         match self {
+            #[cfg(target_os = "linux")]
+            Self::HangWatchQuestion(_) => Station::Woken,
+            #[cfg(target_os = "linux")]
+            Self::NativeDialogReady
+            | Self::NativeHotkeyReady { .. }
+            | Self::NativeHotkeyActivated { .. } => Station::Chrome,
+            #[cfg(target_os = "linux")]
+            Self::NativeDisplayReady { .. } => Station::Chrome,
+            #[cfg(target_os = "linux")]
+            Self::WindowCloseRequested(_) => Station::EventClose,
             Self::PreviewReady => Station::Preview,
             Self::MathReady => Station::Math,
             Self::FilesReady => Station::Files,
@@ -834,6 +905,10 @@ impl AppEvent {
             // The station the acquisition opened, charged again for the half of
             // the same gesture that finishes it.
             Self::ClipboardPictureReady => Station::ClipboardRead,
+            #[cfg(target_os = "linux")]
+            Self::LinuxClipboardReady => Station::ClipboardRead,
+            #[cfg(target_os = "linux")]
+            Self::TrashAnswered => Station::Files,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
             Self::PsReadLineProbed
@@ -843,9 +918,12 @@ impl AppEvent {
             | Self::ExplorerPackageChanged
             | Self::FontsScanned
             | Self::TaskbarAnswered
+            | Self::ProgramsAnswered
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
+            | Self::DisplayChanged
+            | Self::InputLanguageChanged
             | Self::WindowChromeChanged
             | Self::NotificationClicked
             | Self::HandoffAnswered => Station::Chrome,
@@ -2101,6 +2179,14 @@ fn read_video_glance(worker: &bt_platform::admission::WorkerCtx, path: &Path) ->
     let metadata = std::fs::metadata(path).ok();
     let bytes = metadata.as_ref().map(std::fs::Metadata::len);
     let mtime = metadata.and_then(|meta| meta.modified().ok());
+    #[cfg(target_os = "linux")]
+    let frame = bt_platform::first_frame_on_worker(
+        worker,
+        path,
+        VIDEO_FRAME_FIT_PX.0,
+        VIDEO_FRAME_FIT_PX.1,
+    );
+    #[cfg(not(target_os = "linux"))]
     let frame = {
         let _ = worker;
         bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1)
@@ -2290,7 +2376,7 @@ fn run_path_verify_worker(
     mut wake: impl FnMut(),
 ) {
     while let Ok(PathWorkerRequest { leaf, path }) = task_rx.recv() {
-        let verdict = bt_term::verify_path(&path);
+        let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
         if result_tx
             .send(MathWorkerResult {
                 leaf,
@@ -2317,27 +2403,12 @@ fn run_decoration_worker(
         let completion = match work {
             MathWorkerRequest::Math {
                 leaf,
-                task,
+                mut task,
                 foreground_rgb,
-            } => (
-                leaf,
-                match *task {
-                    SessionMathTask::Frozen(mut task) => {
-                        let result = render_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Frozen(task)),
-                            result,
-                        }
-                    }
-                    SessionMathTask::Live(mut task) => {
-                        let result = render_live_detection_task(&engine, &mut task, foreground_rgb);
-                        DecorationWorkerCompletion::Math {
-                            task: Box::new(SessionMathTask::Live(task)),
-                            result,
-                        }
-                    }
-                },
-            ),
+            } => {
+                let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                (leaf, DecorationWorkerCompletion::Math { task, result })
+            }
             MathWorkerRequest::InlineImage { leaf, task } => {
                 let result = image_decoder.decode(task.clone());
                 (
@@ -4656,6 +4727,9 @@ fn preview_tab_index_among(tabs: &[TabState], tab: TabId) -> Option<usize> {
 /// would be three booleans that can all say yes.
 #[derive(Default)]
 struct PreviewPane {
+    /// Identity of this particular preview surface for delayed operations.
+    #[cfg(target_os = "linux")]
+    instance_identity: Arc<()>,
     neighbours: Option<preview_neighbours::Folder>,
     /// The picture on this surface, if it is showing one. Mutually exclusive
     /// with [`Self::buffer`] — the two doors clear each other on the way in.
@@ -9555,7 +9629,9 @@ fn git_full_path(root: &Path, path: &str) -> PathBuf {
 /// [`cli::resolve`]'s plan. A function so the launch's place can be pinned without a window.
 fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
     LeafSeed {
-        profile: profiles::id(plan.profile),
+        profile: plan
+            .profile
+            .map_or_else(|| profiles::DEFAULT_IDENTITY.to_owned(), profiles::id),
         // **Named** (GitHub issue #16): `Open in Folio`, `folio <folder>`, `--cwd` and
         // `folio-here.cmd` all said where, so the profile's own starting place does not overrule it.
         cwd: plan.cwd.clone().map(profiles::SeedPlace::Named),
@@ -9567,6 +9643,9 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
         unknown_profile_id: None,
         card_skip: 0,
         prefill: None,
+        // `--with-environment` (owner ruling 2026-10-05): the launcher's environment, when the
+        // command line asked for it, and the account's otherwise.
+        carried_environment: plan.carried_environment.clone(),
     }
 }
 
@@ -9610,6 +9689,9 @@ fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> Leaf
         card_skip: 0,
         // A restart is a new shell in the same place; nothing is owed to its prompt.
         prefill: None,
+        // Not the seed's to say: a Restart shell is born in its tab, and `born_in_tab` gives it
+        // the tab's carried environment (coordinator's ruling 2026-10-09).
+        carried_environment: None,
     }
 }
 
@@ -9654,6 +9736,9 @@ struct TermMenuState {
     /// What the pane could answer for when the menu was raised.
     subject: profiles::TermMenuSubject,
     hover: Option<profiles::TermMenuHover>,
+    /// Which hand lit `hover` last — what a relayout under it does with it
+    /// ([`profiles::relit`]).
+    lit_by: profiles::LitBy,
     /// **Whether the pane was the only one in its tab when the menu came up**
     /// (§7.1.6i's floor) — the one fact the pane-verb segment turns on.
     ///
@@ -9822,6 +9907,9 @@ struct PaneMenuState {
     /// anyway — the verb that would shuts the menu on its way through.
     zoomed: bool,
     hover: Option<profiles::PaneMenuHover>,
+    /// Which hand lit `hover` last — what a relayout under it does with it
+    /// ([`profiles::relit`]).
+    lit_by: profiles::LitBy,
     /// **Which of this menu's rows has its list open** (B9), or `None` when
     /// none has.
     ///
@@ -10457,8 +10545,9 @@ fn shown_address(url: &str) -> String {
 /// the page's own bottom edge every time the pointer crossed a link.
 ///
 /// A target this window will not follow is written out in full and stamped
-/// `· blocked` (2026-08-20's terminal hover-line ruling, same words from
-/// [`i18n::Text::HyperlinkBlockedSuffix`]). The stamp is on the hovered target
+/// with why — `· address invalid` or `· blocked` (2026-08-20's terminal
+/// hover-line ruling, the same words from [`LinkRefusal::suffix`]; owner ruling
+/// 2026-10-06, the suffix says what is true). The stamp is on the hovered target
 /// only: the seat's own URL committed, so it is by definition one this window
 /// went to, and there is no longer any rest state in which it could be stamped.
 /// **Both addresses are handed in, and the page's own is deliberately unused.**
@@ -10478,7 +10567,7 @@ fn page_foot_lead(_page_url: &str, hover: &str) -> String {
     // because a link into a local file is a local file (`shown_address`).
     let mut lead = shown_address(hover);
     if !matches!(webnav::address_bar(hover), webnav::Decision::Navigate(_)) {
-        lead.push_str(i18n::Text::HyperlinkBlockedSuffix.text());
+        lead.push_str(LinkRefusal::of_address(hover).suffix(i18n::current()));
     }
     lead
 }
@@ -11503,6 +11592,22 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// **A shell still being born** (T-PROGRAMS-REFRESH, T-LAUNCH-PROBE's invariant): `Some`
+    /// while the rule that decides which program this pane starts needs a row the program walk
+    /// has not answered, `None` for every pane whose shell was decided at creation. Such a pane
+    /// owns no process yet; it holds the seed it will be born from — its identity, the
+    /// unresolved default or a named profile and never a fallback — and what is typed into it
+    /// meanwhile, which reaches the shell first and in order. See [`PaneBirth`].
+    ///
+    /// And `Some` while this pane's pseudoconsole and process are being made on their worker
+    /// (T-BIRTH-OFF-WINDOW): every pane whose shell is started is born this way, and lands on a
+    /// later turn (`Runtime::land_births`).
+    birth: Option<PaneBirth>,
+    /// **The shell *Restart shell* is bringing up in this pane's place** (T-BIRTH-OFF-WINDOW), in
+    /// birth beside the shell it replaces: this pane goes on being the one typed into until the
+    /// successor lands, and a successor whose birth fails leaves it exactly as it was. `None` on
+    /// every pane not being restarted.
+    successor: Option<Box<LeafSession>>,
     foreground_program_cadence: foreground_program::Cadence,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
@@ -11846,6 +11951,141 @@ struct LeafSession {
     pending_paste: Option<PendingPaste>,
 }
 
+/// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
+/// answering the program rows it needs (T-PROGRAMS-REFRESH), and the `bt-pty-birth` worker
+/// answering for its pseudoconsole and process (T-BIRTH-OFF-WINDOW).
+///
+/// The pane is found again where it stands, in whichever window holds it by then, so an answer
+/// that arrives after it closed finds nothing. `typed` is the queue that stands in for the
+/// pseudoconsole's input ring: every byte offered to this pane before its shell exists is kept, in
+/// order, and written to the shell at its birth.
+#[derive(Debug)]
+struct PaneBirth {
+    seed: LeafSeed,
+    probe_input: Option<Vec<u8>>,
+    typed: std::cell::RefCell<Vec<u8>>,
+    waiting: BirthWait,
+}
+
+/// **What a pane in birth is waiting for.**
+#[derive(Debug)]
+enum BirthWait {
+    /// A program row the walk has not answered: nothing about the pane's shell is decided yet.
+    /// The walk counts this pane as waiting while it is held, so every walk asked meanwhile runs in
+    /// the band of a walk a pane waits on (`programs_lane::PaneWaits`).
+    Programs { _waits: programs_lane::PaneWaits },
+    /// Its pseudoconsole and process, asked of `bt-pty-birth` with everything decided.
+    Shell(ShellLanding),
+}
+
+/// **A shell being born for a decided pane**, and what its landing needs that the window thread
+/// decided before it asked (`finish_leaf_birth`).
+#[derive(Debug)]
+struct ShellLanding {
+    shell: pty_door::ShellBirth,
+    decision: BirthDecision,
+    /// The grid the pseudoconsole is born at — what it has been told.
+    born_grid: GridSize,
+    /// The physical size of the last resize released while the shell was being born, when one
+    /// was: the pane's grid moved and its pseudoconsole is owed it at the landing.
+    owed_physical: Option<PhysicalSize<u32>>,
+}
+
+/// **What the window thread decided about a pane's shell before asking for it**: the rule's
+/// verdict, the profile the spawn is for, where it is put down, and the program it starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BirthDecision {
+    started: Started,
+    spawn_profile: String,
+    spawn_place: Option<PathBuf>,
+    at_shell_home: bool,
+    named: bool,
+    program: Option<PathBuf>,
+    /// The folder the birth asks the disk about, and where the pane stands when it is gone
+    /// (G-SWEEP-048, #29).
+    unless_gone: Option<Box<profiles::GoneFolder>>,
+}
+
+impl BirthDecision {
+    /// **The decision for a pane whose folder the birth found gone**: standing where no folder
+    /// would have put it, and a `diagnostics.log` line that says which folder and where instead.
+    fn with_folder_gone(mut self, note: &mut dyn FnMut(&str)) -> Self {
+        if let Some(gone) = self.unless_gone.take().map(|gone| *gone) {
+            note(&format!(
+                "{} is not a folder this machine can open now (removed, or on a share that is not \
+                 answering); the shell started in {} instead",
+                gone.folder.display(),
+                gone.place.directory.as_deref().map_or_else(
+                    || "this process's folder".to_owned(),
+                    |directory| directory.display().to_string()
+                )
+            ));
+            self.spawn_place = gone.place.directory;
+            self.at_shell_home = gone.place.at_shell_home;
+            self.named = gone.place.named;
+        }
+        self
+    }
+}
+
+impl PaneBirth {
+    /// **Keep bytes for the shell being born — on the input ring's terms** (`bt_pty::InputRing`):
+    /// a write is taken whole when nothing is held whatever its size, or when it fits under
+    /// [`bt_pty::PTY_INPUT_RING_BYTES`] beside what is; otherwise none of it is taken and the
+    /// answer is the ring's own refusal. The walk a birth waits on has no deadline, so this is
+    /// what keeps a pane stuck behind a dead `PATH` entry from holding a paste without end.
+    fn hold(&self, bytes: &[u8]) -> Result<(), bt_pty::PtyError> {
+        let mut typed = self.typed.borrow_mut();
+        let capacity = bt_pty::PTY_INPUT_RING_BYTES.get();
+        if !typed.is_empty() && typed.len() + bytes.len() > capacity {
+            return Err(bt_pty::PtyError::InputRefused {
+                offered: bytes.len(),
+                queued: typed.len(),
+                capacity,
+            });
+        }
+        typed.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// **Hand what was held to the shell that has just been born**, in the order it was offered,
+    /// through `write`; the queue is emptied only once `write` took it, so a write that fails
+    /// leaves every byte held. Nothing held is nothing written.
+    fn deliver(&self, write: impl FnOnce(&[u8]) -> Result<()>) -> Result<()> {
+        let held = self.typed.borrow().clone();
+        if held.is_empty() {
+            return Ok(());
+        }
+        write(&held)?;
+        self.typed.borrow_mut().clear();
+        Ok(())
+    }
+}
+
+/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane born with
+/// no shell (a program this machine does not have, `Started::Nothing`, or a shell that did not
+/// start), nowhere: then the bytes are dropped and `note` is told once how many.
+fn deliver_held_input(
+    birth: &PaneBirth,
+    target: PtyTarget<'_>,
+    mut note: impl FnMut(&str),
+) -> Result<()> {
+    birth.deliver(|held| match target {
+        PtyTarget::Nowhere => {
+            note(&format!(
+                "a pane born with no shell (no program here, or its shell did not start) dropped                  the {} byte(s) typed into it while it waited",
+                held.len()
+            ));
+            Ok(())
+        }
+        target => write_pty_input(
+            target,
+            held,
+            "deliver what was typed while the shell was being born",
+        ),
+    })
+}
+
 struct TabState {
     id: TabId,
     /// This tab's shells, one per Terminal leaf, keyed by the seat they draw
@@ -11985,6 +12225,9 @@ struct TabState {
     /// sets it and every tab reads through to what the program or the shell
     /// said.
     manual_name: Option<String>,
+    /// **The environment a launch carried into this tab** ([`TabSeed::carried_environment`]), the source
+    /// for every shell born in it ([`born_in_tab`]). Held in memory and never saved.
+    carried_environment: Option<cli::CarriedEnvironment>,
     pending_keyboard_at: Option<Instant>,
     /// **A resize present is owed to this tab's focused pane** (ticket 47).
     ///
@@ -12316,6 +12559,12 @@ enum Announce {
     OnlyFailures,
 }
 
+#[cfg(target_os = "linux")]
+type PendingWindowLook = (
+    Option<WindowId>,
+    Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+);
+
 /// **What is true of this program, whatever window you are looking at**
 /// (multiwindow slice B, `docs/spikes/spike-multiwindow.md` 片 B).
 ///
@@ -12400,7 +12649,26 @@ struct App {
     /// window kept for itself would hand two windows the same name for two
     /// different pictures. A number minted here is unique wherever it is read.
     animation_serials: u64,
+    #[cfg(target_os = "linux")]
+    display_generation: u64,
+    #[cfg(target_os = "linux")]
+    display_input_generation: u64,
     event_proxy: EventLoopProxy<AppEvent>,
+    /// The one process-wide asynchronous owner for Linux clipboard ordering.
+    #[cfg(target_os = "linux")]
+    clipboard_lane:
+        Option<linux_clipboard_lane::ClipboardLane<ClipboardTargetToken, ClipboardWriteTarget>>,
+    /// App-owned Linux trash transactions and the duties their results carry.
+    #[cfg(target_os = "linux")]
+    trash_lane: Option<trash_lane::TrashLane>,
+    #[cfg(target_os = "linux")]
+    pending_trash: HashMap<trash_lane::TrashId, TrashTarget>,
+    /// Folder news owed until locally accepted scheme deletes settle.
+    #[cfg(target_os = "linux")]
+    schemes_rescan_owed: bool,
+    /// A last-window close awaiting accepted trash transactions.
+    #[cfg(target_os = "linux")]
+    pending_last_window_close: Option<WindowId>,
     /// **The OS hand-off lane** — the one thread every hand-off that leaves a window runs on
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
     /// be unique across windows, because an answer finds its window by id.
@@ -12518,21 +12786,28 @@ struct App {
     /// unnamed row means the default, and the default is bundled.
     scheme_source: [Option<(String, String)>; 2],
     /// Which of [`profiles::PROFILES`] this machine can actually start, and with
-    /// which executable — probed once, when the window opens.
+    /// which executable — the program walk's answers, adopted between frames
+    /// (T-PROGRAMS-REFRESH).
     ///
-    /// Once, and held here, for the reason [`profiles::ProfilePrograms`] gives:
-    /// availability is a filesystem question and the picker asks it of every row
-    /// on every frame it is open. Held on the `Runtime` rather than passed down
-    /// from the event loop because it is the same kind of fact as `settings` —
-    /// something about the world this window was opened into, which every verb
-    /// that starts a shell has to consult and none of them may re-derive.
-    ///
-    /// It is deliberately **not** re-probed when a menu opens. Installing Git
-    /// while a menu is on screen is not a case worth a filesystem call per
-    /// frame, and the failure it would introduce — a row changing under a
-    /// pointer already travelling toward it — is worse than the staleness it
-    /// would fix.
+    /// Held here for the reason [`profiles::ProfilePrograms`] gives: availability
+    /// is a filesystem question and the picker asks it of every row on every frame
+    /// it is open, so a frame and the click aimed at it read one value. One for
+    /// the application, because it is a fact about the machine and not about a
+    /// window. **It follows the machine**: a menu that lists programs opening, a
+    /// settings page, the environment broadcast and a pane waiting for a row ask
+    /// the walk again (`programs_lane`), and [`FolioApp::adopt_program_walk`] is
+    /// its one writer after the launch. Every window then re-reads it on its turn
+    /// ([`Self::program_news`]).
     profile_programs: profiles::ProfilePrograms,
+    /// **Each window's seat in the program walk's news** (T-PROGRAMS-REFRESH) — told, through
+    /// `tell_all`, every time an answer moved what [`Self::profile_programs`] or a profile's name
+    /// says, and taken by each window on its own turn to re-lay out and relight the menus that
+    /// list programs and to bear the panes that were waiting for a row. Seated and released by the
+    /// window directory's walk, beside the git watch.
+    program_news: window_news::WindowSeats<WindowId, MachineNews>,
+    /// The startup trace's shell lines while a launch tab's shell is still being born — see
+    /// [`StartupShells`]. `None` once said, and for every launch that had nothing to wait for.
+    startup_shells: Option<StartupShells>,
     // `editor` is **retired** (user ruling 2026-08-25: 「既然有 default app 了,
     // 就把 VS Code 去掉」). It held `profiles::find_vscode`'s answer for one row
     // of one menu, and the row is gone — the door above it hands the path to
@@ -12565,6 +12840,9 @@ struct App {
     /// copy was installed (U-3). Never rearmed: once spent, a still-missing
     /// answer is read as unknown.
     first_run_waited_for_channel: bool,
+    /// Whether the first-run card has already waited its one turn for the program walk's reading
+    /// of the agent folders (`first_run::agent_folders_settled`).
+    first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
     /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
@@ -12826,6 +13104,16 @@ struct App {
     /// and queues the other two, and an accepted restore prompt can queue as many
     /// as the file described.
     pending_new_windows: Vec<NewWindowPlan>,
+    #[cfg(target_os = "linux")]
+    pending_quake_summon: Option<PendingQuakeSummon>,
+    #[cfg(target_os = "linux")]
+    pending_new_window_display: Option<PendingNewWindowDisplay>,
+    #[cfg(target_os = "linux")]
+    pending_new_window_like: Option<PendingWindowLook>,
+    #[cfg(target_os = "linux")]
+    pending_new_window_restore_placement: Option<(Option<WindowId>, Option<RestoredPlacement>)>,
+    #[cfg(target_os = "linux")]
+    pending_drag_guard_screen: Option<PendingDragGuardScreen>,
     /// **The drag that is crossing a window boundary**, if one is (multiwindow
     /// slice F2/F4). See [`DragBroker`] for why the pointer needs a broker at all
     /// and why the clock is here rather than on either window.
@@ -13036,14 +13324,13 @@ struct NewWindowPlan {
     /// See [`TearOut`] for what the errand carries and why the seed tab this
     /// window opens holding is scaffolding.
     receives: Option<TearOut>,
-    /// **Whether this is the window a key summons** (§7.54).
+    /// **Whether this saved window is the summoned terminal** (§7.54).
     ///
-    /// A field of the plan and not a fact discovered afterwards, because three
-    /// things about the window are decided while it is being built and all three
-    /// read it: it stays above other windows whatever the `Always on top` row
-    /// says, it is not put on the screen when the door finishes, and it is
-    /// written into the document as the summoned one. A window told about its own
-    /// kind after it was standing would have been an ordinary window for a frame.
+    /// The actual native backend decides how that identity is presented. X11
+    /// keeps the summon hidden until its chord and can place, restore and focus
+    /// it. Wayland cannot provide that lifecycle, so `Runtime::open_window`
+    /// shows the saved tabs as an ordinary window while retaining this marker and
+    /// its placement preferences in the document.
     quake: bool,
 }
 
@@ -13077,6 +13364,36 @@ struct TearOut {
     /// and the grip and [`tear_out_rect`] turns them into a rectangle at the
     /// target monitor's dpi.
     at: Option<((i32, i32), TearGrip)>,
+    #[cfg(target_os = "linux")]
+    screen: Option<(bt_platform::WindowRect, u32)>,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingQuakeSummon {
+    window: WindowId,
+    previous: Option<bt_platform::hotkey::Foreground>,
+    request: bt_platform::linux_display::LinuxDisplayRequest,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingDragGuardScreen {
+    broker_generation: u64,
+    request: bt_platform::linux_display::LinuxDisplayRequest,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingNewWindowDisplay {
+    plan: NewWindowPlan,
+    request: bt_platform::linux_display::LinuxDisplayRequest,
+    like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
+    input_generation: u64,
+    kind: PendingNewWindowDisplayKind,
+}
+
+#[cfg(target_os = "linux")]
+enum PendingNewWindowDisplayKind {
+    TearOut,
+    Restore { inputs: Vec<RestoreMonitorInput> },
 }
 
 impl NewWindowPlan {
@@ -13197,6 +13514,9 @@ impl NewWindowPlan {
 /// field into a map keyed by `WindowId`; this slice only makes that sentence
 /// something the type system can express.
 struct WindowRuntime {
+    /// Identity of this particular native window instance for delayed operations.
+    #[cfg(target_os = "linux")]
+    instance_identity: Arc<()>,
     ime_report: ime_report::Report,
     ime_report_due: Option<Instant>,
     /// **When this window gives up waiting for its pages to let go** (§7.35).
@@ -13466,7 +13786,7 @@ struct WindowRuntime {
     /// offered to undo is no longer the thing that would come back.
     profile_undo: Option<(toast::ToastId, profiles::Profile, usize)>,
     /// The one managed `$PROFILE` line a standing toast can remove again.
-    powershell_profile_undo: Option<(toast::ToastId, PathBuf, PathBuf)>,
+    powershell_profile_undo: Option<(toast::ToastId, PathBuf, shell_integration::ProfileEdit)>,
     /// **Where a checkout came from**, while it is in flight (user ruling,
     /// 2026-08-19): the repository, and the branch `HEAD` was on before.
     ///
@@ -13713,6 +14033,16 @@ struct WindowRuntime {
     /// anything inside this window that wanted the keys.
     web_keyboard: Option<LeafId>,
     window: Arc<Window>,
+    #[cfg(target_os = "linux")]
+    last_winit_rect: Option<bt_platform::WindowRect>,
+    #[cfg(target_os = "linux")]
+    last_winit_size: Option<PhysicalSize<u32>>,
+    #[cfg(target_os = "linux")]
+    native_client_origin: Option<(i32, i32)>,
+    #[cfg(target_os = "linux")]
+    maximize_intent: WindowMaximizeIntent,
+    #[cfg(target_os = "linux")]
+    native_window_minimized: Option<bool>,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
     /// An outbox, replaced whole at each commit rather than appended to, because
@@ -13733,6 +14063,11 @@ struct WindowRuntime {
     background_visible: Option<Duration>,
     first_text_visible: Option<Duration>,
     window_shown: bool,
+    /// This session came from a saved summon that native Wayland cannot hide
+    /// and restore. The live window acts as ordinary UI, while snapshots retain
+    /// the summon marker and its stored per-display placements for a later
+    /// backend that can honor them.
+    restored_quake_as_ordinary: bool,
     first_visible_present_dpi_checked: bool,
     first_text_presented: bool,
     /// The next absolute pre-prompt PTY poll. Querying the deadline never moves
@@ -13853,6 +14188,22 @@ struct WindowRuntime {
     ///
     /// `None` on every turn but the one after a drop.
     dropped_files: Option<DropBatch>,
+    #[cfg(target_os = "linux")]
+    pending_summoned_arrangement: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    #[cfg(target_os = "linux")]
+    summoned_arrangement_refresh_owed: bool,
+    #[cfg(target_os = "linux")]
+    pending_window_rect: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    #[cfg(target_os = "linux")]
+    window_rect_refresh_owed: bool,
+    #[cfg(target_os = "linux")]
+    pending_work_area: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    #[cfg(target_os = "linux")]
+    work_area_refresh_owed: bool,
+    #[cfg(target_os = "linux")]
+    pending_external_drop: Option<PendingExternalDrop>,
+    #[cfg(target_os = "linux")]
+    pending_paste_path: Option<PendingPastePath>,
     /// When the last present happened, so the trace can report the *interval*
     /// between two pictures rather than only the cost of making one. The cost of
     /// a frame is what a profiler measures; the gap between frames is what a
@@ -14935,12 +15286,15 @@ struct WindowRuntime {
     /// persisted: it is a fact about this sitting, and a file that remembered it
     /// would let a refusal from last month be re-opened by a font change today.
     psreadline_size_changed: bool,
-    /// Whether the gate's `Discard` has asked for the window to go.
+    /// **Which window the gate's confirmed answer has asked to go**, if it has —
+    /// this window after its own shut, or the run's last ordinary window after
+    /// the run's end was answered here, in the summoned terminal
+    /// (T-SUMMON-DIRTY-PREVIEW).
     ///
-    /// A flag rather than a call, because the shut belongs to the event loop:
-    /// `CloseRequested` is what performs it, and the gate re-requests it rather
-    /// than performing half of it here (see [`Runtime::answer_dirty_gate`]).
-    window_close_requested: bool,
+    /// A request rather than a call, because the close belongs to the event
+    /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
+    /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
+    window_close_requested: Option<WindowId>,
     /// Which preview pane has its filename switcher up (P130-P137).
     ///
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
@@ -15022,22 +15376,6 @@ struct WindowRuntime {
     /// frame put on the glass rather than a set it computes for itself and
     /// hopes matches.
     palette_layout: Option<palette::PaletteLayout>,
-    /// **The seat whose shell is being replaced**, for as long as it is.
-    ///
-    /// One at a time by construction — a restart is asked for from a menu, and
-    /// raising a menu is a gesture — so an `Option` rather than a set, and the
-    /// `Option` is what `Restart shell…` is greyed from (ticket #62, item 4).
-    ///
-    /// Today's teardown-and-spawn completes inside the call that starts it, so
-    /// nothing can read this between the two halves; it is a field rather than a
-    /// local because the contract's teardown is not finished. Per
-    /// `docs/M2-restart-shell-contract.md` §1.2 the old process is owed a gentle
-    /// exit signal and a **timeout** before it is killed outright, and a timeout
-    /// is a wait — the moment that lands, the greyed row is the only thing
-    /// standing between a reader and a second restart of a shell that has not
-    /// finished dying. Stating the rule where the wait will be is what keeps the
-    /// two from being written by different people.
-    restarting: Option<SeatId>,
     /// **The two `⌄` clocks** (user ruling, 2026-08-16) — one policy, two
     /// buttons, and a single struct so that there is nowhere for them to differ.
     chevrons: ChevronGates,
@@ -17279,7 +17617,7 @@ mod tab_identity_tests {
 
         // The seat half of the lookup is a free function so it can be pinned by
         // value as well as by shape — see
-        // `tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
+        // `app_preview_tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
         let among = free_fn_body("preview_tab_index_among");
         assert!(
             among.contains("state.id == tab"),
@@ -17617,6 +17955,8 @@ mod tab_identity_tests {
             // The menu row's own answer (F1c): a verb names no place. F2's drag
             // names one, and that is [`tear_out_rect`]'s own pin.
             at: None,
+            #[cfg(target_os = "linux")]
+            screen: None,
         };
         let carrying = NewWindowPlan::receiving(asker, errand);
         let carried = carrying.receives.expect("this window is opened to receive");
@@ -18069,7 +18409,7 @@ impl TabState {
     /// has never reported a folder is not called PowerShell. It is the same
     /// mistake the mark made, one column to the right.
     fn focused_profile_title(&self) -> &'static str {
-        profiles::title(profiles::index_of_id(&self.leaf_profile(self.focused_leaf)))
+        profiles::identity_title(&self.leaf_profile(self.focused_leaf))
     }
 
     /// What this tab's tooltip says (M140).
@@ -18246,7 +18586,7 @@ impl TabState {
     fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
         self.sessions
             .iter()
-            .map(|(seat, leaf)| (*seat, profiles::mark(profiles::index_of_id(&leaf.profile))))
+            .map(|(seat, leaf)| (*seat, profiles::identity_mark(&leaf.profile)))
             .collect()
     }
 
@@ -18303,9 +18643,9 @@ impl TabState {
         // used to do unconditionally, was harmless only while the preview arm
         // ignored the argument.
         let content = match kind {
-            bt_layout::SeatKind::Terminal => Some(profiles::mark(profiles::index_of_id(
-                &self.leaf_profile(seat),
-            ))),
+            bt_layout::SeatKind::Terminal => {
+                Some(profiles::identity_mark(&self.leaf_profile(seat)))
+            }
             // **And the site's own icon where it has one** (§7.7 ②) — which is
             // why the argument is a map and not the set it was: "this leaf holds
             // a page" and "this is the icon that page wears" are one fact about
@@ -18544,7 +18884,11 @@ fn dirty_gate_names(
             }
         }
         restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
-        restore::GateRequest::Shut => tabs.iter().flat_map(one_tab).collect(),
+        // The run's end, asked in the summoned terminal, loses what its shut
+        // would: every tab's dirty buffers.
+        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
+            tabs.iter().flat_map(one_tab).collect()
+        }
         // A discard names one file, and it is never empty — which matters,
         // because `raise_dirty_gate` treats an empty list as "there is
         // nothing to ask about" and lets the verb through. There is always
@@ -18594,6 +18938,53 @@ fn raise_dirty_gate_over(
 ) -> restore::GateRaise {
     let at_risk = dirty_gate_names(tabs, active_tab, &request);
     gate.raise(request, &at_risk)
+}
+
+/// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
+/// (D-4, 0.4.8 G7) — the whole of [`Runtime::keep_unsaved_edits`] except its
+/// diagnostics lines. Every tab's pool and not the active tab's, on the quit
+/// gate's own reasoning: a dirty buffer on a tab nobody is looking at is still a
+/// dirty buffer. Each pool keeps its own through
+/// [`preview::PreviewPool::keep_dirty`].
+fn keep_unsaved_edits_over(
+    tabs: &mut [TabState],
+    recovery: &Path,
+    at: SystemTime,
+) -> Vec<preview::Kept> {
+    tabs.iter_mut()
+        .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
+        .collect()
+}
+
+/// **What an answer to one of the two exits comes to over the asking window's
+/// tabs** (B1; T-SUMMON-DIRTY-PREVIEW): the window whose close the loop is asked
+/// to re-run — `closes`, the window itself for a shut and the run's last ordinary
+/// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
+/// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
+/// has already made through [`Runtime::quit_save`] (`saved_all`: whether all of
+/// it landed).
+///
+/// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
+/// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
+/// the dirty buffers and only those: the rest of each pool is the list of files
+/// the switcher shows next launch (`TabState::preview_content`), and the gate
+/// raises itself off the dirty ones, so the re-run close finds nothing to ask.
+fn answer_an_exit_over(
+    tabs: &mut [TabState],
+    closes: WindowId,
+    answer: restore::GateAnswer,
+    saved_all: bool,
+) -> Option<WindowId> {
+    match answer {
+        restore::GateAnswer::Cancel => None,
+        restore::GateAnswer::Save => saved_all.then_some(closes),
+        restore::GateAnswer::Discard => {
+            for tab in tabs {
+                tab.preview_pool.discard_dirty();
+            }
+            Some(closes)
+        }
+    }
 }
 
 /// **Which of the tabs whose shells have all exited the loop may close on its
@@ -19779,6 +20170,12 @@ fn preview_opened_label() -> &'static str {
 /// built from a host or a scheme and a `&'static str` cannot carry one (§7.7 ④).
 struct CardWords {
     notice: String,
+    /// The address the card is about, in full and in the row's spelling, or empty
+    /// (owner's ruling 2026-10-09: a page that does not open names it).
+    address: String,
+    /// That address folded to the seat by `seats::fold_address` beside the renderer, the
+    /// counterpart of [`Self::detail_lines`].
+    address_line: String,
     /// The one fact, or empty.
     detail: String,
     /// That fact, wrapped to the seat beside the renderer (§7.43) — the
@@ -19846,6 +20243,8 @@ fn refused_preview_card(
 ) -> CardWords {
     CardWords {
         notice,
+        address: String::new(),
+        address_line: String::new(),
         detail: String::new(),
         detail_lines: Vec::new(),
         verb: offers_the_default_app.then(|| open_label.to_owned()),
@@ -20099,13 +20498,88 @@ enum TextFieldSeat {
     FindBar,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct ClipboardTargetToken {
+    window: WindowId,
+    window_identity: Arc<()>,
+    destination: ClipboardDestination,
+}
+
 /// What a clipboard write should say once the platform's clipboard path has
 /// accepted it.
 enum ClipboardWriteEffect {
     None,
+    #[cfg(target_os = "linux")]
+    ClearTerminalSelection {
+        target: PasteTarget,
+        expected: ViewSelection,
+    },
+    #[cfg(target_os = "linux")]
+    MathCopied {
+        target: PasteTarget,
+        anchor: MathBlockAnchor,
+    },
     Toast {
         anchor: toast::ToastAnchor,
         text: String,
+    },
+}
+
+#[cfg(target_os = "linux")]
+struct ClipboardWriteTarget {
+    window: WindowId,
+    window_identity: Arc<()>,
+    effect: ClipboardWriteEffect,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+enum ClipboardDestination {
+    Terminal(PasteTarget),
+    Field(ClipboardFieldTarget),
+    Preview {
+        surface: PreviewSurface,
+        source: preview::PreviewSource,
+        identity: Arc<()>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+enum ClipboardFieldTarget {
+    Rename(Arc<()>),
+    GitPrompt(Arc<()>),
+    Palette(Arc<()>),
+    Settings {
+        target: settings::SettingsTarget,
+        identity: Arc<()>,
+    },
+    GraphSearch {
+        tab: TabId,
+        surface: PreviewSurface,
+        identity: Arc<()>,
+    },
+    FindBar {
+        tab: TabId,
+        seat: SeatId,
+        identity: Arc<()>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+enum TrashTarget {
+    File {
+        leaf: LeafId,
+        root: String,
+        key: String,
+        name: String,
+        parent: PathBuf,
+    },
+    Scheme {
+        window: WindowId,
+        window_identity: Arc<()>,
+        file: String,
     },
 }
 
@@ -20941,8 +21415,45 @@ fn take_psreadline_resize_reanchor_input(
 ///
 /// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
 /// refusal and not an error: there is nowhere for the bytes to go and never was.
-fn write_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<()> {
+///
+/// A leaf whose shell is being born keeps them for that shell ([`PaneBirth`]).
+fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<()> {
     offer_pty_input(pty, bytes, what).map(drop)
+}
+
+/// **Where a pane's input goes**: its shell's ring, the queue of a shell being born, or nowhere.
+#[derive(Clone, Copy)]
+enum PtyTarget<'a> {
+    Shell(&'a PtySession),
+    Birth(&'a PaneBirth),
+    Nowhere,
+}
+
+impl<'a> PtyTarget<'a> {
+    /// The target a leaf's two input facts name — its shell, else the shell being born.
+    fn of(pty: Option<&'a PtySession>, birth: Option<&'a PaneBirth>) -> Self {
+        match (pty, birth) {
+            (Some(pty), _) => Self::Shell(pty),
+            (None, Some(birth)) => Self::Birth(birth),
+            (None, None) => Self::Nowhere,
+        }
+    }
+}
+
+impl LeafSession {
+    /// Where bytes offered to this pane go — see [`PtyTarget`].
+    fn input_target(&self) -> PtyTarget<'_> {
+        PtyTarget::of(self.pty.as_ref(), self.birth.as_ref())
+    }
+
+    /// Whether this pane is in birth for its shell and the shell has answered — the landing is
+    /// due ([`land_shell_birth`]).
+    fn shell_answered(&self) -> bool {
+        matches!(
+            self.birth.as_ref().map(|birth| &birth.waiting),
+            Some(BirthWait::Shell(landing)) if landing.shell.answered()
+        )
+    }
 }
 
 /// **What became of the bytes** — the same door, for the callers that have to
@@ -20962,9 +21473,20 @@ fn write_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -
 /// whether the program on the other end reads them, and what it makes of them,
 /// is its own business and nothing this process can report. A drop's focus move
 /// is answering "did this window send it", which is the question this answers.
-fn offer_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
-    let Some(pty) = pty else {
-        return Ok(PtyInput::NoChild);
+fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
+    let pty = match pty {
+        PtyTarget::Shell(pty) => pty,
+        PtyTarget::Birth(birth) => {
+            return match birth.hold(bytes) {
+                Ok(()) => Ok(PtyInput::HeldForBirth),
+                // Said as the shell's own refusal is said, and for its reason.
+                Err(refused) => {
+                    eprintln!("{what}: {refused}");
+                    Ok(PtyInput::Refused)
+                }
+            };
+        }
+        PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
     };
     match hang_watch::during(hang_watch::Station::PtyInput, || {
         let result = pty.write_with_reason(bytes, what);
@@ -20999,12 +21521,15 @@ enum PtyInput {
     /// whose shell is gone. Not a refusal and not an error — there is nowhere
     /// for the bytes to go and never was.
     NoChild,
+    /// Kept for a shell being born, which receives them first, in order — the part the
+    /// pseudoconsole's input ring plays for a shell that exists.
+    HeldForBirth,
 }
 
 impl PtyInput {
     /// Whether this window actually sent the bytes.
     const fn queued(self) -> bool {
-        matches!(self, Self::Queued)
+        matches!(self, Self::Queued | Self::HeldForBirth)
     }
 }
 
@@ -21295,6 +21820,16 @@ fn release_due_leaf_resize(
     )?;
     leaf.grid = pending.grid;
     leaf.conpty_grid = pending.grid;
+    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW): it was
+    // asked for at the grid of its request, and nothing above could tell it.
+    if let Some(PaneBirth {
+        waiting: BirthWait::Shell(landing),
+        ..
+    }) = leaf.birth.as_mut()
+        && commit.told_the_child
+    {
+        landing.owed_physical = Some(pending.physical);
+    }
     Ok((Some(commit), wake))
 }
 
@@ -23692,7 +24227,7 @@ impl ControlClickHint {
             | HyperlinkActivation::Page(_)
             | HyperlinkActivation::Preview(_, _)
             | HyperlinkActivation::FilesColumn(_)
-            | HyperlinkActivation::Blocked => None,
+            | HyperlinkActivation::Blocked(_) => None,
         }
     }
 
@@ -23733,12 +24268,59 @@ fn printable_address(uri: &str) -> String {
         .collect()
 }
 
+/// **Why a link was not followed** — the three things the hover line can truly say about it
+/// (owner ruling 2026-10-06: 「已拦截」/"blocked" is never said of an address that is not one).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkRefusal {
+    /// The text is not an address: its host does not parse, it has no host, it holds a control
+    /// character — or, for a reference, it names nothing this machine can name.
+    Invalid,
+    /// The system took the hand-off and had nothing to open it with.
+    NoProgram,
+    /// An address the door will not go to: a scheme, userinfo, a page asking for a window.
+    Door,
+}
+
+impl LinkRefusal {
+    /// What the address door says about `address`, as one of the three.
+    ///
+    /// An address the door admits was refused by a door after it (the gesture rule of a page's
+    /// new window), so it is the door's refusal; text the door would search for is not an
+    /// address.
+    fn of_address(address: &str) -> Self {
+        match webnav::address_bar(address) {
+            webnav::Decision::Refuse(refusal) if refusal.is_malformed() => Self::Invalid,
+            webnav::Decision::Search(_) => Self::Invalid,
+            webnav::Decision::Refuse(_) | webnav::Decision::Navigate(_) => Self::Door,
+        }
+    }
+
+    /// The suffix, separator included.
+    fn suffix(self, lang: i18n::Lang) -> &'static str {
+        match self {
+            Self::Invalid => i18n::Text::HyperlinkInvalidSuffix.in_lang(lang),
+            Self::NoProgram => i18n::Text::HyperlinkNoProgramSuffix.in_lang(lang),
+            Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
+        }
+    }
+
+    /// The same words alone, for a pane too narrow for the address as well.
+    fn word(self, lang: i18n::Lang) -> &'static str {
+        match self {
+            Self::Invalid => i18n::Text::HyperlinkInvalid.in_lang(lang),
+            Self::NoProgram => i18n::Text::HyperlinkNoProgram.in_lang(lang),
+            Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
+        }
+    }
+}
+
 #[derive(Default)]
 struct HyperlinkHover {
     candidate: Option<HyperlinkHit>,
     show_at: Option<Instant>,
     active: Option<HyperlinkHit>,
-    blocked: bool,
+    /// Why the press on [`Self::active`] was refused, when it was.
+    refused: Option<LinkRefusal>,
     /// Filled once, when the hover settles — see [`ControlClickHint`].
     ///
     /// Once and not per frame, because the status line is repainted on every frame the pane owes
@@ -23761,7 +24343,7 @@ impl HyperlinkHover {
             return false;
         }
         let active_changed = self.active.take().is_some();
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = None;
         // The underline is the affordance and follows the candidate immediately; only the status
         // tooltip waits out the hover delay. A candidate change therefore needs a republish too.
@@ -23794,7 +24376,7 @@ impl HyperlinkHover {
         }
         self.show_at = None;
         self.active = self.candidate.take();
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = self
             .active
             .as_ref()
@@ -23802,11 +24384,11 @@ impl HyperlinkHover {
         self.active.is_some()
     }
 
-    fn show_blocked(&mut self, hyperlink: HyperlinkHit) {
+    fn show_refused(&mut self, hyperlink: HyperlinkHit, refusal: LinkRefusal) {
         self.candidate = None;
         self.show_at = None;
         self.active = Some(hyperlink);
-        self.blocked = true;
+        self.refused = Some(refusal);
         // A refusal is the answer to the very press the sentence was offering;
         // printing the offer beside the refusal would be the line arguing with
         // itself.
@@ -23816,7 +24398,7 @@ impl HyperlinkHover {
     fn clear(&mut self) -> bool {
         self.candidate = None;
         self.show_at = None;
-        self.blocked = false;
+        self.refused = None;
         self.hands_on = None;
         self.active.take().is_some()
     }
@@ -23845,8 +24427,8 @@ impl HyperlinkHover {
             return None;
         }
         let uri_columns = bt_unicode::text_width(&uri);
-        let suffix = if self.blocked {
-            i18n::Text::HyperlinkBlockedSuffix.in_lang(lang)
+        let suffix = if let Some(refusal) = self.refused {
+            refusal.suffix(lang)
         } else {
             // **The aside about `Ctrl` is printed only when it costs the target
             // nothing** (丙3). A verdict is the answer to a press somebody
@@ -23862,10 +24444,10 @@ impl HyperlinkHover {
         };
         let suffix_columns = bt_unicode::text_width(suffix);
         if columns <= suffix_columns {
-            return Some(head_within_columns(
-                i18n::Text::HyperlinkBlocked.in_lang(lang),
-                columns,
-            ));
+            // The refusal's word alone; with no refusal the suffix is the hint, which is only
+            // printed when it fits.
+            let word = self.refused.map_or(suffix, |refusal| refusal.word(lang));
+            return Some(head_within_columns(word, columns));
         }
         let target_columns = columns - suffix_columns;
         let mut status = if uri_columns > target_columns {
@@ -24063,6 +24645,21 @@ enum PeekCacheEntry {
         /// [`bt_term::DecodedInlineImage::native_size`].
         native_size: Option<(u32, u32)>,
     },
+}
+
+/// **Whether a peek reads its file now** (T-FRESH-FACTS): when nothing is cached for it, and —
+/// on a new peek only — when the last read failed. A file that was missing or half-written when a
+/// hover first settled on it used to stay silent for the window's life, while its link was
+/// verified again at the next command's end; a hover that settles on it again reads it again. The
+/// re-entries of one peek (its decode or its resample landing) never re-read, and one read is out
+/// at a time (`Pending`). A subject with no file behind it (`readable` false) is never read.
+fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: bool) -> bool {
+    readable
+        && match entry {
+            None => true,
+            Some(PeekCacheEntry::Failed(_)) => settled,
+            Some(PeekCacheEntry::Pending | PeekCacheEntry::Ready { .. }) => false,
+        }
 }
 
 impl bt_term::Weighed for PeekCacheEntry {
@@ -24947,28 +25544,22 @@ enum WheelBurst {
 ///
 /// **Why the point belongs to the batch and not to the flush.** The paste
 /// happens at the turn boundary, which is later — and "later" is enough:
-/// reading the cursor then asks where the hand is *now*, and on a window that is
-/// busy (a drain turn, a page coming up) the hand has had time to travel to
-/// another pane. It also used to prefer `pointer_position`, the window's own
-/// cached pointer, which during a drag from another application is not merely
-/// old but *from before the drag began* — no pointer event is delivered while
-/// another program's drag is over this window, so the cache is whatever the hand
-/// was doing last time it was in here. Either reading can name a pane the file
-/// was never dropped on, which is exactly the promise the changelog made.
+/// reading the cursor then asks where the hand is *now*, and on a busy window
+/// the hand has time to travel to another pane. The window's cached pointer is
+/// also from before an external drag began, because no pointer event arrives
+/// while another program's drag is over this window.
 ///
-/// So the point is taken **once, when the first file of the drop arrives** —
-/// [`Runtime::collect_dropped_file`] — and nothing later may replace it. That is
-/// the earliest this process can ask: `IDropTarget::Drop` and
-/// `performDragOperation:` are the platform telling us about the release, and
-/// the arm that fills this runs out of that same delivery. Earlier still would
-/// mean carrying the `POINTL` and the `draggingLocation` out of winit's
-/// backends, which is upstream's to give.
+/// The point is resolved once for the first file — [`Runtime::collect_dropped_file`]
+/// — and never replaced after the batch opens. Windows and macOS answer in their
+/// release callback. Linux requests the Xdnd pointer on its display worker and
+/// only accepts that answer while the window observes the same pointer, tab,
+/// layout and shell context; otherwise it says to re-drop.
 #[derive(Debug)]
 struct DropBatch {
-    /// Where the cursor stood when this drop opened, in this window's physical
-    /// pixels — [`bt_platform::pointer_position_in_window`]'s units, which are
-    /// `CursorMoved`'s. `None` when the platform would not say, which is the one
-    /// road left to the pane holding the keyboard.
+    /// The point used to resolve this drop, in this window's physical pixels —
+    /// [`bt_platform::pointer_position_in_window`]'s units, which are
+    /// `CursorMoved`'s. Linux attaches a worker answer only if the observed drop
+    /// context remains current. `None` means the platform did not answer.
     point: Option<PhysicalPosition<f64>>,
     /// **The shell this drop was aimed at**, resolved at the same instant as
     /// [`Self::point`] and for the same reason (review X-1 beside X-10).
@@ -25014,6 +25605,31 @@ impl DropBatch {
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+struct PendingExternalDrop {
+    request: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    paths: Vec<PathBuf>,
+    batch_open: bool,
+    refused: bool,
+    tab: TabId,
+    layout: SeatLayout,
+    viewport: LogicalRect,
+    focused_target: Option<PasteTarget>,
+    targets: Vec<PasteTarget>,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingPastePath {
+    request: Option<bt_platform::linux_display::LinuxDisplayRequest>,
+    drag: Drag,
+    plan: seats::DropPlan,
+    path: PathBuf,
+    tab: TabId,
+    layout: SeatLayout,
+    viewport: LogicalRect,
+    focused_target: Option<PasteTarget>,
 }
 
 impl WheelBurst {
@@ -26268,9 +26884,9 @@ enum HyperlinkActivation {
     /// A local folder, opened the way this window opens every other folder — the
     /// files column, pointed at it.
     FilesColumn(PathBuf),
-    /// A target this window will not hand to the shell. The hover line says so
+    /// A target this window will not hand to the shell, and why. The hover line says so
     /// and nothing else happens.
-    Blocked,
+    Blocked(LinkRefusal),
 }
 
 /// **Which row of §7.1.5g's table a reference falls in**, read off its own text before any
@@ -26329,7 +26945,9 @@ fn reference_activation(intent: ClickIntent, row: ReferenceRow) -> HyperlinkActi
             WebAddressActivation::None => HyperlinkActivation::None,
             WebAddressActivation::Page => HyperlinkActivation::Page(uri),
             WebAddressActivation::Browser => HyperlinkActivation::Browser(uri),
-            WebAddressActivation::Blocked => HyperlinkActivation::Blocked,
+            WebAddressActivation::Blocked => {
+                HyperlinkActivation::Blocked(LinkRefusal::of_address(&uri))
+            }
         },
         ReferenceRow::Local { path, at, known } => match (known, intent) {
             // **Nobody has asked the disk about this name yet, so it is not a link yet** (audit 3
@@ -26368,7 +26986,7 @@ fn reference_activation(intent: ClickIntent, row: ReferenceRow) -> HyperlinkActi
         },
         ReferenceRow::Unnamed => match intent {
             ClickIntent::Here => HyperlinkActivation::None,
-            ClickIntent::System => HyperlinkActivation::Blocked,
+            ClickIntent::System => HyperlinkActivation::Blocked(LinkRefusal::Invalid),
         },
         ReferenceRow::Nothing => HyperlinkActivation::None,
     }
@@ -26884,7 +27502,7 @@ fn reference_card(
         | HyperlinkActivation::Page(_)
         | HyperlinkActivation::External(_)
         | HyperlinkActivation::Reveal(_)
-        | HyperlinkActivation::Blocked => None,
+        | HyperlinkActivation::Blocked(_) => None,
     }
 }
 
@@ -28142,7 +28760,7 @@ fn attention_delivery(
         title: notify::toast_title(
             carried,
             tab.terminal_name(seat).as_deref(),
-            profiles::title(profiles::index_of_id(&tab.leaf_profile(seat))),
+            profiles::identity_title(&tab.leaf_profile(seat)),
         ),
         body: raised.body,
     }
@@ -29370,6 +29988,16 @@ impl NotificationDesk {
             .as_ref()
             .map(bt_platform::Notifier::take_activations)
             .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn take_failure(&mut self) -> Option<String> {
+        let failure = self.voice.as_ref()?.take_failures().into_iter().next()?;
+        if self.refused {
+            return None;
+        }
+        self.refused = true;
+        Some(failure)
     }
 }
 
@@ -30945,6 +31573,7 @@ struct PreviewPlacement {
 /// passes that float's own layer, because the float is its pane — a hole under
 /// the stack is a hole the float's face paints straight back over, which is the
 /// report this argument exists to answer.
+#[cfg(any(not(target_os = "linux"), test))]
 fn hole_for(
     presence: webhost::WebPresence,
     floored: bool,
@@ -33860,23 +34489,57 @@ struct DragGuard {
     /// Which window holds the loop thread's mouse capture.
     capture: Option<bt_platform::NativeWindow>,
     /// The bounding box of every monitor together.
-    screen: bt_platform::WindowRect,
+    screen: Option<bt_platform::WindowRect>,
 }
 
 impl DragGuard {
     /// Read both facts as they are now, for the window that should be holding
     /// the capture.
+    #[cfg(not(target_os = "linux"))]
     fn sample() -> Self {
         Self {
             capture: bt_platform::thread_mouse_capture(),
-            screen: bt_platform::virtual_screen_rect(),
+            screen: Some(bt_platform::virtual_screen_rect()),
         }
     }
 
     /// Whether the world this gesture began in is still the world it is in.
+    #[cfg(any(not(target_os = "linux"), test))]
     fn still_holds(&self, now: &Self) -> bool {
-        self.capture == now.capture && self.screen == now.screen
+        self.capture == now.capture && self.screen.is_some() && self.screen == now.screen
     }
+}
+
+#[cfg(target_os = "linux")]
+fn drag_guard_reply_matches(
+    active_generation: Option<u64>,
+    pending_generation: u64,
+    request: bt_platform::linux_display::LinuxDisplayReady,
+    ready: bt_platform::linux_display::LinuxDisplayReady,
+) -> bool {
+    active_generation == Some(pending_generation) && request == ready
+}
+
+#[cfg(target_os = "linux")]
+fn observed_drag_guard_screen(
+    previous: Option<bt_platform::WindowRect>,
+    answer: Result<bt_platform::WindowRect, String>,
+) -> Option<bt_platform::WindowRect> {
+    let observed = answer.ok()?;
+    (observed.left < observed.right
+        && observed.top < observed.bottom
+        && previous.is_none_or(|previous| previous == observed))
+    .then_some(observed)
+}
+
+#[cfg(target_os = "linux")]
+fn drag_guard_allows_release(
+    screen: Option<bt_platform::WindowRect>,
+    request_pending: bool,
+    aim_pointer: Option<(f64, f64)>,
+    release_pointer: (f64, f64),
+) -> bool {
+    screen.is_some() && !request_pending && aim_pointer == Some(release_pointer)
 }
 
 /// **Where a cross-window gesture is pointing right now** (multiwindow slice
@@ -34048,6 +34711,14 @@ struct DragBroker {
     spring: SpringGate,
     /// The world this gesture began in — see [`DragGuard`].
     guard: DragGuard,
+    #[cfg(target_os = "linux")]
+    guard_generation: u64,
+    #[cfg(target_os = "linux")]
+    /// A confirmed screen sample available to authorize one broker turn.
+    guard_sample_ready: bool,
+    #[cfg(target_os = "linux")]
+    /// The delivered point used to compute the broker's last aim.
+    guard_aim_pointer: Option<(f64, f64)>,
 }
 
 impl DragBroker {
@@ -34074,6 +34745,47 @@ impl DragBroker {
     /// The rest has been paid.
     fn spend(&mut self, tab: TabId) {
         self.spring.spend(tab);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_guard_screen_answer(
+        &mut self,
+        generation: u64,
+        answer: Result<bt_platform::WindowRect, String>,
+    ) -> bool {
+        if self.guard_generation != generation {
+            return false;
+        }
+        let Some(screen) = observed_drag_guard_screen(self.guard.screen, answer) else {
+            return false;
+        };
+        self.guard.screen = Some(screen);
+        self.guard_sample_ready = true;
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    fn consume_guard_screen_answer(&mut self) -> bool {
+        std::mem::replace(&mut self.guard_sample_ready, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn record_guarded_aim(&mut self, pointer: (f64, f64)) {
+        self.guard_aim_pointer = Some(pointer);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn guarded_release_is_current(
+        &self,
+        request_pending: bool,
+        release_pointer: (f64, f64),
+    ) -> bool {
+        drag_guard_allows_release(
+            self.guard.screen,
+            request_pending,
+            self.guard_aim_pointer,
+            release_pointer,
+        )
     }
 
     /// **The broker's own wake-up, for the loop's set** — the v3 增补's
@@ -34106,13 +34818,19 @@ impl DragBroker {
             spring: SpringGate::default(),
             guard: DragGuard {
                 capture: None,
-                screen: bt_platform::WindowRect {
+                screen: Some(bt_platform::WindowRect {
                     left: 0,
                     top: 0,
                     right: 0,
                     bottom: 0,
-                },
+                }),
             },
+            #[cfg(target_os = "linux")]
+            guard_generation: 0,
+            #[cfg(target_os = "linux")]
+            guard_sample_ready: true,
+            #[cfg(target_os = "linux")]
+            guard_aim_pointer: None,
         }
     }
 }
@@ -35748,6 +36466,8 @@ fn revive_plan(
     let seed = TabSeed {
         manual_name: saved.first().and_then(|leaf| leaf.manual_name.clone()),
         pinned: tab.pinned,
+        // Never saved, so never revived.
+        carried_environment: None,
     };
     // **Each pane comes back as its own shell in its own folder.** The two facts
     // are read out of the same saved leaf in the same pass, which is what makes
@@ -35756,10 +36476,11 @@ fn revive_plan(
     //
     // An empty `cwd` is a shell that never reported one, not a path to the root
     // of the drive — hand over nothing and let the new shell start where a fresh
-    // one would. Whether the folder still exists is a filesystem question, and
-    // the answer to a missing one is the same as the answer to none: HOME. Both
-    // are expressed as `None` rather than as an empty path, so
-    // `create_leaf_session` has one shape to read instead of two.
+    // one would, expressed as `None` rather than as an empty path, so
+    // `create_leaf_session` has one shape to read instead of two. Whether the
+    // folder still exists is a filesystem question the pane's birth asks
+    // (`profiles::BirthPlace`), never this thread, and the answer to a missing
+    // one is the same as the answer to none.
     //
     // An unknown `profile_id` falls to the default profile and keeps the pane —
     // §5.4 逐叶降级, and `index_of_id`'s own rule: a profile that was removed, or
@@ -35770,29 +36491,20 @@ fn revive_plan(
         .into_iter()
         .zip(saved)
         .map(|(seat, leaf)| {
+            // **The saved id, kept as an id** — and swapped for the fallback's here
+            // and only here, which is where the reader is owed the sentence about it
+            // ([`revived_profile`]). Below this line the seed names a profile that
+            // exists, or the unresolved default its birth decides; above it,
+            // `unknown_profile_id` carries the name the banner quotes.
+            let (profile, unknown_profile_id) = revived_profile(&leaf.profile_id);
             (
                 seat,
                 LeafSeed {
-                    // **The saved id, kept as an id** — and swapped for the
-                    // fallback's here and only here, which is where the reader is
-                    // owed the sentence about it. Below this line the seed names a
-                    // profile that exists, so nothing downstream has to carry the
-                    // distinction; above it, `unknown_profile_id` carries the name
-                    // the banner quotes.
-                    profile: if profiles::has_id(&leaf.profile_id) {
-                        leaf.profile_id.clone()
-                    } else {
-                        profiles::fallback_profile_id().to_owned()
-                    },
-                    unknown_profile_id: (!profiles::has_id(&leaf.profile_id))
-                        .then(|| leaf.profile_id.clone()),
+                    profile,
+                    unknown_profile_id,
                     cwd: Some(leaf.cwd.as_str())
                         .filter(|cwd| !cwd.is_empty())
-                        .map(Path::new)
-                        .and_then(|cwd| {
-                            profiles::revived_cwd(profiles::index_of_id(&leaf.profile_id), cwd)
-                        })
-                        .map(profiles::SeedPlace::Carried),
+                        .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
                     // The third fact read out of the same saved leaf in the same
                     // pass, for the reason the two above it are: a pane revived
                     // with somebody else's aim is a card pointed at the wrong
@@ -35803,6 +36515,7 @@ fn revive_plan(
                     // so "this shell never reported one" and "this rung does not restore them"
                     // arrive as one case (§7.54e ④).
                     prefill: Some(leaf.last_command.clone()).filter(|it| !it.is_empty()),
+                    carried_environment: None,
                 },
             )
         })
@@ -36608,6 +37321,22 @@ struct TabSeed {
     /// a profile is something each shell in it *is*.
     manual_name: Option<String>,
     pinned: bool,
+    /// **The environment `--with-environment` carried into this tab** (owner ruling 2026-10-05;
+    /// coordinator's ruling 2026-10-09: it belongs to the tab). Every shell born in the tab —
+    /// its first pane, a split, a duplicate pane or tab, a Restart shell — is born with it
+    /// ([`born_in_tab`]). `None` for every tab no launch carried one into, and for every tab
+    /// revived from disk: it is never saved.
+    carried_environment: Option<cli::CarriedEnvironment>,
+}
+
+/// **A shell born in a tab is born with the tab's carried environment** — the one rule for every
+/// birth inside a tab (the tab's own panes at its creation, a split, a duplicate, a Restart shell;
+/// coordinator's ruling 2026-10-09). The tab is the source, so the seed's own is replaced.
+fn born_in_tab(seed: LeafSeed, tab_environment: Option<&cli::CarriedEnvironment>) -> LeafSeed {
+    LeafSeed {
+        carried_environment: tab_environment.cloned(),
+        ..seed
+    }
 }
 
 /// What one Terminal leaf is started from: which profile, and where.
@@ -36670,6 +37399,32 @@ struct LeafSeed {
     /// one place the rung is read, so an empty `last_command` on the leaf and "this rung does not
     /// restore commands" are the same fact and cannot disagree.
     prefill: Option<String>,
+    /// **The environment a launch carried into this pane** (`--with-environment`, owner ruling
+    /// 2026-10-05), laid over the account's as the birth's `launch_overrides`.
+    ///
+    /// The tab's ([`TabSeed::carried_environment`]) for every shell born in a tab a launch carried
+    /// one into — its first pane, a split, a duplicate, a Restart shell — put here by
+    /// [`born_in_tab`]; `None` in every other tab. Never saved, so a revived pane takes the
+    /// account's environment.
+    carried_environment: Option<cli::CarriedEnvironment>,
+}
+
+/// **The profile a saved pane comes back as, and the id its banner names** — one reading of a
+/// saved `profile_id` for every door that revives one.
+///
+/// The saved id when this build has the row; the fallback's, with the saved id kept for the
+/// banner, when it has not (§5.4 逐叶降级); and [`profiles::DEFAULT_IDENTITY`] kept as itself
+/// (T-PROGRAMS-REFRESH): a pane saved while its default was still unresolved is a pane whose shell
+/// nobody had decided — it comes back as the default, decided at its birth, and says nothing.
+fn revived_profile(saved: &str) -> (String, Option<String>) {
+    if saved == profiles::DEFAULT_IDENTITY || profiles::has_id(saved) {
+        (saved.to_owned(), None)
+    } else {
+        (
+            profiles::fallback_profile_id().to_owned(),
+            Some(saved.to_owned()),
+        )
+    }
 }
 
 /// **Every popup this window can raise** — E61's "one at a time" written as a
@@ -38079,6 +38834,7 @@ fn new_tab_leaf_seed(
         unknown_profile_id: None,
         card_skip: 0,
         prefill: None,
+        carried_environment: None,
     }
 }
 
@@ -38217,6 +38973,7 @@ impl SplitSeed {
                 card_skip: 0,
                 // A split is not a restore; nothing is owed to its prompt.
                 prefill: None,
+                carried_environment: None,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: profile.clone(),
@@ -38231,6 +38988,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                carried_environment: None,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -38249,6 +39007,7 @@ impl SplitSeed {
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
+                carried_environment: None,
             },
         }
     }
@@ -38453,24 +39212,1308 @@ enum Started {
     Nothing,
 }
 
-fn startable_profile(requested: &str, programs: &profiles::ProfilePrograms) -> Started {
-    // **Both authorities, in one place, about one id.** `has_id` is the live
-    // table — the only thing that can say whether a row still exists — and the
-    // snapshot is this window's answer about the machine. Neither alone is the
-    // question the spawn is about.
-    let startable = |id: &str| profiles::has_id(id) && programs.is_available(id);
-    if startable(requested) {
-        return Started::AsAsked;
+/// **The rule, decided from completed answers only** (T-PROGRAMS-REFRESH): `Err` names the rows
+/// whose answer it needed and does not have. A row the machine has not answered is never read as
+/// "not here" — that would turn a slow disk into a fallback, a banner and a rewritten saved pane.
+fn startable_profile(
+    requested: &str,
+    programs: &profiles::ProfilePrograms,
+) -> Result<Started, Vec<String>> {
+    profiles::decided_from_answers(programs, |available| {
+        // **Both authorities, in one place, about one id.** `has_id` is the live
+        // table — the only thing that can say whether a row still exists — and the
+        // snapshot is the application's answer about the machine. Neither alone is
+        // the question the spawn is about.
+        let startable = |id: &str| profiles::has_id(id) && available(id);
+        if startable(requested) {
+            return Started::AsAsked;
+        }
+        let fallback = profiles::fallback_profile_id();
+        // The fallback answering for itself is not a fallback: a default profile
+        // this machine cannot start has nowhere further to fall, and saying
+        // `FellBack(fallback)` there would put a banner on a pane about a swap that
+        // did not happen.
+        if fallback != requested && startable(fallback) {
+            return Started::FellBack(fallback.to_owned());
+        }
+        Started::Nothing
+    })
+}
+
+/// **What a seed is born as, if the answers in hand decide it**: the profile it starts as (the
+/// default resolved, for [`profiles::DEFAULT_IDENTITY`]) and the rule's verdict about it. `Err`
+/// names the rows the decision waits for; the pane is then born in birth ([`PaneBirth`]).
+fn decided_birth(
+    seed: &LeafSeed,
+    stored_default: &str,
+    programs: &profiles::ProfilePrograms,
+) -> Result<(String, Started), Vec<String>> {
+    let identity = if seed.profile == profiles::DEFAULT_IDENTITY {
+        profiles::id(profiles::default_profile_decided(stored_default, programs)?)
+    } else {
+        seed.profile.clone()
+    };
+    let started = startable_profile(&identity, programs)?;
+    Ok((identity, started))
+}
+
+/// **What [`create_leaf_session`] may decide on the spot**: the seed it is born from and the
+/// rule's verdict, when the answers in hand decide it **and nothing about it has to be said**. A
+/// seed of the unresolved default whose named folder cannot cross into the profile it resolved to
+/// owes the reader a card, and the constructor has no window to say it in; such a pane is left in
+/// birth (`Err` naming its profile, which the walk then answers first), and its landing
+/// (`Runtime::land_births`) — which decides it from the same answers — says the refusal. So no
+/// refusal can be decided and dropped here.
+fn birth_here(
+    seed: &LeafSeed,
+    stored_default: &str,
+    programs: &profiles::ProfilePrograms,
+) -> Result<(LeafSeed, Started), Vec<String>> {
+    let (identity, started) = decided_birth(seed, stored_default, programs)?;
+    match resolved_birth_seed(seed, &identity) {
+        (resolved, None) => Ok((resolved, started)),
+        (_, Some(_)) => Err(vec![identity]),
     }
-    let fallback = profiles::fallback_profile_id();
-    // The fallback answering for itself is not a fallback: a default profile
-    // this machine cannot start has nowhere further to fall, and saying
-    // `FellBack(fallback)` there would put a banner on a pane about a swap that
-    // did not happen.
-    if fallback != requested && startable(fallback) {
-        return Started::FellBack(fallback.to_owned());
+}
+
+/// **A seed of the unresolved default, made the seed of the profile it resolved to** — its folder,
+/// which such a seed holds in the host's own namespace, crossed into that profile's (`D:\proj` is
+/// `/mnt/d/proj` to WSL). A folder a launch *named* that has no spelling there is the command
+/// line's own "can't reach this folder" refusal, answered beside the seed for the caller to say;
+/// a carried one simply leaves the pane at the profile's own starting place. Any other seed is
+/// returned as it is.
+fn resolved_birth_seed(seed: &LeafSeed, identity: &str) -> (LeafSeed, Option<cli::CliRefusal>) {
+    let mut resolved = LeafSeed {
+        profile: identity.to_owned(),
+        ..seed.clone()
+    };
+    if seed.profile != profiles::DEFAULT_IDENTITY {
+        return (seed.clone(), None);
     }
-    Started::Nothing
+    let target = profiles::index_of_id(identity);
+    let mut refusal = None;
+    resolved.cwd = seed.cwd.as_ref().and_then(|place| {
+        let crossed = profiles::cwd_for_spawn(
+            profiles::index_of_id(profiles::DEFAULT_IDENTITY),
+            target,
+            Some(place.path()),
+        );
+        if crossed.is_none() && matches!(place, profiles::SeedPlace::Named(_)) {
+            refusal = Some(cli::CliRefusal::UnreachableFolder {
+                folder: place.path().to_path_buf(),
+                profile: target,
+            });
+        }
+        crossed.map(|crossed| place.with_path(crossed))
+    });
+    (resolved, refusal)
+}
+
+/// **What a window is told about the machine** (T-PROGRAMS-REFRESH): one subject, the program
+/// walk's answer, told to every window through `WindowSeats::tell_all` and taken on each window's
+/// own turn ([`Runtime::take_program_news`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MachineNews {
+    /// What [`App::profile_programs`] or a profile's drawn name says has moved.
+    Programs,
+}
+
+/// **The program rows a window's open menus show**, by what each row is about — noted before an
+/// answer re-lays them out, so a keyboard's highlight follows its item ([`profiles::relit`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ShownProgramRows {
+    /// The pane menu's open child, by profile.
+    pane: Vec<usize>,
+    /// The terminal menu's open `Split with` child, by profile.
+    term: Vec<usize>,
+}
+
+/// **What adopting a walk's answers moved** — each field one thing a reader can see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProgramNews {
+    /// A row became known, or its program moved.
+    pub(crate) rows: bool,
+    /// WSL's installation says something else, so a profile's title may read differently.
+    pub(crate) names: bool,
+    /// Git is somewhere else now, so the Git pages answered about the old place ask again.
+    pub(crate) git: bool,
+    /// A variable that says where an agent keeps its configuration reads differently now, so
+    /// the agent rows read their files again (T-FRESH-FACTS).
+    pub(crate) agent_homes: bool,
+    /// The `copilot` row's program moved, so the copilot version is asked again
+    /// (T-FRESH-FACTS). Part of [`Self::rows`] for every reader but that probe.
+    pub(crate) copilot: bool,
+}
+
+impl ProgramNews {
+    pub(crate) const fn any(self) -> bool {
+        self.rows || self.names || self.git || self.agent_homes
+    }
+}
+
+/// **The one adoption of the program walk's answers**, at the launch and between frames: the rows
+/// into `programs` (refusing an answer older than the one held for its row), WSL's installation
+/// into `wsl`'s slot, git's location into the git worker's slot.
+fn adopt_program_answers(
+    programs: &mut profiles::ProfilePrograms,
+    answers: programs_lane::Answers,
+) -> ProgramNews {
+    let copilot_before = programs
+        .program(attention_copilot::PROFILE_ID)
+        .map(std::ffi::OsStr::to_owned);
+    let mut news = ProgramNews {
+        rows: programs.adopt(answers.verdicts),
+        ..ProgramNews::default()
+    };
+    news.copilot = programs
+        .program(attention_copilot::PROFILE_ID)
+        .map(std::ffi::OsStr::to_owned)
+        != copilot_before;
+    if let Some(facts) = answers.facts {
+        if wsl::adopt(facts.wsl) {
+            profiles::names_changed();
+            news.names = true;
+        }
+        news.git = git::GIT_LOCATION.adopt(facts.git);
+        news.agent_homes = attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes);
+    }
+    news
+}
+
+/// **The three agent rows, read off their files again** — `Runtime::refresh_agent_rows`'s body,
+/// and the program walk's adopter's when the folders the files live in moved (T-FRESH-FACTS). The
+/// copilot readiness is read again with them: whether its hooks are switched off is a file in the
+/// same folder.
+fn read_the_agent_rows_again(app: &mut App) {
+    (app.claude_hooks_installed, app.agent_config_refusals[0]) = attention_hooks::row_state();
+    (app.codex_notify_installed, app.agent_config_refusals[1]) = attention_codex::row_state();
+    (app.copilot_hooks_installed, app.agent_config_refusals[2]) = attention_copilot::row_state();
+    app.copilot_readiness = attention_copilot::readiness();
+}
+
+/// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
+///
+/// `BT_CONPTY_SOURCE` and `BT_STARTUP` name the pseudoconsole each launch tab's first shell came
+/// up on and how long the launch's shells took. A tab whose shell is in birth has neither yet, so
+/// both lines wait until every launch tab's identity shell is born, and then carry the born
+/// shells' own sources, with `pty_spawn` running to the last birth. A launch whose shells were all
+/// decided at once says them where it always did and holds nothing here.
+#[derive(Debug)]
+struct StartupShells {
+    /// One per launch tab, in order: its identity shell's tab and seat, and the ConPTY source it
+    /// came up on — `None` while it is being born.
+    tabs: Vec<(TabId, SeatId, Option<String>)>,
+    /// Whether `BT_CONPTY_SOURCE` is owed.
+    conpty_line: bool,
+    /// Whether `BT_STARTUP` is owed (`BT_STARTUP_TRACE`).
+    startup_owed: bool,
+    /// The `BT_STARTUP` line, measured where the launch measured it, said once `pty_spawn` and
+    /// the sources are known; `None` until the launch has reached it.
+    startup: Option<StartupLine>,
+    /// When the launch began making its shells.
+    phase_started: Instant,
+}
+
+/// The `BT_STARTUP` line's launch-time fields, every one but `pty_spawn` and the sources.
+#[derive(Clone, Debug)]
+struct StartupLine {
+    window: Duration,
+    adapter: Duration,
+    device: Duration,
+    surface: Duration,
+    fonts: Duration,
+    metrics: Duration,
+    render_resources: Duration,
+    renderer_total: Duration,
+    probe_input: usize,
+    runtime_ready: Duration,
+}
+
+impl StartupLine {
+    fn said(&self, pty_spawn: Duration, sources: &[String]) -> String {
+        format!(
+            "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={sources:?} runtime_ready={}ms",
+            self.window.as_millis(),
+            self.adapter.as_millis(),
+            self.device.as_millis(),
+            self.surface.as_millis(),
+            self.fonts.as_millis(),
+            self.metrics.as_millis(),
+            self.render_resources.as_millis(),
+            self.renderer_total.as_millis(),
+            pty_spawn.as_millis(),
+            self.probe_input,
+            self.runtime_ready.as_millis(),
+        )
+    }
+}
+
+impl StartupShells {
+    /// The identity shell of `tab` was born at `seat` on `source`.
+    fn born(&mut self, tab: TabId, seat: SeatId, source: String) {
+        for (held_tab, held_seat, held) in &mut self.tabs {
+            if *held_tab == tab && *held_seat == seat {
+                *held = Some(source.clone());
+            }
+        }
+    }
+
+    /// The lines, once every launch tab's shell is born and the launch has measured its own
+    /// fields; `None` while something is still owed (and `self` keeps waiting).
+    fn lines_if_born(&self) -> Option<Vec<String>> {
+        let sources: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|(_, _, source)| source.clone())
+            .collect::<Option<_>>()?;
+        if self.startup_owed && self.startup.is_none() {
+            // The launch is still on its way to measuring the line it owes.
+            return None;
+        }
+        let mut lines = Vec::new();
+        if self.conpty_line {
+            lines.push(format!("BT_CONPTY_SOURCE sources={sources:?}"));
+        }
+        if let Some(startup) = &self.startup {
+            lines.push(startup.said(self.phase_started.elapsed(), &sources));
+        }
+        Some(lines)
+    }
+}
+
+/// The ConPTY source a leaf's shell came up on — `None` for a pane in birth, which has none yet;
+/// `"direct-input"` for a leaf with no shell at all (`BT_PROBE_INPUT`).
+fn conpty_source_of(leaf: Option<&LeafSession>) -> Option<String> {
+    match leaf {
+        Some(leaf) if leaf.birth.is_some() => None,
+        Some(leaf) => Some(
+            leaf.pty
+                .as_ref()
+                .map(|pty| pty.conpty_source().to_string())
+                .unwrap_or_else(|| "direct-input".to_string()),
+        ),
+        None => Some("none".to_string()),
+    }
+}
+
+/// **A pane's birth from the program walk's answers** (T-PROGRAMS-REFRESH): decided only from
+/// answers in hand, held while it waits, its typed bytes kept for its shell, the startup trace held
+/// with it.
+#[cfg(test)]
+mod program_birth_tests {
+    use super::*;
+
+    fn seed_of(profile: &str) -> LeafSeed {
+        LeafSeed {
+            profile: profile.to_owned(),
+            ..LeafSeed::default()
+        }
+    }
+
+    fn every_row() -> profiles::ProfilePrograms {
+        profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>())
+    }
+
+    /// RED — **a pane whose row is unknown is not decided: it waits, and names the row it waits
+    /// for** — never a fallback, a banner or a rewritten saved pane from unknown.
+    ///
+    /// MUTATION (observed red): `profiles::decided_from_answers` answering `Ok` with the unknown
+    /// row read as absent — the named pane is decided `FellBack` to the fallback and the default
+    /// pane is decided as the next shipped row.
+    #[test]
+    fn a_pane_whose_row_is_unknown_waits_for_it_and_is_never_decided_from_unknown() {
+        let named = profiles::shipped_order()
+            .iter()
+            .copied()
+            .find(|id| profiles::has_id(id) && *id != profiles::fallback_profile_id())
+            .expect("a shipped row other than the fallback");
+        let waiting = every_row().without(named);
+        assert_eq!(
+            decided_birth(&seed_of(named), "", &waiting),
+            Err(vec![named.to_owned()]),
+            "the named pane waits for its own row"
+        );
+        assert_eq!(
+            startable_profile(named, &waiting),
+            Err(vec![named.to_owned()]),
+            "and the rule says so rather than falling back"
+        );
+        assert_eq!(
+            decided_birth(&seed_of(named), "", &every_row()),
+            Ok((named.to_owned(), Started::AsAsked)),
+            "once answered it is born as itself"
+        );
+
+        let first = profiles::shipped_order()
+            .iter()
+            .copied()
+            .find(|id| profiles::has_id(id))
+            .expect("the shipped order names a row");
+        let default_waits = every_row().without(first);
+        assert_eq!(
+            decided_birth(
+                &seed_of(profiles::DEFAULT_IDENTITY),
+                bt_persist::DEFAULT_PROFILE_UNSET,
+                &default_waits
+            ),
+            Err(vec![first.to_owned()]),
+            "the unresolved default waits for the first row its rule reads"
+        );
+        assert_eq!(
+            decided_birth(
+                &seed_of(profiles::DEFAULT_IDENTITY),
+                bt_persist::DEFAULT_PROFILE_UNSET,
+                &every_row()
+            )
+            .map(|(identity, _)| identity),
+            Ok(first.to_owned()),
+            "and is born as the default the answers decide"
+        );
+        // A saved pane of the unresolved default comes back as itself, with no banner.
+        assert_eq!(
+            revived_profile(profiles::DEFAULT_IDENTITY),
+            (profiles::DEFAULT_IDENTITY.to_owned(), None)
+        );
+    }
+
+    /// RED — **what is typed into a pane in birth reaches its shell first, in order**: held, not
+    /// dropped, and taken once.
+    ///
+    /// MUTATION (observed red): the `PtyTarget::Birth` arm of `offer_pty_input` answering
+    /// `NoChild` without holding — the bytes are lost.
+    #[test]
+    fn input_offered_to_a_pane_in_birth_is_held_for_its_shell_in_order() {
+        let birth = PaneBirth {
+            seed: seed_of(profiles::DEFAULT_IDENTITY),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+            waiting: BirthWait::Programs {
+                _waits: programs_lane::pane_waits(),
+            },
+        };
+        let first = offer_pty_input(PtyTarget::Birth(&birth), "git 状态".as_bytes(), "typed")
+            .expect("held");
+        let second = offer_pty_input(PtyTarget::Birth(&birth), b"\r", "typed").expect("held");
+        assert_eq!(
+            (first, second),
+            (PtyInput::HeldForBirth, PtyInput::HeldForBirth)
+        );
+        assert!(first.queued(), "a drop's focus move counts it as sent");
+        let mut delivered = Vec::new();
+        birth
+            .deliver(|held| {
+                delivered.extend_from_slice(held);
+                Ok(())
+            })
+            .expect("delivered");
+        assert_eq!(delivered, "git 状态\r".as_bytes());
+        birth
+            .deliver(|_| panic!("nothing is left to deliver"))
+            .expect("taken once");
+        assert_eq!(
+            offer_pty_input(PtyTarget::Nowhere, b"x", "typed").expect("nowhere"),
+            PtyInput::NoChild
+        );
+    }
+
+    fn a_birth() -> PaneBirth {
+        PaneBirth {
+            seed: seed_of(profiles::DEFAULT_IDENTITY),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+            waiting: BirthWait::Programs {
+                _waits: programs_lane::pane_waits(),
+            },
+        }
+    }
+
+    /// RED (round 2) — **a pane in birth holds input on the input ring's terms**: a write is
+    /// taken whole when nothing is held, however large, and one that would pass the ring's size
+    /// beside what is held is refused whole, as the shell's ring refuses it.
+    ///
+    /// MUTATION (observed red): `PaneBirth::hold` without its capacity check — the second write is
+    /// held and the queue grows past the ring's size.
+    #[test]
+    fn a_pane_in_birth_holds_no_more_than_the_input_ring_would() {
+        let birth = a_birth();
+        let capacity = bt_pty::PTY_INPUT_RING_BYTES.get();
+        let paste = "粘".repeat(capacity / 3 + 1);
+        assert_eq!(
+            offer_pty_input(PtyTarget::Birth(&birth), paste.as_bytes(), "paste").expect("held"),
+            PtyInput::HeldForBirth,
+            "a first write is taken whole, as the ring takes one into an empty queue"
+        );
+        assert_eq!(
+            offer_pty_input(PtyTarget::Birth(&birth), b"x", "typed").expect("answered"),
+            PtyInput::Refused,
+            "past the ring's size, refused"
+        );
+        assert!(!PtyInput::Refused.queued());
+        assert_eq!(
+            birth.typed.borrow().len(),
+            paste.len(),
+            "nothing of it taken"
+        );
+    }
+
+    /// RED (round 2) — **a write that fails leaves the held bytes held**, so a birth that could
+    /// not hand them over loses nothing.
+    ///
+    /// MUTATION (observed red): `PaneBirth::deliver` emptying the queue before it writes — the
+    /// failed write takes the bytes with it.
+    #[test]
+    fn a_failed_delivery_keeps_what_was_typed() {
+        let birth = a_birth();
+        birth.hold("ls 目录\r".as_bytes()).expect("held");
+        let failed = birth.deliver(|_| Err(anyhow!("the shell's input was closed")));
+        assert!(failed.is_err());
+        assert_eq!(birth.typed.borrow().as_slice(), "ls 目录\r".as_bytes());
+    }
+
+    /// RED (round 2) — **a pane born with no program says that its typed bytes went nowhere**,
+    /// once, beside its own no-program banner.
+    ///
+    /// MUTATION (observed red): the `PtyTarget::Nowhere` arm of `deliver_held_input` without its
+    /// note — the bytes are dropped in silence.
+    #[test]
+    fn typed_bytes_a_pane_with_no_program_drops_are_said() {
+        let birth = a_birth();
+        birth.hold("echo 你好".as_bytes()).expect("held");
+        let mut lines = Vec::new();
+        deliver_held_input(&birth, PtyTarget::Nowhere, |line| {
+            lines.push(line.to_owned())
+        })
+        .expect("nowhere is not an error");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("{} byte(s)", "echo 你好".len())),
+            "{lines:?}"
+        );
+        let mut again = Vec::new();
+        deliver_held_input(&birth, PtyTarget::Nowhere, |line| {
+            again.push(line.to_owned())
+        })
+        .expect("nothing held");
+        assert!(again.is_empty(), "said once");
+    }
+
+    /// RED — **the startup trace's shell lines wait for the launch's shells** and then name the
+    /// born shells' own sources.
+    ///
+    /// MUTATION (observed red): `lines_if_born` mapping a missing source to `"in-birth"` instead
+    /// of waiting — the lines are said before the second tab's shell exists.
+    #[test]
+    fn the_startup_trace_waits_for_every_launch_shell_and_names_its_conpty() {
+        let mut shells = StartupShells {
+            tabs: vec![
+                (TabId(1), SeatId(0), Some("packaged".to_owned())),
+                (TabId(2), SeatId(0), None),
+            ],
+            conpty_line: true,
+            startup_owed: false,
+            startup: None,
+            phase_started: Instant::now(),
+        };
+        assert_eq!(shells.lines_if_born(), None, "tab 2's shell is being born");
+        shells.born(TabId(2), SeatId(0), "inbox".to_owned());
+        assert_eq!(
+            shells.lines_if_born(),
+            Some(vec![
+                r#"BT_CONPTY_SOURCE sources=["packaged", "inbox"]"#.to_owned()
+            ])
+        );
+        shells.startup_owed = true;
+        assert_eq!(
+            shells.lines_if_born(),
+            None,
+            "the launch has not measured the line it owes yet"
+        );
+    }
+
+    /// RED (Windows) — **a seed of the unresolved default is crossed into the profile it
+    /// resolved to**: a named folder into WSL's namespace, a named folder WSL cannot spell said
+    /// as the command line's refusal, a carried one left to the profile's own place.
+    ///
+    /// MUTATION (observed red): `resolved_birth_seed` keeping the seed's folder as it was — the
+    /// WSL pane is handed `D:\…`.
+    #[cfg(windows)]
+    #[test]
+    fn a_default_pane_is_crossed_into_the_profile_it_resolved_to() {
+        let named = LeafSeed {
+            cwd: Some(profiles::SeedPlace::Named(PathBuf::from(r"D:\项目"))),
+            ..seed_of(profiles::DEFAULT_IDENTITY)
+        };
+        let (wsl, refusal) = resolved_birth_seed(&named, profiles::WSL_ID);
+        assert_eq!(wsl.profile, profiles::WSL_ID);
+        assert_eq!(
+            wsl.cwd,
+            Some(profiles::SeedPlace::Named(PathBuf::from("/mnt/d/项目")))
+        );
+        assert_eq!(refusal, None);
+        let (windows, _) = resolved_birth_seed(&named, profiles::WINDOWS_POWERSHELL_ID);
+        assert_eq!(
+            windows.cwd, named.cwd,
+            "a Windows shell keeps the Windows folder"
+        );
+
+        let unc = PathBuf::from(r"\\服务器\共享");
+        let (_, refusal) = resolved_birth_seed(
+            &LeafSeed {
+                cwd: Some(profiles::SeedPlace::Named(unc.clone())),
+                ..seed_of(profiles::DEFAULT_IDENTITY)
+            },
+            profiles::WSL_ID,
+        );
+        assert!(
+            matches!(refusal, Some(cli::CliRefusal::UnreachableFolder { ref folder, .. }) if *folder == unc),
+            "{refusal:?}"
+        );
+        let (carried, refusal) = resolved_birth_seed(
+            &LeafSeed {
+                cwd: Some(profiles::SeedPlace::Carried(unc.clone())),
+                ..seed_of(profiles::DEFAULT_IDENTITY)
+            },
+            profiles::WSL_ID,
+        );
+        assert_eq!((carried.cwd, refusal), (None, None));
+    }
+
+    /// RED (round 2, Windows) — **the constructor decides nothing it would have to say**: a
+    /// default pane whose named folder WSL cannot spell is left in birth, waiting on the WSL row,
+    /// for its landing to say the refusal; the same pane with a folder that crosses is decided on
+    /// the spot.
+    ///
+    /// MUTATION (observed red): `birth_here` answering `Ok` with the resolved seed whatever the
+    /// refusal — the card would be dropped.
+    #[cfg(windows)]
+    #[test]
+    fn a_pane_that_owes_a_refusal_is_left_for_its_landing_to_say_it() {
+        let named = |folder: &str| LeafSeed {
+            cwd: Some(profiles::SeedPlace::Named(PathBuf::from(folder))),
+            ..seed_of(profiles::DEFAULT_IDENTITY)
+        };
+        let unc = named(r"\\服务器\共享");
+        assert!(
+            decided_birth(&unc, profiles::WSL_ID, &every_row()).is_ok(),
+            "the answers decide it"
+        );
+        assert_eq!(
+            birth_here(&unc, profiles::WSL_ID, &every_row()).map(|(seed, _)| seed),
+            Err(vec![profiles::WSL_ID.to_owned()])
+        );
+        assert_eq!(
+            birth_here(&named(r"D:\项目"), profiles::WSL_ID, &every_row())
+                .map(|(seed, started)| (seed.profile, started)),
+            Ok((profiles::WSL_ID.to_owned(), Started::AsAsked))
+        );
+    }
+}
+
+/// **A pane's shell born off the window thread** (T-BIRTH-OFF-WINDOW): the pane exists and draws
+/// before its pseudoconsole does, what is typed into it waits and arrives first and in order, a
+/// birth that fails lands as a refusal, every answer reaches the pane that asked for it, an answer
+/// nobody waits for is not kept, and a pane landed later is the pane that would have been born with
+/// its shell in hand.
+#[cfg(test)]
+mod shell_birth_tests {
+    use super::*;
+    use bt_platform::admission::WorkerCtx;
+    use bt_pty::test_shell::{Hygiene, TestShell};
+    use std::num::NonZeroU16;
+    use std::sync::mpsc;
+
+    fn grid() -> GridSize {
+        GridSize {
+            columns: NonZeroU16::new(48).unwrap(),
+            rows: NonZeroU16::new(8).unwrap(),
+        }
+    }
+
+    fn view() -> LeafView {
+        LeafView {
+            text_scale: TextScale::ACTUAL,
+            metrics: fixture_cell_metrics(1.0, 16.0),
+        }
+    }
+
+    fn seed_of(profile: &str) -> LeafSeed {
+        LeafSeed {
+            profile: profile.to_owned(),
+            cwd: None,
+            unknown_profile_id: None,
+            card_skip: 0,
+            prefill: None,
+            carried_environment: None,
+        }
+    }
+
+    fn decided(started: Started) -> BirthDecision {
+        BirthDecision {
+            started,
+            spawn_profile: profiles::fallback_profile_id().to_owned(),
+            spawn_place: None,
+            at_shell_home: false,
+            named: false,
+            program: Some(PathBuf::from("外壳")),
+            unless_gone: None,
+        }
+    }
+
+    fn bare(decision: &BirthDecision, seed: &LeafSeed) -> LeafSession {
+        bare_leaf(
+            view(),
+            grid(),
+            decision,
+            seed,
+            "能力-capability".to_owned(),
+            None,
+            FormulaSwitches::from_settings(&bt_persist::SettingsV1::default()),
+            NonZeroUsize::new(1_000).unwrap(),
+            true,
+        )
+    }
+
+    /// A real shell on a pseudoconsole, through the test-shell door: `cmd` on Windows, `sh`
+    /// elsewhere — neither keeps a history the account owns.
+    fn a_shell() -> Result<(PtySession, Hygiene), PtyError> {
+        #[cfg(windows)]
+        let command = bt_pty::PtyCommand::new("cmd.exe").arg("/D");
+        // A pane's shell is told the system's locale when the environment names none
+        // (`shell_integration::locale_declaration`); this one is told it the same way, or a
+        // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
+        // locale and its line editor reads the CJK typed below as meta keys.
+        #[cfg(not(windows))]
+        let command = bt_platform::system_locale_declaration()
+            .into_iter()
+            .flat_map(bt_platform::LocaleDeclaration::variables)
+            .fold(
+                bt_pty::PtyCommand::new("/bin/sh"),
+                |command, (name, value)| command.env(*name, value),
+            );
+        let size = PtySize::cells(grid().columns, grid().rows);
+        TestShell::spawn(command, size).map(TestShell::into_session)
+    }
+
+    /// The birth a test holds: it starts nothing until `gate` opens (or the lane suite's patience
+    /// runs out), then answers `answer`'s.
+    fn held_birth(
+        gate: mpsc::Receiver<()>,
+        answer: impl FnOnce() -> Result<PtySession, PtyError> + Send + 'static,
+    ) -> impl FnOnce(&WorkerCtx) -> Result<PtySession, PtyError> + Send + 'static {
+        move |_| {
+            let _ = gate.recv_timeout(crate::lane::PATIENCE);
+            answer()
+        }
+    }
+
+    /// A shell made only once `gate` opens; its hygiene directory is handed back on `kept`, to be
+    /// dropped after the pane.
+    fn shell_once(
+        gate: mpsc::Receiver<()>,
+        kept: mpsc::Sender<Hygiene>,
+    ) -> impl FnOnce(&WorkerCtx) -> Result<PtySession, PtyError> + Send + 'static {
+        held_birth(gate, move || {
+            a_shell().map(|(session, hygiene)| {
+                let _ = kept.send(hygiene);
+                session
+            })
+        })
+    }
+
+    /// The wake a birth is handed, and the receiver a test waits on it with.
+    fn waking() -> (OutputWake, mpsc::Receiver<()>) {
+        let (said, heard) = mpsc::channel();
+        (
+            Arc::new(move || {
+                let _ = said.send(());
+            }),
+            heard,
+        )
+    }
+
+    fn woken(heard: &mpsc::Receiver<()>) {
+        heard
+            .recv_timeout(crate::lane::PATIENCE)
+            .expect("the birth worker wakes its pane within the lane suite's patience");
+    }
+
+    /// How long a test waits for a birth that starts a **real** shell. Not a measure of
+    /// anything: on a machine whose every core is busy a pseudoconsole and its process take
+    /// seconds (the clean guest measured 7.7 s under load), so this is only the backstop for a
+    /// worker that never answers, set where the test shell's own ceiling is.
+    const SHELL_BIRTH_CEILING: Duration = Duration::from_secs(180);
+
+    fn woken_by_a_shell(heard: &mpsc::Receiver<()>) {
+        heard
+            .recv_timeout(SHELL_BIRTH_CEILING)
+            .expect("the birth worker wakes its pane once its shell is made");
+    }
+
+    /// What the shell said until every needle has been seen, in the order they are given, or the
+    /// shell has said nothing for a while. A pseudoconsole's opening cursor question is answered.
+    fn read_until(pty: &PtySession, needles: &[&str]) -> String {
+        const SILENCE: Duration = Duration::from_secs(60);
+        let mut seen = String::new();
+        let mut answered = false;
+        let mut last_byte = Instant::now();
+        loop {
+            let chunk = pty.read_output();
+            if chunk.is_empty() {
+                assert!(
+                    last_byte.elapsed() <= SILENCE,
+                    "the shell went quiet without saying {needles:?}; it said {seen:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            last_byte = Instant::now();
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+            if !answered && seen.contains("\x1b[6n") {
+                pty.write(b"\x1b[1;1R")
+                    .expect("the cursor answer is written");
+                answered = true;
+            }
+            let mut from = 0;
+            let in_order = needles
+                .iter()
+                .all(|needle| match seen[from..].find(needle) {
+                    Some(at) => {
+                        from += at + needle.len();
+                        true
+                    }
+                    None => false,
+                });
+            if in_order {
+                return seen;
+            }
+        }
+    }
+
+    /// A folder resolver that says it was asked, then waits for the test to answer for the disk —
+    /// a network share that has stopped answering, until the test lets it.
+    fn share_that_waits(
+        asked: mpsc::Sender<PathBuf>,
+        answer: mpsc::Receiver<bool>,
+    ) -> impl Fn(&Path) -> bool {
+        move |folder| {
+            let _ = asked.send(folder.to_path_buf());
+            answer.recv_timeout(crate::lane::PATIENCE).unwrap_or(true)
+        }
+    }
+
+    /// The folder a birth worker asked the disk about.
+    fn asked_about(asked: &mpsc::Receiver<PathBuf>) -> PathBuf {
+        asked
+            .recv_timeout(crate::lane::PATIENCE)
+            .expect("the birth worker asks about the folder within the lane suite's patience")
+    }
+
+    /// RED — **a pane whose folder is on a share that stopped answering is made without the
+    /// window waiting, and its shell lands where no folder would have put it** (G-SWEEP-048, #29).
+    /// The window decides the place without the disk: the folder kept, and where the pane goes
+    /// if the folder is gone. The birth worker asks — here a resolver that blocks until the test
+    /// answers for the share — while the pane already draws and holds what is typed; the share
+    /// then answers "no folder", and the shell starts and lands in the profile's own place, with
+    /// one `diagnostics.log` line naming the folder.
+    ///
+    /// MUTATION (observed red): check on the window thread — `spawn_place` keeping a carried
+    /// folder only when it is a directory now, as `revived_cwd` did — the window answers the
+    /// share itself and leaves the birth nothing to ask.
+    #[test]
+    fn a_folder_that_does_not_answer_is_asked_by_the_birth_and_the_shell_lands_where_no_folder_would()
+     {
+        let share = PathBuf::from(if cfg!(windows) {
+            r"\\共享-offline.invalid\项目\folio"
+        } else {
+            "/Volumes/共享-offline/项目/folio"
+        });
+        let profile = profiles::fallback_profile_id();
+        let decided = profiles::spawn_place(
+            profiles::index_of_id(profile),
+            Some(profiles::SeedPlace::Carried(share.clone())),
+            &bt_pty::SystemShellEnvironment,
+        );
+        assert_eq!(
+            decided.place.directory.as_ref(),
+            Some(&share),
+            "the window puts the pane in its folder, asking nobody"
+        );
+        let gone = decided
+            .unless_gone
+            .clone()
+            .expect("and leaves the folder for the birth to ask about");
+        let decision = BirthDecision {
+            started: Started::AsAsked,
+            spawn_profile: profile.to_owned(),
+            spawn_place: decided.place.directory.clone(),
+            at_shell_home: decided.place.at_shell_home,
+            named: decided.place.named,
+            program: Some(PathBuf::from("外壳")),
+            unless_gone: decided.unless_gone.clone().map(Box::new),
+        };
+        let seed = LeafSeed {
+            cwd: Some(profiles::SeedPlace::Carried(share.clone())),
+            ..seed_of(profile)
+        };
+        let mut leaf = bare(&decision, &seed);
+        let (asked_by, asked) = mpsc::channel();
+        let (answer, share_answers) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let spec = pty_door::GoneSpec {
+            folder: gone.folder.clone(),
+            arguments: Vec::new(),
+            working_directory: gone.place.working_directory.clone(),
+        };
+        let shell = pty_door::request(
+            move |_| {
+                let resolver = share_that_waits(asked_by, share_answers);
+                let folder_gone = pty_door::gone_place(Some(spec), &resolver).is_some();
+                pty_door::Born {
+                    session: a_shell().map(|(session, hygiene)| {
+                        let _ = kept.send(hygiene);
+                        session
+                    }),
+                    folder_gone,
+                }
+            },
+            wake,
+        )
+        .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+
+        assert_eq!(asked_about(&asked), share, "the birth asks the disk");
+        assert!(!leaf.shell_answered(), "and waits on it, not the window");
+        assert_eq!(leaf.spawn_place.as_ref(), Some(&share));
+        let frame = leaf
+            .session
+            .viewport_frame(&mut leaf.projection)
+            .expect("the pane draws while its folder is asked about");
+        assert!(frame_matches_grid(&frame, leaf.grid));
+        assert_eq!(
+            offer_pty_input(leaf.input_target(), "echo 共享\r".as_bytes(), "typed").expect("held"),
+            PtyInput::HeldForBirth
+        );
+
+        answer.send(false).expect("the worker waits on the share");
+        woken_by_a_shell(&heard);
+        let mut notes = Vec::new();
+        let refusal =
+            land_shell_birth(&mut leaf, |line| notes.push(line.to_owned())).expect("the landing");
+        assert!(refusal.is_none(), "{refusal:?}");
+        assert!(leaf.pty.is_some(), "the shell started");
+        assert_eq!(
+            leaf.spawn_place, gone.place.directory,
+            "where no folder would have put it"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains(&share.display().to_string()) && notes[0].contains("not a folder"),
+            "{notes:?}"
+        );
+        drop(leaf);
+        drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// PIN (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS) — **both roads that make a pseudoconsole name the
+    /// folder of the program's own file before the first one**: the elevated host before it
+    /// serves, and the resident run after its diagnostics are in the log (the line that says which
+    /// file was resolved goes there) and before the event loop that makes the first pane. A road
+    /// that names nothing runs every pane on the inbox ConPTY (`bt_pty::use_sidecars_in`).
+    ///
+    /// MUTATION (observed red): drop the resident run's `use_sidecars_in`.
+    #[test]
+    fn the_program_names_its_sidecar_folder_before_any_pane() {
+        use bt_source::{Index, ItemQuery};
+        let main = Index::of_package("bt-app")
+            .body_of(&ItemQuery::function("main"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let naming = "bt_pty::use_sidecars_in(bt_platform::own_files_folder())";
+        let named: Vec<usize> = main.match_indices(naming).map(|(at, _)| at).collect();
+        assert_eq!(named.len(), 2, "the host and the resident run each name it");
+        let at = |needle: &str| {
+            main.find(needle)
+                .unwrap_or_else(|| panic!("`main` no longer does `{needle}`"))
+        };
+        assert!(named[0] < at("elevated_host::serve("));
+        assert!(at("diagnostics::enter_resident_run(") < named[1]);
+        assert!(named[1] < at("EventLoop::<AppEvent>::with_user_event()"));
+    }
+    /// RED — **the pane is there before its shell is, and what was typed meanwhile reaches the
+    /// shell first, in order.** The shell is not even started until the test opens the gate; the
+    /// pane already has a frame of its own grid, holds two typed lines (one Chinese), and, once
+    /// the worker has answered and the pane has landed, the shell runs both, in the order typed.
+    ///
+    /// MUTATIONS (observed red): `land_shell_birth` without its `deliver_held_input` — the shell
+    /// never says either line; `pty_door::request` joining its worker before it answers (the old
+    /// row 11) — the birth is already answered before the gate is opened.
+    #[test]
+    fn a_pane_draws_before_its_shell_exists_and_its_shell_gets_what_was_typed_in_order() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (open, gate) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+
+        assert!(
+            leaf.pty.is_none() && !leaf.shell_answered(),
+            "nothing is born yet"
+        );
+        let frame = leaf
+            .session
+            .viewport_frame(&mut leaf.projection)
+            .expect("a pane in birth projects a frame");
+        assert!(frame_matches_grid(&frame, leaf.grid), "of its own grid");
+        for line in ["echo 第一-first\r", "echo 第二-second\r"] {
+            assert_eq!(
+                offer_pty_input(leaf.input_target(), line.as_bytes(), "typed").expect("held"),
+                PtyInput::HeldForBirth
+            );
+        }
+
+        open.send(()).expect("the worker waits at the gate");
+        woken_by_a_shell(&heard);
+        assert!(leaf.shell_answered());
+        let refusal = land_shell_birth(&mut leaf, |line| panic!("nothing is dropped: {line}"))
+            .expect("the landing writes what was held");
+        assert!(refusal.is_none(), "{refusal:?}");
+        assert!(leaf.birth.is_none());
+        let pty = leaf.pty.as_ref().expect("the pane has its shell");
+        read_until(pty, &["第一-first", "第二-second"]);
+        drop(leaf);
+        drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// RED — **a birth that fails lands as the refusal to say**, over a pane with no shell: the
+    /// reason names the profile and keeps the system's own words, and what was typed is said
+    /// dropped, once.
+    ///
+    /// MUTATION (observed red): `land_shell_birth` answering `None` for a failed birth — the
+    /// refusal is never said.
+    #[test]
+    fn a_birth_that_fails_lands_the_refusal_over_a_pane_with_no_shell() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (open, gate) = mpsc::channel();
+        let (wake, heard) = waking();
+        let shell = pty_door::request(
+            held_birth(gate, || {
+                Err(PtyError::Backend(
+                    "CreatePseudoConsole refused: 找不到".into(),
+                ))
+            }),
+            wake,
+        )
+        .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+        offer_pty_input(leaf.input_target(), "dir 目录\r".as_bytes(), "typed").expect("held");
+        open.send(()).expect("the worker waits at the gate");
+        woken(&heard);
+        let mut notes = Vec::new();
+        let refusal = land_shell_birth(&mut leaf, |line| notes.push(line.to_owned()))
+            .expect("a failed birth is not this window's error")
+            .expect("it is the refusal to say");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains("ConPTY") && said.contains("CreatePseudoConsole refused: 找不到"),
+            "{said}"
+        );
+        assert!(leaf.pty.is_none() && leaf.birth.is_none() && leaf.wake.is_none());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains(&format!("{} byte(s)", "dir 目录\r".len())));
+    }
+
+    /// RED — **every answer reaches the pane that asked for it**, whatever order the workers
+    /// answer in: three panes of one restored tab, released last-first and all answered before
+    /// any lands, each land on their own birth's answer.
+    ///
+    /// MUTATION (observed red): `ShellBirth::take` taking the oldest answer in the mailbox rather
+    /// than its own number's — the panes land on each other's answers.
+    #[test]
+    fn every_pane_of_a_restored_tab_lands_on_its_own_answer() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut panes = Vec::new();
+        let (wake, heard) = waking();
+        for pane in ["甲", "乙", "丙"] {
+            let mut leaf = bare(&decision, &seed);
+            let (open, gate) = mpsc::channel();
+            let shell = pty_door::request(
+                held_birth(gate, move || {
+                    Err(PtyError::Backend(format!("the answer for {pane}")))
+                }),
+                Arc::clone(&wake),
+            )
+            .expect("a birth worker");
+            await_shell(&mut leaf, shell, decision.clone(), &seed);
+            panes.push((pane, leaf, open));
+        }
+        for (_, _, open) in panes.iter().rev() {
+            open.send(()).expect("the worker waits at the gate");
+            woken(&heard);
+        }
+        for (pane, leaf, _) in panes.iter_mut().rev() {
+            assert!(leaf.shell_answered());
+            let said = format!(
+                "{:#}",
+                land_shell_birth(leaf, |_| {})
+                    .expect("landed")
+                    .expect("the answer")
+            );
+            assert!(
+                said.contains(&format!("the answer for {pane}")),
+                "{pane}: {said}"
+            );
+        }
+    }
+
+    /// RED — **an answer nobody waits for is not kept**: a pane closed while its shell was being
+    /// born leaves nothing in the mailbox once the worker has answered, and neither does one
+    /// closed after the answer arrived.
+    ///
+    /// MUTATION (observed red): `ShellBirth`'s drop leaving the number unmarked — the answer of
+    /// the pane that closed first stays in the mailbox for ever.
+    #[test]
+    fn an_answer_for_a_pane_that_closed_is_not_kept() {
+        let (wake, heard) = waking();
+        let (open, gate) = mpsc::channel();
+        let closed_first = pty_door::request(
+            held_birth(gate, || Err(PtyError::Backend("关闭".into()))),
+            Arc::clone(&wake),
+        )
+        .expect("a birth worker");
+        let first = closed_first.generation();
+        drop(closed_first);
+        open.send(()).expect("the worker waits at the gate");
+        woken(&heard);
+        assert!(!pty_door::holds(first), "retired, not kept");
+
+        let (open, gate) = mpsc::channel();
+        let closed_after = pty_door::request(
+            held_birth(gate, || Err(PtyError::Backend("关闭".into()))),
+            wake,
+        )
+        .expect("a birth worker");
+        let second = closed_after.generation();
+        open.send(()).expect("the worker waits at the gate");
+        woken(&heard);
+        assert!(closed_after.answered());
+        drop(closed_after);
+        assert!(!pty_door::holds(second), "taken out when its asker went");
+    }
+
+    /// The facts of a landed pane a reader can see, and the session's own.
+    fn landed_facts(leaf: &LeafSession) -> String {
+        format!(
+            "{:#?}",
+            (
+                (
+                    &leaf.profile,
+                    &leaf.program,
+                    &leaf.spawn_place,
+                    leaf.born_named,
+                    leaf.integration,
+                    leaf.wake.is_some(),
+                    leaf.pty.as_ref().map(PtySession::conpty_kind),
+                    leaf.birth.is_some(),
+                    leaf.successor.is_some(),
+                ),
+                (
+                    leaf.grid,
+                    leaf.conpty_grid,
+                    leaf.text_scale,
+                    leaf.metrics,
+                    leaf.card_skip,
+                    &leaf.pending_typing,
+                    &leaf.attention_capability,
+                    leaf.has_rail,
+                ),
+                (
+                    leaf.session.terminal().visible_text(),
+                    leaf.session.reference_directory(),
+                    leaf.session.pty_transport(),
+                    leaf.session.layout_key(),
+                ),
+            )
+        )
+    }
+
+    /// RED — **a pane that waited for its shell is the pane that would have been born with it in
+    /// hand** (the differential): the same decision — a saved profile whose program is gone, so a
+    /// banner is said — landed through the birth road and finished at once on a second shell of
+    /// the same kind, compared fact by fact, the screen included.
+    ///
+    /// MUTATION (observed red): the landing finishing the pane as one still waiting on a row
+    /// (`in_birth` true in `land_shell_birth`) — no banner, and no place kept.
+    #[test]
+    fn a_pane_landed_later_is_the_pane_born_with_its_shell_in_hand() {
+        let decision = BirthDecision {
+            spawn_place: Some(std::env::temp_dir()),
+            ..decided(Started::FellBack(
+                profiles::fallback_profile_id().to_owned(),
+            ))
+        };
+        let seed = seed_of(profiles::WSL_ID);
+
+        let (at_once_shell, at_once_hygiene) = a_shell().expect("a real shell");
+        let mut at_once = bare(&decision, &seed);
+        finish_leaf_birth(
+            &mut at_once,
+            Some(at_once_shell),
+            &decision,
+            &seed,
+            None,
+            false,
+        )
+        .expect("born with its shell in hand");
+
+        let mut later = bare(&decision, &seed);
+        let (open, gate) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
+        await_shell(&mut later, shell, decision.clone(), &seed);
+        open.send(()).expect("the worker waits at the gate");
+        woken_by_a_shell(&heard);
+        assert!(
+            land_shell_birth(&mut later, |line| panic!("nothing was typed: {line}"))
+                .expect("landed")
+                .is_none()
+        );
+
+        assert_eq!(landed_facts(&later), landed_facts(&at_once));
+        drop((at_once, later));
+        drop((
+            at_once_hygiene,
+            hygiene.recv().expect("the shell's directory"),
+        ));
+    }
+
+    /// RED (round 2, B1) — **a birth worker that panics is a birth that failed**: its pane is
+    /// woken and lands the refusal toast's reason, naming the panic, instead of waiting for ever.
+    ///
+    /// MUTATION (observed red): the worker body without its `catch_unwind` — nothing is
+    /// published and the pane is never woken.
+    #[test]
+    fn a_birth_worker_that_panics_lands_the_refusal() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (wake, heard) = waking();
+        let shell = pty_door::request(|_| -> pty_door::Born { panic!("举手-planted") }, wake)
+            .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+        woken(&heard);
+        let said = format!(
+            "{:#}",
+            land_shell_birth(&mut leaf, |_| {})
+                .expect("a failed birth is not this window's error")
+                .expect("it is the refusal to say")
+        );
+        assert!(
+            said.contains("the PTY birth worker panicked: 举手-planted"),
+            "{said}"
+        );
+        assert!(leaf.birth.is_none() && leaf.pty.is_none());
+    }
+
+    /// RED (round 2, B2) — **a *Restart shell* successor that waits on an unknown row lands once
+    /// the walk answers**: the one scan finds it beside the pane in both of its waits — its rows,
+    /// then its shell — and once its shell lands it takes the pane's place and the restart is no
+    /// longer in flight.
+    ///
+    /// MUTATION (observed red): `births_due` scanning only the pane's own birth — the successor
+    /// is never found, and the restart stays in flight for ever.
+    #[test]
+    fn a_restart_waiting_on_an_unknown_row_lands_when_the_walk_answers() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        finish_leaf_birth(&mut leaf, None, &decision, &seed, None, false).expect("the old pane");
+        let mut waiting = bare(&decision, &seed);
+        waiting.birth = Some(PaneBirth {
+            seed: seed_of(profiles::DEFAULT_IDENTITY),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+            waiting: BirthWait::Programs {
+                _waits: programs_lane::pane_waits(),
+            },
+        });
+        leaf.successor = Some(Box::new(waiting));
+        assert!(leaf.restart_in_flight());
+        assert_eq!(births_due(&leaf, &|_| false), [], "the row is unknown");
+        assert_eq!(
+            births_due(&leaf, &|_| true),
+            [(BirthAt::Successor, BirthDue::Rows)],
+            "the walk answered: the successor is due to be made again"
+        );
+
+        // What `Runtime::land_pane_birth` puts back for a successor whose rows decided it: a
+        // pane in birth for its shell.
+        let (open, gate) = mpsc::channel();
+        let (kept, hygiene) = mpsc::channel();
+        let (wake, heard) = waking();
+        let mut remade = bare(&decision, &seed);
+        let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
+        await_shell(&mut remade, shell, decision, &seed);
+        leaf.successor = Some(Box::new(remade));
+        open.send(()).expect("the worker waits at the gate");
+        woken_by_a_shell(&heard);
+        assert_eq!(
+            births_due(&leaf, &|_| true),
+            [(BirthAt::Successor, BirthDue::Shell)]
+        );
+        let SuccessorLanding::Landed(successor) =
+            land_successor(&mut leaf, |line| panic!("nothing was typed: {line}")).expect("landed")
+        else {
+            panic!("the successor's shell was born");
+        };
+        assert!(successor.pty.is_some() && successor.birth.is_none());
+        assert!(!leaf.restart_in_flight(), "the menu row is offered again");
+        drop((leaf, successor));
+        drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// RED (round 2, nit 5) — **a launch shell that could not start completes the startup
+    /// trace** as `not-started`, so `BT_CONPTY_SOURCE` and `BT_STARTUP` are said, and not as a
+    /// probe's `direct-input`.
+    ///
+    /// MUTATION (observed red): `landed_source` ignoring the refusal — the failed tab is recorded
+    /// as `direct-input`.
+    #[test]
+    fn a_launch_shell_that_could_not_start_completes_the_startup_trace() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        let (wake, heard) = waking();
+        let shell = pty_door::request(|_| Err(PtyError::Backend("没有控制台".into())), wake)
+            .expect("a birth worker");
+        await_shell(&mut leaf, shell, decision, &seed);
+        woken(&heard);
+        let refusal = land_shell_birth(&mut leaf, |_| {}).expect("landed");
+        let mut shells = StartupShells {
+            tabs: vec![
+                (TabId(1), SeatId(0), Some("packaged".to_owned())),
+                (TabId(2), SeatId(0), None),
+            ],
+            conpty_line: true,
+            startup_owed: false,
+            startup: None,
+            phase_started: Instant::now(),
+        };
+        let source = landed_source(&leaf, refusal.is_some()).expect("a source");
+        shells.born(TabId(2), SeatId(0), source);
+        assert_eq!(
+            shells.lines_if_born(),
+            Some(vec![
+                r#"BT_CONPTY_SOURCE sources=["packaged", "not-started"]"#.to_owned()
+            ])
+        );
+    }
 }
 
 /// **Where a leaf's shell was born, said for the profile that actually started** (T-RESTART-CWD
@@ -38533,6 +40576,9 @@ fn create_leaf_session(
     probe_input: Option<&[u8]>,
     seed: &LeafSeed,
     programs: &profiles::ProfilePrograms,
+    // `settings.json`'s default choice, which a seed of the unresolved default is resolved
+    // against at its birth.
+    stored_default: &str,
     formulas: FormulaSwitches,
     // **How much of its own past this pane will keep.** A parameter beside
     // `formulas` rather than a field inside it: that struct is the Rendered
@@ -38562,7 +40608,22 @@ fn create_leaf_session(
     // the file named. A WSL leaf falling back to PowerShell must not be handed
     // `/home/me`, and a Git Bash falling back to Windows PowerShell is a pane
     // that does want the PSReadLine probe.
-    let started = startable_profile(&seed.profile, programs);
+    //
+    // **And only from answers in hand** (T-PROGRAMS-REFRESH). When the rule needs a row the
+    // program walk has not answered, nothing is decided: the pane is made **in birth** — every
+    // part of a pane but its process, holding its seed and what is typed into it — the walk is
+    // asked for the rows it waits on, and `Runtime::land_births` comes back here with the
+    // answers once they land.
+    let decided = birth_here(seed, stored_default, programs);
+    let in_birth = decided.is_err();
+    let (seed, started): (LeafSeed, Started) = match decided {
+        Ok(decided) => decided,
+        Err(waiting) => {
+            programs_lane::request(programs_lane::Trigger::Birth, stored_default, &waiting);
+            (seed.clone(), Started::Nothing)
+        }
+    };
+    let seed = &seed;
     let spawn_profile = match &started {
         Started::AsAsked | Started::Nothing => seed.profile.as_str(),
         Started::FellBack(to) => to.as_str(),
@@ -38571,8 +40632,8 @@ fn create_leaf_session(
     // this process, because the module that is broken is the one `Windows
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
     // Idempotent — see `psreadline::begin_probe`.
-    if spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
-        psreadline::begin_probe();
+    if !in_birth && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
+        psreadline::begin_probe(psreadline::ProbeTrigger::Birth);
     }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
     // beside this spawn to ask the default distribution which shell it logs
@@ -38603,7 +40664,11 @@ fn create_leaf_session(
     // Hoisted out of the spawn branch because `LeafSession::spawn_place` is the
     // second rung of §7.1.4's ladder and a leaf is asked where it stands whether
     // or not a process was started behind it.
-    let place = profiles::spawn_place(
+    //
+    // **And without asking the disk** (G-SWEEP-048, #29): whether a carried folder still stands is
+    // the birth worker's question ([`profiles::BirthPlace`]), so a folder on a share that stopped
+    // answering holds this pane in birth and never this thread.
+    let profiles::BirthPlace { place, unless_gone } = profiles::spawn_place(
         profiles::index_of_id(spawn_profile),
         seed.cwd.clone(),
         &bt_pty::SystemShellEnvironment,
@@ -38633,8 +40698,9 @@ fn create_leaf_session(
     // the code says that rather than a comment claiming it: no shell is started
     // unless the row and the program are both in hand.
     let spawn_row = profiles::row_of(spawn_profile);
-    let mut pty = if let (Some(row), Some(program)) = (&spawn_row, programs.program(spawn_profile))
+    let shell = if let (Some(row), Some(program)) = (&spawn_row, programs.program(spawn_profile))
         && probe_input.is_none()
+        && !in_birth
     {
         // **The line the picker was missing.** Choosing a profile used to change
         // a tab's title and its mark and nothing else — `spawn_default_in` was
@@ -38656,6 +40722,19 @@ fn create_leaf_session(
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
         );
+        // The same row composed for the place the pane opens in when its folder is gone: the
+        // birth worker takes this command line and working directory instead, having asked.
+        let gone_spec = unless_gone.as_ref().map(|gone| pty_door::GoneSpec {
+            folder: gone.folder.clone(),
+            arguments: shell_integration::shell_command(
+                row,
+                &gone.place.arguments,
+                shell_integration::Scripts::installed(),
+                &bt_pty::SystemShellEnvironment,
+            )
+            .arguments,
+            working_directory: gone.place.working_directory.clone(),
+        });
         // **The PowerShell load is finished on the birth worker**, not here: naming `folio.ps1`
         // means preparing it, which is disk work. The switch is read here, once, and travels with
         // the birth, which composes both this argv and the last-resort retry's with it.
@@ -38684,29 +40763,30 @@ fn create_leaf_session(
             ));
         }
         resolved_program = Some(PathBuf::from(&program));
-        // **The shell's birth is an owner-thread door** (`doors::PtyBirth`, row 11): the one join
-        // of the `bt-pty-birth` worker, admitted here and nowhere else. A refusal is this branch's
-        // own spawn failure.
+        // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
+        // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
+        // pane is made in birth around the request, holds what is typed into it, and lands when the
+        // answer does (`Runtime::land_births`). Only a worker that cannot be started is this
+        // branch's own failure.
         Some(
-            bt_platform::admission::admitted::<doors::PtyBirth, _>(|token| {
-                pty_door::spawn_shell(
-                    token,
-                    program.into(),
-                    &command.arguments,
+            pty_door::request_shell(
+                pty_door::ShellSpec {
+                    program: program.into(),
+                    arguments: command.arguments,
                     powershell_integration,
-                    command.environment_derivation,
-                    &command.environment,
-                    &command.profile_environment,
-                    pty_size(grid, PhysicalSize::new(body.width, body.height)),
-                    wake.output(),
-                    place.working_directory,
-                )
-                .map_err(anyhow::Error::from)
-            })
-            .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+                    environment_derivation: command.environment_derivation,
+                    folio_environment: command.environment,
+                    profile_environment: command.profile_environment,
+                    carried_environment: seed.carried_environment.clone(),
+                    size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
+                    working_directory: place.working_directory,
+                    unless_gone: gone_spec,
+                },
+                wake.output(),
+            )
             .with_context(|| {
                 format!(
-                    "spawn the {} profile in ConPTY",
+                    "ask for the {} profile's shell",
                     profile_banner_name(spawn_profile)
                 )
             })?,
@@ -38714,6 +40794,200 @@ fn create_leaf_session(
     } else {
         None
     };
+    let decision = BirthDecision {
+        started: started.clone(),
+        spawn_profile: spawn_profile.to_owned(),
+        spawn_place,
+        at_shell_home: place.at_shell_home,
+        named: place.named,
+        program: resolved_program,
+        unless_gone: unless_gone.map(Box::new),
+    };
+    let mut leaf = bare_leaf(
+        LeafView {
+            text_scale,
+            metrics,
+        },
+        grid,
+        &decision,
+        seed,
+        capability,
+        // A wake-up is the other end of a reader thread: held from the request, because the
+        // worker hands the reader thread this very wake, and a pane moved to another window
+        // while it is being born must be woken there. None when no shell is asked for.
+        shell.is_some().then_some(wake),
+        formulas,
+        scrollback,
+        line_wrapping,
+    );
+    match shell {
+        // **Born later, standing where its shell will stand.** The place is said now, from the
+        // decision, so a pane split off or restarted from this one while it is being born is put
+        // down where this one will be; the landing says it again for the shell that started.
+        Some(shell) => await_shell(&mut leaf, shell, decision, seed),
+        // No shell to wait for — no program on this machine, the probe's direct input, or a rule
+        // that waits on a row: what is said about the pane is said now.
+        None => {
+            finish_leaf_birth(&mut leaf, None, &decision, seed, probe_input, in_birth)?;
+            if in_birth {
+                leaf.birth = Some(PaneBirth {
+                    seed: seed.clone(),
+                    probe_input: probe_input.map(<[u8]>::to_vec),
+                    typed: std::cell::RefCell::default(),
+                    waiting: BirthWait::Programs {
+                        _waits: programs_lane::pane_waits(),
+                    },
+                });
+            }
+        }
+    }
+    Ok(leaf)
+}
+
+/// **A pane, every part but its shell's** — its session made and dressed for its view, standing
+/// for the profile its shell is decided to be, with nothing fed and nowhere put down yet. The one
+/// construction every pane comes out of ([`create_leaf_session`]); what needs the shell is
+/// [`finish_leaf_birth`]'s.
+#[allow(clippy::too_many_arguments)]
+fn bare_leaf(
+    view: LeafView,
+    grid: GridSize,
+    decision: &BirthDecision,
+    seed: &LeafSeed,
+    capability: String,
+    wake: Option<Arc<LeafWake>>,
+    formulas: FormulaSwitches,
+    scrollback: NonZeroUsize,
+    line_wrapping: bool,
+) -> LeafSession {
+    let LeafView {
+        text_scale,
+        metrics,
+    } = view;
+    let columns = nonzero_u32(grid.columns.get());
+    let rows = nonzero_u32(grid.rows.get());
+    let mut session = DualPlaneSession::with_quotas_and_cell_height(
+        columns,
+        rows,
+        DEFAULT_STAGING_QUOTA,
+        scrollback,
+        metrics.cell_height_subpixels(),
+    );
+    session.set_cell_width_subpixels(cell_width_subpixels(metrics));
+    session.set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+    session.set_font_size_subpixels(metrics.font_size_subpixels());
+    session.set_math_layout_options(MathLayoutOptions {
+        detect_image_paths: true,
+        block_max_height_px: block_max_height_px(formulas.max_height),
+        restore_stripped_environment_newlines: formulas.repair_row_breaks,
+        ..MathLayoutOptions::default()
+    });
+    // A pane born from a split must obey the switches its neighbours already
+    // obey, which is exactly why this builder exists (see [`create_leaf_session`]).
+    session.set_display_math_bands(formulas.display);
+    session.set_inline_math_bands(formulas.inline);
+    session.set_table_bands(formulas.tables);
+    session.set_layout_key(window_layout_key(
+        columns,
+        metrics.dpi_milli(),
+        metrics.font_size_subpixels(),
+        1,
+        line_wrapping,
+    ));
+    let projection = session.new_projection(session.layout_key());
+    LeafSession {
+        incarnation: next_incarnation(),
+        wake,
+        pty: None,
+        foreground_program_cadence: foreground_program::Cadence::default(),
+        paste_recipient: profiles::paste_recipient(
+            profiles::index_of_id(&decision.spawn_profile),
+            &bt_pty::SystemShellEnvironment,
+        ),
+        integration: profiles::row_of(&decision.spawn_profile)
+            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+        profile: decision.spawn_profile.clone(),
+        program: decision.program.clone(),
+        born_named: false,
+        spawn_place: None,
+        // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
+        // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
+        pending_typing: seed.prefill.clone().map(|command| (command, false)),
+        session,
+        // Nobody has asked for anything yet.
+        attention: attention::AttentionLedger::default(),
+        bell_reported: false,
+        attention_clock: attention_wire::WaitClock::default(),
+        attention_capability: capability,
+        // Aimed at the tail, which is where a card looks until somebody turns a
+        // wheel over it — a shell that has just started has no furniture on its
+        // floor to be aimed past.
+        card_skip: seed.card_skip,
+        projection,
+        text_scale,
+        metrics,
+        thumb_awake: Instant::now(),
+        column_awake: Instant::now(),
+        grid,
+        conpty_grid: grid,
+        pending_pty_resize: None,
+        pending_psreadline_resize_reanchor: false,
+        last_finished_command: None,
+        // Its shell has not said anything yet, let alone marked a prompt.
+        has_rail: false,
+        output_revision: 0,
+        last_seen_revision: 0,
+        last_presented_frame: None,
+        presented_metrics: metrics,
+        frame_image_references: FrameImageReferences::default(),
+        // Nothing has been pasted into a shell that has just started.
+        pending_paste: None,
+        birth: None,
+        successor: None,
+    }
+}
+
+/// **A pane waits for the shell asked for it**: put down where the decision says it will stand —
+/// so a pane split off or restarted from it while it is being born starts there — and in birth on
+/// `shell`, at the grid the shell is being born at, until [`land_shell_birth`].
+fn await_shell(
+    leaf: &mut LeafSession,
+    shell: pty_door::ShellBirth,
+    decision: BirthDecision,
+    seed: &LeafSeed,
+) {
+    let spawn_profile = decision.spawn_profile.clone();
+    place_leaf(leaf, &decision, seed, &spawn_profile, false);
+    leaf.birth = Some(PaneBirth {
+        seed: seed.clone(),
+        probe_input: None,
+        typed: std::cell::RefCell::default(),
+        waiting: BirthWait::Shell(ShellLanding {
+            shell,
+            decision,
+            born_grid: leaf.grid,
+            owed_physical: None,
+        }),
+    });
+}
+
+/// **The half of a pane's birth that needs its shell** — run at creation for a pane with no shell
+/// to wait for, and at the landing for one whose shell was asked of `bt-pty-birth`
+/// (`land_shell_birth`): the same code on both roads, so a pane that waited for its shell is the
+/// pane that would have been made had the shell been there at once.
+///
+/// `pty` is the shell that was born (`None`: no program, the probe's direct input, a pane waiting
+/// on a row, or a birth that failed). `in_birth` is a pane still waiting on a row, about which
+/// nothing is said yet.
+fn finish_leaf_birth(
+    leaf: &mut LeafSession,
+    pty: Option<PtySession>,
+    decision: &BirthDecision,
+    seed: &LeafSeed,
+    probe_input: Option<&[u8]>,
+    in_birth: bool,
+) -> Result<()> {
+    let mut pty = pty;
     let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
@@ -38725,6 +40999,7 @@ fn create_leaf_session(
              written to it"
         ));
     }
+    let mut resolved_program = decision.program.clone();
     // **A pane is the shell it is actually running.** When the profile's own
     // program would not start, `bt-pty` falls back once to `powershell.exe` and
     // hands back the notice that says so — so what this leaf *is*, from here on,
@@ -38757,50 +41032,16 @@ fn create_leaf_session(
         // leaf still claiming to be Git Bash would write `"gitbash"` back into
         // `session.json` for a shell that is not one — so the next launch would
         // meet the same missing program and say the same thing again, for ever.
-        spawn_profile.to_owned()
+        decision.spawn_profile.clone()
     };
-    // **And the place it was born in is said in the namespace of the shell that started**
-    // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
-    // above this leaf is `profile`.
-    let (spawn_place, at_shell_home) =
-        birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place.at_shell_home);
-    let columns = nonzero_u32(grid.columns.get());
-    let rows = nonzero_u32(grid.rows.get());
-    let mut session = DualPlaneSession::with_quotas_and_cell_height(
-        columns,
-        rows,
-        DEFAULT_STAGING_QUOTA,
-        scrollback,
-        metrics.cell_height_subpixels(),
-    );
-    session.set_cell_width_subpixels(cell_width_subpixels(metrics));
-    session.set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
-    session.set_font_size_subpixels(metrics.font_size_subpixels());
-    session.set_math_layout_options(MathLayoutOptions {
-        detect_image_paths: true,
-        block_max_height_px: block_max_height_px(formulas.max_height),
-        restore_stripped_environment_newlines: formulas.repair_row_breaks,
-        ..MathLayoutOptions::default()
-    });
-    // A pane born from a split must obey the switches its neighbours already
-    // obey, which is exactly why this builder exists (see above).
-    session.set_display_math_bands(formulas.display);
-    session.set_inline_math_bands(formulas.inline);
-    session.set_table_bands(formulas.tables);
-    session.set_layout_key(window_layout_key(
-        columns,
-        metrics.dpi_milli(),
-        metrics.font_size_subpixels(),
-        1,
-        line_wrapping,
-    ));
+    let session = &mut leaf.session;
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
     // `fallback_profile()` before the spawn, so the shell starts cleanly and
     // `bt-pty` has nothing to report — the pane simply came up a PowerShell,
     // having been something else when it was saved, with nothing said. §3 and
     // §5#3 give both ways in one rule, so they get one line in one register.
-    if let Some(unknown) = &seed.unknown_profile_id {
+    if let Some(unknown) = seed.unknown_profile_id.as_ref().filter(|_| !in_birth) {
         session
             .feed(unknown_profile_banner(unknown).as_bytes())
             .context("write the unknown-profile banner into the leaf's first line")?;
@@ -38811,7 +41052,9 @@ fn create_leaf_session(
     // profile that was asked for, the one standing in for it, one line, dim —
     // because from the reader's side it is the same event: the pane is back, and
     // it is not the shell they left in it.
-    match &started {
+    match &decision.started {
+        // Nothing has been decided about a pane in birth, so there is nothing to say yet.
+        _ if in_birth => {}
         Started::AsAsked => {}
         Started::FellBack(to) => {
             session
@@ -38819,7 +41062,7 @@ fn create_leaf_session(
                 .context("write the missing-program banner into the leaf's first line")?;
         }
         // Nothing on this machine can stand in, so there is no shell behind this
-        // pane at all: `pty` is `None` above and what is left is a pane that
+        // pane at all: no shell was asked for and what is left is a pane that
         // holds its place in the tree and says why it is empty.
         Started::Nothing => {
             session
@@ -38835,84 +41078,249 @@ fn create_leaf_session(
             .feed(fallback_banner(fallback, &seed.profile).as_bytes())
             .context("write the shell fallback banner into the leaf's first line")?;
     }
-    if let Some(bytes) = probe_input {
+    if let Some(bytes) = probe_input.filter(|_| !in_birth) {
         session
             .feed(bytes)
             .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
     }
+    place_leaf(leaf, decision, seed, &profile, in_birth);
+    // Which modes the carrier itself keeps on, for the two roads that reset a dead program's
+    // modes without a byte to the child: the person's verb and the session's own return from a
+    // stranded alternate screen. The pane's pseudoconsole is fixed here, at its birth.
+    leaf.session.set_pty_transport(
+        match pty.as_ref().map_or(
+            bt_pty::ConPtyKind::NotConPty,
+            bt_pty::PtySession::conpty_kind,
+        ) {
+            bt_pty::ConPtyKind::Shipped | bt_pty::ConPtyKind::Inbox => {
+                bt_term::PtyTransport::ConPty
+            }
+            bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
+        },
+    );
+    leaf.projection = leaf.session.new_projection(leaf.session.layout_key());
+    // A wake-up is the other end of a reader thread, and there is no thread
+    // when there is no ConPTY — see the field.
+    if pty.is_none() {
+        leaf.wake = None;
+    }
+    leaf.paste_recipient = profiles::paste_recipient(
+        profiles::index_of_id(&profile),
+        &bt_pty::SystemShellEnvironment,
+    );
+    // The door of the profile this pane actually came up as, read once,
+    // here, where that profile is finally known — after both fallbacks. See
+    // the field for why it is not read again later.
+    leaf.integration = profiles::row_of(&profile)
+        .map_or(profiles::Integration::None, |row| profiles::served_by(&row));
+    leaf.profile = profile;
+    leaf.program = resolved_program;
+    leaf.pty = pty;
+    Ok(())
+}
+
+/// **Where a pane stands, said for the profile it is (or will be) running** — the spawn's place
+/// crossed into `profile`'s namespace after a fallback (`birth_place_of_the_started_shell`), told
+/// to the session as the second rung of §7.1.4's ladder, and kept on the leaf. A pane still waiting
+/// on a row was never put down anywhere; its seed says where it will be.
+fn place_leaf(
+    leaf: &mut LeafSession,
+    decision: &BirthDecision,
+    seed: &LeafSeed,
+    profile: &str,
+    in_birth: bool,
+) {
+    // **And the place it was born in is said in the namespace of the shell that started**
+    // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
+    // this leaf is `profile`.
+    let (spawn_place, at_shell_home) = birth_place_of_the_started_shell(
+        &decision.spawn_profile,
+        profile,
+        decision.spawn_place.clone(),
+        decision.at_shell_home,
+    );
     // The second rung of §7.1.4's ladder, told to the shell that is standing on it. Only the spawn
     // knows it (`profiles::spawn_place` has already folded HOME into it), so pushing it here is
     // what keeps relative text in this pane from being measured by a second copy of the ladder.
-    session.set_spawn_directory(spawn_place.clone());
+    leaf.session.set_spawn_directory(spawn_place.clone());
     // And whether that rung is a *mark* rather than a place: a WSL leaf opening at its own `$HOME`
     // was handed `--cd ~`, which only the shell can expand, so the session reads the expansion off
     // the pane's first `OSC 7` report (§7.30, 2026-09-07).
-    session.set_spawn_at_shell_home(at_shell_home);
+    leaf.session.set_spawn_at_shell_home(at_shell_home);
     // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
     // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
     // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
     // `/mnt/d/Demo/report.md` for files that are really on this disk.
-    session.set_path_namespace(profiles::printed_path_namespace(
-        profiles::index_of_id(&seed.profile),
-        &bt_pty::SystemShellEnvironment,
-    ));
-    let projection = session.new_projection(session.layout_key());
-    Ok(LeafSession {
-        incarnation: next_incarnation(),
-        // A wake-up is the other end of a reader thread, and there is no thread
-        // when there is no ConPTY — see the field.
-        wake: pty.is_some().then_some(wake),
-        pty,
-        foreground_program_cadence: foreground_program::Cadence::default(),
-        paste_recipient: profiles::paste_recipient(
-            profiles::index_of_id(&profile),
+    leaf.session
+        .set_path_namespace(profiles::printed_path_namespace(
+            profiles::index_of_id(&seed.profile),
             &bt_pty::SystemShellEnvironment,
+        ));
+    // Named only while the started shell stands in the named folder: a fallback profile that
+    // could not spell it was put down elsewhere (`birth_place_of_the_started_shell`).
+    leaf.born_named = !in_birth && decision.named && spawn_place.is_some();
+    // A pane in birth was never put down anywhere yet; its seed still says where it will be.
+    leaf.spawn_place = spawn_place.filter(|_| !in_birth);
+}
+
+/// **A pane's shell has answered: land it** (T-BIRTH-OFF-WINDOW). The pane's birth is finished
+/// from the answer exactly as a pane with its shell in hand is ([`finish_leaf_birth`]); a resize
+/// released while the shell was being born is told to it; what was typed meanwhile is written to
+/// it first, in order. Answers the refusal to say when the birth failed — the pane is then a pane
+/// with no shell, and what was typed into it is said dropped. `None` and nothing changed while
+/// the shell has not answered.
+fn land_shell_birth(
+    leaf: &mut LeafSession,
+    mut note: impl FnMut(&str),
+) -> Result<Option<anyhow::Error>> {
+    let Some(BirthWait::Shell(landing)) = leaf.birth.as_mut().map(|birth| &mut birth.waiting)
+    else {
+        return Ok(None);
+    };
+    let Some(pty_door::Born {
+        session: answer,
+        folder_gone,
+    }) = landing.shell.take()
+    else {
+        return Ok(None);
+    };
+    // Read while the birth is still on the pane; it leaves the pane only below, into the delivery
+    // of what it holds, so nothing a birth carries can be dropped on the way.
+    let decision = if folder_gone {
+        landing.decision.clone().with_folder_gone(&mut note)
+    } else {
+        landing.decision.clone()
+    };
+    let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
+    let (pty, refusal) = match answer {
+        Ok(pty) => (Some(pty), None),
+        Err(error) => (
+            None,
+            Some(anyhow::Error::from(error).context(format!(
+                "spawn the {} profile in ConPTY",
+                profile_banner_name(&decision.spawn_profile)
+            ))),
         ),
-        // The door of the profile this pane actually came up as, read once,
-        // here, where that profile is finally known — after both fallbacks. See
-        // the field for why it is not read again later.
-        integration: profiles::row_of(&profile)
-            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
-        profile,
-        program: resolved_program,
-        // Named only while the started shell stands in the named folder: a fallback profile that
-        // could not spell it was put down elsewhere (`birth_place_of_the_started_shell`).
-        born_named: place.named && spawn_place.is_some(),
-        spawn_place,
-        // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
-        // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
-        pending_typing: seed.prefill.clone().map(|command| (command, false)),
-        session,
-        // Nobody has asked for anything yet.
-        attention: attention::AttentionLedger::default(),
-        bell_reported: false,
-        attention_clock: attention_wire::WaitClock::default(),
-        attention_capability: capability,
-        // Aimed at the tail, which is where a card looks until somebody turns a
-        // wheel over it — a shell that has just started has no furniture on its
-        // floor to be aimed past.
-        card_skip: seed.card_skip,
-        projection,
-        text_scale,
-        metrics,
-        thumb_awake: Instant::now(),
-        column_awake: Instant::now(),
-        grid,
-        conpty_grid: grid,
-        pending_pty_resize: None,
-        pending_psreadline_resize_reanchor: false,
-        last_finished_command: None,
-        // Its shell has not said anything yet, let alone marked a prompt.
-        has_rail: false,
-        output_revision: 0,
-        last_seen_revision: 0,
-        last_presented_frame: None,
-        presented_metrics: metrics,
-        frame_image_references: FrameImageReferences::default(),
-        // Nobody has asked the machine where this shell's `$PROFILE` is yet.
-        // Nothing has been pasted into a shell that has just started.
-        pending_paste: None,
+    };
+    let held = leaf.birth.take();
+    let seed = held
+        .as_ref()
+        .map_or_else(LeafSeed::default, |birth| birth.seed.clone());
+    finish_leaf_birth(leaf, pty, &decision, &seed, None, false)?;
+    if let (Some(pty), Some(physical)) = (leaf.pty.as_mut(), owed_physical)
+        && leaf.conpty_grid != born_grid
+    {
+        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
+        let grid = leaf.conpty_grid;
+        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
+            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+        .context("tell a landed shell the grid its pane moved to while it was being born")?;
+    }
+    if let Some(birth) = &held {
+        deliver_held_input(birth, leaf.input_target(), note)?;
+    }
+    Ok(refusal)
+}
+
+/// **Where a pane's birth sits**: the pane's own, or a *Restart shell* successor's beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BirthAt {
+    Pane,
+    Successor,
+}
+
+/// **What a due birth is due for**: its rows answered (made again through `create_leaf_session`,
+/// asking for its shell), or its shell answered (landed, [`land_shell_birth`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BirthDue {
+    Rows,
+    Shell,
+}
+
+impl LeafSession {
+    /// The birth at `at`, if there is one.
+    fn birth_at(&self, at: BirthAt) -> Option<&PaneBirth> {
+        match at {
+            BirthAt::Pane => self.birth.as_ref(),
+            BirthAt::Successor => self
+                .successor
+                .as_deref()
+                .and_then(|successor: &LeafSession| successor.birth.as_ref()),
+        }
+    }
+
+    /// Whether *Restart shell* is still bringing up this pane's replacement — the menu's greyed
+    /// row reads this.
+    fn restart_in_flight(&self) -> bool {
+        self.successor.is_some()
+    }
+}
+
+/// What one birth is due for now, if anything: a row-waiting birth whose rows `rows_decide`, a
+/// shell birth whose shell has answered.
+fn birth_due(birth: &PaneBirth, rows_decide: &dyn Fn(&LeafSeed) -> bool) -> Option<BirthDue> {
+    match &birth.waiting {
+        BirthWait::Programs { .. } => rows_decide(&birth.seed).then_some(BirthDue::Rows),
+        BirthWait::Shell(landing) => landing.shell.answered().then_some(BirthDue::Shell),
+    }
+}
+
+/// **The one scan of a pane's births** (round 2): both places a birth can sit — the pane's own
+/// and a *Restart shell* successor's — in both of its waits, so no birth is one no landing pass
+/// looks at.
+fn births_due(
+    leaf: &LeafSession,
+    rows_decide: &dyn Fn(&LeafSeed) -> bool,
+) -> Vec<(BirthAt, BirthDue)> {
+    [BirthAt::Pane, BirthAt::Successor]
+        .into_iter()
+        .filter_map(|at| {
+            leaf.birth_at(at)
+                .and_then(|birth| birth_due(birth, rows_decide))
+                .map(|due| (at, due))
+        })
+        .collect()
+}
+
+/// **What a *Restart shell* successor's shell landing came to.**
+enum SuccessorLanding {
+    /// Its shell has not answered.
+    Waiting,
+    /// Its birth failed; the pane keeps the shell it has.
+    Refused(anyhow::Error),
+    /// It was born and is taken off the pane, to take the pane's place.
+    Landed(Box<LeafSession>),
+}
+
+/// Land the successor's shell, if it answered ([`land_shell_birth`]); a landed or refused
+/// successor leaves the pane, which then has no restart in flight.
+fn land_successor(leaf: &mut LeafSession, note: impl FnMut(&str)) -> Result<SuccessorLanding> {
+    let Some(successor) = leaf.successor.as_deref_mut() else {
+        return Ok(SuccessorLanding::Waiting);
+    };
+    if !successor.shell_answered() {
+        return Ok(SuccessorLanding::Waiting);
+    }
+    let refusal = land_shell_birth(successor, note)?;
+    let Some(landed) = leaf.successor.take() else {
+        return Ok(SuccessorLanding::Waiting);
+    };
+    Ok(match refusal {
+        Some(refusal) => SuccessorLanding::Refused(refusal),
+        None => SuccessorLanding::Landed(landed),
     })
+}
+
+/// **The ConPTY source the startup trace records for a pane that has just landed** — its
+/// shell's, or `not-started` for a birth that failed (round 2: a failed identity shell is a
+/// launch shell the trace no longer waits for, and is not a probe's direct input).
+fn landed_source(leaf: &LeafSession, refused: bool) -> Option<String> {
+    if refused {
+        return Some("not-started".to_owned());
+    }
+    conpty_source_of(Some(leaf))
 }
 
 /// **A terminal pane's metrics for a test**, measured once per (scale, size) per process by the
@@ -39105,8 +41513,10 @@ fn create_tab_state(
     programs: &profiles::ProfilePrograms,
     // What a Terminal seat with no entry in `leaves` is started as — the
     // resolved `settings.json` default, by id like every other profile a seed
-    // names (T-PROFILE-TABLE-MOVE).
+    // names (T-PROFILE-TABLE-MOVE); [`profiles::DEFAULT_IDENTITY`] while that is undecided.
     default_profile: &str,
+    // `settings.json`'s default choice — see [`create_leaf_session`]'s parameter of this name.
+    stored_default: &str,
     policy: SizePolicy,
     rail: seats::RailState,
     // The other half of the stage this tab is born into — see [`solve_seats`].
@@ -39163,14 +41573,19 @@ fn create_tab_state(
             LeafId { tab: id, seat },
             wake,
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
-            &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
-                profile: default_profile.to_owned(),
-                cwd: None,
-                unknown_profile_id: None,
-                card_skip: 0,
-                prefill: None,
-            }),
+            &born_in_tab(
+                leaves.get(&seat).cloned().unwrap_or(LeafSeed {
+                    profile: default_profile.to_owned(),
+                    cwd: None,
+                    unknown_profile_id: None,
+                    card_skip: 0,
+                    prefill: None,
+                    carried_environment: None,
+                }),
+                seed.carried_environment.as_ref(),
+            ),
             programs,
+            stored_default,
             formulas,
             scrollback,
             line_wrapping,
@@ -39182,15 +41597,10 @@ fn create_tab_state(
     // `"none"` is that said out loud rather than borrowed from the
     // shell-less-probe spelling beside it: `"direct-input"` means "a shell, fed
     // by the probe instead of by a pipe", which is a different fact (§7.1.6h).
-    let conpty_source = sessions.get(&terminal_seat_id).map_or_else(
-        || "none".to_string(),
-        |leaf| {
-            leaf.pty
-                .as_ref()
-                .map(|pty| pty.conpty_source().to_string())
-                .unwrap_or_else(|| "direct-input".to_string())
-        },
-    );
+    // A tab whose identity shell is in birth has no source yet; its launch holds the line
+    // ([`StartupShells`]), and every other caller ignores it.
+    let conpty_source =
+        conpty_source_of(sessions.get(&terminal_seat_id)).unwrap_or_else(|| "in-birth".to_owned());
     // Built off the *tree* and not off the caller's map, so the table is total
     // over this tab's Files leaves by construction — the same invariant the loop
     // above gives `sessions`, reached the same way. A seat the caller said
@@ -39347,6 +41757,7 @@ fn assemble_tab_state(
         focused_leaf,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
+        carried_environment: seed.carried_environment,
         pending_keyboard_at: None,
         // A tab that arrives pinned wears its pin from the first frame; it
         // is a fact about the tab, not an offer that has to be hovered out.
@@ -39576,6 +41987,8 @@ fn pane_into_new_tab(
             // The name belonged to the tab, not to the pane. A tear-out that
             // carried "build" across would name a room after the house.
             manual_name: None,
+            // A pane torn into a tab of its own takes the account's environment from here on.
+            carried_environment: None,
             pinned,
         },
         seats,
@@ -40632,7 +43045,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
                 leaf.session.take_pty_writes()
             }) {
                 write_pty_input(
-                    leaf.pty.as_ref(),
+                    leaf.input_target(),
                     &reply,
                     "return terminal protocol reply to PTY",
                 )?;
@@ -40675,7 +43088,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             leaf.session.take_pty_writes()
         }) {
             write_pty_input(
-                leaf.pty.as_ref(),
+                leaf.input_target(),
                 &reply,
                 "return terminal protocol reply to PTY",
             )?;
@@ -40716,7 +43129,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             let bytes = quake::typed_into_a_prompt(&command, submit);
             if !bytes.is_empty() {
                 write_pty_input(
-                    leaf.pty.as_ref(),
+                    leaf.input_target(),
                     &bytes,
                     "type a restored command at the prompt",
                 )?;
@@ -40862,6 +43275,38 @@ fn git_surfaces_wanting_reread(
                 .iter()
                 .any(|cwd| git::should_reread(root, Some(cwd), *showing)),
         })
+        .map(|(origin, _, _)| origin.clone())
+        .collect()
+}
+
+/// **R31's fourth moment, the window's half: the repositories this window
+/// wants the kernel's news about** — the roots of its surfaces that are drawn.
+///
+/// The seat a window holds in [`git_watch::GitWatch`] is exactly this set, so a
+/// surface that is not on the glass (a column on its Files page, a page in a tab
+/// that is not on screen, which `Runtime::git_surfaces_on_screen` never lists)
+/// subscribes to nothing and is told nothing.
+#[must_use]
+fn git_roots_on_glass(surfaces: &[(GitOrigin, PathBuf, bool)]) -> BTreeSet<PathBuf> {
+    surfaces
+        .iter()
+        .filter(|(_, _, showing)| *showing)
+        .map(|(_, root, _)| root.clone())
+        .collect()
+}
+
+/// **And which of those surfaces the news it took is about**: every drawn
+/// surface standing on a repository the kernel said moved. Two columns and a
+/// graph can be looking at one repository, and all three are out of date
+/// together.
+#[must_use]
+fn git_surfaces_the_kernel_moved(
+    surfaces: &[(GitOrigin, PathBuf, bool)],
+    moved: &BTreeSet<PathBuf>,
+) -> Vec<GitOrigin> {
+    surfaces
+        .iter()
+        .filter(|(_, root, showing)| *showing && moved.contains(root))
         .map(|(origin, _, _)| origin.clone())
         .collect()
 }
@@ -41184,8 +43629,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         let proxy = event_proxy.clone();
         bt_platform::SystemSettingsWatch::install(
             native,
-            Box::new(move || {
-                let _ = proxy.send_event(AppEvent::SystemPreferencesChanged);
+            Box::new(move |news| {
+                let _ = proxy.send_event(AppEvent::of_system_news(news));
             }),
         )
         .ok()
@@ -41216,6 +43661,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         clock
     };
     WindowRuntime {
+        #[cfg(target_os = "linux")]
+        instance_identity: Arc::default(),
         ime_report,
         ime_report_due: None,
         // A window is born staying.
@@ -41286,6 +43733,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         background_visible: None,
         first_text_visible: None,
         window_shown: false,
+        restored_quake_as_ordinary: false,
         first_visible_present_dpi_checked: false,
         first_text_presented: false,
         startup_poll_at: Instant::now() + STARTUP_PTY_POLL_INTERVAL,
@@ -41302,6 +43750,32 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_burst: None,
         parked_pans,
         dropped_files: None,
+        #[cfg(target_os = "linux")]
+        last_winit_rect: None,
+        #[cfg(target_os = "linux")]
+        last_winit_size: None,
+        #[cfg(target_os = "linux")]
+        native_client_origin: None,
+        #[cfg(target_os = "linux")]
+        maximize_intent: WindowMaximizeIntent::default(),
+        #[cfg(target_os = "linux")]
+        native_window_minimized: None,
+        #[cfg(target_os = "linux")]
+        pending_summoned_arrangement: None,
+        #[cfg(target_os = "linux")]
+        summoned_arrangement_refresh_owed: false,
+        #[cfg(target_os = "linux")]
+        pending_window_rect: None,
+        #[cfg(target_os = "linux")]
+        window_rect_refresh_owed: false,
+        #[cfg(target_os = "linux")]
+        pending_work_area: None,
+        #[cfg(target_os = "linux")]
+        work_area_refresh_owed: false,
+        #[cfg(target_os = "linux")]
+        pending_external_drop: None,
+        #[cfg(target_os = "linux")]
+        pending_paste_path: None,
         last_present_at: None,
         present_diagnostics: present_diagnostics::State::default(),
         attention_sampled_at: None,
@@ -41474,7 +43948,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
-        window_close_requested: false,
+        window_close_requested: None,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
@@ -41485,7 +43959,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         tab_menu: None,
         palette: None,
         palette_layout: None,
-        restarting: None,
         pane_menu: None,
         chevrons: ChevronGates::default(),
         graph_filter_menu: None,
@@ -42068,6 +44541,14 @@ impl Runtime<'_> {
             });
         }
         taskbar_lane::request();
+        // **And the program walk's** (T-PROGRAMS-REFRESH): what this machine can start is asked
+        // on its own lane, first a few lines below, once the profile table is installed.
+        {
+            let proxy = proxy.clone();
+            programs_lane::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::ProgramsAnswered);
+            });
+        }
         // **The probe can repair and renew the package registration**, which
         // is O's until an update's trial is committed (`update_trial`, F-7,
         // F-18): the probe asks the trial's gate itself
@@ -42117,6 +44598,13 @@ impl Runtime<'_> {
             .after_rollback(update_startup::failed())
             .after_start(
                 update_startup::waiting(),
+                // How the run before this one ended (0.4.8 E3): the session sentinel this
+                // process's store already probed above.
+                if persist::previous_run_ended_orderly() {
+                    update_txn::PreviousRun::Orderly
+                } else {
+                    update_txn::PreviousRun::Unfinished
+                },
                 update_job::resumer_for_this_copy(),
                 update::begin,
             );
@@ -42158,6 +44646,17 @@ impl Runtime<'_> {
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
             profiles_fault.get_or_insert(sentence);
         }
+        // **What this machine can start is asked here, and not answered on this thread**
+        // (T-PROGRAMS-REFRESH; T-LAUNCH-PROBE's invariant). The walk runs on its own lane the
+        // moment the table it walks is installed, and the panes below read whatever it has
+        // answered by the time they are made — the whole table on an ordinary machine, where the
+        // walk takes a few milliseconds and the window and the GPU take far longer. A row still
+        // out then is unknown, and a pane whose program depends on it is born when it lands.
+        programs_lane::request(
+            programs_lane::Trigger::Launch,
+            &settings_store.loaded().default_profile,
+            &[],
+        );
         // The pin table, on the same terms and for a narrower reason: the root
         // menu's width is measured from the folder names in it, and a PINNED
         // section that arrived after the first measurement would be a menu drawn
@@ -42169,6 +44668,10 @@ impl Runtime<'_> {
         // own words and a build that silently rewrote one it could not read
         // would destroy the copy they could have fixed by hand.
         let mut keybindings_store = persist::KeybindingsStore::open();
+        #[cfg(target_os = "linux")]
+        if let Err(error) = persist::start_linux_config_migration() {
+            eprintln!("recoverable Linux config migration start failure: {error}");
+        }
         let mut shortcuts = shortcuts::Shortcuts::defaults();
         let overrides: Vec<shortcuts::Override> = keybindings_store
             .loaded()
@@ -42234,12 +44737,8 @@ impl Runtime<'_> {
         // product — a reader who lives in the card column lives in it in every
         // window, including the first one of a fresh profile.
         let focus_mode = settings_store.loaded().focus_mode;
-        // Probed here rather than beside the first shell, which is where it used
-        // to sit: the opening window is *titled* after the default profile, and
-        // resolving which profile that is needs to know what this machine can
-        // start. It is an environment read and four `is_file` calls, so moving it
-        // ahead of the window costs the launch nothing measurable.
-        let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        // Every row unknown until the walk asked for above has answered it.
+        let mut profile_programs = profiles::ProfilePrograms::unknown();
         // **Folio's own older PSReadLine is replaced here, without asking**
         // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
         // first window, because a pane of this Folio starting a PowerShell is
@@ -42262,25 +44761,8 @@ impl Runtime<'_> {
         shell_integration::begin_startup_migration();
         // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
         // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
-        shell_integration::begin_powershell_preparation_for(&profile_programs);
-        // Three registry reads, on this thread, finishing before the next line
-        // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
-        // `getent` inside the distribution — and the `profiles::title` call
-        // twenty lines below, which composes the opening window's own title,
-        // then **joined** that worker. So the launch waited for a WSL virtual
-        // machine to boot before it could ask for a window, and the console
-        // Windows handed that `wsl.exe` was a Windows Terminal window opening in
-        // front of Folio. What is left costs microseconds and starts nothing.
-        wsl::start(profile_programs.program("wsl"));
-        let default_profile =
-            profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
-        // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::id(default_profile);
-        // The command line, put to this machine: the folder asked about, the
-        // profile looked up in this build's table, and the crossing into that
-        // profile's namespace. Everything it could not honour comes back in the
-        // plan's own list and is said on a card once the window is up.
-        let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        // The parser questions about the PowerShell rows follow when the walk has answered them.
+        shell_integration::begin_powershell_script_preparation();
         // **The canvas, settled before there is a window to paint one in**
         // (§7.46 ②). Everything below this point — the first frame, the first
         // pane, and the `OSC 11` that pane answers — happens on the canvas
@@ -42304,11 +44786,18 @@ impl Runtime<'_> {
             );
         }
         let restored = restore_window_placement(event_loop, &opening);
+        // Titled from whatever the walk has answered so far; the active tab's own title replaces
+        // it before the first paint either way.
+        adopt_program_answers(&mut profile_programs, programs_lane::take());
+        let requested_size = restored
+            .map(|placement| placement.size)
+            .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
         let attributes = opening_window_attributes(
-            profiles::title(default_profile),
-            restored
-                .map(|placement| placement.size)
-                .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
+            profiles::identity_title(&profiles::default_profile_identity(
+                &settings_store.loaded().default_profile,
+                &profile_programs,
+            )),
+            requested_size,
         );
         let attributes = match restored.and_then(|placement| placement.position) {
             Some(position) => attributes.with_position(position),
@@ -42342,6 +44831,24 @@ impl Runtime<'_> {
         // an `å` before the setting is read.
         set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
         let native = native_window(&window)?;
+        #[cfg(target_os = "linux")]
+        {
+            let backend = linux_window_backend(&window)?;
+            bt_platform::hotkey::set_linux_backend(backend);
+            // These installers bind process-wide backend identity from the live window.
+            // They only set OnceLocks; they do not probe the display or clipboard
+            // service. A mismatch would route later requests to the wrong backend,
+            // so it must stop startup; service failures remain operation-local.
+            bt_platform::install_linux_display_backend(backend).map_err(|error| anyhow!(error))?;
+            let clipboard_backend = match backend {
+                bt_platform::linux_window::Backend::X11 => bt_platform::LinuxClipboardBackend::X11,
+                bt_platform::linux_window::Backend::Wayland => {
+                    bt_platform::LinuxClipboardBackend::Wayland
+                }
+            };
+            bt_platform::install_linux_clipboard_backend(clipboard_backend)
+                .map_err(|error| anyhow!(error))?;
+        }
         // **The clipboard's owner window, told once here and never carried by a
         // caller again** (M1-9). `OpenClipboard` wants a window and
         // `NSPasteboard` does not, so the handle used to be a parameter on a
@@ -42430,15 +44937,19 @@ impl Runtime<'_> {
         // larger than the one it was torn from, and grows again on every
         // restart. Left as a note rather than as a helper because the slice that
         // opens a second window is the one that will have somewhere to put it.
-        let opened_at = dpi_snapshot(&window)?;
+        let opened_at = dpi_snapshot(&window, None)?;
+        let has_restored_position = restored.is_some();
+        let stood_at = startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale);
+        let initial_rect = has_restored_position.then_some(stood_at);
         stand_the_window_at(
+            &window,
             native,
-            startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
+            stood_at,
             "restore the first window's outer rectangle",
         );
         let window_time = phase_started.elapsed();
-        let startup_dpi = dpi_snapshot(&window)?;
-        let physical = window.inner_size();
+        let startup_dpi = dpi_snapshot(&window, initial_rect)?;
+        let physical = opening_client_allocation(&window, requested_size, initial_rect);
         let startup_scale_factor = startup_dpi.authoritative_scale;
         let phase_started = Instant::now();
         // The visual tree first, because the swapchain hangs off it. Its
@@ -42528,6 +45039,28 @@ impl Runtime<'_> {
         let pty_wake = PtyWakeSignal::new(proxy.clone());
         let wake = &pty_wake;
         let phase_started = Instant::now();
+        // **The walk's answers, read as late as the launch can read them** — right before the
+        // panes are made, without waiting. Everything below decides from these exactly as it
+        // always did from the probe that stood here; a row still unanswered is decided by nobody.
+        adopt_program_answers(&mut profile_programs, programs_lane::take());
+        shell_integration::begin_powershell_preparation_for(&profile_programs);
+        let default_profile =
+            profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
+        // The same answer as a seed spells it — see `Runtime::default_profile_id`.
+        let default_profile_id = profiles::default_profile_identity(
+            &settings_store.loaded().default_profile,
+            &profile_programs,
+        );
+        // The command line, put to this machine: the folder asked about, the
+        // profile looked up in this build's table, and the crossing into that
+        // profile's namespace. Everything it could not honour comes back in the
+        // plan's own list and is said on a card once the window is up.
+        let mut cli_plan: cli::CliPlan = cli::resolve(cli, default_profile, cli::machine_path_kind);
+        // **`--with-environment` reads this process's environment, which on a first launch is
+        // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
+        cli_plan.carried_environment = cli
+            .with_environment
+            .then(cli::CarriedEnvironment::of_this_process);
         // Pinned tabs are an answer already given, so they simply open; the rest
         // become a question the prompt will ask over a window that already works.
         let plan = if probe_input.is_some() {
@@ -42553,7 +45086,11 @@ impl Runtime<'_> {
                 .collect();
             (
                 seats,
-                TabSeed::default(),
+                TabSeed {
+                    // The command-line tab owns what `--with-environment` carried.
+                    carried_environment: cli_plan.carried_environment.clone(),
+                    ..TabSeed::default()
+                },
                 leaves,
                 BTreeMap::new(),
                 PreviewRestore::default(),
@@ -42615,6 +45152,7 @@ impl Runtime<'_> {
                 seed,
                 &profile_programs,
                 &default_profile_id,
+                &settings_store.loaded().default_profile,
                 // Startup: the opening rectangle is the program's own.
                 SizePolicy::Lawful,
                 // **The panel this window is opening with, both halves of it.**
@@ -42673,7 +45211,25 @@ impl Runtime<'_> {
             platform_chrome,
         );
         renderer.set_seat_viewport(terminal_seat);
-        if trace_startup || trace_resize {
+        // **A launch tab whose shell is in birth holds the two shell lines** until it is born
+        // ([`StartupShells`]); a launch whose shells were all decided says them here, as always.
+        let launch_shells: Vec<(TabId, SeatId, Option<String>)> = tabs
+            .iter()
+            .map(|tab: &TabState| {
+                let seat = tab.seats.identity();
+                (tab.id, seat, conpty_source_of(tab.sessions.get(&seat)))
+            })
+            .collect();
+        let startup_shells = ((trace_startup || trace_resize)
+            && launch_shells.iter().any(|(_, _, source)| source.is_none()))
+        .then_some(StartupShells {
+            tabs: launch_shells,
+            conpty_line: true,
+            startup_owed: trace_startup,
+            startup: None,
+            phase_started,
+        });
+        if (trace_startup || trace_resize) && startup_shells.is_none() {
             trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
@@ -42717,7 +45273,21 @@ impl Runtime<'_> {
             favicons_changed: false,
             tab_ids,
             animation_serials: 0,
+            #[cfg(target_os = "linux")]
+            display_generation: 0,
+            #[cfg(target_os = "linux")]
+            display_input_generation: 0,
             event_proxy: proxy.clone(),
+            #[cfg(target_os = "linux")]
+            clipboard_lane: None,
+            #[cfg(target_os = "linux")]
+            trash_lane: None,
+            #[cfg(target_os = "linux")]
+            pending_trash: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            schemes_rescan_owed: false,
+            #[cfg(target_os = "linux")]
+            pending_last_window_close: None,
             git_watch: git_watch::GitWatch::default(),
             handoff_lane,
             layout_tables,
@@ -42748,10 +45318,13 @@ impl Runtime<'_> {
             scheme_fault: None,
             scheme_source: [None, None],
             profile_programs,
+            program_news: window_news::WindowSeats::default(),
+            startup_shells,
             psreadline_documents,
             psreadline_installed: None,
             first_run_attempted: false,
             first_run_waited_for_channel: false,
+            first_run_waited_for_agent_folders: false,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
@@ -42806,6 +45379,16 @@ impl Runtime<'_> {
             pending_restore_answer: None,
             pending_application_change: None,
             pending_new_windows: Vec::new(),
+            #[cfg(target_os = "linux")]
+            pending_quake_summon: None,
+            #[cfg(target_os = "linux")]
+            pending_new_window_display: None,
+            #[cfg(target_os = "linux")]
+            pending_new_window_like: None,
+            #[cfg(target_os = "linux")]
+            pending_new_window_restore_placement: None,
+            #[cfg(target_os = "linux")]
+            pending_drag_guard_screen: None,
             drag_broker: None,
             pending_handover: None,
             quit_requested: false,
@@ -42917,20 +45500,23 @@ impl Runtime<'_> {
         runtime.dress_new_window(native)?;
         if trace_startup {
             let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
-            trace_sink::stderr_line(format!(
-                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={conpty_sources:?} runtime_ready={}ms",
-                window_time.as_millis(),
-                renderer_phases.adapter.as_millis(),
-                renderer_phases.device.as_millis(),
-                renderer_phases.surface_configure.as_millis(),
-                renderer_phases.font_system.as_millis(),
-                renderer_phases.font_metrics.as_millis(),
-                renderer_phases.render_resources.as_millis(),
-                renderer_time.as_millis(),
-                pty_time.as_millis(),
-                probe_input.as_ref().map_or(0, Vec::len),
-                startup_started.elapsed().as_millis(),
-            ));
+            let line = StartupLine {
+                window: window_time,
+                adapter: renderer_phases.adapter,
+                device: renderer_phases.device,
+                surface: renderer_phases.surface_configure,
+                fonts: renderer_phases.font_system,
+                metrics: renderer_phases.font_metrics,
+                render_resources: renderer_phases.render_resources,
+                renderer_total: renderer_time,
+                probe_input: probe_input.as_ref().map_or(0, Vec::len),
+                runtime_ready: startup_started.elapsed(),
+            };
+            match runtime.app.startup_shells.as_mut() {
+                // Said when the last launch shell is born, with `pty_spawn` running to it.
+                Some(shells) => shells.startup = Some(line),
+                None => trace_sink::stderr_line(line.said(pty_time, &conpty_sources)),
+            }
         }
         runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
         // **Every page the file said this window's panes were on**, and here for
@@ -43331,9 +45917,10 @@ impl Runtime<'_> {
             .settings
             .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
         if psreadline_opened {
-            // A failed machine query remains unknown and is retried at the next
-            // real reader edge, never on every frame while this page is open.
-            psreadline::begin_probe();
+            // Asked at every visit (T-PROBE-NO-CACHED-FAILURE): a module installed or updated
+            // while Folio runs is seen here, and a failed check is asked again. One probe per
+            // visit, never per frame while this page is open.
+            psreadline::begin_probe(psreadline::ProbeTrigger::TerminalPage);
             // An out-of-band module change becomes visible when the reader
             // opens its page. A redraw or hover on the open page is not an edge.
             self.psreadline_documents();
@@ -43349,6 +45936,11 @@ impl Runtime<'_> {
             .take_agents_open_edge(content.shows_agents(self.window.settings.category()));
         if agents_opened {
             self.refresh_agent_rows();
+            // Which agents are on this machine is the program walk's answer: asked again here.
+            self.ask_the_program_walk(programs_lane::Trigger::AgentsPage);
+            // And which copilot it is: the page that prints the version asks for it at every
+            // visit, a failure included (T-FRESH-FACTS).
+            attention_copilot::reask_probe(attention_copilot::ProbeTrigger::AgentsPage);
         }
         let profiles_opened = self.window.settings.take_profiles_open_edge(
             self.window.settings.category() == settings::SettingsCategory::Profiles
@@ -43356,6 +45948,8 @@ impl Runtime<'_> {
         );
         if profiles_opened {
             shell_integration::begin_profile_observation_for(&self.app.profile_programs);
+            // Every row's program, and WSL's distributions, asked again as the page opens.
+            self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
         // Use the refreshed fact on this very layout, including its geometry.
         let refreshed_values = (psreadline_opened || agents_opened).then(|| {
@@ -45073,7 +47667,9 @@ impl Runtime<'_> {
             // is a row that cannot start, and the first thing anybody does with a
             // new one is call it something.
             settings::SettingsTarget::ProfileNew => {
-                let Some(made) = profiles::create(self.default_profile()) else {
+                // A copy of the default, and so not before the default is decided: the press
+                // does nothing during the few milliseconds the machine has not answered.
+                let Some(made) = self.default_profile().and_then(profiles::create) else {
                     return Ok(());
                 };
                 self.store_profiles()?;
@@ -45298,7 +47894,11 @@ impl Runtime<'_> {
             }
             settings::RowVerb::Hide => {
                 let hidden = profiles::hidden(index);
-                if !profiles::set_hidden(index, !hidden, self.default_profile()) {
+                let defaults = profiles::possible_defaults(
+                    &self.app.settings_store.loaded().default_profile,
+                    &self.app.profile_programs,
+                );
+                if !profiles::set_hidden(index, !hidden, &defaults) {
                     return Ok(());
                 }
             }
@@ -45651,126 +48251,44 @@ impl Runtime<'_> {
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
         // a shut dialog remembering one.
-        self.window.settings.press(target);
-        match target {
-            settings::SettingsTarget::Scrim => self.window.settings.close(),
-            settings::SettingsTarget::Close => self.window.settings.close(),
-            settings::SettingsTarget::Combo(row) => {
-                self.window.settings.toggle_menu(row);
-                // The list opens showing the answer it already has, whatever
-                // page of it that answer is on — a capped picker whose thirty
-                // faces begin at `Agency FB` would otherwise open nowhere near
-                // the one that is ticked. Asked after the open, because only
-                // then is there a menu whose body can say where the item is.
-                self.show_open_settings_choice(row);
-            }
-            // A press on a track is a jump to the pointer AND the first frame of
-            // a drag — one gesture, so one door (`SettingsLayout::slider_at`).
-            // Grabbing the thumb and not moving is a press that asked for the
-            // value it already had, which costs nothing.
-            settings::SettingsTarget::Slider(row) => {
-                self.window.settings.close_menu();
+        // **The dialog's half of the press is the panel's** (`SettingsPanel::press_verb`), in the
+        // vocabulary `Enter` answers in, so the two roads are one model (F-SWEEP-048): the focus
+        // follows the finger with the ring off — stated before the verb, because closing the
+        // dialog drops the focus — and what comes back is what only the window can do.
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        let verdict = self.window.settings.press_verb(target, content);
+        match (target, verdict) {
+            // The list opens showing the answer it already has, whatever page of it that answer
+            // is on. Asked after the open, because only then is there a menu whose body can say
+            // where the item is.
+            (settings::SettingsTarget::Combo(row), _) => self.show_open_settings_choice(row),
+            // A press on a track is a jump to the pointer AND the first frame of a drag — one
+            // gesture, so one door (`SettingsLayout::slider_at`).
+            (settings::SettingsTarget::Slider(row), _) => {
                 if let Some(value) = layout.slider_at(row, position.x) {
                     self.apply_slider(row, value)?;
                 }
                 self.window.settings_slider_drag = Some(row);
             }
-            target @ settings::SettingsTarget::Choice(..) => {
-                self.window.settings.close_menu();
-                self.apply_settings_choice(target)?;
+            // Turning a page puts the reader at the top of it.
+            (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
+                self.window.settings_scroll = 0.0;
             }
-            // **A press on a greyed item leaves the picker standing and still
-            // speaks** (§7.47). Nothing was chosen, so nothing closes and no
-            // value moves — that half is exactly what it always was. What is
-            // new is that it leaves through the same door a chosen press
-            // leaves by, so a row that knows why its item is dark gets to say
-            // it. Rows with nothing to say answer `None` all the way down the
-            // chain and this is a press that did nothing, as before.
-            target @ settings::SettingsTarget::ChoiceRefused(..) => {
-                self.apply_settings_choice(target)?;
+            (
+                _,
+                settings::SettingsKeyVerdict::Chose(
+                    target @ (settings::SettingsTarget::RestoreRow(_)
+                    | settings::SettingsTarget::RestoreAll),
+                ),
+            ) => self.apply_shortcut_edit(target)?,
+            // Every verb that leaves the dialog goes through the door `Enter` on it goes through:
+            // a verb reachable two ways whose body lives on one of them is a verb that half works.
+            (_, settings::SettingsKeyVerdict::Chose(target)) => {
+                self.apply_settings_choice(target)?
             }
-            // Turning a page puts the reader at the top of it. The distance
-            // belonged to the page they were on, and carrying it across would
-            // open the next one somewhere in its middle.
-            settings::SettingsTarget::Nav(category) => {
-                if self.window.settings.select_category(category) {
-                    self.window.settings_scroll = 0.0;
-                }
-            }
-            settings::SettingsTarget::Record(index) => self.window.settings.begin_recording(index),
-            // **The same capture, started from the other page** (§7.54e ⑤). The
-            // recorder is indexed by a line of the shortcut table and this row is
-            // not on that page, so the index is resolved here — the one place
-            // that holds both the press and the table — and everything after it
-            // is the road the Shortcuts page's own `Record` goes down:
-            // `record_settings_key`, `Shortcuts::set`, `store_keybindings`, and
-            // `settle_quake`'s reconciliation on the very next turn.
-            //
-            // A build with no summon row is a build with nothing to record, and
-            // the press does nothing rather than opening a capture on whatever
-            // line happened to be first.
-            settings::SettingsTarget::QuakeChord => {
-                if let Some(index) = self.summon_shortcut_line() {
-                    self.window.settings.begin_recording(index);
-                }
-            }
-            target @ (settings::SettingsTarget::RestoreRow(_)
-            | settings::SettingsTarget::RestoreAll) => self.apply_shortcut_edit(target)?,
-            // Both leave through the same door the keyboard's Enter leaves
-            // through, which is `apply_settings_choice`'s founding rule: a verb
-            // reachable two ways whose body lives on one of them is a verb that
-            // half works.
-            target @ (settings::SettingsTarget::Advanced(_)
-            | settings::SettingsTarget::ResetAdvanced(_)
-            | settings::SettingsTarget::ProfileUp(_)
-            | settings::SettingsTarget::ProfileDown(_)
-            | settings::SettingsTarget::ProfileEnable(_)
-            | settings::SettingsTarget::ProfileCopyPolicyCommand(_)
-            | settings::SettingsTarget::MenuAction(_)
-            | settings::SettingsTarget::MenuItemEdit(..)
-            | settings::SettingsTarget::MenuItemDelete(..)
-            // The About page's three doors, on that rule exactly
-            // (T-SETTINGS-ABOUT): the pointer and `Enter` open the same address
-            // or the same file, because both arrive at
-            // `apply_settings_choice`'s `Link` arm and neither carries a body of
-            // its own. No `close_menu` beside it, unlike the run below — the
-            // page this target can be drawn on holds no picker to close.
-            | settings::SettingsTarget::Link(_)) => {
-                self.apply_settings_choice(target)?;
-            }
-            // A press on the dialog's own body, or inside the open menu but on
-            // none of its items, lands nowhere. It notably does *not* close: the
-            // mock-up closes on the scrim and on the `×`, and nothing else.
-            settings::SettingsTarget::Panel => {}
-            settings::SettingsTarget::Menu(_) => {}
-            // A press on a row's band is a press on the row and not on a verb.
-            // It moves the focus (see `SettingsPanel::press`) so that `Enter`
-            // opens the editor from where the finger left the keyboard, and does
-            // nothing else: a single click that opened a sub-page would make the
-            // row a button, and the row is a row with buttons on it.
-            settings::SettingsTarget::ProfileRow(_) => {}
-            settings::SettingsTarget::ProfileMore(index) => {
-                self.window.settings.toggle_row_menu(index);
-            }
-            target @ (settings::SettingsTarget::ProfileEdit(_)
-            | settings::SettingsTarget::ProfileMoreItem(..)
-            | settings::SettingsTarget::ProfileNew
-            | settings::SettingsTarget::EditorBack
-            | settings::SettingsTarget::EditorBrowse
-            | settings::SettingsTarget::EnvRemove(_)
-            | settings::SettingsTarget::EnvGhost(_)
-            | settings::SettingsTarget::EnvAdd
-            | settings::SettingsTarget::EditorRestore
-            | settings::SettingsTarget::EditorDelete) => {
-                self.window.settings.close_menu();
-                self.apply_settings_choice(target)?;
-            }
-            // A press into a field puts the caret there and nothing more: the
-            // field already holds the table's own value, and this dialog writes
-            // on change rather than on commit.
-            settings::SettingsTarget::Field(_)
-            | settings::SettingsTarget::EnvName(_)
-            | settings::SettingsTarget::EnvValue(_) => self.window.settings.close_menu(),
+            _ => {}
         }
         if let Some(position) = self.window.pointer_position {
             let hover = self.settings_layout().map(|layout| {
@@ -46317,21 +48835,6 @@ impl Runtime<'_> {
     /// missing. Pinned by `a_deletion_this_window_made_raises_one_card_not_two`.
     fn delete_scheme_file(&mut self, file: &str) -> Result<()> {
         let file = file.to_owned();
-        // **Which rows this file was answering for**, asked before it goes. A
-        // scheme that is not in force needs no fallback at all — deleting it
-        // changes nothing on screen — and one that is needs the default put in
-        // its row, which is the rule this verb has always had, now asked per row
-        // instead of assumed about the canvas in force.
-        let in_force = [
-            self.app.settings_store.loaded().light_scheme.clone(),
-            self.app.settings_store.loaded().dark_scheme.clone(),
-        ];
-        let catalogue = schemes::catalogue();
-        let falls: [bool; 2] = [true, false].map(|light| {
-            let index = usize::from(!light);
-            catalogue.user_file_of(&in_force[index], light) == Some(file.as_str())
-        });
-        drop(catalogue);
         let path = match schemes::user_dir() {
             Ok(directory) => directory.join(&file),
             Err(error) => {
@@ -46343,48 +48846,65 @@ impl Runtime<'_> {
                 );
             }
         };
-        match bt_platform::recycle(&path) {
-            // The shell asked, and the answer was no. Nothing happened and
-            // nothing is said: "cancelled" is a card about a decision the reader
-            // made half a second ago and is still looking at.
-            Ok(false) => return Ok(()),
-            Ok(true) => {}
-            Err(error) => {
-                return self.toast(
+        #[cfg(target_os = "linux")]
+        {
+            let target = TrashTarget::Scheme {
+                window: self.window.window.id(),
+                window_identity: Arc::clone(&self.window.instance_identity),
+                file: file.clone(),
+            };
+            match self.app.submit_trash(path, target) {
+                Ok(_) => Ok(()),
+                Err(error) => self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     Some(i18n::Text::SchemeDeleted.text().to_owned()),
                     i18n::not_deleted(&error),
-                );
+                ),
             }
         }
-        // Only the rows this file was actually answering for fall back, and a
-        // row that was on something else is not touched: `apply_scheme` takes
-        // `None` for "leave this canvas alone", which is what makes deleting a
-        // scheme nobody is wearing a pure file operation.
-        if falls[0] || falls[1] {
-            self.apply_scheme(falls[0].then(String::new), falls[1].then(String::new))?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            // **Which rows this file was answering for**, asked before it goes.
+            let in_force = [
+                self.app.settings_store.loaded().light_scheme.clone(),
+                self.app.settings_store.loaded().dark_scheme.clone(),
+            ];
+            let catalogue = schemes::catalogue();
+            let falls: [bool; 2] = [true, false].map(|light| {
+                let index = usize::from(!light);
+                catalogue.user_file_of(&in_force[index], light) == Some(file.as_str())
+            });
+            drop(catalogue);
+            match bt_platform::recycle(&path) {
+                // The shell asked, and the answer was no. Nothing happened and
+                // nothing is said: "cancelled" is a card about a decision the reader
+                // made half a second ago and is still looking at.
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) => {
+                    return self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                        i18n::not_deleted(&error),
+                    );
+                }
+            }
+            if falls[0] || falls[1] {
+                self.apply_scheme(falls[0].then(String::new), falls[1].then(String::new))?;
+            }
+            let after = schemes::rescan();
+            let fallback = (falls[0] || falls[1]).then(|| after.default_name(falls[0]).to_owned());
+            drop(after);
+            self.refresh_scheme_sources();
+            self.toast(
+                toast::ToastKind::Ok,
+                toast::ToastAnchor::Window,
+                Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                i18n::scheme_deleted(&file, fallback.as_deref()),
+            )
         }
-        // Ahead of the watcher, so the picker has lost the entry by the next
-        // frame rather than by the next quiet window — and so the verdict the
-        // watcher does eventually reach is about a folder that already matches
-        // the settings.
-        let after = schemes::rescan();
-        // The canvas whose row moved is the one whose default the card names,
-        // and a file nobody was wearing moves no row at all — so there is
-        // nothing to name and the sentence says only that the file has gone.
-        let fallback = (falls[0] || falls[1]).then(|| after.default_name(falls[0]).to_owned());
-        drop(after);
-        self.refresh_scheme_sources();
-        self.toast(
-            toast::ToastKind::Ok,
-            toast::ToastAnchor::Window,
-            Some(i18n::Text::SchemeDeleted.text().to_owned()),
-            // **The file and not the scheme's name**: what is in the Recycle Bin
-            // is spelled the way the file was, and that is the string somebody
-            // going to fetch it back has to recognise.
-            i18n::scheme_deleted(&file, fallback.as_deref()),
-        )
     }
 
     /// Note which file each canvas's scheme is coming from, now.
@@ -46394,16 +48914,7 @@ impl Runtime<'_> {
     /// needed, because by the time it is needed the connection it records is
     /// exactly what has been lost.
     fn refresh_scheme_sources(&mut self) {
-        let names = [
-            self.app.settings_store.loaded().light_scheme.clone(),
-            self.app.settings_store.loaded().dark_scheme.clone(),
-        ];
-        let catalogue = schemes::catalogue();
-        for (index, light) in [true, false].into_iter().enumerate() {
-            self.app.scheme_source[index] = catalogue
-                .file_of(&names[index], light)
-                .map(|file| (names[index].clone(), file.to_owned()));
-        }
+        self.app.refresh_scheme_sources();
     }
 
     /// The schemes folder moved and has gone quiet: read it again
@@ -46415,6 +48926,11 @@ impl Runtime<'_> {
     /// being the polling R31 forbids.
     fn advance_scheme_watch(&mut self, now: Instant) -> Result<()> {
         if !self.app.scheme_watch.due(now) {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if self.app.scheme_trash_pending() {
+            self.app.schemes_rescan_owed = true;
             return Ok(());
         }
         self.reread_schemes()
@@ -47430,15 +49946,20 @@ impl Runtime<'_> {
     /// The window's one door for 「这件事刚刚发生」 ([`Self::toast`]), which is
     /// also the one that makes the notice stand where the attention already is
     /// rather than in a corner. It carries the same two facts the terminal's
-    /// hover line carries when it is blocked, in the same words and with the
-    /// same control characters made printable: the address, and that it was
-    /// blocked. No new sentence is minted for a fact this window already has one
+    /// hover line carries when a press is refused, in the same words and with the
+    /// same control characters made printable: the address, and why it was
+    /// refused ([`LinkRefusal`]). No new sentence is minted for a fact this window already has one
     /// for.
-    fn say_address_refused(&mut self, surface: PreviewSurface, url: &str) -> Result<()> {
+    fn say_address_refused(
+        &mut self,
+        surface: PreviewSurface,
+        url: &str,
+        refusal: LinkRefusal,
+    ) -> Result<()> {
         let body = format!(
             "{}{}",
             printable_address(url),
-            i18n::Text::HyperlinkBlockedSuffix.text()
+            refusal.suffix(i18n::current())
         );
         self.toast(toast::ToastKind::Error, surface.toast_anchor(), None, body)
     }
@@ -48498,7 +51019,7 @@ impl Runtime<'_> {
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf| leaf.session.working_directory())
+            .filter_map(|leaf: &LeafSession| leaf.session.standing_folder())
             .map(|cwd| cwd.display().to_string())
             .collect();
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
@@ -49078,6 +51599,7 @@ impl Runtime<'_> {
         );
         let card = seats::PreviewCardContent {
             notice: &words.notice,
+            address: (!words.address_line.is_empty()).then_some(words.address_line.as_str()),
             detail: &words.detail_lines,
             mark: words.mark,
             fault: words.fault,
@@ -49203,17 +51725,11 @@ impl Runtime<'_> {
                 .find(|tab| tab.id == leaf.tab)
                 .map(|tab| (tab, leaf.seat)),
         };
-        seat.and_then(|(tab, seat)| {
-            tab.sessions
-                .get(&seat)
-                .and_then(|leaf| leaf.session.working_directory())
-                .map(|path| path.display().to_string())
-        })
-        .or_else(|| {
-            profiles::home_directory(&bt_pty::SystemShellEnvironment)
-                .map(|home| home.display().to_string())
-        })
-        .unwrap_or_default()
+        files_root_of(
+            seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
+                .map(|leaf| &leaf.session),
+            &bt_pty::SystemShellEnvironment,
+        )
     }
 
     /// Hand one path to the system's default handler, and say so when the window
@@ -49391,11 +51907,10 @@ impl Runtime<'_> {
             // Per leaf: a synchronized update is a property of one screen, and
             // two shells in one tab time out independently.
             for (seat, leaf) in tab.leaves_mut() {
-                let due = leaf
-                    .session
-                    .synchronized_update_deadline()
-                    .is_some_and(|deadline| deadline <= now);
-                if !due {
+                // The product's "if due, finish": `bt_compose::advance` is the same step for a
+                // single-call host (the web road); this loop keeps its own to read the name evidence
+                // between the two, for a due leaf only.
+                if !bt_compose::deadlines(&leaf.session).synchronized_update_due(now) {
                     continue;
                 }
                 let name_before = leaf.name_evidence();
@@ -49761,7 +52276,8 @@ impl Runtime<'_> {
         // `expect` because "nothing was typed into" is a real outcome and a
         // panic is not.
         write_pty_input(
-            self.focused().and_then(|leaf| leaf.pty.as_ref()),
+            self.focused()
+                .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
             bytes,
             context,
         )?;
@@ -49921,9 +52437,24 @@ impl Runtime<'_> {
     /// closed on the window, and where the hand closed does not move because the
     /// tab list scrolled underneath it.
     fn open_broker(&mut self, source: &DragSource, position: PhysicalPosition<f64>) {
+        #[cfg(target_os = "linux")]
+        let Some(pointer) = self.to_screen(position) else {
+            return;
+        };
+        #[cfg(not(target_os = "linux"))]
+        let pointer = self.to_screen(position).unwrap_or((position.x, position.y));
         let scale = self.window.renderer.scale_factor().max(0.01);
-        let size = self.window.window.inner_size();
+        let size = self.client_size();
         let window = self.window_id();
+        #[cfg(target_os = "linux")]
+        let guard_generation = self.app.next_display_generation();
+        #[cfg(target_os = "linux")]
+        let guard = DragGuard {
+            capture: bt_platform::thread_mouse_capture(),
+            screen: None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let guard = DragGuard::sample();
         self.app.drag_broker = Some(DragBroker {
             source: window,
             cargo: source.clone(),
@@ -49931,7 +52462,7 @@ impl Runtime<'_> {
             cargo_tree: None,
             cargo_pane: None,
             guest_mini: None,
-            pointer: self.to_screen(position).unwrap_or((position.x, position.y)),
+            pointer,
             grip: TearGrip {
                 grab_logical: ((position.x / scale) as f32, (position.y / scale) as f32),
                 size_logical: (
@@ -49941,7 +52472,13 @@ impl Runtime<'_> {
             },
             aim: BrokerAim::Home,
             spring: SpringGate::default(),
-            guard: DragGuard::sample(),
+            guard,
+            #[cfg(target_os = "linux")]
+            guard_generation,
+            #[cfg(target_os = "linux")]
+            guard_sample_ready: false,
+            #[cfg(target_os = "linux")]
+            guard_aim_pointer: None,
         });
     }
 
@@ -50564,7 +53101,7 @@ impl Runtime<'_> {
                     .unwrap_or_else(|| tab.display_title());
                 let hint = leaf
                     .session
-                    .working_directory()
+                    .standing_folder()
                     .map(|cwd| cwd.display().to_string())
                     .or_else(|| {
                         leaf.program
@@ -50576,9 +53113,7 @@ impl Runtime<'_> {
                     section: palette::Section::Places,
                     label,
                     hint,
-                    mark: Some(profiles::mark(profiles::index_of_id(
-                        &tab.leaf_profile(*seat),
-                    ))),
+                    mark: Some(profiles::identity_mark(&tab.leaf_profile(*seat))),
                     awaiting: leaf.attention.ticket().is_some(),
                     verb: palette::Verb::Go {
                         tab: tab.id,
@@ -51497,6 +54032,135 @@ impl Runtime<'_> {
 }
 
 impl App {
+    #[cfg(target_os = "linux")]
+    fn submit_trash(
+        &mut self,
+        path: PathBuf,
+        target: TrashTarget,
+    ) -> std::result::Result<trash_lane::TrashId, String> {
+        if self.trash_lane.is_none() {
+            let proxy = self.event_proxy.clone();
+            self.trash_lane = Some(
+                trash_lane::TrashLane::spawn(move || {
+                    let _ = proxy.send_event(AppEvent::TrashAnswered);
+                })
+                .map_err(|error| error.to_string())?,
+            );
+        }
+        if self
+            .trash_lane
+            .as_ref()
+            .is_some_and(|lane| lane.pending_count() >= crate::handoff_lane::CAPACITY)
+        {
+            return Err(trash_lane::LANE_FULL.to_owned());
+        }
+        let scheme = matches!(&target, TrashTarget::Scheme { .. });
+        let id = self
+            .trash_lane
+            .as_mut()
+            .ok_or_else(|| trash_lane::LANE_GONE.to_owned())?
+            .submit(path)?;
+        self.pending_trash.insert(id, target);
+        if scheme {
+            self.schemes_rescan_owed = true;
+        }
+        Ok(id)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn trash_pending_count(&self) -> usize {
+        self.trash_lane
+            .as_ref()
+            .map_or(0, trash_lane::TrashLane::pending_count)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scheme_trash_pending(&self) -> bool {
+        self.pending_trash
+            .values()
+            .any(|target| matches!(target, TrashTarget::Scheme { .. }))
+    }
+
+    fn refresh_scheme_sources(&mut self) {
+        let names = [
+            self.settings_store.loaded().light_scheme.clone(),
+            self.settings_store.loaded().dark_scheme.clone(),
+        ];
+        let catalogue = schemes::catalogue();
+        for (index, light) in [true, false].into_iter().enumerate() {
+            self.scheme_source[index] = catalogue
+                .file_of(&names[index], light)
+                .map(|file| (names[index].clone(), file.to_owned()));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rescan_schemes_without_window(&mut self) {
+        let source = self.scheme_source.clone();
+        let after = schemes::rescan();
+        let current = self.settings_store.loaded().clone();
+        let verdict = schemes::rescan_verdict(
+            &after,
+            [&current.light_scheme, &current.dark_scheme],
+            source,
+            bt_render::schemes_in_force(),
+            self.scheme_fault.as_deref(),
+        );
+        bt_render::set_schemes(verdict.schemes.0, verdict.schemes.1);
+        self.scheme_fault = verdict.fault;
+        let mut renamed = current;
+        for (index, name) in verdict.renamed {
+            if index == 0 {
+                renamed.light_scheme = name;
+            } else {
+                renamed.dark_scheme = name;
+            }
+        }
+        self.settings_store.store(renamed);
+        self.refresh_scheme_sources();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn successful_scheme_trash(&mut self, file: &str) -> Option<String> {
+        let settings = self.settings_store.loaded().clone();
+        let falls = [
+            self.scheme_source[0]
+                .as_ref()
+                .is_some_and(|(name, source)| name == &settings.light_scheme && source == file),
+            self.scheme_source[1]
+                .as_ref()
+                .is_some_and(|(name, source)| name == &settings.dark_scheme && source == file),
+        ];
+        let fallback = if falls[0] || falls[1] {
+            Some(schemes::catalogue().default_name(falls[0]).to_owned())
+        } else {
+            None
+        };
+        if falls[0] || falls[1] {
+            let mut next = settings;
+            if falls[0] {
+                next.light_scheme.clear();
+            }
+            if falls[1] {
+                next.dark_scheme.clear();
+            }
+            self.settings_store.store(next);
+            if adopt_stored_schemes(self.settings_store.loaded()) == ThemeChange::Changed {
+                let change = ApplicationChange {
+                    font: false,
+                    look: true,
+                    caret: false,
+                    option: false,
+                    paid_by: None,
+                };
+                self.pending_application_change =
+                    Some(change.merged_with(self.pending_application_change));
+            }
+            self.refresh_scheme_sources();
+        }
+        fallback
+    }
+
     fn decoration_senders(&self) -> DecorationSenders {
         DecorationSenders {
             math: self.math_worker.tasks.clone(),
@@ -51519,7 +54183,13 @@ impl App {
                 // start's, which makes it as every start does.
                 Writer::DataFolderMove => {}
                 Writer::DataFolder => {
-                    let _ = std::fs::create_dir_all(persist::storage_dir());
+                    let _ = persist::make_data_folder(&persist::storage_dir());
+                    #[cfg(target_os = "linux")]
+                    if let Some(config) =
+                        persist::linux_config_directory_for(&persist::storage_dir())
+                    {
+                        let _ = persist::make_data_folder(&config);
+                    }
                 }
                 Writer::RefusedCopies => update_trial::keep_owed_copies(),
                 Writer::Session => self.session_store.release_trial(),
@@ -51558,6 +54228,10 @@ impl App {
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = persist::start_linux_config_migration() {
+            eprintln!("recoverable Linux config migration start failure: {error}");
+        }
     }
 
     /// **Name the next playback of an animated picture** (adversarial review
@@ -51570,6 +54244,12 @@ impl App {
     fn next_animation_serial(&mut self) -> u64 {
         self.animation_serials = self.animation_serials.saturating_add(1);
         self.animation_serials
+    }
+
+    #[cfg(target_os = "linux")]
+    fn next_display_generation(&mut self) -> u64 {
+        self.display_generation = self.display_generation.wrapping_add(1);
+        self.display_generation
     }
 
     /// What one window last said about itself, if it has said anything.
@@ -52380,7 +55060,8 @@ mod launch_landing_tests {
     fn a_request_opens_its_tab_where_it_asked_and_raises_the_window() {
         let tab = method_body("FolioApp", "open_a_tab_for_a_launch");
         assert!(
-            tab.contains("runtime.new_tab_with_profile(&profile, request.cwd.clone())"),
+            tab.contains("runtime.new_tab_with_profile_carrying(")
+                && tab.contains("request.cwd.clone(),"),
             "the tab door is not reached with the request's own folder:\n{tab}"
         );
         assert!(
@@ -52417,7 +55098,7 @@ mod launch_landing_tests {
             .find("restore_minimized_window(window)?")
             .unwrap_or(usize::MAX);
         let front = forward
-            .find("give_foreground_to(native_window(window)?)")
+            .find("take_owned_keyboard_focus(window)")
             .unwrap_or(0);
         assert!(
             restore < front,
@@ -53000,9 +55681,9 @@ mod mouse_trace_station_tests {
     //
     // **One reading widens** (§4.1). The route sweep took this file; it now
     // takes every file the package declares, which is one site more — a fixture
-    // in `tests.rs` writing a declared word. The closed set of route words is a
-    // fact about the package and not about one file of it, and a reading
-    // watching one file could not say so.
+    // in one of the crate root's test files writing a declared word. The closed
+    // set of route words is a fact about the package and not about one file of
+    // it, and a reading watching one file could not say so.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -54187,7 +56868,8 @@ mod files_locate_door_tests {
         let hit = method_body("Runtime", "float_hit_at");
         assert!(
             hit.contains("float::FloatPart::CardButton")
-                && hit.contains("preview_card_geometry(geometry.body, Some(open_button_px)"),
+                && hit.contains("seats::preview_card_geometry(")
+                && hit.contains("Some(open_button_px)"),
             "the float's no-preview button is not hit where the card drew it"
         );
         let press = method_body("Runtime", "press_float");
@@ -55768,8 +58450,31 @@ mod formula_tool_seat_tests {
         let copy = method_body("Runtime", "copy_math_latex");
         assert!(
             copy.find("self.live_paste_target(target)").unwrap()
-                < copy.find("bt_platform::set_clipboard_text").unwrap()
+                < copy.find("self.submit_clipboard_write").unwrap()
         );
+        assert!(copy.contains("ClipboardWriteEffect::MathCopied"));
+        assert_eq!(
+            found(
+                needle!(Pattern::text("bt_platform::set_clipboard_text_on_worker(")),
+                View::Raw
+            )
+            .in_the_product(source())
+            .len(),
+            1,
+            "Linux native writes enter only through the lane adapter"
+        );
+        let sync_setters = found(
+            needle!(Pattern::text("bt_platform::set_clipboard_text(")),
+            View::Raw,
+        );
+        assert_eq!(
+            sync_setters.in_the_product(source()).len(),
+            2,
+            "only the non-Linux terminal helper and formula fallback call the synchronous setter:\n{}",
+            sync_setters.report(source())
+        );
+        assert!(copy.contains("#[cfg(not(target_os = \"linux\"))]"));
+        assert!(copy.contains("bt_platform::set_clipboard_text(source)"));
         let validate = method_body("Runtime", "live_paste_target");
         assert!(validate.contains("tab.sessions.get(&target.seat)"));
         assert!(validate.contains("paste_target_is_live(tab.id, standing, target)"));
@@ -55922,7 +58627,7 @@ mod formula_tool_seat_tests {
             .find("self.carry_live_journeys(Instant::now());")
             .expect("every compose carries the journeys that are running");
         let projected = compose
-            .find("leaf.session.refresh_projection(&mut leaf.projection);")
+            .find("bt_compose::project(bt_compose::Pane {")
             .expect("and the projection is what reads the band's height");
         assert!(
             carried < projected,
@@ -58710,8 +61415,8 @@ mod quit_transaction_tests {
         );
     }
 
-    /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` is
-    /// unchanged.**
+    /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` leaves by
+    /// the controlled failure road** (`FolioApp::stop_every_window`, 0.4.8 G7).
     ///
     /// The two are different machines for different events and the plan's whole
     /// §E2 rests on keeping them apart: `exiting` runs after the loop has stopped
@@ -58733,8 +61438,8 @@ mod quit_transaction_tests {
         let exiting =
             item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler"));
         assert!(
-            exiting.contains(&[shut.as_str(), "(true)"].concat()),
-            "and the backstop for a loop stopped by something else is untouched"
+            exiting.contains("self.stop_every_window()"),
+            "and the backstop for a loop stopped by something else leaves by the failure road, held to its tables by `restore_app_tests::failure_road`"
         );
     }
 
@@ -59688,7 +62393,7 @@ mod pty_drain_budget_tests {
     /// PIN — **no path reaches ConPTY with a rectangle except through the quiet window.**
     ///
     /// The behavioural half lives in
-    /// `tests::a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`; this
+    /// `app_panes_tests::a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`; this
     /// is the half that can actually be broken again, because the way it broke the first time
     /// was a *second* commit path being written beside the coalescer rather than the coalescer
     /// being wrong. `commit_leaf_resize` is the only thing that calls `PtySession::resize` for a
@@ -59704,9 +62409,10 @@ mod pty_drain_budget_tests {
             // Its declaration and the one production release, counted over every file a
             // product build of this package compiles. The number was the same when the
             // reading was "the whole of `main.rs`", and for a reason that had nothing to
-            // do with the rule: the six test callers are in `tests.rs`, which that
-            // reading did not open. Now they are not counted because the declaration that
-            // reaches that file is `#[cfg(test)]`, which is the fact meant all along.
+            // do with the rule: the six test callers are in the crate root's test files
+            // (`app_panes_tests.rs` and its siblings), which that reading did not open. Now
+            // they are not counted because the declarations that reach those files are
+            // `#[cfg(test)]`, which is the fact meant all along.
             2,
             "the commit has one caller in the product, and that caller is the release"
         );
@@ -59904,6 +62610,10 @@ mod pty_drain_budget_tests {
             due.contains("leaves_mut()"),
             "and when it wakes, every pane of the tab on screen settles"
         );
+        assert!(
+            due.contains("bt_compose::advance_live_stability("),
+            "each through the crate's advance, the step a live row settles at"
+        );
         for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
             assert!(
                 !deadline.contains(focused_only) && !due.contains(focused_only),
@@ -59913,7 +62623,7 @@ mod pty_drain_budget_tests {
         }
         let redraw = method_body("Runtime", "redraw");
         assert!(
-            redraw.contains("schedule_visible_artifacts("),
+            redraw.contains("bt_compose::schedule("),
             "and the pass that projects the panes nobody is typing in is the pass that schedules \
              the artifacts it just found in them"
         );
@@ -60743,6 +63453,77 @@ impl FolioApp {
     /// photographed it would put a window the reader closed back into
     /// `session.json` and open it again next launch. The one caller that does
     /// have business with it is [`Self::for_every_window_engines_included`].
+    /// **Adopt what the program walk published, and tell every window** (T-PROGRAMS-REFRESH).
+    ///
+    /// The one writer of [`App::profile_programs`] after the launch. Before the answer moves
+    /// anything, each window notes the program rows its open menus show (a keyboard's highlight
+    /// follows its item across the relayout); the answer is adopted once, for the application;
+    /// and, when it moved something a reader can see, every window's seat is told
+    /// (`WindowSeats::tell_all`) and each window takes the news on its own turn — relighting its
+    /// menus, re-asking its Git pages when git moved, and bearing the panes that were waiting.
+    fn adopt_program_walk(&mut self) -> Result<()> {
+        // Before the application exists the answers wait in the mailbox, where the launch reads
+        // them.
+        if self.app.is_none() {
+            return Ok(());
+        }
+        let answers = programs_lane::take();
+        if answers.is_empty() {
+            return Ok(());
+        }
+        let mut shown = BTreeMap::new();
+        self.for_each_window(|runtime| {
+            shown.insert(runtime.window_id(), runtime.shown_program_rows());
+            Ok(())
+        })?;
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        // A walk that died never published its facts: one walk is asked for in its place
+        // (T-FRESH-FACTS round 2), so nothing waiting on them waits for an unrelated trigger.
+        if let Some(died) = answers.died {
+            let line = match programs_lane::request_after_death(
+                died,
+                &app.settings_store.loaded().default_profile,
+            ) {
+                Some(again) => {
+                    format!(
+                        "program walk {died} ended early; walk {again} is asked for in its place"
+                    )
+                }
+                None => format!(
+                    "program walk {died} ended early; it was itself asked for after a death, so \
+                     the next trigger walks again"
+                ),
+            };
+            diagnostics::note(&line);
+        }
+        // A walk's end is news to a pane in birth even when no answer moved: a pane left in birth
+        // to say something at its landing (`birth_here`) waits on rows that were already known.
+        let ended = answers.finished.is_some();
+        let news = adopt_program_answers(&mut app.profile_programs, answers);
+        if !news.any() && !ended {
+            return Ok(());
+        }
+        if news.rows {
+            // The parser questions about the PowerShell rows, as after a table change.
+            shell_integration::begin_powershell_preparation_for(&app.profile_programs);
+        }
+        if news.agent_homes {
+            // Where an agent keeps its configuration moved: its row reads the file there now,
+            // once for the process (the rows are the application's).
+            read_the_agent_rows_again(app);
+        }
+        if news.copilot {
+            attention_copilot::reask_probe(attention_copilot::ProbeTrigger::ProgramMoved);
+        }
+        app.program_news.tell_all(&MachineNews::Programs);
+        self.for_each_window(|runtime| {
+            let shown = shown.remove(&runtime.window_id()).unwrap_or_default();
+            runtime.take_program_news(&shown, news)
+        })
+    }
+
     fn for_each_window(
         &mut self,
         mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
@@ -61099,7 +63880,12 @@ impl FolioApp {
             // **The wake-up is re-pointed here and nowhere else** — see
             // [`LeafWake`] for what a shell nudging the bit of a window that has
             // closed costs, which is silence rather than a wrong picture.
-            if let Some(wake) = leaf.wake.as_ref() {
+            // A *Restart shell* successor being born beside it moves with it, and is woken there.
+            let successor_wake = leaf
+                .successor
+                .as_deref()
+                .and_then(|successor: &LeafSession| successor.wake.as_ref());
+            for wake in [leaf.wake.as_ref(), successor_wake].into_iter().flatten() {
                 wake.rebind(&target.pty_wake);
                 debug_assert!(
                     Arc::ptr_eq(&wake.bit(), &target.pty_wake.raised),
@@ -61363,6 +64149,204 @@ impl FolioApp {
         batch
     }
 
+    #[cfg(target_os = "linux")]
+    fn cancel_stale_clipboard_reads(&mut self) {
+        let pending = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+            .map_or_else(Vec::new, |reads| reads.pending_targets());
+        let stale: Vec<u64> = pending
+            .into_iter()
+            .filter_map(|(id, target)| {
+                let current = self
+                    .runtime(target.window)
+                    .is_some_and(|mut runtime| runtime.clipboard_target_is_current(&target));
+                (!current).then_some(id)
+            })
+            .collect();
+        if let Some(reads) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+        {
+            reads.cancel_requests(&stale);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain_clipboard_lane(&mut self) -> Result<()> {
+        let result = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+            .and_then(|lane| lane.take_result());
+        let Some(result) = result else {
+            return Ok(());
+        };
+        let result_id = result.id();
+        let adopted = match result {
+            linux_clipboard_lane::ClipboardLaneResult::Read(result) => {
+                match self.runtime(result.target.window) {
+                    Some(mut runtime) => {
+                        if runtime.clipboard_target_is_current(&result.target) {
+                            runtime.apply_clipboard_read_result(result)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    _ => Ok(()),
+                }
+            }
+            linux_clipboard_lane::ClipboardLaneResult::Write(result) => {
+                if !recoverable_clipboard_write(
+                    result.result.map_err(|error| anyhow!(error)),
+                    result.action,
+                ) || matches!(&result.effect.effect, ClipboardWriteEffect::None)
+                {
+                    Ok(())
+                } else {
+                    match self.runtime(result.effect.window) {
+                        Some(mut runtime)
+                            if Arc::ptr_eq(
+                                &runtime.window.instance_identity,
+                                &result.effect.window_identity,
+                            ) =>
+                        {
+                            runtime.apply_clipboard_write_effect(result.effect.effect)
+                        }
+                        _ => Ok(()),
+                    }
+                }
+            }
+        };
+        if let Some(lane) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.clipboard_lane.as_ref())
+        {
+            lane.acknowledge_result(result_id);
+        }
+        adopted
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain_trash_answers(&mut self) -> Result<()> {
+        let completions = self
+            .app
+            .as_mut()
+            .and_then(|app| app.trash_lane.as_mut())
+            .map_or_else(Vec::new, trash_lane::TrashLane::answers);
+        for completion in completions {
+            let target = self
+                .app
+                .as_mut()
+                .and_then(|app| app.pending_trash.remove(&completion.id));
+            let Some(target) = target else {
+                continue;
+            };
+            match target {
+                TrashTarget::File {
+                    leaf,
+                    root,
+                    key,
+                    name,
+                    parent,
+                } => {
+                    if let Some(owner) = self.owner_of(leaf.tab)
+                        && let Some(mut runtime) = self.runtime(owner)
+                    {
+                        runtime.complete_trash_file(
+                            leaf,
+                            &root,
+                            &key,
+                            &name,
+                            parent,
+                            completion.outcome,
+                        )?;
+                    }
+                }
+                TrashTarget::Scheme {
+                    window,
+                    window_identity,
+                    file,
+                } => match completion.outcome {
+                    Ok(true) => {
+                        let fallback = self
+                            .app
+                            .as_mut()
+                            .map(|app| app.successful_scheme_trash(&file));
+                        if let Some(mut runtime) = self.runtime(window)
+                            && runtime.window.leaving.is_none()
+                            && Arc::ptr_eq(&window_identity, &runtime.window.instance_identity)
+                        {
+                            runtime.toast(
+                                toast::ToastKind::Ok,
+                                toast::ToastAnchor::Window,
+                                Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                                i18n::scheme_deleted(&file, fallback.flatten().as_deref()),
+                            )?;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        if let Some(mut runtime) = self.runtime(window)
+                            && runtime.window.leaving.is_none()
+                            && Arc::ptr_eq(&window_identity, &runtime.window.instance_identity)
+                        {
+                            runtime.toast(
+                                toast::ToastKind::Error,
+                                toast::ToastAnchor::Window,
+                                Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                                i18n::not_deleted(&error),
+                            )?;
+                        }
+                    }
+                },
+            }
+        }
+
+        let rescan = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.schemes_rescan_owed && !app.scheme_trash_pending());
+        if rescan {
+            if let Some(app) = self.app.as_mut() {
+                app.schemes_rescan_owed = false;
+            }
+            let live = (0..self.windows.len()).find_map(|index| {
+                let id = self.windows.key_at(index)?;
+                (!self.is_leaving(id)).then_some(id)
+            });
+            if let Some(id) = live {
+                if let Some(mut runtime) = self.runtime(id) {
+                    runtime.reread_schemes()?;
+                }
+            } else if let Some(app) = self.app.as_mut() {
+                app.rescan_schemes_without_window();
+            }
+        }
+        self.settle_application_change()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn settle_pending_last_window_close(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_ref() else {
+            return Ok(());
+        };
+        if app.quit.is_some() || app.quit_requested || app.trash_pending_count() > 0 {
+            return Ok(());
+        }
+        let Some(window) = self
+            .app
+            .as_mut()
+            .and_then(|app| app.pending_last_window_close.take())
+        else {
+            return Ok(());
+        };
+        self.close(window)
+    }
+
     /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
     ///
     /// Each answer is offered to every open window and claimed by the one whose duties hold its
@@ -61391,6 +64375,20 @@ impl FolioApp {
     /// The queue is drained before the loop over it, so the borrow of the application ends before
     /// the first window is reached.
     fn route_clicked_notifications(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(error) = self
+            .app
+            .as_mut()
+            .and_then(|app| app.notifications.take_failure())
+        {
+            eprintln!("desktop notification refused: {error}");
+            if let Some(id) = self.frontmost_window().or_else(|| self.windows.key_at(0))
+                && !self.is_leaving(id)
+                && let Some(mut runtime) = self.runtime(id)
+            {
+                runtime.raise_notification_refusal(&error)?;
+            }
+        }
         let Some(app) = self.app.as_ref() else {
             return Ok(());
         };
@@ -61563,6 +64561,20 @@ impl FolioApp {
         // program: it goes when the windows go, and comes back holding what the
         // restore row says — see `retire_the_summon_with_the_run` below.
         let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id));
+        // A dirty summoned window answers before this last visible window leaves.
+        if ending && !self.the_summon_lets_the_run_end(id)? {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if ending
+            && let Some(app) = self.app.as_mut()
+            && app.trash_pending_count() > 0
+        {
+            // Keep the last window and session writer alive until accepted
+            // trash results have updated their owning facts.
+            app.pending_last_window_close = Some(id);
+            return Ok(());
+        }
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -61659,6 +64671,39 @@ impl FolioApp {
             .count()
     }
 
+    /// **Whether the summoned terminal lets the run end with `closing`**
+    /// (T-SUMMON-DIRTY-PREVIEW) — its dirty gate, put the run's end
+    /// ([`restore::GateRequest::ShutWithTheRun`]) over its own tabs.
+    ///
+    /// The run's end is a normal close of the summoned terminal, not a failure,
+    /// so it goes through the gate every other close of a window goes through:
+    /// nothing to ask lets the run end; a question raised — or one already up in
+    /// it, which no second request slips past (ticket 58) — holds the close, and
+    /// the summoned terminal is brought up by its own door
+    /// ([`Self::summon_quake`]) so that the question is on the screen. Its
+    /// confirmed answer re-runs the close of `closing`
+    /// ([`WindowRuntime::window_close_requested`]); `Cancel` leaves `closing` open, so
+    /// the summoned terminal never stands alone (§7.54e ①).
+    ///
+    /// No summoned window, or one already leaving, has nothing to ask.
+    fn the_summon_lets_the_run_end(&mut self, closing: WindowId) -> Result<bool> {
+        let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
+            return Ok(true);
+        };
+        if self.is_leaving(id) {
+            return Ok(true);
+        }
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(true);
+        };
+        let raised = runtime.raise_dirty_gate(restore::GateRequest::ShutWithTheRun(closing))?;
+        if raised.proceeds() {
+            return Ok(true);
+        }
+        self.summon_quake(None)?;
+        Ok(false)
+    }
+
     /// **The summoned terminal goes with the run** (§7.54).
     ///
     /// Told at the moment the last window a reader can see is told, and through
@@ -61681,6 +64726,10 @@ impl FolioApp {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
+        #[cfg(target_os = "linux")]
+        if let Some(app) = self.app.as_mut() {
+            app.pending_quake_summon.take();
+        }
         if self.is_leaving(id) {
             return Ok(());
         }
@@ -61812,6 +64861,14 @@ impl FolioApp {
         if !self.windows.is_empty() {
             return web_spare::RunControl::Wait;
         }
+        #[cfg(target_os = "linux")]
+        if self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.trash_pending_count() > 0)
+        {
+            return web_spare::RunControl::Wait;
+        }
         web_spare::after_the_last_window(
             a_run_ends_with_its_last_visible_window(self.windows.len()),
             let_go,
@@ -61900,7 +64957,28 @@ impl FolioApp {
             })
             .collect();
         if let Some(app) = self.app.as_mut() {
+            // **Every window the directory names has a seat in every holder of
+            // per-window news, and no other** (T-WINDOWS-ALL): the walk that names
+            // a window seats it, and the walk that stops naming it — closed, or
+            // leaving — releases its seat, and in the git watch every subscription
+            // only it wanted. A new holder is one more entry in this list.
+            let ids: Vec<WindowId> = open.iter().map(|window| window.id).collect();
+            window_news::seat_every_holder(&mut [&mut app.git_watch, &mut app.program_news], &ids);
             app.windows_open = open;
+        }
+    }
+
+    /// **Ripen the git watch's news for every window** (R31's D; T-WINDOWS-ALL).
+    ///
+    /// The application's clocks over the union of every window's Git pages,
+    /// read once a pass and before any window's turn: a repository whose tree
+    /// has gone quiet is filed under every seat that wants it, and each window
+    /// takes its own in [`Runtime::advance_git_watch`] on this same pass.
+    fn ripen_git_news(&mut self, now: Instant) {
+        if let Some(app) = self.app.as_mut() {
+            hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
+                app.git_watch.ripen(now);
+            });
         }
     }
 
@@ -62007,15 +65085,51 @@ impl FolioApp {
     }
 
     fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.pending_new_window_display.is_some())
+        {
+            return Ok(());
+        }
         let plans = match self.app.as_mut() {
             Some(app) => std::mem::take(&mut app.pending_new_windows),
             None => return Ok(()),
         };
-        for plan in plans {
+        let mut plans = std::collections::VecDeque::from(plans);
+        while let Some(plan) = plans.pop_front() {
             // The rail the asking window is wearing, read before the borrow is
             // handed to the door: since schema v9 there is no single answer in
             // the file, so a window a verb asked for copies the window that
             // asked. See `Runtime::open_window`.
+            #[cfg(target_os = "linux")]
+            let like_override = if let Some(app) = self.app.as_mut() {
+                let matches = app
+                    .pending_new_window_like
+                    .as_ref()
+                    .is_some_and(|(window, _)| *window == plan.like);
+                if matches {
+                    app.pending_new_window_like.take().map(|(_, like)| like)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            #[cfg(target_os = "linux")]
+            let like = match like_override {
+                Some(like) => like,
+                None => plan.like.and_then(|id| {
+                    self.windows.get_mut(id).map(|window| {
+                        (
+                            session_tab_layout(window.rail.layout),
+                            session_sidebar_mode(window.rail.mode),
+                        )
+                    })
+                }),
+            };
+            #[cfg(not(target_os = "linux"))]
             let like = plan.like.and_then(|id| {
                 self.windows.get_mut(id).map(|window| {
                     (
@@ -62024,11 +65138,114 @@ impl FolioApp {
                     )
                 })
             });
+            #[cfg(target_os = "linux")]
+            let display_point = plan.receives.as_ref().and_then(|errand| {
+                (errand.screen.is_none())
+                    .then(|| errand.at.map(|((x, y), _)| (errand.from, x, y)))
+                    .flatten()
+            });
+            #[cfg(target_os = "linux")]
+            if let Some((from, x, y)) = display_point {
+                let request = if let Some(app) = self.app.as_mut() {
+                    let generation = app.next_display_generation();
+                    bt_platform::linux_display::request_display(
+                        u64::from(from),
+                        generation,
+                        bt_platform::linux_display::LinuxDisplayQuery::TearOutScreen { x, y },
+                    )
+                } else {
+                    return Ok(());
+                };
+                if let Ok(request) = request {
+                    let Some(app) = self.app.as_mut() else {
+                        return Ok(());
+                    };
+                    app.pending_new_window_display = Some(PendingNewWindowDisplay {
+                        plan,
+                        request,
+                        like,
+                        input_generation: app.display_input_generation,
+                        kind: PendingNewWindowDisplayKind::TearOut,
+                    });
+                    app.pending_new_windows.extend(plans);
+                    return Ok(());
+                }
+            }
+            #[cfg(target_os = "linux")]
+            let mut restore_placement = self.app.as_mut().and_then(|app| {
+                let matches = app
+                    .pending_new_window_restore_placement
+                    .as_ref()
+                    .is_some_and(|(for_like, _)| *for_like == plan.like);
+                matches
+                    .then(|| app.pending_new_window_restore_placement.take())
+                    .flatten()
+                    .map(|(_, placement)| placement)
+            });
+            #[cfg(target_os = "linux")]
+            if restore_placement.is_none() {
+                let saved: Option<&SessionWindowV1> =
+                    if plan.like.is_none() && plan.receives.is_none() {
+                        plan.saved.as_deref()
+                    } else {
+                        None
+                    };
+                if let Some(saved) = saved {
+                    let inputs = restore_monitor_inputs(event_loop);
+                    if !saved.tabs.is_empty()
+                        && bt_platform::linux_display_backend()
+                            == Some(bt_platform::linux_window::Backend::X11)
+                    {
+                        let points = inputs
+                            .iter()
+                            .map(|input| {
+                                (
+                                    input.full.left + (input.full.right - input.full.left) / 2,
+                                    input.full.top + (input.full.bottom - input.full.top) / 2,
+                                )
+                            })
+                            .collect();
+                        let request = self.app.as_mut().map(|app| {
+                            let generation = app.next_display_generation();
+                            bt_platform::linux_display::request_display(
+                                0,
+                                generation,
+                                bt_platform::linux_display::LinuxDisplayQuery::MonitorWorkAreasAt(
+                                    points,
+                                ),
+                            )
+                        });
+                        if let Some(Ok(request)) = request {
+                            let Some(app) = self.app.as_mut() else {
+                                return Ok(());
+                            };
+                            app.pending_new_window_display = Some(PendingNewWindowDisplay {
+                                plan,
+                                request,
+                                like,
+                                input_generation: app.display_input_generation,
+                                kind: PendingNewWindowDisplayKind::Restore { inputs },
+                            });
+                            app.pending_new_windows.extend(plans);
+                            return Ok(());
+                        }
+                    }
+                    restore_placement = Some(choose_restored_placement(
+                        saved,
+                        &restore_monitors_from_work_areas(&inputs, None),
+                    ));
+                } else {
+                    restore_placement = Some(None);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let restore_placement = None;
             let Some(app) = self.app.as_mut() else {
                 return Ok(());
             };
             let opened_at = Instant::now();
-            let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
+            let (id, window) =
+                Runtime::open_window(event_loop, app, &plan, like, restore_placement)?;
             let door = opened_at.elapsed();
             self.windows.insert(id, window);
             // **The directory names the window from the moment it exists**: the
@@ -62739,7 +65956,11 @@ impl FolioApp {
             return Ok(());
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile_carrying(
+            &profile,
+            request.cwd.clone(),
+            request.carried_environment.clone(),
+        )?;
         runtime.report_launch_refusals(refusals)
     }
 
@@ -62771,7 +65992,11 @@ impl FolioApp {
         let Some(opened) = self.windows.key_at(self.windows.len().saturating_sub(1)) else {
             return Ok(None);
         };
-        if request.cwd.is_none() && request.profile.is_none() {
+        // A launch that carries its environment asks for its own tab, as one naming a place does.
+        if request.cwd.is_none()
+            && request.profile.is_none()
+            && request.carried_environment.is_none()
+        {
             return Ok(Some(opened));
         }
         let stand_in = self
@@ -62783,7 +66008,11 @@ impl FolioApp {
             return Ok(Some(opened));
         };
         let (profile, refusals) = runtime.launch_profile(request);
-        runtime.new_tab_with_profile(&profile, request.cwd.clone())?;
+        runtime.new_tab_with_profile_carrying(
+            &profile,
+            request.cwd.clone(),
+            request.carried_environment.clone(),
+        )?;
         if let Some(stand_in) = stand_in {
             runtime.retire_the_stand_in(stand_in)?;
         }
@@ -62957,10 +66186,23 @@ impl FolioApp {
             .find(|row| row.action == shortcuts::Action::SummonQuake)
             .and_then(|row| row.chord.clone());
         app.quake.reconcile(wanted.as_ref());
+        if let Some(bt_platform::hotkey::HotkeyFault::Refused(reason)) =
+            app.quake.take_unreported_capability_refusal()
+        {
+            eprintln!("BT_HOTKEY capability unavailable: {reason}");
+        }
         let pressed = app.quake.take_press();
+        #[cfg(target_os = "linux")]
+        let pressed_pointer = app.quake.take_press_pointer();
+        #[cfg(not(target_os = "linux"))]
+        let pressed_pointer = None;
         let blurred = app.quake.take_dismiss();
         let showing = app.quake.is_showing();
         let summoned_window = app.quake.window();
+        #[cfg(target_os = "linux")]
+        let pending_summon = app.pending_quake_summon.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let pending_summon = false;
         if !pressed && !blurred {
             return Ok(());
         }
@@ -62980,8 +66222,16 @@ impl FolioApp {
                 .get_mut(id)
                 .is_some_and(|window| window.window_focused)
         });
-        if pressed && quake::summon_move(showing, focused) == quake::SummonMove::Dismiss {
-            return self.dismiss_quake();
+        if pressed {
+            match quake::summon_move(showing, focused, pending_summon) {
+                quake::SummonMove::Dismiss => return self.dismiss_quake(),
+                quake::SummonMove::CancelPending => {
+                    #[cfg(target_os = "linux")]
+                    app.pending_quake_summon.take();
+                    return Ok(());
+                }
+                quake::SummonMove::Raise => {}
+            }
         }
         if pressed {
             if summoned_window.is_none() {
@@ -62992,7 +66242,7 @@ impl FolioApp {
                 app.pending_new_windows.push(NewWindowPlan::summoned());
                 self.open_pending_window(event_loop)?;
             }
-            return self.summon_quake();
+            return self.summon_quake(pressed_pointer);
         }
         // A blur that arrived after the window had already gone is a blur about
         // nothing: hiding it is what moved the focus in the first place.
@@ -63013,27 +66263,47 @@ impl FolioApp {
     /// keyboard is a separate statement from showing the window and is made
     /// after - a `SetForegroundWindow` on a window that is not on the screen yet
     /// is a request Windows has no reason to honour.
-    fn summon_quake(&mut self) -> Result<()> {
+    fn summon_quake(&mut self, pointer: Option<(i32, i32)>) -> Result<()> {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
         };
-        let previous = bt_platform::hotkey::foreground_holder();
-        let Some(mut runtime) = self.runtime(id) else {
-            return Ok(());
-        };
-        runtime.show_quake_window()?;
-        let native = native_window(&runtime.window.window).ok();
+        #[cfg(target_os = "linux")]
+        {
+            let previous = bt_platform::hotkey::foreground_holder();
+            let Some(mut runtime) = self.runtime(id) else {
+                return Ok(());
+            };
+            let request = runtime.request_quake_screen(pointer)?;
+            if let Some(app) = self.app.as_mut() {
+                app.pending_quake_summon = Some(PendingQuakeSummon {
+                    window: id,
+                    previous,
+                    request,
+                });
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pointer;
+            let previous = bt_platform::hotkey::foreground_holder();
+            let Some(mut runtime) = self.runtime(id) else {
+                return Ok(());
+            };
+            runtime.show_quake_window()?;
+            self.finish_summon_quake(id, previous)
+        }
+    }
+
+    fn finish_summon_quake(
+        &mut self,
+        id: WindowId,
+        previous: Option<bt_platform::hotkey::Foreground>,
+    ) -> Result<()> {
+        let native = self
+            .runtime(id)
+            .and_then(|runtime| native_window(&runtime.window.window).ok());
         if let Some(app) = self.app.as_mut() {
-            // The window this one came down over is not remembered when it *is*
-            // this one: a summon pressed while the window already had the
-            // keyboard would otherwise record the window it is about to hide as
-            // the window it owes the keyboard to.
-            //
-            // **Asked of the holder rather than compared to it** (M4-8). On
-            // Windows it is the same handle comparison it always was; on macOS
-            // the holder is an application, this same case is refused one step
-            // earlier by `foreground_holder` answering `None` for ourselves, and
-            // `Foreground::is_window` says so.
             let previous =
                 previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
             app.quake.shown_over(previous);
@@ -63041,21 +66311,8 @@ impl FolioApp {
         if let Some(runtime) = self.runtime(id)
             && let Err(error) = runtime.give_foreground_with_retry()
         {
-            // Said to the log and never to the reader: there is nothing a person
-            // can do about a foreground lock, and a card over their editor
-            // reporting one would be a worse interruption than the one it reports.
             eprintln!("BT_QUAKE the summoned window could not take the keyboard: {error}");
         }
-        // **And the one command the reader asked to have run, on the first summon
-        // of this launch** (§7.54e ⑤). Taken here rather than at the door that
-        // opens the window, because the row's own sentence is 「首次唤出时」 and a
-        // launch that restored a summoned terminal has a window before it has a
-        // summon; taken through `Quake::take_startup_command`, which is what makes
-        // "once" a fact rather than a habit.
-        //
-        // It is *queued* on the pane and written at that pane's first prompt, down
-        // the very road a restored command takes — one door, and the `true` is the
-        // whole of the difference. See `quake::typed_into_a_prompt`.
         let command = self.app.as_mut().and_then(|app| {
             let row = app.settings_store.loaded().quake_startup_command.clone();
             app.quake.take_startup_command(&row)
@@ -63068,7 +66325,210 @@ impl FolioApp {
         Ok(())
     }
 
-    /// Send it back up, and give the keyboard to whoever had it.
+    #[cfg(target_os = "linux")]
+    fn apply_linux_display_ready(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<()> {
+        let pending = if let Some(app) = self.app.as_mut() {
+            let matches = app
+                .pending_quake_summon
+                .as_ref()
+                .is_some_and(|pending| pending.request.ready() == ready);
+            matches.then(|| app.pending_quake_summon.take()).flatten()
+        } else {
+            None
+        };
+        if let Some(pending) = pending {
+            if self.is_leaving(pending.window)
+                || self.app.as_ref().is_none_or(|app| {
+                    app.quake.window() != Some(pending.window)
+                        || app.quit.as_ref().is_some_and(quit::Quit::is_retiring)
+                })
+            {
+                return Ok(());
+            }
+            let answer = pending.request.try_take().map_err(|error| {
+                anyhow!("the Linux display worker woke without an answer: {error}")
+            })?;
+            let bt_platform::linux_display::LinuxDisplayAnswer::SummonScreen {
+                work,
+                monitor_id,
+                dpi,
+            } = answer
+            else {
+                return Err(anyhow!(
+                    "the Linux display worker returned the wrong summon answer"
+                ));
+            };
+            let Some(mut runtime) = self.runtime(pending.window) else {
+                return Ok(());
+            };
+            runtime.restore_minimized_window()?;
+            runtime.show_quake_window_at(quake::SummonScreen {
+                work,
+                monitor_id,
+                dpi,
+            })?;
+            return self.finish_summon_quake(pending.window, pending.previous);
+        }
+        let pending_window = if let Some(app) = self.app.as_mut() {
+            let matches = app
+                .pending_new_window_display
+                .as_ref()
+                .is_some_and(|pending| pending.request.ready() == ready);
+            if matches {
+                app.pending_new_window_display.take()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(pending) = pending_window {
+            let answer = pending.request.try_take().ok();
+            match pending.kind {
+                PendingNewWindowDisplayKind::TearOut => {
+                    let Some(bt_platform::linux_display::LinuxDisplayAnswer::TearOutScreen {
+                        work,
+                        dpi,
+                    }) = answer
+                    else {
+                        return Err(anyhow!(
+                            "the Linux display worker returned no tear-out answer"
+                        ));
+                    };
+                    let mut plan = pending.plan;
+                    let Some(errand) = plan.receives.as_mut() else {
+                        return Err(anyhow!("the pending tear-out plan has no receiving tab"));
+                    };
+                    errand.screen = Some((work, dpi));
+                    let Some(app) = self.app.as_mut() else {
+                        return Ok(());
+                    };
+                    app.pending_new_window_like = Some((plan.like, pending.like));
+                    app.pending_new_windows.insert(0, plan);
+                    return self.open_pending_window(event_loop);
+                }
+                PendingNewWindowDisplayKind::Restore { inputs } => {
+                    let plan = pending.plan;
+                    let placement = plan.saved.as_deref().and_then(|saved| {
+                        let input_generation_matches = self.app.as_ref().is_some_and(|app| {
+                            app.display_input_generation == pending.input_generation
+                        });
+                        let Some(answer) = answer else {
+                            return choose_restored_placement(
+                                saved,
+                                &restore_monitors_from_work_areas(&inputs, None),
+                            );
+                        };
+                        let bt_platform::linux_display::LinuxDisplayAnswer::MonitorWorkAreasAt(Ok(
+                            observed,
+                        )) = answer
+                        else {
+                            return choose_restored_placement(
+                                saved,
+                                &restore_monitors_from_work_areas(&inputs, None),
+                            );
+                        };
+                        if !input_generation_matches
+                            || observed.work_areas.len() != inputs.len()
+                            || !restore_monitor_topology_matches(
+                                &inputs,
+                                &observed.monitor_bounds,
+                                observed.primary_bounds,
+                            )
+                        {
+                            return choose_restored_placement(saved, &[]);
+                        }
+                        let work_areas = observed
+                            .work_areas
+                            .into_iter()
+                            .map(Result::ok)
+                            .collect::<Vec<_>>();
+                        let monitors = restore_monitors_from_work_areas(&inputs, Some(&work_areas));
+                        choose_restored_placement(saved, &monitors)
+                    });
+                    let Some(app) = self.app.as_mut() else {
+                        return Ok(());
+                    };
+                    app.pending_new_window_like = Some((plan.like, pending.like));
+                    app.pending_new_window_restore_placement = Some((plan.like, placement));
+                    app.pending_new_windows.insert(0, plan);
+                    return self.open_pending_window(event_loop);
+                }
+            }
+        }
+        let pending_guard = if let Some(app) = self.app.as_mut() {
+            let matches = app
+                .pending_drag_guard_screen
+                .as_ref()
+                .is_some_and(|pending| pending.request.ready() == ready);
+            matches
+                .then(|| app.pending_drag_guard_screen.take())
+                .flatten()
+        } else {
+            None
+        };
+        if let Some(pending) = pending_guard {
+            let answer = pending.request.try_take().ok();
+            let active = self
+                .app
+                .as_ref()
+                .and_then(|app| app.drag_broker.as_ref())
+                .map(|broker| (broker.source, broker.guard_generation));
+            if let Some((source, active_generation)) = active
+                && drag_guard_reply_matches(
+                    Some(active_generation),
+                    pending.broker_generation,
+                    pending.request.ready(),
+                    ready,
+                )
+            {
+                let answer = match answer {
+                    Some(bt_platform::linux_display::LinuxDisplayAnswer::VirtualScreenRect(
+                        answer,
+                    )) => answer,
+                    _ => Err("the Linux display worker returned no screen rectangle".to_owned()),
+                };
+                let accepted = self
+                    .app
+                    .as_mut()
+                    .and_then(|app| app.drag_broker.as_mut())
+                    .is_some_and(|broker| {
+                        broker.apply_guard_screen_answer(pending.broker_generation, answer)
+                    });
+                if !accepted {
+                    if let Some(mut runtime) = self.runtime(source) {
+                        runtime.cancel_drag()?;
+                    }
+                    if let Some(app) = self.app.as_mut() {
+                        app.drag_broker = None;
+                    }
+                    self.clear_visitors()?;
+                }
+            }
+            return Ok(());
+        }
+        let Some(id) = self
+            .windows
+            .order
+            .iter()
+            .copied()
+            .find(|id| u64::from(*id) == ready.owner)
+        else {
+            return Ok(());
+        };
+        if let Some(mut runtime) = self.runtime(id)
+            && !runtime.apply_linux_display_ready(ready)?
+            && !runtime.apply_linux_work_area_ready(ready)?
+            && !runtime.apply_linux_window_rect_ready(ready)?
+        {
+            let _ = runtime.apply_linux_pointer_display_ready(ready)?;
+        }
+        Ok(())
+    }
     fn dismiss_quake(&mut self) -> Result<()> {
         let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
             return Ok(());
@@ -63221,12 +66681,46 @@ impl FolioApp {
     /// target window will receive no further event of any kind, so a dwell over
     /// it that waited for one would wait for ever.
     fn drive_drag_broker(&mut self, now: Instant) -> Result<Option<Instant>> {
-        let Some(broker) = self.app.as_ref().and_then(|app| app.drag_broker.as_ref()) else {
+        let Some((source, guard, guard_generation, guard_sample_ready)) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.drag_broker.as_ref())
+            .map(|broker| {
+                (
+                    broker.source,
+                    broker.guard,
+                    {
+                        #[cfg(target_os = "linux")]
+                        {
+                            broker.guard_generation
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            0
+                        }
+                    },
+                    {
+                        #[cfg(target_os = "linux")]
+                        {
+                            broker.guard_sample_ready
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            false
+                        }
+                    },
+                )
+            })
+        else {
             self.clear_visitors()?;
             return Ok(None);
         };
-        let source = broker.source;
-        let held = broker.guard.still_holds(&DragGuard::sample());
+        #[cfg(not(target_os = "linux"))]
+        let _ = (guard_generation, guard_sample_ready);
+        #[cfg(target_os = "linux")]
+        let held = guard.capture == bt_platform::thread_mouse_capture();
+        #[cfg(not(target_os = "linux"))]
+        let held = guard.still_holds(&DragGuard::sample());
         if !held || !self.windows.contains(source) {
             // One result for every cause, which is what the plan asked for. The
             // payload goes home by the route Esc already takes — the drag is
@@ -63241,10 +66735,75 @@ impl FolioApp {
             self.clear_visitors()?;
             return Ok(None);
         }
-        let pointer = broker.pointer;
-        let cargo = broker.cargo.clone();
-        let cargo_tree = broker.cargo_tree.clone();
-        let face = broker.face.clone();
+        #[cfg(target_os = "linux")]
+        {
+            let pending = self
+                .app
+                .as_ref()
+                .and_then(|app| app.pending_drag_guard_screen.as_ref());
+            let pending_for_broker =
+                pending.is_some_and(|pending| pending.broker_generation == guard_generation);
+            if !guard_sample_ready {
+                if pending.is_some() {
+                    return Ok(None);
+                }
+                let request = bt_platform::linux_display::request_display(
+                    u64::from(source),
+                    guard_generation,
+                    bt_platform::linux_display::LinuxDisplayQuery::VirtualScreenRect,
+                );
+                match request {
+                    Ok(request) => {
+                        if let Some(app) = self.app.as_mut() {
+                            app.pending_drag_guard_screen = Some(PendingDragGuardScreen {
+                                broker_generation: guard_generation,
+                                request,
+                            });
+                        }
+                        return Ok(None);
+                    }
+                    Err(_) => {
+                        if let Some(mut runtime) = self.runtime(source) {
+                            runtime.cancel_drag()?;
+                        }
+                        if let Some(app) = self.app.as_mut() {
+                            app.drag_broker = None;
+                        }
+                        self.clear_visitors()?;
+                        return Ok(None);
+                    }
+                }
+            }
+            if pending_for_broker {
+                return Ok(None);
+            }
+            let consumed = self
+                .app
+                .as_mut()
+                .and_then(|app| app.drag_broker.as_mut())
+                .is_some_and(|broker| {
+                    broker.guard_generation == guard_generation
+                        && broker.consume_guard_screen_answer()
+                });
+            if !consumed {
+                return Ok(None);
+            }
+        }
+        let Some((pointer, cargo, cargo_tree, face)) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.drag_broker.as_ref())
+            .map(|broker| {
+                (
+                    broker.pointer,
+                    broker.cargo.clone(),
+                    broker.cargo_tree.clone(),
+                    broker.face.clone(),
+                )
+            })
+        else {
+            return Ok(None);
+        };
         // **The picture of the pane in the air, taken from the window holding
         // it** (B2, 2026-09-01). Pulled here rather than pushed from the source's
         // pointer handler, because a hand that crosses onto another window's
@@ -63295,6 +66854,8 @@ impl FolioApp {
             && let Some(broker) = app.drag_broker.as_mut()
         {
             broker.aim_at(aim.clone(), now);
+            #[cfg(target_os = "linux")]
+            broker.record_guarded_aim(pointer);
         }
         // Spent before the switch is attempted and not after — `advance_drag_spring`'s
         // own note, for its own reason: a gate left armed because the tab had been
@@ -63461,6 +67022,8 @@ impl FolioApp {
                             from,
                             promoted,
                             at: Some((pointer, grip)),
+                            #[cfg(target_os = "linux")]
+                            screen: None,
                         },
                     ));
                 }
@@ -63630,6 +67193,18 @@ impl FolioApp {
             else {
                 return Ok(());
             };
+            #[cfg(target_os = "linux")]
+            if self
+                .app
+                .as_ref()
+                .is_some_and(|app| app.trash_pending_count() > 0)
+                && !matches!(
+                    step,
+                    quit::QuitStep::Ask | quit::QuitStep::WaitForPages | quit::QuitStep::Abandon
+                )
+            {
+                return Ok(());
+            }
             match step {
                 // Both of these are waits, and the loop has to go back round for
                 // them: one for a press, one for a browser process.
@@ -64157,12 +67732,7 @@ impl FolioApp {
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
             announce_panic(path);
         });
-        // Every window, because the failure is the process's: a shell left
-        // running behind a window nobody can see is the one outcome worse than
-        // stopping. `ending` for every one of them, and that is the point: this
-        // is the process stopping, not somebody closing five windows, so what
-        // was open stays in the file and nothing is filed away as "closed".
-        if let Err(shutdown_error) = self.for_each_window(|runtime| runtime.close_window(true)) {
+        if let Err(shutdown_error) = self.stop_every_window() {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
         // **The spare is abandoned, not waited for** (ticket 60, SW-2): its controller closed now,
@@ -64177,6 +67747,56 @@ impl FolioApp {
         event_loop.exit();
     }
 
+    fn settle_trash_answers_for_turn(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.drain_trash_answers()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+
+    fn settle_pending_last_window_close_for_turn(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.settle_pending_last_window_close()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+
+    /// **The one road a stop that is not a quit leaves by** (D-4, 0.4.8 G7): a
+    /// controlled failure ([`Self::fail`], twelve sites) and a loop stopped by
+    /// something that is not a window closing (`exiting`).
+    ///
+    /// First every window keeps what it would lose ([`Runtime::keep_unsaved_edits`]):
+    /// each dirty preview buffer written back through the quit's judged write, or,
+    /// where the file refuses or has changed on disk, copied into the data
+    /// directory's [`preview::RECOVERED_FOLDER`] — with one diagnostics line each
+    /// saying where the edit is. The writes are made on this thread and are done
+    /// when the call returns, as the quit's are; nothing waits for anything else.
+    /// Then every window, because the stop is the process's: a shell left running
+    /// behind a window nobody can see is the one outcome worse than stopping.
+    /// `ending` for every one of them, and that is the point: this is the process
+    /// stopping, not somebody closing five windows, so what was open stays in the
+    /// file and nothing is filed away as "closed".
+    ///
+    /// The structural guard `failure_road` holds every closing of a window with
+    /// `ending` to this road or a row of its table, and the twelve `fail` sites to
+    /// theirs.
+    fn stop_every_window(&mut self) -> Result<()> {
+        let recovery = persist::storage_dir().join(preview::RECOVERED_FOLDER);
+        self.for_each_window(|runtime| {
+            runtime.keep_unsaved_edits(&recovery);
+            Ok(())
+        })?;
+        self.for_each_window(|runtime| runtime.close_window(true))
+    }
+
     fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
         if self.app.is_none() {
             return;
@@ -64188,6 +67808,10 @@ impl FolioApp {
         // reaping one, or rebuilding the menu bar was reported as a wake that
         // named no lane. See [`hang_watch::Station::AppTurn`].
         hang_watch::at(hang_watch::Station::AppTurn);
+        #[cfg(target_os = "linux")]
+        hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.cancel_stale_clipboard_reads();
+        });
         // **This turn's allowance for deferrable work** (0.4.6 A4; budget note §R-B): one shared
         // deadline — the earliest next frame of the windows on the glass whose clocks are running,
         // less the present's reserve — taken from the turn's start, before any window takes its
@@ -64290,8 +67914,21 @@ impl FolioApp {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
+            .and_then(|()| self.settle_trash_answers_for_turn())
             .and_then(|()| self.settle_quit(event_loop))
+            .and_then(|()| self.settle_pending_last_window_close_for_turn())
         {
+            self.fail(event_loop, error);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.cancel_stale_clipboard_reads();
+        });
+        #[cfg(target_os = "linux")]
+        if let Err(error) = hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.drain_clipboard_lane()
+        }) {
             self.fail(event_loop, error);
             return;
         }
@@ -64343,6 +67980,10 @@ impl FolioApp {
             });
             return;
         }
+        // **The kernel's news about repositories, filed under every window that
+        // shows them, before any window takes its turn** (T-WINDOWS-ALL), so each
+        // window's own turn takes what it was told on this same pass.
+        self.ripen_git_news(now);
         // **Every window's own turn, and the earliest wake-up any of them asked
         // for.** A loop that woke for the first window's clocks and not the
         // second's would be a second window whose caret blinks only when the
@@ -64785,6 +68426,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        #[cfg(target_os = "linux")]
+        if let AppEvent::HangWatchQuestion(id) = event {
+            linux_hang_probe::answer(id);
+            if self.app.as_ref().is_some_and(|app| app.trace_perf) {
+                trace_sink::stderr_line(format!("BT_HANG_PROBE dispatched={id}"));
+            }
+            return;
+        }
         if matches!(
             event,
             AppEvent::QuakeSummoned | AppEvent::NotificationClicked
@@ -64805,6 +68454,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // from — a second address for the same answer, and one that can be
         // wrong the moment a pane moves between windows.
         let applied = match event {
+            #[cfg(target_os = "linux")]
+            AppEvent::HangWatchQuestion(_) => Ok(()),
             // **Nothing is done here** — the same answer, and for the same
             // reason, as [`AppEvent::GitChanged`] below.
             //
@@ -64907,6 +68558,69 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let (mut batch, gone) = self.drain_files_answers();
                 self.for_each_window(|runtime| runtime.apply_files_results(&mut batch, gone))
             }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeDialogReady => Ok(()),
+            #[cfg(target_os = "linux")]
+            AppEvent::LinuxClipboardReady => Ok(()),
+            #[cfg(target_os = "linux")]
+            AppEvent::TrashAnswered => Ok(()),
+            #[cfg(target_os = "linux")]
+            AppEvent::WindowCloseRequested(window_id) => {
+                self.window_event(event_loop, window_id, WindowEvent::CloseRequested);
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeHotkeyReady { id, generation } => {
+                if let Some(app) = self.app.as_mut()
+                    && linux_hotkey_is_current(app.quake.claim(), id, generation)
+                    && let Some(claim) = app.quake.claim()
+                    && let bt_platform::linux_hotkey::LinuxHotkeyStatus::Failed(fault) =
+                        claim.status()
+                {
+                    app.quake.registration_failed(fault);
+                    match app.quake.registration_fault().cloned() {
+                        Some(bt_platform::hotkey::HotkeyFault::Refused(_)) => {
+                            if let Some(bt_platform::hotkey::HotkeyFault::Refused(reason)) =
+                                app.quake.take_unreported_capability_refusal()
+                            {
+                                eprintln!("BT_HOTKEY capability unavailable: {reason}");
+                            }
+                        }
+                        Some(fault) => eprintln!("BT_HOTKEY registration failed: {fault:?}"),
+                        None => {}
+                    }
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeHotkeyActivated {
+                id,
+                generation,
+                pointer,
+            } => {
+                if let Some(app) = self.app.as_mut()
+                    && linux_hotkey_is_current(app.quake.claim(), id, generation)
+                    && let Some(claim) = app.quake.claim()
+                    && claim.status() == bt_platform::linux_hotkey::LinuxHotkeyStatus::Active
+                    && claim.take_activation()
+                {
+                    app.quake.press_at(pointer);
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeDisplayReady {
+                owner,
+                request_id,
+                generation,
+            } => self.apply_linux_display_ready(
+                event_loop,
+                bt_platform::linux_display::LinuxDisplayReady {
+                    owner,
+                    request_id,
+                    generation,
+                },
+            ),
             AppEvent::PreviewReady => {
                 let (mut batch, gone) = self.drain_preview_answers();
                 self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
@@ -64979,7 +68693,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         match outcome.clone() {
                             shell_integration::ProfileInstallOutcome::Installed {
                                 program,
-                                profile,
+                                edit,
                             } => {
                                 let id = runtime.toast_with_verb(
                                     toast::ToastKind::Info,
@@ -64987,8 +68701,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                                     i18n::Text::ShellProfileAddedToast.text(),
                                     i18n::Text::ProfilesUndo.text(),
                                 )?;
-                                runtime.window.powershell_profile_undo =
-                                    Some((id, program, profile));
+                                runtime.window.powershell_profile_undo = Some((id, program, edit));
                             }
                             shell_integration::ProfileInstallOutcome::Refused(reason)
                             | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
@@ -64999,7 +68712,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                                     reason,
                                 )?;
                             }
-                            shell_integration::ProfileInstallOutcome::Undone => {}
+                            shell_integration::ProfileInstallOutcome::Present
+                            | shell_integration::ProfileInstallOutcome::Undone => {}
                         }
                     }
                     Ok(())
@@ -65185,7 +68899,35 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // And the taskbar is asked again (ticket 62): turning auto-hide on or off moves
                 // the desktop's work area, which Windows announces with this same broadcast.
                 taskbar_lane::request();
+                // **And what this machine can start** (T-PROGRAMS-REFRESH). An installer that
+                // puts a program on `PATH` announces it with this broadcast (`Environment`), and
+                // this is the one listener Folio has for it. Not filtered by section: a burst of
+                // broadcasts is at most one walk out and one waiting (measured: a walk is 2–7 ms
+                // on its own worker).
+                if let Some(app) = self.app.as_ref() {
+                    programs_lane::request(
+                        programs_lane::Trigger::Environment,
+                        &app.settings_store.loaded().default_profile,
+                        &[],
+                    );
+                }
                 adopted
+            }
+            AppEvent::ProgramsAnswered => self.adopt_program_walk(),
+            // **Every window asks its display again** (T-FRESH-FACTS): a rate changed on the
+            // panel a window stands on moves neither the window nor its scale, the two events
+            // that asked until now. One monitor query per window, the one a move makes.
+            AppEvent::DisplayChanged => self.for_each_window(|runtime| {
+                runtime.follow_the_display();
+                Ok(())
+            }),
+            // **The summon's key asked of the layout again** (T-FRESH-FACTS); re-claimed only
+            // when the layout puts the chord's character on another key.
+            AppEvent::InputLanguageChanged => {
+                if let Some(app) = self.app.as_mut() {
+                    app.quake.layout_changed();
+                }
+                Ok(())
             }
             AppEvent::WindowChromeChanged => self.adopt_platform_chrome(),
             // Every window, on this family's standing reason: a window whose
@@ -65280,6 +69022,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         present_diagnostics::event();
         hang_watch::at(hang_watch::Station::Event);
         hang_watch::during(window_event_station(&event), || {
+            #[cfg(target_os = "linux")]
+            if matches!(&event, WindowEvent::ScaleFactorChanged { .. })
+                && let Some(app) = self.app.as_mut()
+            {
+                app.display_input_generation = app.display_input_generation.wrapping_add(1);
+            }
             // **The one line the whole slice is about.** winit stamps the id of the
             // window the event happened to; before this, the loop compared it against
             // the only window there was and dropped anything else. Now it is a
@@ -65321,6 +69069,24 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // window the wheel has already moved.
             if !matches!(event, WindowEvent::MouseWheel { .. })
                 && let Err(error) = runtime.flush_wheel()
+            {
+                self.fail(event_loop, error);
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            if matches!(
+                event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::Moved(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
+                    | WindowEvent::CloseRequested
+            ) && let Err(error) = runtime.refuse_pending_linux_pointer_actions()
             {
                 self.fail(event_loop, error);
                 return;
@@ -65455,11 +69221,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
                 // one gesture over.
                 //
-                // **And the cursor is read here too, on the file that opens the
-                // batch** (release review 0.4.2 X-10): this arm runs inside the
-                // platform's delivery of the release, which is the only instant at
-                // which where the cursor is and where the file was let go of are the
-                // same point. See [`Runtime::collect_dropped_file`].
+                // **The point is requested here on the file that opens the batch**
+                // (release review 0.4.2 X-10). Winit supplies the path but not its
+                // Xdnd position, so Linux reads the native pointer on the display
+                // worker and refuses the drop if the window observes a move or a
+                // target change before the answer arrives. See
+                // [`Runtime::collect_dropped_file`].
                 //
                 // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
                 // They would be the drop affordance, and what an external drag
@@ -65470,10 +69237,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // the feedback that carries the ruling. Inventing a second set of
                 // zones here, for a gesture winit reports without a position, would
                 // be this window answering the harder half for itself.
-                WindowEvent::DroppedFile(path) => {
-                    runtime.collect_dropped_file(path);
-                    Ok(())
-                }
+                WindowEvent::DroppedFile(path) => runtime.collect_dropped_file(path),
                 WindowEvent::Resized(size) => runtime.resized(size),
                 // **The engine is told the window moved** (§7.7 ⑩, user report
                 // 2026-08-25). The pages are drawn through DirectComposition and
@@ -65484,7 +69248,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // than on a page's clock: a window can be dragged with nothing on
                 // the glass but a shell, and the engine still has to be right the
                 // next time a page is opened in it.
-                WindowEvent::Moved(_) => runtime.window_moved(),
+                WindowEvent::Moved(position) => runtime.window_moved(position),
                 WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
                 // The payload is deliberately dropped: `os_theme_changed` asks the
                 // one reader this process trusts rather than taking a second
@@ -65493,6 +69257,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 WindowEvent::RedrawRequested => runtime.redraw(),
                 WindowEvent::Focused(false) => {
                     runtime.observe_ime_focus(false);
+                    #[cfg(target_os = "linux")]
+                    runtime.clear_web_input();
                     // Losing the window is a blur, and blur commits (J102). The
                     // mock-up's editor is a real focusable element and gets this
                     // from the DOM; here it has to be said. A press that was still
@@ -65541,7 +69307,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     runtime.window.tab_clicks.interrupt();
                     // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                     // Commit during this transition, and the product decision is to accept it.
-                    runtime.window.ime_active = false;
+                    // X11 focus changes only focus the existing XIC; winit does
+                    // not emit a fresh `Ime::Enabled` when that window regains
+                    // focus. Keep the XIC's enabled state across an X11 blur;
+                    // caret offers are gated on native window focus below.
+                    #[cfg(target_os = "linux")]
+                    let keep_ime_context = bt_platform::linux_display_backend()
+                        .is_some_and(|backend| backend.ime_activation_survives_focus_loss());
+                    #[cfg(not(target_os = "linux"))]
+                    let keep_ime_context = false;
+                    if !keep_ime_context {
+                        runtime.window.ime_active = false;
+                    }
                     runtime.window.ime_cursor.reset();
                     hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
                         runtime.destroy_ime_caret("window_blur")
@@ -65646,13 +69423,25 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // shut belongs to the event loop, and re-requesting it means closing goes
             // through the one door it always went through instead of a second one
             // opened for the gate.
-            shutting |= std::mem::take(&mut runtime.window.window_close_requested);
+            let requested = std::mem::take(&mut runtime.window.window_close_requested);
+            shutting |= requested == Some(window_id);
             let result = if shutting {
                 result.and(hang_watch::during(hang_watch::Station::EventShut, || {
                     self.close(window_id)
                 }))
             } else {
                 result
+            };
+            // **And the window another window's answer closes**
+            // (T-SUMMON-DIRTY-PREVIEW): the run's end, answered in the summoned
+            // terminal, re-runs the close of the ordinary window that ends the run
+            // — through the same door, which asks again and now finds nothing.
+            let result = match requested.filter(|closing| *closing != window_id) {
+                Some(closing) => result
+                    .and(hang_watch::during(hang_watch::Station::EventShut, || {
+                        self.close(closing)
+                    })),
+                None => result,
             };
             // Whatever this event changed about the *application*, handed to the
             // windows that were not this one. Before the door below, because a window
@@ -65757,10 +69546,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if self.windows.is_empty() {
             return;
         }
-        // `ending` for the reason `fail` gives: the loop stopping is the process
+        // `fail`'s road, for its reason: the loop stopping is the process
         // stopping, and every window still up at that moment is a window the
-        // reader had open — the file says so and the next launch opens them.
-        if let Err(error) = self.for_each_window(|runtime| runtime.close_window(true)) {
+        // reader had open — its unsaved edits are kept, the file says so and the
+        // next launch opens them.
+        if let Err(error) = self.stop_every_window() {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.windows.clear();
@@ -65904,6 +69694,7 @@ fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn copy_selection(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
@@ -65917,6 +69708,7 @@ fn copy_selection(
     true
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn write_selection_text(
     session: &DualPlaneSession,
     ignore_empty: bool,
@@ -65934,6 +69726,7 @@ fn write_selection_text(
     true
 }
 
+#[cfg(not(target_os = "linux"))]
 fn write_terminal_clipboard_text(text: &str) -> Result<()> {
     hang_watch::during(hang_watch::Station::ClipboardWrite, || {
         bt_platform::set_clipboard_text(text)
@@ -66071,12 +69864,9 @@ fn prepare_clipboard_paste(
 /// give, and since 2026-09-17 it would also have taken the keyboard there and
 /// brought the window forward for it.
 ///
-/// **No platform is kept on the old road**, which was checked rather than
-/// assumed: `bt_platform::pointer_position_in_window` is implemented on both
-/// systems this product ships on — `GetCursorPos` through `ScreenToClient` on
-/// Windows, `NSEvent.mouseLocation` through the view on macOS — so `None` here
-/// is a window on a session with no desktop to read, and a refusal is the honest
-/// answer for it too.
+/// Windows and macOS supply this point synchronously in their drop callbacks;
+/// Linux supplies the same client-pixel coordinates from the display worker.
+/// `None` is not replaced by a focused pane: it is an unaimed drop.
 fn dropped_files_seat_at(
     layout: &SeatLayout,
     position: Option<PhysicalPosition<f64>>,
@@ -67463,8 +71253,8 @@ fn banner_line(text: &str) -> String {
 /// The parentheses are the mock-up's and not a stylistic choice: the tip names
 /// the *verb* first and qualifies it, so that a user who reads only the first two
 /// words has still read the truth.
-fn new_tab_tip(profile: usize) -> String {
-    i18n::new_tab_tip(profiles::title(profile))
+fn new_tab_tip(profile: &str) -> String {
+    i18n::new_tab_tip(profiles::identity_title(profile))
 }
 
 fn resolve_title(
@@ -67581,6 +71371,27 @@ fn session_title(
         .or_else(|| {
             place_layer(working_directory, place).map(|text| (text, tooltip::NameSource::Cwd))
         })
+}
+
+/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28): the
+/// folder the pane is standing in ([`DualPlaneSession::standing_folder`] — its shell's last report,
+/// else the folder it was opened in), and the account's home only for a pane that has neither.
+///
+/// One reader for both doors, the folder button's card ([`Runtime::trigger_root`]) and
+/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). The report alone is not enough: a pane
+/// opened in a profile's fixed folder has none until its shell's first prompt, and none for its
+/// whole life when the shell does not report, while its own tab is already named after the folder
+/// it stands in.
+fn files_root_of(
+    session: Option<&DualPlaneSession>,
+    environment: &dyn bt_pty::ShellEnvironment,
+) -> String {
+    session
+        .and_then(DualPlaneSession::standing_folder)
+        .map(Path::to_path_buf)
+        .or_else(|| profiles::home_directory(environment))
+        .map(|folder| folder.display().to_string())
+        .unwrap_or_default()
 }
 
 /// The folder layer on its own: the working directory as one reader writes it,
@@ -67745,12 +71556,15 @@ fn ensure_metrics_match_authoritative_scale(
 /// what a Windows machine that somehow could not answer should have done, and
 /// is the one behaviour this changes there: a window used to refuse to open.
 ///
-/// The rectangle follows the same rule and is read the same way winit reads it:
-/// the outer position and the outer size, which is what `GetWindowRect` hands
-/// back on Windows once `WM_NCCALCSIZE` has made the client the whole window.
-/// A window that has not been placed yet has no outer position, and an empty
-/// rectangle is what `startup_window_rect` already treats as "nothing known".
-fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
+/// On Linux the rectangle comes from the supplied saved/tear-out geometry or
+/// the cache of winit `Moved`/`Resized` events; `None` stays unknown. This path
+/// never asks winit for fresh X11 outer geometry on the window thread. On the
+/// other platforms the outer position and size follow the existing native-read
+/// and winit-fallback path.
+fn dpi_snapshot(
+    window: &Window,
+    cached_rect: Option<bt_platform::WindowRect>,
+) -> Result<DpiSnapshot> {
     let native = native_window(window)?;
     let winit_scale = window.scale_factor();
     let (win32_dpi, authoritative_scale) = match bt_platform::get_dpi_for_window(native) {
@@ -67760,9 +71574,20 @@ fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
             winit_scale,
         ),
     };
-    let rect = match bt_platform::get_window_rect(native) {
-        Ok(rect) => rect,
-        Err(_) => winit_outer_rect(window),
+    #[cfg(target_os = "linux")]
+    let rect = cached_rect.unwrap_or(bt_platform::WindowRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    });
+    #[cfg(not(target_os = "linux"))]
+    let rect = {
+        let _ = cached_rect;
+        match bt_platform::get_window_rect(native) {
+            Ok(rect) => rect,
+            Err(_) => winit_outer_rect(window),
+        }
     };
     Ok(DpiSnapshot {
         winit_scale,
@@ -67773,10 +71598,9 @@ fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
 }
 
 /// The window's outer rectangle as winit itself reports it, in physical pixels.
-///
-/// The fall-back half of [`dpi_snapshot`]. An empty rectangle for a window
-/// whose position the platform will not state — which every caller already
-/// reads as "no geometry is known about this window" rather than as a place.
+/// This remains the fallback for non-Linux platforms when their native rectangle
+/// helper refuses.
+#[cfg(not(target_os = "linux"))]
 fn winit_outer_rect(window: &Window) -> bt_platform::WindowRect {
     let Ok(position) = window.outer_position() else {
         return bt_platform::WindowRect {
@@ -67950,8 +71774,35 @@ fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {
 /// call). It is pinned by
 /// `the_window_is_asked_for_transparent_and_invisible`.
 #[must_use]
+/// The first surface allocation is a request; native observations arrive separately.
+fn opening_client_allocation(
+    window: &Window,
+    requested: LogicalSize<f64>,
+    placed: Option<bt_platform::WindowRect>,
+) -> PhysicalSize<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        if matches!(
+            linux_window_backend(window),
+            Ok(bt_platform::linux_window::Backend::X11)
+        ) && let Some(rect) = placed
+        {
+            return PhysicalSize::new(
+                rect.right.abs_diff(rect.left),
+                rect.bottom.abs_diff(rect.top),
+            );
+        }
+        requested.to_physical(window.scale_factor())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (requested, placed);
+        window.inner_size()
+    }
+}
+
 fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> WindowAttributes {
-    Window::default_attributes()
+    let attributes = Window::default_attributes()
         // "新 tab，和启动" — one setting for both (mock-up 7575: `bootFresh()`
         // opens its first tab from `defaultProfile()`). The title is replaced
         // by the active tab's own the moment there is one, so what this is
@@ -67995,7 +71846,20 @@ fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> Win
         // Unconditional is also harmless at full opacity: the clear is then
         // `a = 1.0` and `install_window_class_background` keeps its opaque
         // brush, so there is no alpha anywhere for DWM to honour.
-        .with_transparent(true)
+        .with_transparent(true);
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        // Winit stores this name in one Linux attribute consumed as the
+        // Wayland app_id and the X11 WM_CLASS pair.
+        attributes
+            .with_decorations(false)
+            .with_name("io.github.lulu-loopp.folio", "folio")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        attributes
+    }
 }
 
 /// **What the Option key does**, told to the window that has to do it (M1-7,
@@ -68539,7 +72403,7 @@ mod floated_page_tests {
         use crate::preview_watch::Stamp;
 
         // ① The buffer, end to end, on a real file.
-        let dir = std::env::temp_dir().join(format!("bt-page-source-{}", std::process::id()));
+        let dir = bt_testpath::temp_path("bt-page-source");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("index.html");
@@ -68960,38 +72824,48 @@ mod floated_page_tests {
         );
     }
 
-    /// RED (§7.54) — **the summoned terminal is not put on the screen by the door
-    /// that opens it, and the door that does put it there states its rectangle
-    /// first.**
+    /// RED (§7.54) — **a summon stays hidden only on a backend that can restore
+    /// and activate it; Wayland opens its saved contents as an ordinary window.**
     ///
-    /// Two halves of one sentence, and neither survives without the other. This
-    /// window is born hidden — on a restore that is the whole of it, because the
-    /// key that would show it may never be pressed — so `open_window` must decline
-    /// to show it; and every summon computes its rectangle afresh against the
-    /// monitor the pointer is on, so the door that does show it must place it
-    /// before it does.
+    /// The backend comes from the actual winit handle. X11 keeps the saved summon
+    /// hidden until its key is pressed and places it at summon time; native Wayland
+    /// cannot restore or focus it, so its saved tabs are shown as an ordinary
+    /// window and its summon metadata remains in the document for a later backend.
     ///
-    /// A source gate rather than a behavioural one because both facts are about a
-    /// door that needs a GPU, a compositor and a real `HWND` to run at all, and
-    /// the thing that can go wrong is a line moving rather than a value changing.
+    /// A source gate rather than a behavioural one because these doors need a
+    /// GPU, a compositor and a live native window to run at all; the regression
+    /// is a missing or misplaced platform branch.
     ///
-    /// MUTATIONS: drop `&& !plan.quake` from the show condition and a restored
-    /// summon stands across the top of the screen at every launch, with no key
-    /// pressed. Drop the placement from `show_quake_window` and it comes down at
-    /// whatever rectangle winit gave it — which on a second monitor is the wrong
-    /// screen. Weaken it back to `set_window_outer_rect` and it comes down at
-    /// three quarters or four thirds of the rectangle it asked for whenever the
-    /// pointer is on a screen of a different dpi — measured on this desk
-    /// 2026-09-02, and the whole reason `stand_window_at` exists. Drop the
-    /// `set_window_topmost` beside it and the twentieth summon arrives behind the
-    /// editor it was called over, because `HWND_TOPMOST` is a place in a z-order
-    /// other programs are entitled to move.
+    /// Mutations: dropping the actual-backend check leaves the Wayland session
+    /// with a hidden, un-restorable summon; dropping the persistence flag loses
+    /// the saved summon marker and its per-display placements. Showing every X11
+    /// summon from `open_window` bypasses the key; removing X11 placement or its
+    /// topmost request loses the existing summon behavior.
     #[test]
     fn a_summoned_window_is_not_shown_by_the_door_that_opens_it() {
         let door = method_body("Runtime", "open_window");
         assert!(
-            door.contains("if plan.receives.is_none() && !plan.quake {"),
-            "the door that opens a window shows the one a key summons:\n{door}"
+            door.contains("crate::linux_window_backend(&window)?")
+                && door.contains("Backend::Wayland")
+                && door.contains("let is_quake = plan.quake && !restored_quake_as_ordinary;")
+                && door.contains("if is_quake {\n            app.quake.adopt(id);")
+                && door.contains("if plan.receives.is_none() && !is_quake {")
+                && door.contains("window.restored_quake_as_ordinary = restored_quake_as_ordinary;"),
+            "the actual backend does not decide whether a saved summon is shown as ordinary:\n{door}"
+        );
+        let snapshot_door = method_body("Runtime", "window_snapshot");
+        assert!(
+            snapshot_door.contains("self.window_snapshot_with_rect("),
+            "the snapshot must use the persistence body:\n{snapshot_door}"
+        );
+        let snapshot = method_body("Runtime", "window_snapshot_with_rect");
+        assert!(
+            snapshot.contains(
+                "let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;"
+            ) && snapshot.contains("quake: persist_quake_record")
+                && snapshot.contains("if persist_quake_record {")
+                && snapshot.contains("tab.term_leaf(seat, persist_quake_record && tab.pinned)"),
+            "the visible Wayland fallback loses the saved summon marker, placements, or tabs:\n{snapshot}"
         );
         let summon = method_body("Runtime", "show_quake_window");
         // **Through the one door and not by doing the arithmetic here** (§7.54e ③).
@@ -69001,9 +72875,23 @@ mod floated_page_tests {
         // not allowed to overrule.
         assert!(
             summon.contains("self.app.quake.placement(&screen, settings)")
+                && summon.contains("set_outer_position(")
                 && summon.contains("stand_window_at("),
             "a summon does not state its own rectangle, or states it the one way \
              that a dpi seam is allowed to overrule:\n{summon}"
+        );
+        let refusal = summon
+            .find("if let Some(reason) = refusal")
+            .expect("the unsupported backend is refused");
+        let placement = summon
+            .find("set_outer_position(")
+            .expect("X11 placement uses winit");
+        let show = summon
+            .find("put_the_window_on_the_glass(false)?")
+            .expect("a supported summon shows the window");
+        assert!(
+            refusal < placement && placement < show,
+            "Wayland refusal must happen before placement or visibility changes:\n{summon}"
         );
         assert!(
             // The call and not the name: the comment above it names the
@@ -69014,7 +72902,8 @@ mod floated_page_tests {
              another dpi lands at the ratio of the two:\n{summon}"
         );
         assert!(
-            summon.contains("set_window_topmost(native, true)"),
+            summon.contains("set_window_level(winit::window::WindowLevel::AlwaysOnTop)")
+                && summon.contains("set_window_topmost(native, true)"),
             "the posture is not re-stated, so a window that has been hidden and \
              shown again may arrive behind what it was called over:\n{summon}"
         );
@@ -69024,6 +72913,11 @@ mod floated_page_tests {
                 && !hide.contains("window_shown = false"),
             "a summon that is sent away is closed rather than hidden, or forgets \
              that it has ever been on the glass:\n{hide}"
+        );
+        assert!(
+            hide.contains("Backend::Wayland")
+                && hide.find("Backend::Wayland") < hide.find("owner_door::set_visible"),
+            "native Wayland must not hide a summon that cannot be restored:\n{hide}"
         );
     }
 
@@ -69149,33 +73043,65 @@ mod floated_page_tests {
     #[test]
     fn the_foreground_is_read_before_the_summon_and_handed_back_after_it() {
         let up = method_body("FolioApp", "summon_quake");
-        let read = up
+        let linux = up
+            .split("#[cfg(target_os = \"linux\")]")
+            .nth(1)
+            .expect("the Linux summon path is present")
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux summon path ends before the portable path");
+        let read = linux
             .find("foreground_holder()")
-            .expect("the summon reads who had the keyboard");
-        let show = up
-            .find("show_quake_window()")
-            .expect("the summon shows the window");
+            .expect("the Linux summon reads the foreground before queuing work");
+        let request = linux
+            .find("runtime.request_quake_screen(pointer)?")
+            .expect("the Linux summon requests its display facts");
         assert!(
-            read < show,
-            "the foreground is read after the window is up, by which time it is \
-             the window:\n{up}"
+            read < request,
+            "the foreground read follows the Linux query: {linux}"
         );
-        let focus = up
-            .find("runtime.give_foreground_with_retry()")
-            .expect("the summon retries giving foreground to its window");
+
+        let request = method_body("Runtime", "request_quake_screen");
+        assert!(!request.contains("restore_minimized_window()"));
+
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        let restore = ready
+            .find("runtime.restore_minimized_window()?")
+            .expect("the Linux completion restores before showing");
+        let show = ready
+            .find("runtime.show_quake_window_at(")
+            .expect("the Linux completion shows after restore");
+        let finish = ready
+            .find("self.finish_summon_quake(pending.window, pending.previous)")
+            .expect("the Linux completion finishes after showing");
         assert!(
-            show < focus,
-            "the foreground retry must follow showing the summon: {up}"
+            restore < show && show < finish,
+            "Linux restore/show/finish order changed: {ready}"
         );
+
+        let portable = up
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .expect("the Windows and macOS summon path is present");
+        let read = portable
+            .find("foreground_holder()")
+            .expect("the portable summon reads the foreground");
+        let show = portable
+            .find("runtime.show_quake_window()?")
+            .expect("the portable summon shows its window");
+        let finish = portable
+            .find("self.finish_summon_quake(id, previous)")
+            .expect("the portable summon hands off after showing");
+        assert!(
+            read < show && show < finish,
+            "portable read/show/finish order changed: {portable}"
+        );
+
         let runtime_focus = method_body("Runtime", "give_foreground_with_retry");
-        assert!(
-            runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
-            "the runtime focus helper does not use its owned-window path: {runtime_focus}"
-        );
+        assert!(runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"));
         let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
         assert!(
-            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
-            "the foreground helper no longer uses the platform foreground door: {foreground}"
+            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)")
         );
 
         let down = method_body("FolioApp", "dismiss_quake");
@@ -69189,6 +73115,54 @@ mod floated_page_tests {
             hide < hand,
             "the keyboard is handed back before the window is off the screen, so \
              hiding it undoes the handover:\n{down}"
+        );
+    }
+
+    /// A press during an unanswered Linux summon cancels that hidden request.
+    #[test]
+    fn a_second_hotkey_press_cancels_a_pending_linux_summon() {
+        let settle = method_body("FolioApp", "settle_quake");
+        assert!(settle.contains("pending_quake_summon.is_some()"));
+        assert!(settle.contains("SummonMove::CancelPending"));
+        assert!(settle.contains("app.pending_quake_summon.take()"));
+
+        let movement = item_body(&ItemQuery::function("summon_move"));
+        assert!(movement.contains("pending && !showing"));
+        assert!(movement.contains("SummonMove::CancelPending"));
+    }
+    /// Retiring a summon withdraws its request before close; late completions cannot show it.
+    #[test]
+    fn a_retiring_linux_summon_discards_its_pending_display_answer() {
+        let retire = method_body("FolioApp", "retire_the_summon_with_the_run");
+        let withdraw = retire
+            .find("app.pending_quake_summon.take()")
+            .expect("retirement withdraws the pending summon");
+        let close = retire
+            .find("runtime.close_window(true)")
+            .expect("the summon follows ordinary window close");
+        assert!(
+            withdraw < close,
+            "the request survives window close: {retire}"
+        );
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        let leaving = ready
+            .find("self.is_leaving(pending.window)")
+            .expect("late completion checks the window lifecycle");
+        let active = ready
+            .find("app.quake.window() != Some(pending.window)")
+            .expect("late completion checks the active summon");
+        let quitting = ready
+            .find("quit::Quit::is_retiring")
+            .expect("late completion checks process retirement");
+        let consume = ready
+            .find("pending.request.try_take()")
+            .expect("an active request consumes its addressed answer");
+        let restore = ready
+            .find("runtime.restore_minimized_window()?")
+            .expect("an active summon restores before show");
+        assert!(
+            leaving < consume && active < consume && quitting < consume && consume < restore,
+            "late facts can restore a retired window: {ready}"
         );
     }
 
@@ -69275,7 +73249,11 @@ mod floated_page_tests {
         let door = item_body(
             &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
         );
-        let arm = door
+        let arms = door
+            .split("match event {")
+            .nth(1)
+            .expect("the receiving door dispatches the native event");
+        let arm = arms
             .split("WindowEvent::CloseRequested")
             .nth(1)
             .expect("the close arm is in the door that receives it");
@@ -69970,6 +73948,16 @@ mod opening_window_tests {
             Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
         );
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_window_attributes_set_the_desktop_identity() {
+        let source = bt_source::Index::of_package("bt-app");
+        let body = source
+            .body_of(&bt_source::ItemQuery::function("opening_window_attributes"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(body.contains("with_name(\"io.github.lulu-loopp.folio\", \"folio\")"));
+    }
 }
 
 /// Review X-1 and X-3: the two races a delayed picture paste can lose.
@@ -70202,8 +74190,9 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
 /// [`bt_platform::Compositor`] owns, because a window that will one day have a
 /// hole cut in it for a web preview has to be `PreMultiplied` and no amount of
 /// configuring an `HWND` swapchain will make it so
-/// (`bt_render::WindowTarget`'s own note). That is the whole reason the enum
-/// has two arms.
+/// (`bt_render::WindowTarget`'s own note). The composition-visual target stays
+/// separate from the window-handle target because it has a different alpha
+/// contract.
 ///
 /// **On macOS neither half of that sentence holds, and X-1 measured why.**
 /// wgpu-hal 30's Metal backend offers only `Opaque` and `PostMultiplied` —
@@ -70212,6 +74201,10 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
 /// writing premultiplied pixels and declares `PostMultiplied` to wgpu, with the
 /// platform arm owning the view and clearing its sublayers before every
 /// reconstruction (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`).
+///
+/// **Linux names its native window target separately.** The renderer prefers
+/// `PreMultiplied` when the adapter offers it and accepts `Opaque` only when
+/// that is the available fallback.
 ///
 /// **M1-4 is that answer, and it is three statements in this one function.**
 /// `bt_platform::surface_view` makes — or finds again — a plain `NSView` of
@@ -70225,15 +74218,14 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
 /// caller is the rebuild: a clear written at the two constructors would be a
 /// clear that never runs when it matters.
 ///
-/// **A refusal from either door is reported and not propagated** (§4.4, and
-/// M1-1 ② next door). Both doors refuse for one reason only — a thread that is
-/// not the window's, or a view that is in no window — and neither is something
-/// a reader's machine can be; but a `?` here would mean a program defect
-/// closing the window instead of saying so. What the fallback opens is the
-/// window this function opened before this ticket: the portable door, wgpu's
-/// own layer on winit's own view, `Opaque`, no translucent ground offered and
-/// no hole possible. That is a window a reader can work in, with one line on
-/// stderr saying what it is missing.
+/// **A refusal from the macOS owned-view path is reported and not propagated**
+/// (§4.4, and M1-1 ② next door). It refuses for one reason only — a thread that
+/// is not the window's, or a view that is in no window — and neither is
+/// something a reader's machine can be; but a `?` here would mean a program
+/// defect closing the window instead of saying so. The Mac fallback uses the
+/// common winit target with `Opaque`, no translucent ground and no hole. That
+/// is a window a reader can work in, with one line on stderr saying what it is
+/// missing.
 ///
 /// There are three callers: the two window constructors and the device-loss
 /// rebuild, and the third is why the choice is a function rather than a line in
@@ -70262,7 +74254,12 @@ fn window_surface_target(
             }
         }
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = compositor;
+        bt_render::WindowTarget::LinuxWindow(Arc::clone(window).into())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         let _ = compositor;
         bt_render::WindowTarget::Hwnd(Arc::clone(window).into())
@@ -70311,11 +74308,33 @@ fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
 /// one available, and the plan's §4.4 says which of the two a deferred service
 /// owes its caller.
 fn stand_the_window_at(
+    window: &Window,
     native: bt_platform::NativeWindow,
     rect: bt_platform::WindowRect,
     what: &str,
 ) {
-    if let Err(error) = bt_platform::set_window_outer_rect(native, rect) {
+    #[cfg(target_os = "linux")]
+    let answer = {
+        let _ = native;
+        linux_window_request(
+            window,
+            bt_platform::linux_window::Operation::SetGlobalPosition,
+        )
+        .map(|()| {
+            let _ = window.request_inner_size(PhysicalSize::new(
+                rect.right.abs_diff(rect.left),
+                rect.bottom.abs_diff(rect.top),
+            ));
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+        })
+        .map_err(|error| error.to_string())
+    };
+    #[cfg(not(target_os = "linux"))]
+    let answer = {
+        let _ = window;
+        bt_platform::set_window_outer_rect(native, rect)
+    };
+    if let Err(error) = answer {
         eprintln!("BT_WINDOW {what}: {error}");
     }
 }
@@ -70586,27 +74605,124 @@ fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
     let handle = window
         .window_handle()
         .context("get the native window handle")?;
-    match handle.as_raw() {
-        #[cfg(windows)]
-        RawWindowHandle::Win32(handle) => Ok(bt_platform::NativeWindow::from_win32(handle.hwnd)),
-        #[cfg(target_os = "macos")]
-        RawWindowHandle::AppKit(handle) => {
-            Ok(bt_platform::NativeWindow::from_appkit(handle.ns_view))
-        }
-        other => Err(anyhow!(
-            "bt-app has no native window backend for {other:?} on this platform"
-        )),
+    native_window_from_handle(handle.as_raw())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_window_backend(window: &Window) -> Result<bt_platform::linux_window::Backend> {
+    linux_backend_from_handle(window.window_handle()?.as_raw())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_backend_from_handle(
+    handle: RawWindowHandle,
+) -> Result<bt_platform::linux_window::Backend> {
+    use bt_platform::linux_window::Backend;
+    match handle {
+        RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_) => Ok(Backend::X11),
+        RawWindowHandle::Wayland(_) => Ok(Backend::Wayland),
+        other => Err(anyhow!("unsupported Linux window backend: {other:?}")),
     }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_window_request(
+    window: &Window,
+    operation: bt_platform::linux_window::Operation,
+) -> Result<()> {
+    if let Some(reason) =
+        bt_platform::linux_window::refusal(linux_window_backend(window)?, operation)
+    {
+        return Err(anyhow!(reason));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_resize_direction(
+    position: PhysicalPosition<f64>,
+    size: PhysicalSize<u32>,
+    scale: f64,
+) -> Option<winit::window::ResizeDirection> {
+    use winit::window::ResizeDirection;
+    let width = f64::from(size.width);
+    let height = f64::from(size.height);
+    if position.x < 0.0 || position.y < 0.0 || position.x >= width || position.y >= height {
+        return None;
+    }
+    let edge = 4.0 * scale;
+    let west = position.x < edge;
+    let east = position.x >= width - edge;
+    let north = position.y < edge;
+    let south = position.y >= height - edge;
+    match (west, east, north, south) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_hotkey_is_current(
+    claim: Option<&bt_platform::hotkey::GlobalHotkey>,
+    id: i32,
+    generation: u64,
+) -> bool {
+    claim.is_some_and(|claim| claim.id() == id && claim.generation() == generation)
+}
+
+#[cfg(target_os = "linux")]
+fn window_focus_request_is_needed(window: &Window) -> Result<bool, String> {
+    if window.has_focus() {
+        return Ok(false);
+    }
+    linux_window_request(window, bt_platform::linux_window::Operation::RequestFocus)
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+    #[cfg(target_os = "linux")]
+    {
+        if window_focus_request_is_needed(window).map_err(|error| anyhow!(error))? {
+            bt_platform::admission::admitted::<bt_platform::admission::doors::FocusWindow, _>(
+                |token| owner_door::focus_window(token, window),
+            )
+            .map_err(|error| anyhow!("window focus refused: {error:?}"))?;
+        }
         Ok(())
-    } else {
-        Err(anyhow!("the window could not take the keyboard"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+            Ok(())
+        } else {
+            Err(anyhow!("the window could not take the keyboard"))
+        }
     }
 }
 fn restore_minimized_window(window: &Window) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        match linux_window_backend(window)? {
+            bt_platform::linux_window::Backend::X11 => {
+                linux_window_request(window, bt_platform::linux_window::Operation::Restore)?;
+                window.set_minimized(false);
+            }
+            bt_platform::linux_window::Backend::Wayland => {
+                if window.is_minimized() == Some(true) {
+                    window.set_minimized(false);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     if window.is_minimized() == Some(true) {
         window.set_minimized(false);
     }
@@ -70615,24 +74731,344 @@ fn restore_minimized_window(window: &Window) -> Result<()> {
 
 fn bring_owned_window_forward(window: &Window) -> Result<()> {
     restore_minimized_window(window)?;
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
-        Ok(())
-    } else {
-        Err(anyhow!("the window could not take the keyboard"))
+    #[cfg(target_os = "linux")]
+    {
+        take_owned_keyboard_focus(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+            Ok(())
+        } else {
+            Err(anyhow!("the window could not take the keyboard"))
+        }
     }
 }
 
-fn request_owned_window_close(window: &Window) -> Result<()> {
-    bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+fn request_owned_window_close(window: &Window, proxy: &EventLoopProxy<AppEvent>) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        proxy
+            .send_event(AppEvent::WindowCloseRequested(window.id()))
+            .map_err(|error| anyhow!(error))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = proxy;
+        bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+    }
 }
 
 fn minimize_owned_window(window: &Window) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    linux_window_request(window, bt_platform::linux_window::Operation::Minimize)?;
     window.set_minimized(true);
     Ok(())
 }
 
-fn press_owned_title_bar(frame: &bt_platform::CustomWindowFrame) -> Result<(), String> {
-    frame.press_title_bar()
+fn press_owned_title_bar(
+    window: &Window,
+    frame: &bt_platform::CustomWindowFrame,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = frame;
+        window.drag_window().map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        frame.press_title_bar()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn retire_linux_desktop(
+    token: bt_platform::admission::WaitToken<'_, doors::DesktopRetire>,
+    clipboard_lane: Option<
+        linux_clipboard_lane::ClipboardLane<ClipboardTargetToken, ClipboardWriteTarget>,
+    >,
+    trash_lane: Option<trash_lane::TrashLane>,
+) -> Result<()> {
+    let cutoff = Instant::now() + crate::persist::SESSION_SAVE_BUDGET;
+    let worker: std::thread::JoinHandle<std::result::Result<(), String>> =
+        bt_platform::spawn_at_priority(
+            "bt-desktop-retire",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |ctx| {
+                bt_platform::linux_display::stop_display_service();
+                let clipboard = clipboard_lane
+                    .map(|lane| lane.shutdown(ctx, cutoff))
+                    .unwrap_or(Ok(()));
+                let trash = trash_lane
+                    .map(|lane| lane.shutdown(ctx).map_err(|error| error.to_string()))
+                    .unwrap_or(Ok(()));
+                let clipboard_owners = bt_platform::release_clipboard_on_worker(ctx, cutoff);
+                let notifications = bt_platform::shutdown_notifications(ctx);
+                let helpers = bt_platform::shutdown_helpers(ctx);
+                let watches = bt_platform::shutdown_watches(ctx);
+                let hotkeys = bt_platform::linux_hotkey::shutdown_hotkey_worker(ctx);
+                let system_settings = bt_platform::shutdown_system_settings(ctx);
+                let display = wait_linux_display_retirement(ctx, cutoff);
+                clipboard
+                    .and(trash)
+                    .and(clipboard_owners)
+                    .and(notifications)
+                    .and(helpers)
+                    .and(watches)
+                    .and(hotkeys)
+                    .and(system_settings)
+                    .and(display)
+            },
+        )
+        .context("start desktop retirement worker")?;
+    join_linux_desktop_retirement(token, worker, cutoff)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_linux_display_retirement(
+    _worker: &bt_platform::admission::WorkerCtx,
+    cutoff: Instant,
+) -> std::result::Result<(), String> {
+    while !bt_platform::linux_display::display_service_stopped() {
+        if Instant::now() >= cutoff {
+            return Err("Linux display retirement reached the desktop cutoff".to_owned());
+        }
+        std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn join_linux_desktop_retirement(
+    _token: bt_platform::admission::WaitToken<'_, doors::DesktopRetire>,
+    worker: std::thread::JoinHandle<std::result::Result<(), String>>,
+    cutoff: Instant,
+) -> Result<()> {
+    while !worker.is_finished() {
+        if Instant::now() >= cutoff {
+            return Err(anyhow!(
+                "Linux desktop retirement exceeded its cutoff; continuing shutdown"
+            ));
+        }
+        std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
+    }
+    worker
+        .join()
+        .map_err(|_| anyhow!("desktop retirement worker panicked"))?
+        .map_err(|error| anyhow!(error))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_desktop_retirement_tests {
+    use super::join_linux_desktop_retirement;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn an_unfinished_retirement_worker_is_left_running_at_the_exit_budget() {
+        crate::test_support::on_the_window_thread_exiting();
+
+        let release = Arc::new(Barrier::new(2));
+        let worker_release = Arc::clone(&release);
+        let returned = Arc::new(Barrier::new(2));
+        let worker_returned = Arc::clone(&returned);
+        let worker = bt_platform::spawn_at_priority(
+            "bt-desktop-retire-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |_worker| {
+                worker_release.wait();
+                worker_returned.wait();
+                Ok::<(), String>(())
+            },
+        )
+        .expect("the controlled retirement worker starts");
+
+        let timed_out = bt_platform::admission::admitted::<
+            bt_platform::admission::doors::DesktopRetire,
+            _,
+        >(move |token| {
+            join_linux_desktop_retirement(token, worker, std::time::Instant::now())
+        })
+        .expect("the exiting window thread is admitted");
+        assert!(
+            timed_out
+                .expect_err("an unfinished worker exceeds a zero-length test budget")
+                .to_string()
+                .contains("continuing shutdown"),
+            "the timeout reports that shutdown can proceed"
+        );
+
+        release.wait();
+        returned.wait();
+    }
+}
+
+fn native_window_from_handle(handle: RawWindowHandle) -> Result<bt_platform::NativeWindow> {
+    match handle {
+        #[cfg(windows)]
+        RawWindowHandle::Win32(handle) => Ok(bt_platform::NativeWindow::from_win32(handle.hwnd)),
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(handle) => {
+            Ok(bt_platform::NativeWindow::from_appkit(handle.ns_view))
+        }
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Xlib(handle) => {
+            let window = u32::try_from(handle.window)
+                .ok()
+                .and_then(std::num::NonZeroU32::new)
+                .context("Xlib window ID is zero or exceeds 32 bits")?;
+            Ok(bt_platform::NativeWindow::from_x11(window))
+        }
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Xcb(handle) => Ok(bt_platform::NativeWindow::from_x11(handle.window)),
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Wayland(handle) => {
+            Ok(bt_platform::NativeWindow::from_wayland(handle.surface))
+        }
+        other => Err(anyhow!(
+            "bt-app has no native window backend for {other:?} on this platform"
+        )),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_window_tests {
+    use super::{RawWindowHandle, linux_backend_from_handle, native_window_from_handle};
+    use std::{num::NonZeroU32, ptr::NonNull};
+    use winit::raw_window_handle::{WaylandWindowHandle, XcbWindowHandle, XlibWindowHandle};
+
+    #[test]
+    fn linux_window_handles_reach_the_platform_door() {
+        let xlib =
+            native_window_from_handle(RawWindowHandle::Xlib(XlibWindowHandle::new(42))).unwrap();
+        let xcb = native_window_from_handle(RawWindowHandle::Xcb(XcbWindowHandle::new(
+            NonZeroU32::new(42).unwrap(),
+        )))
+        .unwrap();
+        assert_eq!(xlib, xcb);
+        assert_eq!(
+            linux_backend_from_handle(RawWindowHandle::Xlib(XlibWindowHandle::new(42))).unwrap(),
+            bt_platform::linux_window::Backend::X11
+        );
+        assert_eq!(
+            linux_backend_from_handle(RawWindowHandle::Xcb(XcbWindowHandle::new(
+                NonZeroU32::new(42).unwrap(),
+            )))
+            .unwrap(),
+            bt_platform::linux_window::Backend::X11
+        );
+        let surface = NonNull::dangling();
+        assert_eq!(
+            native_window_from_handle(RawWindowHandle::Wayland(WaylandWindowHandle::new(surface)))
+                .unwrap(),
+            bt_platform::NativeWindow::from_wayland(surface)
+        );
+        assert_eq!(
+            linux_backend_from_handle(RawWindowHandle::Wayland(WaylandWindowHandle::new(surface)))
+                .unwrap(),
+            bt_platform::linux_window::Backend::Wayland
+        );
+        assert!(
+            native_window_from_handle(RawWindowHandle::Xlib(XlibWindowHandle::new(0))).is_err()
+        );
+    }
+
+    #[test]
+    fn app_close_requests_reach_the_existing_close_event() {
+        let mouse = include_str!("runtime/mouse.rs");
+        let tabs = include_str!("runtime/tabs.rs");
+        let windows = include_str!("runtime/windows.rs");
+        assert!(mouse.contains("self.request_window_close()"));
+        assert!(tabs.contains("self.request_window_close()"));
+        assert!(windows.contains(
+            "crate::request_owned_window_close(&self.window.window, &self.app.event_proxy)"
+        ));
+
+        let app = include_str!("main.rs");
+        assert!(app.contains("AppEvent::WindowCloseRequested(window.id())"));
+        assert!(app.contains("AppEvent::WindowCloseRequested(window_id) =>"));
+        assert!(
+            app.contains("self.window_event(event_loop, window_id, WindowEvent::CloseRequested);")
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_trash_app_source_tests {
+    use bt_source::{Index, ItemQuery};
+
+    fn method(owner: &str, name: &str) -> &'static str {
+        Index::of_package("bt-app")
+            .body_of(&ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    #[test]
+    fn file_delete_admits_only_a_live_row_and_captures_its_leaf_and_parent() {
+        let delete = method("Runtime", "delete_files_row");
+        let checked = delete
+            .find("row.key == key")
+            .expect("the key is resolved against the current tree");
+        let admitted = delete
+            .find("self.app.submit_trash(path, target)")
+            .expect("Linux queues the captured path");
+        assert!(checked < admitted, "a stale key reached trash admission");
+        assert!(delete.contains("TrashTarget::File"));
+        assert!(delete.contains("leaf: LeafId"));
+        assert!(delete.contains("root,"));
+        assert!(delete.contains("parent,"));
+        let completion = method("FolioApp", "drain_trash_answers");
+        assert!(completion.contains("self.owner_of(leaf.tab)"));
+        assert!(completion.contains("runtime.complete_trash_file("));
+    }
+
+    #[test]
+    fn scheme_delete_keeps_window_duty_and_current_selection_verdict() {
+        let delete = method("Runtime", "delete_scheme_file");
+        assert!(delete.contains("self.app.submit_trash(path, target)"));
+        assert!(delete.contains("window_identity: Arc::clone(&self.window.instance_identity)"));
+        let settle = method("App", "successful_scheme_trash");
+        assert!(settle.contains("self.scheme_source[0]"));
+        assert!(settle.contains("self.scheme_source[1]"));
+        assert!(settle.contains("source == file"));
+        assert!(settle.contains("adopt_stored_schemes("));
+        let watcher = method("Runtime", "advance_scheme_watch");
+        assert!(watcher.contains("self.app.scheme_trash_pending()"));
+        assert!(watcher.contains("self.app.schemes_rescan_owed = true"));
+        let completion = method("FolioApp", "drain_trash_answers");
+        assert!(completion.contains("!app.scheme_trash_pending()"));
+        assert!(completion.contains("runtime.reread_schemes()?"));
+    }
+
+    #[test]
+    fn accepted_trash_holds_the_final_close_and_quit_writes() {
+        let close = method("FolioApp", "close");
+        let waits = close
+            .find("app.trash_pending_count() > 0")
+            .expect("the ordinary last-window close is deferred");
+        let snapshot = close
+            .find("runtime.close_window(ending)")
+            .expect("the saved window picture is still recorded");
+        assert!(
+            waits < snapshot,
+            "the session was photographed before trash settled"
+        );
+
+        let quit = method("FolioApp", "settle_quit");
+        let wait = quit
+            .find("app.trash_pending_count() > 0")
+            .expect("Quit waits for accepted trash transactions");
+        let action = quit
+            .find("match step {")
+            .expect("the quit step is dispatched");
+        assert!(
+            wait < action,
+            "a quit save or photograph ran while trash was pending"
+        );
+
+        let end = method("FolioApp", "run_end");
+        assert!(end.contains("app.trash_pending_count() > 0"));
+    }
 }
 
 /// **Hand this window's touch input to the system that already knows what to do
@@ -71513,15 +75949,86 @@ fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorA
     }
 }
 
-/// What the OS is currently doing with the window, as far as its rectangle is
-/// concerned. The three postures are exhaustive and mutually exclusive: Windows
-/// reports iconic and zoomed separately, and a window that is both is iconic —
-/// its rectangle is the icon's either way.
+/// The OS posture as far as the window rectangle is concerned.
+/// Windows reports iconic and zoomed separately, with iconic taking precedence.
+/// `Unknown` means no valid native or backend-cached state has arrived yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowPosture {
     Normal,
     Maximized,
     Minimized,
+    Unknown,
+}
+
+fn choose_window_posture(minimized: Option<bool>, maximized: Option<bool>) -> WindowPosture {
+    match (minimized, maximized) {
+        (Some(true), _) => WindowPosture::Minimized,
+        (Some(false), Some(true)) => WindowPosture::Maximized,
+        (Some(false), Some(false)) => WindowPosture::Normal,
+        _ => WindowPosture::Unknown,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WindowMaximizeIntent {
+    observed: Option<bool>,
+    desired: Option<bool>,
+    toggle_while_unknown: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowMaximizeAction {
+    Request(bool),
+    WaitForObservation,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl WindowMaximizeIntent {
+    pub(crate) const fn observed(&self) -> Option<bool> {
+        self.observed
+    }
+
+    fn posture_state(&self) -> Option<bool> {
+        let observed = self.observed();
+        if self
+            .desired
+            .is_some_and(|desired| Some(desired) != observed)
+        {
+            None
+        } else {
+            observed
+        }
+    }
+
+    pub(crate) fn request_initial(&mut self, desired: bool) {
+        self.desired = Some(desired);
+    }
+
+    pub(crate) fn toggle(&mut self) -> WindowMaximizeAction {
+        let Some(current) = self.desired.or(self.observed) else {
+            self.toggle_while_unknown = !self.toggle_while_unknown;
+            return WindowMaximizeAction::WaitForObservation;
+        };
+        let desired = !current;
+        self.desired = Some(desired);
+        WindowMaximizeAction::Request(desired)
+    }
+
+    pub(crate) fn observe(&mut self, observed: Option<bool>) -> Option<WindowMaximizeAction> {
+        self.observed = observed;
+        let observed = observed?;
+        if std::mem::take(&mut self.toggle_while_unknown) {
+            let desired = !observed;
+            self.desired = Some(desired);
+            return Some(WindowMaximizeAction::Request(desired));
+        }
+        if self.desired == Some(observed) {
+            self.desired = None;
+        }
+        None
+    }
 }
 
 /// The `(bounds, maximized)` pair a snapshot should record.
@@ -71549,6 +76056,7 @@ fn recorded_window_placement(
         WindowPosture::Normal => (measured.unwrap_or(saved_bounds), false),
         WindowPosture::Maximized => (saved_bounds, true),
         WindowPosture::Minimized => (saved_bounds, saved_maximized),
+        WindowPosture::Unknown => (saved_bounds, saved_maximized),
     }
 }
 
@@ -71648,6 +76156,13 @@ struct RestoreMonitor {
     bottom: f64,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RestoreMonitorInput {
+    full: bt_platform::WindowRect,
+    scale: f64,
+}
+
 impl RestoreMonitor {
     fn width(self) -> f64 {
         (self.right - self.left).max(0.0)
@@ -71676,10 +76191,59 @@ impl RestoreMonitor {
 /// monitor can see to the first entry, because a window that forfeits its corner opens wherever
 /// the OS puts it, and that is the primary.
 ///
-/// The one impure half of the restore judgment, and all it does is read. `available_monitors`
-/// gives the arrangement, and Win32 gives each monitor's work area — the taskbar's strip is not a
-/// fact winit reports, and it is exactly the strip a restored window must not open under.
+/// The one impure half of the restore judgment, and all it does is read. Winit gives each
+/// monitor's bounds and scale. Windows and macOS keep their existing native work-area read here;
+/// Linux uses these full bounds for the first-window fallback and sends saved secondary restores
+/// to the display worker for their work-area answers.
 fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
+    #[cfg(target_os = "linux")]
+    {
+        let inputs = restore_monitor_inputs(event_loop);
+        restore_monitors_from_work_areas(&inputs, None)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let primary = event_loop.primary_monitor();
+        primary
+            .clone()
+            .into_iter()
+            .chain(
+                event_loop
+                    .available_monitors()
+                    .filter(|monitor| Some(monitor) != primary.as_ref()),
+            )
+            .map(|monitor| {
+                let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
+                let origin = monitor.position();
+                let extent = monitor.size();
+                let full = bt_platform::WindowRect {
+                    left: origin.x,
+                    top: origin.y,
+                    right: origin
+                        .x
+                        .saturating_add(extent.width.min(i32::MAX as u32) as i32),
+                    bottom: origin
+                        .y
+                        .saturating_add(extent.height.min(i32::MAX as u32) as i32),
+                };
+                let asked = bt_platform::work_area_at(
+                    full.left + (full.right - full.left) / 2,
+                    full.top + (full.bottom - full.top) / 2,
+                );
+                let work = monitor_work_area(full, asked.ok());
+                RestoreMonitor {
+                    left: f64::from(work.left) / scale,
+                    top: f64::from(work.top) / scale,
+                    right: f64::from(work.right) / scale,
+                    bottom: f64::from(work.bottom) / scale,
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_monitor_inputs(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitorInput> {
     let primary = event_loop.primary_monitor();
     primary
         .clone()
@@ -71703,21 +76267,52 @@ fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
                     .y
                     .saturating_add(extent.height.min(i32::MAX as u32) as i32),
             };
+            RestoreMonitorInput { full, scale }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn restore_monitors_from_work_areas(
+    inputs: &[RestoreMonitorInput],
+    work_areas: Option<&[Option<bt_platform::WindowRect>]>,
+) -> Vec<RestoreMonitor> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
             // The centre, because that is the one point of a monitor that is certainly on it —
             // `MonitorFromPoint` resolves a shared edge to whichever neighbour it likes.
-            let asked = bt_platform::work_area_at(
-                full.left + (full.right - full.left) / 2,
-                full.top + (full.bottom - full.top) / 2,
+            let work = monitor_work_area(
+                input.full,
+                work_areas.and_then(|areas| areas.get(index).copied().flatten()),
             );
-            let work = monitor_work_area(full, asked.ok());
             RestoreMonitor {
-                left: f64::from(work.left) / scale,
-                top: f64::from(work.top) / scale,
-                right: f64::from(work.right) / scale,
-                bottom: f64::from(work.bottom) / scale,
+                left: f64::from(work.left) / input.scale,
+                top: f64::from(work.top) / input.scale,
+                right: f64::from(work.right) / input.scale,
+                bottom: f64::from(work.bottom) / input.scale,
             }
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn restore_monitor_topology_matches(
+    inputs: &[RestoreMonitorInput],
+    native_bounds: &[bt_platform::WindowRect],
+    native_primary: bt_platform::WindowRect,
+) -> bool {
+    let mut expected = inputs.iter().map(|input| input.full).collect::<Vec<_>>();
+    let mut observed = native_bounds.to_vec();
+    let by_position =
+        |rect: &bt_platform::WindowRect| (rect.left, rect.top, rect.right, rect.bottom);
+    expected.sort_by_key(by_position);
+    observed.sort_by_key(by_position);
+    expected == observed
+        && inputs
+            .first()
+            .is_some_and(|input| input.full == native_primary)
 }
 
 /// **One monitor's work area, held to the one thing a work area always is: a
@@ -72360,15 +76955,27 @@ fn main() -> Result<()> {
         };
         std::process::exit(code);
     }
+    // **The elevated host's door, second**, for the first door's reason: an exact private line,
+    // answered before console adoption, the panic log, any claim, endpoint or settings — the
+    // host is a headless process that authenticates its pipe and is otherwise nothing.
+    if let Some(line) = bt_platform::elevated_protocol::HostLine::parse(std::env::args_os().skip(1))
+    {
+        // The host makes the elevated pane's pseudoconsole: its sidecars are named first.
+        bt_pty::use_sidecars_in(bt_platform::own_files_folder());
+        std::process::exit(match line {
+            Ok(line) => elevated_host::serve(&line),
+            Err(_) => elevated_host::USAGE,
+        });
+    }
     // The private native remover's stdout is its readiness pipe. Answer this
-    // second door before console adoption can replace that inherited handle,
+    // third door before console adoption can replace that inherited handle,
     // and before any code capable of constructing a window.
     if cli::uninstall_remove(std::env::args_os().skip(1)) {
         let code =
             uninstall::remover_standalone(bt_platform::deferred_removal::run_from_environment);
         std::process::exit(code);
     }
-    // After both private doors, adopt the console so that even the panic hook's own words have
+    // After the private doors, adopt the console so that even the panic hook's own words have
     // somewhere to land when a shell launched this window-subsystem process to read its traces.
     // **For the front door only** — see `diagnostics::enter_resident_run`, which
     // is where the borrow ends.
@@ -72430,6 +77037,7 @@ fn main() -> Result<()> {
     if cli::remove_shell_integration(std::env::args_os().skip(1)) {
         let report = shell_integration::remove_shell_integration(
             shell_integration::profile_marks::Asker::Door,
+            &shell_integration::ProbeEnvironment::Inherited,
         );
         let done = report.text(false);
         if done.is_empty() && report.exit_code() == 0 {
@@ -72501,6 +77109,10 @@ fn main() -> Result<()> {
     // first turn. Below the six argv doors, whose processes never have a window, and above the
     // hand-over, which is this phase's one wait (§5.3 row 18).
     bt_platform::admission::enter_window_thread();
+    // **The machine's answers for `bt-term`, before anything here can make a session**
+    // (`host_answers`): its names and the resample pool's priority band. Every session is made by
+    // the event loop below, and a session's first working-directory report reads the names.
+    host_answers::install();
     // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
     // taken shared here, before the data directory is resolved (which may move
     // it), before settings, sidecars and the hand-over below; then one look at
@@ -72534,26 +77146,46 @@ fn main() -> Result<()> {
     // would answer that search first — turning a pin on where the run's last
     // line is written into a pin on a branch that never writes one.
     let storage = persist::storage_dir();
-    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
-    // asks for it until the old build has let go, and adopts it into the claim
-    // table before anything below asks who writes here. One that is not handed
-    // the claim does not start and does not hand itself over — its applier
-    // sees the trial gone without a receipt and rolls back. Nothing at all in
-    // any other start.
-    if let Err(line) = update_trial::take_the_claim(&storage) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        bt_platform::leave_process(1);
-    }
     //
     // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
     // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+    // **Why a hand-over gave up is kept for the log** (0.4.8 D3): the front door has none, so the
+    // line waits here and is written once `enter_resident_run` has opened this run's.
+    let gave_up = std::cell::Cell::new(None::<String>);
+    let hand_over = || {
+        bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+            launch_wire::hand_over(
+                token,
+                &admitted,
+                &storage,
+                &request,
+                say_at_the_front_door,
+                |line| gave_up.set(Some(line)),
+            )
+        })
+        .ok()
+        .flatten()
+    };
+    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
+    // asks for it until the old build has let go, and adopts it into the claim
+    // table before anything below asks who writes here. One a holder launched
+    // that is not handed the claim does not start and does not hand itself
+    // over — its applier sees the trial gone without a receipt and rolls
+    // back. A person's start standing in for U-35's reserved trial offers its
+    // launch to the trial that holds the claim, and when that trial does not
+    // take it within the wait, opens its own window, its writes held (0.4.8
+    // E3). Nothing at all in any other start.
+    let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
+        update_trial::Claimed::Ours => None,
+        update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
+        update_trial::Claimed::StoodDown(line) => Some(line),
+        update_trial::Claimed::NotHad(line) => {
+            bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            bt_platform::leave_process(1);
+        }
+    };
     if !persist::is_writer_of(&storage)
-        && let Some(handed) =
-            bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-                launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
-            })
-            .ok()
-            .flatten()
+        && let Some(handed) = hand_over()
     {
         bt_platform::leave_process(handed);
     }
@@ -72572,6 +77204,26 @@ fn main() -> Result<()> {
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
     let channel = diagnostics::enter_resident_run(&storage);
+    // A start whose hand-over gave up says why where this run's diagnostics go
+    // (0.4.8 D3), above the line that says its window saves nothing.
+    if let Some(line) = gave_up.take() {
+        diagnostics::note(&line);
+    }
+    // A stand-in that stood down beside the reserved trial says so where this
+    // run's diagnostics go (0.4.8 E3).
+    if let Some(line) = stood_down {
+        diagnostics::note(&line);
+    }
+    // **Where this program's own files are, said once and named before any pane** (G-SWEEP-048,
+    // T-EXE-SYMLINK-SIDECARS): the loaded image with its links followed, so a start through
+    // winget's alias finds its ConPTY pair beside the real file and says which file that is.
+    if let Some(note) = bt_platform::running_image()
+        .ok()
+        .and_then(bt_platform::RunningImage::note)
+    {
+        diagnostics::note(&note);
+    }
+    bt_pty::use_sidecars_in(bt_platform::own_files_folder());
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and
@@ -72733,6 +77385,49 @@ fn main() -> Result<()> {
         }
     };
     let _ = SUMMON_PROXY.set(event_loop.create_proxy());
+    #[cfg(target_os = "linux")]
+    let linux_hang_registration = {
+        let proxy = event_loop.create_proxy();
+        linux_hang_probe::install(move |id| {
+            proxy.send_event(AppEvent::HangWatchQuestion(id)).is_ok()
+        })
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let proxy = event_loop.create_proxy();
+        bt_platform::install_dialog_wake(move || {
+            let _ = proxy.send_event(AppEvent::NativeDialogReady);
+        })
+        .map_err(|error| anyhow!(error))?;
+        let proxy = event_loop.create_proxy();
+        bt_platform::linux_display::install_display_wake(move |ready| {
+            let _ = proxy.send_event(AppEvent::NativeDisplayReady {
+                owner: ready.owner,
+                request_id: ready.request_id,
+                generation: ready.generation,
+            });
+        })
+        .map_err(|error| anyhow!(error))?;
+        let proxy = event_loop.create_proxy();
+        bt_platform::linux_hotkey::install_hotkey_wake(move |event| {
+            let event = match event {
+                bt_platform::linux_hotkey::LinuxHotkeyEvent::Ready { id, generation } => {
+                    AppEvent::NativeHotkeyReady { id, generation }
+                }
+                bt_platform::linux_hotkey::LinuxHotkeyEvent::Activated {
+                    id,
+                    generation,
+                    pointer,
+                } => AppEvent::NativeHotkeyActivated {
+                    id,
+                    generation,
+                    pointer,
+                },
+            };
+            let _ = proxy.send_event(event);
+        })
+        .map_err(|error| anyhow!(error))?;
+    }
     // **The application delegate, and it has to be here** (M3-1, X-4).
     //
     // After `build` and not before it: what `EventLoop::new` does on the machine
@@ -72787,12 +77482,35 @@ fn main() -> Result<()> {
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
+    #[cfg(target_os = "linux")]
+    drop(linux_hang_registration);
     // The loop has returned, and what follows is the way out (§5.3 rows 15–17) — from `Running`,
     // or from `Starting` when the loop stopped before its first turn.
     bt_platform::admission::exiting();
     // The session that outlived every question is released once the loop has
     // returned, never before a question could still be in flight.
     bt_platform::video::shutdown_media_session();
+    #[cfg(target_os = "linux")]
+    {
+        let clipboard_lane = application
+            .app
+            .as_mut()
+            .and_then(|app| app.clipboard_lane.take());
+        let trash_lane = application
+            .app
+            .as_mut()
+            .and_then(|app| app.trash_lane.take());
+        drop(application);
+        if let Err(error) =
+            bt_platform::admission::admitted::<doors::DesktopRetire, _>(move |token| {
+                retire_linux_desktop(token, clipboard_lane, trash_lane)
+            })
+            .map_err(|error| anyhow!("desktop retirement refused: {error:?}"))
+            .and_then(|result| result)
+        {
+            diagnostics::note(&format!("desktop retirement: {error}"));
+        }
+    }
     // **An update's exit guard** (0.4.6 U-34): after a Restart to update, this
     // process leaves behind the applier it started, or starts Folio again —
     // here, with the loop over and the session's sentinel gone, after letting
@@ -72846,23 +77564,190 @@ fn main() -> Result<()> {
     bt_platform::leave_process(code)
 }
 
-/// **The largest of this file's test modules, in a file of its own**
-/// (`refactor/main-tests-out`, 2026-09-18).
-///
-/// A move and nothing else: the same tests under the same paths, reading the
-/// same fixtures from the same directory. It is out here because a module of
-/// forty-eight thousand lines is the reason an editor, a reviewer and a
-/// `cargo fmt` all have to carry the whole of this file to reach anything in
-/// it, and because the pins that count this file's own text now count a file
-/// that is that much closer to being the product's.
-///
-/// **`main.rs` is still not the same thing as this crate's product text**: it
-/// holds fifty-four smaller test modules besides. Every pin that reads it says
-/// which of the two it means.
+// **The crate root's tests, by what they test** (`docs/DESIGN.md`, K1). Each file sits in
+// `src/` and is written in this file's scope (`use super::*`): `app_<theme>_tests` for items
+// this file owns, sorted by the theme sort of `docs/plans/bt-app-split-inventory-2026-09-15.md`
+// §0.3, and `<module>_app_tests` for tests whose first assertion is about another module.
+//
+// **`main.rs` is still not the same thing as this crate's product text**: it holds fifty-four
+// smaller inline test modules besides. Every pin that reads it says which of the two it means.
+#[cfg(test)]
+mod app_attention_tests;
+#[cfg(test)]
+mod app_clipboard_tests;
+#[cfg(test)]
+mod app_configuration_tests;
+#[cfg(test)]
+mod app_diagnostics_tests;
+#[cfg(test)]
+mod app_dpi_tests;
+#[cfg(test)]
+mod app_files_tests;
+#[cfg(test)]
+mod app_first_run_tests;
+#[cfg(test)]
+mod app_floats_tests;
+#[cfg(test)]
+mod app_focus_tests;
+#[cfg(test)]
+mod app_frame_tests;
+#[cfg(test)]
+mod app_git_tests;
+#[cfg(test)]
+mod app_i18n_tests;
+#[cfg(test)]
+mod app_keyboard_tests;
+#[cfg(test)]
+mod app_launch_tests;
+#[cfg(test)]
+mod app_math_tests;
+#[cfg(test)]
+mod app_mouse_tests;
+#[cfg(test)]
+mod app_palette_tests;
+#[cfg(test)]
+mod app_panes_tests;
+#[cfg(test)]
+mod app_peek_tests;
+#[cfg(test)]
+mod app_preview_tests;
+#[cfg(test)]
+mod app_profiles_tests;
+#[cfg(test)]
+mod app_tabs_tests;
+#[cfg(test)]
+mod app_terminal_tests;
+#[cfg(test)]
+mod app_tooltips_tests;
+#[cfg(test)]
+mod app_unclassified_tests;
+#[cfg(test)]
+mod app_web_tests;
+#[cfg(test)]
+mod app_windows_tests;
+#[cfg(test)]
+mod attention_map_app_tests;
+#[cfg(test)]
+mod attention_wire_app_tests;
+#[cfg(test)]
+mod card_trace_app_tests;
+#[cfg(test)]
+mod cli_app_tests;
+#[cfg(test)]
+mod cmdrail_app_tests;
+#[cfg(test)]
+mod file_peek_app_tests;
+#[cfg(test)]
+mod files_app_tests;
+#[cfg(test)]
+mod float_app_tests;
+#[cfg(test)]
+mod focus_thumb_app_tests;
+#[cfg(test)]
+mod foreground_program_app_tests;
+#[cfg(test)]
+mod formula_tools_app_tests;
+#[cfg(test)]
+mod git_app_tests;
+#[cfg(test)]
+mod input_app_tests;
+#[cfg(test)]
+mod install_channel_app_tests;
+#[cfg(test)]
+mod launch_wire_app_tests;
+#[cfg(test)]
+mod marks_app_tests;
+#[cfg(test)]
+mod menubar_app_tests;
+#[cfg(test)]
+mod notice_app_tests;
+#[cfg(test)]
+mod owner_door_app_tests;
+#[cfg(test)]
+mod pace_app_tests;
+#[cfg(test)]
+mod palette_app_tests;
+#[cfg(test)]
+mod persist_app_tests;
+#[cfg(test)]
+mod preview_app_tests;
+#[cfg(test)]
+mod preview_edit_app_tests;
+#[cfg(test)]
+mod preview_live_app_tests;
+#[cfg(test)]
+mod preview_provenance_app_tests;
+#[cfg(test)]
+mod preview_select_app_tests;
+#[cfg(test)]
+mod preview_text_app_tests;
+#[cfg(test)]
+mod preview_trace_app_tests;
+#[cfg(test)]
+mod preview_viewport_app_tests;
+#[cfg(test)]
+mod preview_wrap_app_tests;
+#[cfg(test)]
+mod profiles_app_tests;
+#[cfg(test)]
+mod restore_app_tests;
+#[cfg(test)]
+mod schemes_app_tests;
+#[cfg(test)]
+mod search_app_tests;
+#[cfg(test)]
+mod seats_app_tests;
+#[cfg(test)]
+mod seed_app_tests;
+#[cfg(test)]
+mod session_end_app_tests;
+#[cfg(test)]
+mod settings_app_tests;
+#[cfg(test)]
+mod shell_integration_app_tests;
+#[cfg(test)]
+mod shell_literal_app_tests;
+#[cfg(test)]
+mod shortcuts_app_tests;
+#[cfg(test)]
+mod table_block_app_tests;
+/// **The fixtures the crate root's test files share**, `pub(crate)` where another file
+/// reaches them.
+#[cfg(test)]
+mod test_support;
+/// **The tests that keep the path `tests::<name>`** — the few that something outside
+/// their own body names by it (a row of `docs/plans/TIMING-BOUND-TESTS.tsv`, or a test that
+/// runs itself again with `--exact`); the file's head lists why.
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod text_size_tests;
+#[cfg(test)]
+mod trace_app_tests;
+#[cfg(test)]
+mod update_apply_app_tests;
+#[cfg(test)]
+mod update_archive_app_tests;
+#[cfg(test)]
+mod update_card_app_tests;
+#[cfg(test)]
+mod update_job_app_tests;
+#[cfg(test)]
+mod update_prepare_macos_app_tests;
+#[cfg(test)]
+mod update_prepare_windows_app_tests;
+#[cfg(test)]
+mod update_startup_app_tests;
+#[cfg(test)]
+mod update_txn_app_tests;
+#[cfg(test)]
+mod video_seat_app_tests;
+#[cfg(test)]
+mod web_trace_app_tests;
+#[cfg(test)]
+mod webhost_app_tests;
+#[cfg(test)]
+mod webnav_app_tests;
 
 /// **The files in which `bt-app` is allowed to know what platform it is on**
 /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.3, ticket M1-10).
@@ -72918,7 +77803,14 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 17] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 51] = [
+        // Windows-only test fixtures: a share named by a document (`\\server\share`).
+        "app_preview_tests.rs",
+        // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
+        // verbatim spellings of a printed link.
+        "app_terminal_tests.rs",
+        // Windows-only test fixtures: a breadcrumb row's drive segment.
+        "app_unclassified_tests.rs",
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -72935,27 +77827,93 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
-        // The startup path: the native-window door's two arms, and the five
-        // platform calls M1-1 made non-fatal.
+        // Linux asks through winit; Windows and macOS keep their native loop probes.
+        "hang_watch.rs",
+        // Linux hands process work its WorkerCtx; the other hand-off doors are synchronous.
+        "handoff_lane.rs",
+        // Linux-only drop and cleanup labels remain available to all translation tests.
+        "i18n.rs",
+        // Linux forwards winit key and composition values to its software page host.
+        "input.rs",
+        // First-window display and clipboard identities are strict; optional
+        // service failures remain local to their operation.
         "main.rs",
+        // The Linux focus door must refuse a Wayland focus request before calling winit.
+        "owner_door.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
+        // Linux configuration files share the existing data writer but use XDG paths.
+        "persist.rs",
+        // Windows-only test fixtures: the drive, share, verbatim and WSL spellings of
+        // the read-unasked gate, beside its one-root twin.
+        "preview.rs",
         // Test fixtures compose Windows-only namespace translation with profile
         // overrides; production profile policy uses the portable platform interface.
         "profiles.rs",
+        // Windows-only test fixtures: a WSL tab, split and fallback crossing into WSL's
+        // spelling, each beside its twin for a build without WSL.
+        "profiles_app_tests.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // Linux's generation-checked native hotkey answers read the current claim here.
+        "quake.rs",
+        // Linux clipboard and path-drop replies apply only to their captured destination.
+        "runtime/clipboard.rs",
+        // Linux snapshots use event geometry and an asynchronous native rectangle answer.
+        "runtime/dpi.rs",
+        // Linux trash and path-drop answers apply only to their original destination.
+        "runtime/files.rs",
+        // Linux withdraws cross-window dragging when its observed client origin is invalidated.
+        "runtime/frame.rs",
+        // Linux keeps its input method across a focus loss in this ladder.
+        "runtime/keyboard.rs",
+        // Linux's client frame starts a native resize from this pointer gesture.
+        "runtime/mouse.rs",
+        // Linux path drops and tear-out placement use worker answers; other platforms keep their
+        // existing synchronous gesture path.
+        "runtime/panes.rs",
+        // Linux preview paste adopts its delayed text reply only at the original document instance.
+        "runtime/preview.rs",
+        // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
+        "runtime/quake.rs",
+        // Linux tear-out plans carry the worker's work-area and DPI answer to window creation.
+        "runtime/tabs.rs",
+        // Linux screen coordinates use the display worker's client translation.
+        "runtime/terminal.rs",
+        // Linux pages draw software frames; other native pages retain compositor holes.
+        "runtime/web.rs",
+        // The Linux-only minimize restore bridge has only the Linux quake summon caller.
+        "runtime/windows.rs",
+        // Native failure fixture: Linux reports async watch-start failure; other starts refuse inline.
+        "scheme_watch.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
+        // Linux field identities reject delayed clipboard answers after a field is replaced.
+        "text_field.rs",
+        // Explicit Linux purge inventories only this data namespace's XDG roots.
+        "uninstall.rs",
+        // Windows-only test fixtures: a share handed over under `Ctrl`.
+        "tests.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
-        // Only the symlinked-log regression fixture; the recovery road is portable.
-        "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
         "update_handoff.rs",
+        // Only the symlinked-log regression fixture; the recovery road is portable.
+        "update_recover.rs",
+        // Only the Linux startup-write fixture checks XDG migration and drains helper workers;
+        // production trial-write policy stays platform-blind.
+        "update_trial.rs",
+        // Linux owns forwarded keys and software frame/caret generations in this web seat.
+        "webhost.rs",
+        // Windows-only test fixtures: the UNC spelling of a share in a document.
+        "web_trace_app_tests.rs",
+        // Windows-only test fixtures: WebView2's favicon fetch, beside the macOS twin.
+        "webhost_favicon_tests.rs",
+        // Windows-only test fixtures: WebView2's Win32 accelerator keys.
+        "webhost_keyboard_tests.rs",
         // WSL.
         "wsl.rs",
     ];
@@ -73386,6 +78344,12 @@ mod cross_window_drag_tests {
         profiles, seats, strip_insert_slot, tear_out_rect,
     };
 
+    #[cfg(target_os = "linux")]
+    use super::{
+        RestoreMonitor, RestoreMonitorInput, drag_guard_reply_matches,
+        restore_monitor_topology_matches, restore_monitors_from_work_areas,
+    };
+
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -73518,7 +78482,7 @@ mod cross_window_drag_tests {
     /// kill a launch** (ticket M1-1; `docs/plans/port/macos-plan-2026-09-12.md`
     /// §4.4, `docs/plans/port/backend-inventory-2026-09-12.md` §3 (a) and §6 ⑥).
     ///
-    /// The inventory's finding, and it is the reason M1-1 is an L rather than an M:
+    /// The original M1 inventory's finding, and it is the reason M1-1 is an L rather than an M:
     /// **seven** of the sixteen steps between `main` and the first frame are a
     /// `bt-platform` call propagated with `?` and `anyhow::Context`, in **both**
     /// window constructors, and every one of them is a Win32 bridge with no work to
@@ -73534,12 +78498,16 @@ mod cross_window_drag_tests {
     /// `?` on a call that cannot fail is not a hazard, it is the caller reading a
     /// `Result`.
     ///
-    /// So this test is a list, and the list is the claim: **these five and no
-    /// others.** A sixth name appearing here is a launch that a platform arm
-    /// nobody has written yet gets to veto.
+    /// The five portable service calls are the M1 exception list. Linux adds a
+    /// separate two-name list for process-wide backend identity: both are bound
+    /// from the first window's actual native handle, and neither installer probes
+    /// service availability. A mismatch would make later requests use the wrong
+    /// backend, so it must stop startup.
     ///
-    /// MUTATION: put the `?` back on either of the two, or add a `?` to a sixth
-    /// platform call in either constructor, and this goes red naming it.
+    /// Every other propagated platform call remains fatal to this gate.
+    ///
+    /// MUTATION: add an unlisted propagated call, move a binding out of
+    /// `Runtime::create`'s Linux block, or add one to `open_window`; this goes red.
     #[test]
     fn the_m1_startup_path_has_no_fatal_platform_call_off_windows() {
         /// The five that may still propagate: each of them answers `Ok` on every
@@ -73550,6 +78518,11 @@ mod cross_window_drag_tests {
             "FolderPicker::new",          // step 8
             "ImagePicker::new",           // step 9
             "Compositor::new",            // step 13
+        ];
+        /// The backend calls bind OnceLocks selected from the first native window.
+        const LINUX_BACKEND_BINDINGS: [&str; 2] = [
+            "install_linux_display_backend",
+            "install_linux_clipboard_backend",
         ];
 
         /// Every `bt_platform::…` call in `body` whose statement carries a `?`.
@@ -73599,7 +78572,10 @@ mod cross_window_drag_tests {
         for constructor in ["create", "open_window"] {
             let body = method_body("Runtime", constructor);
             let mut fatal = propagated(body);
-            fatal.retain(|name| !MAY_STILL_PROPAGATE.contains(&name.as_str()));
+            fatal.retain(|name| {
+                !MAY_STILL_PROPAGATE.contains(&name.as_str())
+                    && !LINUX_BACKEND_BINDINGS.contains(&name.as_str())
+            });
             assert!(
                 fatal.is_empty(),
                 "`Runtime::{constructor}` lets a platform call that can refuse off Windows decide \
@@ -73623,6 +78599,39 @@ mod cross_window_drag_tests {
                  on a platform with no visual tree"
             );
         }
+
+        let create = method_body("Runtime", "create");
+        let backend_call = create
+            .find("let backend = linux_window_backend(&window)?;")
+            .expect("the first window reads its actual native backend");
+        let cfg_start = create[..backend_call]
+            .rfind("#[cfg(target_os = \"linux\")]")
+            .expect("process backend binding is under the Linux gate");
+        let block_end = backend_call
+            + create[backend_call..]
+                .find("\n        }")
+                .expect("the first-window Linux setup block closes");
+        let binding_block = &create[cfg_start..block_end];
+        for binding in LINUX_BACKEND_BINDINGS {
+            let needle = format!("bt_platform::{binding}(");
+            assert_eq!(
+                create.matches(needle.as_str()).count(),
+                1,
+                "the first window binds {binding} exactly once"
+            );
+            assert_eq!(
+                binding_block.matches(needle.as_str()).count(),
+                1,
+                "the first window binds {binding} inside its Linux block"
+            );
+        }
+        let open_window = method_body("Runtime", "open_window");
+        assert!(
+            LINUX_BACKEND_BINDINGS
+                .iter()
+                .all(|binding| !open_window.contains(*binding)),
+            "a second window does not rebind the process-wide native backend"
+        );
 
         assert!(
             !found(
@@ -73953,13 +78962,13 @@ mod cross_window_drag_tests {
     ///
     /// Red gate: sample only the capture and a monitor unplugged mid-drag leaves
     /// a highlight burning on a window that has moved out from under the pointer;
-    /// sample neither and a stolen capture leaves a tab floating over a tab list
-    /// nobody is holding any more.
+    /// treat an unknown screen sample as a match and an unanswered X11 request
+    /// can spend a drop after its guard stopped being observable.
     #[test]
     fn one_guard_answers_every_way_a_cross_window_gesture_is_taken_away() {
         let held = DragGuard {
             capture: Some(bt_platform::NativeWindow::stand_in(0x1234)),
-            screen: rect(0, 0, 3840, 2160),
+            screen: Some(rect(0, 0, 3840, 2160)),
         };
         assert!(
             held.still_holds(&held),
@@ -73983,12 +78992,186 @@ mod cross_window_drag_tests {
         );
         assert!(
             !held.still_holds(&DragGuard {
-                screen: rect(0, 0, 1920, 1080),
+                screen: Some(rect(0, 0, 1920, 1080)),
                 ..held
             }),
             "the desktop changed shape under a gesture whose whole state is \
              screen coordinates, so every rectangle it was reasoning about is \
              stale — including the one it was about to open a window in"
+        );
+        assert!(
+            !held.still_holds(&DragGuard {
+                screen: None,
+                ..held
+            }),
+            "an unavailable screen answer is a refusal, never a successful empty snapshot"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn delayed_drag_guard_answers_need_the_same_broker_and_observed_screen() {
+        use bt_platform::linux_display::LinuxDisplayReady;
+
+        let ready = LinuxDisplayReady {
+            owner: 9,
+            request_id: 17,
+            generation: 23,
+        };
+        assert!(drag_guard_reply_matches(Some(23), 23, ready, ready));
+        assert!(!drag_guard_reply_matches(None, 23, ready, ready));
+        assert!(!drag_guard_reply_matches(Some(24), 23, ready, ready));
+        assert!(!drag_guard_reply_matches(
+            Some(23),
+            23,
+            ready,
+            LinuxDisplayReady {
+                request_id: 18,
+                ..ready
+            }
+        ));
+
+        let source = WindowId::from(9_u64);
+        let target = WindowId::from(10_u64);
+        let original = rect(-1920, 0, 3840, 2160);
+        let pointer = (320.0, 180.0);
+        let landing = DropLanding::StripAdopt { tab: TabId(7) };
+        let mut broker = DragBroker::for_test(source);
+        broker.guard.screen = None;
+        broker.guard_generation = 23;
+        broker.guard_sample_ready = false;
+        broker.pointer = pointer;
+
+        assert!(!broker.apply_guard_screen_answer(24, Ok(original)));
+        assert_eq!(broker.guard.screen, None);
+        assert!(!broker.consume_guard_screen_answer());
+
+        assert!(broker.apply_guard_screen_answer(23, Ok(original)));
+        assert!(broker.consume_guard_screen_answer());
+        assert!(!broker.guard_sample_ready);
+        broker.aim_at(
+            BrokerAim::Window {
+                window: target,
+                landing: Some(landing),
+            },
+            Instant::now(),
+        );
+        broker.record_guarded_aim(pointer);
+
+        assert!(broker.guarded_release_is_current(false, pointer));
+        assert_eq!(
+            broker_verdict(&broker.cargo, &broker.aim),
+            BrokerRelease::Into {
+                window: target,
+                landing,
+            },
+            "consuming the screen sample before aiming must leave a valid release spendable"
+        );
+        assert!(!broker.guarded_release_is_current(true, pointer));
+        assert!(!broker.guarded_release_is_current(false, (pointer.0 + 1.0, pointer.1)));
+
+        let mut changed = broker.clone();
+        assert!(!changed.apply_guard_screen_answer(23, Ok(rect(0, 0, 1920, 1080))));
+        assert_eq!(changed.guard.screen, Some(original));
+        assert_eq!(changed.guard_aim_pointer, Some(pointer));
+        assert_eq!(changed.aim, broker.aim);
+        assert_eq!(changed.pointer, pointer);
+
+        let mut late = broker.clone();
+        assert!(!late.apply_guard_screen_answer(24, Ok(rect(0, 0, 1920, 1080))));
+        assert_eq!(late.aim, broker.aim);
+        assert_eq!(late.pointer, pointer);
+
+        let mut refused = DragBroker::for_test(source);
+        refused.guard.screen = None;
+        refused.guard_generation = 23;
+        refused.guard_sample_ready = false;
+        assert!(!refused.apply_guard_screen_answer(23, Err("refused".into())));
+        assert_eq!(refused.guard.screen, None);
+        assert!(!refused.guarded_release_is_current(false, pointer));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_drag_guard_and_restore_reads_resume_from_display_answers() {
+        let open = method_body("Runtime", "open_broker");
+        assert!(open.contains("screen: None"));
+        assert!(!open.contains("virtual_screen_rect"));
+
+        let drive = method_body("FolioApp", "drive_drag_broker");
+        assert!(drive.contains("LinuxDisplayQuery::VirtualScreenRect"));
+        assert!(drive.contains("pending_drag_guard_screen"));
+        assert!(!drive.contains("virtual_screen_rect"));
+
+        let release = method_body("Runtime", "hand_over_across_windows");
+        assert!(release.contains("guarded_release_is_current"));
+
+        let restore = free_fn_body("restore_monitors");
+        assert!(
+            restore.contains("#[cfg(target_os = \"linux\")]"),
+            "the Linux restore reads only the captured Winit topology"
+        );
+        assert!(restore.contains("restore_monitors_from_work_areas(&inputs, None)"));
+        assert!(restore.contains("#[cfg(not(target_os = \"linux\"))]"));
+        assert!(restore.contains("bt_platform::work_area_at"));
+
+        let open_pending = method_body("FolioApp", "open_pending_window");
+        assert!(open_pending.contains("LinuxDisplayQuery::MonitorWorkAreasAt"));
+        assert!(open_pending.contains("PendingNewWindowDisplayKind::Restore"));
+
+        let apply = method_body("FolioApp", "apply_linux_display_ready");
+        assert!(apply.contains("LinuxDisplayAnswer::MonitorWorkAreasAt"));
+        assert!(apply.contains("restore_monitor_topology_matches"));
+        assert!(apply.contains("input_generation_matches"));
+        assert!(!apply.contains("available_monitors"));
+        assert!(!apply.contains("primary_monitor"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn async_restore_work_areas_require_the_captured_topology_and_primary() {
+        let inputs = [
+            RestoreMonitorInput {
+                full: rect(0, 0, 1920, 1080),
+                scale: 2.0,
+            },
+            RestoreMonitorInput {
+                full: rect(-1920, 0, 0, 1080),
+                scale: 1.0,
+            },
+        ];
+        assert!(restore_monitor_topology_matches(
+            &inputs,
+            &[rect(-1920, 0, 0, 1080), rect(0, 0, 1920, 1080)],
+            rect(0, 0, 1920, 1080),
+        ));
+        assert!(!restore_monitor_topology_matches(
+            &inputs,
+            &[rect(-1920, 0, 0, 1080), rect(0, 0, 1920, 1080)],
+            rect(-1920, 0, 0, 1080),
+        ));
+        assert!(!restore_monitor_topology_matches(
+            &inputs,
+            &[rect(-1920, 0, 0, 1080), rect(0, 0, 1600, 900)],
+            rect(0, 0, 1920, 1080),
+        ));
+
+        assert_eq!(
+            restore_monitors_from_work_areas(&inputs, Some(&[Some(rect(0, 0, 1920, 1000)), None]),),
+            [
+                RestoreMonitor {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 960.0,
+                    bottom: 500.0,
+                },
+                RestoreMonitor {
+                    left: -1920.0,
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 1080.0,
+                },
+            ]
         );
     }
 
@@ -74783,8 +79966,9 @@ mod palette_wiring_tests {
             "the paste chord is the window's own predicate, not a second spelling"
         );
         assert!(
-            method_body("Runtime", "clipboard_line").contains("text_field::one_line"),
-            "and what it hands the field is one line of printable text"
+            method_body("Runtime", "apply_clipboard_text_to_field")
+                .contains("text_field::one_line"),
+            "and the result door hands a one-line field printable text"
         );
         assert!(
             keys.contains(
@@ -75577,6 +80761,11 @@ mod edit_menu_clipboard_tests {
             "the name box spells its own paste chord"
         );
         let door = method_body("Runtime", "paste_into_field");
+        assert!(
+            door.contains("self.request_clipboard_text(field)")
+                && door.contains("self.apply_clipboard_text_to_field(field, &text)"),
+            "the platform read or queued read bypasses the field insert helper"
+        );
         let read = door
             .find("bt_platform::clipboard_text()")
             .expect("the door reads the clipboard");
@@ -75587,7 +80776,7 @@ mod edit_menu_clipboard_tests {
             read < applied,
             "the field apply step must follow the clipboard read"
         );
-        let apply = method_body("Runtime", "apply_clipboard_text_to_field");
+        let field_insert = method_body("Runtime", "apply_clipboard_text_to_field");
         for insert in [
             "self.search_ime(",
             "self.graph_search_ime(",
@@ -75597,7 +80786,7 @@ mod edit_menu_clipboard_tests {
             "self.paste_into_settings_field(",
         ] {
             assert!(
-                apply.contains(insert),
+                field_insert.contains(insert),
                 "a field's paste skips its own insert: {insert}"
             );
         }
@@ -76529,7 +81718,7 @@ mod refused_preview_card_tests {
                 refusal.notice
             );
             assert_eq!(card.notice, refusal.notice, "the card says something else");
-            let geometry = seats::preview_card_geometry(seat, Some(96.0), 0, 1.0);
+            let geometry = seats::preview_card_geometry(seat, Some(96.0), false, 0, 1.0);
             let button = geometry
                 .button
                 .expect("a card with a verb lays out a rectangle for it");
@@ -77245,7 +82434,23 @@ mod clipboard_path_tests {
                 View::Raw
             )),
             1,
-            "the board is read in one place the product compiles"
+            "the synchronous non-Linux payload path remains one place"
+        );
+        assert_eq!(
+            in_product_items(&found(
+                needle!(Pattern::text("bt_platform::clipboard_payload_on_worker(")),
+                View::Raw
+            )),
+            1,
+            "Linux payload reads enter through the single worker adapter"
+        );
+        assert_eq!(
+            in_product_items(&found(
+                needle!(Pattern::text("bt_platform::clipboard_text_on_worker(")),
+                View::Raw
+            )),
+            1,
+            "Linux text reads enter through the same worker adapter"
         );
         let paste = method_body("Runtime", "paste_from_clipboard_into");
         let read = paste
@@ -77259,6 +82464,8 @@ mod clipboard_path_tests {
             "the payload apply step must follow the clipboard read"
         );
         assert!(paste.contains("hang_watch::Station::ClipboardRead"));
+        assert!(paste.contains("ClipboardDestination::Terminal(target)"));
+        assert!(paste.contains("request_clipboard_read("));
         assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
         assert!(!paste.contains("set_focus("));
         assert!(!paste.contains("set_files_keyboard("));
@@ -77281,6 +82488,26 @@ mod clipboard_path_tests {
         assert!(k144.contains("self.seats.set_focus(seat)"));
         assert!(k144.contains("paste_text("));
         assert!(!k144.contains("to_string_lossy"));
+    }
+
+    #[test]
+    fn policy_command_copy_uses_the_linux_write_lane_and_defers_its_toast() {
+        let copy = method_body("Runtime", "copy_policy_command");
+        let (linux, non_linux) = copy
+            .split_once("#[cfg(not(target_os = \"linux\"))]")
+            .expect("the synchronous platform branch remains explicit");
+        assert!(linux.contains("#[cfg(target_os = \"linux\")]"));
+        assert!(linux.contains("self.submit_clipboard_write("));
+        assert!(linux.contains("crate::shell_integration::POLICY_COMMAND.to_owned()"));
+        assert!(linux.contains("ClipboardWriteEffect::Toast"));
+        assert!(linux.contains("crate::i18n::graph_copied("));
+        assert!(
+            !linux.contains("write_terminal_clipboard_text"),
+            "Linux policy copies enter the clipboard lane before native publication:\n{linux}"
+        );
+        assert!(
+            non_linux.contains("copy_policy_command_with(crate::write_terminal_clipboard_text)")
+        );
     }
 
     /// A PowerShell recipient whose quote policy is named by the caller.
@@ -77421,12 +82648,12 @@ mod clipboard_path_tests {
     fn a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary() {
         for (once, what) in [
             (
-                "runtime.collect_dropped_file(path);",
-                "the arm writes the path down and pastes nothing itself",
+                "WindowEvent::DroppedFile(path) => runtime.collect_dropped_file(path),",
+                "the arm submits the path to the runtime and pastes nothing itself",
             ),
             (
                 "DropBatch::collect(&mut self.window.dropped_files, path, point, target);",
-                "one drop is assembled in one place",
+                "the Linux answer and the W/M collector each assemble their batch",
             ),
             (
                 "self.window.dropped_files.take()",
@@ -77442,7 +82669,7 @@ mod clipboard_path_tests {
             ),
             (
                 "self.paste_target(seat)",
-                "and it is addressed — tab, seat and shell — as it arrives (X-1)",
+                "both platform paths address the tab, seat and shell (X-1)",
             ),
             (
                 ".and_then(bt_platform::pointer_position_in_window)",
@@ -77457,9 +82684,17 @@ mod clipboard_path_tests {
                 "and a turn spends whatever is still there",
             ),
         ] {
+            let expected = if once
+                == "DropBatch::collect(&mut self.window.dropped_files, path, point, target);"
+                || once == "self.paste_target(seat)"
+            {
+                2
+            } else {
+                1
+            };
             assert_eq!(
                 in_product_items(&found(needle!(Pattern::text(once)), View::Raw)),
-                1,
+                expected,
                 "`{once}` — {what}"
             );
         }
@@ -77468,7 +82703,7 @@ mod clipboard_path_tests {
         let arm = item_body(
             &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
         )
-        .split_once("            WindowEvent::DroppedFile(path) => {")
+        .split_once("WindowEvent::DroppedFile(path) =>")
         .expect("the dispatcher answers a dropped file")
         .1
         .split_once("            WindowEvent::Resized(size)")
@@ -77541,6 +82776,373 @@ mod clipboard_path_tests {
             "a drop is routed by the window's cached pointer, which is a \
              different gesture's:\n{collecting}"
         );
+    }
+
+    /// **A delayed X11 answer is spent only against the drop that asked for it** (PR20).
+    ///
+    /// The production runtime is not constructible in this source-pin harness, so this checks the
+    /// event wiring and the real state transitions that keep multi-file drops together, reject a
+    /// moved or changed target, and retain paths until the refusal notice succeeds.
+    #[test]
+    fn a_delayed_linux_drop_is_addressed_cancelled_and_observable() {
+        let collecting = method_body("Runtime", "collect_dropped_file");
+        assert!(collecting.contains("LinuxDisplayQuery::PointerInWindow"));
+        assert!(collecting.contains("pending.paths.push(path)"));
+        assert!(collecting.contains("batch_open: true"));
+        assert!(
+            !collecting.contains("platform_pointer_now()")
+                || collecting.contains("#[cfg(not(target_os = \"linux\"))]"),
+            "the Linux drop may not use a cached pointer as its release position: \
+             {collecting}"
+        );
+
+        let applying = method_body("Runtime", "apply_linux_pointer_display_ready");
+        for (needle, reason) in [
+            (
+                "pending.refused",
+                "a cancelled late answer cannot revive a drop",
+            ),
+            (
+                "request.ready() == ready",
+                "a reply must match its exact request",
+            ),
+            (
+                "tab.seat_layout == pending_layout",
+                "a changed layout refuses the drop",
+            ),
+            (
+                "self.window.seat_viewport == pending_viewport",
+                "a resized viewport refuses a late result",
+            ),
+            (
+                "current_focus == pending_focus",
+                "a changed focused shell refuses the drop",
+            ),
+            (
+                "target != target_at_that_seat",
+                "a replaced shell at the hit seat refuses it",
+            ),
+            (
+                "for path in pending.paths",
+                "all files stay in the same addressed batch",
+            ),
+            (
+                "self.refuse_pending_linux_pointer_actions()?",
+                "every asynchronous refusal uses the recoverable notice path",
+            ),
+        ] {
+            assert!(applying.contains(needle), "{reason}:\n{applying}");
+        }
+
+        let refusing = method_body("Runtime", "refuse_pending_linux_pointer_actions");
+        assert!(refusing.contains("self.window.pending_external_drop = dropped;"));
+        assert!(refusing.contains("self.window.pending_paste_path = pasted;"));
+        assert!(refusing.contains("dropped.refused = true;"));
+        assert!(refusing.contains("if dropped.batch_open"));
+
+        let dispatch = item_body(
+            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+        );
+        assert!(dispatch.contains("runtime.refuse_pending_linux_pointer_actions()"));
+        assert!(dispatch.contains("WindowEvent::CursorMoved { .. }"));
+    }
+
+    /// **The Linux runtime uses only observed resize events or its configured surface allocation.**
+    #[test]
+    fn linux_runtime_sizes_do_not_read_x11_on_the_window_thread() {
+        let size = method_body("Runtime", "client_size");
+        assert!(size.contains("last_winit_size"));
+        assert!(size.contains("presentation_physical_size"));
+        let linux = size
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .unwrap();
+        assert!(!linux.contains("inner_size()"));
+
+        let opening = item_body(&ItemQuery::function("opening_client_allocation"));
+        let linux = opening
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .unwrap();
+        assert!(!linux.contains("inner_size()"));
+        assert!(linux.contains("requested.to_physical(window.scale_factor())"));
+
+        let birth = item_body(&ItemQuery::function("new_window_runtime"));
+        assert!(birth.contains("last_winit_rect: None"));
+        assert!(birth.contains("last_winit_size: None"));
+
+        let resized = method_body("Runtime", "note_winit_size");
+        assert!(resized.contains("last_winit_size = Some(size)"));
+
+        let resize = method_body("Runtime", "resize");
+        assert!(resize.contains("self.client_size()"));
+        assert!(!resize.contains("self.window.window.inner_size()"));
+    }
+
+    /// **A native rectangle read cannot overwrite a newer winit event or a close snapshot**
+    /// (PR20).
+    #[test]
+    fn a_stale_linux_window_rect_answer_is_discarded() {
+        let moved = method_body("Runtime", "window_moved");
+        let resized = method_body("Runtime", "note_winit_size");
+        let snapshot = method_body("Runtime", "window_snapshot");
+        let snapshot_apply = method_body("Runtime", "window_snapshot_with_rect");
+        let apply = method_body("Runtime", "apply_linux_window_rect_ready");
+        let close = method_body("Runtime", "close_window");
+        for (body, needle, reason) in [
+            (
+                moved,
+                "self.note_winit_position(position)",
+                "a move must update the cached geometry",
+            ),
+            (
+                resized,
+                "self.queue_linux_window_rect_snapshot()",
+                "a resize must reach the coalescing geometry request",
+            ),
+            (
+                snapshot,
+                "self.window.last_winit_rect",
+                "a close-time snapshot keeps event geometry while native facts are pending",
+            ),
+            (
+                snapshot,
+                "self.window_snapshot_with_rect(|| self.window.last_winit_rect)",
+                "the close-time geometry reaches the persistence body",
+            ),
+            (
+                close,
+                "self.mark_session_dirty(now)",
+                "the final snapshot is taken before the window is released",
+            ),
+        ] {
+            assert!(body.contains(needle), "{reason}:\n{body}");
+        }
+        let measure = snapshot_apply
+            .find(".then(rect)")
+            .expect("the persistence body measures only the supplied normal rect");
+        let after_measure = &snapshot_apply[measure..];
+        let flatten = after_measure
+            .find(".flatten()")
+            .expect("the normal-posture option is flattened before persistence");
+        let persist = after_measure
+            .find("persisted_window_bounds(rect, scale)")
+            .expect("the measured close-time rect reaches the saved placement");
+        assert!(
+            flatten < persist,
+            "the snapshot must flatten only its normal rect before persistence:\n{snapshot_apply}"
+        );
+        let queue = method_body("Runtime", "queue_linux_window_rect_snapshot");
+        let pending = queue
+            .find("self.window.pending_window_rect.is_some()")
+            .expect("the refresh must observe an in-flight request");
+        let owed = queue
+            .find("self.window.window_rect_refresh_owed = true")
+            .expect("an event must invalidate the in-flight answer");
+        let fresh = queue
+            .find("bt_platform::linux_display::request_display(")
+            .expect("a window without a pending request asks for current facts");
+        assert!(
+            pending < owed && owed < fresh,
+            "a pending request must coalesce before new admission:\n{queue}"
+        );
+        let stale = apply
+            .find("self.window.window_rect_refresh_owed")
+            .expect("an event can mark the native answer stale");
+        let closing = apply
+            .find("self.window.leaving.is_some()")
+            .expect("a closing window discards late native facts");
+        assert!(
+            closing < stale,
+            "a late native reply can be spent after close:\n{apply}"
+        );
+        let write = apply
+            .find("self.window.last_winit_rect = Some(facts.rect)")
+            .expect("a current native answer refreshes the cache");
+        assert!(
+            stale < write,
+            "a stale answer can overwrite newer geometry:\n{apply}"
+        );
+    }
+
+    /// **The page uses the current X11 client origin, and a move or resize clears it** (PR20).
+    #[test]
+    fn linux_window_tests_use_current_client_origin_and_refresh_it() {
+        let position = method_body("Runtime", "note_winit_position");
+        let resized = method_body("Runtime", "note_winit_size");
+        for (event, body) in [("move", position), ("resize", resized)] {
+            let invalidated = body
+                .find("native_client_origin = None")
+                .unwrap_or_else(|| panic!("a {event} must clear the observed client origin"));
+            let refresh = body
+                .find("self.queue_linux_window_rect_snapshot()")
+                .unwrap_or_else(|| panic!("a {event} must request current client facts"));
+            assert!(
+                invalidated < refresh,
+                "a {event} must clear then refresh:\n{body}"
+            );
+        }
+
+        let shown = method_body("Runtime", "put_the_window_on_the_glass");
+        let visible = shown
+            .find("self.window.window_shown = true")
+            .expect("show marks the window visible");
+        let first_facts = shown
+            .find("self.queue_linux_window_rect_snapshot()")
+            .expect("show queues the first client-origin observation");
+        assert!(
+            visible < first_facts,
+            "show must mark then observe the window"
+        );
+
+        let queue = method_body("Runtime", "queue_linux_window_rect_snapshot");
+        let x11 = queue
+            .find("active_backend()")
+            .expect("only the X11 backend has a global client origin");
+        let leaving = queue
+            .find("self.window.leaving.is_some()")
+            .expect("closing windows do not request client facts");
+        let pending = queue
+            .find("self.window.pending_window_rect.is_some()")
+            .expect("an in-flight answer is coalesced");
+        let owed = queue
+            .find("self.window.window_rect_refresh_owed = true")
+            .expect("an event marks the in-flight answer stale");
+        let fresh = queue
+            .find("bt_platform::linux_display::request_display(")
+            .expect("a fresh request follows when no answer is pending");
+        assert!(
+            x11 < pending && leaving < pending && pending < owed && owed < fresh,
+            "only a live X11 window may coalesce or admit a fresh observation:\n{queue}"
+        );
+
+        let apply = method_body("Runtime", "apply_linux_window_rect_ready");
+        let addressed = apply
+            .find("request.ready() == ready")
+            .expect("the answer must match its current request");
+        let stale = apply
+            .find("self.window.window_rect_refresh_owed")
+            .expect("a newer event invalidates the answer");
+        let client_origin = apply
+            .find("self.window.native_client_origin = facts.client_origin")
+            .expect("the current worker answer supplies the client origin");
+        assert!(
+            addressed < stale && stale < client_origin,
+            "a stale or misaddressed answer can replace the client origin:\n{apply}"
+        );
+
+        let origin = method_body("Runtime", "client_origin_on_screen");
+        let linux = origin
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux client-origin path");
+        let other_platforms = origin
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .expect("the existing Windows and macOS path");
+        assert!(linux.contains("native_client_origin"));
+        assert!(!linux.contains("inner_position"));
+        assert!(other_platforms.contains("inner_position"));
+
+        let to_screen = method_body("Runtime", "to_screen");
+        assert!(to_screen.contains("self.client_origin_on_screen()?"));
+        let opening = method_body("Runtime", "open_broker");
+        let linux_opening = opening
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux broker-opening path");
+        let other_opening = opening
+            .split("#[cfg(not(target_os = \"linux\"))]")
+            .nth(1)
+            .expect("the existing Windows and macOS broker-opening path");
+        assert!(linux_opening.contains("let Some(pointer) = self.to_screen(position) else"));
+        assert!(opening.contains("pointer,"));
+        assert!(!linux_opening.contains("unwrap_or"));
+        assert!(
+            other_opening.contains("self.to_screen(position).unwrap_or((position.x, position.y))")
+        );
+
+        let moving = method_body("Runtime", "publish_to_broker");
+        let unavailable = moving
+            .find("if screen.is_none()")
+            .expect("missing Linux origin withdraws the cross-window broker");
+        let withdraw = moving
+            .find("self.app.drag_broker = None")
+            .expect("the stale foreign aim is discarded");
+        let return_without_broker = moving
+            .find("return;")
+            .expect("the invalid cross-window move stops here");
+        let borrow = moving
+            .find("self.app.drag_broker.as_mut()")
+            .expect("a valid origin is required before using the broker");
+        assert!(
+            unavailable < withdraw
+                && withdraw < return_without_broker
+                && return_without_broker < borrow,
+            "an unavailable client origin must clear and stop before broker use:\n{moving}"
+        );
+    }
+
+    /// A current Linux state reply keeps unknown posture facts unknown.
+    #[test]
+    fn linux_window_posture_comes_from_worker_facts_and_keeps_unknown() {
+        let applying = method_body("Runtime", "apply_linux_window_rect_ready");
+        assert!(applying.contains("native_window_minimized = facts.minimized"));
+        assert!(applying.contains("maximize_intent.observe(facts.maximized)"));
+
+        let minimized = method_body("Runtime", "window_minimized_state");
+        assert!(minimized.contains("Backend::X11"));
+        assert!(minimized.contains("Backend::Wayland"));
+        let maximized = method_body("Runtime", "window_maximized_state");
+        assert!(maximized.contains("maximize_intent.posture_state()"));
+        assert!(maximized.contains("Backend::Wayland"));
+        let posture = item_body(&ItemQuery::function("choose_window_posture"));
+        assert!(posture.contains("WindowPosture::Unknown"));
+
+        let snapshot = method_body("Runtime", "window_snapshot_with_rect");
+        assert!(snapshot.contains("self.window_posture()"));
+        assert!(!snapshot.contains("is_maximized()"));
+    }
+
+    /// The X11 maximize target stays window-owned and late state facts stay addressed.
+    #[test]
+    fn x11_maximize_intent_is_window_owned_and_late_answers_stay_addressed() {
+        let birth = item_body(&ItemQuery::function("new_window_runtime"));
+        assert!(birth.contains("maximize_intent: WindowMaximizeIntent::default()"));
+
+        let applying = method_body("Runtime", "apply_linux_window_rect_ready");
+        assert!(applying.contains("maximize_intent.observe(facts.maximized)"));
+
+        let state = method_body("Runtime", "window_maximized_state");
+        assert!(state.contains("maximize_intent.posture_state()"));
+        let restore = item_body(&ItemQuery::function("restore_minimized_window"));
+        let x11_restore = restore.split("Backend::Wayland").next().unwrap();
+        assert!(x11_restore.contains("Operation::Restore"));
+        assert!(!x11_restore.contains("is_minimized()"));
+
+        let notification = method_body("Runtime", "open_from_notification");
+        assert!(notification.contains("self.window_minimized_state()"));
+        assert!(!notification.contains("is_minimized()"));
+
+        let caption = method_body("Runtime", "chrome_mouse_input");
+        assert!(caption.contains("self.toggle_window_maximized()"));
+        assert!(!caption.contains("is_maximized()"));
+        let toggle = method_body("Runtime", "toggle_window_maximized");
+        let x11_toggle = toggle.split("Backend::Wayland").next().unwrap();
+        assert!(x11_toggle.contains("maximize_intent.toggle()"));
+        assert!(!x11_toggle.contains("is_maximized()"));
+        let edge = method_body("Runtime", "mouse_input");
+        assert!(edge.contains("window_maximized_state() == Some(false)"));
+        assert!(!edge.contains("is_maximized()"));
+
+        let request = method_body("Runtime", "request_linux_window_maximized");
+        assert!(request.contains("self.window.window.set_maximized(target)"));
+        assert!(request.contains("window_rect_refresh_owed = true"));
+
+        let close = method_body("Runtime", "close_window");
+        assert!(close.contains("self.let_go_of_this_window()"));
+        let ready = method_body("FolioApp", "apply_linux_display_ready");
+        assert!(ready.contains("find(|id| u64::from(*id) == ready.owner)"));
     }
 
     /// **A file row let go over a terminal's middle is spelled exactly as a file
@@ -77706,14 +83308,14 @@ mod clipboard_path_tests {
         // the live tree** (review 2026-09-17 P1-a). A `Runtime` is not
         // constructible here, so which calls stand in this function is what says
         // that the release does not simply believe the drag.
-        let kept = method_body("Runtime", "paste_offer_kept");
+        // The non-Linux release path still samples the platform at button-up,
+        // then shares the live-tree checks with Linux's worker-supplied point.
+        let native_release = method_body("Runtime", "paste_offer_kept");
+        assert!(native_release.contains("self.platform_pointer_now()"));
+        assert!(native_release.contains(".and_then(|released_at|"));
+        assert!(native_release.contains("self.paste_offer_kept_at(drag, plan, released_at)"));
+        let kept = method_body("Runtime", "paste_offer_kept_at");
         for (once, what) in [
-            (
-                "self.platform_pointer_now()?",
-                "the release asks the platform where the hand is, and refuses if \
-                 it will not say — the router's own position is the last delivered \
-                 motion's, which on Windows is from before the button came up",
-            ),
             (
                 "self.survey_drop(&drag.source, drag.home, released_at, &mut seam)",
                 "and aims again from there, against the tree as it stands now",
@@ -78082,8 +83684,9 @@ mod clipboard_path_tests {
         // (`send_paste`, 0.4.4 ticket 02), which `deliver_paste` answers with.
         let send = method_body("Runtime", "send_paste");
         assert!(
-            send.contains("offer_pty_input(pty.as_ref(), bytes, context)")
-                && send.contains("Ok(landed.queued())"),
+            send.contains(
+                "offer_pty_input(PtyTarget::of(pty.as_ref(), birth.as_ref()), bytes, context)"
+            ) && send.contains("Ok(landed.queued())"),
             "the paste reports the wrapper's success rather than what the ring \
              did with the bytes:\n{send}"
         );
@@ -78546,6 +84149,7 @@ mod printed_path_provenance_tests {
         ClickIntent, HyperlinkActivation, Runtime, TerminalReference, answered_once,
         hyperlink_activation, verified_target_of,
     };
+    use crate::test_support::{host_file_uri, host_path};
     use bt_layout::SeatId;
     use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
     use std::{cell::RefCell, path::Path};
@@ -78653,14 +84257,14 @@ mod printed_path_provenance_tests {
     /// window promising to open a file nobody has told it is there.
     #[test]
     fn a_name_nobody_has_answered_for_is_not_a_link_and_touches_nothing() {
-        let target = Path::new(r"C:\work\notes.md");
+        let target = &host_path(r"C:\work\notes.md");
         for control in [false, true] {
             let ledger = Ledger::new(target, None);
             assert_eq!(
                 hyperlink_activation(
                     control,
                     true,
-                    "file:///C:/work/notes.md",
+                    &host_file_uri(r"C:\work\notes.md"),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -78682,13 +84286,13 @@ mod printed_path_provenance_tests {
     /// of the answer: the same URI, the same table, one field different.
     #[test]
     fn a_ledgers_local_name_is_a_link_with_no_filesystem_call() {
-        let target = Path::new(r"C:\work\notes.md");
+        let target = &host_path(r"C:\work\notes.md");
         let ledger = Ledger::new(target, Some(local_file()));
         assert_eq!(
             hyperlink_activation(
                 false,
                 true,
-                "file:///C:/work/notes.md",
+                &host_file_uri(r"C:\work\notes.md"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| ledger.read(path),
             ),
@@ -78699,7 +84303,7 @@ mod printed_path_provenance_tests {
             hyperlink_activation(
                 false,
                 true,
-                "file:///C:/work/notes.md",
+                &host_file_uri(r"C:\work\notes.md"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| folder.read(path),
             ),
@@ -78728,13 +84332,13 @@ mod printed_path_provenance_tests {
             "shot.png",
             "page.html",
         ] {
-            let target = std::path::PathBuf::from(format!(r"C:\work\{name}"));
+            let target = host_path(&format!(r"C:\work\{name}"));
             let ledger = Ledger::new(&target, Some(local_file()));
             assert_eq!(
                 hyperlink_activation(
                     true,
                     true,
-                    &format!("file:///C:/work/{name}"),
+                    &host_file_uri(&format!(r"C:\work\{name}")),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -78743,13 +84347,13 @@ mod printed_path_provenance_tests {
             );
         }
         // A folder keeps Explorer's arm, which is what it has always had.
-        let folder = std::path::PathBuf::from(r"C:\work\src");
+        let folder = host_path(r"C:\work\src");
         let ledger = Ledger::new(&folder, Some(local_folder()));
         assert_eq!(
             hyperlink_activation(
                 true,
                 true,
-                "file:///C:/work/src",
+                &host_file_uri(r"C:\work\src"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| ledger.read(path),
             ),
@@ -78762,13 +84366,13 @@ mod printed_path_provenance_tests {
     #[test]
     fn a_plain_click_on_a_printed_path_still_previews_it() {
         for name in ["notes.md", "shot.png", "page.html", "notes.py"] {
-            let target = std::path::PathBuf::from(format!(r"C:\work\{name}"));
+            let target = host_path(&format!(r"C:\work\{name}"));
             let ledger = Ledger::new(&target, Some(local_file()));
             assert_eq!(
                 hyperlink_activation(
                     false,
                     true,
-                    &format!("file:///C:/work/{name}"),
+                    &host_file_uri(&format!(r"C:\work\{name}")),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -78801,8 +84405,8 @@ mod printed_path_provenance_tests {
     /// below is zero, which is the dead click exactly.
     #[test]
     fn a_link_under_a_resting_pointer_is_asked_about_by_the_press() {
-        let uri = "file:///C:/work/notes.md";
-        let target = std::path::PathBuf::from(r"C:\work\notes.md");
+        let uri = &host_file_uri(r"C:\work\notes.md");
+        let target = host_path(r"C:\work\notes.md");
         let mut session = bt_term::DualPlaneSession::new(
             std::num::NonZeroU32::new(40).unwrap(),
             std::num::NonZeroU32::new(2).unwrap(),
@@ -78810,7 +84414,7 @@ mod printed_path_provenance_tests {
         // The link arrives the way a scroll or a fresh line delivers one: printed, with no pointer
         // event anywhere.
         session
-            .feed(b"\x1b]8;;file:///C:/work/notes.md\x1b\\notes.txt\x1b]8;;\x1b\\")
+            .feed(format!("\x1b]8;;{uri}\x1b\\notes.txt\x1b]8;;\x1b\\").as_bytes())
             .unwrap();
         assert_eq!(
             session.path_verdict(&target),
@@ -78950,14 +84554,14 @@ mod printed_path_provenance_tests {
     /// a file manager opening on a folder nobody named.
     #[test]
     fn a_name_the_ledger_says_is_gone_is_never_revealed() {
-        let target = Path::new(r"C:\work\gone.md");
+        let target = &host_path(r"C:\work\gone.md");
         for control in [false, true] {
             let ledger = Ledger::new(target, Some(bt_term::PathVerdict::absent()));
             assert_eq!(
                 hyperlink_activation(
                     control,
                     true,
-                    "file:///C:/work/gone.md",
+                    &host_file_uri(r"C:\work\gone.md"),
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
@@ -78975,7 +84579,7 @@ mod printed_path_provenance_tests {
             hyperlink_activation(
                 true,
                 true,
-                "file:///C:/work/gone.md",
+                &host_file_uri(r"C:\work\gone.md"),
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| ledger.read(path),
             ),
@@ -78996,8 +84600,8 @@ mod printed_path_provenance_tests {
     /// the held yes stands and the stale reveal is back.
     #[test]
     fn a_press_re_asks_a_held_yes_and_the_answer_stops_the_reveal() {
-        let uri = "file:///C:/work/notes.md";
-        let target = std::path::PathBuf::from(r"C:\work\notes.md");
+        let uri = &host_file_uri(r"C:\work\notes.md");
+        let target = host_path(r"C:\work\notes.md");
         let mut session = bt_term::DualPlaneSession::new(
             std::num::NonZeroU32::new(40).unwrap(),
             std::num::NonZeroU32::new(2).unwrap(),
@@ -79071,7 +84675,7 @@ mod printed_path_provenance_tests {
 
     /// A scratch directory of this test's own, removed by the caller.
     fn scratch(name: &str) -> std::path::PathBuf {
-        let directory = std::env::temp_dir().join(format!("folio-door-{name}"));
+        let directory = bt_testpath::temp_path(&format!("folio-door-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a scratch folder");
         directory
@@ -79090,13 +84694,17 @@ mod printed_path_provenance_tests {
     ///
     /// MUTATION: take `strip_verbatim_prefix` out of `bt_platform::resolved_for_a_door` and this
     /// goes red on Windows with the prefix back in the argument.
+    ///
+    /// Windows only: `reveal_argument_form` is Explorer's command line. The macOS twin is
+    /// `a_printed_path_reaches_finders_door_resolved_and_unchanged`.
+    #[cfg(windows)]
     #[test]
     fn a_real_file_reaches_a_door_as_the_argument_main_would_have_built() {
         let directory = scratch("file");
         let file = directory.join("notes.md");
         std::fs::write(&file, b"x").expect("a file this test owns");
 
-        let verdict = bt_term::verify_path(&file);
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists && !verdict.directory);
         let target = verified_target_of(Some(&verdict));
         let resolved = target
@@ -79133,6 +84741,10 @@ mod printed_path_provenance_tests {
     /// `reveal_argument_form` refuses a `..` outright — it is a text question Explorer answers its
     /// own way — and `main` never met one because it canonicalised first. A program printing
     /// `…\repo\src\..\docs` is ordinary.
+    ///
+    /// Windows only: `reveal_argument_form` is Explorer's command line. The macOS twin is
+    /// `a_printed_path_reaches_finders_door_resolved_and_unchanged`.
+    #[cfg(windows)]
     #[test]
     fn a_printed_folder_spelled_with_a_parent_step_folds_before_the_door() {
         let directory = scratch("dots");
@@ -79144,7 +84756,7 @@ mod printed_path_provenance_tests {
             "the door refuses a parent step, which is why it has to be folded before it"
         );
 
-        let verdict = bt_term::verify_path(&printed);
+        let verdict = bt_term::verify_path(&printed, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists && verdict.directory);
         let target = verified_target_of(Some(&verdict));
         let resolved = target.resolved.clone().expect("a folder that is there");
@@ -79171,6 +84783,10 @@ mod printed_path_provenance_tests {
     /// Two things a path carries that a command line is where they go wrong: a space, which is why
     /// the argument is quoted at all, and a name outside ASCII, which is where a second encoder
     /// would show up. Neither may change between the file on disk and the argument.
+    ///
+    /// Windows only: `reveal_argument_form` is Explorer's command line. The macOS twin is
+    /// `a_printed_path_reaches_finders_door_resolved_and_unchanged`.
+    #[cfg(windows)]
     #[test]
     fn a_name_with_a_space_and_a_han_character_reaches_the_door_unchanged() {
         let directory = scratch("names");
@@ -79178,7 +84794,7 @@ mod printed_path_provenance_tests {
         let file = directory.join(name);
         std::fs::write(&file, b"x").expect("a file this test owns");
 
-        let verdict = bt_term::verify_path(&file);
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
         assert!(verdict.exists);
         let target = verified_target_of(Some(&verdict));
         let resolved = target.resolved.clone().expect("a name that is there");
@@ -79203,13 +84819,65 @@ mod printed_path_provenance_tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// PIN (closure review r6, B-2) — **the open door is asked about the name `main` asked it
-    /// about.**
+    /// The macOS twin of the three Explorer-argument tests above (the hand-over door off Windows is
+    /// Finder's, which takes the resolved name itself rather than a command line): **a printed
+    /// path reaches Finder's door resolved, absolute, folded and with its name unchanged.**
+    ///
+    /// The same road, driven end to end with no fixture in it: a real file or folder on disk →
+    /// [`bt_term::verify_path`] → [`verified_target_of`]. Finder's door refuses a name that is not
+    /// absolute, and hands the resolved name to `NSWorkspace` as it is.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_printed_path_reaches_finders_door_resolved_and_unchanged() {
+        let directory = scratch("finder");
+        let name = "project notes 中文.md";
+        let file = directory.join(name);
+        std::fs::write(&file, b"x").expect("a file this test owns");
+        std::fs::create_dir_all(directory.join("src")).expect("a subfolder");
+        std::fs::create_dir_all(directory.join("docs")).expect("another");
+
+        let verdict = bt_term::verify_path(&file, &bt_platform::resolved_for_a_door);
+        assert!(verdict.exists && !verdict.directory);
+        let target = verified_target_of(Some(&verdict));
+        let resolved = target
+            .resolved
+            .clone()
+            .expect("the worker resolved a name that is really there");
+        assert!(resolved.is_absolute(), "{}", resolved.display());
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some(name),
+            "the name came back as it was written"
+        );
+
+        let printed = directory.join("src").join("..").join("docs");
+        let verdict = bt_term::verify_path(&printed, &bt_platform::resolved_for_a_door);
+        assert!(verdict.exists && verdict.directory);
+        let target = verified_target_of(Some(&verdict));
+        assert!(target.is_directory);
+        let resolved = target.resolved.clone().expect("a folder that is there");
+        assert!(resolved.is_absolute(), "{}", resolved.display());
+        assert!(
+            !resolved.components().any(|part| part.as_os_str() == ".."),
+            "the resolved name has no parent step left: {}",
+            resolved.display()
+        );
+        assert!(resolved.ends_with("docs"), "{}", resolved.display());
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// GUARD (closure review r6, B-2; re-pointed by CC-4) — **the open door is asked about the name
+    /// `main` asked it about, and the resolved name is the doors' own transform.**
     ///
     /// `main`'s Windows `open_local_path` reads `names_a_program` off the *printed* spelling —
     /// there is no `canonicalize` in that door at all. For one round the branch handed it the
     /// resolved name instead, which is a different question about a symlink and a refusal `main`
-    /// does not make.
+    /// does not make. Its subject is how `Runtime::activate_hyperlink` and
+    /// `run_path_verify_worker` are written (CONVENTIONS, "A test pins behaviour by running it").
+    ///
+    /// MUTATION: hand `bt_term::verify_path` a raw `canonicalize` in `run_path_verify_worker`
+    /// instead of `bt_platform::resolved_for_a_door`, and the last assertion goes red.
     #[test]
     fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
         let press = method_body("Runtime", "activate_hyperlink");
@@ -79220,16 +84888,12 @@ mod printed_path_provenance_tests {
             .find("self.reveal_verified(&path, facts);")
             .expect("and so is the reveal, which takes the resolved name off the target");
         assert!(open < reveal, "the file arm stands before the folder arm");
-        // And the resolved name is the doors' own transform, not a second reading of it.
-        let door = ["resolved_for_a_", "door("].concat();
+        // And the resolved name is the doors' own transform, not a second reading of it: the
+        // path-verification lane hands `bt_term::verify_path` the door's own function as its
+        // resolver (CC-4; `bt-term` names no platform function itself).
+        let door = ["bt_platform::resolved_for_a_", "door"].concat();
         assert!(
-            !found_in_package(
-                "bt-term",
-                needle!(door.as_str()),
-                View::Raw,
-                Scope::Module("crate::session".to_owned()),
-            )
-            .is_empty(),
+            free_fn_body("run_path_verify_worker").contains(&door),
             "the worker produces the door's input with the door's own function"
         );
     }

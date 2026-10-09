@@ -160,6 +160,67 @@ pub struct WebKey {
     pub down: bool,
 }
 
+/// Modifier state on a key sent by the window to its page.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebKeyModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+/// One key transition forwarded from the focused Folio window to its page.
+///
+/// `key` and `code` use the DOM `KeyboardEvent.key` and `KeyboardEvent.code`
+/// spellings. `text` is committed text belonging to this key-down; an IME
+/// preedit travels through [`WebImeEvent`] so the engine can keep composition
+/// separate from insertion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebKeyEvent {
+    pub key: String,
+    pub code: String,
+    pub text: Option<String>,
+    pub modifiers: WebKeyModifiers,
+    /// DOM key location: 0 standard, 1 left, 2 right, or 3 numpad.
+    pub location: u32,
+    pub down: bool,
+    pub repeat: bool,
+}
+
+/// Text composition forwarded to the focused page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WebImeEvent {
+    /// Replace the active preedit. Selection offsets are UTF-16 code units in
+    /// `text`, matching the engine's composition API.
+    Preedit {
+        text: String,
+        selection_utf16: Option<(u32, u32)>,
+    },
+    /// Commit text and end the active preedit.
+    Commit(String),
+    /// End composition without inserting text.
+    Cancel,
+}
+
+/// The newest software frame from a platform web host.
+///
+/// `generation` is the controller generation supplied to
+/// [`WebHost::request_controller`]. `sequence` increases from one for that
+/// generation. Pixels are immutable top-down BGRA8; their byte length is
+/// `width_px * height_px * 4`. `bounds_px` and `visible` report the host's last
+/// placement state when the engine produced this frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebFrame {
+    pub page: PageVisual,
+    pub generation: u64,
+    pub sequence: u64,
+    pub bounds_px: (i32, i32, u32, u32),
+    pub visible: bool,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub bgra: std::sync::Arc<[u8]>,
+}
+
 /// Everything the engine says, in the window's own vocabulary.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WebEvent {
@@ -181,6 +242,17 @@ pub enum WebEvent {
         uri: String,
         success: bool,
         status: i32,
+        /// **The HTTP status the server answered this navigation with**, when one answered
+        /// (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — `http_status_of` over WebView2's
+        /// `HttpStatusCode` (`ICoreWebView2NavigationCompletedEventArgs2`) or the main-frame
+        /// `NSHTTPURLResponse` WebKit showed this navigation. `None` when nothing was reached: a
+        /// name that did not resolve, a connection refused or cut before a response, a scheme
+        /// that is not HTTP.
+        ///
+        /// WebView2 completes a 404 or a 500 with `IsSuccess == false` and `WebErrorStatus`
+        /// `Unknown` while it draws the page the server sent; this is what tells that page from a
+        /// load that reached nothing.
+        http_status: Option<u16>,
     },
     /// A process under this WebView died. `kind` is
     /// `COREWEBVIEW2_PROCESS_FAILED_KIND`: `0` is the browser process, `1` the
@@ -213,6 +285,18 @@ pub enum WebEvent {
     /// `IDC_*` — 32512 arrow, 32513 I-beam, 32649 hand.
     CursorChanged {
         system_cursor_id: u32,
+    },
+    /// The browser's current editable caret bounds for its IME candidate UI.
+    /// `rect` is `(left, top, right, bottom)` in physical pixels relative to
+    /// the page viewport; `None` clears a position after focus leaves editable
+    /// content. The page and controller generation let the seat discard a
+    /// delayed result after a move or rebuild, and the reported rasterization
+    /// scale lets it reject geometry computed before the latest resize.
+    ImeCursorChanged {
+        page: PageVisual,
+        generation: u64,
+        rect: Option<[f64; 4]>,
+        rasterization_scale: f64,
     },
     /// The navigation stack moved: a page was pushed onto it, popped off it, or
     /// replaced through the history API.
@@ -346,6 +430,59 @@ pub enum WebEvent {
     RequestRefused {
         uri: String,
     },
+    /// **A page asked for a window of its own** — a `target=_blank` link, `window.open`, a form
+    /// aimed at a new window (F-SWEEP-048, issue #27).
+    ///
+    /// The engine opens nothing: the request is answered as handled inside the callback
+    /// (`new_window_answer`), because `SetHandled` — and WebKit's `nil` — cannot be decided
+    /// later. What happens instead is the caller's: the address is asked of the same door a typed
+    /// address is, and a new page is opened, or the refusal said, by the window. `user_initiated`
+    /// is the engine's own reading of whether a gesture is behind the request.
+    NewWindowRequested {
+        uri: String,
+        user_initiated: bool,
+    },
+}
+
+/// **An engine's HTTP status code, as the answer of a server or as none** — `0` (and anything
+/// that is not a status) is "no HTTP response", which is how both engines spell it. One reading
+/// for the two arms (T-WEB-404-SAYS-UNKNOWN).
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
+#[must_use]
+pub fn http_status_of(code: i32) -> Option<u16> {
+    u16::try_from(code)
+        .ok()
+        .filter(|code| (100..=599).contains(code))
+}
+
+/// **How the host answers a page's request for a window of its own**, on both engines: the
+/// request is **handled** — the engine opens no window, and on Windows no second WebView2 window
+/// ever exists — and the event that carries the address to the caller (F-SWEEP-048, #27).
+///
+/// One function for the two arms so that "handled" is one fact: WebView2's
+/// `ICoreWebView2NewWindowRequestedEventArgs::SetHandled` takes [`NewWindowAnswer::handled`],
+/// and WebKit's `createWebViewWithConfiguration:` returns no view and its navigation action is
+/// cancelled when it is `true`.
+#[cfg(any(windows, target_os = "macos", test))]
+#[must_use]
+pub fn new_window_answer(uri: String, user_initiated: bool) -> NewWindowAnswer {
+    NewWindowAnswer {
+        handled: true,
+        event: WebEvent::NewWindowRequested {
+            uri,
+            user_initiated,
+        },
+    }
+}
+
+/// What [`new_window_answer`] decides inside the engine's callback.
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewWindowAnswer {
+    /// Whether the engine is told the request is taken care of, so that it opens nothing itself.
+    pub handled: bool,
+    /// What the caller hears.
+    pub event: WebEvent,
 }
 
 /// What the caller's policy says about one thing a document asked for that is
@@ -2348,6 +2485,14 @@ impl WebHost {
                         let success = read_bool(|out| args.IsSuccess(out));
                         let status =
                             read::<COREWEBVIEW2_WEB_ERROR_STATUS>(|out| args.WebErrorStatus(out)).0;
+                        // The second args interface carries the server's answer (runtime 1.0.2210+);
+                        // a runtime without it says nothing, which is "no HTTP response".
+                        let http_status = args
+                            .cast::<ICoreWebView2NavigationCompletedEventArgs2>()
+                            .ok()
+                            .and_then(|args| {
+                                http_status_of(read::<i32>(|out| args.HttpStatusCode(out)))
+                            });
                         let uri = view
                             .map(|view| read_string(|out| view.Source(out)))
                             .unwrap_or_default();
@@ -2355,6 +2500,7 @@ impl WebHost {
                             uri,
                             success,
                             status,
+                            http_status,
                         });
                         Ok(())
                     })),
@@ -2490,11 +2636,20 @@ impl WebHost {
             // made and slice ② implements. What slice ① owes them is that none
             // of them can happen behind its back before it does — so each is
             // attached and each refuses.
+            // **A window a page asks for is the host's to answer** (F-SWEEP-048, #27): handled
+            // here, so WebView2 opens no window of its own, and the address and the engine's
+            // gesture reading go to the caller, which opens it as a new pane or says the refusal.
+            let shared = Rc::clone(&self.shared);
             webview
                 .add_NewWindowRequested(
                     &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
                         let Some(args) = args else { return Ok(()) };
-                        args.SetHandled(true)?;
+                        let answer = new_window_answer(
+                            read_string(|out| args.Uri(out)),
+                            read_bool(|out| args.IsUserInitiated(out)),
+                        );
+                        args.SetHandled(answer.handled)?;
+                        shared.push(answer.event);
                         Ok(())
                     })),
                     &mut token,
@@ -3143,6 +3298,24 @@ impl WebHost {
             )
         }
         .map_err(|error| failure(&format!("SendMouseInput({})", event.name()), &error))
+    }
+
+    /// The window's native input route already delivers keys to WebView2.
+    pub fn send_key(&self, event: WebKeyEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// The window's native input route already delivers IME composition to WebView2.
+    pub fn send_ime(&self, event: WebImeEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// WebView2 composes its pixels underneath the window surface, so this host has no CPU frame.
+    #[must_use]
+    pub fn take_frame(&self) -> Option<WebFrame> {
+        None
     }
 
     /// **Ask the engine for a picture of what is on its glass** (W2 slice ⑥).
@@ -3846,8 +4019,7 @@ mod webview2_runtime_probe {
 
     impl Scratch {
         fn make(tag: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("folio-web-probe-{}-{tag}", std::process::id()));
+            let root = bt_testpath::temp_path(&format!("folio-web-probe-{tag}"));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("a scratch directory");
             Self(root)
@@ -4553,24 +4725,93 @@ pub use macos::{
     web_environment_epoch, webview2_runtime_version,
 };
 
+/// **The Linux page host**: a Chromium target rendered back through Folio's
+/// software frame path.
+#[cfg(target_os = "linux")]
+#[path = "webview_linux.rs"]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::{
+    SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
+    web_environment_epoch, webview2_runtime_version,
+};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn shutdown_linux_actor() {
+    linux::shutdown_actor();
+}
+
 /// **The page host, on a platform whose engine has not been written yet.**
-///
-/// Neither of the two real ones: a Linux build has no web engine this product
-/// hosts, and this is what says so honestly rather than pretending.
 ///
 /// **`WebHost::new` cannot refuse**, because its return type is `Self`: the
 /// window builds one per web seat and holds it. So the refusal lives where a
 /// page is actually asked for — `request_environment` — and everything after
 /// that is unreachable until a seat gets past it, which no seat does.
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 #[path = "webview_portable.rs"]
 mod portable;
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 pub use portable::{
     SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
     web_environment_epoch, webview2_runtime_version,
 };
+
+/// **A window a page asks for is the host's** (F-SWEEP-048, #27).
+#[cfg(test)]
+mod new_window_tests {
+    use super::*;
+
+    /// RED (T-WEB-404-SAYS-UNKNOWN) — **a status code is a server's answer, and `0` is none.**
+    ///
+    /// MUTATION: read every code as an answer (`Some(code as u16)`) and `0` says a server
+    /// answered a load that reached nothing.
+    #[test]
+    fn an_http_status_is_an_answer_only_when_one_came_back() {
+        for (code, answer) in [
+            (0, None),
+            (-1, None),
+            (200, Some(200)),
+            (404, Some(404)),
+            (500, Some(500)),
+            (70_000, None),
+        ] {
+            assert_eq!(http_status_of(code), answer, "{code}");
+        }
+    }
+
+    /// RED — **the engine is told the request is handled, and the caller hears the address
+    /// with the engine's gesture reading.**
+    ///
+    /// `handled` is what WebView2's `SetHandled` is given inside `NewWindowRequested`: left
+    /// `false`, the engine would open a window of its own with the page in it, outside every door
+    /// this window keeps. The event is what the seat answers with a new pane or a refusal.
+    ///
+    /// MUTATION: answer `handled: false` in [`new_window_answer`] (the first assertion), or drop
+    /// the gesture reading (the second).
+    #[test]
+    fn a_window_request_is_handled_here_and_its_address_goes_to_the_caller() {
+        for (uri, user_initiated) in [
+            ("https://example.com/报告/new?q=中文", true),
+            ("https://example.com/popup", false),
+        ] {
+            let answer = new_window_answer(uri.to_owned(), user_initiated);
+            assert!(
+                answer.handled,
+                "the engine opens no window of its own for {uri}"
+            );
+            assert_eq!(
+                answer.event,
+                WebEvent::NewWindowRequested {
+                    uri: uri.to_owned(),
+                    user_initiated,
+                },
+                "and the caller hears where the page wanted to go"
+            );
+        }
+    }
+}
 
 /// **The names under the card, on both engines** (M4-3).
 #[cfg(test)]

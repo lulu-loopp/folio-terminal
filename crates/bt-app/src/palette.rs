@@ -559,6 +559,13 @@ pub struct Block {
     pub note: Option<Text>,
 }
 
+/// Whether two rows are about the same thing: one section, one verb, one label. The label is
+/// part of it because two rows can share a verb (every action row runs some action) and the
+/// label is what the reader aimed at.
+fn same_item(one: &Candidate, other: &Candidate) -> bool {
+    one.section == other.section && one.verb == other.verb && one.label == other.label
+}
+
 /// Everything a query returned, in section order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Listing {
@@ -1593,20 +1600,43 @@ impl PaletteState {
     ///
     /// `requeried` says whether the *query* changed, and it decides where the
     /// selection lands: a new query starts at the top (the mock-up's `palSel =
-    /// 0` on input), while a list that merely got longer because a background
+    /// 0` on input), while a list that merely changed because a background
     /// answer arrived keeps the row the reader was on — moving somebody's
     /// selection because a directory finished being walked would be this box
     /// taking the keyboard away mid-aim.
+    ///
+    /// **Kept by identity, not by position** (owner ruling 2026-10-04, "rows
+    /// follow item identity"; T-FRESH-FACTS): an index walked again can put new
+    /// rows above the one the reader was on, and Enter must still run that row.
+    /// Only when the row is gone does the selection fall back to a position,
+    /// clamped into the list that is there.
     pub fn refill(&mut self, listing: Listing, requeried: bool) {
+        let held = (!requeried)
+            .then(|| self.chosen().map(|row| row.what.clone()))
+            .flatten();
         self.listing = listing;
         if requeried {
             self.selected = 0;
             self.scroll = 0.0;
         } else if self.listing.is_empty() {
             self.selected = 0;
+        } else if let Some(at) = held.and_then(|held| {
+            self.listing
+                .rows()
+                .position(|row| same_item(&row.what, &held))
+        }) {
+            self.selected = at;
         } else {
             self.selected = self.selected.min(self.listing.len() - 1);
         }
+    }
+
+    /// **Bring the selected row into the box this layout draws** — after a refill that kept the
+    /// reader's row by identity (T-FRESH-FACTS round 2): the row may have moved, and the list it is
+    /// in may be shorter than the scroll held, so the scroll is asked of the new layout
+    /// ([`PaletteLayout::scroll_to_show`], clamped to its `max_scroll`).
+    pub fn show_selected(&mut self, layout: &PaletteLayout) {
+        self.scroll = layout.scroll_to_show(self.selected, self.scroll);
     }
 
     /// Walk the selection one row.
@@ -2156,6 +2186,36 @@ mod list_tests {
         assert_eq!(state.selected(), 0, "and an empty list selects nothing");
     }
 
+    /// RED (T-FRESH-FACTS) — **a background answer that puts rows above the
+    /// reader's keeps the selection on the reader's row.**
+    ///
+    /// MUTATION (observed red): `refill` keeping the position (the old clamp)
+    /// — the selection lands on the row that moved into the reader's place.
+    #[test]
+    fn a_refill_follows_the_readers_row_when_rows_arrive_above_it() {
+        use super::PaletteState;
+        let mut state = PaletteState::opening(crate::shortcuts::Focus::default());
+        let before = vec![
+            candidate(Section::Places, "甲.md"),
+            candidate(Section::Places, "乙.md"),
+            candidate(Section::Places, "丙.md"),
+        ];
+        state.refill(arrange(&before, "", None), true);
+        state.step(true);
+        assert_eq!(
+            state.chosen().map(|row| row.what.label.as_str()),
+            Some("乙.md")
+        );
+        let mut after = vec![candidate(Section::Places, "新建 notes.md")];
+        after.extend(before);
+        state.refill(arrange(&after, "", None), false);
+        assert_eq!(
+            state.chosen().map(|row| row.what.label.as_str()),
+            Some("乙.md"),
+            "Enter still runs the row the reader was on"
+        );
+    }
+
     /// PIN — **a pre-edit is drawn and is not the query.**
     ///
     /// Typing `nihao` on a pinyin IME produces a running composition that is
@@ -2326,6 +2386,46 @@ mod list_tests {
             tall.max_scroll() > 0.0,
             "so the rest is reachable by scroll"
         );
+    }
+
+    /// RED (T-FRESH-FACTS round 2) — **a refill that keeps the reader's row
+    /// leaves a scroll the new list can hold.** A long list scrolled to its
+    /// end is answered by a short one that still holds the row.
+    ///
+    /// MUTATION (observed red): `show_selected` leaving the scroll as it was —
+    /// the scroll stays past the short list's end.
+    #[test]
+    fn a_kept_row_is_shown_in_the_list_that_replaced_the_old_one() {
+        use super::PaletteState;
+        let long = listing_of((0..60).map(|at| row(&format!("行 {at}"), None)).collect());
+        let mut state = PaletteState::opening(crate::shortcuts::Focus::default());
+        state.refill(long.clone(), true);
+        state.point_at(59);
+        let tall = super::layout(WINDOW, SCALE, &long, look("", ""), 0.0, &mut ten_per_char);
+        state.show_selected(&tall);
+        assert!(
+            state.scroll() > 0.0,
+            "the last of sixty rows is scrolled to"
+        );
+
+        let short = listing_of(
+            [57, 58, 59]
+                .iter()
+                .map(|at| row(&format!("行 {at}"), None))
+                .collect(),
+        );
+        state.refill(short.clone(), false);
+        assert_eq!(state.selected(), 2, "the reader's row, by identity");
+        let small = super::layout(
+            WINDOW,
+            SCALE,
+            &short,
+            look("", ""),
+            state.scroll(),
+            &mut ten_per_char,
+        );
+        state.show_selected(&small);
+        assert_eq!(state.scroll(), 0.0, "three rows have nothing to scroll");
     }
 
     /// PIN — **the scroll brings the selected row wholly into the box, and

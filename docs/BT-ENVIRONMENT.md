@@ -33,9 +33,9 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |
-| `BT_PTY_DUMP` | file path, used verbatim | Records every byte the ConPTY reader receives, per pane. `File::create` — **the named file is truncated**. A `.chunks` sidecar beside it records arrival times. The first pane takes the named path; later panes take `<path>.2`, `<path>.3`. | **Everything on the screen and everything typed.** Shell output, prompts, the echo of what you type, the contents of any file printed to the terminal, anything a program prints including secrets. The `.chunks` header also records the process id and the wall-clock start. | off |
+| `BT_PTY_DUMP` | file path, used verbatim | Records every byte the ConPTY reader receives, per pane. `File::create` — **the named file is truncated**. A `.chunks` sidecar beside it records arrival times. The first pane takes the named path; later panes take `<path>.2`, `<path>.3`. A file that cannot be written (its folder missing) is one line on standard error and no recording; the pane starts as without the switch (`BT_PTY_INPUT_DUMP` alike). | **Everything on the screen and everything typed.** Shell output, prompts, the echo of what you type, the contents of any file printed to the terminal, anything a program prints including secrets. The `.chunks` header also records the process id and the wall-clock start. | off |
 | `BT_PTY_INPUT_DUMP` | file path; unset or empty is off | Records queued input through `PtyDump` to `<path>.in`, then `<path>.in.2`, etc. Raw bytes plus one `.chunks` line per write: sequence, elapsed microseconds, byte count, pane ordinal, quoted reason, hex bytes. Shares the receive dump clock and pane identity. A queued write does not prove the child consumed it. | **records your keystrokes, including anything typed at a password prompt; for a diagnosis you run yourself, never to be shared unread** | off, including release |
-| `BT_IME_TRACE` | file path, used verbatim | Appends inbound IME events, text-free startup order and native focus snapshots, outbound calls, ownership/routing rulings and changes in terminal pre-edit drawing. See line formats below. | Kinds, byte lengths, cursor ranges, rectangles, static reasons and results only. **No composed or committed text.** Older builds wrote literal text. | off |
+| `BT_IME_TRACE` | file path, used verbatim | Appends inbound IME events, text-free startup order and native focus snapshots, outbound calls, ownership/routing rulings and changes in terminal pre-edit drawing. See line formats below. A file that cannot be opened (its folder missing) is one line on the trace writer's standard error, once, and the run goes on without the trace. | Kinds, byte lengths, cursor ranges, rectangles, static reasons and results only. **No composed or committed text.** Older builds wrote literal text. | off |
 | `BT_CHROME_DUMP` | file path, used verbatim | Appends one block per chrome rebuild and per overlay frame: rectangles, colours, sprite marks, and label text. | **Every visible label**: tab titles, pane-head captions, file names in the files column, path foots, tooltips, menu rows. | off |
 | `BT_DECOR_TRACE` | file path, used verbatim | Appends one snapshot per call: the lifecycle state of each frozen or live formula decoration and why it failed. | **Up to 96 characters of the terminal line** the decoration was drawn from. | off |
 | `BT_WEB_TRACE` | file path, used verbatim | Appends one line per web-preview decision. | **Full navigation URLs**, including query and fragment, and the file names of refused downloads. | off |
@@ -65,6 +65,11 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_CONPTY_FORCE_SYSTEM` | presence | Skips the packaged `conpty.dll`/`OpenConsole.exe` and uses the ConPTY that ships with Windows. Read in the vendored `portable-pty`. | — | the packaged pair is preferred. **Presence-only**: `BT_CONPTY_FORCE_SYSTEM=` counts as on. |
 | `BT_SHELL_INTEGRATION` | `login` \| `interactive` | Not read by `folio.exe` — **written** into the environment of a bash launched with `--init-file`, and read by the shipped `folio.bash` to decide **which** startup chain it must source in place of the one the flag displaced. `login` is `/etc/profile` then the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile`; `interactive` is `~/.bashrc` alone. Which of the two is a fact about the profile's own arguments. | — | not set |
 | `BT_USER_ZDOTDIR` | a directory | Not read by `folio.exe` — **written** into the environment of a zsh whose `ZDOTDIR` this terminal has taken, carrying the one the session already had so that the shipped `folio.zsh` can source the reader's own startup files out of it. Absent when the session had none, which says the files are in `$HOME`. | — | not set |
+
+On Linux, `BT_PERF_TRACE` also emits `BT_HANG_PROBE dispatched=<id>` when the
+window's user-event handler receives a watchdog question. A trace run asks once
+when the event loop becomes available, as well as when a stall is suspected. It carries a numeric
+question ID only. See [Linux hang diagnostics](plans/port/linux-hang-diagnostics.md).
 
 ### `BT_IME_TRACE` line formats
 
@@ -169,7 +174,14 @@ tests' child halves read them, and they write only into the test's own temporary
 `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`
 sets on the copies of its own test binary that play the trial and the recovery. Only
 those tests' child halves read them, and they write only into the test's own
-temporary folder. `BT_U42D_WINDOWS_SAY`, `BT_U42D_MACOS_SAY` and
+temporary folder. `BT_LAUNCH_WIRE_COPY_CHILD` and `BT_LAUNCH_WIRE_COPY_ROOT` name the test
+and its half (`serve` or `start`) and the private folder (the shared data directory and the
+second start's command line) that `bt-app`'s three `launch_wire::tests` of two installed
+copies sharing one data directory (0.4.8 D3) set on the copies of their own test binary that
+play the copy holding the data directory and the second copy's start, with `APPDATA`,
+`LOCALAPPDATA`, `HOME` and `XDG_DATA_HOME` pointed inside that folder. Only those tests'
+child halves read them, and they write nothing but the claim and the endpoint of that
+folder's data directory. `BT_U42D_WINDOWS_SAY`, `BT_U42D_MACOS_SAY` and
 `BT_U42D_RECOVER_SAY` name the `diagnostics.log` in a test's own temporary folder
 that `bt-app`'s `update_apply_windows::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log`,
 its `update_apply_macos` twin and `update_recover::tests::a_recovery_line_reaches_the_log_once_whatever_standard_error_is`
@@ -179,6 +191,16 @@ that file. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
 `bt-platform`'s ignored `trust::tests::the_released_windows_assets_carry_an_identity_oid`
 downloads to read real signatures from (E-6); unset or empty, it asks GitHub for the
 latest release. It downloads into the temporary folder and writes nothing else.
+`BT_ELEVATED_HOST_TEST_LINE` and `BT_ELEVATED_HOST_TEST_ANSWER` carry the host line
+(the words the launch would hand `ShellExecuteExW`) and an answer file that `bt-platform`'s
+`elevated_pipe::tests::an_honest_host_and_parent_authenticate_by_kernel_pid_and_capability`
+sets on the copy of its own test binary that plays the elevated host: only that test's child
+half reads them, and it writes one line into that file. `BT_ELEVATED_PIPE_VM_ROW`,
+`BT_ELEVATED_PIPE_VM_DIR` and `BT_ELEVATED_PIPE_VM_PROGRAM` name the row (`launch` or
+`observe`), the guest folder its `row.txt` (and for `observe`, `line.txt`) is written to,
+and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
+`elevated_pipe::tests::vm_row`, which only the clean-VM harness runs: it performs a real
+`runas` launch.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |

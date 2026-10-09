@@ -1203,7 +1203,7 @@ mod tests {
         fn scratch(name: &str) -> PathBuf {
             let directory = std::env::temp_dir()
                 .join("bt-platform-http-download")
-                .join(format!("{name}-{}", std::process::id()));
+                .join(bt_testpath::unique_name(name));
             let _ = std::fs::remove_dir_all(&directory);
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             directory

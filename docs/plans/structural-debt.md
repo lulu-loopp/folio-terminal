@@ -295,7 +295,7 @@ ledger's.
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.5 — **0.5 precondition** (the 2026-09-21 structure review): the session/document/view ownership note is 0.4.8 J5 (T-05-CONTRACTS, design only); the first slice and the session registry are 0.5; the backend stays 0.6 | open; **2026-10-08 (J4):** untouched; 0.4.7 added session facts on the session's own thread (T-PANE-IDENTITY's `current_frame`, `screen_fence_state`; T-PANE-COLUMNS' `foreground_program`), no owner beside the window; was 0.4.7 |
 | D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — A2 (the bare-site lint), the step its closure waits for, has no ticket; G4 takes the waits #29 and #31 | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid); every raw effect outside a door is a row of `docs/plans/window-thread-bare-sites.tsv`, which only shrinks — 248 sites, seeded at 263 on `2cc59a83` — and the configuration the lint will need is fenced and its probe proven per target (A2a, 2026-09-26: advanced, not repaid); every turn is accounted and every admitted call measured per call, with a budget line for each of the four triggers and an exit summary from the run's atomics (A3, 2026-09-27: advanced, not repaid — A1 and A3 have landed, and by the owner's ruling of 2026-09-25 D-2 closes when A2 lands too); deferrable work yields to the earliest window's deadline — the search walk's slice and the idle calls ask one `TurnAllowance` a turn (A4, 2026-09-27: advanced, not repaid — A1, A3 and A4 have landed; what the allowance leaves of aggregate scheduling is D-84); **2026-10-08 (J4):** **narrowed**: row 11's process birth runs on the `bt-pty-birth` worker and the window thread joins it (T-ENV-REFRESH round 4); an unlisted window-thread join of the PowerShell script worker was found and removed, and the scanner taught its shape (`c7a604ab`); row 29 added, ruled to stay (the update's exit guard, 2026-09-28); bare sites 248 → 232; A2 has not landed; was 0.4.6 |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.8 — B4 (T-PROBE-NO-CACHED-FAILURE) and B3 (T-FRESH-FACTS: the probes as facts re-asked); G1 for the two named containment gaps | open — the update job's worker `bt-update-job` added to the list (U-20, 2026-09-27; its two drivers U-27 and U-20); **2026-10-08 (J4):** **narrowed**: every machine probe starts through one door, `bt_platform::spawn_probe` / `probe_output`, which contains its whole process tree and ends it on deadline, wait, drop and unwind (T-PROBE-CHILD, T-PROBE-BORN-IN-JOB; ARCHITECTURE §2.2); the three PowerShell probes share one five-second deadline and a failed answer is asked again at the next reader edge (T-ENV-REFRESH round 4, T-INTEGRATION-INJECT-3 round 2). Still open: `copilot --version` and the macOS locale probe have no deadline, and each probe keeps its own slot, wake and latch (`profile_runtime::REMOVAL` has no in-flight latch); was 0.4.6 |
-| D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.8 — G7 (census #28: an internal stop loses unsaved preview edits, this row's controlled-failure road); the emergency half is D-56 (0.5) | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
+| D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | G7-SWEEP-048 | 0.4.8 — G7 (census #28: an internal stop loses unsaved preview edits, this row's controlled-failure road); the emergency half is D-56 (0.5) | **narrowed to the emergency half (D-56)** — **2026-10-09 (G7):** the controlled road is repaid: `FolioApp::fail`'s twelve sites and `exiting` leave by one road, `stop_every_window`, which keeps every dirty preview buffer first (the quit's judged write, else a copy in the data directory's `recovered` folder, each said in `diagnostics.log`) and is held to its tables by `restore_app_tests::failure_road`; the panic hook still loses them — D-56; was 0.4.6 |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.8 — rolling: each 0.4.8 ticket folds the `docs/RULES.md` row it depends on in its own commit; what is unfolded at 0.4.8's end goes to 0.5 with its subsystem | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not); **2026-10-08 (J4):** **narrowed**: row 36 (the update check) folded on `5bdc1a5a` (0.4.6); RULES has 55 rows, 24 folded in whole or part, 31 `not yet folded`; was 0.4.6 |
 | D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff`; **2026-10-08 (J4):** untouched: §7.2's chains are still first-pass lines (T-IMAGE-N added a hop to §7.1's recognition and verdict rows); was 0.4.7 |
 | D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) — it closes with D-28 | open; **2026-10-08 (J4):** untouched; was 0.4.6 |
@@ -305,8 +305,8 @@ ledger's.
 | D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | census-1 | 0.4.6, with D-32 | repaid (census-1) — the census is `bt_source::FieldCensus` over `bt-app`; inventory and site rows are query reports under `target/`, while the owner annotations (census-1's proposals, until the owner rules) and the shrink-only unknown row multiset are committed and held by `bt-source`'s `census` test and `scripts/ci/check-census-unknowns.ps1`, so a fact with an unknown is `incomplete`, never single-writer. D-32 (census-7) is what the census was taken for, and stays open |
 | D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.5 — `bt-platform` is not split in 0.4.8 (plan K, *Not in 0.4.8*); J2's small boundary crate for D-14 is the first extraction | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | — | repaid on `21cf1ef8` (2026-09-21) — the ConPTY width probe lives in `bt-corpus` and `bt-pty`'s manifest names `bt-term` only under `[dev-dependencies]` (ARCHITECTURE §3.2, *Done 2026-09-21*); carried open by mistake from 2026-09-23 to 2026-10-08 (J4). Not this row: `bt-pty`'s optional edge to `bt-platform` behind its test-only `test-shell` feature and `bt-term`'s dev-dependency on `bt-pty` (T-TEST-SHELL-HYGIENE, T-INTEGRATION-INJECT-4 round 6), for J1 to classify |
-| D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite | open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6 |
-| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then | open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | CC-3 (`bt-effects`), CC-4 | 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite | open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', and three surfaces remain for CC-4 (thread priority, `resolved_for_a_door`, `host_names`); **repaid on `744cc02a` (CC-4; the product edge went in `0479c1ca`, the last, dev, edge in `744cc02a`)**: `bt-term`'s manifest names `bt-platform` nowhere (not as a dev-dependency either); the host names and the resample pool's thread-start hook are installed by the host (`bt_term::install_host_names`, `install_pool_thread_start`; `bt-app`'s `host_answers::install`), and `verify_path` takes the door-ready resolver as a parameter |
+| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27; CC-5, CC-6b, CC-7 (design T-COMPOSE-CRATE §3.4) | 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then | open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-08 (CC-5):** **narrowed**: the four math data types are `bt_doc::math`'s (re-exported by `bt-math`); what remains is execution — `MathEngine`/`key_for_em_px` in `session.rs` (CC-6b), `rasterize_svg_document` in `inline_image` and the `MathEngine` re-export (CC-7); **2026-10-08 (CC-6a):** untouched; the receiving crate exists — `bt-compose`, layer 6, which `typeset` moves into with CC-6b; **2026-10-09 (CC-6b):** **narrowed**: math execution is `bt_compose::typeset`'s (moved verbatim; `bt-app`'s lane and the tools call it); what remains is CC-7's — `rasterize_svg_document` in `inline_image` and the `MathEngine` re-export; **repaid on `ac33d15c` (CC-7)**: the SVG codec is installed by the host (`bt_term::install_svg_rasterizer`; `bt-app`'s `host_answers::install` and `bt_corpus::install_host_answers` install `bt_math::rasterize_svg_document`), its two types are `bt_doc::svg`'s, the `MathEngine` re-export is gone, and `bt-term`'s manifest names `bt-math` nowhere; the exemption row is deleted (the list has none) |
 | D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.5 — **0.5 precondition**: the side-effect contract's admission half; its note is 0.4.8 J5 (T-05-CONTRACTS); the enumeration lane and the observation threads' band are built in 0.5 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain; **2026-10-08 (J4):** untouched: every thread 0.4.7 added comes through the door (T-PROBE-CHILD's reader, T-KEYBOARD-CTRLALT's `folio-layout-tables`, T-UNINSTALL-UX's remover pipe); `folio-web-thumb` still stands at `Normal`; RULES 53's 0.4.7 ticket was never cut; was 0.4.7 |
 | D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.5 — with D-1's document owner, after J5's note | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
 | D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | repaid (census-2, 0.4.6) — each subject is item-bound or file-bound by how the test reads it (`ITEM_QUERIES` and the helpers derived from it); only a file-bound subject read out of `main.rs` is a reader 2a must retarget; `--self-check` holds the fixture |
@@ -376,6 +376,7 @@ ledger's.
 | D-82 | WinHTTP's `http::Request` waits up to `CLOSE_WAIT` (5 s) on a `Condvar` in `Drop` for its handle's closing callback | thread-door note (g)2; A1e | none yet — *A download's request is closed through its own bounded door, not by its drop* | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product caller of `https_download` yet; **2026-10-08 (J4):** **widened**: `https_download` has a product caller now, the update job (`update_job`, U-18…U-20), so the drop's wait runs on the `bt-update-job` worker, never the window thread; was 0.4.7 |
 | D-83 | the `bt-app` and `bt-term` suites are not portable: on macOS 294 of `bt-app`'s 4,600 tests (282 after ticket 72) and 43 of `bt-term`'s fail, each asserting a Windows fact on every host | ticket 72's report (Mac mini, 2026-09-26) | none yet | 0.4.8 — H1 (T-D83), then H7 | open; **2026-10-08 (J4):** **narrowed**: core-macos runs `bt-app`'s updater modules (T-GUARDS-BLIND, `5f7ba1fe`) and its uninstall tests (`1d914d1a`); the rest of `bt-app` and all of `bt-term` are checked, not tested; was 0.4.7 |
 | D-84 | aggregate turn scheduling beyond deferrable work: a turn's deadline is one number shared by every window, and only deferrable work is scheduled against it | budget note §R-B, §R-G (Codex's Q2; the owner's ruling of 2026-09-25, 1); A4 | none yet — owed a 0.4.7 ticket, *The window thread's turn is scheduled across windows and sources*, after B4–B9 | unassigned — no 0.4.8 plan ticket takes it; listed for the coordinator (2026-10-08) | open — opened by A4 (2026-09-27); **2026-10-08 (J4):** untouched: its ticket was to follow B4–B9, none of which was cut; was 0.4.7 |
+| D-85 | the program-walk lane: the requests made while a walk is out are answered by the next walk and get no outcome of their own; the line `diagnostics.log` gets when that walk ends is the only record of them | A5 (Programs × every request ends exactly once); T-PROGRAMS-REFRESH (2026-10-08) | none yet | unassigned — listed for the coordinator (2026-10-08) | open |
 
 ---
 
@@ -591,9 +592,14 @@ trade-off down as a ruling with quantified impact per `CONVENTIONS` §十 rule 7
 The depth review rules out the first as stated and asks for the transaction
 above. Both are acceptable exits; the coordinator picks one.
 
-**Status.** open.
+**Status.** narrowed to the emergency half, D-56 (2026-10-09, G7-SWEEP-048). The
+controlled road takes the depth review's exit as the coordinator ruled it for G7:
+every dirty buffer goes through the quit's judged write — the file when it can be
+written, its conflict check kept — and otherwise into a copy in the data
+directory's `recovered` folder, never over the file; the outcome of each is said
+in `diagnostics.log` before the windows close. The panic hook is untouched.
 
-**Ledger.** source: C-3 · K-8 · ticket: none yet · version: 0.4.8 — G7 (census #28: an internal stop loses unsaved preview edits, this row's controlled-failure road); the emergency half is D-56 (0.5) · status: open; **2026-10-08 (J4):** untouched; was 0.4.6.
+**Ledger.** source: C-3 · K-8 · ticket: G7-SWEEP-048 · version: 0.4.8 — G7 (census #28: an internal stop loses unsaved preview edits, this row's controlled-failure road); the emergency half is D-56 (0.5) · status: narrowed to the emergency half (D-56); **2026-10-09 (G7):** the controlled road keeps every unsaved preview edit (`FolioApp::stop_every_window`); **2026-10-08 (J4):** untouched; was 0.4.6.
 
 ---
 
@@ -909,6 +915,31 @@ import surfaces: `inline_image::resample_pool` sets a thread priority through
 `bt-platform`, `session::verify_path` calls `handoff::resolved_for_a_door`, and
 `inline_image::read_and_decode_local_image` goes through the read ledger.
 
+**Narrowed 2026-10-08 (CC-3).** The read ledger moved to `bt-effects`, with the
+admission vocabulary (`docs/ARCHITECTURE.md` §3.1), and `bt-term` names it from
+there; `bt-term`'s manifest comment now names what is left. **What CC-4 still
+owes**, counted in `bt-term`'s source on the CC-3 commit: product
+`inline_image.rs` `resample_pool` (`set_current_thread_priority`,
+`ThreadPriority`), `inline_image.rs` `local_host_names` (`host_names`) and
+`session.rs` `verify_path` (`resolved_for_a_door`); tests `session.rs`
+(`quiet_command` twice, `host_names` once), which need the platform only as a
+dev-dependency once the product edge goes. The exemption row
+(`scripts/ci/crate-edge-exemptions.tsv`) stays until CC-4 removes the edge.
+
+**Repaid 2026-10-08 (CC-4: the product edge in `0479c1ca`, the last, dev, edge in `744cc02a`).** `bt-term`'s manifest names `bt-platform`
+nowhere, not as a dev-dependency either; `cargo tree -p bt-term -i bt-platform`
+prints nothing, and the exemption row is deleted. The three remaining surfaces
+are the host's (`docs/ARCHITECTURE.md` §3.2): the machine's names and the
+resample pool's thread-start hook are process-wide facts the host installs
+(`bt_term::install_host_names`, `bt_term::install_pool_thread_start`; `bt-app`
+installs both in `host_answers::install`, before its event loop), and
+`verify_path` takes the door-ready resolver as a parameter, which its one product
+caller fills with `bt_platform::resolved_for_a_door` — the function did not move
+and the verdicts were compared byte for byte on a fixture set before the old call
+was deleted. The tests that needed the platform left with it: the real-shell
+tests went to `bt-pty/tests`, and the host-name pin's real-producer half to
+`bt-app`.
+
 **If left.** A stale comment that a reader trusts, and a portable crate whose
 real coupling to the platform crate is invisible in its own manifest.
 
@@ -922,9 +953,9 @@ stays the single answer, consumed by both `bt-term::verify_path` and
 (`CONVENTIONS` §十 rule 9). Fix the manifest comment in the same commit.
 
 **Version.** 0.5 — both halves change product code, which a preparation ticket
-forbids. **Status.** open.
+forbids. **Status.** repaid on `744cc02a`.
 
-**Ledger.** source: C-4 · K-11 · ticket: none yet · version: 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite · status: open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6.
+**Ledger.** source: C-4 · K-11 · ticket: CC-3 (`bt-effects`), CC-4 · version: 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite · status: open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', three surfaces remain for CC-4; **repaid on `744cc02a` (CC-4)**.
 
 ---
 
@@ -932,21 +963,39 @@ forbids. **Status.** open.
 
 *C-4 (refinement) · K-11* · **Class:** wrong layer — **recorded debt, not a task**.
 
-**Evidence.** `session.rs` imports six math types and calls into the math crate
-in product code; `inline_image::decode_svg_bytes` rasterises through it;
-`crates/bt-term/src/lib.rs` re-exports the engine; and
-`crates/bt-term/src/bin/bt-repaint-oracle.rs` uses it in a binary target — the
-same target trap as D-13. Hiding the dependency behind re-exports changes
-nothing.
+**Evidence (until CC-7).** `inline_image::decode_svg_bytes` rasterised through
+`rasterize_svg_document`, and `crates/bt-term/src/lib.rs` re-exported the engine.
+(Until CC-6b `session.rs` also typeset formulas through `MathEngine` and
+`key_for_em_px`; that execution is `bt_compose::typeset`'s now.)
+The math data types (`MathRenderKey`, `MathRaster`, `MathRenderError`,
+`MathFailureStage`) are `bt_doc::math`'s since CC-5, and `bt-term` names them
+there. (The binary target that
+used it too, `bt-repaint-oracle`, moved to `bt-corpus` with CC-4.) Hiding the
+dependency behind re-exports changes nothing.
 
 **If left.** The terminal crate carries decoration policy. Accepted for now.
 
-**Smallest change.** None attempted until the composition layer is designed.
-**This row exists so that the edge is recorded rather than rediscovered.**
+**Smallest change.** The composition design's three steps (T-COMPOSE-CRATE
+§3.4 D-15): the data types to `bt-doc` (CC-5, done), math execution to
+`bt-compose` (CC-6b, done), the SVG codec installed by the host (CC-7, done), after
+which `bt-term` has no `bt-math` edge.
 
-**Version.** 0.5 at the earliest. **Status.** decided — recorded as debt.
+**How it was repaid (CC-7).** `decode_svg_bytes` calls the codec the host
+installed (`bt_term::install_svg_rasterizer`, a process-wide `fn` of
+`bt_doc::svg::{SvgRaster, SvgRasterError}`, moved there verbatim and re-exported by
+`bt-math`); a read before any installation panics in every profile. `bt-app`
+installs `bt_math::rasterize_svg_document` in `host_answers::install`, before its
+first session, and the `bt-corpus` tools in `install_host_answers`. The
+`MathEngine` re-export is gone; its one outside user, `bt-zoom-perf`, names
+`bt-math`. `crates/bt-term/Cargo.toml` names `bt-math` nowhere:
+`cargo tree -p bt-term -i bt-math -e normal,build` prints nothing. The one path
+left in the default `cargo tree` is the dev-dependency on `bt-compose` (CC-6b),
+through which `bt-term`'s session tests typeset real rasters; a dev-dependency is
+not a layer edge.
 
-**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27 · version: 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then · status: open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7.
+**Version.** 0.4.8. **Status.** repaid on `ac33d15c`.
+
+**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27; CC-5, CC-6b, CC-7 (design T-COMPOSE-CRATE §3.4) · version: 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then · status: open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-08 (CC-5):** **narrowed**: the data types moved to `bt-doc`; execution remains (`typeset`'s engine calls for CC-6b, the SVG codec and the `MathEngine` re-export for CC-7); **2026-10-08 (CC-6a):** untouched; the receiving crate `bt-compose` exists (layer 6); **2026-10-09 (CC-6b):** **narrowed**: math execution moved to `bt_compose::typeset`; the SVG codec and the `MathEngine` re-export remain (CC-7); **repaid on `ac33d15c` (CC-7)**.
 
 ---
 
@@ -1228,8 +1277,18 @@ reader fix plus a pure move, beside the rest of the split's second half.
   the order `flush_pending_pty_resize` represents is the contract. 0.4.7.
 - **D-50 · paste convergence.** `Runtime::prepare_clipboard_paste`,
   `paste_text`, `bt-term`'s `input::paste_bytes`, and the clipboard read on
-  the window thread. 0.4.6: tickets 02 and 03 changed `deliver_paste` and the
-  hops are fresh.
+  the window thread on Windows and macOS. Linux partially repays this debt:
+  one process-owned `ClipboardLane` serializes source-pinned reads and
+  server-confirmed writes in one FIFO, with eight waiting operations, one held
+  result and a four-second admission deadline. Copy snapshots its owned text
+  at admission; the window validates result targets and acknowledges each
+  outcome before the next operation starts. Unconfirmed native claims remain
+  joinable and reconcile before a later read or write. Cancellation and
+  retirement joins stay in the worker lane; see `docs/ARCHITECTURE.md` §5.1,
+  §5.2, §6 and §7.2. D-50 remains open for Windows/macOS and the remaining
+  cross-platform paste-chain convergence. 0.4.6: tickets 02 and 03 changed
+  `deliver_paste`; this Linux extension adds ordered copies to the existing
+  partial repayment.
 
 ### `docs/ARCHITECTURE.md` — ownership (§4)
 
@@ -1619,3 +1678,14 @@ wait on some road, and none has a ruling that it may.
   *The window thread's turn is scheduled across windows and sources*, drafted
   after B4–B9 have moved their waits. Opened by A4 per §R-G; by the owner's ruling
   of 2026-09-25 it is one of the two rows D-2 leaves behind when it closes.
+
+## D-85 — the row added on 2026-10-08 by T-PROGRAMS-REFRESH
+
+- **D-85 · program walk.** `ProgramsLane::serve` answers the newest request
+  standing; a request replaced before its walk started is answered by the walk
+  that served its successor, which a request made later always is — nothing is
+  lost, but no request has an outcome of its own, which is D-72's and D-73's
+  shape. Unlike them, a walk that unwinds is observable (`WalkOut` marks the
+  worker gone and reports the walk that died, and the next request starts a new
+  worker), so only the outcome half is owed: a "superseded by walk N" outcome the
+  drain can report once per request, if a consumer ever needs one.

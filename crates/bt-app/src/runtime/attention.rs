@@ -4,9 +4,8 @@
 use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
-    attention, attention_codex, attention_copilot, attention_hooks, attention_trace,
-    emit_attention_lines, float, i18n, marks, native_window, next_attention_stop, notice, notify,
-    profiles, seats, taskbar_lane, toast,
+    attention, attention_trace, emit_attention_lines, float, i18n, marks, native_window,
+    next_attention_stop, notice, notify, profiles, seats, taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -624,18 +623,7 @@ impl Runtime<'_> {
     /// only way a machine that has been put right becomes a machine Folio will act on again
     /// without a relaunch.
     pub(crate) fn refresh_agent_rows(&mut self) {
-        (
-            self.app.claude_hooks_installed,
-            self.app.agent_config_refusals[0],
-        ) = attention_hooks::row_state();
-        (
-            self.app.codex_notify_installed,
-            self.app.agent_config_refusals[1],
-        ) = attention_codex::row_state();
-        (
-            self.app.copilot_hooks_installed,
-            self.app.agent_config_refusals[2],
-        ) = attention_copilot::row_state();
+        crate::read_the_agent_rows_again(self.app);
     }
 
     /// Whether one of the built-in agent profiles has its program on this
@@ -849,7 +837,7 @@ impl Runtime<'_> {
     /// definition one the reader was not looking at, so there is no pane under their eye for the
     /// card to hang off; and what the card is about is the *channel*, which belongs to the window
     /// rather than to whichever shell happened to speak first.
-    fn raise_notification_refusal(&mut self, error: &str) -> Result<()> {
+    pub(crate) fn raise_notification_refusal(&mut self, error: &str) -> Result<()> {
         self.toast(
             toast::ToastKind::Error,
             toast::ToastAnchor::Window,
@@ -896,10 +884,8 @@ impl Runtime<'_> {
         // Un-minimised first: `focus_window` on an iconified window brings it forward without
         // restoring it on some configurations, and a restored window that never came forward is
         // the same click going unanswered twice.
-        let restored = self.window.window.is_minimized() == Some(true);
-        if restored {
-            self.window.window.set_minimized(false);
-        }
+        let minimized_before = self.window_minimized_state();
+        crate::restore_minimized_window(&self.window.window)?;
         // An owner-thread door (`doors::FocusWindow`, whose station the meter enters). A refusal
         // opens the route without taking focus.
         let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::FocusWindow, _>(
@@ -910,9 +896,8 @@ impl Runtime<'_> {
         if !self.window.tabs[index].sessions.contains_key(&seat) {
             attention_trace::line(|| {
                 format!(
-                    "open tab={index} seat={seat:?} id={} by=toast restored={} leave=no-seat",
-                    route.tab,
-                    u8::from(restored)
+                    "open tab={index} seat={seat:?} id={} by=toast minimized_before={:?} leave=no-seat",
+                    route.tab, minimized_before
                 )
             });
             return Ok(());
@@ -924,9 +909,8 @@ impl Runtime<'_> {
         // `toast` line that raised it.
         attention_trace::line(|| {
             format!(
-                "open tab={index} seat={seat:?} id={} by=toast restored={}",
-                route.tab,
-                u8::from(restored)
+                "open tab={index} seat={seat:?} id={} by=toast minimized_before={:?}",
+                route.tab, minimized_before
             )
         });
         if self.window.tabs[index].focused_leaf != seat {

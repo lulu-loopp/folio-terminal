@@ -140,7 +140,7 @@ impl Runtime<'_> {
                     prompt_the_shell_opened,
                 ) {
                     write_pty_input(
-                        leaf.pty.as_ref(),
+                        leaf.input_target(),
                         reanchor_input,
                         "request PSReadLine anchor repair after resize quiescence",
                     )?;
@@ -352,7 +352,7 @@ impl Runtime<'_> {
             .resize(&self.app.gpu, physical.width, physical.height)
             .context("synchronize renderer swapchain with resized physical client")?;
         self.reconcile_authoritative_dpi("resized")?;
-        let requested_physical = self.window.window.inner_size();
+        let requested_physical = self.client_size();
         if requested_physical.width == 0 || requested_physical.height == 0 {
             return Ok(());
         }
@@ -431,7 +431,7 @@ impl Runtime<'_> {
         self.window.dpi_rectangle.announced();
         self.defer_preview_resample(Instant::now());
         self.reconcile_authoritative_dpi("scale-factor-changed")?;
-        self.resize(self.window.window.inner_size())
+        self.resize(self.client_size())
     }
 
     /// **A rectangle from the OS**, and the one road on which a pane's grid may
@@ -443,6 +443,7 @@ impl Runtime<'_> {
     /// has arrived" by its own call would be told it by the very event that
     /// says it has not.
     pub(crate) fn resized(&mut self, physical: PhysicalSize<u32>) -> Result<()> {
+        self.note_winit_size(physical);
         self.window.dpi_rectangle.arrived();
         self.resize(physical)
     }
@@ -521,7 +522,7 @@ impl Runtime<'_> {
         &mut self,
         stage: &'static str,
     ) -> Result<bool> {
-        let physical = self.window.window.inner_size();
+        let physical = self.client_size();
         // **The second reader of the same rectangle**, held to the same rule
         // ([`resize_worth_solving`]): `inner_size()` on an iconic window is the icon's client
         // area, and every geometry step below — the swapchain, the solve, the per-leaf grids —
@@ -549,7 +550,11 @@ impl Runtime<'_> {
         if worth {
             self.resolve_seat_layout(render_physical);
         }
-        let snapshot = dpi_snapshot(&self.window.window)?;
+        #[cfg(target_os = "linux")]
+        let cached_rect = self.window.last_winit_rect;
+        #[cfg(not(target_os = "linux"))]
+        let cached_rect = None;
+        let snapshot = dpi_snapshot(&self.window.window, cached_rect)?;
         log_dpi_snapshot(
             stage,
             snapshot,

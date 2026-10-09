@@ -76,6 +76,17 @@ pub fn install_channel_settled(waited: &mut bool, landed: bool) -> bool {
     false
 }
 
+/// **The card's wait for the program walk's reading of the agent folders** (T-FRESH-FACTS):
+/// [`install_channel_settled`]'s bound — settled once the reading has landed, or after the card
+/// has waited one turn for it.
+pub fn agent_folders_settled(waited: &mut bool, answered: bool) -> bool {
+    if answered || *waited {
+        return true;
+    }
+    *waited = true;
+    false
+}
+
 /// Consume the first ready attempt, including one that cannot show a card.
 /// The App owns this latch; profile-table adoption and answering the card rearm
 /// it. Availability itself remains owned by `ProfilePrograms`, not this latch.
@@ -2393,13 +2404,7 @@ mod tests {
     /// A temporary folder standing in for the folder `folio.exe` was installed
     /// into, never the real one.
     fn install_folder(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "folio-first-run-channel-{tag}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = bt_testpath::temp_path(&format!("folio-first-run-channel-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -2520,6 +2525,27 @@ mod tests {
     /// MUTATION: make `install_channel_settled` answer `landed` (the card
     /// waits for ever on a worker that never came back) or `true` (it never
     /// waits for a fact a millisecond away).
+    /// RED (T-FRESH-FACTS round 2) — **the card waits one turn for the walk's reading of the agent
+    /// folders, never longer.** A launch walk that died never publishes it.
+    ///
+    /// MUTATION (observed red): `agent_folders_settled` answering `answered` (no bound) — the card
+    /// is still waiting after its turn.
+    #[test]
+    fn the_card_waits_one_turn_for_the_agent_folders_and_no_longer() {
+        let mut waited = false;
+        assert!(
+            !agent_folders_settled(&mut waited, false),
+            "one turn is waited"
+        );
+        assert!(
+            agent_folders_settled(&mut waited, false),
+            "and after it the card goes ahead with the folders it has"
+        );
+        let mut fresh = false;
+        assert!(agent_folders_settled(&mut fresh, true));
+        assert!(!fresh, "a reading already there spends no wait");
+    }
+
     #[test]
     fn a_card_built_before_the_install_channel_lands_waits_one_turn_then_shows_the_row_off() {
         let mut waited = false;

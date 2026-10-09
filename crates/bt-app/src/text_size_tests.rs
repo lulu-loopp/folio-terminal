@@ -11,7 +11,7 @@
 //! pinned on the item bodies through `bt_source`.
 
 use super::*;
-use crate::tests::{
+use crate::test_support::{
     cross_metrics, cross_solve, cross_tab, focused_frame, leaf_saying, tab_holding,
 };
 use bt_source::{Index, ItemQuery, Pattern, Search, View, needle};
@@ -381,12 +381,20 @@ fn restart_shell_keeps_the_rung_and_a_failed_restart_keeps_the_old_leaf() {
         .find("LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?")
         .expect("and handed to the constructor");
     let spawned = restart.find("create_leaf_session(").expect("spawns");
+    let waits = restart
+        .find("leaf.successor = Some(Box::new(spawned));")
+        .expect("a replacement being born waits beside the old leaf");
     let replaced = restart
-        .find("self.sessions.insert(seat, spawned?);")
+        .find("self.replace_restarted_shell(seat, spawned)")
         .expect("the old leaf goes only with a replacement in hand");
     assert!(
-        read < built && built < spawned && spawned < replaced,
+        read < built && built < spawned && spawned < waits && spawned < replaced,
         "{restart}"
+    );
+    assert!(
+        method_body("Runtime", "replace_restarted_shell")
+            .contains("self.sessions.insert(seat, spawned);"),
+        "the replacement takes the seat by the insert that drops the old leaf"
     );
     assert!(
         !restart.contains("self.sessions.remove(&seat)"),
@@ -436,7 +444,7 @@ fn split_and_duplicate_start_at_100_and_tear_out_and_merge_keep_the_rung() {
     let leaf = arriving.sessions.get_mut(&SeatId(2)).unwrap();
     step_leaf_text_scale(leaf, TextStep::Smaller, 1, derive_at(1.0, BASE)).unwrap();
     let mut target = cross_tab(3, &["HOST"]);
-    let arrived = crate::tests::cross_merge(
+    let arrived = crate::test_support::cross_merge(
         &arriving.seats,
         &mut target,
         seats::LayoutAim::SeatEdge(SeatId(1), seats::DropEdge::Right),
@@ -588,12 +596,17 @@ fn the_rung_has_one_owner() {
         "LeafView::text_scale",
         "LeafView::at",
         "create_leaf_session",
+        // the constructor's half that makes the pane at that rung (T-BIRTH-OFF-WINDOW)
+        "bare_leaf",
         // the door's core, the derivation and the walk that re-derives
         "step_leaf_text_scale",
         "pane_cell_metrics",
         "apply_tabs_leaf_metrics",
         // the restart reads the rung it hands the constructor
         "Runtime::restart_shell",
+        // and so does a pane in birth's landing, which is born at the rung it already has
+        // (T-PROGRAMS-REFRESH)
+        "Runtime::land_pane_birth",
         // the pane head's mark and its tip read the requested rung
         "Runtime::pane_text_sizes",
         "Runtime::rebuild_tooltip_anchors",

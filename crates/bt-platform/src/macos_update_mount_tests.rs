@@ -205,7 +205,7 @@ echo '"disk9" ejected.'
         pub(super) fn new(tag: &str) -> Self {
             let root = std::fs::canonicalize(std::env::temp_dir())
                 .unwrap()
-                .join(format!("bt-u17-{tag}-{}", std::process::id()));
+                .join(bt_testpath::unique_name(&format!("bt-u17-{tag}")));
             let _ = std::fs::remove_dir_all(&root);
             let state = root.join("state");
             let mount_dir = root.join("H/txn/mnt");
@@ -520,7 +520,7 @@ mod real {
         fn new(tag: &str) -> Self {
             let root = std::fs::canonicalize(std::env::temp_dir())
                 .unwrap()
-                .join(format!("bt-u17-real-{tag}-{}", std::process::id()));
+                .join(bt_testpath::unique_name(&format!("bt-u17-real-{tag}")));
             let _ = std::fs::remove_dir_all(&root);
             let home = root.join(".Folio.app.folio-update");
             let mount_dir = home.join("00112233445566778899aabbccddeeff/mnt");

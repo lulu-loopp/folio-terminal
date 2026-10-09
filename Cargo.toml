@@ -3,12 +3,15 @@
 # dependency versions, so a dep can't silently resolve to something our pinned
 # toolchain can't build.
 resolver = "3"
+exclude = ["vendor/arboard", "vendor/wl-clipboard-rs"]
 members = [
     "crates/bt-term",
+    "crates/bt-compose",
     "crates/bt-transcript",
     "crates/bt-doc",
     "crates/bt-viewport",
     "crates/bt-detect",
+    "crates/bt-effects",
     "crates/bt-layout",
     "crates/bt-math",
     "crates/bt-corpus",
@@ -18,6 +21,7 @@ members = [
     "crates/bt-unicode",
     "crates/bt-render",
     "crates/bt-source",
+    "crates/bt-testpath",
     "crates/bt-winres",
     "crates/bt-workbench",
     "crates/bt-app",
@@ -42,7 +46,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
-# **None of these seventeen crates is a crates.io package.** They are one product
+# **None of these crates is a crates.io package.** They are one product
 # cut into compilation units; `bt-math` and `bt-detect` would be squatting names
 # that mean nothing outside this tree, and a `cargo publish` typed in the wrong
 # directory is the only way any of them would ever get there. `vendor/` does not
@@ -82,6 +86,12 @@ anyhow = "1"
 base64 = "0.22"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
+fontconfig-parser = "0.5"
+fontdb = "0.23"
+# **Exact pin (the port's dependency fix)**: `futures-util` only enters for the
+# Linux portal subscriptions, and it is pinned the way the workspace pins the
+# packages a platform crate depends on, so a minor cannot drift under it.
+futures-util = "=0.3.32"
 glyphon = "0.12"
 # The glance card's first page (`bt_app::pdf::first_page`, §7.10 ⑥). It was
 # **already in the lock file** transitively — `typst-svg` rasterises the PDFs a
@@ -131,6 +141,11 @@ image = { version = "=0.25.10", default-features = false, features = [
 # `Send`, and `crates/bt-app/src/animation.rs` needs a decoder that can be moved
 # to a worker and back to stream a long file a ring at a time.
 gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
+# **Exact pin (the port's dependency fix)**: `libloading` opens the installed
+# GStreamer 1.x runtime for Linux playback, and it is pinned the way the
+# workspace pins the packages a platform crate depends on, so a minor cannot
+# drift under it.
+libloading = "=0.8.9"
 # Exact for the same reason as the two lines above, and vendored for a reason of
 # its own: `mitex` and `mitex-parser` are where a formula's recursion is
 # *enforced* (`vendor/mitex-parser/src/depth.rs`). A 0.2.x out-resolving the
@@ -229,6 +244,12 @@ unicode-segmentation = "1"
 unicode-script = "0.5.8"
 unicode-properties = { version = "0.1", default-features = false, features = ["emoji", "general-category"] }
 unicode-width = "0.2"
+# The WHATWG host parser behind `bt_transcript::web_host_parses`, the one check of whether a web
+# address's host is a host (F-SWEEP-2-048). Already in the lock file at this exact version through
+# `hayagriva` and `typst-library`, so naming it here costs no new package and nothing in
+# `THIRD-PARTY-NOTICES.md`; exact so that what a browser would call a host does not change under a
+# build nobody touched.
+url = "=2.5.8"
 # `default-features = false` and `std` named instead, which is the same thing —
 # `vte`'s `default` is exactly `["std"]`. The point is that it is the same thing
 # under *every* package selection. `bt-corpus` is the only workspace member that
@@ -244,9 +265,23 @@ unicode-width = "0.2"
 # dispatch arms for the kitty keyboard protocol and xterm's modifyOtherKeys
 # (`vendor/vte/CHANGES-FOLIO.md`), and a 0.15.x out-resolving the copy would
 # undo them.
+# **Exact pins (the port's dependency fix)**: `tokio` and `zbus` serve only the
+# Linux portal subscriptions today; both are pinned exactly, with the features
+# the subscriptions need and no default features, so their resolution cannot
+# drift independently of this lock file.
+tokio = { version = "=1.53.2", default-features = false, features = ["rt", "net", "time"] }
 vte = { version = "=0.15.0", default-features = false, features = ["std"] }
+# **The clock a browser build can read.** `std::time::Instant::now()` and
+# `SystemTime::now()` panic on `wasm32-unknown-unknown`; `web_time`'s read
+# `performance.now()` and `Date.now()` there, and on every other target its
+# `Instant` and `SystemTime` are re-exports of `std::time`'s — the same types, so a
+# native build compiles exactly what it did. Every crate a browser build reads
+# names its clock through it (`crates/bt-source/tests/clock_guard.rs` holds the
+# set). Already in the lock file through `winit`, at this version.
+web-time = "=1.1.0"
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 
 [profile.test]
 opt-level = 1
@@ -304,8 +339,10 @@ panic = "unwind"
 debug = "line-tables-only"
 
 [patch.crates-io]
+arboard = { path = "vendor/arboard" }
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 mitex = { path = "vendor/mitex" }
 mitex-parser = { path = "vendor/mitex-parser" }
 portable-pty = { path = "vendor/conpty/portable-pty" }
 vte = { path = "vendor/vte" }
+wl-clipboard-rs = { path = "vendor/wl-clipboard-rs" }

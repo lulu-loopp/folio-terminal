@@ -1,6 +1,8 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+#[cfg(not(target_os = "linux"))]
+use crate::write_terminal_clipboard_text;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
@@ -51,8 +53,10 @@ use crate::{
     surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
     tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
     video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
-    webhost, webnav, wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    webhost, webnav, wheel_points_sideways, window_taskbar_progress,
 };
+#[cfg(target_os = "linux")]
+use crate::{ClipboardDestination, linux_clipboard_lane::ReadKind};
 use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::Result;
@@ -899,7 +903,7 @@ impl Runtime<'_> {
             ceiling.1 = ceiling.1.max(size.height);
         }
         if ceiling.0 == 0 || ceiling.1 == 0 {
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             ceiling = (inner.width.max(1), inner.height.max(1));
         }
         ceiling
@@ -3595,32 +3599,18 @@ impl Runtime<'_> {
         };
         match kind {
             seats::PreviewRailKind::Address => {
-                let page = self.web_of(surface).map(|web| web.page().clone())?;
-                // **The committed address, and the refused one when a seat's one
-                // navigation was turned away** — the same pair the head's name
-                // cell used to fall back through, arriving where it belongs now
-                // that the name is a title again. A blank row over a page that
-                // was handed an address it would not go to would be this window
-                // forgetting what it was asked for.
-                let refused_address = self
-                    .web_of(surface)
-                    .and_then(webhost::WebSeat::fault)
-                    .and_then(webhost::WebFault::refused_address);
-                frame.address = shown_address(&if page.url.is_empty() {
-                    refused_address.unwrap_or_default()
-                } else {
-                    page.url.clone()
-                });
+                let web = self.web_of(surface)?;
+                let page = web.page().clone();
+                // **The address asked for until it is reached, then the committed one, then the
+                // refused one** (`WebSeat::row_address`; owner's ruling 2026-10-09) — a page on
+                // its way, or one that failed to load, is named by what was asked rather than by
+                // nothing or by the page before it. The field opens on the same string.
+                let address = shown_address(&web.row_address());
                 frame.web = seats::WebHeadState {
                     can_go_back: page.can_go_back,
                     can_go_forward: page.can_go_forward,
                     loading: page.loading,
                 };
-                frame.measure.address_width = self.window.renderer.measure_chrome_text(
-                    &mut self.app.gpu,
-                    &frame.address,
-                    font,
-                );
                 // **`</>` on a page's row too** (user ruling 2026-08-26; DESIGN
                 // §7.7 ⑭). The offer and the state are two questions and both
                 // are asked here: whether this page has a file on this disk that
@@ -3632,6 +3622,27 @@ impl Runtime<'_> {
                 // The glyph names the *destination*, exactly as it does one arm
                 // down.
                 frame.flip_to_source = self.page_source_shown_on(surface).is_none();
+                // **Folded to the room the row gives it** (owner's ruling 2026-10-09,
+                // `seats::fold_address`): the room is the field the row would grant a draft —
+                // everything the buttons leave, `</>` included — less the field's own inset, and
+                // the folded text is what the field is then measured and centred for.
+                let inset = (seats::PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
+                let room = self.rail_band(surface, scale).and_then(|band| {
+                    let whole = seats::PreviewRailMeasure {
+                        address_width: ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD,
+                        ..frame.measure.clone()
+                    };
+                    seats::preview_rail_geometry_in(band, scale, &whole)
+                        .address
+                        .map(|field| (field[2] - field[0] - inset * 2.0).max(0.0))
+                });
+                let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+                let mut measure = |text: &str| renderer.measure_chrome_text(gpu, text, font);
+                frame.address = match room {
+                    Some(room) => seats::fold_address(&address, room, &mut measure),
+                    None => address,
+                };
+                frame.measure.address_width = measure(&frame.address);
             }
             seats::PreviewRailKind::Crumbs => {
                 let path = self.preview_rail_path(surface)?;
@@ -4127,10 +4138,13 @@ impl Runtime<'_> {
     /// what makes the two rows' identical glyph an honest promise: one verb,
     /// two kinds of address.
     fn copy_preview_address(&mut self, surface: PreviewSurface) -> Result<()> {
+        // **What the row names, in full** (`WebSeat::row_address`): the failure card has no
+        // button since the owner's ruling of 2026-10-09, so this `⧉` is what copies an address
+        // that did not load or was refused.
         let Some(url) = self
             .rail_page(surface)
             .and_then(|leaf| self.window.web.get(&leaf))
-            .map(|web| web.page().url.clone())
+            .map(webhost::WebSeat::row_address)
         else {
             return Ok(());
         };
@@ -5558,7 +5572,8 @@ impl Runtime<'_> {
             // a document has no cells.
             HyperlinkActivation::Page(url) => {
                 if !self.open_web_address_here(&url)? {
-                    self.say_address_refused(surface, &url)?;
+                    let refusal = crate::LinkRefusal::of_address(&url);
+                    self.say_address_refused(surface, &url, refusal)?;
                 }
             }
             HyperlinkActivation::Browser(url) => {
@@ -5599,7 +5614,9 @@ impl Runtime<'_> {
             HyperlinkActivation::FilesColumn(path) => {
                 self.locate_folder_in_files_column(&path, None)?
             }
-            HyperlinkActivation::Blocked => self.say_address_refused(surface, target.trim())?,
+            HyperlinkActivation::Blocked(refusal) => {
+                self.say_address_refused(surface, target.trim(), refusal)?
+            }
             // A scheme-less target this window cannot place, or an anchor it
             // cannot yet honour. The press is still the link's: it landed on a
             // control, and letting it fall through would put a caret in the prose.
@@ -7722,8 +7739,19 @@ impl Runtime<'_> {
         else {
             return;
         };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
-            eprintln!("recoverable preview copy failure: {error:#}");
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) =
+                self.submit_clipboard_write(text, "preview copy", crate::ClipboardWriteEffect::None)
+            {
+                eprintln!("recoverable preview copy failure: {error:#}");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Err(error) = write_terminal_clipboard_text(&text) {
+                eprintln!("recoverable preview copy failure: {error:#}");
+            }
         }
     }
 
@@ -7733,16 +7761,43 @@ impl Runtime<'_> {
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
     pub(in crate::runtime) fn paste_into_preview(&mut self) -> Result<()> {
-        let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        }) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!("recoverable preview paste failure: {error}");
+        #[cfg(target_os = "linux")]
+        {
+            let Some(surface) = self.preview_keyboard_surface() else {
+                return Ok(());
+            };
+            let Some(pane) = self.preview_pane(surface) else {
+                return Ok(());
+            };
+            let Some(source) = pane.buffer.clone() else {
+                return Ok(());
+            };
+            if !self.preview_is_editable(surface) {
                 return Ok(());
             }
-        };
-        self.apply_clipboard_text_to_preview(&text)
+            let target = self.clipboard_target(ClipboardDestination::Preview {
+                surface,
+                source,
+                identity: Arc::clone(&pane.instance_identity),
+            });
+            if let Err(error) = self.request_clipboard_read(target, ReadKind::Text) {
+                diagnostics::note(&format!("recoverable preview paste failure: {error}"));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
+                bt_platform::clipboard_text()
+            }) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!("recoverable preview paste failure: {error}");
+                    return Ok(());
+                }
+            };
+            self.apply_clipboard_text_to_preview(&text)
+        }
     }
 
     pub(in crate::runtime) fn apply_clipboard_text_to_preview(&mut self, text: &str) -> Result<()> {
@@ -10310,6 +10365,40 @@ impl Runtime<'_> {
                 stage: drawn.shape.stage,
             });
         }
+        #[cfg(target_os = "linux")]
+        for web in self.window.web.values() {
+            let Some((frame, bounds, above)) = web.frame_layer() else {
+                continue;
+            };
+            let Some(box_) = viewport_of_rect(bounds.as_rect()) else {
+                continue;
+            };
+            let stage = above.map_or(
+                bt_render::VideoStage::Seat,
+                bt_render::VideoStage::OverlayContent,
+            );
+            crate::web_trace::line(|| {
+                format!(
+                    "linux_frame layer page={:?} generation={} sequence={} stage={stage:?} bounds={bounds:?}",
+                    frame.page, frame.generation, frame.sequence,
+                )
+            });
+            layers.push(bt_render::VideoLayer {
+                key: format!("web:{:?}:{}", frame.page, frame.generation),
+                box_,
+                clip: box_,
+                frame: Some(bt_render::VideoFrameUpload {
+                    bgra: Arc::clone(&frame.bgra),
+                    width_px: frame.width_px,
+                    height_px: frame.height_px,
+                    generation: frame.sequence,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+                stage,
+            });
+        }
         layers
     }
 
@@ -12130,15 +12219,15 @@ impl Runtime<'_> {
         // Leaving the no-op there is what made the mock-up's window duplicate
         // itself (3838-3843), docked and floating at once.
         if !self.seats.close_seat(&metrics, seat) {
-            // **The shell is spawned before the tree is touched**, against the
+            // **The stand-in is made before the tree is touched**, against the
             // slot the preview is standing in this very frame — which is the slot
             // the stand-in inherits unchanged, because `ReplaceSeat` swaps the
             // leaf inside the slot and moves no rectangle. Nothing here is
             // invented (L10): it is the rectangle already on screen, and
             // `settle_seat_set_change` below re-solves and tells the shell its
-            // real columns the ordinary way. Doing it in this order is what keeps
-            // the failure clean — a `create_leaf_session` that cannot start a
-            // ConPTY leaves the pane exactly where it was.
+            // real columns the ordinary way. Its shell is asked for, not waited
+            // for (T-BIRTH-OFF-WINDOW): a ConPTY that cannot be started lands
+            // later as an error toast over the stand-in, which keeps its place.
             let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
             else {
                 *self.preview_panes.entry(surface) = pane;
@@ -12163,6 +12252,7 @@ impl Runtime<'_> {
                 None,
                 &LeafSeed::default(),
                 &self.app.profile_programs,
+                &self.app.settings_store.loaded().default_profile,
                 formulas,
                 scrollback,
                 self.app.settings_store.loaded().line_wrapping,
@@ -13506,7 +13596,7 @@ impl Runtime<'_> {
                 if let Some(active) = self.window.peek_hover.active.clone()
                     && active.subject.key == cache_key
                 {
-                    self.show_or_request_peek(&active)?;
+                    self.show_or_request_peek(&active, false)?;
                 }
             }
             Err(error) => {
