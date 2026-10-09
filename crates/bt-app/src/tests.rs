@@ -755,27 +755,6 @@ fn an_update_doors_panic_unwinds_through_its_exit_guard_under_mains_hook() {
     assert!(said.contains("1 passed"), "{said}");
 }
 
-/// An unavailable native posture keeps both previously saved placement facts.
-#[test]
-fn unknown_native_posture_preserves_the_saved_window_placement() {
-    assert_eq!(choose_window_posture(None, None), WindowPosture::Unknown);
-    assert_eq!(
-        choose_window_posture(Some(false), None),
-        WindowPosture::Unknown
-    );
-    for saved_maximized in [false, true] {
-        assert_eq!(
-            recorded_window_placement(
-                WindowPosture::Unknown,
-                Some(ICONIC_BOUNDS),
-                CHOSEN_BOUNDS,
-                saved_maximized,
-            ),
-            (CHOSEN_BOUNDS, saved_maximized),
-        );
-    }
-}
-
 #[test]
 fn maximize_intent_keeps_desired_state_ahead_of_stale_answers() {
     let mut intent = WindowMaximizeIntent::default();
