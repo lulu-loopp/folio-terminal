@@ -71,8 +71,12 @@ pub struct PumpReport {
     pub completed: usize,
     /// Tasks the executor declined, each given its declined completion.
     pub declined: usize,
-    /// The session is still owed answers ([`DualPlaneSession::outstanding_decoration_work`]): the
-    /// host calls again.
+    /// The session is still owed answers ([`DualPlaneSession::outstanding_decoration_work`]).
+    ///
+    /// That count includes frozen formulas a full queue turned away, which wait for the next
+    /// [`crate::schedule`] to be filed again and which no pump can take. So it is not a loop
+    /// condition on its own: a host keeps running the per-frame sequence (advance, project,
+    /// schedule, pump) and pumps within it, or a queue overflow reads as pending for ever.
     pub more_pending: bool,
 }
 
@@ -80,6 +84,10 @@ pub struct PumpReport {
 /// the order the session hands them out. Every task taken is completed — with the executor's
 /// result or, when it declines, with the declined completion for its kind — before the next is
 /// taken, so no task is held across calls and none is taken twice.
+///
+/// It drains what is queued, not what the session owes: work a full queue turned away comes back
+/// through [`crate::schedule`], so a host pumps inside its per-frame sequence (the crate header's
+/// steps 1–6) rather than only while [`PumpReport::more_pending`] holds.
 pub fn pump(
     session: &mut DualPlaneSession,
     executor: &mut dyn Executor,

@@ -470,3 +470,143 @@ fn a_pump_takes_its_budget_and_lands_the_lanes_completion() {
         assert!(pumped_frame == lane_frame, "the pumped frame is the lane's");
     }
 }
+
+// ── a table's extent ─────────────────────────────────────────────────────────────────────────
+
+/// A host's table measure, standing in for `bt-app`'s shaper: the extent of a pipe table at
+/// `font_size_px`, a function of the source and the em only (rows of 1.5 em, columns of 6 em),
+/// with no pixels, as `bt-app`'s `table_raster` returns it.
+fn table_extent(source: &str, font_size_px: f32) -> MathRaster {
+    let lines: Vec<&str> = source
+        .lines()
+        .filter(|line| !line.contains("---"))
+        .collect();
+    let columns = lines
+        .first()
+        .map_or(0, |line| line.matches('|').count().saturating_sub(1));
+    let width_px = (columns as f32 * 6.0 * font_size_px).round() as u32;
+    let height_px = (lines.len() as f32 * 1.5 * font_size_px).round() as u32;
+    MathRaster {
+        rgba: Vec::new(),
+        width_px,
+        height_px,
+        content_height_px: height_px,
+        ascent_px: 0.0,
+        descent_px: 0.0,
+        baseline_px: 0.0,
+        render_time: std::time::Duration::ZERO,
+        inline_runs: Vec::new(),
+    }
+}
+
+/// The typesetting executor with a table measure: what it was asked to measure, and at what em.
+struct MeasuringExecutor {
+    typesetter: TypesettingExecutor,
+    measured: Vec<(String, f32)>,
+}
+
+impl Executor for MeasuringExecutor {
+    fn math(&mut self, task: &mut SessionMathTask) -> Outcome<Result<MathRaster, MathRenderError>> {
+        self.typesetter.math(task)
+    }
+
+    fn table(
+        &mut self,
+        source: &str,
+        font_size_px: f32,
+    ) -> Outcome<Result<MathRaster, MathRenderError>> {
+        self.measured.push((source.to_owned(), font_size_px));
+        Outcome::Done(Ok(table_extent(source, font_size_px)))
+    }
+
+    fn image(
+        &mut self,
+        task: &InlineImageTask,
+    ) -> Outcome<Result<DecodedInlineImage, InlineImageDecodeError>> {
+        self.typesetter.image(task)
+    }
+
+    fn scale(&mut self, task: &InlineImageScaleTask) -> Outcome<ScaledInlineImage> {
+        self.typesetter.scale(task)
+    }
+
+    fn verify(&mut self, path: &Path) -> Outcome<PathVerdict> {
+        self.typesetter.verify(path)
+    }
+}
+
+/// RED — **a proven table is measured by the host at the em its task was laid out at, and the
+/// extent the host answers is the block the session keeps** (the pump's table road: `math`
+/// proves the table and returns no picture, `table` measures it, the session is completed with
+/// the measure).
+///
+/// The pane's em (20 px) is not its row (24 px), so a measure taken at any other size of the
+/// layout lands a block of another width.
+///
+/// MUTATION: in `table_of`, measure at the row instead of the em
+/// (`layout.font_size_subpixels as f32 / SUBPIXELS_PER_PX as f32 * 1.2`) — the measure is asked
+/// at 24 px and the "measured at the pane's em" assertion goes red.
+#[test]
+fn a_proven_table_is_measured_at_its_tasks_em_and_kept_at_that_extent() {
+    let (mut session, mut view) = pane_of(60, 4);
+    let table = "| \u{540d}\u{79f0} | value |\r\n|---|---|\r\n| a | 1 |\r\n| b | 2 |\r\n";
+    // Into history, where a proven table is a block over its own rows.
+    session
+        .feed(
+            format!("{table}\u{7ed3}\u{675f} one\r\ntail two\r\ntail three\r\ntail four\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    compose(&mut session, &mut view);
+    view.scroll_to_top();
+    compose(&mut session, &mut view);
+
+    let mut executor = MeasuringExecutor {
+        typesetter: TypesettingExecutor {
+            engine: MathEngine::new(),
+        },
+        measured: Vec::new(),
+    };
+    pump_dry(&mut session, &mut executor, Budget { tasks: 4 });
+    assert_eq!(session.outstanding_decoration_work(), 0);
+    assert!(
+        !executor.measured.is_empty(),
+        "the screen filed a table, or this proves nothing"
+    );
+    for (source, font_size_px) in &executor.measured {
+        assert!(
+            source.contains('\u{540d}'),
+            "the table's own source: {source:?}"
+        );
+        assert_eq!(*font_size_px, 20.0, "measured at the pane's em");
+    }
+
+    view.scroll_to_top();
+    let frame = compose(&mut session, &mut view);
+    let tables: Vec<_> = frame
+        .math_blocks
+        .iter()
+        .filter(|block| block.artifact.kind == bt_viewport::RgbaArtifactKind::Table)
+        .collect();
+    assert_eq!(
+        tables.len(),
+        1,
+        "the table is a block: {:?}",
+        frame.math_blocks.len()
+    );
+    // The table grows a row at a time, and each growth is measured again; the block is the last.
+    let (source, _) = executor
+        .measured
+        .iter()
+        .max_by_key(|(source, _)| source.len())
+        .unwrap();
+    let expected = table_extent(source, 20.0);
+    assert_eq!(
+        tables[0].artifact.width_px, expected.width_px,
+        "the session keeps the width the host measured at the em"
+    );
+    assert!(
+        tables[0].artifact.height_subpixels >= i64::from(expected.height_px) * SUBPIXELS_PER_PX,
+        "and stands at least as tall as the measure"
+    );
+}

@@ -974,9 +974,10 @@ fn one_video_texture_is_one_file_at_one_version_at_one_size() {
 /// `bt_compose::typeset` — both assertions go red.
 #[test]
 fn the_lane_typesets_a_terminal_formula_through_the_composition_crate() {
-    let lane = crate::test_support::free_fn_body("run_decoration_worker");
+    use crate::test_support::{free_fn_body, squeezed};
+    let lane = squeezed(free_fn_body("run_decoration_worker"));
     assert_eq!(
-        lane.matches("bt_compose::typeset(&engine, &mut task, foreground_rgb)")
+        lane.matches("bt_compose::typeset(&engine,&muttask,foreground_rgb)")
             .count(),
         1,
         "the terminal formula's arm typesets through the composition crate:\n{lane}"
