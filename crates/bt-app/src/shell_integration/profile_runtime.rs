@@ -471,6 +471,13 @@ pub fn install_recorded(
     let profile = std::path::absolute(profile)?;
     let script = std::path::absolute(script)?;
     let _lock = lock(data, Asker::InApp)?;
+    if let Some(error) = seen.unreadable() {
+        crate::diagnostics::note(&format!(
+            "BT_SHELL_PROFILE {}: the check could not read it ({error}); Enable refused",
+            profile.display()
+        ));
+        return Err(io::Error::other(Text::ShellProfileChangedElsewhere.text()));
+    }
     if ProfileRevision::of_edit(&profile)? != *seen {
         return Err(io::Error::other(Text::ShellProfileChangedElsewhere.text()));
     }
@@ -1249,6 +1256,37 @@ mod tests {
             theirs,
             "the person's line and Folio's are where they were"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (0.4.8 G7 round 2, Kimi nit 1) — **a profile the check could not read is not a
+    /// missing one**: its revision is neither "no file" nor bytes, and an Enable against it is
+    /// refused with the reload sentence, not with whatever the writer's own read of the file
+    /// says. A folder where the file should be is a path every platform refuses to read as a
+    /// file with an error other than "no such file".
+    ///
+    /// MUTATION: `conflate` — `ProfileRevision::read` answers no file for every failed read (`.ok()`
+    /// as it was): the revision is the missing file's, and the Enable meets the writer's read of
+    /// a folder, which refuses with the read-only sentence instead.
+    #[test]
+    fn a_profile_the_check_could_not_read_is_refused_with_the_reload_sentence() {
+        let root = super::super::tests::temp_dir("profile-unreadable-check");
+        let data = root.join("data");
+        let profile = root.join("文档").join("profile.ps1");
+        fs::create_dir_all(&profile).unwrap();
+        let check = ProfileRevision::read(&profile);
+        assert_ne!(
+            check,
+            ProfileRevision::default(),
+            "a folder is not a missing file"
+        );
+        assert!(!check.carries_the_line());
+        let refused = enable_against(&profile, &data, &check).expect_err("no revision was seen");
+        assert_eq!(
+            refused.to_string(),
+            Text::ShellProfileChangedElsewhere.text()
+        );
+        assert!(profile.is_dir(), "nothing was written");
         fs::remove_dir_all(root).unwrap();
     }
 

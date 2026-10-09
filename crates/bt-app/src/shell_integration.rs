@@ -4177,44 +4177,75 @@ pub struct ProfileWrite {
     pub edit: Option<ProfileEdit>,
 }
 
-/// **A profile's bytes at one moment** (0.4.8 G7): the file's content, or `None` where there
-/// was no file. The revision every edit of the integration line is made against: the writer
-/// reads the file again under the marks lock, immediately before its edit, and refuses when
-/// the bytes differ from the revision its caller saw — an Enable against what the row's check
-/// read, an Undo against what the Enable wrote.
+/// **A profile's bytes at one moment** (0.4.8 G7): the file's content, no file, or a file the
+/// check could not read. The revision every edit of the integration line is made against: the
+/// writer reads the file again under the marks lock, immediately before its edit, and refuses
+/// when the bytes differ from the revision its caller saw — an Enable against what the row's
+/// check read, an Undo against what the Enable wrote. A check that could not read the file saw
+/// no revision at all, and an edit against it is refused the same way.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ProfileRevision(Option<Vec<u8>>);
+pub struct ProfileRevision(Seen);
+
+/// What one read of a profile found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Seen {
+    /// No file at the path.
+    #[default]
+    Absent,
+    /// The file's bytes.
+    Bytes(Vec<u8>),
+    /// The read failed for another reason: the operating system's words.
+    Unreadable(String),
+}
 
 impl ProfileRevision {
-    /// The file at `path` as it stands, read on the settings lane; a file that cannot be read
-    /// is no file to this revision, and an edit against it meets the writer's own read.
+    /// The file at `path` as it stands, read on the settings lane: its bytes, no file, or the
+    /// error a file that is there but cannot be read gave — never a missing file for that.
     pub(crate) fn read(path: &Path) -> Self {
-        Self(bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path).ok())
+        Self(
+            match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path) {
+                Ok(bytes) => Seen::Bytes(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Seen::Absent,
+                Err(error) => Seen::Unreadable(error.to_string()),
+            },
+        )
     }
 
     /// The file as the writer reads it for an edit ([`read_profile_for_edit`]'s answer).
     fn of(bytes: Option<Vec<u8>>) -> Self {
-        Self(bytes)
+        Self(bytes.map_or(Seen::Absent, Seen::Bytes))
     }
 
     /// The file at `profile` read as the writer reads it for an edit — the read a precondition
     /// compares, made under the marks lock immediately before the edit.
     fn of_edit(profile: &Path) -> std::io::Result<Self> {
-        read_profile_for_edit(profile).map(Self)
+        read_profile_for_edit(profile).map(Self::of)
+    }
+
+    /// Why the check that made this revision could not read the file, when it could not.
+    fn unreadable(&self) -> Option<&str> {
+        match &self.0 {
+            Seen::Unreadable(error) => Some(error),
+            Seen::Absent | Seen::Bytes(_) => None,
+        }
     }
 
     /// The bytes, or nothing for no file.
     fn bytes(&self) -> &[u8] {
-        self.0.as_deref().unwrap_or_default()
+        match &self.0 {
+            Seen::Bytes(bytes) => bytes,
+            Seen::Absent | Seen::Unreadable(_) => &[],
+        }
     }
 
     /// Whether the bytes, decoded as PowerShell decodes them, carry a Folio line — the
     /// observation's "present", which keeps the one-click Enable away.
     pub(crate) fn carries_the_line(&self) -> bool {
-        self.0.as_deref().is_some_and(|bytes| {
-            profile_marks::Decoded::read(bytes)
-                .is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text))
-        })
+        match &self.0 {
+            Seen::Bytes(bytes) => profile_marks::Decoded::read(bytes)
+                .is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text)),
+            Seen::Absent | Seen::Unreadable(_) => false,
+        }
     }
 }
 

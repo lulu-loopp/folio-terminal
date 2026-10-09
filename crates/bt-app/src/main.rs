@@ -60271,7 +60271,7 @@ mod quit_transaction_tests {
             item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler"));
         assert!(
             exiting.contains("self.stop_every_window()"),
-            "and the backstop for a loop stopped by something else leaves by the failure road              (held to its tables by `restore_app_tests::failure_road`)"
+            "and the backstop for a loop stopped by something else leaves by the failure road, held to its tables by `restore_app_tests::failure_road`"
         );
     }
 

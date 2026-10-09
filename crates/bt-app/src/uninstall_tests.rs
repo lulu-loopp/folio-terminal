@@ -3252,7 +3252,7 @@ fn uninstall_removes_the_folder_of_the_trial_its_journal_names() {
     assert_eq!(
         journal.exists(),
         scope.update_home.is_none(),
-        "the row reads the journal and writes nothing; on macOS the update home's row, after          it, removes the home and the journal with it"
+        "the row reads the journal and writes nothing; on macOS the update home's row, after it, removes the home and the journal with it"
     );
     fs::create_dir_all(journal.parent().unwrap()).unwrap();
 
