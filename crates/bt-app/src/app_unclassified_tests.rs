@@ -4,7 +4,7 @@
 //! [`crate::test_support`].
 
 use super::*;
-use crate::test_support::{PtyPresentationHarness, assert_close, at};
+use crate::test_support::{PtyPresentationHarness, assert_close, at, host_path};
 use std::time::Duration;
 
 /// PIN (user report, 2026-08-25) — **`BT_PROBE_INPUT=` opens no probe and
@@ -584,10 +584,21 @@ fn the_landing_wash_runs_out_over_its_own_two_hundred_milliseconds() {
 /// folder from another.
 #[test]
 fn the_folded_levels_read_from_the_deepest_towards_the_root() {
-    let path = Path::new(r"D:\Developer\folio-terminal\test-assets\huge.txt");
+    let path = &host_path(r"D:\Developer\folio-terminal\test-assets\huge.txt");
     // What `preview_rail_geometry` folds: the middle, nearest the root
-    // first.
-    let levels = folded_levels(path, &[1, 2, 3]);
+    // first — the folders between the top of the host's row (a drive crumb
+    // on Windows, none off it) and the file.
+    let segments = crumb_segments(path);
+    let at = |name: &str| {
+        segments
+            .iter()
+            .position(|(segment, _)| segment == name)
+            .expect("every folder of the path is a segment")
+    };
+    let levels = folded_levels(
+        path,
+        &[at("Developer"), at("folio-terminal"), at("test-assets")],
+    );
     assert_eq!(
         levels
             .iter()
@@ -601,9 +612,9 @@ fn the_folded_levels_read_from_the_deepest_towards_the_root() {
             .map(|level| level.folder.clone())
             .collect::<Vec<_>>(),
         vec![
-            PathBuf::from(r"D:\Developer\folio-terminal\test-assets"),
-            PathBuf::from(r"D:\Developer\folio-terminal"),
-            PathBuf::from(r"D:\Developer"),
+            host_path(r"D:\Developer\folio-terminal\test-assets"),
+            host_path(r"D:\Developer\folio-terminal"),
+            host_path(r"D:\Developer"),
         ],
         "every row goes to the place it names"
     );
@@ -629,6 +640,10 @@ fn the_folded_levels_read_from_the_deepest_towards_the_root() {
 ///    catches;
 /// ③ drop the last segment because it is a file — the row loses the one
 ///    part the ruling says is bold, and the tail assertion goes red.
+///
+/// Windows only: a drive, its separator and `\` are Windows path grammar. The
+/// row off Windows is `app_windows_tests::a_mac_breadcrumb_starts_at_the_home_crumb_or_at_a_name`.
+#[cfg(windows)]
 #[test]
 fn a_path_reads_as_segments_that_each_name_where_they_lead() {
     let walked = crumb_segments(Path::new(r"D:\Developer\Folio\docs\DESIGN.md"));

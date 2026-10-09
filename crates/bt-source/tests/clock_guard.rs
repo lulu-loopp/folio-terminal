@@ -13,8 +13,8 @@
 //! The product items of these, and nothing else (see [`SOURCE_SET`]):
 //!
 //! * `crates/{bt-unicode,bt-transcript,bt-doc,bt-layout,bt-viewport,bt-detect,
-//!   bt-effects,bt-math,bt-render,bt-term}/src` — every target the package roots
-//!   there;
+//!   bt-effects,bt-math,bt-render,bt-term,bt-compose}/src` — every target the
+//!   package roots there;
 //! * `vendor/vte/src`;
 //! * `vendor/alacritty_terminal/src` minus the modules `crate::event_loop` and
 //!   `crate::tty`, which are not compiled for `wasm32`.
@@ -90,7 +90,7 @@ impl Modules {
 }
 
 /// The source set of the module documentation, package by package.
-const SOURCE_SET: [(&str, Modules); 12] = [
+const SOURCE_SET: [(&str, Modules); 13] = [
     ("bt-unicode", Modules::All),
     ("bt-transcript", Modules::All),
     ("bt-doc", Modules::All),
@@ -101,6 +101,7 @@ const SOURCE_SET: [(&str, Modules); 12] = [
     ("bt-math", Modules::All),
     ("bt-render", Modules::All),
     ("bt-term", Modules::All),
+    ("bt-compose", Modules::All),
     ("vte", Modules::All),
     (
         "alacritty_terminal",

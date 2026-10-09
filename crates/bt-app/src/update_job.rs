@@ -541,6 +541,12 @@ pub(crate) enum Failure {
     /// were held until a commit it never saw, and the trial left its mark in
     /// the transaction's folder (`update_trial`). `version` is this build's.
     ChangesNotKept { version: String },
+    /// **This start stood in for U-35's reserved trial and found that trial
+    /// already running** (0.4.8 E3, `update_startup::stand_down`): the trial
+    /// did not take its launch within the claim's wait, so this session opens
+    /// a window of its own, not as the trial, its writes held for its life.
+    /// The update is not finished; `folder` is where its journal is.
+    BesideTheTrial { folder: PathBuf },
 }
 
 impl Failure {
@@ -1157,8 +1163,13 @@ pub(crate) enum Landed {
     /// **A staged set passed revalidation**: the offer minted again from the
     /// set's own version under the transaction's identity, and the staged
     /// transaction, lock held — the verified card, as if its download had just
-    /// finished.
-    Resumed(Offer, Box<Staged>),
+    /// finished; `restart_missed` when Restart was pressed for it and the
+    /// restart did not happen (0.4.8 E3), which that card says.
+    Resumed {
+        offer: Offer,
+        staged: Box<Staged>,
+        restart_missed: bool,
+    },
 }
 
 /// Where this launch's job-owner pass is.
@@ -1170,6 +1181,9 @@ enum Launch {
     /// to it, as a press does).
     Due {
         home: Home,
+        /// How the run before this launch ended (0.4.8 E3): what makes this
+        /// launch a counted deferral or not.
+        previous: crate::update_txn::PreviousRun,
         resume: Resumer,
         check: Box<dyn FnOnce() + Send>,
     },
@@ -1437,6 +1451,10 @@ pub(crate) struct Job<W> {
     /// a failure, a cancel, another offer — lets it go
     /// ([`Self::keep_the_asked_restart_in_its_transaction`]).
     restart_asked: Option<TxnId>,
+    /// **The staged set this launch resumed is one whose restart did not
+    /// happen** (0.4.8 E3, [`Landed::Resumed`]'s `restart_missed`): its Ready
+    /// card says so ([`Self::restart_missed`]) until Restart is pressed again.
+    restart_missed: bool,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
@@ -1496,6 +1514,7 @@ impl<W: Copy + Eq> Job<W> {
             launch: Launch::Done,
             said_incomplete: false,
             restart_asked: None,
+            restart_missed: false,
         }
     }
 
@@ -1548,7 +1567,10 @@ impl<W: Copy + Eq> Job<W> {
         }
         self.said_incomplete |= matches!(
             failure.beneath(),
-            Failure::Incomplete { .. } | Failure::TrialIncomplete { .. } | Failure::Newer { .. }
+            Failure::Incomplete { .. }
+                | Failure::TrialIncomplete { .. }
+                | Failure::Newer { .. }
+                | Failure::BesideTheTrial { .. }
         );
         self.last_failure = Some((None, failure.clone()));
         self.state = State::Failed(None, failure);
@@ -1610,6 +1632,7 @@ impl<W: Copy + Eq> Job<W> {
                 failure.beneath(),
                 Failure::Incomplete { .. }
                     | Failure::TrialIncomplete { .. }
+                    | Failure::BesideTheTrial { .. }
                     | Failure::Newer { .. }
             ),
             State::Idle => true,
@@ -1650,10 +1673,16 @@ impl<W: Copy + Eq> Job<W> {
     /// (a check that is not due asks nothing, `update::due`). A kernel that
     /// will not give the pass a thread leaves the transaction for the next
     /// launch and makes this one ordinary.
+    ///
+    /// `previous` is how the run before this launch ended (the product's is
+    /// `persist::previous_run_ended_orderly`, 0.4.8 E3): only a launch after a
+    /// run that ended orderly counts as a deferral of a staged set
+    /// (`update_txn::launch_event`).
     #[must_use]
     pub(crate) fn after_start(
         mut self,
         waiting: Option<Home>,
+        previous: crate::update_txn::PreviousRun,
         resume: Resumer,
         check: impl FnOnce() + Send + 'static,
     ) -> Self {
@@ -1662,6 +1691,7 @@ impl<W: Copy + Eq> Job<W> {
             Some(home) => {
                 self.launch = Launch::Due {
                     home,
+                    previous,
                     resume,
                     check: Box::new(check),
                 };
@@ -1677,12 +1707,14 @@ impl<W: Copy + Eq> Job<W> {
             Launch::Done => return Pass::Ordinary,
             Launch::Due {
                 home,
+                previous,
                 resume,
                 check,
             } => {
                 let Some(channel) = gathered.channel else {
                     self.launch = Launch::Due {
                         home,
+                        previous,
                         resume,
                         check,
                     };
@@ -1703,6 +1735,7 @@ impl<W: Copy + Eq> Job<W> {
                             resume,
                             Some(channel),
                             platform,
+                            previous,
                         );
                         *slot
                             .lock()
@@ -1747,7 +1780,11 @@ impl<W: Copy + Eq> Job<W> {
                     format!("Folio: update job — no offer: {}", Stop::Busy.why())
                 }))
             }
-            Landed::Resumed(offer, staged) => {
+            Landed::Resumed {
+                offer,
+                staged,
+                restart_missed,
+            } => {
                 let line = format!(
                     "Folio: update job — {} was prepared at an earlier launch and is verified again",
                     offer.tag()
@@ -1759,6 +1796,7 @@ impl<W: Copy + Eq> Job<W> {
                 );
                 self.staged = Some(*staged);
                 self.state = State::Verified(offer);
+                self.restart_missed = restart_missed;
                 self.put_away = false;
                 self.offered_this_launch = true;
                 Pass::Decided((!self.said).then(|| {
@@ -1776,6 +1814,14 @@ impl<W: Copy + Eq> Job<W> {
         let mut job = Self::with_offers(true);
         job.state = State::Verified(offer);
         job
+    }
+
+    /// **Whether the Ready card says the restart did not happen** (0.4.8 E3):
+    /// this launch resumed a staged set whose Restart was pressed and whose
+    /// restart did not happen, and Restart has not been pressed since.
+    #[must_use]
+    pub(crate) const fn restart_missed(&self) -> bool {
+        self.restart_missed && matches!(self.state, State::Verified(_))
     }
 
     /// **Why the last quit gave the update up**, while the job is back at
@@ -1803,6 +1849,7 @@ impl<W: Copy + Eq> Job<W> {
         // Restart's row never reaches a driver, so the one there is serves.
         let unfetched: SharedTransport = Arc::new(NoDownloadDoor);
         self.answer_verb(Verb::Restart, &Unsupported, &unfetched)?;
+        self.restart_missed = false;
         let txn = self
             .state
             .offer()
@@ -3861,13 +3908,96 @@ mod tests {
 
         // The launch pass settling an earlier launch's transaction.
         let home = crate::update_txn::Home::at(PathBuf::from(r"D:\工具\.folio-update"));
-        let mut settling =
-            self::job().after_start(Some(home), super::resumer_for_this_copy(), || {});
+        let mut settling = self::job().after_start(
+            Some(home),
+            crate::update_txn::PreviousRun::Orderly,
+            super::resumer_for_this_copy(),
+            || {},
+        );
         assert!(!settling.told_by_a_launch(incomplete(), Some(4)));
         assert_eq!(settling.card_window(), None);
         assert_eq!(
             settling.last_failure().map(|(_, failure)| failure),
             Some(&incomplete())
         );
+    }
+
+    /// RED (0.4.8 E3, #13) — **the launch that resumes a staged update whose
+    /// restart did not happen says so, and offers the same Restart**: its
+    /// Ready card's heading is *The restart did not happen.*, the Ready line
+    /// under it, with Restart · Later; a resumed set whose restart was never
+    /// pressed shows the Ready card as ever; pressing Restart spends the
+    /// sentence.
+    ///
+    /// MUTATION: `update_card::paint_of` answers `paint(job.state())` alone.
+    #[test]
+    fn a_missed_restart_is_offered_again_by_a_card_that_says_so() {
+        use crate::update_card::{CardVerb, paint_of};
+        let root = bt_testpath::temp_path("bt-update-job-重启");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = crate::update_txn::Home::at(root.join("更新"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let tx = txn(0x4d);
+        for restart_missed in [true, false] {
+            let lock = bt_platform::install_txn::try_hold(
+                &home.lock(),
+                bt_platform::install_txn::Hold::Exclusive,
+            )
+            .unwrap()
+            .expect("the lock is free");
+            let staged = crate::update_handoff::Staged {
+                home: home.clone(),
+                journal: crate::update_txn::Journal::allocate(
+                    tx,
+                    "rescue".to_owned(),
+                    crate::update_txn::Layout::Members(crate::update_txn::Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                ),
+                lock,
+            };
+            let mut job = job();
+            job.launch = super::Launch::Running {
+                landed: Arc::new(Mutex::new(Some(super::Landed::Resumed {
+                    offer: Offer::mint(tx, "v0.4.9", HostPlatform::Windows).expect("a release"),
+                    staged: Box::new(staged),
+                    restart_missed,
+                }))),
+                check: Box::new(|| {}),
+            };
+            let _ = job.consider(
+                gathered("v0.4.9", None, Some(Channel::Ours)),
+                &one_window(),
+                || tx,
+            );
+            assert!(
+                matches!(job.state(), State::Verified(_)),
+                "{:?}",
+                job.state()
+            );
+            let paint = paint_of(&job).expect("the Ready card");
+            assert_eq!(paint.verbs, vec![CardVerb::Restart, CardVerb::Later]);
+            if restart_missed {
+                assert_eq!(
+                    paint.heading.as_deref(),
+                    Some("The restart did not happen.")
+                );
+                assert_eq!(
+                    paint.detail.as_deref(),
+                    Some("Ready. Running programs will close.")
+                );
+                job.restart().expect("Restart");
+                assert!(!job.restart_missed(), "Restart spends it");
+            } else {
+                assert_eq!(
+                    paint.heading.as_deref(),
+                    Some("Ready. Running programs will close.")
+                );
+                assert_eq!(paint.detail, None);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

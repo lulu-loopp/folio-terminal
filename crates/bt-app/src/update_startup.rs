@@ -131,6 +131,19 @@ static LAST_TRIAL: OnceLock<()> = OnceLock::new();
 /// write of such a process and never releases one (`update_trial::defer`).
 static HELD: OnceLock<TxnId> = OnceLock::new();
 
+/// **This start stands in for U-35's reserved trial** (0.4.8 E3): a
+/// person's start that [`pass`] continued as that trial because no rescue
+/// build could be started, with [`TRIAL`] and [`LAST_TRIAL`]. Which of the two
+/// processes that may then both be admitted as that trial is it, is the data
+/// directory's claim's to say (`update_trial::take_the_claim`).
+static STAND_IN: OnceLock<()> = OnceLock::new();
+
+/// **This stand-in found the reserved trial already running and stood down**
+/// (0.4.8 E3, [`stand_down`]): it is no trial from here — no watch, no
+/// receipt, no commit — and continues with its writes held for the life of
+/// the process, as a held start does ([`is_held`]).
+static STOOD_DOWN: OnceLock<()> = OnceLock::new();
+
 /// What [`TRIAL`] holds.
 struct Trial {
     txn: TxnId,
@@ -160,37 +173,75 @@ pub(crate) fn waiting() -> Option<Home> {
 /// `rolled_back` — the job starts at `Failed` with it
 /// (`update_job::Job::after_rollback`). `None` for every other start.
 pub(crate) fn failed() -> Option<Failure> {
+    if stood_down() {
+        return trial_home_as_set().map(|home| Failure::BesideTheTrial {
+            folder: home.root().to_path_buf(),
+        });
+    }
     FAILED.get().cloned()
 }
 
 /// **Whether this start is an update's trial, and its nonce** — the fact the
 /// trial's write gate and its receipt read (`update_trial`, U-13).
 pub(crate) fn trial() -> Option<(TxnId, Nonce)> {
-    TRIAL.get().map(|trial| (trial.txn, trial.nonce))
+    TRIAL
+        .get()
+        .filter(|_| !stood_down())
+        .map(|trial| (trial.txn, trial.nonce))
 }
 
 /// **The installation home of this start's trial**: where its journal is read
 /// and its receipt written (`update_trial`, U-13). `None` exactly when
 /// [`trial`] is.
 pub(crate) fn trial_home() -> Option<&'static Home> {
+    trial_home_as_set().filter(|_| !stood_down())
+}
+
+/// [`TRIAL`]'s home as [`pass`] set it, stood down or not.
+fn trial_home_as_set() -> Option<&'static Home> {
     TRIAL.get().map(|trial| &trial.home)
 }
 
 /// Whether this start is U-35's reserved trial ([`LAST_TRIAL`]).
 pub(crate) fn is_last_trial() -> bool {
-    LAST_TRIAL.get().is_some()
+    LAST_TRIAL.get().is_some() && !stood_down()
 }
 
-/// **Whether this start continues with its writes held** ([`HELD`]): every
-/// durable write is held back for the life of the process, as a trial's are
-/// before its commit, and none is ever released.
+/// **Whether this start continues with its writes held** ([`HELD`], or a
+/// stand-in that stood down, [`STOOD_DOWN`]): every durable write is held back
+/// for the life of the process, as a trial's are before its commit, and none
+/// is ever released.
 pub(crate) fn is_held() -> bool {
-    HELD.get().is_some()
+    HELD.get().is_some() || stood_down()
 }
 
 /// The transaction a held start continued past ([`is_held`]).
 pub(crate) fn held() -> Option<TxnId> {
-    HELD.get().copied()
+    HELD.get()
+        .copied()
+        .or_else(|| TRIAL.get().filter(|_| stood_down()).map(|trial| trial.txn))
+}
+
+/// **Whether this start stands in for U-35's reserved trial** and has not
+/// stood down ([`STAND_IN`]).
+pub(crate) fn stands_in() -> bool {
+    STAND_IN.get().is_some() && !stood_down()
+}
+
+/// Whether this stand-in stood down ([`STOOD_DOWN`]).
+fn stood_down() -> bool {
+    STOOD_DOWN.get().is_some()
+}
+
+/// **This stand-in stands down** (0.4.8 E3): the reserved trial already holds
+/// the data directory's claim and did not take this launch within the claim's
+/// wait (`update_trial::take_the_claim`). From here this process is no trial
+/// ([`trial`] is `None`), its writes are held for its life ([`is_held`]), and
+/// its card says the update did not finish and that this session's changes are
+/// not kept (`Failure::BesideTheTrial`). Answers whether this call stood it
+/// down: only a stand-in can, once.
+pub(crate) fn stand_down() -> bool {
+    stands_in() && STOOD_DOWN.set(()).is_ok()
 }
 
 /// **Make this test process a held start** — what [`pass`] records when a
@@ -208,6 +259,19 @@ pub(crate) fn become_held(txn: TxnId) -> bool {
 #[cfg(test)]
 pub(crate) fn become_trial(txn: TxnId, nonce: Nonce, home: Home) -> bool {
     TRIAL.set(Trial { txn, nonce, home }).is_ok()
+}
+
+/// **Make this test process a person's start standing in for U-35's reserved
+/// trial** — what [`pass`] records when no rescue build could be started over
+/// `TrialStarting` ([`STAND_IN`]), for a test that runs it in a process of its
+/// own (`update_trial`'s tests). Once per process.
+#[cfg(test)]
+pub(crate) fn become_stand_in(txn: TxnId, nonce: Nonce, home: Home) -> bool {
+    let folder = home.root().to_path_buf();
+    TRIAL.set(Trial { txn, nonce, home }).is_ok()
+        && LAST_TRIAL.set(()).is_ok()
+        && STAND_IN.set(()).is_ok()
+        && FAILED.set(Failure::TrialIncomplete { folder }).is_ok()
 }
 
 /// **The start's effects that are not files in the home**: its one line, the
@@ -269,6 +333,10 @@ pub(crate) enum Verdict {
         /// The transaction this start continues past with its writes held
         /// ([`is_held`]): its rescue build could not be started.
         held: Option<TxnId>,
+        /// **This start stands in for U-35's reserved trial** — a person's
+        /// start continued as that trial because no rescue build could be
+        /// started ([`stands_in`]); `trial` and `last_trial` say which.
+        stands_in: bool,
     },
     /// Leave now, with this exit code: the rescue build has this start.
     Exit(i32),
@@ -302,6 +370,7 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
             failed,
             waiting,
             held,
+            stands_in,
         } => {
             if let Some(held) = admission {
                 let _ = ADMISSION.set(held);
@@ -316,6 +385,9 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
                 let _ = TRIAL.set(Trial { txn, nonce, home });
                 if last_trial {
                     let _ = LAST_TRIAL.set(());
+                }
+                if stands_in {
+                    let _ = STAND_IN.set(());
                 }
             }
             if let Some(failure) = failed {
@@ -341,6 +413,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             failed: None,
             waiting: None,
             held: None,
+            stands_in: false,
         };
     };
     // Nothing of the journal reads, not even the transaction or its rescue
@@ -358,6 +431,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             failed: Some(unfinished(&seen, start.home, false)),
             waiting: None,
             held: None,
+            stands_in: false,
         };
     };
     if !matches!(seen, Sight::Known(_)) {
@@ -460,6 +534,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             failed,
             waiting,
             held: None,
+            stands_in: false,
         },
         StartAction::RunAsTrial => Verdict::Continue {
             admission,
@@ -468,6 +543,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             failed,
             waiting: None,
             held: None,
+            stands_in: false,
         },
         action @ (StartAction::Retire | StartAction::Discard) => {
             // Read by the start that retires the transaction, before the
@@ -487,6 +563,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
                 failed,
                 waiting: None,
                 held: None,
+                stands_in: false,
             }
         }
         StartAction::HandToRescue => {
@@ -796,6 +873,7 @@ fn hand_to_rescue(
             }),
             waiting: None,
             held: None,
+            stands_in: true,
         };
     }
     if named.is_none() {
@@ -810,6 +888,7 @@ fn hand_to_rescue(
             failed: Some(unfinished(seen, start.home, true)),
             waiting: None,
             held: Some(header.txn),
+            stands_in: false,
         };
     }
     world.say(&format!(
@@ -823,6 +902,7 @@ fn hand_to_rescue(
         failed: Some(unfinished(seen, start.home, false)),
         waiting: None,
         held: None,
+        stands_in: false,
     }
 }
 
@@ -1032,6 +1112,7 @@ mod tests {
                 (Class::Preparing, _) => Phase::Allocated,
                 (Class::Deferred, _) => Phase::Prepared {
                     deferred_launches: 0,
+                    restart_missed: false,
                 },
                 (Class::Destructive, HeaderOutcome::None) => Phase::Moving,
                 (Class::Destructive, HeaderOutcome::Committed) => Phase::Committed,

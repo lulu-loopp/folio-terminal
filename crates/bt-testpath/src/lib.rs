@@ -26,7 +26,7 @@
 //! readable in a listing of the temporary directory; uniqueness never rests on
 //! it.
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf, Prefix};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The process-wide ordinal. Every name this crate hands out takes the next
@@ -52,6 +52,49 @@ pub fn unique_name(tag: &str) -> String {
 #[must_use]
 pub fn temp_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(unique_name(tag))
+}
+
+/// **The system's temporary directory with every link above it resolved, in its ordinary
+/// spelling.**
+///
+/// For a test whose subject refuses a path with a link among its ancestors — the uninstall
+/// door's removal roots, the shell profile writer — and so must stand in a directory whose own
+/// spelling carries none, or every fixture reads as a planted link. On macOS the system's own
+/// spelling does: `$TMPDIR` is `/var/folders/…`, and `/var` is the system's link to
+/// `/private/var`. `canonicalize` is the resolution; on Windows it answers the verbatim `\\?\`
+/// form, where `/` is not a separator and a fixture's `root.join("app/folio.exe")` would name no
+/// file, so a verbatim drive or share prefix is spelled back the ordinary way. A path with no
+/// prefix (every Unix path) is the canonical answer itself.
+///
+/// # Panics
+///
+/// When the temporary directory does not exist, which no test can stand in.
+#[must_use]
+pub fn link_free_temp_dir() -> PathBuf {
+    let real = std::fs::canonicalize(std::env::temp_dir()).expect("the temporary directory exists");
+    let mut components = real.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return real;
+    };
+    let head = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => format!("{}:\\", char::from(letter)),
+        Prefix::VerbatimUNC(server, share) => format!(
+            r"\\{}\{}\",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        ),
+        _ => return real,
+    };
+    let rest: PathBuf = components
+        .filter(|component| !matches!(component, Component::RootDir))
+        .collect();
+    PathBuf::from(head).join(rest)
+}
+
+/// [`unique_name`] under [`link_free_temp_dir`]. Nothing is created.
+#[must_use]
+pub fn link_free_temp_path(tag: &str) -> PathBuf {
+    link_free_temp_dir().join(unique_name(tag))
 }
 
 #[cfg(test)]
@@ -113,5 +156,36 @@ mod tests {
             temp_path("渲染-probe").parent(),
             Some(std::env::temp_dir().as_path())
         );
+    }
+
+    /// RED — **a link-free scratch path has no link above it, and is spelled the ordinary way.**
+    ///
+    /// Every ancestor of a fresh directory under [`link_free_temp_path`] is asked about itself
+    /// (`symlink_metadata` never follows), and the path must be the one that directory reads back
+    /// as its canonical name — with no verbatim `\\?\` head, which a fixture's `join("a/b")` cannot
+    /// cross.
+    ///
+    /// MUTATION: return `std::env::temp_dir()` from `link_free_temp_dir` and the macOS run is red
+    /// at `/var`; drop the verbatim respelling and the Windows run is red at the prefix.
+    #[test]
+    fn a_link_free_scratch_path_has_no_link_above_it() {
+        let directory = link_free_temp_path("無鏈 probe");
+        std::fs::create_dir(&directory).expect("a fresh scratch directory");
+        let linked: Vec<_> = directory
+            .ancestors()
+            .filter(|ancestor| {
+                std::fs::symlink_metadata(ancestor)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            })
+            .map(std::path::Path::to_path_buf)
+            .collect();
+        let verbatim = matches!(
+            directory.components().next(),
+            Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+        );
+        std::fs::remove_dir(&directory).expect("the scratch directory goes");
+        assert!(linked.is_empty(), "links above {directory:?}: {linked:?}");
+        assert!(!verbatim, "{directory:?} is spelled verbatim");
+        assert_eq!(directory.parent(), Some(link_free_temp_dir().as_path()));
     }
 }

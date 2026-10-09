@@ -199,6 +199,11 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
 /// MUTATION: build the share's request as an address in `unverified_reference_handoff`
 /// (`Handoff::Address`, `shell_execute` — the door without the list) and the request below is not
 /// `Open`.
+///
+/// Windows only: a share on another machine is a spelling only Windows' grammar has
+/// (`bt_transcript::paths::is_a_share_on_another_machine`). On macOS a share is a mount point with
+/// a local name, so it leaves through the local file's arm and meets the program list there.
+#[cfg(windows)]
 #[test]
 fn a_share_handed_over_meets_the_same_program_list() {
     let HyperlinkActivation::Share(path) = hyperlink_activation(
@@ -216,15 +221,14 @@ fn a_share_handed_over_meets_the_same_program_list() {
     };
     assert_eq!(handed, &path);
 
-    let mut lane = handoff_lane::HandoffLane::spawn(|| {}).expect("the lane starts");
+    let (wake, wakes) = crate::lane::wake_channel();
+    let mut lane = handoff_lane::HandoffLane::spawn(wake).expect("the lane starts");
     let id = lane.submit(bt_platform::NativeWindow::stand_in(0), request);
-    let deadline = Instant::now() + Duration::from_secs(10);
     let answer = loop {
         if let Some(answer) = lane.answers().into_iter().find(|answer| answer.id == id) {
             break answer;
         }
-        assert!(Instant::now() < deadline, "the lane answered");
-        std::thread::sleep(Duration::from_millis(2));
+        crate::lane::wait_for_a_wake(&wakes, "the share's answer");
     };
     let reason = answer.outcome.expect_err("a program on a share is refused");
     assert_eq!(reason, bt_platform::PROGRAM_REFUSED, "the door's own words");

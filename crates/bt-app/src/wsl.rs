@@ -271,7 +271,7 @@ pub(crate) fn facts_of(distributions: &[&str], default: &str) -> WslFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, sync::mpsc, time::Duration};
+    use std::collections::BTreeMap;
 
     /// A registry somebody wrote down, shaped exactly like the one Windows keeps.
     ///
@@ -480,12 +480,16 @@ mod tests {
     /// It leaves no state behind for the rest of the suite: `INSTALLATION` is
     /// never set — no test calls [`adopt`] — so `facts()` answers the empty
     /// installation here as it does everywhere else.
+    ///
+    /// Windows only: the WSL row is the Windows seed's, and its script is named across the
+    /// boundary through a drive-letter path.
+    #[cfg(windows)]
     #[test]
     fn the_first_frame_and_the_first_pane_do_not_wait_for_a_distribution() {
         /// Long enough that only a read which never returns can reach it.
-        const NEVER: Duration = Duration::from_secs(60);
+        const NEVER: std::time::Duration = std::time::Duration::from_secs(60);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let facts = facts();
             let _ = crate::profiles::title(0);

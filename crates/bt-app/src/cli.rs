@@ -1372,6 +1372,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::host_path;
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
@@ -1642,30 +1643,32 @@ mod tests {
     /// a drive-qualified path joined onto another drive keeps the wrong drive.
     #[test]
     fn a_named_folder_is_made_absolute_lexically_and_nothing_else_is() {
-        let here = Path::new(r"D:\Developer\Ledger");
-        let asked = |folder: &str| absolute_from(Some(here), Path::new(folder));
-        assert_eq!(asked("."), PathBuf::from(r"D:\Developer\Ledger"));
+        let here = &host_path(r"D:\Developer\Ledger");
+        // A relative folder, joined with this host's separator.
+        let relative = |names: &[&str]| names.iter().collect::<PathBuf>();
+        let asked = |folder: &Path| absolute_from(Some(here), folder);
+        assert_eq!(asked(Path::new(".")), host_path(r"D:\Developer\Ledger"));
         assert_eq!(
-            asked("crates"),
-            PathBuf::from(r"D:\Developer\Ledger\crates")
+            asked(Path::new("crates")),
+            host_path(r"D:\Developer\Ledger\crates")
         );
         assert_eq!(
-            asked(r"crates\bt-app"),
-            PathBuf::from(r"D:\Developer\Ledger\crates\bt-app")
+            asked(&relative(&["crates", "bt-app"])),
+            host_path(r"D:\Developer\Ledger\crates\bt-app")
         );
-        assert_eq!(asked(".."), PathBuf::from(r"D:\Developer"));
+        assert_eq!(asked(Path::new("..")), host_path(r"D:\Developer"));
         assert_eq!(
-            asked(r"..\bt-wt\launch-window"),
-            PathBuf::from(r"D:\Developer\bt-wt\launch-window")
+            asked(&relative(&["..", "bt-wt", "launch-window"])),
+            host_path(r"D:\Developer\bt-wt\launch-window")
         );
         assert_eq!(
-            asked(r"..\..\..\..\..\.."),
-            PathBuf::from(r"D:\"),
+            asked(&relative(&[".."; 6])),
+            host_path(r"D:\"),
             "a walk above the root stops at the root, which is what every shell does"
         );
         assert_eq!(
-            asked(r"D:\Other"),
-            PathBuf::from(r"D:\Other"),
+            asked(host_path(r"D:\Other").as_path()),
+            host_path(r"D:\Other"),
             "a folder that was already absolute is left exactly as it was written"
         );
         assert_eq!(
@@ -2053,6 +2056,10 @@ mod tests {
     /// This is the rule a split's folder chooser already obeys
     /// (`SplitSeed::Folder`), asked at the other door: a Windows path handed to
     /// a WSL shell unconverted names nothing at all.
+    ///
+    /// Windows only: the WSL profile and the drive-letter crossing into `/mnt/<drive>` exist only
+    /// on Windows.
+    #[cfg(windows)]
     #[test]
     fn a_windows_folder_crosses_into_the_profiles_namespace_or_is_refused() {
         let wsl = profiles::index_of_id("wsl");

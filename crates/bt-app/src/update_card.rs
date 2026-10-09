@@ -10,7 +10,8 @@
 //! - **What the card says** — [`paint`]: one line per state, C9's verbs, and
 //!   for the download a bar (determinate with `12 / 41 MB` beside it, or the
 //!   indeterminate bar alone when the length is unknown). `None` in every
-//!   state C9 draws no card for.
+//!   state C9 draws no card for. A job's card is [`paint_of`]: the state's,
+//!   and the Ready card of a restart that did not happen says so first.
 //! - **What a press on it asks** — [`CardVerb::asks`] (Escape and the close
 //!   box are Later; a failed card's Close is Later too; Restart asks the
 //!   application's quit, not the job alone) and [`spend`], which
@@ -338,6 +339,23 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
     }
 }
 
+/// **What the card of `job` says** — [`paint`] of its state, except the Ready
+/// card of a staged set whose restart did not happen (0.4.8 E3,
+/// `Job::restart_missed`): its heading is *The restart did not happen.*, the
+/// Ready line follows as its detail, and the same Restart · Later are offered.
+#[must_use]
+pub(crate) fn paint_of<W: Copy + Eq>(job: &Job<W>) -> Option<Paint> {
+    let paint = paint(job.state())?;
+    if !job.restart_missed() {
+        return Some(paint);
+    }
+    Some(Paint {
+        heading: Some(Text::UpdateCardRestartMissed.text().to_owned()),
+        detail: paint.heading,
+        ..paint
+    })
+}
+
 /// **A failed card**: the reason, then what the failure did (C9's three
 /// shapes; coordinator ruling 11 — the reasons stay U-20's, the suffix is
 /// C9's).
@@ -431,7 +449,9 @@ fn reason(failure: &Failure) -> String {
         Failure::JournalHeld { error, .. } => return i18n::update_failed_journal_held(error),
         // Never a failed card: the job raises it as `State::Updated`.
         Failure::ChangesNotKept { version } => return format!("Folio {version}"),
-        Failure::TrialIncomplete { .. } => Text::UpdateFailedTrialRunning,
+        Failure::TrialIncomplete { .. } | Failure::BesideTheTrial { .. } => {
+            Text::UpdateFailedTrialRunning
+        }
         Failure::Interrupted => Text::UpdateFailedInterrupted,
         Failure::Newer {
             version: Some(_), ..
@@ -482,6 +502,12 @@ fn outcome(failure: &Failure) -> Outcome {
         },
         Failure::TrialIncomplete { folder } => Outcome::Trial {
             folder: folder.clone(),
+        },
+        // The update's reserved trial runs in another process; this session's
+        // writes are held for its life (0.4.8 E3).
+        Failure::BesideTheTrial { folder } => Outcome::Incomplete {
+            folder: Some(folder.clone()),
+            held: true,
         },
     }
 }

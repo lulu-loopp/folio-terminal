@@ -175,9 +175,9 @@ use crate::cli;
 use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    BeforeDeciding, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave, Limits, Opener,
-    Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon, read_receipt, stop_trial,
-    trial_runs, trial_words, until_let_go,
+    Ahead, BeforeDeciding, Carried, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave,
+    Limits, Opener, Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
+    read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -239,6 +239,18 @@ pub(crate) trait World {
     fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool;
     /// **The failure window, in this process**: `text` in a message box.
     fn show_here(&mut self, text: &str);
+    /// **Carry a person's start this recovery deferred to the window**
+    /// (0.4.8 E3): `request` handed over the launch wire to the Folio that
+    /// holds `data`, once the party `ahead` has opened it, waiting for that
+    /// party no longer than `within` (`update_apply::carry_the_start`).
+    fn carry(
+        &mut self,
+        worker: &WorkerCtx,
+        data: &Path,
+        ahead: &Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        within: Duration,
+    ) -> Carried;
 }
 
 // ── the layout's points ─────────────────────────────────────────────────────
@@ -535,6 +547,13 @@ pub(crate) struct Recovered {
     /// The refusal of a journal write another program's hold outlasted the
     /// window for ([`Journaled::held`], 0.4.8 E4).
     pub(crate) journal_held: Option<String>,
+    /// **Whom a person's start was deferred to** (0.4.8 E3): the party that
+    /// opens the window while this recovery starts nothing — the applier the
+    /// mark names, an election in flight, the lock holder that kept the
+    /// transaction, a Folio already holding the data directory, or a successor
+    /// that was not started with the start. `None` at logon, and wherever the
+    /// start was delivered or this recovery's own exit guard starts it.
+    pub(crate) deferred_to: Option<Ahead>,
 }
 
 /// **How a Windows road process leaves** (`update_apply::ExitGuard`, U-34):
@@ -910,7 +929,7 @@ pub(crate) fn recover(
         Opener::Login
     };
     let handed = start.unwrap_or(&[]);
-    let (ended, successor, journal_held) = match hold(road) {
+    let (ended, successor, deferred_to, journal_held) = match hold(road) {
         Ok((lock, journal)) => {
             let txn = journal.txn;
             match Txn::of(road, worker, journal, lock, Asker::Rescue) {
@@ -947,12 +966,31 @@ pub(crate) fn recover(
                         "BT_UPDATE_RECOVER transaction {txn} wrote {:?}",
                         held.j.written
                     ));
-                    (ended, held.successor, held.j.held)
+                    let deferred_to = match (&ended, held.successor) {
+                        (_, Some(_)) if held.successor_has_the_start => None,
+                        (_, Some(successor)) => Some(Ahead::Process(successor)),
+                        (Ended::Deferred(Deferral::WindowDuty), None) => Some(Ahead::Election {
+                            home: road.home.clone(),
+                            txn,
+                            me: road.me,
+                        }),
+                        (Ended::Deferred(Deferral::Held), None) => Some(Ahead::DataHolder),
+                        _ => None,
+                    };
+                    (ended, held.successor, deferred_to, held.j.held)
                 }
-                Err(ended) => (ended, None, None),
+                Err(ended) => (ended, None, None, None),
             }
         }
-        Err(ended) => (ended, None, None),
+        // Another holder kept the transaction lock through the wait: it opens
+        // the window.
+        Err(Ended::LockHeld) => (
+            Ended::LockHeld,
+            None,
+            Some(Ahead::Lock(road.home.lock())),
+            None,
+        ),
+        Err(ended) => (ended, None, None, None),
     };
     let waiting = opener == Opener::Start || owed_at_logon(&ended);
     Recovered {
@@ -960,6 +998,7 @@ pub(crate) fn recover(
         successor,
         waiting,
         journal_held,
+        deferred_to: deferred_to.filter(|_| opener == Opener::Start),
     }
 }
 
@@ -1104,6 +1143,10 @@ struct Txn<'a> {
     /// nothing (U-34; U-29b's ruling 2's "exactly one"); a trial stopped by a
     /// rollback no longer runs.
     successor: Option<Running>,
+    /// **The successor was started with the person's start this road was
+    /// handed** (the retrial over `Stuck`, [`Txn::begin_retrial`]): that start
+    /// is delivered with it and nothing is carried (0.4.8 E3).
+    successor_has_the_start: bool,
 }
 
 impl<'a> Txn<'a> {
@@ -1131,6 +1174,7 @@ impl<'a> Txn<'a> {
             inventories,
             layout,
             successor: None,
+            successor_has_the_start: false,
         })
     }
 
@@ -1844,6 +1888,7 @@ impl<'a> Txn<'a> {
         };
         let started = install_flip::started_of(pid).unwrap_or(0);
         self.successor = Some(Running { pid, started });
+        self.successor_has_the_start = true;
         // A retrial whose start cannot be recorded runs on as the window: it
         // carries `--update-failed`, and a trial of this transaction that no
         // journal records is what `Opens::Trial` starts over `Stuck` (U-34).
@@ -2040,6 +2085,17 @@ impl World for Machine {
 
     fn arm(&mut self, txn: TxnId, rescue: &Path) -> Result<Armed, String> {
         bt_platform::logon_hook::arm(txn.bytes(), rescue).map_err(|refusal| refusal.to_string())
+    }
+
+    fn carry(
+        &mut self,
+        worker: &WorkerCtx,
+        data: &Path,
+        ahead: &Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        within: Duration,
+    ) -> Carried {
+        crate::update_apply::carry_the_start(worker, data, ahead, request, within)
     }
 
     fn disarm(&mut self, txn: TxnId) -> Result<(), String> {

@@ -696,6 +696,7 @@ pub fn take() -> Answers {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::lane::wait_for_a_wake;
     use crate::profiles::{ProgramCandidate, ProgramSource};
     use std::sync::{Arc, mpsc};
 
@@ -860,14 +861,6 @@ pub(crate) mod tests {
                 return gathered;
             }
             wait_for_a_wake(wakes, &format!("walk {generation}'s end"));
-        }
-    }
-
-    /// **One wake, within the lane suite's patience** (`crate::lane::PATIENCE`): a lane that never
-    /// wakes fails the test that awaited `what`, by name, rather than hanging it.
-    pub(crate) fn wait_for_a_wake(wakes: &mpsc::Receiver<()>, what: &str) {
-        if wakes.recv_timeout(crate::lane::PATIENCE).is_err() {
-            panic!("no wake within the lane suite's patience while awaiting {what}");
         }
     }
 

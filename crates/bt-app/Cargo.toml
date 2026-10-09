@@ -38,6 +38,9 @@ bt-winres = { path = "../bt-winres" }
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+# The order a pane's frame is made in: project, the hold, schedule, the deadlines,
+# the acknowledgment, and the draw list (`docs/ARCHITECTURE.md` §3.1).
+bt-compose = { path = "../bt-compose" }
 bt-detect = { path = "../bt-detect" }
 bt-doc = { path = "../bt-doc" }
 bt-layout = { path = "../bt-layout" }

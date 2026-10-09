@@ -305,7 +305,7 @@ impl Runtime<'_> {
                 restore::update_card_build(
                     &layout,
                     self.window.update_card.hover(),
-                    crate::update_card::paint(self.app.update_job.state())
+                    crate::update_card::paint_of(&self.app.update_job)
                         .and_then(|paint| self.window.update_card.ring(&paint.verbs)),
                 ),
                 ModalBand::Fixed,
@@ -1294,14 +1294,7 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let mut settled = false;
         for (_, leaf) in self.window.tabs[active].leaves_mut() {
-            if leaf
-                .session
-                .live_stability_deadline()
-                .is_some_and(|deadline| now >= deadline)
-            {
-                leaf.session.advance_live_stability(now);
-                settled = true;
-            }
+            settled |= bt_compose::advance_live_stability(&mut leaf.session, now);
         }
         if !settled {
             return Ok(());

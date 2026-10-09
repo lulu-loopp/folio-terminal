@@ -7911,6 +7911,7 @@ pub const MIXED_SCRIPT_PAGE: &str = concat!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::host_path;
 
     /// Ruling 2026-08-14, both axes: however long the document, the thumb is
     /// never drawn shorter than a hand can see and take — and the floor costs
@@ -8195,7 +8196,7 @@ mod tests {
 
         // The same file, as a file, still goes down the lane it always did.
         let file = PreviewBuffer::new(
-            PreviewSource::file(r"C:\w\repo\src\main.rs"),
+            PreviewSource::file(host_path(r"C:\w\repo\src\main.rs")),
             "main.rs".to_owned(),
         );
         assert!(file.wants_head_read());
@@ -8225,7 +8226,7 @@ mod tests {
     #[test]
     fn a_head_read_is_claimed_once_and_a_refusal_is_not_retried() {
         let mut buffer = PreviewBuffer::new(
-            PreviewSource::file(r"C:\w\repo\notes.md"),
+            PreviewSource::file(host_path(r"C:\w\repo\notes.md")),
             "notes.md".to_owned(),
         );
         assert!(
@@ -8261,7 +8262,7 @@ mod tests {
 
         // A body that arrives is the same shut door, by the other clause.
         let mut read = PreviewBuffer::new(
-            PreviewSource::file(r"C:\w\repo\main.rs"),
+            PreviewSource::file(host_path(r"C:\w\repo\main.rs")),
             "main.rs".to_owned(),
         );
         assert!(read.claim_head_read().is_some());
@@ -8482,7 +8483,10 @@ mod tests {
     /// fails; drop its `dirty` guard and the third does.
     #[test]
     fn a_saved_file_is_read_again_without_unloading_it_and_never_over_an_edit() {
-        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"D:\notes\a.md"), "a.md".into());
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(host_path(r"D:\notes\a.md")),
+            "a.md".into(),
+        );
         assert!(buffer.claim_head_read().is_some(), "the opening read");
         buffer.accept(HeadOutcome::Read {
             text: "# one\n".into(),
@@ -8730,7 +8734,7 @@ mod tests {
         ] {
             assert_eq!(preview_ftype(name), PreviewFtype::Video, "{name}");
             assert!(
-                path_names_a_video(std::path::Path::new(&format!(r"D:\shots\{name}"))),
+                path_names_a_video(&host_path(r"D:\shots").join(name)),
                 "{name}"
             );
         }
@@ -8750,7 +8754,7 @@ mod tests {
         ] {
             assert_ne!(preview_ftype(name), PreviewFtype::Video, "{name}");
             assert!(
-                !path_names_a_video(std::path::Path::new(&format!(r"D:\shots\{name}"))),
+                !path_names_a_video(&host_path(r"D:\shots").join(name)),
                 "{name}"
             );
         }
@@ -8977,7 +8981,7 @@ mod tests {
             (r"D:\site\index.htm", "index.htm"),
             (r"D:\reports\report.pdf", "report.pdf"),
         ] {
-            let buffer = PreviewBuffer::new(PreviewSource::file(path), name.to_owned());
+            let buffer = PreviewBuffer::new(PreviewSource::file(host_path(path)), name.to_owned());
             assert_eq!(buffer.ftype, PreviewFtype::Web, "{name}");
             assert_ne!(
                 buffer.load,
@@ -9006,8 +9010,10 @@ mod tests {
         // it is still refused for its type when they come back saying binary,
         // which is the card this line has always been about. See
         // `an_unreadable_type_asks_the_disk_once_and_refuses_on_the_answer`.
-        let mut unknown =
-            PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
+        let mut unknown = PreviewBuffer::new(
+            PreviewSource::file(host_path(r"C:\w\a.exe")),
+            "a.exe".to_owned(),
+        );
         assert_eq!(unknown.load, PreviewLoad::Pending);
         unknown.accept(HeadOutcome::Refused(PreviewRefusal::Binary));
         assert_eq!(unknown.load, PreviewLoad::Refused(PreviewRefusal::Type));
@@ -9035,7 +9041,7 @@ mod tests {
     #[test]
     fn a_glance_reads_a_pages_source_when_the_page_is_made_of_text() {
         let glance = |path: &str, name: &str| {
-            PreviewBuffer::glancing(PreviewSource::file(path), name.to_owned())
+            PreviewBuffer::glancing(PreviewSource::file(host_path(path)), name.to_owned())
         };
         for (path, name) in [
             (r"D:\site\index.html", "index.html"),
@@ -9079,7 +9085,10 @@ mod tests {
         // A share's `.html` keeps the network refusal §7.1.3 has always shown:
         // the promotion is of a buffer that was going to sit empty, never of one
         // that already has its answer.
-        let share = glance(r"\\server\share\index.html", "index.html");
+        let share = PreviewBuffer::glancing(
+            PreviewSource::file(r"\\server\share\index.html"),
+            "index.html".to_owned(),
+        );
         assert_eq!(
             share.load,
             PreviewLoad::Refused(PreviewRefusal::NetworkPath),
@@ -9110,7 +9119,7 @@ mod tests {
     /// both readings.
     #[test]
     fn what_a_glance_shows_of_a_page_is_a_property_of_the_class() {
-        let glance = |path: &str| path_page_glance(Path::new(path));
+        let glance = |path: &str| path_page_glance(&host_path(path));
         assert_eq!(glance(r"D:\site\index.html"), Some(PageGlance::Source));
         assert_eq!(glance(r"D:\site\index.htm"), Some(PageGlance::Source));
         assert_eq!(glance(r"D:\site\INDEX.HTM"), Some(PageGlance::Source));
@@ -9125,7 +9134,7 @@ mod tests {
         // a spelling added to the class without a decision about what a glance
         // shows of it would be a card with nothing to draw.
         for name in ["index.html", "index.htm", "report.pdf"] {
-            let path = PathBuf::from(format!(r"D:\site\{name}"));
+            let path = host_path(r"D:\site").join(name);
             assert_eq!(
                 path_names_a_page(&path),
                 path_page_glance(&path).is_some(),
@@ -9276,8 +9285,14 @@ mod tests {
 
     /// ⑦ A network path is refused without a read.
     ///
+    /// Windows only: every spelling below — a drive letter, a share, a verbatim
+    /// or device prefix, a WSL distribution's share — is a piece of Windows' path
+    /// grammar. The one-root half of the same gate is
+    /// `a_path_not_spelled_from_this_machines_root_is_refused_without_a_read`.
+    ///
     /// Mutation: make [`bt_transcript::paths::may_read_unasked`] answer from
     /// `starts_with(r"\\")` on the string, which drags `\\?\C:\…` in with it.
+    #[cfg(windows)]
     #[test]
     fn a_network_path_is_refused_without_a_read() {
         assert!(!is_readable_unasked(Path::new(r"\\server\share\notes.txt")));
@@ -9318,6 +9333,37 @@ mod tests {
         assert!(!buffer.wants_head_read());
     }
 
+    /// ⑦ on a filesystem with one root — **a path not spelled from it is refused
+    /// without a read.**
+    ///
+    /// No spelling of a path names another machine here (a share is a mount
+    /// point with a local name), so the gate is the root itself: an absolute
+    /// path is this machine's, and anything else — a relative name, or a
+    /// Windows share's spelling, which is one relative name on this filesystem —
+    /// is not a path this window reads unasked, and its buffer is the same
+    /// card a share is on Windows.
+    ///
+    /// Mutation: make the one-root arm of
+    /// [`bt_transcript::paths::may_read_unasked`] answer `true` and the second
+    /// assertion fails.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_path_not_spelled_from_this_machines_root_is_refused_without_a_read() {
+        assert!(is_readable_unasked(Path::new("/w/notes.txt")));
+        assert!(!is_readable_unasked(Path::new("w/notes.txt")));
+        assert!(!is_readable_unasked(Path::new(r"\\server\share\notes.txt")));
+
+        let buffer = PreviewBuffer::new(
+            PreviewSource::file(r"\\server\share\notes.txt"),
+            "notes.txt".to_owned(),
+        );
+        assert_eq!(
+            buffer.load,
+            PreviewLoad::Refused(PreviewRefusal::NetworkPath)
+        );
+        assert!(!buffer.wants_head_read());
+    }
+
     /// A type with no reader **asks the disk once** and refuses on the answer
     /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.32).
     ///
@@ -9334,7 +9380,10 @@ mod tests {
     /// [`PreviewBuffer::accept`] and the last block does.
     #[test]
     fn an_unreadable_type_asks_the_disk_once_and_refuses_on_the_answer() {
-        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(host_path(r"C:\w\a.exe")),
+            "a.exe".to_owned(),
+        );
         assert_eq!(
             buffer.load,
             PreviewLoad::Pending,
@@ -9357,7 +9406,10 @@ mod tests {
         );
         assert!(!buffer.wants_head_read(), "asked once, answered once");
 
-        let mut text = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
+        let mut text = PreviewBuffer::new(
+            PreviewSource::file(host_path(r"C:\w\a.rs")),
+            "a.rs".to_owned(),
+        );
         assert_eq!(text.load, PreviewLoad::Pending);
         assert!(text.wants_head_read());
         // A listed name is text because it is listed. The strict verdict is not
@@ -10324,15 +10376,15 @@ mod tests {
     ///    `/select` was handed it and opened the wrong folder.
     #[test]
     fn a_file_link_opens_in_the_preview_and_only_the_web_leaves_the_window() {
-        let document = Path::new(r"D:\repo\test-assets\preview-samples\stress.md");
-        let here = Path::new(r"D:\repo\test-assets\preview-samples");
+        let document = &host_path(r"D:\repo\test-assets\preview-samples\stress.md");
+        let here = &host_path(r"D:\repo\test-assets\preview-samples");
 
         // ① A relative file link, resolved against the document's own folder —
         //    and the climb folded out, because this path is about to be printed
         //    in a caption and handed to another program.
         assert_eq!(
             link_action("../../docs/DESIGN.md", document),
-            LinkAction::Preview(PathBuf::from(r"D:\repo\docs\DESIGN.md")),
+            LinkAction::Preview(host_path(r"D:\repo\docs\DESIGN.md")),
             "a file link is a way of pointing at a file, and this window \
              previews files"
         );
@@ -10341,26 +10393,37 @@ mod tests {
             LinkAction::Preview(here.join("sample.csv")),
             "and a `.` is not part of anybody's idea of a path"
         );
+        // `\` is a separator where the platform says it is one: on Windows the
+        // link climbs, and on a filesystem where `\` is an ordinary character
+        // it is one name in the document's folder.
+        let backslashed = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => host_path(r"D:\repo\test-assets\sample.csv"),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+                here.join(r"..\sample.csv")
+            }
+        };
         assert_eq!(
             link_action(r"..\sample.csv", document),
-            LinkAction::Preview(PathBuf::from(r"D:\repo\test-assets\sample.csv")),
+            LinkAction::Preview(backslashed),
             "a backslash-written link is a link too"
         );
         assert_eq!(
             link_action("../../../../../../x.md", document),
-            LinkAction::Preview(PathBuf::from(r"D:\x.md")),
+            LinkAction::Preview(host_path(r"D:\x.md")),
             "and a climb past the root stops at the root, as Windows does"
         );
 
         // ② An absolute one stands as it is; a `file:` URL is unwrapped.
+        let absolute = host_path(r"C:\notes\a.md");
         assert_eq!(
-            link_action(r"C:\notes\a.md", document),
-            LinkAction::Preview(PathBuf::from(r"C:\notes\a.md")),
-            "a drive letter is a path, not a scheme"
+            link_action(&absolute.to_string_lossy(), document),
+            LinkAction::Preview(absolute.clone()),
+            "an absolute path is a path, and a drive letter is not a scheme"
         );
+        let uri = &crate::test_support::host_file_uri(r"C:\notes\a%20b.md");
         assert_eq!(
-            link_action("file:///C:/notes/a%20b.md", document),
-            LinkAction::Preview(PathBuf::from(r"C:\notes\a b.md")),
+            link_action(uri, document),
+            LinkAction::Preview(host_path(r"C:\notes\a b.md")),
             "unwrapped, and its escapes undone"
         );
 
@@ -11435,8 +11498,10 @@ mod tests {
 
     #[test]
     fn md_loading_caret_wait_ends_on_refusal() {
-        let mut buffer =
-            PreviewBuffer::new(PreviewSource::file(r"C:\w\large.md"), "large.md".into());
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(host_path(r"C:\w\large.md")),
+            "large.md".into(),
+        );
         assert!(
             buffer.awaits_the_whole_file(),
             "Markdown's first load is already the whole-file request"
@@ -11578,7 +11643,7 @@ mod tests {
 
     #[test]
     fn md_loading_whole_policy_is_scoped_to_markdown_panes() {
-        let source = PreviewSource::file(r"C:\w\notes.md");
+        let source = PreviewSource::file(host_path(r"C:\w\notes.md"));
         let mut pane = PreviewBuffer::new(source.clone(), "notes.md".into());
         assert!(matches!(
             pane.claim_head_read(),
@@ -11590,8 +11655,10 @@ mod tests {
             Some(PreviewWant::Head(_))
         ));
         for name in ["notes.txt", "table.csv", "changes.diff", "unknown.xyz"] {
-            let mut buffer =
-                PreviewBuffer::new(PreviewSource::file(format!(r"C:\w\{name}")), name.into());
+            let mut buffer = PreviewBuffer::new(
+                PreviewSource::file(host_path(r"C:\w").join(name)),
+                name.into(),
+            );
             assert!(
                 matches!(buffer.claim_head_read(), Some(PreviewWant::Head(_))),
                 "{name}"
@@ -12078,8 +12145,10 @@ mod tests {
     #[test]
     fn the_first_head_past_the_cap_records_the_disk_state_it_was_read_at() {
         let opened_at = stamp(1_000);
-        let mut buffer =
-            PreviewBuffer::new(PreviewSource::file(r"C:\w\book.md"), "book.md".to_owned());
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(host_path(r"C:\w\book.md")),
+            "book.md".to_owned(),
+        );
         assert_eq!(buffer.load, PreviewLoad::Pending);
 
         buffer.accept(over_cap("# chapter one\n", opened_at, 9 * 1024 * 1024));
@@ -12736,7 +12805,7 @@ mod tests {
     /// came from.
     #[test]
     fn a_composed_document_s_foot_names_its_repository_and_its_place_in_it() {
-        let root = PathBuf::from(r"D:\work\folio");
+        let root = host_path(r"D:\work\folio");
         assert_eq!(
             PreviewSource::GitDiff {
                 root: root.clone(),

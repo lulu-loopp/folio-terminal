@@ -1092,6 +1092,7 @@ mod tests {
         );
     }
     use crate::attention::{MappedAction, Tier, WaitKind};
+    use crate::test_support::{host_path, host_spelling};
 
     #[test]
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
@@ -1159,14 +1160,17 @@ mod tests {
         // The variable wins, which is what makes an isolated run isolated — and what lets this be
         // verified on a real machine without touching the user's own installation.
         assert_eq!(
-            config_dir_from(named(r"D:\scratch\claude-home"), named(r"C:\Users\someone")),
-            Some(PathBuf::from(r"D:\scratch\claude-home"))
+            config_dir_from(
+                named(&host_spelling(r"D:\scratch\claude-home")),
+                named(&host_spelling(r"C:\Users\someone"))
+            ),
+            Some(host_path(r"D:\scratch\claude-home"))
         );
         // Set-but-empty is not set. A shell that wrote `CLAUDE_CONFIG_DIR=` said nothing, and
         // taking it literally would put this file at the root of the current drive.
         assert_eq!(
-            config_dir_from(named(""), named(r"C:\Users\someone")),
-            Some(PathBuf::from(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
+            config_dir_from(named(""), named(&host_spelling(r"C:\Users\someone"))),
+            Some(host_path(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
         );
         // With nothing to go on, nothing is written — and never a relative path, which is what a
         // bare directory name would be, and which *would* land in a working directory.
@@ -1191,11 +1195,11 @@ mod tests {
         // an absolute answer the path is absolute, so nothing this module writes can ever be
         // resolved against wherever the process happens to be standing.
         assert!(
-            config_dir_from(named(r"D:\scratch\claude-home"), None)
+            config_dir_from(named(&host_spelling(r"D:\scratch\claude-home")), None)
                 .is_some_and(|path| path.is_absolute())
         );
         assert!(
-            config_dir_from(None, named(r"C:\Users\someone"))
+            config_dir_from(None, named(&host_spelling(r"C:\Users\someone")))
                 .is_some_and(|path| path.is_absolute())
         );
     }
@@ -1211,12 +1215,12 @@ mod tests {
     fn the_tip_names_the_default_spelling_until_the_variable_moves_it() {
         let named = |text: &str| Some(OsString::from(text));
         assert_eq!(
-            settings_path_shown_from(None, named(r"C:\Users\someone")),
+            settings_path_shown_from(None, named(&host_spelling(r"C:\Users\someone"))),
             "~/.claude/settings.json"
         );
         // Set-but-empty is not set, `config_dir_from`'s rule, so the spelling does not move.
         assert_eq!(
-            settings_path_shown_from(named(""), named(r"C:\Users\someone")),
+            settings_path_shown_from(named(""), named(&host_spelling(r"C:\Users\someone"))),
             "~/.claude/settings.json"
         );
         // …and with nothing to go on at all, the default spelling is still the honest answer:
@@ -1226,8 +1230,11 @@ mod tests {
             "~/.claude/settings.json"
         );
         assert_eq!(
-            settings_path_shown_from(named(r"D:\scratch\claude-home"), named(r"C:\Users\someone")),
-            PathBuf::from(r"D:\scratch\claude-home")
+            settings_path_shown_from(
+                named(&host_spelling(r"D:\scratch\claude-home")),
+                named(&host_spelling(r"C:\Users\someone"))
+            ),
+            host_path(r"D:\scratch\claude-home")
                 .join(SETTINGS_FILE)
                 .display()
                 .to_string()

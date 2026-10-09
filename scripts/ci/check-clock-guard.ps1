@@ -11,7 +11,7 @@
 #
 # THE SOURCE SET (the test's `SOURCE_SET` is where it is written):
 #   crates/{bt-unicode,bt-transcript,bt-doc,bt-layout,bt-viewport,bt-detect,
-#           bt-effects,bt-math,bt-render,bt-term}/src
+#           bt-effects,bt-math,bt-render,bt-term,bt-compose}/src
 #   vendor/vte/src
 #   vendor/alacritty_terminal/src minus `crate::event_loop` and `crate::tty`
 #

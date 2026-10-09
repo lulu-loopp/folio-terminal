@@ -165,8 +165,12 @@ impl Report {
             }),
             // The trial's own card (above), an update committed after its trial
             // ended (nothing failed), and a driver's own stops: none is a
-            // start's to tell another Folio.
+            // start's to tell another Folio. A stand-in that stood down
+            // beside the reserved trial reports nothing either: its card is
+            // about this session, and the Folio it would cross to is that
+            // very trial (0.4.8 E3).
             Failure::TrialIncomplete { .. }
+            | Failure::BesideTheTrial { .. }
             | Failure::ChangesNotKept { .. }
             | Failure::Unsupported
             | Failure::Stopped(_) => None,
@@ -929,6 +933,33 @@ pub(crate) fn hand_over(
     if !request.is_sayable() {
         return None;
     }
+    let answer = converse(directory, &request);
+    after_reply(request, answer?, say)
+}
+
+/// **The command line a person's start handed a rescue build, as the request it crosses in**
+/// (0.4.8 E3): `handed` (`--then-launch`'s words) parsed as that start parsed them, its folder
+/// resolved against `here` — the start's working directory, which the rescue build it started
+/// inherits — and nothing to report, since the road decided no failure for it. `None` for a line
+/// this wire cannot carry, as [`LaunchRequest::from_cli`] says (a document), or one that does not
+/// parse.
+#[must_use]
+pub(crate) fn carried(handed: &[std::ffi::OsString], here: Option<&Path>) -> Option<LaunchRequest> {
+    let line = cli::parse(handed.iter().cloned()).ok()?;
+    LaunchRequest::from_cli(&line, cli::machine_path_kind, here).filter(LaunchRequest::is_sayable)
+}
+
+/// **A person's start a recovery carried, handed to the Folio that holds `directory`** (0.4.8
+/// E3, `update_apply::carry_the_start`): one conversation on the launch endpoint, the one
+/// [`hand_over`] has — from a road process's worker, which has no console to say a refusal on, so
+/// the answer itself is returned. `None` when nobody answered.
+pub(crate) fn hand_over_carried(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
+    converse(directory, request)
+}
+
+/// **One conversation with the Folio that holds `directory`**: `request` sent, and its answer —
+/// `None` for no endpoint, nobody listening, or an answer this build cannot read.
+fn converse(directory: &Path, request: &LaunchRequest) -> Option<Reply> {
     let endpoint = bt_platform::launch_pipe::endpoint_for(directory)?;
     let mut answer = None;
     bt_platform::launch_pipe::hand_over(&endpoint, &request.encode(), |server, line| {
@@ -950,7 +981,7 @@ pub(crate) fn hand_over(
         }
     })
     .ok()?;
-    after_reply(request, answer?, say)
+    answer
 }
 
 /// **What the start does with the running Folio's answer** — `Some(code)` to leave, `None` to carry
@@ -987,6 +1018,7 @@ fn after_reply(request: LaunchRequest, answer: Reply, say: impl Fn(&str)) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{host_path, host_spelling};
 
     fn argv(list: &[&str]) -> cli::CliRequest {
         cli::parse(list.iter().map(std::ffi::OsString::from))
@@ -998,13 +1030,24 @@ mod tests {
         cli::PathKind::Directory
     }
 
+    /// A relative folder, joined with this host's separator.
+    fn relative(names: &[&str]) -> String {
+        names
+            .iter()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// The working directory a test launch was typed in. Named, so that the one test about
     /// resolving a relative folder is the only place it means anything.
-    const HERE: &str = r"D:\Developer\Ledger";
+    fn typed_in() -> PathBuf {
+        host_path(r"D:\Developer\Ledger")
+    }
 
     /// `from_cli` with this module's two fixtures, since every call but one wants both.
     fn from(list: &[&str]) -> Option<LaunchRequest> {
-        LaunchRequest::from_cli(&argv(list), all_folders, Some(Path::new(HERE)))
+        LaunchRequest::from_cli(&argv(list), all_folders, Some(typed_in().as_path()))
     }
 
     /// **RED (§7.59) — the message is built from argv exactly, and it carries three fields.**
@@ -1020,19 +1063,19 @@ mod tests {
         let request = LaunchRequest::from_cli(
             &argv(&[
                 "--cwd",
-                r"D:\Developer",
+                host_spelling(r"D:\Developer").as_str(),
                 "--profile",
                 "winps",
                 "--new-window",
             ]),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("a command line with no document is one this wire can carry");
         assert_eq!(
             request,
             LaunchRequest {
-                cwd: Some(PathBuf::from(r"D:\Developer")),
+                cwd: Some(host_path(r"D:\Developer")),
                 profile: Some("winps".to_owned()),
                 new_window: true,
                 tab: false,
@@ -1062,21 +1105,27 @@ mod tests {
     #[test]
     fn a_positional_folder_is_a_cwd_and_a_positional_document_is_not_carried() {
         assert_eq!(
-            from(&[r"D:\Developer"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Developer"))
-        );
-        assert_eq!(
-            from(&["--cwd", r"D:\Developer", r"D:\Other"])
+            from(&[host_spelling(r"D:\Developer").as_str()])
                 .expect("a folder crosses")
                 .cwd,
-            Some(PathBuf::from(r"D:\Developer")),
+            Some(host_path(r"D:\Developer"))
+        );
+        assert_eq!(
+            from(&[
+                "--cwd",
+                host_spelling(r"D:\Developer").as_str(),
+                host_spelling(r"D:\Other").as_str(),
+            ])
+            .expect("a folder crosses")
+            .cwd,
+            Some(host_path(r"D:\Developer")),
             "the flag said where to open, so the positional is not the place"
         );
         assert_eq!(
             LaunchRequest::from_cli(
-                &argv(&[r"D:\a\notes.md"]),
+                &argv(&[host_spelling(r"D:\a\notes.md").as_str()]),
                 |_| cli::PathKind::File,
-                Some(Path::new(HERE))
+                Some(typed_in().as_path())
             ),
             None,
             "a document has no field on this wire"
@@ -1262,21 +1311,31 @@ mod tests {
     /// is a verbatim path that `is_local_absolute_path` refuses.
     #[test]
     fn a_relative_folder_is_resolved_before_it_goes_on_the_wire() {
-        for spelling in [".", r"crates\..", r".\crates\.."] {
+        for spelling in [
+            relative(&["."]),
+            relative(&["crates", ".."]),
+            relative(&[".", "crates", ".."]),
+        ] {
             assert_eq!(
-                from(&["--cwd", spelling]).expect("a folder crosses").cwd,
-                Some(PathBuf::from(HERE)),
+                from(&["--cwd", spelling.as_str()])
+                    .expect("a folder crosses")
+                    .cwd,
+                Some(typed_in()),
                 "{spelling} is the folder the launch was typed in"
             );
         }
         assert_eq!(
-            from(&[r"..\bt-wt"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Developer\bt-wt")),
+            from(&[relative(&["..", "bt-wt"]).as_str()])
+                .expect("a folder crosses")
+                .cwd,
+            Some(host_path(r"D:\Developer\bt-wt")),
             "a positional goes through the same door as the flag"
         );
         assert_eq!(
-            from(&["--cwd", r"D:\Other"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Other")),
+            from(&["--cwd", host_spelling(r"D:\Other").as_str()])
+                .expect("a folder crosses")
+                .cwd,
+            Some(host_path(r"D:\Other")),
             "a folder that was already absolute is left exactly as it was written"
         );
         assert_eq!(
@@ -1549,9 +1608,13 @@ mod tests {
         ]);
         // A local path on the platform the test runs on, so [`accept`] keeps it.
         for failure in reports(here.join(".folio-update")) {
-            let request =
-                LaunchRequest::of_start(&start, Some(&failure), all_folders, Some(Path::new(HERE)))
-                    .expect("a start a rollback sent is a launch this wire carries");
+            let request = LaunchRequest::of_start(
+                &start,
+                Some(&failure),
+                all_folders,
+                Some(typed_in().as_path()),
+            )
+            .expect("a start a rollback sent is a launch this wire carries");
             assert!(request.is_sayable(), "{failure:?} can be said");
             let decision = decide(&request.encode(), || true).expect("the line is a request");
             assert_eq!(Reply::decode(&decision.reply), Some(Reply::Taken));
@@ -1863,7 +1926,7 @@ mod tests {
                 untried: false,
             }),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("the launch crosses")
         .encode();
@@ -1885,7 +1948,7 @@ mod tests {
                     &sent_by_a_rollback(),
                     Some(&failure),
                     all_folders,
-                    Some(Path::new(HERE)),
+                    Some(typed_in().as_path()),
                 )
                 .expect("the launch crosses")
                 .encode();
@@ -1928,7 +1991,7 @@ mod tests {
                 &sent_by_a_rollback(),
                 Some(&failure),
                 all_folders,
-                Some(Path::new(HERE)),
+                Some(typed_in().as_path()),
             )
             .expect("the launch still crosses");
             assert_eq!(request.report, None, "{failure:?} is not carried");
@@ -2012,13 +2075,9 @@ mod tests {
                 then: Box::new(Failure::Interrupted),
             },
         ] {
-            let request = LaunchRequest::of_start(
-                &sent_by_a_rollback(),
-                Some(&failure),
-                all_folders,
-                Some(Path::new(HERE)),
-            )
-            .expect("it crosses");
+            let request =
+                LaunchRequest::of_start(&sent_by_a_rollback(), Some(&failure), all_folders, None)
+                    .expect("it crosses");
             let frame = request.encode();
             let words: serde_json::Value = serde_json::from_str(&frame).unwrap();
             assert_ne!(
@@ -2067,7 +2126,7 @@ mod tests {
             &sent_by_a_rollback(),
             Some(&Failure::RolledBack),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("it crosses");
         assert_eq!(
@@ -2196,7 +2255,7 @@ mod tests {
                 &sent_by_a_rollback(),
                 Some(&failure),
                 all_folders,
-                Some(Path::new(HERE)),
+                Some(typed_in().as_path()),
             )
             .expect("it crosses");
             assert!(request.report.is_some(), "{failure:?} is carried");
@@ -2220,5 +2279,81 @@ mod tests {
                 "the frozen reader reads its own build's frames: {frame}"
             );
         }
+    }
+
+    /// **RED (0.4.8 E3, #12) — a person's start a recovery deferred reaches the Folio that opens
+    /// the window: its folder, over the real launch endpoint.**
+    ///
+    /// A recovery handed `--then-launch --cwd <folder>` that started nothing, because another
+    /// process opens the window, carries that start ([`carried`], `update_apply::carry_the_start`):
+    /// once a Folio holds the data directory, the request crosses the endpoint that Folio listens
+    /// on, folder and origin intact, and no report rides with it. The far end here is a listener
+    /// of the test's own on a private directory whose claim the test holds.
+    ///
+    /// MUTATION: in [`hand_over_carried`], converse with `&LaunchRequest::default()` (the folder
+    /// dropped on the way to the window).
+    #[test]
+    fn a_carried_start_reaches_the_folio_that_holds_the_data_directory() {
+        let directory = bt_testpath::temp_path("launch-wire-carried-数据");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let folder = bt_testpath::temp_path("工作 文件夹 carried");
+        std::fs::create_dir_all(&folder).unwrap();
+        if bt_platform::launch_pipe::endpoint_for(&directory).is_none() {
+            return;
+        }
+        let _holder = crate::persist::try_claim(&directory).expect("the window's Folio holds it");
+        let (sender, landed) = std::sync::mpsc::channel();
+        let Ok(_endpoint) = bt_platform::launch_pipe::LaunchPipe::start(
+            &directory,
+            |line: &str| {
+                let request = LaunchRequest::decode(line)?;
+                Some(bt_platform::launch_pipe::Decision {
+                    reply: Reply::Taken.encode(),
+                    admitted: Some(request),
+                })
+            },
+            move |request: LaunchRequest| {
+                let _ = sender.send(request);
+            },
+        ) else {
+            return;
+        };
+        let handed: Vec<std::ffi::OsString> = ["--from-explorer", "--cwd"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .chain([folder.clone().into_os_string()])
+            .collect();
+        let request = carried(&handed, None).expect("a folder crosses");
+        assert_eq!(request.cwd.as_deref(), Some(folder.as_path()));
+        assert_eq!(request.origin, cli::LaunchOrigin::Explorer);
+        assert_eq!(request.report, None, "a carried start reports nothing");
+        let sent = request.clone();
+        let carried = bt_platform::spawn_at_priority(
+            "bt-launch-wire-carry-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                crate::update_apply::carry_the_start(
+                    worker,
+                    &directory,
+                    &crate::update_apply::Ahead::DataHolder,
+                    &sent,
+                    std::time::Duration::from_secs(1),
+                )
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(carried, crate::update_apply::Carried::Taken);
+        assert_eq!(
+            // The listener commits once this end has confirmed `Taken`: its one
+            // message is the completion signal.
+            landed
+                .recv()
+                .expect("the window's Folio was handed the start"),
+            request
+        );
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

@@ -2000,6 +2000,11 @@ mod tests {
     ///    compares them and the moved install goes red for the same reason;
     /// ④ act on `Absent` as well and its assertion goes red, which is a launch
     ///    registering a package on a machine that never asked for one.
+    ///
+    /// Windows only: the package is the Explorer verb's, and "the same file,
+    /// spelled the way Windows also spells it" is Windows' case-blind path
+    /// comparison.
+    #[cfg(windows)]
     #[test]
     fn the_launch_takes_over_a_dead_registration_and_leaves_a_live_one_standing() {
         let elsewhere = |at: &str| PackageState::Elsewhere {

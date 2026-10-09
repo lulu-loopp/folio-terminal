@@ -893,6 +893,15 @@ pub fn selected_columns(
 mod tests {
     use super::*;
 
+    /// **This host's command modifier** — Control, or Command on a Mac — read off
+    /// [`crate::input::is_command_chord`], which is the question [`command`] asks.
+    fn command_modifier() -> ModifiersState {
+        [ModifiersState::CONTROL, ModifiersState::SUPER]
+            .into_iter()
+            .find(|modifiers| crate::input::is_command_chord(*modifiers))
+            .expect("one of the two is the host's command modifier")
+    }
+
     /// A caret with nothing selected, at one offset.
     fn at(offset: usize) -> EditCaret {
         EditCaret {
@@ -1138,14 +1147,8 @@ mod tests {
         // The save chord belongs to the registry's scoped row and is swallowed
         // here rather than typed — a `Ctrl+S` that inserted an `s` into the file
         // would be the worst of both readings.
-        assert_eq!(
-            command(&ch("s"), ModifiersState::CONTROL),
-            EditCommand::Ignore
-        );
-        assert_eq!(
-            command(&ch("v"), ModifiersState::CONTROL),
-            EditCommand::Paste
-        );
+        assert_eq!(command(&ch("s"), command_modifier()), EditCommand::Ignore);
+        assert_eq!(command(&ch("v"), command_modifier()), EditCommand::Paste);
         assert_eq!(
             command(&Key::Named(NamedKey::Escape), none),
             EditCommand::Release
@@ -1163,19 +1166,25 @@ mod tests {
             }
         );
         assert_eq!(
-            command(&Key::Named(NamedKey::Home), ModifiersState::CONTROL),
+            command(&Key::Named(NamedKey::Home), command_modifier()),
             EditCommand::Move {
                 motion: Motion::DocStart,
                 extend: false
             }
         );
         // AltGr is typing, not a chord — the one place a Ctrl means nothing.
+        // It is a fact about a keyboard that reports AltGr as Ctrl+Alt; on a Mac
+        // the same pair is Control and Option, a chord aimed past this editor.
         assert_eq!(
             command(
                 &ch("\u{20ac}"),
                 ModifiersState::CONTROL | ModifiersState::ALT
             ),
-            EditCommand::Insert("\u{20ac}".to_owned())
+            if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
+                EditCommand::Ignore
+            } else {
+                EditCommand::Insert("\u{20ac}".to_owned())
+            }
         );
         // And a key with nothing to do is still the editor's.
         assert_eq!(

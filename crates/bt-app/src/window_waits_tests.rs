@@ -4525,17 +4525,20 @@ fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
 /// `std::thread::spawn`, `std::thread::Builder` and `std::thread::scope` in exactly one place, the
 /// door's own `admission::spawn_at_priority_with_stack` (A1c; ARCHITECTURE §5.1 and §6).
 /// `bt-pty`'s four threads and `bt-term`'s resample pool stay outside by design (revision (c)6).
-/// `bt-effects`, the vocabulary the door lends from, is read the same way and names none at all
-/// (CC-3; its other three effects are [`bt_effects_starts_waits_reads_and_names_no_platform`]'s).
+/// `bt-effects`, the vocabulary the door lends from, and `bt-compose`, the composition order, are
+/// read the same way and name none at all (CC-3, CC-6a; their other effects are
+/// [`bt_effects_starts_waits_reads_and_names_no_platform`]'s and
+/// [`bt_compose_has_no_direct_effects`]').
 ///
 /// MUTATION: add `pub fn probe() { std::thread::spawn(|| ()); }` to `crates/bt-effects/src/lib.rs`
-/// and this names `bt-effects`' `crate::probe`.
+/// and this names `bt-effects`' `crate::probe`; the same line in `crates/bt-compose/src/lib.rs`
+/// names `bt-compose`'s.
 fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> Vec<String> {
     use bt_source::{Pattern, Search, View, needle};
 
     let mut failures = Vec::new();
     let mut door = 0;
-    for package in ["bt-app", "bt-platform", "bt-effects"] {
+    for package in ["bt-app", "bt-platform", "bt-effects", "bt-compose"] {
         let index = Index::of_package(package);
         for path in ["thread::spawn", "thread::Builder", "thread::scope"] {
             let found = match index.search(&Search::new(
@@ -4613,7 +4616,33 @@ const EFFECTS_FILES: [&str; 4] = ["fs", "File", "OpenOptions", "env"];
 /// `pub fn probe() -> std::time::Instant { std::time::Instant::now() }`;
 /// `macro_rules! probe { () => { bt_platform::spawn_at_priority }; }`.
 fn bt_effects_starts_waits_reads_and_names_no_platform(world: &World) -> Vec<String> {
-    let src = world.src("bt-effects");
+    names_no_effect(world, "bt-effects", Some("crate::file_reads"))
+}
+
+/// **`bt-compose` has no direct effects** (CC-6a; design T-COMPOSE-CRATE §3.2 "bt-compose has no
+/// direct effects", §6.2 "the census, for every new crate"). The crate orders library calls and
+/// owns nothing across them, so in its product code: no blocking wait ([`EFFECTS_WAITS`]), the
+/// file system and the environment ([`EFFECTS_FILES`]) named nowhere — it has no ledger of its
+/// own — no clock of the standard library, and no `bt_platform`. Its threads are the thread
+/// door's assertion above. The libraries it calls keep the effects their owning tickets have not
+/// yet moved (§2.2); this reads the crate itself.
+///
+/// MUTATION, each alone in `crates/bt-compose/src/lib.rs`, and each names its own line:
+/// `pub fn probe(r: std::sync::mpsc::Receiver<()>) { let _ = r.recv(); }`;
+/// `pub fn probe() -> bool { std::env::var_os("X").is_some() }`;
+/// `pub fn probe() -> std::time::Instant { std::time::Instant::now() }`;
+/// `macro_rules! probe { () => { bt_platform::spawn_at_priority }; }`.
+fn bt_compose_has_no_direct_effects(world: &World) -> Vec<String> {
+    names_no_effect(world, "bt-compose", None)
+}
+
+/// What [`bt_effects_starts_waits_reads_and_names_no_platform`] and
+/// [`bt_compose_has_no_direct_effects`] read in `package`'s product: every name of a blocking
+/// wait, of the file system or the environment (allowed inside `ledger` alone, when the package
+/// has one), of a standard-library clock and of the platform crate. A package with a ledger must
+/// name the ledger's own opens, so a reading that found nothing there read nothing.
+fn names_no_effect(world: &World, package: &str, ledger: Option<&str>) -> Vec<String> {
+    let src = world.src(package);
     let mut failures = Vec::new();
     let mut read = 0;
     for word in EFFECTS_WAITS
@@ -4630,7 +4659,7 @@ fn bt_effects_starts_waits_reads_and_names_no_platform(world: &World) -> Vec<Str
                 Some("a blocking wait")
             } else if EFFECTS_FILES.contains(word) {
                 let module = src.module_at(at);
-                (module != "crate::file_reads")
+                (Some(module) != ledger)
                     .then_some("the file system or the environment outside the ledger")
             } else if *word == "bt_platform" {
                 Some("the platform crate")
@@ -4644,19 +4673,18 @@ fn bt_effects_starts_waits_reads_and_names_no_platform(world: &World) -> Vec<Str
             };
             if let Some(what) = refused {
                 failures.push(format!(
-                    "`bt-effects` names `{word}` ({what}) at {} ({})",
+                    "`{package}` names `{word}` ({what}) at {} ({})",
                     src.location(at),
                     src.owner_of(at)
                 ));
             }
         }
     }
-    if read == 0 {
-        failures.push(
-            "no product name of the ledger's own reads was found in `bt-effects`: this reads \
+    if read == 0 && ledger.is_some() {
+        failures.push(format!(
+            "no product name of the ledger's own reads was found in `{package}`: this reads \
              nothing"
-                .into(),
-        );
+        ));
     }
     failures
 }
@@ -4805,7 +4833,7 @@ fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 13] = [
+    let assertions: [(&str, Vec<String>); 14] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -4849,6 +4877,10 @@ fn every_door_is_where_the_registry_says() {
         (
             "bt_effects_starts_waits_reads_and_names_no_platform",
             bt_effects_starts_waits_reads_and_names_no_platform(&world),
+        ),
+        (
+            "bt_compose_has_no_direct_effects",
+            bt_compose_has_no_direct_effects(&world),
         ),
         (
             "every_entrance_left_the_vocabulary_takes_its_capability",

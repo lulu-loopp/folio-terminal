@@ -481,3 +481,100 @@ fn a_turn_walks_a_search_in_progress_and_wakes_for_it() {
         "a published frame carries the answer and reads no slice"
     );
 }
+
+/// How many times the product names `path`, and where.
+fn product_names(path: &str) -> (usize, String) {
+    use bt_source::{Pattern, View, needle};
+    let found = crate::test_support::found(needle!(Pattern::path(path)), View::Identifiers)
+        .in_the_product(crate::test_support::source());
+    (found.len(), found.report(crate::test_support::source()))
+}
+
+/// GUARD — **the focused frame's hold is decided before anything is scheduled, and every frame is
+/// scheduled through `bt_compose::schedule`** (design T-COMPOSE-CRATE §6.2, planted violation
+/// "hold before schedule", the call-site half; the half inside the crate is
+/// `bt_compose::tests::project_files_no_decoration_work_and_schedule_does`).
+///
+/// A guard: it reads how `publish_frame_inner` is written, because `Runtime` needs a window and
+/// its order cannot be driven from a test. The product names the session's own scheduler nowhere,
+/// so no site can go round the crate; and inside `publish_frame_inner` the projection comes first,
+/// the hold's return second and the schedule third.
+///
+/// MUTATIONS: move the `bt_compose::schedule` call above the hold check in `publish_frame_inner`
+/// — the order goes red; call `session.schedule_visible_artifacts` directly there — the product
+/// names it and the first assertion goes red.
+#[test]
+fn the_hold_is_decided_before_anything_is_scheduled() {
+    let (named, report) = product_names("schedule_visible_artifacts");
+    assert_eq!(
+        named, 0,
+        "a frame is scheduled through `bt_compose::schedule` only:\n{report}"
+    );
+    let publish = method_body("Runtime", "publish_frame_inner");
+    let projected = publish
+        .find("bt_compose::project(")
+        .expect("the focused frame is projected through the crate");
+    let held = publish
+        .find("if projected.hold_requested && self.window.last_presented_frame.is_some()")
+        .expect("the hold is the projection's request and a picture already on the glass");
+    let returned = held
+        + publish[held..]
+            .find("return Ok(false);")
+            .expect("a held frame goes no further");
+    let scheduled = publish
+        .find("bt_compose::schedule(")
+        .expect("an unheld frame is scheduled through the crate");
+    assert!(
+        projected < held && returned < scheduled,
+        "project, then the hold, then schedule:\n{publish}"
+    );
+    assert_eq!(
+        publish.matches("bt_compose::schedule(").count(),
+        1,
+        "and scheduled once:\n{publish}"
+    );
+}
+
+/// GUARD — **a frame is acknowledged once, at entry to the pending slot** (design
+/// T-COMPOSE-CRATE §6.2, planted violation "acknowledge only at pending-slot entry"; the state
+/// half is `bt_compose::tests::the_revision_moves_once_per_frame_entered_into_the_slot`).
+///
+/// A guard, for the reason the one above gives. The product acknowledges in one place: inside
+/// `publish_frame_inner`, below the unchanged-frame return and above the slot's `publish`. The
+/// retry arm of `redraw`, which files a frame back after a present that failed, acknowledges
+/// nothing; neither does anything else.
+///
+/// MUTATIONS: call `bt_compose::acknowledge` in the skipped-unchanged branch — two sites, and the
+/// one in the branch stands above the return; call `session.record_published_frame` anywhere in
+/// the product — the first assertion goes red.
+#[test]
+fn a_frame_is_acknowledged_once_at_entry_to_the_pending_slot() {
+    let (recorded, report) = product_names("record_published_frame");
+    assert_eq!(
+        recorded, 0,
+        "a frame is acknowledged through `bt_compose::acknowledge` only:\n{report}"
+    );
+    let (acknowledged, report) = product_names("bt_compose::acknowledge");
+    assert_eq!(
+        acknowledged, 1,
+        "one acknowledgment in the product:\n{report}"
+    );
+    let publish = method_body("Runtime", "publish_frame_inner");
+    let unchanged = publish
+        .find("pty_drain_says_nothing_new(")
+        .expect("the unchanged-frame skip");
+    let skipped = unchanged
+        + publish[unchanged..]
+            .find("return Ok(false);")
+            .expect("an unchanged frame goes no further");
+    let at = publish
+        .find("bt_compose::acknowledge(")
+        .expect("the acknowledgment is the publish door's");
+    let entered = publish
+        .find(".publish(composed.frame, trigger)")
+        .expect("the frame enters the slot");
+    assert!(
+        skipped < at && at < entered,
+        "below the unchanged return, above the slot's entry:\n{publish}"
+    );
+}

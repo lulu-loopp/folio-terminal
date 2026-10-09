@@ -1105,7 +1105,16 @@ in, never the summoned terminal. An offer put away with Later, or a failed card
 that was closed, comes back only when asked — About → Version's **Update and
 restart** or **Retry** raises the same `Available` offer from `Idle`
 (`Job::offer_again`), in the window pressed, for the decision the job keeps
-current after its one unasked offer; never unasked. A launch a finished rollback
+current after its one unasked offer; never unasked. **A staged update is given
+up only after two deliberate deferrals** (0.4.8 E3): a launch that finds one
+counts against it only when the run before it ended on its clean-exit path
+without pressing Restart — never after a crash or a power cut, which the
+session sentinel says (`persist::previous_run_ended_orderly`) — and the second
+such launch discards it; a restart that did not happen (a power cut before
+anything moved, an admission refused: the road put back to `Prepared`) is
+recorded in the journal (`restart_missed`), and the next launch's Ready card
+says *The restart did not happen.* and offers the same Restart · Later,
+counting nothing. A launch a finished rollback
 sent (`--update-failed`) likewise raises nothing by itself, and its asked verbs
 work once the check lands; while an update this launch was told is incomplete
 may still be committed forward, nothing can be asked. **A launch a rollback sent
@@ -1264,9 +1273,15 @@ unchanged. At `TrialStarting` the reserved trial is the only one the
 transaction runs: an exit guard names its nonce, a start admits only that
 nonce (with or without `--update-failed`), and a start whose rescue build
 cannot be started continues as that trial — beside a reserved trial that
-already runs, it waits for the data directory's claim (30 s), as every trial
-does, and leaves without handing its command line over; the running trial
-stays the window. It holds its writes as every trial
+already runs, which holds the data directory's claim, that start offers its
+launch to it over the launch wire while it waits for the claim (30 s), as
+every trial waits, and leaves once the trial takes it; one the trial has not
+taken by the end of the wait stands down and opens a window of its own — no
+trial, its writes held for its life, its card saying the update did not finish
+and that this session's changes are not kept — with one line in
+`diagnostics.log`, never leaving with nothing shown (0.4.8 E3). A trial a
+holder launched never offers its launch, and does not start when the claim is
+not had. The reserved trial holds its writes as every trial
 does; once ready it takes the transaction lock and records `Committed` itself
 on its own receipt, which must name it exactly (pid and start instant) — the
 one road to `Committed` that needs no rescue process. A receipt is written
@@ -1305,6 +1320,20 @@ stands (a retired or prepared transaction is left to the next ordinary
 start); and the macOS process check before the exchange waits within its
 window for a process of the installed executable to leave, as the Windows
 road waits for a held file, reverting only for one still there at its end.
+**A person's start a recovery defers is carried to the window, never dropped**
+(0.4.8 E3): where the recovery build it was handed to starts nothing because
+another process opens the window — the applier the mark names, an election in
+flight (and the outgoing build behind it), a holder that kept the transaction
+lock through the recovery's wait, a trial that runs, a Folio that holds the
+data directory — it waits while that party is on its way, no longer than its
+road's own bound (the old build's wait and the trial's deadline), and hands
+that start's request — its folder, profile, switches and who started it, and
+no report — over the launch wire to the Folio that holds the data directory
+once one does, as a second launch beside a running Folio would; a Folio that
+does not take it within 20 s is the window as it stands, and with no Folio
+holding the data directory 20 s after the party is done the recovery starts
+what the disk names with that start's command line. A command line the wire
+cannot carry (a document) is not carried.
 An applier killed from outside after
 it has taken the window duty, and a live holder the recovery build deferred to
 that is then killed from outside, are outside the guarantee and are recovered

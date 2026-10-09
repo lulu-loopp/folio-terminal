@@ -209,6 +209,15 @@ struct Fake {
     /// the installed program started with no trial words at each launch, its
     /// pid kept here.
     beside_launch: Option<Arc<Mutex<Vec<u32>>>>,
+    /// **The person's starts a recovery carried to the window** (0.4.8 E3):
+    /// whom it waited for, and the request it handed over.
+    carried: Vec<(
+        crate::update_apply::Ahead,
+        crate::launch_wire::LaunchRequest,
+    )>,
+    /// What the window's Folio answers a carried start: taken, unless a test
+    /// says otherwise.
+    carry_answer: crate::update_apply::Carried,
 }
 
 impl World for Fake {
@@ -322,6 +331,18 @@ impl World for Fake {
 
     fn show_here(&mut self, text: &str) {
         self.shown.push(text.to_owned());
+    }
+
+    fn carry(
+        &mut self,
+        _worker: &WorkerCtx,
+        _data: &Path,
+        ahead: &crate::update_apply::Ahead,
+        request: &crate::launch_wire::LaunchRequest,
+        _within: Duration,
+    ) -> crate::update_apply::Carried {
+        self.carried.push((ahead.clone(), request.clone()));
+        self.carry_answer
     }
 }
 
@@ -501,6 +522,8 @@ impl Install {
             before_start: None,
             real_ack: None,
             beside_launch: None,
+            carried: Vec::new(),
+            carry_answer: crate::update_apply::Carried::Taken,
         }
     }
 
@@ -949,7 +972,8 @@ fn a_held_open_file_refuses_before_any_move_and_relaunches_o() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     nothing_moved(&install);
@@ -2385,11 +2409,14 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
 /// transaction to it**: `WindowHolder::Unmarked` is `Deferral::WindowDuty` —
 /// nothing written, nothing started, and the line says why. The test holds
 /// the election lock through the whole recovery (an applier's election
-/// stalled past `ELECTION_WITHIN`).
+/// stalled past `ELECTION_WITHIN`). The person's start it was handed is
+/// carried to whichever window that election's road opens — the applier's,
+/// or the outgoing build's when the applier stands aside (0.4.8 E3, E2's road
+/// carries it too): it waits on the election, then on the mark it leaves.
 ///
-/// MUTATION: in `recover`, settle the transaction on `WindowHolder::Unmarked`
+/// MUTATIONS: in `recover`, settle the transaction on `WindowHolder::Unmarked`
 /// as on `Ok(None)` (the recovery reverts a transaction an applier is still
-/// deciding).
+/// deciding); or answer `deferred_to: None` there (the start dropped).
 #[test]
 fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
     let Some(install) = Install::new("e2-election-in-flight") else {
@@ -2420,6 +2447,24 @@ fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
         "the transaction is left to the election in flight"
     );
     assert!(world.opened.is_empty(), "{:?}", world.opened);
+    assert_eq!(
+        world
+            .carried
+            .iter()
+            .map(|(ahead, request)| (ahead.clone(), request.cwd.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            crate::update_apply::Ahead::Election {
+                home: install.home.clone(),
+                txn: install.txn,
+                me: install.road(limits(20_000, 20_000)).me,
+            },
+            crate::launch_wire::carried(&handed(), std::env::current_dir().ok().as_deref())
+                .and_then(|request| request.cwd),
+        )],
+        "{:?}",
+        world.said
+    );
     nothing_moved(&install);
 }
 
@@ -2436,8 +2481,15 @@ fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
 /// never took the mark is nobody's successor. U-23 let the lock go and waited
 /// up to 180 s instead; that wait is removed.
 ///
-/// MUTATION: in `recover`, leave a `Handoff` to any live process of the rescue
-/// image, named or not.
+/// **The person's start it was handed is not dropped** (0.4.8 E3, #12): the
+/// recovery carries it to the window that applier opens — its request (the
+/// folder, the switches, who started it) handed over the launch wire once a
+/// Folio holds the data directory (the world's `carry`) — and starts nothing
+/// itself; the start it was handed reverts with is still its own start.
+///
+/// MUTATIONS: in `recover`, leave a `Handoff` to any live process of the
+/// rescue image, named or not; or answer `deferred_to: None` (the deferred
+/// start dropped, as before E3).
 #[test]
 fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
     let Some(install) = Install::new("alive") else {
@@ -2484,7 +2536,7 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
         "nothing is waited for: {:?}",
         began.elapsed()
     );
-    assert_eq!(code, 1, "{:?}", world.said);
+    assert_eq!(code, 0, "{:?}", world.said);
     assert!(
         said_at(&world, &format!("{} has the update's window", applier.pid)).is_some(),
         "{:?}",
@@ -2496,6 +2548,24 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
         "the live applier's transaction is left to it"
     );
     assert!(world.opened.is_empty(), "that applier opens Folio");
+    let here = std::env::current_dir().ok();
+    assert_eq!(
+        world.carried,
+        vec![(
+            crate::update_apply::Ahead::Process(applier),
+            crate::launch_wire::carried(&handed(), here.as_deref()).expect("a folder crosses"),
+        )],
+        "the person's start is carried to the window that applier opens: {:?}",
+        world.said
+    );
+    assert!(
+        world
+            .said
+            .iter()
+            .any(|line| line.contains("was taken by the Folio that holds the data directory")),
+        "{:?}",
+        world.said
+    );
     nothing_moved(&install);
 
     // Not named — it never took the mark: not waited for.
@@ -2505,7 +2575,8 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     assert_eq!(
@@ -2514,6 +2585,7 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
         "{:?}",
         world.said
     );
+    assert!(world.carried.is_empty(), "its own start carries it");
 }
 
 // ── a journal write refused (U-34) ──────────────────────────────────────────
@@ -3299,7 +3371,8 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Prepared {
-            deferred_launches: 0
+            deferred_launches: 0,
+            restart_missed: true
         }
     );
     assert_eq!(
@@ -5413,6 +5486,8 @@ fn bare_world(home: Home) -> Fake {
         before_start: None,
         real_ack: None,
         beside_launch: None,
+        carried: Vec::new(),
+        carry_answer: crate::update_apply::Carried::Taken,
     }
 }
 

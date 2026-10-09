@@ -1993,19 +1993,25 @@ mod tests {
             for modifiers in MODIFIERS {
                 let modifier = xterm_modifier(modifiers);
                 for (key, number) in keys {
-                    // Exact Shift+Insert is the paste command and deliberately wins over encoding.
+                    // Exact Shift+Insert is the Windows paste command (no Mac keyboard has the
+                    // key), and the host's paste command deliberately wins over encoding.
                     if key == NamedKey::Insert && modifiers == ModifiersState::SHIFT {
-                        assert!(is_paste_shortcut(&Key::Named(key), modifiers));
-                        continue;
+                        assert!(is_paste_shortcut_on(
+                            &Key::Named(key),
+                            modifiers,
+                            HostPlatform::Windows
+                        ));
                     }
-                    let expected = if modifier == 1 {
-                        format!("\x1b[{number}~")
+                    let expected = if is_paste_shortcut(&Key::Named(key), modifiers) {
+                        None
+                    } else if modifier == 1 {
+                        Some(format!("\x1b[{number}~").into_bytes())
                     } else {
-                        format!("\x1b[{number};{modifier}~")
+                        Some(format!("\x1b[{number};{modifier}~").into_bytes())
                     };
                     assert_eq!(
                         legacy_bytes(&Key::Named(key), modifiers, application_mode),
-                        Some(expected.into_bytes()),
+                        expected,
                         "key={key:?} application_mode={application_mode} modifiers={modifiers:?}"
                     );
                 }
@@ -2276,22 +2282,36 @@ mod tests {
             ),
             Some(vec![0x1b, 0x02])
         );
-        // Ctrl+V stays the paste door and is not encoded here.
+        // Ctrl+V stays the paste door where it is the paste chord (off a Mac) and
+        // is not encoded there; on a Mac it is `^V`, readline's quoted-insert.
+        let ctrl_v = Key::Character("v".into());
         assert_eq!(
-            legacy_bytes(&Key::Character("v".into()), ModifiersState::CONTROL, false),
-            None
+            legacy_bytes(&ctrl_v, ModifiersState::CONTROL, false),
+            if is_paste_shortcut(&ctrl_v, ModifiersState::CONTROL) {
+                None
+            } else {
+                Some(vec![0x16])
+            }
         );
     }
 
     #[test]
     fn paste_shortcuts_are_commands_and_preedit_owns_editing_keys() {
-        assert!(is_paste_shortcut(
+        assert!(is_paste_shortcut_on(
             &Key::Character("v".into()),
-            ModifiersState::CONTROL
+            ModifiersState::CONTROL,
+            WINDOWS
         ));
-        assert!(is_paste_shortcut(
+        assert!(is_paste_shortcut_on(
             &Key::Named(NamedKey::Insert),
-            ModifiersState::SHIFT
+            ModifiersState::SHIFT,
+            WINDOWS
+        ));
+        assert!(is_paste_shortcut_on(&Key::Character("v".into()), CMD, MAC));
+        // The host's own paste chord is a command, and preedit hands it over.
+        assert!(is_ime_owned_key(
+            &Key::Character("v".into()),
+            host_command()
         ));
         assert!(is_ime_owned_key(
             &Key::Named(NamedKey::ArrowLeft),
@@ -2582,13 +2602,33 @@ mod tests {
     #[test]
     fn ctrl_c_is_interrupt_without_selection_but_copy_with_selection_or_shift() {
         let key = Key::Character("c".into());
-        assert!(!should_copy_selection(&key, ModifiersState::CONTROL, false));
-        assert!(should_copy_selection(&key, ModifiersState::CONTROL, true));
-        assert!(should_copy_selection(
+        assert!(!should_copy_selection_on(
+            &key,
+            ModifiersState::CONTROL,
+            false,
+            WINDOWS
+        ));
+        assert!(should_copy_selection_on(
+            &key,
+            ModifiersState::CONTROL,
+            true,
+            WINDOWS
+        ));
+        assert!(should_copy_selection_on(
             &key,
             ModifiersState::CONTROL.union(ModifiersState::SHIFT),
             false,
+            WINDOWS,
         ));
+        // On a Mac `Ctrl+C` is the interrupt whatever is selected: the copy is
+        // `Cmd+C` there (see `the_clipboard_pair_is_the_platforms`).
+        assert!(!should_copy_selection_on(
+            &key,
+            ModifiersState::CONTROL,
+            true,
+            MAC
+        ));
+        // And `^C` reaches the child on every platform.
         assert_eq!(
             legacy_bytes(&key, ModifiersState::CONTROL, false),
             Some(vec![0x03])
@@ -2611,14 +2651,30 @@ mod tests {
         let paste = Key::Character("v".into());
         let copy = Key::Character("c".into());
         let ctrl_shift = ModifiersState::CONTROL.union(ModifiersState::SHIFT);
-        assert!(is_paste_shortcut(&paste, ctrl_shift));
-        assert!(should_copy_selection(&copy, ctrl_shift, false));
+        assert!(is_paste_shortcut_on(&paste, ctrl_shift, WINDOWS));
+        assert!(should_copy_selection_on(&copy, ctrl_shift, false, WINDOWS));
         // winit reports the shifted letter in upper case on most layouts.
-        assert!(is_paste_shortcut(&Key::Character("V".into()), ctrl_shift));
-        // And the shifted paste never reaches the child as `^V`.
-        assert_eq!(legacy_bytes(&paste, ctrl_shift, false), None);
+        assert!(is_paste_shortcut_on(
+            &Key::Character("V".into()),
+            ctrl_shift,
+            WINDOWS
+        ));
+        // The same pair on a Mac is `Cmd+Shift+V` and `Cmd+Shift+C`.
+        let cmd_shift = CMD.union(ModifiersState::SHIFT);
+        assert!(is_paste_shortcut_on(&paste, cmd_shift, MAC));
+        assert!(should_copy_selection_on(&copy, cmd_shift, false, MAC));
+        // And the host's shifted paste never reaches the child as `^V`.
+        assert_eq!(
+            legacy_bytes(&paste, host_command().union(ModifiersState::SHIFT), false),
+            None
+        );
         // The unshifted half is untouched.
-        assert!(is_paste_shortcut(&paste, ModifiersState::CONTROL));
+        assert!(is_paste_shortcut_on(
+            &paste,
+            ModifiersState::CONTROL,
+            WINDOWS
+        ));
+        assert!(is_paste_shortcut_on(&paste, CMD, MAC));
     }
 
     /// RED (gesture audit 2026-08-26, 附 ②) — **`Ctrl+Insert` copies, because
@@ -2639,19 +2695,31 @@ mod tests {
     #[test]
     fn ctrl_insert_copies_a_selection_and_stays_the_child_s_otherwise() {
         let insert = Key::Named(NamedKey::Insert);
-        assert!(should_copy_selection(
+        assert!(should_copy_selection_on(
             &insert,
             ModifiersState::CONTROL,
-            true
+            true,
+            WINDOWS
         ));
-        assert!(!should_copy_selection(
+        assert!(!should_copy_selection_on(
             &insert,
             ModifiersState::CONTROL,
-            false
+            false,
+            WINDOWS
         ));
         // It is a copy and never a paste — the pair's other half is Shift.
-        assert!(!is_paste_shortcut(&insert, ModifiersState::CONTROL));
-        assert!(is_paste_shortcut(&insert, ModifiersState::SHIFT));
+        assert!(!is_paste_shortcut_on(
+            &insert,
+            ModifiersState::CONTROL,
+            WINDOWS
+        ));
+        assert!(is_paste_shortcut_on(
+            &insert,
+            ModifiersState::SHIFT,
+            WINDOWS
+        ));
+        // With nothing selected no platform's clipboard takes the key, so it
+        // reaches the child the same way everywhere.
         assert_eq!(
             legacy_bytes(&insert, ModifiersState::CONTROL, false),
             Some(b"\x1b[2;5~".to_vec()),
@@ -2831,6 +2899,15 @@ mod tests {
     const MAC: HostPlatform = HostPlatform::MacOs;
     const WINDOWS: HostPlatform = HostPlatform::Windows;
     const CMD: ModifiersState = ModifiersState::SUPER;
+
+    /// **This host's command modifier** — Control, or Command on a Mac — read off
+    /// [`is_command_chord`] rather than decided a second time here.
+    fn host_command() -> ModifiersState {
+        [ModifiersState::CONTROL, ModifiersState::SUPER]
+            .into_iter()
+            .find(|modifiers| is_command_chord(*modifiers))
+            .expect("one of the two is the host's command modifier")
+    }
 
     /// RED (M1-7, X-3 §4 ①) — **a Control chord is the child's on macOS**, byte
     /// for byte what it is here.

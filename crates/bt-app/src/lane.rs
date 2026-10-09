@@ -26,7 +26,7 @@
 //! product code.
 
 use std::collections::BTreeMap;
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
@@ -539,6 +539,27 @@ impl Delivered {
 
 /// How long the suite waits for something that must happen.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(10);
+
+/// **A wake a test can wait on**: the closure a test hands a lane as its wake, and the receiving
+/// end that hears one `()` for every time the lane wakes its loop.
+pub(crate) fn wake_channel() -> (impl Fn() + Clone + Send + 'static, mpsc::Receiver<()>) {
+    let (woke, wakes) = mpsc::channel();
+    (
+        move || {
+            let _ = woke.send(());
+        },
+        wakes,
+    )
+}
+
+/// **One wake, within the lane suite's patience** ([`PATIENCE`]): a lane that never wakes fails
+/// the test that awaited `what`, by name, rather than hanging it. The wait ends on the wake, so a
+/// loaded machine is waited for and a quick one pays nothing.
+pub(crate) fn wait_for_a_wake(wakes: &mpsc::Receiver<()>, what: &str) {
+    if wakes.recv_timeout(PATIENCE).is_err() {
+        panic!("no wake within the lane suite's patience while awaiting {what}");
+    }
+}
 /// How long it watches before concluding that something does not happen.
 const QUIET: Duration = Duration::from_millis(300);
 /// A submission slower than this made the asker wait.
