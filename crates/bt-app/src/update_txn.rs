@@ -3858,8 +3858,7 @@ mod tests {
     /// committed copy whose next update has nothing recorded to compare.
     ///
     /// MUTATION: `advance` writes `marker: None` — the advanced journal has
-    /// lost it; drop `#[serde(default)]` from `Body::marker` — every ordinary
-    /// journal is refused.
+    /// lost it.
     #[test]
     fn a_carried_marker_is_read_back_whole_and_every_later_phase_carries_it() {
         let carried = carried();
