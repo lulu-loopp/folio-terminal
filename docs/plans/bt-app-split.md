@@ -196,6 +196,7 @@ What has landed on the way, outside the steps above or as part of them. One row 
 | --- | --- | --- |
 | `mod tests` out of `main.rs` | 2026-09-18 (`refactor/main-tests-out`) | one `tests.rs` of 48,039 lines in the crate root's scope |
 | `tests.rs` split by what each test tests (K1) | 2026-10-08 (`chore/split-tests-rs`) | 83 root-declared test files (`app_<theme>_tests.rs`, `<module>_app_tests.rs`) and `test_support.rs`; `tests.rs` keeps the 8 tests named as `tests::<name>` from outside, 752 lines; `--list` equal, 5,201 names |
+| the frame order out of `bt-app` into `bt-compose` (CC-6a; design T-COMPOSE-CRATE) | 2026-10-08 (`feat/bt-compose`) | `bt-app`'s two project sites, the hold-before-schedule order, `advance_live_math_if_due`'s per-leaf body, the deadline reads, the acknowledgment and the seat-frame assembly call the crate; the pending slot, present admission, the GPU context and the decoration lane stay in `bt-app` |
 
 ---
 

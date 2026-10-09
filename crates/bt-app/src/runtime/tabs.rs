@@ -1590,7 +1590,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn live_stability_deadline(&self) -> Option<Instant> {
         self.window.tabs[self.window.active_tab]
             .leaves()
-            .filter_map(|(_, leaf)| leaf.session.live_stability_deadline())
+            .filter_map(|(_, leaf)| bt_compose::deadlines(&leaf.session).live_stability)
             .min()
     }
 

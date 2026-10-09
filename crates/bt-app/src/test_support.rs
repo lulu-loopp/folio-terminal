@@ -41,6 +41,74 @@ use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, n
 use std::time::Duration;
 use winit::keyboard::Key;
 
+// ── a fixture's path, in the spelling of the platform the test runs on (H1)
+//
+// A test that is not limited to one platform asserts a fact of every platform
+// (`docs/CONVENTIONS.md`). Its absolute fixtures are written once, in their
+// Windows spelling, and these spell them the way this platform does; an
+// expected value is built through the same helper from the same fixture.
+
+/// **A Windows-spelled absolute fixture, spelled the way this platform spells
+/// one.**
+///
+/// On Windows the fixture is the path, byte for byte. Everywhere else a drive
+/// letter is no root and `\` is no separator — `D:\proj\README.md` is one
+/// relative file name there — so the same names stand under `/`:
+/// `/proj/README.md`, and `D:\` is `/`.
+pub(crate) fn host_spelling(windows: &str) -> String {
+    match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => windows.to_owned(),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+            let bytes = windows.as_bytes();
+            let below_drive =
+                if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                    &windows[2..]
+                } else {
+                    windows
+                };
+            below_drive.replace('\\', "/")
+        }
+    }
+}
+
+/// [`host_spelling`] as a path.
+pub(crate) fn host_path(windows: &str) -> PathBuf {
+    PathBuf::from(host_spelling(windows))
+}
+
+/// The `file:` URI a shell on this platform prints for [`host_spelling`]'s
+/// path, names written as they are (no escaping) with `/` between them:
+/// `file:///D:/proj/README.md` on Windows, `file:///proj/README.md` elsewhere.
+pub(crate) fn host_file_uri(windows: &str) -> String {
+    let path = host_spelling(windows).replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+/// The path part of [`host_file_uri`]'s URI, the scheme and its `//` left out:
+/// `/D:/proj/README.md` on Windows, `/proj/README.md` elsewhere.
+pub(crate) fn host_uri_path(windows: &str) -> String {
+    let path = host_spelling(windows).replace('\\', "/");
+    if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    }
+}
+
+/// The value a test expects on this platform, for the few facts whose answer is
+/// the platform's own: `windows` on Windows, `elsewhere` on a Mac and on any
+/// other Unix. It chooses an expected value, never an assertion.
+pub(crate) fn on_this_host<T>(windows: T, elsewhere: T) -> T {
+    match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => windows,
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => elsewhere,
+    }
+}
+
 /// **This crate, indexed once per process** — the workspace read, this
 /// package's own `src/` declared as the universe and lowered, on the first ask
 /// of the process, behind one call.
@@ -1740,7 +1808,7 @@ pub(crate) fn resolve_sharpening_page(
     let blocks = preview::parse_markdown(SHARPEN_SOURCE);
     resolve_document_pictures(
         &blocks,
-        Some(Path::new(SHARPEN_DOCUMENT)),
+        Some(&host_path(SHARPEN_DOCUMENT)),
         bt_render::Theme::Dark,
         PictureReach::from_the_top(),
         standing,
@@ -1779,7 +1847,7 @@ pub(crate) struct Sharpening {
 }
 
 pub(crate) fn a_page_that_wants_a_sharper_picture() -> Sharpening {
-    let file = PathBuf::from(r"D:\proj\shots/one.png");
+    let file = host_path(r"D:\proj\shots/one.png");
     let mut standing = DocumentPictures::default();
     standing.by_source.insert(
         "shots/one.png".to_owned(),
@@ -2729,25 +2797,31 @@ pub(crate) fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
 
 /// **Wait for the ledger to reach `target`**, and answer where it got to.
 ///
-/// Since `Engine::open` stopped waiting for the engine to be built (§7.44
-/// ⑫), "an engine exists" becomes true shortly *after* the open returns
-/// rather than before it: the counter is bumped on the engine's own thread,
-/// where the `IMFMediaEngine` is actually made. A test that reads the
-/// counter on the next instruction is reading that race.
+/// `Engine::open` does not wait for the engine to be built (§7.44 ⑫), so "an
+/// engine exists" becomes true shortly *after* the open returns rather than
+/// before it: the counter is moved on the engine's own thread, where the
+/// `IMFMediaEngine` is actually made — and taken off on that thread too,
+/// possibly after a `shutdown` that ran out of its budget has returned. A test
+/// that reads the counter on the next instruction is reading that race.
 ///
-/// A deadline and not a sleep, so a machine that is quick pays nothing and a
-/// machine that is slow is not called wrong. Under [`ledger_gate`], so
-/// nothing else is moving the number while this watches it.
+/// So the wait is on the ledger's own signal: it ends the moment an engine
+/// thread moves the count onto `target`, whatever the machine's load, and
+/// [`crate::lane::PATIENCE`] only bounds a wait for a movement that is never
+/// coming — **which is a red here, by this helper**, naming the patience and
+/// the count that stood, so no caller can pass by the wait running out. A
+/// caller that wants the count itself asks
+/// `bt_platform::video::engine::engines_outstanding_reaching`. Under
+/// [`ledger_gate`], so nothing else is moving the number while this watches it.
 pub(crate) fn engines_settling_to(target: u64) -> u64 {
-    use bt_platform::video::engine::engines_outstanding;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let now = engines_outstanding();
-        if now == target || Instant::now() >= deadline {
-            return now;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let reached =
+        bt_platform::video::engine::engines_outstanding_reaching(target, crate::lane::PATIENCE);
+    assert_eq!(
+        reached,
+        target,
+        "the engine ledger did not reach {target} within the lane suite's patience ({:?});          {reached} engines stood",
+        crate::lane::PATIENCE
+    );
+    reached
 }
 
 /// A real folder with a real file in it, for the glance-foot tests: the path

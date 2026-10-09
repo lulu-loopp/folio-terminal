@@ -922,6 +922,7 @@ fn after_reply(request: LaunchRequest, answer: Reply, say: impl Fn(&str)) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{host_path, host_spelling};
 
     fn argv(list: &[&str]) -> cli::CliRequest {
         cli::parse(list.iter().map(std::ffi::OsString::from))
@@ -933,13 +934,24 @@ mod tests {
         cli::PathKind::Directory
     }
 
+    /// A relative folder, joined with this host's separator.
+    fn relative(names: &[&str]) -> String {
+        names
+            .iter()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// The working directory a test launch was typed in. Named, so that the one test about
     /// resolving a relative folder is the only place it means anything.
-    const HERE: &str = r"D:\Developer\Ledger";
+    fn typed_in() -> PathBuf {
+        host_path(r"D:\Developer\Ledger")
+    }
 
     /// `from_cli` with this module's two fixtures, since every call but one wants both.
     fn from(list: &[&str]) -> Option<LaunchRequest> {
-        LaunchRequest::from_cli(&argv(list), all_folders, Some(Path::new(HERE)))
+        LaunchRequest::from_cli(&argv(list), all_folders, Some(typed_in().as_path()))
     }
 
     /// **RED (§7.59) — the message is built from argv exactly, and it carries three fields.**
@@ -955,19 +967,19 @@ mod tests {
         let request = LaunchRequest::from_cli(
             &argv(&[
                 "--cwd",
-                r"D:\Developer",
+                host_spelling(r"D:\Developer").as_str(),
                 "--profile",
                 "winps",
                 "--new-window",
             ]),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("a command line with no document is one this wire can carry");
         assert_eq!(
             request,
             LaunchRequest {
-                cwd: Some(PathBuf::from(r"D:\Developer")),
+                cwd: Some(host_path(r"D:\Developer")),
                 profile: Some("winps".to_owned()),
                 new_window: true,
                 tab: false,
@@ -997,21 +1009,27 @@ mod tests {
     #[test]
     fn a_positional_folder_is_a_cwd_and_a_positional_document_is_not_carried() {
         assert_eq!(
-            from(&[r"D:\Developer"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Developer"))
-        );
-        assert_eq!(
-            from(&["--cwd", r"D:\Developer", r"D:\Other"])
+            from(&[host_spelling(r"D:\Developer").as_str()])
                 .expect("a folder crosses")
                 .cwd,
-            Some(PathBuf::from(r"D:\Developer")),
+            Some(host_path(r"D:\Developer"))
+        );
+        assert_eq!(
+            from(&[
+                "--cwd",
+                host_spelling(r"D:\Developer").as_str(),
+                host_spelling(r"D:\Other").as_str(),
+            ])
+            .expect("a folder crosses")
+            .cwd,
+            Some(host_path(r"D:\Developer")),
             "the flag said where to open, so the positional is not the place"
         );
         assert_eq!(
             LaunchRequest::from_cli(
-                &argv(&[r"D:\a\notes.md"]),
+                &argv(&[host_spelling(r"D:\a\notes.md").as_str()]),
                 |_| cli::PathKind::File,
-                Some(Path::new(HERE))
+                Some(typed_in().as_path())
             ),
             None,
             "a document has no field on this wire"
@@ -1197,21 +1215,31 @@ mod tests {
     /// is a verbatim path that `is_local_absolute_path` refuses.
     #[test]
     fn a_relative_folder_is_resolved_before_it_goes_on_the_wire() {
-        for spelling in [".", r"crates\..", r".\crates\.."] {
+        for spelling in [
+            relative(&["."]),
+            relative(&["crates", ".."]),
+            relative(&[".", "crates", ".."]),
+        ] {
             assert_eq!(
-                from(&["--cwd", spelling]).expect("a folder crosses").cwd,
-                Some(PathBuf::from(HERE)),
+                from(&["--cwd", spelling.as_str()])
+                    .expect("a folder crosses")
+                    .cwd,
+                Some(typed_in()),
                 "{spelling} is the folder the launch was typed in"
             );
         }
         assert_eq!(
-            from(&[r"..\bt-wt"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Developer\bt-wt")),
+            from(&[relative(&["..", "bt-wt"]).as_str()])
+                .expect("a folder crosses")
+                .cwd,
+            Some(host_path(r"D:\Developer\bt-wt")),
             "a positional goes through the same door as the flag"
         );
         assert_eq!(
-            from(&["--cwd", r"D:\Other"]).expect("a folder crosses").cwd,
-            Some(PathBuf::from(r"D:\Other")),
+            from(&["--cwd", host_spelling(r"D:\Other").as_str()])
+                .expect("a folder crosses")
+                .cwd,
+            Some(host_path(r"D:\Other")),
             "a folder that was already absolute is left exactly as it was written"
         );
         assert_eq!(
@@ -1472,9 +1500,13 @@ mod tests {
         ]);
         // A local path on the platform the test runs on, so [`accept`] keeps it.
         for failure in reports(here.join(".folio-update")) {
-            let request =
-                LaunchRequest::of_start(&start, Some(&failure), all_folders, Some(Path::new(HERE)))
-                    .expect("a start a rollback sent is a launch this wire carries");
+            let request = LaunchRequest::of_start(
+                &start,
+                Some(&failure),
+                all_folders,
+                Some(typed_in().as_path()),
+            )
+            .expect("a start a rollback sent is a launch this wire carries");
             assert!(request.is_sayable(), "{failure:?} can be said");
             let decision = decide(&request.encode(), || true).expect("the line is a request");
             assert_eq!(Reply::decode(&decision.reply), Some(Reply::Taken));
@@ -1783,7 +1815,7 @@ mod tests {
                 held: false,
             }),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("the launch crosses")
         .encode();
@@ -1804,7 +1836,7 @@ mod tests {
                     &sent_by_a_rollback(),
                     Some(&failure),
                     all_folders,
-                    Some(Path::new(HERE)),
+                    Some(typed_in().as_path()),
                 )
                 .expect("the launch crosses")
                 .encode();
@@ -1846,7 +1878,7 @@ mod tests {
                 &sent_by_a_rollback(),
                 Some(&failure),
                 all_folders,
-                Some(Path::new(HERE)),
+                Some(typed_in().as_path()),
             )
             .expect("the launch still crosses");
             assert_eq!(request.report, None, "{failure:?} is not carried");
@@ -1915,7 +1947,7 @@ mod tests {
             &sent_by_a_rollback(),
             Some(&Failure::RolledBack),
             all_folders,
-            Some(Path::new(HERE)),
+            Some(typed_in().as_path()),
         )
         .expect("it crosses");
         assert_eq!(
@@ -2044,7 +2076,7 @@ mod tests {
                 &sent_by_a_rollback(),
                 Some(&failure),
                 all_folders,
-                Some(Path::new(HERE)),
+                Some(typed_in().as_path()),
             )
             .expect("it crosses");
             assert!(request.report.is_some(), "{failure:?} is carried");

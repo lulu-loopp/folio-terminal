@@ -1180,6 +1180,7 @@ fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
 mod tests {
     use super::*;
     use crate::attention::{MappedAction, Tier};
+    use crate::test_support::{host_path, host_spelling};
     use std::sync::{Arc, Condvar, mpsc};
 
     /// **A copilot a test writes**: what each probe answers, in order, and a gate that holds a
@@ -1496,15 +1497,15 @@ mod tests {
         let named = |text: &str| Some(OsString::from(text));
         assert_eq!(
             config_dir_from(
-                named(r"D:\scratch\copilot-home"),
-                named(r"C:\Users\someone")
+                named(&host_spelling(r"D:\scratch\copilot-home")),
+                named(&host_spelling(r"C:\Users\someone"))
             ),
-            Some(PathBuf::from(r"D:\scratch\copilot-home"))
+            Some(host_path(r"D:\scratch\copilot-home"))
         );
         // Set-but-empty is not set.
         assert_eq!(
-            config_dir_from(named(""), named(r"C:\Users\someone")),
-            Some(PathBuf::from(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
+            config_dir_from(named(""), named(&host_spelling(r"C:\Users\someone"))),
+            Some(host_path(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
         );
         assert_eq!(config_dir_from(None, None), None);
         assert_eq!(config_dir_from(None, named("")), None);
@@ -1526,7 +1527,7 @@ mod tests {
             );
         }
         assert!(
-            config_dir_from(named(r"D:\scratch\copilot-home"), None)
+            config_dir_from(named(&host_spelling(r"D:\scratch\copilot-home")), None)
                 .is_some_and(|path| path.is_absolute())
         );
     }

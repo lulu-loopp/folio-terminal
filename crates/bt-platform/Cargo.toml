@@ -1182,7 +1182,9 @@ libc = "0.2"
 # ephemeral keys, and small PE files signed and time-stamped under them. For
 # tests only: `bt-app` names it on its *dev-dependency* on this crate, so its
 # tests can verify a release signed here, and a build of the shipped program
-# never has it. It adds no package.
+# never has it. It adds no package. The other test-only doors a dependent's tests
+# need ride on it too: `install_flip::hold_unshared` and the engine ledger's wait
+# (`video::engine::engines_outstanding_reaching`).
 trust-harness = ["dep:bt-testpath"]
 
 [lints.clippy]

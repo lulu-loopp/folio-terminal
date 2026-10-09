@@ -1,0 +1,34 @@
+[package]
+name = "bt-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# **Terminal composition** (`src/lib.rs`): the order one pane's frame is made in
+# — project, the presentation hold, schedule, the deadlines and their advance,
+# the acknowledgment at the publish boundary — and the draw list a present is
+# handed. A borrowing coordinator: the host owns every session and view and
+# lends them per call. Its edges are by direct use, and it stays out of the
+# platform layer, the PTY, persistence and the window (design T-COMPOSE-CRATE
+# §3.1; `docs/ARCHITECTURE.md` §3.1).
+[dependencies]
+# `DualPlaneSession`: projection, scheduling, deadlines, the acknowledgment.
+bt-term = { path = "../bt-term" }
+# `ViewportProjection` (the view half of a pane) and `ViewportFrame`.
+bt-viewport = { path = "../bt-viewport" }
+# `SeatFrame`, `SeatViewport` and `CellMetrics`: the draw list's vocabulary.
+bt-render = { path = "../bt-render" }
+# The `Instant` in its signatures: `std::time::Instant` on every native target,
+# `performance.now()` in a browser (the clock guard, gate G3).
+web-time.workspace = true
+
+[dev-dependencies]
+# The tests answer the session's math tasks as the lane would: `bt-detect` resolves a task's
+# source, and the raster and its error are `bt-doc`'s types.
+bt-detect = { path = "../bt-detect" }
+bt-doc = { path = "../bt-doc" }
+
+[lints]
+workspace = true

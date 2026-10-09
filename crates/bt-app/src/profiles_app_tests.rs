@@ -6,11 +6,28 @@ use super::*;
 use crate::test_support::{
     BOTH_NOTIFICATION_ROWS_ON, POWERSHELL_PROMPT, SHARPEN_CONTENT, SHARPEN_NATIVE, THREE_LINES,
     TwoPaneHarness, a_page_that_wants_a_sharper_picture, answer, chevron_button, cross_metrics,
-    cross_solve, cross_tab, free_fn_body, grid_of, hand_leaves, leaf_saying, leaf_says,
-    method_body, on_a_screen, paste_leaf, paste_tab, paste_text_into, peek_open, request_attention,
-    resolve_sharpening_page, ring, ringing_tab, saved_row_of_two, staged_bytes_sent, tab_holding,
-    the_three_chevrons,
+    cross_solve, cross_tab, free_fn_body, grid_of, hand_leaves, host_spelling, host_uri_path,
+    leaf_saying, leaf_says, method_body, on_a_screen, paste_leaf, paste_tab, paste_text_into,
+    peek_open, request_attention, resolve_sharpening_page, ring, ringing_tab, saved_row_of_two,
+    staged_bytes_sent, tab_holding, the_three_chevrons,
 };
+
+/// An OSC 7 report, ended by `ST`, of [`host_spelling`]'s folder with its separators as
+/// they are: `file:///D:\Demo` on Windows, `file:///Demo` elsewhere.
+fn osc7_st(windows: &str) -> String {
+    let path = host_spelling(windows);
+    let root = if path.starts_with('/') { "" } else { "/" };
+    format!("\x1b]7;file://{root}{path}\x1b\\")
+}
+
+/// A shipped row of this build that is not its fallback profile: Git Bash on Windows,
+/// bash on every Unix.
+fn a_shipped_row_other_than_the_fallback() -> &'static str {
+    match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => "gitbash",
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => "bash",
+    }
+}
 
 // ── the overlay's z-order (user ruling 2026-08-12) ──────────────────────
 
@@ -564,7 +581,10 @@ fn a_pane_heads_folder_is_capped_at_max_path_and_not_at_a_names_forty() {
 /// sequence and percent-decoding included, rather than being posted into the
 /// middle of it.
 fn osc7_report(path: &str) -> String {
-    format!("\u{1b}]7;file:///{}\u{7}", path.replace('\\', "/"))
+    format!(
+        "\u{1b}]7;file:///{}\u{7}",
+        path.replace('\\', "/").trim_start_matches('/')
+    )
 }
 
 /// The title `scripts/shell-integration/folio.ps1` writes, in its
@@ -602,8 +622,8 @@ fn osc0_report(title: &str) -> String {
 /// to their last segment.
 #[test]
 fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
-    let left_path = r"D:\Developer\folio-terminal\crates\bt-app";
-    let right_path = r"D:\Developer\folio-terminal\crates\bt-term";
+    let left_path: &str = &host_spelling(r"D:\Developer\folio-terminal\crates\bt-app");
+    let right_path: &str = &host_spelling(r"D:\Developer\folio-terminal\crates\bt-term");
     let profile = profiles::title(profiles::fallback_profile());
     // Both shells say exactly what the shipped integration makes them say:
     // the profile's own title, then where they stand. This is the pane pair
@@ -929,21 +949,19 @@ fn the_attention_trace_writes_one_line_per_decision_and_none_otherwise() {
 /// this replaced — and the second and third cases here are the panic.
 #[test]
 fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
-    let git = profiles::index_of_id("gitbash");
+    let asked = a_shipped_row_other_than_the_fallback();
+    let git = profiles::index_of_id(asked);
     let fallback = profiles::fallback_profile();
     let fallback_id = profiles::fallback_profile_id();
     assert_ne!(git, fallback, "the fixture needs two different rows");
 
     let equipped = profiles::ProfilePrograms::with_only(&[git, fallback]);
-    assert_eq!(
-        startable_profile("gitbash", &equipped),
-        Ok(Started::AsAsked)
-    );
+    assert_eq!(startable_profile(asked, &equipped), Ok(Started::AsAsked));
 
     // Git uninstalled between two launches, which is the row's own case.
     let gitless = profiles::ProfilePrograms::with_only(&[fallback]);
     assert_eq!(
-        startable_profile("gitbash", &gitless),
+        startable_profile(asked, &gitless),
         Ok(Started::FellBack(fallback_id.to_owned())),
         "the pane comes back running what this machine does have"
     );
@@ -956,7 +974,7 @@ fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
     // Nothing at all: a machine with no Windows PowerShell, or a `BT_SHELL`
     // pointed at a program that is not there.
     let bare = profiles::ProfilePrograms::with_only(&[]);
-    assert_eq!(startable_profile("gitbash", &bare), Ok(Started::Nothing));
+    assert_eq!(startable_profile(asked, &bare), Ok(Started::Nothing));
     assert_eq!(startable_profile(fallback_id, &bare), Ok(Started::Nothing));
 
     // **An id the table does not hold at all** — a row somebody deleted in
@@ -1087,7 +1105,8 @@ fn a_tab_name_takes_the_most_specific_layer_that_actually_spoke() {
 /// is what is left when no folder is known.
 #[test]
 fn a_tab_follows_its_folder_when_the_shell_only_repeats_its_launchers_name() {
-    let demo = Path::new(r"D:\Demo");
+    let demo_path = host_spelling(r"D:\Demo");
+    let demo = Path::new(&demo_path);
     let named = |manual: Option<&str>, program: Option<&str>, cwd, id: &str| {
         let profile = profiles::index_of_id(id);
         display_title(
@@ -1098,33 +1117,46 @@ fn a_tab_follows_its_folder_when_the_shell_only_repeats_its_launchers_name() {
             &profiles::announcement_set(profile),
         )
     };
+    // This build's rows: each one whose shell repeats its launcher's name, with the name
+    // it repeats; a row whose shell sets a title of its own; and a row whose shell says
+    // what it is running.
+    let (echoing, titled, busy): (&[(&str, &str)], &str, &str) = match bt_platform::host_platform()
+    {
+        bt_platform::HostPlatform::Windows => (
+            &[
+                ("pwsh", "PowerShell 7"),
+                ("winps", "Windows PowerShell 5.1"),
+                ("cmd", "Command Prompt"),
+                // And the profile's *shipped* name is refused as well as its
+                // displayed one, which is what `announcement_set` exists to say:
+                // `WSL · Ubuntu` and the bare `WSL` are one name in two spellings.
+                ("wsl", "WSL"),
+            ],
+            "gitbash",
+            "cmd",
+        ),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+            (&[("bash", "bash"), ("sh", "sh")], "bash", "sh")
+        }
+    };
+    let (first, first_name) = echoing[0];
 
-    // ① The defect itself, in all three shells whose integration announces
-    // the name their own launcher chose.
-    assert_eq!(
-        named(None, Some("PowerShell 7"), Some(demo), "pwsh"),
-        "Demo",
-        "a shell agreeing with its launcher has announced nothing, so the \
+    // ① The defect itself, in every shell whose integration announces the
+    // name its own launcher chose.
+    for &(id, name) in echoing {
+        assert_eq!(
+            named(None, Some(name), Some(demo), id),
+            "Demo",
+            "{id}: a shell agreeing with its launcher has announced nothing, so the \
              folder names the tab"
-    );
-    assert_eq!(
-        named(None, Some("Windows PowerShell 5.1"), Some(demo), "winps"),
-        "Demo"
-    );
-    assert_eq!(
-        named(None, Some("Command Prompt"), Some(demo), "cmd"),
-        "Demo"
-    );
-    // And the profile's *shipped* name is refused as well as its displayed
-    // one, which is what `announcement_set` exists to say: `WSL · Ubuntu`
-    // and the bare `WSL` are one name in two spellings.
-    assert_eq!(named(None, Some("WSL"), Some(demo), "wsl"), "Demo");
+        );
+    }
 
     // ② A shell that sets a title of its own is shown saying it. Git Bash
     // does, in Git for Windows' own MSYS spelling, and that title is not in
     // its profile's set.
     assert_eq!(
-        named(None, Some("MINGW64:/d/Demo"), Some(demo), "gitbash"),
+        named(None, Some("MINGW64:/d/Demo"), Some(demo), titled),
         "MINGW64:/d/Demo",
         "what the shell said outranks where it is standing"
     );
@@ -1132,36 +1164,36 @@ fn a_tab_follows_its_folder_when_the_shell_only_repeats_its_launchers_name() {
     // remainder `LeafSession::announced_title` keeps off Windows' console
     // convention is a program announcing what it is running.
     assert_eq!(
-        named(None, Some("ping -n 8 127.0.0.1"), Some(demo), "cmd"),
+        named(None, Some("ping -n 8 127.0.0.1"), Some(demo), busy),
         "ping -n 8 127.0.0.1"
     );
 
     // ③ A tab you named keeps your name, over both of the layers above.
     assert_eq!(
-        named(Some("构建"), Some("PowerShell 7"), Some(demo), "pwsh"),
+        named(Some("构建"), Some(first_name), Some(demo), first),
         "构建"
     );
     assert_eq!(
-        named(Some("构建"), Some("MINGW64:/d/Demo"), Some(demo), "gitbash"),
+        named(Some("构建"), Some("MINGW64:/d/Demo"), Some(demo), titled),
         "构建"
     );
 
     // ④ And with no folder known at all, the profile is what is left —
     // which is the same string the announcement was, so nothing regresses
     // for a tab whose shell has not yet said where it is.
-    let pwsh = profiles::index_of_id("pwsh");
+    let pwsh = profiles::index_of_id(first);
     assert_eq!(
-        named(None, Some("PowerShell 7"), None, "pwsh"),
+        named(None, Some(first_name), None, first),
         profiles::title(pwsh)
     );
-    assert_eq!(named(None, None, None, "pwsh"), profiles::title(pwsh));
+    assert_eq!(named(None, None, None, first), profiles::title(pwsh));
 
     // The provenance the tip reports moves with the name, because it comes
     // off the same walk: nobody announced anything, so the folder spoke.
     assert_eq!(
         resolve_title(
             None,
-            Some("PowerShell 7"),
+            Some(first_name),
             Some(demo),
             profiles::title(pwsh),
             &profiles::announcement_set(pwsh),
@@ -1172,7 +1204,7 @@ fn a_tab_follows_its_folder_when_the_shell_only_repeats_its_launchers_name() {
     assert_eq!(
         resolve_title(
             None,
-            Some("PowerShell 7"),
+            Some(first_name),
             None,
             profiles::title(pwsh),
             &profiles::announcement_set(pwsh),
@@ -1206,21 +1238,22 @@ fn the_tab_and_the_head_over_its_own_pane_agree_about_what_the_shell_said() {
         .feed(announcement.as_bytes())
         .expect("the shell's own announcement");
     leaf.session
-        .feed(b"\x1b]7;file:///D:\\Demo\x1b\\")
+        .feed(osc7_st(r"D:\Demo").as_bytes())
         .expect("and the folder it is standing in");
     let tab = tab_holding(leaf);
     let seat = tab.seats.identity();
+    let demo = host_spelling(r"D:\Demo");
 
     assert_eq!(tab.display_title(), "Demo", "the tab has room for one word");
     assert_eq!(
         tab.terminal_name(seat).as_deref(),
-        Some(r"D:\Demo"),
+        Some(demo.as_str()),
         "and the head, which has a whole bar, the whole path — with no \
              launcher's name prefixed to it"
     );
     assert_eq!(
         tab.tooltip_text(),
-        "Demo\nWorking folder · D:\\Demo",
+        format!("Demo\nWorking folder · {demo}"),
         "and the tip names the folder that named the tab"
     );
 }
@@ -1369,18 +1402,29 @@ fn a_tabs_tip_is_the_name_then_its_provenance_then_its_promise() {
 /// the argument rather than of the table's first row.
 #[test]
 fn the_new_tab_button_names_the_profile_it_would_start() {
+    // This build's fallback, a second shell, and a third the setting could point at, each
+    // with the title its row carries.
+    let (fallback, second, third) = match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => (
+            "New tab (Windows PowerShell 5.1)",
+            ("pwsh", "New tab (PowerShell 7)"),
+            ("cmd", "New tab (Command Prompt)"),
+        ),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => (
+            "New tab (sh)",
+            ("bash", "New tab (bash)"),
+            ("sh", "New tab (sh)"),
+        ),
+    };
+    assert_eq!(new_tab_tip(profiles::fallback_profile_id()), fallback);
     assert_eq!(
-        new_tab_tip(profiles::fallback_profile_id()),
-        "New tab (Windows PowerShell 5.1)"
-    );
-    assert_eq!(
-        new_tab_tip("pwsh"),
-        "New tab (PowerShell 7)",
+        new_tab_tip(second.0),
+        second.1,
         "the two PowerShells are told apart by the only thing that differs \n             — their version, which is why both titles carry one"
     );
     assert_eq!(
-        new_tab_tip("cmd"),
-        "New tab (Command Prompt)",
+        new_tab_tip(third.0),
+        third.1,
         "point the setting elsewhere and the button says so"
     );
     for index in 0..profiles::count() {
@@ -1472,8 +1516,9 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
     let mut leaf = leaf_saying("x");
     leaf.program = Some(program.clone());
     leaf.session
-        .feed(b"\x1b]0;C:\\WINDOWS\\System32\\cmd.exe\x07\x1b]7;file:///D:\\src\x1b\\")
+        .feed(b"\x1b]0;C:\\WINDOWS\\System32\\cmd.exe\x07")
         .unwrap();
+    leaf.session.feed(osc7_st(r"D:\src").as_bytes()).unwrap();
     assert_eq!(
         display_title(
             None,
@@ -1492,7 +1537,7 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
             &[profiles::title(profiles::index_of_id("cmd"))],
         )
         .map(|(name, _)| name),
-        Some(r"D:\src".to_owned()),
+        Some(host_spelling(r"D:\src")),
         "and the head the whole path, with no executable prefixed to it"
     );
 }
@@ -1514,7 +1559,7 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
 /// that function exists.
 #[test]
 fn a_pane_saved_as_a_profile_this_build_lacks_says_so_rather_than_pretending() {
-    assert!(profiles::has_id("cmd") && !profiles::has_id("fish"));
+    assert!(profiles::has_id(a_shipped_row_other_than_the_fallback()) && !profiles::has_id("fish"));
     let banner = unknown_profile_banner("wsl-ubuntu");
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
         nonzero_u32(120),
@@ -1530,7 +1575,7 @@ fn a_pane_saved_as_a_profile_this_build_lacks_says_so_rather_than_pretending() {
         "the line names the terminal and quotes the id that is missing: {first:?}"
     );
     assert!(
-        first.contains("PowerShell"),
+        first.contains(profiles::title(profiles::fallback_profile())),
         "and the profile that stood in for it, on the same row: {first:?}"
     );
     assert!(
@@ -1555,6 +1600,11 @@ fn a_pane_saved_as_a_profile_this_build_lacks_says_so_rather_than_pretending() {
 /// and the day one of them is a WSL pane the tab opens somewhere else.
 ///
 /// And the cancel: a chooser that comes back with nothing asks for nothing.
+///
+/// Windows only: its rows are PowerShell and WSL and its crossing is the WSL one. The
+/// build without WSL is
+/// `a_tab_opened_in_a_chosen_folder_stands_there_on_a_build_without_wsl`.
+#[cfg(windows)]
 #[test]
 fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
     let (pwsh, wsl) = ("pwsh", "wsl");
@@ -1585,6 +1635,47 @@ fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
     assert_eq!(new_tab_cwd(pwsh, None, pwsh, None), None);
 
     // A cancelled chooser asks for nothing at all — no tab, no toast.
+    assert_eq!(
+        folder_pick_outcome(Some(FolderPick::NewTabIn), Ok(None)),
+        None,
+    );
+    assert_eq!(
+        folder_pick_outcome(Some(FolderPick::NewTabIn), Ok(Some(chosen.clone()))),
+        Some((FolderPick::NewTabIn, chosen)),
+    );
+}
+
+/// PIN — the twin of `a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was`
+/// on a build without WSL: the folder that was chosen wins over the pane's, for this pane's
+/// shell and for another, every shell of this build reads it as it was chosen, the pane answers
+/// when nobody chose, and a cancelled chooser asks for nothing.
+#[cfg(not(windows))]
+#[test]
+fn a_tab_opened_in_a_chosen_folder_stands_there_on_a_build_without_wsl() {
+    let (shell, other) = (
+        a_shipped_row_other_than_the_fallback(),
+        profiles::fallback_profile_id(),
+    );
+    let chosen = PathBuf::from("/Developer/folio-terminal");
+    let pane = PathBuf::from("/Users/dev/elsewhere");
+    let carried = profiles::SeedPlace::Carried(pane.clone());
+
+    assert_eq!(
+        new_tab_cwd(shell, Some(&chosen), shell, Some(&carried)),
+        Some(profiles::SeedPlace::Named(chosen.clone())),
+        "the folder that was named out loud wins over the pane's own"
+    );
+    assert_eq!(
+        new_tab_cwd(other, Some(&chosen), shell, Some(&carried)),
+        Some(profiles::SeedPlace::Named(chosen.clone())),
+        "and every shell of this build is handed it as it was chosen"
+    );
+    assert_eq!(
+        new_tab_cwd(shell, None, shell, Some(&carried)),
+        Some(profiles::SeedPlace::Carried(pane.clone())),
+    );
+    assert_eq!(new_tab_cwd(shell, None, shell, None), None);
+
     assert_eq!(
         folder_pick_outcome(Some(FolderPick::NewTabIn), Ok(None)),
         None,
@@ -2059,6 +2150,10 @@ fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
 ///
 /// MUTATION, observed red: return the place and the mark unchanged after a swap — the WSL
 /// spelling and the launcher's mark stay on a PowerShell leaf.
+///
+/// Windows only: the namespace crossed is WSL's. The build without WSL is
+/// `a_shell_that_fell_back_keeps_its_birth_place_and_drops_the_launchers_mark`.
+#[cfg(windows)]
 #[test]
 fn a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace() {
     let (wsl, fallback) = ("wsl", profiles::fallback_profile_id());
@@ -2098,6 +2193,37 @@ fn a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace() {
         .find("leaf.session.set_spawn_at_shell_home(at_shell_home);")
         .expect("and the session is told the mark that goes with it");
     assert!(said < told, "{place}");
+}
+
+/// PIN — the twin of `a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace` on a
+/// build without WSL: every shell of this build speaks one namespace, so a leaf whose shell fell
+/// back keeps the place it was born in, the launcher's mark does not survive the swap, and a leaf
+/// that did not fall back keeps both.
+#[cfg(not(windows))]
+#[test]
+fn a_shell_that_fell_back_keeps_its_birth_place_and_drops_the_launchers_mark() {
+    let (asked, fallback) = (
+        a_shipped_row_other_than_the_fallback(),
+        profiles::fallback_profile_id(),
+    );
+    assert_eq!(
+        birth_place_of_the_started_shell(asked, fallback, Some(PathBuf::from("/Projects")), true),
+        (Some(PathBuf::from("/Projects")), false),
+        "the place needs no crossing, and the mark goes with the swap"
+    );
+    assert_eq!(
+        birth_place_of_the_started_shell(asked, asked, Some(PathBuf::from("/Projects")), true),
+        (Some(PathBuf::from("/Projects")), true),
+        "no swap, nothing changes"
+    );
+    let birth = free_fn_body("finish_leaf_birth");
+    let swapped = birth
+        .find("let profile = if let Some(fallback) = &shell_fallback {")
+        .expect("the swap");
+    let placed = birth
+        .find("place_leaf(leaf, decision, seed, &profile, in_birth);")
+        .expect("the leaf is placed for the started profile");
+    assert!(swapped < placed, "{birth}");
 }
 
 /// PIN — **a crash that nobody can see is a crash that nobody reports.**
@@ -2390,13 +2516,16 @@ fn a_tab_that_never_reported_a_folder_is_seeded_where_its_shell_was_put_down() {
     // still first, and it is the only one anybody actually *said*.
     let reported = tab_holding(LeafSession {
         spawn_place: Some(started_in.clone()),
-        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/folio-terminal\u{7}")
+        ..leaf_saying(&format!(
+            "\u{1b}]7;file://localhost{}\u{7}",
+            host_uri_path(r"D:\Developer\folio-terminal")
+        ))
     });
     assert_eq!(
         reported.seed(),
         Some(seed::Seed::Term {
             profile_id: profiles::id(profiles::fallback_profile()),
-            cwd: r"D:\Developer\folio-terminal".to_owned(),
+            cwd: host_spelling(r"D:\Developer\folio-terminal"),
             manual_name: None,
         }),
     );
@@ -2498,10 +2627,18 @@ fn a_pane_heads_folder_is_written_the_way_this_reader_writes_one() {
     let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
         .expect("the reader running this test has a home directory");
     let under = home.join("notes");
+    // Windows knows no `~`, so a head there prints what the shell reported; a Unix head
+    // writes the reader's home as the `~` its shell prints.
+    let written = match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => under.to_str().map(str::to_owned),
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+            Some("~/notes".to_owned())
+        }
+    };
     assert_eq!(
-        write(&under).as_deref(),
-        under.to_str(),
-        "Windows knows no `~`, so a head prints what the shell reported"
+        write(&under),
+        written,
+        "a head writes the folder the way this reader's shell writes it"
     );
     assert_eq!(
         write(Path::new("/nowhere/at/all")).as_deref(),
@@ -2755,6 +2892,10 @@ fn the_open_pill_peeks_and_pins_like_a_chevron() {
 /// The WSL crossing is the one that cannot be got right by accident: a
 /// Windows `D:\repo` handed to `wsl.exe` unconverted names nothing, and the
 /// pane opens at `~` with no explanation.
+///
+/// Windows only: its rows are PowerShell and WSL and its crossing is the WSL one. The build
+/// without WSL is `a_seeded_split_carries_the_profile_and_the_directory_on_a_build_without_wsl`.
+#[cfg(windows)]
 #[test]
 fn a_seeded_split_carries_the_profile_and_the_directory_the_row_promised() {
     let (pwsh, wsl) = ("pwsh", "wsl");
@@ -2806,6 +2947,40 @@ fn a_seeded_split_carries_the_profile_and_the_directory_the_row_promised() {
         ))),
         "the chooser speaks Windows, and a WSL pane does not"
     );
+}
+
+/// PIN — the twin of `a_seeded_split_carries_the_profile_and_the_directory_the_row_promised` on a
+/// build without WSL: `Duplicate pane` carries both halves, `Split with` carries the named profile
+/// and this pane's directory as it is, and the chooser's folder carries this pane's profile.
+#[cfg(not(windows))]
+#[test]
+fn a_seeded_split_carries_the_profile_and_the_directory_on_a_build_without_wsl() {
+    let (this, named) = (
+        a_shipped_row_other_than_the_fallback(),
+        profiles::fallback_profile_id(),
+    );
+    let here = PathBuf::from("/Developer");
+
+    let same = SplitSeed::Inherit.applied(this, Some(&profiles::SeedPlace::Carried(here.clone())));
+    assert_eq!(same.profile, this);
+    assert_eq!(same.cwd, Some(profiles::SeedPlace::Carried(here.clone())));
+
+    let split = SplitSeed::Profile(named.to_owned())
+        .applied(this, Some(&profiles::SeedPlace::Carried(here.clone())));
+    assert_eq!(split.profile, named);
+    assert_eq!(
+        split.cwd,
+        Some(profiles::SeedPlace::Carried(here.clone())),
+        "one namespace, so the directory is the one this pane stands in"
+    );
+    assert_eq!(
+        SplitSeed::Profile(named.to_owned()).applied(this, None).cwd,
+        None
+    );
+
+    let folder = SplitSeed::Folder(here.clone()).applied(this, None);
+    assert_eq!(folder.profile, this);
+    assert_eq!(folder.cwd, Some(profiles::SeedPlace::Named(here)));
 }
 
 /// RED (45) — **a block without the marks keeps `Run line by line` as its default**, and the other

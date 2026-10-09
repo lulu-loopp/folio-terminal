@@ -1294,14 +1294,7 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let mut settled = false;
         for (_, leaf) in self.window.tabs[active].leaves_mut() {
-            if leaf
-                .session
-                .live_stability_deadline()
-                .is_some_and(|deadline| now >= deadline)
-            {
-                leaf.session.advance_live_stability(now);
-                settled = true;
-            }
+            settled |= bt_compose::advance_live_stability(&mut leaf.session, now);
         }
         if !settled {
             return Ok(());

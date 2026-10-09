@@ -281,13 +281,14 @@ it closes.
 
 ### 3.1 The graph
 
-Twenty first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
-Two of the twenty arrived on 2026-10-08: `bt-testpath`, which no shipped build
+Twenty-one first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
+Three of the twenty-one arrived on 2026-10-08: `bt-testpath`, which no shipped build
 contains: it is every tested crate's dev-dependency and the optional dependency
 of the two test-support features, `bt-pty`'s `test-shell` and `bt-platform`'s
-`trust-harness`, and it depends on nothing; and `bt-effects` (CC-3), layer 0. Normal and
+`trust-harness`, and it depends on nothing; `bt-effects` (CC-3), layer 0; and
+`bt-compose` (CC-6a), layer 6. Normal and
 target-specific edges as the manifests declare them (2026-09-23; `bt-workbench`
-2026-09-25; `bt-effects` 2026-10-08):
+2026-09-25; `bt-effects` and `bt-compose` 2026-10-08):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
@@ -300,10 +301,14 @@ bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
 bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
 bt-platform     ← bt-persist, bt-app, bt-lint-probe
-bt-viewport     ← bt-render, bt-term
+bt-viewport     ← bt-render, bt-term, bt-compose
 bt-detect       ← bt-term
 bt-math         ← bt-term
-bt-term         ← bt-app (bt-pty only as a dev-dependency, since 2026-09-21)
+bt-term         ← bt-compose, bt-app (bt-pty only as a dev-dependency, since
+                  2026-09-21)
+bt-render       ← bt-compose, bt-app
+bt-compose      ← bt-app (itself: bt-term, bt-viewport, bt-render and
+                  web-time)
 bt-pty          ← bt-app
 bt-app          ← (nothing; the top)
 ```
@@ -333,10 +338,28 @@ window-waits source guard holds `bt-effects` to starting no thread, waiting on
 nothing, naming the file system and the environment only inside `file_reads`, no
 standard-library clock and no `bt_platform` (§5.1).
 
+**`bt-compose` is the order a pane's frame is made in** (CC-6a, design
+T-COMPOSE-CRATE §3.2): `project` (refresh the projection, build the frame, file
+the paths it printed — it schedules nothing), the hold's request read beside
+it, `schedule` for a frame that is not held, `deadlines` and `advance` (a
+synchronized update that ran out is committed, then live rows that settled are
+advanced), `acknowledge` at the publish boundary, and `seat_frames`, the draw
+list a present is handed. It sits at layer 6, above every crate it orders
+(`bt-term` 4, `bt-render` 5) and below the host that lends it sessions and
+views; `bt-app` and the tools moved up to 7. It has no direct effects: it reads
+no file, environment or clock, waits on nothing and starts no thread
+(`bt-app`'s window-waits guard reads it, §5.1). **What `bt-app` still owns of
+the frame path:** the pending slot and the unchanged-frame skip, the "a picture
+is already on the glass" half of the hold, the decoration lane and its
+dispatch, present admission and the GPU context, the retry that files a frame
+back after a failed present (without acknowledging it again), the perf traces,
+hover marks, notices and the IME, and the synchronized-update loop's title
+evidence. Math execution (`typeset`) and the bounded `pump` join it in CC-6b.
+
 The library crates below `bt-app` that a browser build will reference —
 `bt-unicode`, `bt-transcript`, `bt-doc`, `bt-layout`, `bt-viewport`,
-`bt-detect`, `bt-effects`, `bt-math`, `bt-render` and `bt-term` — check for
-`wasm32-unknown-unknown` in CI (`wasm-lib-check`, `scripts/ci/check-wasm-lib.ps1`,
+`bt-detect`, `bt-effects`, `bt-math`, `bt-render`, `bt-term` and `bt-compose` —
+check for `wasm32-unknown-unknown` in CI (`wasm-lib-check`, `scripts/ci/check-wasm-lib.ps1`,
 which holds the list).
 
 ### 3.2 The three questioned edges, and their disposition
@@ -426,10 +449,10 @@ those manifests actually practise, restated here from what they say:
 
 **The layering rule, restated from what enforces it:**
 
-- **`scripts/check-portable-core.ps1`** — sixteen named crates (`bt-source`,
-  `bt-testpath`, `bt-unicode`, `bt-doc`, `bt-detect`, `bt-layout`, `bt-persist`, `bt-winres`,
-  `bt-math`, `bt-transcript`, `bt-viewport`, `bt-render`, `bt-term`, `bt-pty`,
-  `bt-corpus`, `bt-workbench`) name no Win32 outside a `#[cfg(windows)]` gate. Platform-specific code lives
+- **`scripts/check-portable-core.ps1`** — eighteen named crates (`bt-source`,
+  `bt-testpath`, `bt-effects`, `bt-compose`, `bt-unicode`, `bt-doc`, `bt-detect`, `bt-layout`,
+  `bt-persist`, `bt-winres`, `bt-math`, `bt-transcript`, `bt-viewport`, `bt-render`, `bt-term`,
+  `bt-pty`, `bt-corpus`, `bt-workbench`) name no Win32 outside a `#[cfg(windows)]` gate. Platform-specific code lives
   behind `bt-platform`'s interface. This is the cheap local substitute for a
   non-Windows compile; CI proves the same property by compiling on macOS and
   Linux. `bt_app::platform_gate_tests` alone owns the separate rule that only
@@ -494,6 +517,13 @@ The ruled split, preserving the existing implementations:
 A view's inputs to a session are explicit: input commands, resize proposals,
 seen observations, and actions that answer an attention request. **A view
 disappearing must not implicitly mean the session ended.**
+
+**Composition borrows both halves and owns neither.** The session
+(`DualPlaneSession`) and the view (`ViewportProjection`, with the cell metrics a
+frame is drawn at and the last presented picture) are owned by the host —
+`bt-app`'s `LeafSession` today — and lent to `bt-compose` for one call
+(`bt_compose::Pane`); nothing is kept across calls, so the session/view split
+above can be made without touching it.
 
 The entry that replaces `create_leaf_session` accepts these narrower objects.
 If it accepts another wrapper holding `&mut App` and `&mut WindowRuntime`, the
@@ -932,10 +962,13 @@ body (the first-party edges in order, the vocabulary effects by call site) and a
 repayment in `docs/plans/structural-debt.md` (D-40, D-78…D-82); any other `Drop`
 that names a wait, or calls a door or a pinned body, is red;
 (9) every thread `bt-app` and `bt-platform` start comes through the thread door
-(A1c's guard, absorbed under its own name), and `bt-effects` starts none;
+(A1c's guard, absorbed under its own name), and `bt-effects` and `bt-compose`
+start none;
 (10) `bt-effects` waits on nothing (no blocking receive, sleep, park or lock), names
 the file system and the environment only inside `file_reads`, names no clock of the
-standard library and no `bt_platform` (CC-3). The world it reads reaches, from each
+standard library and no `bt_platform` (CC-3); (11) `bt-compose` has no direct
+effects: no wait, no file system or environment at all, no standard-library clock,
+no `bt_platform` (CC-6a). The world it reads reaches, from each
 package, its direct product dependencies and the crates those re-export with
 `pub use` — `bt-app`'s calls of `bt_platform::admission::admitted` resolve to
 `bt-effects`' function.

@@ -14499,6 +14499,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
+    use crate::test_support::host_spelling;
 
     /// RED (ticket 22) — **the section labels inside every menu `profiles.rs`
     /// builds are on the section-label scale, not their own smaller, more
@@ -14554,7 +14555,7 @@ mod tests {
             let title = layers
                 .iter()
                 .flat_map(|layer| &layer.labels)
-                .find(|label| label.text == powershell_seven())
+                .find(|label| label.text == first_row_title())
                 .expect("the profile row is named");
             let column_right = layout.items[0][0]
                 + (ITEM_PADDING_X_LOGICAL_PX + ITEM_ICON_COLUMN_LOGICAL_PX) * scale;
@@ -15000,29 +15001,30 @@ mod tests {
     /// local, says why each place is on it, and names each place once.
     #[test]
     fn the_root_menu_offers_home_then_the_shells_then_one_level_up() {
-        let choices = root_choices(
-            r"C:\work\project",
-            Some(r"C:\Users\dev"),
-            &[r"D:\repos\api".to_owned(), r"C:\work".to_owned()],
-            &[],
+        let (project, home, api, work) = (
+            host_spelling(r"C:\work\project"),
+            host_spelling(r"C:\Users\dev"),
+            host_spelling(r"D:\repos\api"),
+            host_spelling(r"C:\work"),
         );
+        let choices = root_choices(&project, Some(&home), &[api.clone(), work.clone()], &[]);
         assert_eq!(
             choices,
             vec![
                 RootChoice {
-                    path: r"C:\Users\dev".to_owned(),
+                    path: home.clone(),
                     notes: RootNotes::of(RootNote::Home),
                     pinned: false,
                     on_disk: true
                 },
                 RootChoice {
-                    path: r"D:\repos\api".to_owned(),
+                    path: api.clone(),
                     notes: RootNotes::of(RootNote::Terminal),
                     pinned: false,
                     on_disk: true
                 },
                 RootChoice {
-                    path: r"C:\work".to_owned(),
+                    path: work.clone(),
                     notes: RootNotes::of(RootNote::Terminal).and(RootNote::Parent),
                     pinned: false,
                     on_disk: true
@@ -15032,9 +15034,9 @@ mod tests {
         );
 
         // With no shell standing in it, the parent is offered as the parent.
-        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]);
+        let choices = root_choices(&project, Some(&home), &[], &[]);
         assert_eq!(choices.len(), 2);
-        assert_eq!(choices[1].path, r"C:\work");
+        assert_eq!(choices[1].path, work);
         assert_eq!(choices[1].notes, RootNotes::of(RootNote::Parent));
     }
 
@@ -15047,10 +15049,11 @@ mod tests {
     /// menu and unrecognisable. Keeping the first note was the whole of it.
     #[test]
     fn one_folder_is_one_row_wearing_every_badge_it_has_earned() {
+        let home = host_spelling(r"C:\Users\dev");
         let choices = root_choices(
-            r"C:\Users\dev\work",
-            Some(r"C:\Users\dev"),
-            &[r"C:\Users\dev".to_owned()],
+            &host_spelling(r"C:\Users\dev\work"),
+            Some(&home),
+            std::slice::from_ref(&home),
             &[],
         );
         assert_eq!(choices.len(), 1);
@@ -15075,10 +15078,11 @@ mod tests {
         // The user's own case: the folder above happens to be a shell's folder.
         // The row is where the shell put it — the order does not move — and it
         // says *both* things.
+        let (api, work) = (host_spelling(r"D:\repos\api"), host_spelling(r"C:\work"));
         let choices = root_choices(
-            r"C:\work\project",
+            &host_spelling(r"C:\work\project"),
             None,
-            &[r"D:\repos\api".to_owned(), r"C:\work".to_owned()],
+            &[api.clone(), work.clone()],
             &[],
         );
         assert_eq!(
@@ -15086,7 +15090,7 @@ mod tests {
                 .iter()
                 .map(|choice| choice.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![r"D:\repos\api", r"C:\work"],
+            vec![api.as_str(), work.as_str()],
             "merging two reasons does not move the row"
         );
         assert!(choices[1].notes.has(RootNote::Parent));
@@ -15122,16 +15126,17 @@ mod tests {
     /// list of its own to be at the top of.
     #[test]
     fn a_root_at_the_top_of_its_drive_offers_no_step_up() {
-        let choices = root_choices(r"C:\", None, &[], &[]);
+        let top = host_spelling(r"C:\");
+        let choices = root_choices(&top, None, &[], &[]);
         assert!(
             choices.is_empty(),
-            "`C:\\` has no parent, and there is nothing else to offer: {choices:?}"
+            "`{top}` has no parent, and there is nothing else to offer: {choices:?}"
         );
         assert!(root_choices("", None, &[], &[]).is_empty());
         assert!(
-            root_choices(r"C:\work\", None, &[], &[])
+            root_choices(&host_spelling(r"C:\work\"), None, &[], &[])
                 .iter()
-                .any(|choice| choice.path == r"C:\"),
+                .any(|choice| choice.path == top),
             "a trailing separator does not hide the folder above"
         );
     }
@@ -15161,11 +15166,18 @@ mod tests {
                 })
                 .collect()
         };
+        let (project, home, api, work) = (
+            host_spelling(r"C:\work\project"),
+            host_spelling(r"C:\Users\dev"),
+            host_spelling(r"D:\repos\api"),
+            host_spelling(r"C:\work"),
+        );
+        let (notes, photos) = (host_spelling(r"E:\notes"), host_spelling(r"E:\photos"));
         let choices = root_choices(
-            r"C:\work\project",
-            Some(r"C:\Users\dev"),
-            &[r"D:\repos\api".to_owned()],
-            &recent(&[r"E:\notes", r"E:\photos"]),
+            &project,
+            Some(&home),
+            std::slice::from_ref(&api),
+            &recent(&[notes.as_str(), photos.as_str()]),
         );
         assert_eq!(
             choices
@@ -15173,11 +15185,11 @@ mod tests {
                 .map(|choice| choice.path.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                r"C:\Users\dev",
-                r"D:\repos\api",
-                r"E:\notes",
-                r"E:\photos",
-                r"C:\work",
+                home.as_str(),
+                api.as_str(),
+                notes.as_str(),
+                photos.as_str(),
+                work.as_str(),
             ],
             "home, the shell, what was opened in the store's own order, then the folder above"
         );
@@ -15188,17 +15200,17 @@ mod tests {
         // collects the badge, which is how "it does not repeat what is above it"
         // is spelled on a menu whose rows carry every reason they have.
         let choices = root_choices(
-            r"C:\work\project",
-            Some(r"C:\Users\dev"),
-            &[r"D:\repos\api".to_owned()],
-            &recent(&[r"C:\Users\dev", r"D:\repos\api", r"C:\work"]),
+            &project,
+            Some(&home),
+            std::slice::from_ref(&api),
+            &recent(&[home.as_str(), api.as_str(), work.as_str()]),
         );
         assert_eq!(
             choices
                 .iter()
                 .map(|choice| choice.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![r"C:\Users\dev", r"D:\repos\api", r"C:\work"],
+            vec![home.as_str(), api.as_str(), work.as_str()],
             "three folders, three rows - nothing is listed twice"
         );
         assert!(choices[0].notes.has(RootNote::Home));
@@ -15223,19 +15235,23 @@ mod tests {
     /// make `root_menu_hit` consult it and the press goes.
     #[test]
     fn a_folder_that_has_gone_is_grey_and_is_still_a_row_you_can_press() {
+        let (project, unplugged) = (
+            host_spelling(r"C:\work\project"),
+            host_spelling(r"E:\unplugged"),
+        );
         let choices = root_choices(
-            r"C:\work\project",
+            &project,
             None,
             &[],
             &[crate::recent_folders::RecentFolder {
-                path: r"E:\unplugged".to_owned(),
+                path: unplugged.clone(),
                 at: std::time::SystemTime::UNIX_EPOCH,
                 on_disk: false,
             }],
         );
         let gone = choices
             .iter()
-            .position(|choice| choice.path == r"E:\unplugged")
+            .position(|choice| choice.path == unplugged)
             .expect("the folder is still offered");
         assert!(!choices[gone].on_disk);
         let layout = root_menu_layout(
@@ -15248,7 +15264,7 @@ mod tests {
         let layer = one_layer(root_menu_build(
             &layout,
             &choices,
-            r"C:\work\project",
+            &project,
             None,
             &mut fake_measure,
         ));
@@ -15485,7 +15501,8 @@ mod tests {
         );
 
         // And the menu that holds both kinds of row.
-        let choices = root_choices(r"C:\work\project", None, &[], &[]);
+        let project = host_spelling(r"C:\work\project");
+        let choices = root_choices(&project, None, &[], &[]);
         let root = root_menu_layout(
             [40.0, 8.0, 140.0, 27.0],
             (960.0, 600.0),
@@ -15496,7 +15513,7 @@ mod tests {
         let root_layer = one_layer(root_menu_build(
             &root,
             &choices,
-            r"C:\work\project",
+            &project,
             None,
             &mut fake_measure,
         ));
@@ -15581,27 +15598,26 @@ mod tests {
     ///    label stuck in the middle of it.
     #[test]
     fn the_kept_folders_are_a_section_above_home_with_a_rule_under_them() {
-        let found = root_choices(
-            r"C:\work\project",
-            Some(r"C:\Users\dev"),
-            &[r"D:\repos\api".to_owned()],
-            &[],
+        let (project, home, api, work, archive) = (
+            host_spelling(r"C:\work\project"),
+            host_spelling(r"C:\Users\dev"),
+            host_spelling(r"D:\repos\api"),
+            host_spelling(r"C:\work"),
+            host_spelling(r"Z:\archive"),
         );
+        let found = root_choices(&project, Some(&home), std::slice::from_ref(&api), &[]);
         // One kept folder this window also found, and one it did not.
-        let choices = apply_pins(
-            found,
-            &[r"D:\repos\api".to_owned(), r"Z:\archive".to_owned()],
-        );
+        let choices = apply_pins(found, &[api.clone(), archive.clone()]);
         assert_eq!(
             choices
                 .iter()
                 .map(|choice| (choice.path.as_str(), choice.pinned))
                 .collect::<Vec<_>>(),
             vec![
-                (r"D:\repos\api", true),
-                (r"Z:\archive", true),
-                (r"C:\Users\dev", false),
-                (r"C:\work", false),
+                (api.as_str(), true),
+                (archive.as_str(), true),
+                (home.as_str(), false),
+                (work.as_str(), false),
             ],
             "kept first, in the file's order, then what this window found"
         );
@@ -15651,8 +15667,8 @@ mod tests {
         // rule read for the other one: pinning every place this window found
         // leaves `OPEN FOLDER` standing over a hairline.
         let all_kept = apply_pins(
-            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]),
-            &[r"C:\Users\dev".to_owned(), r"C:\work".to_owned()],
+            root_choices(&project, Some(&home), &[], &[]),
+            &[home.clone(), work.clone()],
         );
         let all_kept_layout = root_menu_layout(
             [40.0, 8.0, 140.0, 27.0],
@@ -15675,7 +15691,7 @@ mod tests {
             !one_layer(root_menu_build(
                 &all_kept_layout,
                 &all_kept,
-                r"C:\work\project",
+                &project,
                 None,
                 &mut fake_measure,
             ))
@@ -15687,7 +15703,7 @@ mod tests {
         let layer = one_layer(root_menu_build(
             &layout,
             &choices,
-            r"C:\work\project",
+            &project,
             None,
             &mut fake_measure,
         ));
@@ -15718,10 +15734,7 @@ mod tests {
         );
 
         // Nothing kept is the menu exactly as it was: no heading, no rule.
-        let plain = apply_pins(
-            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[], &[]),
-            &[],
-        );
+        let plain = apply_pins(root_choices(&project, Some(&home), &[], &[]), &[]);
         let plain_layout = root_menu_layout(
             [40.0, 8.0, 140.0, 27.0],
             (960.0, 600.0),
@@ -15810,16 +15823,68 @@ mod tests {
         assert_eq!(menu.hover(), None);
     }
 
-    /// What the PowerShell 7 row is called, read from the table rather than
-    /// written down.
+    /// What the table's first row is called — PowerShell 7 on Windows, the
+    /// account's first shell elsewhere — read from the table rather than written
+    /// down.
     ///
     /// The rows below are about *drawing* — this row's name is inked here, greyed
     /// there, tipped with what its caption left out — and none of them is about
     /// what the name happens to be. Spelling it out made every one of them a
     /// second, accidental copy of `display_title(…)`, so the 7 / 5.1 rename came
     /// back as six failures in tests that had no opinion about it.
-    fn powershell_seven() -> String {
-        display_title(index_of_id("pwsh"))
+    fn first_row_title() -> String {
+        display_title(0)
+    }
+
+    /// The table a **Windows** build ships, as data — for the pins whose subject
+    /// is that table (its ids, its agents, its PowerShell floor), so they say the
+    /// same thing on every runner. [`shipped_for`] reads no environment for it.
+    fn windows_seed() -> Vec<Profile> {
+        shipped_for(SeedPlatform::Windows, &FakeMachine::default())
+    }
+
+    /// One row of [`windows_seed`].
+    fn windows_row(id: &str) -> Profile {
+        windows_seed()
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap_or_else(|| panic!("{id} is a row of the Windows seed"))
+    }
+
+    /// [`windows_seed`] as a table of its own, never this process's.
+    fn windows_table() -> ProfileTable {
+        ProfileTable {
+            profiles: windows_seed(),
+        }
+    }
+
+    /// A registry holding [`windows_seed`] — for the pins about the table's
+    /// verbs that read nothing but the table they move (rename, duplicate,
+    /// create, move).
+    fn windows_registry() -> Registry {
+        Registry {
+            table: RwLock::new(Arc::new(windows_table())),
+            revision: AtomicU64::new(0),
+        }
+    }
+
+    /// [`merge`] over [`windows_seed`], on the platform that seed is for.
+    fn merge_windows(file: &ProfilesV1) -> (Vec<Profile>, Vec<ProfileFault>) {
+        merge_on(windows_seed(), file, SeedPlatform::Windows)
+    }
+
+    /// The id of the row of **this host's** table that stands in the role a
+    /// Windows pin gave `windows` — that id on Windows, `elsewhere` off it.
+    ///
+    /// For the pins about a mechanism (greying, hiding, a round trip) that need
+    /// one more row than the first and the floor: `elsewhere` is a row every
+    /// build off Windows ships and that is neither of those two.
+    fn host_id(windows: &'static str, elsewhere: &'static str) -> &'static str {
+        if bt_platform::host_platform() == HostPlatform::Windows {
+            windows
+        } else {
+            elsewhere
+        }
     }
 
     /// An in-memory machine: what is on the `PATH`, and which files exist.
@@ -15899,17 +15964,55 @@ mod tests {
         }
     }
 
-    /// The four profiles all startable — the machine most of these tests are
-    /// about the *menu* on rather than about availability.
-    fn equipped() -> ProfilePrograms {
-        ProfilePrograms::probe(&FakeMachine::fully_equipped())
+    /// `machine` with the program of every row of **this process's** table that
+    /// names one path — the rows a build off Windows ships — and that `keep`
+    /// picks, installed at that path.
+    ///
+    /// The Windows rows are found through Windows candidates (`%ProgramFiles%`,
+    /// `PATH`, `.cmd` shims) that only a Windows probe joins into the spellings
+    /// these fixtures hold; a Unix row names its program outright. A Windows
+    /// table names no such row, so on Windows this hands `machine` back as it
+    /// came.
+    fn with_named_programs(
+        mut machine: FakeMachine,
+        keep: impl Fn(&Profile) -> bool,
+    ) -> FakeMachine {
+        for row in table().profiles() {
+            if let ProgramSource::Path(program) = &row.program
+                && keep(row)
+            {
+                machine.files.insert(program.clone());
+            }
+        }
+        machine
     }
 
-    /// A bare Windows box: Windows PowerShell and nothing else this product can
-    /// start — not even PowerShell 7, which is an install rather than part of
-    /// the OS.
+    /// Every row of this host's table startable: [`FakeMachine::fully_equipped`],
+    /// and off Windows the three (or four) shells at the paths their rows name.
+    fn equipped_machine() -> FakeMachine {
+        with_named_programs(FakeMachine::fully_equipped(), |_| true)
+    }
+
+    /// This host's bare machine: [`FakeMachine::bare_windows`] on Windows, and
+    /// off it the floor's own `/bin/sh` and nothing else — on every platform, the
+    /// one program the platform itself guarantees.
+    fn bare_machine() -> FakeMachine {
+        with_named_programs(FakeMachine::bare_windows(), |row| {
+            row.id == fallback_profile_id()
+        })
+    }
+
+    /// Every profile startable — the machine most of these tests are about the
+    /// *menu* on rather than about availability.
+    fn equipped() -> ProfilePrograms {
+        ProfilePrograms::probe(&equipped_machine())
+    }
+
+    /// A bare box: the floor and nothing else this product can start — on
+    /// Windows, Windows PowerShell and not even PowerShell 7, which is an install
+    /// rather than part of the OS.
     fn bare() -> ProfilePrograms {
-        ProfilePrograms::probe(&FakeMachine::bare_windows())
+        ProfilePrograms::probe(&bare_machine())
     }
 
     fn at(secs: u64) -> SystemTime {
@@ -16011,25 +16114,44 @@ mod tests {
                 width >= (180.0 * scale).round(),
                 "scale {scale}: `min-width: 180px`, got {width}"
             );
-            let longest = (0..count())
-                .map(|index| fake_measure(title(index), ITEM_FONT_LOGICAL_PX * scale))
-                .fold(0.0_f32, f32::max);
             let annotation = fake_measure(hint_text(), HINT_FONT_LOGICAL_PX * scale).max(
                 fake_measure(unavailable_hint_text(), HINT_FONT_LOGICAL_PX * scale),
             );
+            // One row's content: its icon column, its name, and what stands after the name.
+            let row = |name: &str, after: f32| {
+                ITEM_ICON_COLUMN_LOGICAL_PX * scale
+                    + 2.0 * ITEM_GAP_LOGICAL_PX * scale
+                    + fake_measure(name, ITEM_FONT_LOGICAL_PX * scale)
+                    + after
+            };
+            // The rows below the rule are this module's own captions and decide the width
+            // with the profiles: `Files pane` with its hint and its chord, and
+            // `New terminal in folder…`. Which row is the longest is the shipped table's
+            // fact — `Windows PowerShell` on Windows, a folder row where the shells'
+            // names are short.
+            let files_accel = accelerator_of(
+                Some(crate::shortcuts::Action::FilesPane),
+                false,
+                &chord_table(),
+                scale,
+                &mut fake_measure,
+            );
+            let files_row = row(
+                files_pane_text(),
+                fake_measure(files_pane_hint_text(), HINT_FONT_LOGICAL_PX * scale)
+                    + accelerator_claim(std::slice::from_ref(&files_accel), scale),
+            )
+            .max(row(new_in_folder_text(), 0.0));
+            let longest = (0..count())
+                .map(|index| row(title(index), annotation))
+                .fold(files_row, f32::max);
             let chrome = 2.0
                 * ((FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
                     + MENU_PADDING_LOGICAL_PX * scale
                     + ITEM_PADDING_X_LOGICAL_PX * scale);
             assert_eq!(
                 width,
-                (chrome
-                    + ITEM_ICON_COLUMN_LOGICAL_PX * scale
-                    + 2.0 * ITEM_GAP_LOGICAL_PX * scale
-                    + longest
-                    + annotation)
-                    .max(180.0 * scale)
-                    .round(),
+                (chrome + longest).max(180.0 * scale).round(),
                 "scale {scale}: and the longest row decides the rest"
             );
             assert_eq!(layout.items.len(), count());
@@ -16155,8 +16277,11 @@ mod tests {
     /// means by "PowerShell", 5.1 beside it because the pair is the choice.
     #[test]
     fn the_picker_offers_exactly_the_profiles_this_build_has() {
-        assert_eq!(count(), 12);
-        let shipped = shipped_rows();
+        // The Windows seed, asked of the table that platform ships whatever this
+        // runner is; the macOS one is `the_shipped_profiles_on_macos_are_zsh_bash_and_sh`'s.
+        let windows = windows_table();
+        let shipped = windows_seed();
+        assert_eq!(shipped.len(), 12);
         let listed: Vec<_> = shipped.iter().map(|profile| profile.id.as_str()).collect();
         // **Five shells, then seven agents** (user rulings 2026-08-28 and
         // 2026-08-29, §7.41). The agents go after the shells and not among
@@ -16171,7 +16296,10 @@ mod tests {
                 "pi", "hermes", "opencode"
             ]
         );
-        assert_eq!(display_title(fallback_profile()), "Windows PowerShell 5.1");
+        assert_eq!(
+            shipped[fallback_profile_in_on(&windows, SeedPlatform::Windows)].display_title,
+            "Windows PowerShell 5.1"
+        );
 
         // **Mark × title, and not the mark alone.** This used to require every
         // mark to be distinct, and the two PowerShells retire that: they are one
@@ -16181,8 +16309,8 @@ mod tests {
         // identity *is* — "图标 × 目录", the icon and the text together — and in
         // this list the text is the title. Two rows with the same mark are fine;
         // two rows a reader cannot tell apart are not.
-        for (index, left) in shipped_rows().iter().enumerate() {
-            for right in &shipped_rows()[index + 1..] {
+        for (index, left) in shipped.iter().enumerate() {
+            for right in &shipped[index + 1..] {
                 assert_ne!(
                     (left.mark, &left.display_title),
                     (right.mark, &right.display_title),
@@ -16193,22 +16321,19 @@ mod tests {
             }
         }
         assert_eq!(
-            mark(index_of_id("pwsh")),
-            mark(index_of_id("winps")),
+            windows_row("pwsh").mark,
+            windows_row("winps").mark,
             "and the two PowerShells share theirs on purpose"
         );
 
         // And five ids, because an id is what a seed is keyed on: two profiles
         // sharing one would be two tabs that cannot be told apart on disk.
         let ids: std::collections::HashSet<_> = listed.iter().collect();
-        assert_eq!(ids.len(), count());
-        for profile in shipped_rows() {
+        assert_eq!(ids.len(), shipped.len());
+        for profile in &shipped {
             assert_eq!(
-                index_of_id(&profile.id),
-                shipped_rows()
-                    .iter()
-                    .position(|p| p.id == profile.id)
-                    .unwrap(),
+                index_of_id_in(&windows, &profile.id),
+                shipped.iter().position(|p| p.id == profile.id).unwrap(),
                 "{} must resolve to its own row",
                 profile.id
             );
@@ -16247,7 +16372,7 @@ mod tests {
             "the list the greyed-row sentence reads is the list of agents"
         );
         for id in AGENT_IDS {
-            let row = row_of(id).expect("the agent is a row");
+            let row = windows_row(id);
             assert_eq!(row.origin, Origin::Builtin, "{id}");
             assert!(
                 !row.hidden,
@@ -16291,7 +16416,7 @@ mod tests {
         // A shell is not an agent, and the sentence it shows when it is missing
         // is the shorter one. Read off the shipped rows so that a sixth shell
         // does not have to be added here as well.
-        for profile in shipped_rows() {
+        for profile in windows_seed() {
             let is_agent = AGENT_IDS.contains(&profile.id.as_str());
             assert_eq!(
                 agent_command(&profile).is_some(),
@@ -16333,7 +16458,7 @@ mod tests {
     /// so two of the seven differ by a pen.
     #[test]
     fn every_agent_wears_one_mark_in_its_own_colour() {
-        let rows = shipped_rows();
+        let rows = windows_seed();
         let agents: Vec<&Profile> = rows
             .iter()
             .filter(|profile| AGENT_IDS.contains(&profile.id.as_str()))
@@ -16460,7 +16585,7 @@ mod tests {
         const SIDE: f32 = 64.0;
         let mut rasters = crate::marks::ChromeMarkRasters::default();
         for id in AGENT_IDS {
-            let mark = row_of(id).expect("the agent is a row").mark;
+            let mark = windows_row(id).mark;
             let mut sprite =
                 crate::marks::ChromeSprite::new(mark, [0.0, 0.0, SIDE, SIDE], [0x7a, 0x99, 0xff]);
             sprite.opacity = UNAVAILABLE_MARK_OPACITY;
@@ -16515,12 +16640,12 @@ mod tests {
         };
         assert_eq!(
             offered(&bare()),
-            ["winps"],
-            "a bare Windows box can start one row, so one row is what it is offered"
+            [fallback_profile_id()],
+            "a bare box can start one row, the floor, so one row is what it is offered"
         );
         assert!(
             page_lines(&bare(), Some(fallback_profile()), true).len() > 1,
-            "and the eleven it dropped are still on the page that explains them"
+            "and the rows it dropped are still on the page that explains them"
         );
         assert_eq!(
             offered(&equipped()),
@@ -16531,16 +16656,30 @@ mod tests {
             "a machine with everything offers everything, in the table's order"
         );
 
-        // Two agents installed the way they really install, and they appear in
-        // their own places rather than at the end of the list — beside the one
-        // shell this machine has and not beside the four it has not.
-        let two = ProfilePrograms::probe(
-            &FakeMachine::bare_windows()
+        // Two programs installed the way they really install — on Windows two
+        // agents, npm shims on `PATH`; off it, one more shell at its own path —
+        // and they appear in their own places rather than at the end of the list:
+        // beside the one shell this machine had and not beside the ones it has not.
+        let installed = [
+            fallback_profile_id(),
+            host_id("claude", "bash"),
+            host_id("codex", "bash"),
+        ];
+        let two = ProfilePrograms::probe(&with_named_programs(
+            FakeMachine::bare_windows()
                 .with_var("PATH", r"C:\Users\dev\AppData\Roaming\npm")
                 .with_file(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd")
                 .with_file(r"C:\Users\dev\AppData\Roaming\npm\codex.cmd"),
+            |row| installed.contains(&row.id.as_str()),
+        ));
+        assert_eq!(
+            offered(&two),
+            shipped_rows()
+                .iter()
+                .map(|profile| profile.id.clone())
+                .filter(|id| installed.contains(&id.as_str()))
+                .collect::<Vec<_>>(),
         );
-        assert_eq!(offered(&two), ["winps", "claude", "codex"]);
 
         // And a row of the reader's own that resolves to nothing is still on the
         // list, beside the shells and where their file put it.
@@ -16568,6 +16707,11 @@ mod tests {
     /// Folio knows about at all. What it does not do is say the same sentence
     /// seven times — [`agent_note_after`] names the one row the group's line
     /// stands under, and answers `None` on a machine that has them all.
+    ///
+    /// **Windows only:** the agent rows are the Windows seed's, the page reads
+    /// this process's table, and the way out the group names is WSL. A build off
+    /// Windows ships no agent row, so its page has no group to say anything.
+    #[cfg(windows)]
     #[test]
     fn the_page_keeps_every_agent_row_and_the_group_says_the_way_out_once() {
         let missing = page_lines(&bare(), Some(fallback_profile()), true);
@@ -16621,7 +16765,9 @@ mod tests {
     /// exact failure that cannot be seen from a screenshot of the menu.
     #[test]
     fn only_the_powershell_profile_asks_for_nologo() {
-        for profile in shipped_rows() {
+        // The Windows seed, the one that ships PowerShell rows;
+        // `nothing_off_windows_ever_names_powershell` is the other platforms'.
+        for profile in windows_seed() {
             let has_nologo = profile.args.iter().any(|argument| argument == "-NoLogo");
             // Both PowerShells: the flag belongs to the family, not to one row.
             let is_powershell = profile.id == "pwsh" || profile.id == "winps";
@@ -16633,11 +16779,8 @@ mod tests {
                 if is_powershell { "" } else { "not" }
             );
         }
-        assert_eq!(args(index_of_id("cmd")), &[] as &[&str]);
-        let gitbash = shipped_rows()
-            .into_iter()
-            .find(|row| row.id == "gitbash")
-            .unwrap();
+        assert_eq!(windows_row("cmd").args, &[] as &[&str]);
+        let gitbash = windows_row("gitbash");
         assert_eq!(
             launch_args(&gitbash),
             &["--login", "-i"],
@@ -16663,6 +16806,12 @@ mod tests {
     ///   original lie, now with a second row beside it making the lie visible;
     /// * point `fallback_profile()` at `pwsh` and the floor under every other
     ///   profile becomes a row that is allowed to be greyed.
+    ///
+    /// **Windows only:** both rows and every path probed here are Windows ones
+    /// (`%ProgramFiles%`, `%SystemRoot%`, `BT_SHELL` naming a `pwsh.exe`), and the
+    /// probe joins them in this process's own grammar. A build off Windows ships
+    /// no PowerShell row (`nothing_off_windows_ever_names_powershell`).
+    #[cfg(windows)]
     #[test]
     fn the_two_powershells_are_two_rows_and_only_one_of_them_can_be_missing() {
         let (seven, five) = (index_of_id("pwsh"), index_of_id("winps"));
@@ -16757,8 +16906,9 @@ mod tests {
         // The assignment as the script writes it — the two arms of the one
         // conditional that decides what a PowerShell calls itself. `Core` is 7 and
         // everything else is the 5.1 that ships with Windows.
+        // The Windows seed's titles, which is where the script runs.
         for (id, edition) in [("pwsh", "Core"), ("winps", "Desktop")] {
-            let title = display_title(index_of_id(id));
+            let title = windows_row(id).display_title;
             let quoted = format!("'{title}'");
             assert!(
                 script.contains(&quoted),
@@ -16768,8 +16918,8 @@ mod tests {
         }
         // And the arms are told apart the way the script tells them apart, so the
         // pair above cannot both be satisfied by one arm carrying both strings.
-        let seven = display_title(index_of_id("pwsh"));
-        let five = display_title(index_of_id("winps"));
+        let seven = windows_row("pwsh").display_title;
+        let five = windows_row("winps").display_title;
         assert!(
             script.contains(&format!(
                 "$PSVersionTable.PSEdition -eq 'Core') {{ '{seven}' }} else {{ '{five}' }}"
@@ -16790,18 +16940,27 @@ mod tests {
     /// no shell in it.
     #[test]
     fn the_fallback_profile_can_always_be_started() {
+        let windows = windows_table();
+        let floor = &windows.profiles()[fallback_profile_in_on(&windows, SeedPlatform::Windows)];
         assert_eq!(
-            shipped_rows()[fallback_profile()].id,
-            "winps",
+            floor.id, "winps",
             "the floor is the shell that is part of Windows"
         );
         assert!(
-            !matches!(
-                shipped_rows()[fallback_profile()].program,
-                ProgramSource::PowerShellSeven
-            ),
+            !matches!(floor.program, ProgramSource::PowerShellSeven),
             "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
         );
+        // And the macOS floor is the shell POSIX puts at `/bin/sh`, which no Mac
+        // is without.
+        let mac = ProfileTable {
+            profiles: shipped_for(SeedPlatform::MacOs, &bare_macos()),
+        };
+        let floor = &mac.profiles()[fallback_profile_in_on(&mac, SeedPlatform::MacOs)];
+        assert_eq!(floor.id, BOURNE_SHELL_ID);
+        assert_eq!(floor.program, ProgramSource::Path(PathBuf::from("/bin/sh")));
+        // This process's own floor is its own table's, and it starts even on a
+        // machine with nothing else on it.
+        assert_eq!(shipped_rows()[fallback_profile()].id, fallback_profile_id());
         // Even on a machine with nothing else on it.
         assert!(bare().row_is_available(fallback_profile()));
         assert!(equipped().row_is_available(fallback_profile()));
@@ -17016,8 +17175,8 @@ mod tests {
             assert_eq!(*rect, expected);
         }
 
-        // And on a machine that has every one of them — twelve rows, this time,
-        // because the agents are all startable — no profile row has anything to
+        // And on a machine that has every one of them — every row of the table,
+        // this time, the agents included on Windows — no profile row has anything to
         // add, but the Recent row still carries the path its caption cropped.
         // `super::` because the binding above has the function's own name here.
         let whole = super::layout(
@@ -17066,15 +17225,22 @@ mod tests {
     #[test]
     fn the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it() {
         let all = equipped();
+        // This host's rows in the roles the rule reads: the first shipped shell
+        // (PowerShell 7 on Windows), the floor (5.1 on Windows, `sh` elsewhere),
+        // a row somebody chose, and one a bare machine has not got.
+        let first = shipped_rows()[0].id.clone();
+        let floor = fallback_profile_id();
+        let chosen = host_id("cmd", "bash");
+        let uninstalled = host_id("gitbash", "bash");
 
         assert_eq!(
-            default_profile("cmd", &all),
-            Some(index_of_id("cmd")),
+            default_profile(chosen, &all),
+            Some(index_of_id(chosen)),
             "a stored id this machine can start is the answer, whatever index it is"
         );
         assert_eq!(
             default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &all),
-            Some(index_of_id("pwsh")),
+            Some(index_of_id(&first)),
             "nobody has ever opened the setting: the first shipped shell this \
              machine has, which on a machine with PowerShell 7 is PowerShell 7"
         );
@@ -17084,33 +17250,40 @@ mod tests {
             "and on a machine that has only the one, the walk stops at the floor"
         );
         assert_eq!(
-            default_profile(WINDOWS_POWERSHELL_ID, &all),
-            Some(index_of_id(WINDOWS_POWERSHELL_ID)),
-            "unset is not the same as choosing 5.1: a reader who picked it keeps it \
-             on the very machine the unset answer would have moved off"
+            default_profile(floor, &all),
+            Some(index_of_id(floor)),
+            "unset is not the same as choosing the floor: a reader who picked it \
+             keeps it on the very machine the unset answer would have moved off"
         );
         assert!(
             default_profile_is_automatic(bt_persist::DEFAULT_PROFILE_UNSET, &all),
             "and the page can tell the two apart, which is what its badge says"
         );
-        assert!(!default_profile_is_automatic(WINDOWS_POWERSHELL_ID, &all));
+        assert!(!default_profile_is_automatic(floor, &all));
         assert!(
-            default_profile_is_automatic("gitbash", &bare()),
+            default_profile_is_automatic(uninstalled, &bare()),
             "a choice this machine cannot honour is not a choice it is honouring"
         );
         assert_eq!(
             default_profile("a-profile-from-a-newer-build", &all),
-            Some(index_of_id("pwsh")),
+            Some(index_of_id(&first)),
             "an id this build does not have decides nothing, so the machine does"
         );
         assert_eq!(
-            default_profile("gitbash", &bare()),
+            default_profile(uninstalled, &bare()),
             Some(fallback_profile()),
             "chosen, installed once, uninstalled since — the window still opens"
         );
         // And the resolved answer is always startable, which is the property
         // `create_leaf_session`'s `expect` is standing on.
-        for stored in ["cmd", "gitbash", "wsl", "pwsh", "", "nonsense"] {
+        for stored in [
+            chosen,
+            uninstalled,
+            host_id("wsl", BOURNE_SHELL_ID),
+            first.as_str(),
+            "",
+            "nonsense",
+        ] {
             for machine in [&all, &bare()] {
                 assert!(
                     default_profile(stored, machine)
@@ -17900,6 +18073,13 @@ mod tests {
     /// it would compile, it would look right in the table, and a WSL tab would
     /// open in `/mnt/c/Users/…` — a real directory, silently not the one the same
     /// shell opens in when started any other way.
+    ///
+    /// **Windows only:** its rows are the Windows seed's, read through this
+    /// process's table, its home is `%USERPROFILE%` and its launcher is
+    /// `wsl.exe`. What a shell of the platform this runs on does is
+    /// `a_finder_launched_pane_starts_in_the_home_directory` and
+    /// `a_shell_of_this_platform_starts_where_its_place_says`.
+    #[cfg(windows)]
     #[test]
     fn a_profile_states_its_starting_place_in_the_form_its_launcher_can_take() {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
@@ -17960,6 +18140,12 @@ mod tests {
     /// folder — so the WSL tab opens in `/mnt/c/WINDOWS/system32` while the menu
     /// row said it would open where you were standing. Nothing about that is
     /// visible: it is a real directory, and the shell starts.
+    ///
+    /// **Windows only:** the two channels are a Windows process's working
+    /// directory and `wsl.exe --cd`, and only a Windows build has a row on the
+    /// second. The first channel on every platform is
+    /// `a_shell_of_this_platform_starts_where_its_place_says`.
+    #[cfg(windows)]
     #[test]
     fn an_inherited_directory_is_told_to_the_launcher_that_can_read_it() {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
@@ -18009,6 +18195,11 @@ mod tests {
     ///
     /// MUTATION, observed red: drop the `revived_cwd` filter from `spawn_place` — the deleted
     /// folder is handed on as the working directory.
+    ///
+    /// **Windows only:** the rows are the Windows seed's and the half no folder
+    /// can be checked for is a WSL one. The same rule for the shells of the
+    /// platform this runs on is `a_shell_of_this_platform_starts_where_its_place_says`.
+    #[cfg(windows)]
     #[test]
     fn a_folder_that_is_no_longer_a_directory_starts_the_shell_where_no_folder_would() {
         let home = r"C:\Users\dev";
@@ -18054,6 +18245,10 @@ mod tests {
     ///
     /// MUTATION, observed red: answer `at_shell_home` with `place.is_none()` again — `~` handed
     /// on is a launch with the mark lost.
+    ///
+    /// **Windows only:** the launcher's home mark is `wsl.exe --cd ~`, the one
+    /// [`StartingDir::LauncherFlag`] row, which only the Windows seed ships.
+    #[cfg(windows)]
     #[test]
     fn a_place_that_is_the_launchers_home_mark_is_the_shells_home() {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
@@ -18090,6 +18285,10 @@ mod tests {
     ///
     /// MUTATION: answer `Windows` for a `BashInitFile` row and Git Bash's own
     /// spelling goes unread, which is the ticket.
+    ///
+    /// **Windows only:** MSYS and WSL are spellings a Windows machine's shells
+    /// print, the rows are the Windows seed's, and the home is `%USERPROFILE%`.
+    #[cfg(windows)]
     #[test]
     fn a_row_says_which_spelling_of_an_absolute_path_its_shell_prints() {
         let machine = FakeMachine::fully_equipped().with_var("USERPROFILE", r"C:\Users\alice");
@@ -18182,6 +18381,10 @@ mod tests {
     /// `src` to `src`, and `/mnt/cdrom` to `C:` — three paths that name nothing,
     /// handed to a shell as the place it should open in. Every `None` row here
     /// is a path that a string-level translation would have accepted.
+    ///
+    /// **Windows only:** a drive letter is a grammar only the Windows path parser
+    /// reads, which is the whole of what [`windows_to_wsl`] stands on.
+    #[cfg(windows)]
     #[test]
     fn the_drive_map_translates_what_it_can_and_refuses_the_rest() {
         for (windows, wsl) in [
@@ -18325,6 +18528,11 @@ mod tests {
     /// every WSL pane it restores — every revived WSL tab comes back at `~`,
     /// nothing is logged, and the session file that has the right answer in it
     /// is overwritten with the wrong one on the next save.
+    ///
+    /// **Windows only:** the rows are the Windows seed's and the namespace no
+    /// check can answer for is WSL's. The check for the shells of the platform
+    /// this runs on is `a_shell_of_this_platform_starts_where_its_place_says`.
+    #[cfg(windows)]
     #[test]
     fn a_saved_directory_is_only_checked_for_existence_where_that_is_answerable() {
         let real = std::env::temp_dir();
@@ -18412,7 +18620,7 @@ mod tests {
     /// is every row but one.
     #[test]
     fn a_probe_answers_about_a_row_and_not_about_a_position() {
-        let machine = FakeMachine::bare_windows();
+        let machine = bare_machine();
         let mut rows = table().profiles().to_vec();
         assert!(rows.len() > 2, "the fixture needs a table worth moving");
 
@@ -18471,6 +18679,14 @@ mod tests {
         );
     }
 
+    /// **Windows only:** every program here is found through a Windows candidate
+    /// (`%LocalAppData%`, `%ProgramFiles%`, `%SystemRoot%`), which the probe joins
+    /// in this process's own path grammar. The same claims about the shells of
+    /// the platform this runs on are
+    /// `an_action_menu_offers_what_this_machine_can_start_and_the_readers_own_rows`
+    /// (a bare box offers its floor, an equipped one everything) and
+    /// `a_row_with_arguments_is_still_installed` (the answer is the probed path).
+    #[cfg(windows)]
     #[test]
     fn a_profile_is_offered_when_this_machine_has_its_program_and_greyed_when_it_does_not() {
         let none = bare();
@@ -18541,6 +18757,12 @@ mod tests {
     /// `<root>\cmd\git.exe` and the shell at `<root>\bin\bash.exe` — siblings
     /// under one root, not nested — so joining onto `git.exe`'s own directory
     /// would look in `<root>\cmd\bin` and find nothing.
+    ///
+    /// **Windows only:** Git Bash is a Windows row, and its `PATH` is a Windows
+    /// `PATH` — `;`-joined drive-letter directories that only this process's own
+    /// parser on Windows takes apart. Git on a Mac's `PATH` is
+    /// `find_git_on_macos_finds_git_and_never_git_exe`'s.
+    #[cfg(windows)]
     #[test]
     fn git_installed_outside_the_well_known_roots_is_found_through_the_tool_on_path() {
         let custom = ProfilePrograms::probe(
@@ -18675,6 +18897,12 @@ mod tests {
     /// MUTATION: send Windows down the Unix arm and `git.exe` is never asked
     /// for; swap two of [`git_fallbacks`]' roots and the order assertion names
     /// the wrong install.
+    ///
+    /// **Windows only:** the platform is a value here, but the `PATH` it walks is
+    /// split and joined by this process's own grammar, and a drive-letter `PATH`
+    /// is not one a Unix process can parse. Its macOS twin is
+    /// `find_git_on_macos_finds_git_and_never_git_exe`.
+    #[cfg(windows)]
     #[test]
     fn find_git_on_windows_is_unchanged() {
         let windows = HostPlatform::Windows;
@@ -18890,7 +19118,8 @@ mod tests {
             "greying is not hiding: every profile still has a row"
         );
 
-        let git = index_of_id("gitbash");
+        // A row a bare machine has not got: Git Bash on Windows, bash elsewhere.
+        let git = index_of_id(host_id("gitbash", "bash"));
         let row = layout.items[git];
         let (x, y) = (
             f64::from((row[0] + row[2]) / 2.0),
@@ -18922,7 +19151,7 @@ mod tests {
         let name = layer
             .labels
             .iter()
-            .find(|label| label.text == "Git Bash")
+            .find(|label| label.text == title(git))
             .expect("the row is still named — a hidden row would say nothing at all");
         assert_eq!(
             name.color, palette.menu_item_hint_text,
@@ -18936,14 +19165,14 @@ mod tests {
             "with the reason in the hint slot, so the grey does not have to be guessed at"
         );
 
-        let mark = layer
+        let git_mark = layer
             .sprites
             .iter()
-            .find(|sprite| sprite.mark == ChromeMark::ProfileGit)
+            .find(|sprite| sprite.mark == mark(git))
             .expect("the row still wears its own artwork");
-        assert_eq!(mark.opacity, UNAVAILABLE_MARK_OPACITY);
+        assert_eq!(git_mark.opacity, UNAVAILABLE_MARK_OPACITY);
         assert!(
-            mark.grayscale,
+            git_mark.grayscale,
             "a profile mark carries its own colours, so only desaturation can quiet it"
         );
 
@@ -18954,15 +19183,16 @@ mod tests {
         // two PowerShells share a mark on purpose — a search would find whichever
         // came first and could not tell the greyed 7 row from the startable 5.1
         // one, which is exactly the pair this test has to distinguish.
-        let winps = layer.sprites[fallback_profile()];
-        assert_eq!(winps.mark, ChromeMark::ProfilePowerShell);
-        assert_eq!(winps.opacity, 1.0);
-        assert!(!winps.grayscale);
-        // …while PowerShell 7, one row above it, is greyed on this machine.
-        let pwsh = layer.sprites[index_of_id("pwsh")];
-        assert_eq!(pwsh.mark, ChromeMark::ProfilePowerShell);
-        assert_eq!(pwsh.opacity, UNAVAILABLE_MARK_OPACITY);
-        assert!(pwsh.grayscale);
+        let floor = layer.sprites[fallback_profile()];
+        assert_eq!(floor.mark, mark(fallback_profile()));
+        assert_eq!(floor.opacity, 1.0);
+        assert!(!floor.grayscale);
+        // …while the first row — PowerShell 7 on Windows — is greyed on this
+        // machine.
+        let first = layer.sprites[0];
+        assert_eq!(first.mark, mark(0));
+        assert_eq!(first.opacity, UNAVAILABLE_MARK_OPACITY);
+        assert!(first.grayscale);
         assert!(
             layer.labels.iter().any(|label| label.text == hint_text()),
             "and still says it is the default"
@@ -18978,10 +19208,12 @@ mod tests {
     #[test]
     fn a_recent_row_whose_shell_is_missing_is_greyed_with_its_profile() {
         let scale = 1.0;
+        // A shell a bare machine has not got: Git Bash on Windows, bash elsewhere.
+        let missing = host_id("gitbash", "bash");
         let vault = [
             RecentEntry {
                 seed: Seed::Term {
-                    profile_id: "gitbash".to_owned(),
+                    profile_id: missing.to_owned(),
                     cwd: "C:\\repo".to_owned(),
                     manual_name: None,
                 },
@@ -19046,7 +19278,7 @@ mod tests {
         let git = layer
             .sprites
             .iter()
-            .find(|sprite| sprite.mark == ChromeMark::ProfileGit)
+            .find(|sprite| sprite.mark == mark(index_of_id(missing)))
             .expect("the recent row wears its own profile's mark");
         assert!(git.grayscale && git.opacity == UNAVAILABLE_MARK_OPACITY);
         assert!(
@@ -19227,21 +19459,17 @@ mod tests {
         ));
         let (rest_quads, rest_labels, sprites) = (rest.quads, rest.labels, rest.sprites);
         let (hover_quads, hover_labels) = (hover.quads, hover.labels);
-        assert!(
-            sprites
-                .iter()
-                .any(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
-        );
+        assert!(sprites.iter().any(|sprite| sprite.mark == mark(0)));
         assert!(
             rest_labels
                 .iter()
-                .any(|label| label.text == powershell_seven()
+                .any(|label| label.text == first_row_title()
                     && label.color == palette.menu_item_text)
         );
         assert!(
             hover_labels
                 .iter()
-                .any(|label| label.text == powershell_seven()
+                .any(|label| label.text == first_row_title()
                     && label.color == palette.menu_item_text_selected)
         );
         assert!(
@@ -19401,14 +19629,16 @@ mod tests {
             "and that padding is the row's own 10px"
         );
         // The 15px mark, centred on its 14px column — what a flex box does with
-        // a child one pixel wider than its box.
+        // a child one pixel wider than its box. The first row's, whose label is
+        // measured below.
+        let first_mark = mark(0);
         let mark = sprites
             .iter()
-            .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+            .find(|sprite| sprite.mark == first_mark)
             .expect("every row wears its profile's mark");
         assert_eq!(
             mark.rect[2] - mark.rect[0],
-            (item_mark_box_logical_px(ChromeMark::ProfilePowerShell)[0] * scale).round(),
+            (item_mark_box_logical_px(first_mark)[0] * scale).round(),
         );
         let column_left = layout.items[0][0] + ITEM_PADDING_X_LOGICAL_PX * scale;
         let column_mid = column_left + ITEM_ICON_COLUMN_LOGICAL_PX * scale / 2.0;
@@ -19419,7 +19649,7 @@ mod tests {
         // And the label clears the column plus the UI-SPEC.md G2 gap of 8px.
         let title = labels
             .iter()
-            .find(|label| label.text == powershell_seven())
+            .find(|label| label.text == first_row_title())
             .expect("the row is named");
         assert_eq!(
             title.rect[0],
@@ -20095,7 +20325,7 @@ mod tests {
             layer
                 .labels
                 .iter()
-                .any(|label| label.text == powershell_seven()
+                .any(|label| label.text == first_row_title()
                     && label.color == palette.menu_item_text),
             "while the profile row it is not stays `--ink2`"
         );
@@ -21497,7 +21727,15 @@ mod tests {
     /// `has_submenu` guard in [`accelerator_of`] and ② goes red.
     #[test]
     fn a_menu_row_prints_the_chord_that_runs_the_same_verb() {
+        use crate::shortcuts::Action;
         let with_chords = pane_menu(false);
+        // What the menu must print is the table's own spelling of the verb's chord, in the
+        // table's dialect: `Ctrl+Shift+W` on Windows, `Cmd+W` on a Mac.
+        let accel = |table: &crate::shortcuts::Shortcuts, action: Action| {
+            table
+                .accelerator(action)
+                .expect("the verb is bound in this table")
+        };
         let chord_of = |layout: &PaneMenuLayout, row: PaneMenuRow| {
             layout
                 .rows
@@ -21507,16 +21745,16 @@ mod tests {
                 .map(|(text, _)| text)
         };
         assert_eq!(
-            chord_of(&with_chords, PaneMenuRow::ClosePane).as_deref(),
-            Some("Ctrl+Shift+W")
+            chord_of(&with_chords, PaneMenuRow::ClosePane),
+            Some(accel(&chord_table(), Action::ClosePane))
         );
         assert_eq!(
-            chord_of(&with_chords, PaneMenuRow::ZoomPane).as_deref(),
-            Some("Ctrl+Shift+X")
+            chord_of(&with_chords, PaneMenuRow::ZoomPane),
+            Some(accel(&chord_table(), Action::ZoomPane))
         );
         assert_eq!(
-            chord_of(&with_chords, PaneMenuRow::Duplicate).as_deref(),
-            Some("Ctrl+Shift+D")
+            chord_of(&with_chords, PaneMenuRow::Duplicate),
+            Some(accel(&chord_table(), Action::DuplicatePaneSplit))
         );
         // ② The two headings, and the drawing.
         assert_eq!(chord_of(&with_chords, PaneMenuRow::SplitWith), None);
@@ -21549,8 +21787,13 @@ mod tests {
             &mut fake_measure,
         );
         assert_eq!(
-            chord_of(&edited, PaneMenuRow::ClosePane).as_deref(),
-            Some("Ctrl+Shift+J")
+            chord_of(&edited, PaneMenuRow::ClosePane),
+            Some(accel(&rebound, Action::ClosePane)),
+            "the rebind is what the row prints"
+        );
+        assert_ne!(
+            accel(&rebound, Action::ClosePane),
+            accel(&chord_table(), Action::ClosePane)
         );
         assert_eq!(
             chord_of(&edited, PaneMenuRow::ZoomPane),
@@ -21613,8 +21856,8 @@ mod tests {
             &mut fake_measure,
         );
         assert_eq!(
-            picker.files_pane_accel.map(|(text, _)| text).as_deref(),
-            Some("Ctrl+Shift+B")
+            picker.files_pane_accel.map(|(text, _)| text),
+            Some(accel(&chord_table(), Action::FilesPane))
         );
     }
 
@@ -21771,6 +22014,15 @@ mod tests {
             &[],
             &mut fake_measure,
         ));
+        // The three chords are the table's own spelling of each verb's chord.
+        let chord = |action| {
+            chord_table()
+                .accelerator(action)
+                .expect("the verb is bound in this table")
+        };
+        let zoom = chord(crate::shortcuts::Action::ZoomPane);
+        let duplicate = chord(crate::shortcuts::Action::DuplicatePaneSplit);
+        let close_chord = chord(crate::shortcuts::Action::ClosePane);
         let names: Vec<&str> = layer
             .labels
             .iter()
@@ -21786,11 +22038,11 @@ mod tests {
                 // belongs to. Three of the nine carry one; the other six are
                 // not rows of the shortcut table — see
                 // [`PaneMenuRow::accelerator`], which names all nine.
-                "Ctrl+Shift+X",
+                zoom.as_str(),
                 split_with_text(),
                 new_in_folder_text(),
                 duplicate_pane_text(),
-                "Ctrl+Shift+D",
+                duplicate.as_str(),
                 move_to_new_tab_text(),
                 move_to_new_window_text(),
                 // `Move to window ▸` wears a chevron, and a row with a chevron
@@ -21798,7 +22050,7 @@ mod tests {
                 move_to_window_text(),
                 reset_terminal_modes_text(),
                 close_pane_text(),
-                "Ctrl+Shift+W",
+                close_chord.as_str(),
             ],
             "the caption under the diagram, then nine rows with their chords, and no heading over them"
         );
@@ -23012,7 +23264,7 @@ mod tests {
         );
         assert!(
             child_rows.len() < count(),
-            "a bare Windows box cannot start every row this build ships"
+            "a bare box cannot start every row this build ships"
         );
         assert!(
             child_rows
@@ -23051,9 +23303,13 @@ mod tests {
         let lines = page_lines(&machine, Some(0), true);
         assert_eq!(lines.len(), count(), "no row is dropped from the page");
         let absent: Vec<&ProfileLine> = lines.iter().filter(|line| !line.available).collect();
-        assert!(
-            absent.len() >= AGENT_IDS.len(),
-            "a bare box is missing at least the seven agents"
+        assert_eq!(
+            absent.iter().map(|line| line.index).collect::<Vec<_>>(),
+            (0..count())
+                .filter(|index| *index != fallback_profile())
+                .collect::<Vec<_>>(),
+            "a bare box is missing every row but the floor — on Windows the seven \
+             agents among them"
         );
         for line in absent {
             assert!(
@@ -23082,17 +23338,26 @@ mod tests {
     /// height below the frame.
     #[test]
     fn a_machine_with_no_agents_leaves_the_shells_and_no_gap() {
-        let shells_only = ProfilePrograms::probe(
-            &FakeMachine::bare_windows()
+        // Every shell of this host's table installed, and no agent: the five
+        // Windows shells, and off Windows the shells at the paths their rows
+        // name (a build off Windows ships no agent at all).
+        let shells_only = ProfilePrograms::probe(&with_named_programs(
+            FakeMachine::bare_windows()
                 .with_var("ProgramFiles", r"C:\Program Files")
                 .with_file(r"C:\Program Files\PowerShell\7\pwsh.exe")
                 .with_file(r"C:\WINDOWS\System32\wsl.exe")
                 .with_file(r"C:\WINDOWS\System32\cmd.exe")
                 .with_file(r"C:\Program Files\Git\bin\bash.exe"),
-        );
+            |_| true,
+        ));
+        let shells = table()
+            .profiles()
+            .iter()
+            .filter(|row| agent_command(row).is_none())
+            .count();
         let layout = pane_menu_on(true, &shells_only);
         let child = layout.submenu.as_ref().expect("the child is up");
-        assert_eq!(child.rows.len(), 5, "the five shells and not one agent");
+        assert_eq!(child.rows.len(), shells, "the shells and not one agent");
         assert!(
             child
                 .rows
@@ -23109,8 +23374,10 @@ mod tests {
         }
         let chrome = child.items[0][1] - child.frame[1];
         assert!(
-            ((child.frame[3] - child.frame[1]) - (2.0 * chrome + 5.0 * item_height)).abs() < 0.5,
-            "and the frame is its chrome plus five rows, with no band left over"
+            ((child.frame[3] - child.frame[1]) - (2.0 * chrome + shells as f32 * item_height))
+                .abs()
+                < 0.5,
+            "and the frame is its chrome plus one row per shell, with no band left over"
         );
     }
 
@@ -23128,17 +23395,20 @@ mod tests {
     /// answer is the first one, so an install never shows up.
     #[test]
     fn a_program_installed_since_the_last_probe_joins_the_menu_on_the_next_one() {
-        let gitbash = index_of_id("gitbash");
-        let before = ProfilePrograms::probe(&FakeMachine::bare_windows());
+        // Git Bash on Windows; off it, bash at the path its row names.
+        let installed = host_id("gitbash", "bash");
+        let gitbash = index_of_id(installed);
+        let before = ProfilePrograms::probe(&bare_machine());
         assert!(
             !table().offered_to_start(&before).contains(&gitbash),
             "no Git, no row"
         );
-        let after = ProfilePrograms::probe(
-            &FakeMachine::bare_windows()
+        let after = ProfilePrograms::probe(&with_named_programs(
+            FakeMachine::bare_windows()
                 .with_var("ProgramFiles", r"C:\Program Files")
                 .with_file(r"C:\Program Files\Git\bin\bash.exe"),
-        );
+            |row| row.id == fallback_profile_id() || row.id == installed,
+        ));
         assert!(
             table().offered_to_start(&after).contains(&gitbash),
             "and the row arrives with the install, on the next probe"
@@ -24867,8 +25137,12 @@ mod tests {
             .iter()
             .map(|label| label.text.as_str())
             .collect();
+        // `Ctrl+F` on Windows, this platform's own spelling of the chord elsewhere.
+        let find_chord = chord_table()
+            .accelerator(crate::shortcuts::Action::OpenSearch)
+            .expect("`Find…` has a chord in the shipped table");
         assert_eq!(
-            names.iter().filter(|name| **name != "Ctrl+F").count(),
+            names.iter().filter(|name| **name != find_chord).count(),
             TERM_MENU_ROWS.len(),
             "every row is painted, including the ones that cannot answer"
         );
@@ -24878,7 +25152,7 @@ mod tests {
         // in `input`, so this column has nothing true to print beside them —
         // see [`TermMenuRow::accelerator`], which names all seven.
         assert_eq!(
-            names.iter().filter(|name| **name == "Ctrl+F").count(),
+            names.iter().filter(|name| **name == find_chord).count(),
             1,
             "`Find…` prints the chord that raises the same capsule"
         );
@@ -25248,8 +25522,18 @@ mod tests {
     /// file mean "empty table", and every surface in the window changes at once.
     #[test]
     fn a_machine_with_no_profiles_file_gets_the_shipped_rows_unchanged() {
+        // This process's own seed, whichever platform it is for.
         let (built, faults) = merge(shipped(), &ProfilesV1::default());
         assert_eq!(built, shipped());
+        assert!(faults.is_empty());
+        // And the macOS seed, by the same rule.
+        let mac = shipped_for(SeedPlatform::MacOs, &bare_macos());
+        let (built, faults) = merge_on(mac.clone(), &ProfilesV1::default(), SeedPlatform::MacOs);
+        assert_eq!(built, mac);
+        assert!(faults.is_empty());
+        // The Windows seed, whose order is the one written down below.
+        let (built, faults) = merge_windows(&ProfilesV1::default());
+        assert_eq!(built, windows_seed());
         assert!(faults.is_empty());
         // Five shells and then the three agents (user ruling 2026-08-28) — the
         // order the picker opens in, which is shells first because a first
@@ -25279,19 +25563,16 @@ mod tests {
     /// bare entry as a blank profile and every untouched row loses its program.
     #[test]
     fn the_array_is_the_order_and_a_builtin_writes_only_its_differences() {
-        let (built, faults) = merge(
-            shipped(),
-            &file(vec![
-                named("cmd"),
-                ProfileEntryV1 {
-                    display_title: Some("Ubuntu".to_owned()),
-                    ..named("wsl")
-                },
-                named("gitbash"),
-                named("winps"),
-                named("pwsh"),
-            ]),
-        );
+        let (built, faults) = merge_windows(&file(vec![
+            named("cmd"),
+            ProfileEntryV1 {
+                display_title: Some("Ubuntu".to_owned()),
+                ..named("wsl")
+            },
+            named("gitbash"),
+            named("winps"),
+            named("pwsh"),
+        ]));
         assert!(faults.is_empty());
         // The five the file named, in the file's order, and then the three it
         // never mentioned — which is the rule the pin below states in full.
@@ -25307,7 +25588,7 @@ mod tests {
             built[1].id, "wsl",
             "renaming a row does not rename what the disk calls it"
         );
-        let shipped = shipped();
+        let shipped = windows_seed();
         for profile in &built {
             let seed = shipped
                 .iter()
@@ -25333,7 +25614,7 @@ mod tests {
     /// move somebody's list around for a row they did not ask for.
     #[test]
     fn a_shipped_id_the_file_never_names_is_appended_and_visible() {
-        let (built, faults) = merge(shipped(), &file(vec![named("cmd"), named("wsl")]));
+        let (built, faults) = merge_windows(&file(vec![named("cmd"), named("wsl")]));
         assert!(faults.is_empty());
         assert_eq!(
             ids(&built),
@@ -25353,10 +25634,8 @@ mod tests {
     /// and a list with an unstartable row in it is a list that lies.
     #[test]
     fn an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named() {
-        let (built, faults) = merge(
-            shipped(),
-            &file(vec![named("pwsh"), named("fish"), named("cmd")]),
-        );
+        let (built, faults) =
+            merge_windows(&file(vec![named("pwsh"), named("fish"), named("cmd")]));
         assert_eq!(
             faults,
             vec![ProfileFault::Unusable {
@@ -25385,19 +25664,16 @@ mod tests {
     /// would leave a file whose two halves disagree and no way to find out.
     #[test]
     fn a_second_entry_claiming_a_taken_id_is_refused_and_named() {
-        let (built, faults) = merge(
-            shipped(),
-            &file(vec![
-                ProfileEntryV1 {
-                    display_title: Some("first".to_owned()),
-                    ..named("pwsh")
-                },
-                ProfileEntryV1 {
-                    display_title: Some("second".to_owned()),
-                    ..named("pwsh")
-                },
-            ]),
-        );
+        let (built, faults) = merge_windows(&file(vec![
+            ProfileEntryV1 {
+                display_title: Some("first".to_owned()),
+                ..named("pwsh")
+            },
+            ProfileEntryV1 {
+                display_title: Some("second".to_owned()),
+                ..named("pwsh")
+            },
+        ]));
         assert_eq!(
             faults,
             vec![ProfileFault::Duplicate {
@@ -25419,13 +25695,10 @@ mod tests {
     /// `profile_id`, which is untouched by any of this.
     #[test]
     fn a_hidden_builtin_leaves_the_pickers_but_stays_a_profile() {
-        let (built, _) = merge(
-            shipped(),
-            &file(vec![ProfileEntryV1 {
-                hidden: true,
-                ..named("cmd")
-            }]),
-        );
+        let (built, _) = merge_windows(&file(vec![ProfileEntryV1 {
+            hidden: true,
+            ..named("cmd")
+        }]));
         let table = ProfileTable { profiles: built };
         assert_eq!(
             table
@@ -25548,11 +25821,15 @@ mod tests {
     /// text editor repaints the marks of panes that have been running for hours.
     #[test]
     fn a_seat_keeps_the_profile_it_was_born_from_when_the_file_is_reordered() {
+        // Two built-ins of this process's own seed: PowerShell 7 and Command
+        // Prompt on Windows, the first shell and bash elsewhere.
+        let first = shipped_rows()[0].id.clone();
+        let other = host_id("cmd", "bash");
         let registry = Registry::shipped();
         registry.install(&file(vec![
-            named("pwsh"),
+            named(&first),
             mine("claude-7f3a"),
-            named("cmd"),
+            named(other),
         ]));
         let before = registry.table();
         let seat = before
@@ -25563,8 +25840,8 @@ mod tests {
         // The same three rows, in another order — one drag in an editor.
         registry.install(&file(vec![
             mine("claude-7f3a"),
-            named("pwsh"),
-            named("cmd"),
+            named(&first),
+            named(other),
         ]));
         let after = registry.table();
         assert_ne!(
@@ -25583,7 +25860,7 @@ mod tests {
 
         // And when the row is deleted outright, the standing answer applies: the
         // seat costs its shell choice, never the seat.
-        registry.install(&file(vec![named("cmd"), named("pwsh")]));
+        registry.install(&file(vec![named(other), named(&first)]));
         let after = registry.table();
         assert_eq!(
             index_of_id_in(&after, &born_from),
@@ -25632,13 +25909,20 @@ mod tests {
         assert!(faults.is_empty(), "{faults:?}");
         assert_eq!(read[0].display_title, "Seven");
         assert_eq!(read[0].args, ["-NoLogo", "-NoProfile"]);
+        // The first row of this process's own seed: PowerShell 7 on Windows,
+        // whose script announces `PowerShell 7`; elsewhere a shell no script
+        // announces, which has no such word to keep.
         assert_eq!(
-            read[0].compared_title.as_deref(),
-            Some("PowerShell 7"),
+            windows_row("pwsh").compared_title.as_deref(),
+            Some("PowerShell 7")
+        );
+        let seed = shipped().remove(0);
+        assert_eq!(
+            read[0].compared_title, seed.compared_title,
             "the byte-compared word is a protocol constant and is not renamed \
              with the row"
         );
-        assert_eq!(read[0].id, "pwsh", "a rename is not a change of identity");
+        assert_eq!(read[0].id, seed.id, "a rename is not a change of identity");
     }
 
     /// PIN — **a name another row already draws is refused, and nothing moves.**
@@ -25650,7 +25934,9 @@ mod tests {
     /// no rule: `powershell 7` is a different name and is allowed.
     #[test]
     fn a_name_another_row_already_draws_is_refused_and_the_table_does_not_move() {
-        let registry = Registry::shipped();
+        // The Windows seed, whose two names this is about; a rename reads nothing
+        // but the table it is made in.
+        let registry = windows_registry();
         let before = registry.table().profiles().to_vec();
 
         assert_eq!(registry.rename(0, "Command Prompt"), NameVerdict::Taken);
@@ -25675,27 +25961,35 @@ mod tests {
     #[test]
     fn a_builtins_colour_is_refused_and_a_profile_of_your_own_can_be_repainted() {
         let registry = Registry::shipped();
+        // The first row of this process's own seed: PowerShell 7 on Windows.
+        let brand = shipped().remove(0).mark;
         assert!(
             !registry.set_colour(0, MarkColour::Amber),
             "PowerShell's blue is Microsoft's"
         );
+        assert_eq!(registry.table().get(0).unwrap().mark, brand);
         assert_eq!(
-            registry.table().get(0).unwrap().mark,
-            ChromeMark::ProfilePowerShell
+            windows_row("pwsh").mark,
+            ChromeMark::ProfilePowerShell,
+            "the brand in question"
         );
 
-        let copy = registry.duplicate(0).expect("pwsh is a row");
+        let copy = registry.duplicate(0).expect("the first row is a row");
         assert_eq!(
             registry.table().get(copy).unwrap().mark,
-            ChromeMark::ProfilePowerShell,
+            brand,
             "a copy of a PowerShell is a PowerShell, and the mark says so"
         );
 
         // And a copy of WSL carries no machine qualifier, before the file is
         // written or after it is read back — one row read twice, and a row that
         // renamed itself across a restart would be the table disagreeing with
-        // itself.
-        let wsl = registry.table().position_of_id("wsl").unwrap();
+        // itself. Off Windows no row wears a qualifier, and a copy of bash says
+        // the same.
+        let wsl = registry
+            .table()
+            .position_of_id(host_id("wsl", "bash"))
+            .unwrap();
         let of_wsl = registry.duplicate(wsl).expect("wsl is a row");
         assert_eq!(
             registry.table().get(of_wsl).unwrap().qualifier,
@@ -25830,12 +26124,21 @@ mod tests {
             profile.start_at = StartAt::Home;
             true
         });
-        let cmd = registry.table().position_of_id("cmd").unwrap();
-        registry.set_hidden(cmd, true, &[1]);
+        // The first row and one more built-in of this process's own seed:
+        // PowerShell 7 and Command Prompt on Windows, the first shell and bash
+        // elsewhere. The floor is the default here, as it is on a fresh machine.
+        let seed = shipped();
+        let first = seed[0].id.clone();
+        let other = host_id("cmd", "bash");
+        let floor = fallback_profile();
+        let cmd = registry.table().position_of_id(other).unwrap();
+        registry.set_hidden(cmd, true, &[floor]);
         registry.rename(cmd, "Console");
         registry.move_profile(0, true);
-        let moved = registry.table().position_of_id("pwsh").unwrap();
+        let moved = registry.table().position_of_id(&first).unwrap();
         assert_eq!(moved, 1);
+        // Found again by its id: off Windows it is the row the move swapped with.
+        let cmd = registry.table().position_of_id(other).unwrap();
 
         assert!(registry.restore_defaults(moved));
         let row = registry.table().get(moved).unwrap().clone();
@@ -25846,7 +26149,7 @@ mod tests {
             }
         );
         assert_eq!(
-            registry.table().position_of_id("pwsh"),
+            registry.table().position_of_id(&first),
             Some(1),
             "the row stays where the reader put it"
         );
@@ -25854,7 +26157,15 @@ mod tests {
         assert!(registry.restore_defaults(cmd));
         assert_eq!(
             registry.table().get(cmd).unwrap().display_title,
-            "Command Prompt"
+            seed.iter()
+                .find(|row| row.id == other)
+                .expect("a shipped row")
+                .display_title
+        );
+        assert_eq!(
+            windows_row("cmd").display_title,
+            "Command Prompt",
+            "the name a restore brings back on Windows"
         );
         assert!(
             registry.table().get(cmd).unwrap().hidden,
@@ -25897,6 +26208,12 @@ mod tests {
 
     /// PIN — **`Inherit` is what this window did before the field existed**, and
     /// the other two answers are the two things it could not say.
+    ///
+    /// **Windows only:** the places are drive-letter folders, the home is
+    /// `%USERPROFILE%`, and the last two answers cross into WSL through the drive
+    /// map. The three answers on the platform this runs on are
+    /// `a_shell_of_this_platform_starts_where_its_place_says`.
+    #[cfg(windows)]
     #[test]
     fn the_three_starting_answers_are_inherit_home_and_one_fixed_place() {
         let machine = FakeMachine::fully_equipped();
@@ -25962,6 +26279,99 @@ mod tests {
             &machine,
         );
         assert_eq!(place.arguments, ["--cd", "~"]);
+    }
+
+    /// PIN — **a shell of the platform this runs on starts where its place says**:
+    /// at the account's home when nothing says otherwise, in a carried folder
+    /// that is still a directory, at home when that folder has gone, and at the
+    /// three starting answers' places.
+    ///
+    /// The rules the Windows-only pins above state with `%USERPROFILE%`, drive
+    /// letters and `wsl.exe --cd`
+    /// (`a_profile_states_its_starting_place_in_the_form_its_launcher_can_take`,
+    /// `an_inherited_directory_is_told_to_the_launcher_that_can_read_it`,
+    /// `a_folder_that_is_no_longer_a_directory_starts_the_shell_where_no_folder_would`,
+    /// `a_saved_directory_is_only_checked_for_existence_where_that_is_answerable`,
+    /// `the_three_starting_answers_are_inherit_home_and_one_fixed_place`), stated
+    /// over this process's own rows — every row whose program is handed its
+    /// place as a working directory — and its own home variable.
+    ///
+    /// MUTATION: drop the `revived_cwd` filter from `spawn_place` and the folder
+    /// that has gone is handed on as the working directory; read the home from a
+    /// variable this platform does not set and the first assertion finds nothing.
+    #[test]
+    fn a_shell_of_this_platform_starts_where_its_place_says() {
+        let home = bt_testpath::temp_path("folio-starting-place-home");
+        let machine = FakeMachine::default().with_var(
+            home_variable(SeedPlatform::of_this_build()),
+            home.to_str().expect("a temporary path this test spelled"),
+        );
+        let live = std::env::temp_dir();
+        let gone = bt_testpath::temp_path("folio-starting-place-no-such-directory");
+        let rows: Vec<usize> = (0..count())
+            .filter(|index| {
+                let row = &shipped_rows()[*index];
+                row.starting_dir == StartingDir::AccountHome && row.paths == PathNamespace::Windows
+            })
+            .collect();
+        assert!(!rows.is_empty(), "every platform ships a shell of its own");
+        for profile in rows {
+            let name = id(profile);
+            assert_eq!(
+                spawn_place(profile, None, &machine),
+                SpawnPlace {
+                    working_directory: Some(home.clone()),
+                    arguments: Vec::new(),
+                    directory: Some(home.clone()),
+                    at_shell_home: false,
+                    named: false,
+                },
+                "{name}: nothing said where, so the account's home, as a working directory"
+            );
+            assert_eq!(
+                spawn_place(profile, Some(SeedPlace::Carried(live.clone())), &machine)
+                    .working_directory,
+                Some(live.clone()),
+                "{name}: a folder that is there is where the shell starts"
+            );
+            assert_eq!(revived_cwd(profile, &live).as_deref(), Some(live.as_path()));
+            assert_eq!(
+                revived_cwd(profile, &gone),
+                None,
+                "{name}: a folder that has gone does not come back"
+            );
+            assert_eq!(
+                spawn_place(profile, Some(SeedPlace::Carried(gone.clone())), &machine),
+                spawn_place(profile, None, &machine),
+                "{name}: a folder that has gone is answered as no folder"
+            );
+            assert_eq!(
+                spawn_place(profile, None, &FakeMachine::default()),
+                SpawnPlace::default(),
+                "{name}: a machine that cannot name its own home is told nothing, not a guess"
+            );
+        }
+
+        // The three starting answers, in this platform's own spelling of a place.
+        let carried = bt_testpath::temp_path("folio-starting-place-carried");
+        let fixed = bt_testpath::temp_path("folio-starting-place-fixed");
+        let answer = |start_at: StartAt| {
+            place_for(
+                &start_at,
+                &StartingDir::AccountHome,
+                PathNamespace::Windows,
+                Some(SeedPlace::Carried(carried.clone())),
+                &machine,
+            )
+            .working_directory
+        };
+        assert_eq!(answer(StartAt::Inherit), Some(carried.clone()));
+        assert_eq!(
+            answer(StartAt::Home),
+            Some(home.clone()),
+            "Home refuses an inheritance that was there"
+        );
+        assert_eq!(answer(StartAt::Fixed(fixed.clone())), Some(fixed.clone()));
     }
 
     /// RED (GitHub issue #16) — **a folder named for this launch wins over every starting
@@ -26066,7 +26476,7 @@ mod tests {
     /// would be a brand on a program that is not theirs.
     #[test]
     fn a_new_profile_wears_the_chassis_and_a_duplicate_wears_the_brand() {
-        let registry = Registry::shipped();
+        let registry = windows_registry();
         let made = registry.create(0).expect("pwsh is a row");
         assert_eq!(made, registry.table().len() - 1, "it lands at the foot");
         let row = registry.table().get(made).unwrap().clone();
@@ -26106,7 +26516,7 @@ mod tests {
         let worn_by_a_builtin = MarkColour::ALL
             .into_iter()
             .filter(|colour| {
-                shipped()
+                windows_seed()
                     .iter()
                     .any(|profile| profile.mark == ChromeMark::ProfileGeneric { colour: *colour })
             })
@@ -26114,6 +26524,23 @@ mod tests {
         assert_eq!(
             worn_by_a_builtin, 0,
             "no shipped row wears the chassis, so all eight are the reader's"
+        );
+
+        // The macOS seed's shells do wear the chassis, so a new profile there
+        // takes a colour none of them is wearing.
+        let mac = Registry {
+            table: RwLock::new(Arc::new(ProfileTable {
+                profiles: shipped_for(SeedPlatform::MacOs, &bare_macos()),
+            })),
+            revision: AtomicU64::new(0),
+        };
+        let made = mac.create(0).expect("zsh is a row");
+        let table = mac.table();
+        let worn = table.profiles()[made].mark;
+        assert!(matches!(worn, ChromeMark::ProfileGeneric { .. }));
+        assert!(
+            table.profiles()[..made].iter().all(|row| row.mark != worn),
+            "two rows in one list must not wear one colour: {worn:?}"
         );
     }
 
@@ -26151,7 +26578,7 @@ mod tests {
     /// Win32.
     #[test]
     fn a_program_a_reader_chose_re_derives_the_namespace_it_speaks() {
-        let registry = Registry::shipped();
+        let registry = windows_registry();
         let copy = registry.duplicate(2).expect("wsl is a row");
         assert_eq!(
             registry.table().get(copy).unwrap().paths,
@@ -26176,7 +26603,7 @@ mod tests {
     /// `xwsl.exe` candidate below is misclassified as WSL and this test fails.
     #[test]
     fn the_wsl_family_alone_launches_a_wsl_path_namespace() {
-        let mut profile = shipped()
+        let mut profile = windows_seed()
             .into_iter()
             .find(|profile| profile.id == "wsl")
             .expect("wsl is a shipped row");
@@ -26211,21 +26638,45 @@ mod tests {
     /// copy, write, read, and land on exactly the same table.
     #[test]
     fn the_table_survives_the_round_trip_through_its_own_file() {
+        // Reordered, renamed, hidden and copied, over this process's own seed —
+        // and where the untouched built-in the file names lands once the copy
+        // has gone in under the first row.
+        let (entries, untouched) = if bt_platform::host_platform() == HostPlatform::Windows {
+            (
+                vec![
+                    named("cmd"),
+                    ProfileEntryV1 {
+                        display_title: Some("Ubuntu".to_owned()),
+                        ..named("wsl")
+                    },
+                    ProfileEntryV1 {
+                        hidden: true,
+                        ..named("gitbash")
+                    },
+                    named("pwsh"),
+                    named("winps"),
+                ],
+                4,
+            )
+        } else {
+            (
+                vec![
+                    named("bash"),
+                    ProfileEntryV1 {
+                        display_title: Some("Renamed".to_owned()),
+                        ..named(&shipped_rows()[0].id)
+                    },
+                    ProfileEntryV1 {
+                        hidden: true,
+                        ..named(BOURNE_SHELL_ID)
+                    },
+                ],
+                0,
+            )
+        };
         let registry = Registry::shipped();
-        registry.install(&file(vec![
-            named("cmd"),
-            ProfileEntryV1 {
-                display_title: Some("Ubuntu".to_owned()),
-                ..named("wsl")
-            },
-            ProfileEntryV1 {
-                hidden: true,
-                ..named("gitbash")
-            },
-            named("pwsh"),
-            named("winps"),
-        ]));
-        registry.duplicate(0).expect("cmd is a row");
+        registry.install(&file(entries));
+        registry.duplicate(0).expect("the first entry is a row");
         let before = registry.table().profiles().to_vec();
 
         let written = registry.to_file();
@@ -26235,11 +26686,13 @@ mod tests {
 
         let wire = serde_json::to_value(&written).unwrap();
         assert_eq!(
-            wire["profiles"][4].as_object().map(serde_json::Map::len),
+            wire["profiles"][untouched]
+                .as_object()
+                .map(serde_json::Map::len),
             Some(1),
             "an untouched built-in is its id and nothing else, so the next build \
              is still free to retune it: {:?}",
-            wire["profiles"][4]
+            wire["profiles"][untouched]
         );
     }
 
@@ -26251,7 +26704,7 @@ mod tests {
     /// is still drawn, and still a focus stop — it just has no effect to have.
     #[test]
     fn moving_a_row_advances_the_revision_and_moving_the_first_row_up_does_not() {
-        let registry = Registry::shipped();
+        let registry = windows_registry();
         assert_eq!(registry.revision(), 0);
 
         assert!(
@@ -26277,7 +26730,7 @@ mod tests {
             "and it goes back the way it came"
         );
         assert_eq!(registry.revision(), 2);
-        assert_eq!(ids(registry.table().profiles()), ids(&shipped()));
+        assert_eq!(ids(registry.table().profiles()), ids(&windows_seed()));
     }
 
     /// PIN — **a copy lands under its original, carries its mark, and takes an
@@ -26289,7 +26742,7 @@ mod tests {
     /// announce a name this build did not choose.
     #[test]
     fn a_duplicate_lands_under_its_original_with_an_id_no_builtin_holds() {
-        let registry = Registry::shipped();
+        let registry = windows_registry();
         let at = registry.duplicate(0).expect("pwsh is a row");
         assert_eq!(at, 1);
         let table = registry.table();
@@ -26304,7 +26757,7 @@ mod tests {
         assert_eq!(copy.origin, Origin::User);
         assert_eq!(copy.compared_title, None);
         assert!(
-            shipped().iter().all(|seed| seed.id != copy.id),
+            windows_seed().iter().all(|seed| seed.id != copy.id),
             "{} took a reserved slug",
             copy.id
         );
@@ -26323,7 +26776,7 @@ mod tests {
     /// sentence here: `X copy`, `X copy 2`, and never `X copy copy`.
     #[test]
     fn a_copy_of_a_copy_numbers_itself_from_the_original_s_name() {
-        let registry = Registry::shipped();
+        let registry = windows_registry();
         registry.duplicate(0);
         registry.duplicate(1);
         registry.duplicate(2);
@@ -26353,13 +26806,10 @@ mod tests {
     /// script's word nor the user's own can leak onto a head as a program title.
     #[test]
     fn a_renamed_builtin_still_drops_the_word_its_script_announces() {
-        let (built, _) = merge(
-            shipped(),
-            &file(vec![ProfileEntryV1 {
-                display_title: Some("七号".to_owned()),
-                ..named("pwsh")
-            }]),
-        );
+        let (built, _) = merge_windows(&file(vec![ProfileEntryV1 {
+            display_title: Some("七号".to_owned()),
+            ..named("pwsh")
+        }]));
         let renamed = &built[0];
         let names = announcement_names(renamed, "七号");
         assert!(
@@ -26415,10 +26865,7 @@ mod tests {
             ("gitbash", "**Git Bash**"),
             ("cmd", "**Command Prompt**"),
         ] {
-            let profile = shipped()
-                .into_iter()
-                .find(|profile| profile.id == id)
-                .expect("a shipped id");
+            let profile = windows_row(id);
             // Lower-cased before the comparison: the sentence opens with a
             // capital because it is a sentence, and the markers it names are
             // the same markers in either case.
@@ -26467,7 +26914,7 @@ mod tests {
         assert_eq!(cells[HYPERLINK], "yes");
         let theirs = Profile {
             integration: IntegrationChoice::Named(Integration::None),
-            ..shipped().swap_remove(0)
+            ..windows_seed().swap_remove(0)
         };
         let sentence = capability_text(&theirs)
             .in_lang(crate::i18n::Lang::English)
@@ -26484,10 +26931,7 @@ mod tests {
 
     #[test]
     fn a_powershell_profile_capability_says_when_process_integration_is_not_provided() {
-        let profile = shipped()
-            .into_iter()
-            .find(|profile| profile.id == "pwsh")
-            .expect("the shipped PowerShell 7 row");
+        let profile = windows_row("pwsh");
         assert_ne!(
             capability_text_for_launch(&profile, Some(Path::new("pwsh.exe")), true),
             crate::i18n::Text::CapPowerShellNotProvided
@@ -26527,10 +26971,7 @@ mod tests {
             sentence.contains("hyperlinks") && !sentence.contains("no hyperlinks")
         };
         for id in ["pwsh", "winps", "wsl", "gitbash", "cmd"] {
-            let shipped_row = shipped()
-                .into_iter()
-                .find(|profile| profile.id == id)
-                .expect("a shipped id");
+            let shipped_row = windows_row(id);
             assert!(claims_links(&shipped_row), "{id}");
             let off = Profile {
                 env: vec![("FORCE_HYPERLINK".to_owned(), "0".to_owned())],
@@ -26594,13 +27035,22 @@ mod tests {
     /// the door it happened to be on when it was written.
     #[test]
     fn the_door_a_reader_chose_survives_the_file_and_so_does_auto() {
+        // A built-in with a door of its own: Command Prompt on Windows, bash
+        // elsewhere.
+        let id = host_id("cmd", "bash");
         let registry = Registry::shipped();
         let cmd = registry
             .table()
             .profiles()
             .iter()
-            .position(|profile| profile.id == "cmd")
-            .expect("cmd is a row");
+            .position(|profile| profile.id == id)
+            .expect("the row is a row");
+        let door = served_by(&registry.table().profiles()[cmd]);
+        assert_ne!(
+            door,
+            Integration::None,
+            "a row whose door can be switched off"
+        );
         registry.edit(cmd, |profile| {
             profile.integration = IntegrationChoice::Named(Integration::None);
             profile.paths = derived_paths(profile);
@@ -26625,9 +27075,11 @@ mod tests {
             IntegrationChoice::Auto,
             "a row switched back to the rule must not read as the answer it left"
         );
+        assert_eq!(served_by(&there_and_back(&registry)[cmd]), door);
         assert_eq!(
-            served_by(&there_and_back(&registry)[cmd]),
-            Integration::CmdPrompt
+            served_by(&windows_row("cmd")),
+            Integration::CmdPrompt,
+            "the door Command Prompt's rule answers"
         );
     }
 
@@ -26641,29 +27093,36 @@ mod tests {
     fn an_unavailable_row_gives_its_reason_and_drops_its_capability_line() {
         let lines = page_lines(&bare(), Some(fallback_profile()), true);
         assert_eq!(lines.len(), count());
+        // A shell a bare machine has not got: Git Bash on Windows, bash elsewhere.
+        let missing = index_of_id(host_id("gitbash", "bash"));
         let git = lines
             .iter()
-            .find(|line| line.index == index_of_id("gitbash"))
+            .find(|line| line.index == missing)
             .expect("Git Bash is a row even where Git is not installed");
         assert!(!git.available);
         assert_eq!(git.capability, None);
         assert!(
-            git.command.contains("Git Bash"),
+            git.command.contains(title(missing)),
             "the sentence became the reason: {}",
             git.command
         );
 
+        // The floor, which a bare machine has: Windows PowerShell 5.1 and its
+        // script on Windows; `/bin/sh`, which no script serves, elsewhere — a
+        // login shell on macOS (`the_shipped_macos_rows_default_to_login`).
+        let (capability, command) = match SeedPlatform::of_this_build() {
+            SeedPlatform::Windows => (crate::i18n::Text::CapPowerShell, "powershell.exe -NoLogo"),
+            SeedPlatform::MacOs => (crate::i18n::Text::CapNone, "sh -l"),
+            SeedPlatform::OtherUnix => (crate::i18n::Text::CapNone, "sh"),
+        };
         let floor = lines
             .iter()
             .find(|line| line.index == fallback_profile())
             .expect("the floor is always a row");
         assert!(floor.available && floor.is_default);
+        assert_eq!(floor.capability, Some(capability.text()));
         assert_eq!(
-            floor.capability,
-            Some(crate::i18n::Text::CapPowerShell.text())
-        );
-        assert_eq!(
-            floor.command, "powershell.exe -NoLogo",
+            floor.command, command,
             "the row says what it starts, in the executable's own name"
         );
     }
@@ -26684,10 +27143,22 @@ mod tests {
                 .map(|line| line.command.clone())
                 .expect("a shipped id")
         };
-        assert_eq!(of("pwsh"), "pwsh.exe -NoLogo");
-        assert_eq!(of("wsl"), "wsl.exe --cd ~");
-        assert_eq!(of("gitbash"), "bash.exe --login -i");
-        assert_eq!(of("cmd"), "cmd.exe");
+        // This process's own rows: the Windows executables and their words, and
+        // off Windows each shell's own name with its login flag where the
+        // platform's rows ask for one (`the_shipped_macos_rows_default_to_login`).
+        let expected: &[(&str, &str)] = match SeedPlatform::of_this_build() {
+            SeedPlatform::Windows => &[
+                ("pwsh", "pwsh.exe -NoLogo"),
+                ("wsl", "wsl.exe --cd ~"),
+                ("gitbash", "bash.exe --login -i"),
+                ("cmd", "cmd.exe"),
+            ],
+            SeedPlatform::MacOs => &[("zsh", "zsh -l"), ("bash", "bash --login"), ("sh", "sh -l")],
+            SeedPlatform::OtherUnix => &[("bash", "bash"), ("sh", "sh")],
+        };
+        for (id, command) in expected {
+            assert_eq!(of(id), *command, "{id}");
+        }
     }
 
     /// **A page's Recent row is a Recent row** (W2 slice ③; `docs/DESIGN.md`

@@ -4,7 +4,9 @@
 //! from [`crate::test_support`].
 
 use super::*;
-use crate::test_support::{leaf_saying, method_body, saved_tab, strip_with_cli_tab};
+use crate::test_support::{
+    host_path, host_uri_path, leaf_saying, method_body, saved_tab, strip_with_cli_tab,
+};
 
 /// PIN — mock-up 7426-7431: "Launch asks about exactly one thing, and it is
 /// not the pinned tabs. **Pinning IS the answer**."
@@ -383,11 +385,14 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     let reported = LeafSession {
         spawn_place: Some(PathBuf::from(r"D:\项目\clicked")),
         born_named: true,
-        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/elsewhere\u{7}")
+        ..leaf_saying(&format!(
+            "\u{1b}]7;file://localhost{}\u{7}",
+            host_uri_path(r"D:\Developer\elsewhere")
+        ))
     };
     assert_eq!(
         reported.place_for_a_new_tab_beside(),
-        Some(profiles::SeedPlace::Carried(PathBuf::from(
+        Some(profiles::SeedPlace::Carried(host_path(
             r"D:\Developer\elsewhere"
         ))),
         "a new tab beside a pane born in a named folder carries its folder"
@@ -410,11 +415,14 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
 
     let reported = LeafSession {
         spawn_place: Some(born_in.clone()),
-        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/folio-terminal\u{7}")
+        ..leaf_saying(&format!(
+            "\u{1b}]7;file://localhost{}\u{7}",
+            host_uri_path(r"D:\Developer\folio-terminal")
+        ))
     };
     assert_eq!(
         reported.place_for_a_new_shell(),
-        Some(PathBuf::from(r"D:\Developer\folio-terminal")),
+        Some(host_path(r"D:\Developer\folio-terminal")),
         "a report is the first rung and beats where the shell was born"
     );
 
