@@ -2659,7 +2659,7 @@ mod tests {
         let shutdown = bt_platform::spawn_at_priority(
             "update-trial-test-linux-helper-shutdown",
             bt_platform::ThreadPriority::BelowNormal,
-            |worker| bt_platform::shutdown_helpers(worker),
+            bt_platform::shutdown_helpers,
         )
         .expect("start the Linux helper shutdown worker");
         shutdown
