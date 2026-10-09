@@ -111,16 +111,16 @@ use objc2_foundation::{
 use objc2_web_kit::{
     WKContentRuleList, WKContentRuleListStore, WKFindConfiguration, WKFindResult, WKFrameInfo,
     WKMediaCaptureType, WKNavigation, WKNavigationAction, WKNavigationActionPolicy,
-    WKNavigationDelegate, WKNavigationResponse, WKNavigationResponsePolicy, WKPermissionDecision,
-    WKSecurityOrigin, WKUIDelegate, WKUserContentController, WKWebView, WKWebViewConfiguration,
-    WKWebsiteDataStore, WKWindowFeatures,
+    WKNavigationDelegate, WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType,
+    WKPermissionDecision, WKSecurityOrigin, WKUIDelegate, WKUserContentController, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
 };
 
 use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
     RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
     WebDpiOwnership, WebEvent, WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
-    WebRequestVerdict, WebSetting, install_rollback,
+    WebRequestVerdict, WebSetting, http_status_of, install_rollback, new_window_answer,
 };
 use crate::admission::{WaitToken, doors};
 use crate::macos_impl::{window_for, window_thread};
@@ -215,9 +215,12 @@ struct Shared {
     /// The target of the rewrite currently in flight, if any — the Windows arm's
     /// belt against a normalisation that answered twice.
     rewriting_to: RefCell<Option<String>>,
-    /// The status the last main-frame response carried, so that
+    /// The status **this** main-frame navigation's response carried, so that
     /// [`WebEvent::NavigationCompleted`] can report one: WebKit's finish
-    /// callback carries no response.
+    /// callback carries no response. Set back to `0` when a main-frame
+    /// navigation is let go (`decide`), so a load that fails before any
+    /// response reports none rather than the page before it's
+    /// (T-WEB-404-SAYS-UNKNOWN).
     last_status: Cell<i32>,
     /// **The term the page is being searched for, and how.**
     ///
@@ -277,6 +280,7 @@ impl Shared {
             uri,
             success: false,
             status: self.last_status.get(),
+            http_status: http_status_of(self.last_status.get()),
         });
     }
 
@@ -925,6 +929,7 @@ define_class!(
                     uri,
                     success: true,
                     status: shared.last_status.get(),
+                    http_status: http_status_of(shared.last_status.get()),
                 });
             });
         }
@@ -1025,9 +1030,12 @@ define_class!(
     }
 
     unsafe impl WKUIDelegate for Gate {
-        /// **No page opens a window.** X-2 measured this as the only door
-        /// `window.open` reaches — it fires with no navigation action decided
-        /// first — so it is shut here as well as at the action above.
+        /// **No page opens a window of WebKit's; the host answers it** (F-SWEEP-048, #27). X-2
+        /// measured this as the only door `window.open` reaches — it fires with no navigation
+        /// action decided first. WebKit asks it only behind a gesture, because the page's
+        /// preferences say `javaScriptCanOpenWindowsAutomatically = NO`, so the request is a
+        /// user's. It returns no view, which is [`new_window_answer`]'s `handled` on this engine,
+        /// and the address goes to the caller as on Windows.
         #[unsafe(method_id(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:))]
         fn create_web_view(
             &self,
@@ -1037,13 +1045,10 @@ define_class!(
             _features: &WKWindowFeatures,
         ) -> Option<Retained<WKWebView>> {
             guarded("createWebViewWithConfiguration:", None, || {
-                // Routed through the gate before it is refused, so that the
-                // caller's trace carries the address a page tried to open in a
-                // window of its own and not merely the fact that one did.
                 // SAFETY: a live action from WebKit on the main thread.
                 let request = unsafe { action.request() };
-                let uri = url_of(&request);
-                let _ = (self.shared_state().gate)(&uri);
+                self.shared_state()
+                    .push(new_window_answer(url_of(&request), true).event);
                 None
             })
         }
@@ -1158,14 +1163,18 @@ impl Gate {
         let request = unsafe { action.request() };
         let uri = url_of(&request);
 
-        // **A window, and this host opens none.** `targetFrame` is nil when the
-        // action would land in a window that does not exist yet —
-        // `target=_blank` and `window.open`. The Windows arm answers
-        // `NewWindowRequested` with `SetHandled(true)` and queues nothing; this
-        // is that, at the earlier of the two doors, and
-        // `createWebViewWithConfiguration:` shuts the other.
+        // **A window, and this host opens none — it answers it** (F-SWEEP-048, #27).
+        // `targetFrame` is nil when the action would land in a window that does not
+        // exist yet — a `target=_blank` link or form. The Windows arm answers
+        // `NewWindowRequested` through [`new_window_answer`]; this is that, at the
+        // earlier of the two doors, and `createWebViewWithConfiguration:` is the other.
+        // The gesture is WebKit's navigation type: a link the reader followed or a form
+        // the reader sent, and not `Other`, which is a script's own navigation.
+        // SAFETY: a live action from WebKit, on the main thread.
         let Some(target) = (unsafe { action.targetFrame() }) else {
-            return WKNavigationActionPolicy::Cancel;
+            // SAFETY: as above.
+            let kind = unsafe { action.navigationType() };
+            return answer_window_request(shared, uri, a_gesture_is_behind(kind));
         };
 
         // **A download, refused before it starts.** The engine says so on the
@@ -1217,6 +1226,11 @@ impl Gate {
                 true
             }
         };
+        if !cancelled {
+            // A main-frame navigation let go has had no response yet: what the last one
+            // answered is not this one's (T-WEB-404-SAYS-UNKNOWN).
+            shared.last_status.set(0);
+        }
         shared.push(WebEvent::NavigationStarting { uri, cancelled });
         if cancelled {
             WKNavigationActionPolicy::Cancel
@@ -1224,6 +1238,30 @@ impl Gate {
             WKNavigationActionPolicy::Allow
         }
     }
+}
+
+/// **A navigation into a window that does not exist yet, answered by the host** (F-SWEEP-048,
+/// #27): the caller hears [`new_window_answer`]'s event, and the action is cancelled when the
+/// answer is handled — which it always is, so WebKit opens nothing of its own.
+fn answer_window_request(
+    shared: &Shared,
+    uri: String,
+    user_initiated: bool,
+) -> WKNavigationActionPolicy {
+    let answer = new_window_answer(uri, user_initiated);
+    shared.push(answer.event);
+    if answer.handled {
+        WKNavigationActionPolicy::Cancel
+    } else {
+        WKNavigationActionPolicy::Allow
+    }
+}
+
+/// **Whether a gesture is behind a navigation**, as WebKit types it: a link the reader followed,
+/// a form the reader sent, a back or forward or a reload are the reader's; `Other` is a page's
+/// own script navigating.
+fn a_gesture_is_behind(kind: WKNavigationType) -> bool {
+    kind != WKNavigationType::Other
 }
 
 // ── the host ───────────────────────────────────────────────────────────────
@@ -2587,6 +2625,41 @@ mod door_tests {
         assert!(
             !door.stands_for_this_mint(),
             "and the pair is not: this list is not on this page"
+        );
+    }
+
+    /// RED (F-SWEEP-048, #27) — **a navigation into a window that does not exist yet is
+    /// cancelled here, and its address and gesture go to the seat** — the macOS twin of
+    /// WebView2's handled `NewWindowRequested`.
+    ///
+    /// `decidePolicyForNavigationAction:` with no target frame (a `target=_blank` link or form)
+    /// answers through [`answer_window_request`]; `createWebViewWithConfiguration:` (the door
+    /// `window.open` reaches, only behind a gesture) returns no view. A link followed and a form
+    /// sent are a gesture; WebKit's `Other` is a script's own navigation.
+    ///
+    /// MUTATION: answer `Allow` from `answer_window_request` (WebKit would carry the page into a
+    /// window of its own), or read every navigation type as a gesture.
+    #[test]
+    fn a_window_a_page_asks_for_is_cancelled_here_and_its_address_goes_to_the_seat() {
+        let door = a_door("");
+        assert_eq!(
+            answer_window_request(&door.shared, "https://example.com/报告".to_owned(), true),
+            WKNavigationActionPolicy::Cancel,
+            "WebKit opens nothing of its own"
+        );
+        assert_eq!(
+            said(&door),
+            vec![WebEvent::NewWindowRequested {
+                uri: "https://example.com/报告".to_owned(),
+                user_initiated: true,
+            }],
+            "and the seat hears where the page wanted to go"
+        );
+        assert!(a_gesture_is_behind(WKNavigationType::LinkActivated));
+        assert!(a_gesture_is_behind(WKNavigationType::FormSubmitted));
+        assert!(
+            !a_gesture_is_behind(WKNavigationType::Other),
+            "a script's own navigation is not a gesture"
         );
     }
 }

@@ -42,6 +42,12 @@ Or, with [Homebrew](https://brew.sh):
 brew install --cask lulu-loopp/folio/folio
 ```
 
+The full name trusts this one cask, which Homebrew 6 and later require before
+they load it; a copy installed another way is trusted with
+`brew trust --cask lulu-loopp/folio/folio`. Folio installed with Homebrew
+updates itself from About, as the download above does, and `brew upgrade`
+leaves a copy that is already as new as the cask alone.
+
 The web preview uses the WebKit already on the machine. There is nothing to
 install.
 

@@ -939,7 +939,7 @@ mod tests {
     /// MUTATION: `RENAME_EXCL` in place of `RENAME_SWAP` in the macOS arm.
     #[test]
     fn a_real_exchange_swaps_two_folders_or_is_refused() {
-        let root = std::env::temp_dir().join(format!("bt-install-flip-{}", std::process::id()));
+        let root = bt_testpath::temp_path("bt-install-flip");
         let _ = std::fs::remove_dir_all(&root);
         let (a, b) = (
             root.join("a").join("One.app"),
@@ -986,7 +986,7 @@ mod tests {
             pid,
             started: mine.started + 1
         }));
-        let elsewhere = std::env::temp_dir().join(format!("bt-flip-none-{pid}"));
+        let elsewhere = bt_testpath::temp_path("bt-flip-none");
         std::fs::write(&elsewhere, b"").unwrap();
         assert!(running_from(&elsewhere).unwrap().is_empty());
         let _ = std::fs::remove_file(&elsewhere);
@@ -1117,7 +1117,7 @@ mod tests {
             pid,
             started: started + 1,
         };
-        let elsewhere = std::env::temp_dir().join(format!("bt-flip-image-{pid}"));
+        let elsewhere = bt_testpath::temp_path("bt-flip-image");
         std::fs::write(&elsewhere, b"").unwrap();
         assert!(!ask(other_start, &[sleep], Ask::Quit).unwrap());
         assert!(!ask(me, &[&elsewhere], Ask::Quit).unwrap());
@@ -1144,11 +1144,7 @@ mod tests {
 
     impl Scratch {
         fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "bt-u23-flip-{tag}-{}-{}",
-                std::process::id(),
-                crate::attention_pipe::unguessable_bits() % 1_000_000
-            ));
+            let root = bt_testpath::temp_path(&format!("bt-u23-flip-{tag}"));
             std::fs::create_dir_all(&root).unwrap();
             Self(root)
         }
@@ -1286,7 +1282,7 @@ mod tests {
             std::fs::write(named, format!("{}:{}", parent.pid, parent.started)).unwrap();
             return;
         }
-        let answer = std::env::temp_dir().join(format!("bt-u37-parent-{}", me.pid));
+        let answer = bt_testpath::temp_path("bt-u37-parent");
         let _ = std::fs::remove_file(&answer);
         let status = crate::quiet_command(std::env::current_exe().unwrap())
             .args([

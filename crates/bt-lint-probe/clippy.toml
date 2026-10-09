@@ -34,6 +34,7 @@ disallowed-methods = [
     { path = "bt_pty::wait_for_retirements", reason = "a cross-crate entrance that waits inside" },
     { path = "bt_platform::keyboard_layout_shift_table", reason = "the worker-only keyboard-layout-table door: one registry read and one System32 DLL load, copied and freed before return" },
     { path = "windows::Win32::UI::Shell::ShellExecuteW", reason = "waits for the shell" },
+    { path = "windows::Win32::UI::Shell::ShellExecuteExW", reason = "waits for the shell and its UAC surface" },
     { path = "windows::Win32::System::Threading::SetEvent", reason = "counted by call site, does not wait" },
     { path = "windows::Win32::Foundation::CloseHandle", reason = "counted by call site, does not wait" },
     { path = "libc::write", reason = "counted by call site, does not wait" },

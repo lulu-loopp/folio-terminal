@@ -703,11 +703,7 @@ mod tests {
     /// and would race every other test in this binary.
     #[test]
     fn an_unset_variable_opens_no_file_and_formats_no_line() {
-        let path = std::env::temp_dir().join(format!(
-            "bt-card-trace-unset-{}-{:?}.log",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let path = bt_testpath::temp_path("bt-card-trace-unset").with_extension("log");
         let _ = std::fs::remove_file(&path);
         let mut formatted = false;
         emit(None, || {

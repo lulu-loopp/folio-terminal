@@ -467,6 +467,15 @@ impl IndexWorker {
     }
 }
 
+/// What [`FileIndexes::reopened`] did about an open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reopened {
+    /// A walk to send to the worker.
+    Asked(IndexRequest),
+    /// The walk with this epoch was already out, and answers this open too.
+    Merged(u64),
+}
+
 /// What the palette can say about a root right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexState {
@@ -573,6 +582,27 @@ impl FileIndexes {
         }
     }
 
+    /// **The palette opened over this root: walk it again** (T-FRESH-FACTS).
+    ///
+    /// The files watch hears only the folders a tree has unfolded (`watched_files_dirs`), so a
+    /// file made under a folded subfolder never marked its root dirty, and the palette offered
+    /// the walk it took the first time for as long as the column stood. An open is the reader
+    /// asking, so it asks the disk: a walk on the index worker, with the index held shown until
+    /// it lands. **A walk already out answers the open** — [`Reopened::Merged`], said by the
+    /// caller in diagnostics — so a palette opened three times in a second is one walk, not three.
+    pub fn reopened(&mut self, root: &Path) -> Reopened {
+        if let Some(entry) = self.roots.get_mut(root) {
+            if entry.building {
+                return Reopened::Merged(entry.epoch);
+            }
+            entry.dirty = true;
+        }
+        Reopened::Asked(
+            self.claim(root)
+                .expect("a root with no walk out, now dirty or new, is claimed"),
+        )
+    }
+
     /// File an answer. A late answer for a superseded epoch is dropped.
     ///
     /// `dirty` is deliberately **not** cleared: news that arrived while the walk
@@ -604,24 +634,16 @@ impl FileIndexes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A scratch directory of this test's own, never shared with another.
     ///
-    /// Process id, wall-clock nanoseconds and a counter, because two tests in
-    /// one binary run at once and two binaries can run at once too — and a
+    /// Named by `bt_testpath`, whose name is unique across the tests of one
+    /// binary and across binaries, because two tests in one binary run at once
+    /// and two binaries can run at once too — and a
     /// fixture that two walks are writing into is the "shared fixture hides a
     /// bug" family from `docs/CONVENTIONS.md` §3 in its most literal form.
     fn scratch(name: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.subsec_nanos());
-        let dir = std::env::temp_dir().join(format!(
-            "folio-palette-index-{name}-{}-{nanos}-{unique}",
-            std::process::id()
-        ));
+        let dir = bt_testpath::temp_path(&format!("folio-palette-index-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir
@@ -995,6 +1017,55 @@ mod tests {
             ]
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-FRESH-FACTS) — **a file made under a folded subfolder is in the palette after the
+    /// next open**, and an open while a walk is out asks nothing more.
+    ///
+    /// MUTATION (observed red): `reopened` calling `claim` without marking the root dirty — a
+    /// ready root is not walked again and the new file never appears.
+    #[test]
+    fn a_file_made_under_a_folded_folder_is_found_by_the_next_open() {
+        let root = scratch("reopened");
+        std::fs::create_dir_all(root.join("折叠的")).unwrap();
+        std::fs::write(root.join("top.txt"), b"").unwrap();
+        let mut register = FileIndexes::default();
+        let Reopened::Asked(first) = register.reopened(&root) else {
+            panic!("an unindexed root is walked at the first open");
+        };
+        register.accept(IndexResponse {
+            root: root.clone(),
+            epoch: first.epoch,
+            index: walk(&root),
+        });
+
+        // Made under a folder no tree has unfolded: no watch heard it, nothing marked the root.
+        std::fs::write(root.join("折叠的").join("新文件.md"), b"").unwrap();
+        let Reopened::Asked(second) = register.reopened(&root) else {
+            panic!("the next open walks the root again");
+        };
+        assert_eq!(
+            register.reopened(&root),
+            Reopened::Merged(second.epoch),
+            "an open while that walk is out is answered by it"
+        );
+        register.accept(IndexResponse {
+            root: root.clone(),
+            epoch: second.epoch,
+            index: walk(&root),
+        });
+        let names: Vec<&str> = register
+            .get(&root)
+            .expect("an index")
+            .files()
+            .iter()
+            .map(|file| file.relative.as_str())
+            .collect();
+        assert!(
+            names.contains(&"折叠的/新文件.md"),
+            "the file made after the first walk is offered: {names:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

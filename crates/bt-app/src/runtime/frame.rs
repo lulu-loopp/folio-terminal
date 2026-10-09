@@ -205,7 +205,6 @@ impl Runtime<'_> {
             );
             self.window.composed_terminal_frames =
                 self.window.composed_terminal_frames.saturating_add(1);
-            let asked_about_paths;
             // **What the projection cost this frame** (`BT_PERF_TRACE projection`,
             // T-MATH-TOGGLE-STUTTER). The gesture that made this worth printing is
             // the formula source toggle: it changes the set of suppressed ids, which
@@ -223,30 +222,34 @@ impl Runtime<'_> {
             // band that made the whole document be pushed through two trees again.
             let rebuilds_before = self.shell().projection.rebuilds();
             let bands_moved_before = self.shell().projection.bands_moved();
-            let mut terminal_frame = {
+            let projected = {
                 // Bound once, to the focused leaf: `session` and `projection` are
                 // two fields of one shell, and reaching each through its own deref
                 // would be two borrows of the tab rather than one borrow of the
                 // leaf.
                 let leaf = self.window.tabs[active].shell_mut();
                 let projection_started_at = trace_perf.then(Instant::now);
-                leaf.session.refresh_projection(&mut leaf.projection);
-                let refresh_us =
+                // The frame, and the paths it drew that nobody has answered for yet
+                // (§7.1.5j): `bt_compose::project` files those as the session's
+                // questions in the same step, because the projection is what walks
+                // every line and the session is what owns a worker. It schedules
+                // nothing: the hold below decides first.
+                let projected = bt_compose::project(bt_compose::Pane {
+                    session: &mut leaf.session,
+                    view: &mut leaf.projection,
+                })
+                .context("project terminal grid into viewport frame")?;
+                let project_us =
                     projection_started_at.map(|started_at| started_at.elapsed().as_micros());
-                let frame = leaf
-                    .session
-                    .viewport_frame(&mut leaf.projection)
-                    .context("project terminal grid into viewport frame")?;
                 // **Written after the frame, not before it.** The three scroll numbers
                 // are what this frame decided — where the window stands, how far it
                 // could stand, and how much of that the blank tail under the prompt is
-                // spending — and a line printed before `viewport_frame` would report
+                // spending — and a line printed before the projection would report
                 // the frame before this one, which is the answer to a different
-                // question than the one the reader is holding the log for. The timing
-                // is still the refresh's own, taken above.
-                if let Some(refresh_us) = refresh_us {
+                // question than the one the reader is holding the log for.
+                if let Some(project_us) = project_us {
                     trace_sink::stderr_line(format!(
-                        "BT_PERF_TRACE projection source={:?} refresh_us={refresh_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
+                        "BT_PERF_TRACE projection source={:?} project_us={project_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
                         trigger.source,
                         leaf.projection
                             .line_text_measurements()
@@ -261,24 +264,19 @@ impl Runtime<'_> {
                         leaf.projection.bottom_relief_subpixels(),
                     ));
                 }
-                // The frame that drew the names is the frame that discovered which of them nobody has
-                // answered for (§7.1.5j). Taken here, one step after the projection wrote them down,
-                // because the projection is what walks every line and the session is what owns a
-                // worker.
-                asked_about_paths = leaf
-                    .session
-                    .absorb_printed_path_probes(&mut leaf.projection)
-                    != 0;
-                frame
+                projected
             };
+            let asked_about_paths = projected.path_work_filed;
+            let mut terminal_frame = projected.frame;
             // State-driven frame hold. Review displacement holds a vanished scroll anchor during a
             // resize reprint. Independently, an unmatched off-band stale-pending DPI record holds the
             // previous complete formula frame while a proven primary reprint is between clear and exact
             // source re-anchor. Both release through projection/session facts (re-anchor, explicit user
             // takeover, or hard lifecycle retirement), never a timer.
-            if self.shell().projection.presentation_hold()
-                && self.window.last_presented_frame.is_some()
-            {
+            //
+            // **Decided before anything is scheduled**: a held frame is not acted on, so the work
+            // it shows is not filed this turn either (design T-COMPOSE-CRATE §3.2, step 4).
+            if projected.hold_requested && self.window.last_presented_frame.is_some() {
                 if self.app.trace_perf {
                     trace_sink::stderr_line(format!(
                         "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
@@ -290,9 +288,7 @@ impl Runtime<'_> {
                 return Ok(false);
             }
             if hang_watch::during(hang_watch::Station::DetectionPass, || {
-                self.shell_mut()
-                    .session
-                    .schedule_visible_artifacts(&terminal_frame)
+                bt_compose::schedule(&mut self.shell_mut().session, &terminal_frame)
             }) != 0
                 || asked_about_paths
             {
@@ -429,9 +425,14 @@ impl Runtime<'_> {
             // grid's caret exists, and [`Runtime::offer_ime_caret`] decides whether
             // the grid is the rung that owns it.
             self.offer_ime_caret(Some(&composed.frame));
-            self.shell_mut()
-                .session
-                .record_published_frame(&composed.frame, trigger.occurred_at);
+            // **The acknowledgment, at the publish boundary**: below the held and the
+            // unchanged returns, immediately before the frame enters the slot, and never
+            // again for it — a present that fails files the same frame back without one.
+            bt_compose::acknowledge(
+                &mut self.shell_mut().session,
+                &composed.frame,
+                trigger.occurred_at,
+            );
             self.flush_resize_trace();
             // **The one line a picture becomes newer than the glass.** Everything
             // above this can hold, skip or decide the frame says nothing new; only
@@ -639,11 +640,13 @@ impl Runtime<'_> {
                 Some(handed) => {
                     self.if_refused(
                         handed,
-                        crate::handoff_lane::OnRefused::HyperlinkBlocked(hyperlink),
+                        crate::handoff_lane::OnRefused::HyperlinkRefused(hyperlink),
                     );
                 }
                 None => {
-                    self.window.hyperlink_hover.show_blocked(hyperlink);
+                    self.window
+                        .hyperlink_hover
+                        .show_refused(hyperlink, crate::LinkRefusal::of_address(&url));
                     self.publish_interaction_frame()?;
                 }
             },
@@ -670,7 +673,9 @@ impl Runtime<'_> {
                 // surface that sentence is the hover line, under the very cells
                 // the address is printed in.
                 if !self.open_web_address_here(&url)? {
-                    self.window.hyperlink_hover.show_blocked(hyperlink);
+                    self.window
+                        .hyperlink_hover
+                        .show_refused(hyperlink, crate::LinkRefusal::of_address(&url));
                     self.publish_interaction_frame()?;
                 }
             }
@@ -715,7 +720,7 @@ impl Runtime<'_> {
                 let handed = self.hand_uri_to_the_system(&uri);
                 self.if_refused(
                     handed,
-                    crate::handoff_lane::OnRefused::HyperlinkBlocked(hyperlink),
+                    crate::handoff_lane::OnRefused::HyperlinkRefused(hyperlink),
                 );
             }
             // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
@@ -747,8 +752,8 @@ impl Runtime<'_> {
             HyperlinkActivation::FilesColumn(path) => {
                 self.locate_folder_in_files_column(&path, None)?
             }
-            HyperlinkActivation::Blocked => {
-                self.window.hyperlink_hover.show_blocked(hyperlink);
+            HyperlinkActivation::Blocked(refusal) => {
+                self.window.hyperlink_hover.show_refused(hyperlink, refusal);
                 self.publish_interaction_frame()?;
             }
         }
@@ -1233,18 +1238,21 @@ impl Runtime<'_> {
                 let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) else {
                     continue;
                 };
-                leaf.session.refresh_projection(&mut leaf.projection);
-                let mut projected = leaf
-                    .session
-                    .viewport_frame(&mut leaf.projection)
-                    .context("project an unfocused pane's grid into a viewport frame")?;
+                let bt_compose::Projected {
+                    frame: mut projected,
+                    path_work_filed,
+                    ..
+                } = bt_compose::project(bt_compose::Pane {
+                    session: &mut leaf.session,
+                    view: &mut leaf.projection,
+                })
+                .context("project an unfocused pane's grid into a viewport frame")?;
                 // A pane nobody has the keyboard in still draws paths, and still owes them an answer.
-                owes_the_engine |= leaf
-                    .session
-                    .absorb_printed_path_probes(&mut leaf.projection)
-                    != 0;
+                owes_the_engine |= path_work_filed;
+                // No hold is read here: a pane the user is not typing in holds nothing, and
+                // the hold is the focused leaf's, decided in `publish_frame_inner`.
                 owes_the_engine |= hang_watch::during(hang_watch::Station::DetectionPass, || {
-                    leaf.session.schedule_visible_artifacts(&projected)
+                    bt_compose::schedule(&mut leaf.session, &projected)
                 }) != 0;
                 if hover_pane == Some(pane.seat) {
                     apply_hover_marks(
@@ -1348,28 +1356,27 @@ impl Runtime<'_> {
             hang_watch::during(hang_watch::Station::RedrawTables, || {
                 self.refresh_table_paints(&table_sources)
             });
-            let mut seat_frames = Vec::with_capacity(unfocused_frames.len() + 1);
-            seat_frames.push(bt_render::SeatFrame {
-                seat: focused_body.viewport,
-                clip: focused_body.clip,
-                frame: &frame,
-                metrics: frame_metrics[0],
-                // **The owner, not the focus** (user report + ruling, 2026-08-13).
-                // This flag is read by `seat_caret` alone, and what it is asked
-                // there is "is this the caret typing would land in" — see
-                // [`Self::keyboard_owner_is_a_shell`] for why the answer stopped
-                // being "yes, it is the focused pane".
-                focused: self.keyboard_owner_is_a_shell(),
-            });
-            for ((pane, projected), metrics) in unfocused_frames.iter().zip(&frame_metrics[1..]) {
-                seat_frames.push(bt_render::SeatFrame {
-                    seat: pane.viewport,
-                    clip: pane.clip,
-                    frame: projected,
-                    metrics: *metrics,
-                    focused: false,
-                });
-            }
+            // **The owner, not the focus** (user report + ruling, 2026-08-13): the
+            // focused entry's caret flag is "is this the caret typing would land in" —
+            // see [`Self::keyboard_owner_is_a_shell`] for why the answer stopped being
+            // "yes, it is the focused pane".
+            let seat_frames = bt_compose::seat_frames(
+                bt_compose::PaneDrawInput {
+                    seat: focused_body.viewport,
+                    clip: focused_body.clip,
+                    frame: &frame,
+                    metrics: frame_metrics[0],
+                },
+                self.keyboard_owner_is_a_shell(),
+                unfocused_frames.iter().zip(&frame_metrics[1..]).map(
+                    |((pane, projected), metrics)| bt_compose::PaneDrawInput {
+                        seat: pane.viewport,
+                        clip: pane.clip,
+                        frame: projected,
+                        metrics: *metrics,
+                    },
+                ),
+            );
             let seat_ids: Vec<_> = std::iter::once(focused_leaf)
                 .chain(unfocused_frames.iter().map(|(pane, _)| pane.seat))
                 .collect();
@@ -1816,21 +1823,18 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::SearchScan, || {
             self.advance_search_scan()
         })?;
-        // The watcher's own clock (R31's D), beside the rest of this window's:
-        // it asks for a wake-up only while it is holding news, and the
-        // subscriptions it keeps level with the screen are dropped here the turn
-        // after the page they were for went away.
-        //
-        // The application's, not this window's, since slice B raised it: the set
-        // it follows is the union of every window's pages, and one clock over a
-        // union is one clock. So one window turns it, as with the two watches
-        // above, and the news it produces reaches the pages through the caches
-        // those pages own.
+        // **This window's seat in the git watch** (R31's D; T-WINDOWS-ALL): the
+        // repositories its drawn Git pages show, and the news it was told about
+        // them. Every window, not only the one that turns the application's
+        // clocks: the subscriptions and their clocks are the application's, one
+        // clock over the union of every window's pages, and they were ripened for
+        // every seat before the first turn (`FolioApp::ripen_git_news`), so each
+        // window re-reads its own pages on the same pass.
+        hang_watch::at(hang_watch::Station::Watches);
+        hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
+            self.advance_git_watch()
+        })?;
         if application_clocks {
-            hang_watch::at(hang_watch::Station::Watches);
-            hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
-                self.advance_git_watch(now)
-            })?;
             // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very
@@ -2118,7 +2122,7 @@ impl Runtime<'_> {
             .tabs
             .iter()
             .flat_map(|tab| tab.leaves())
-            .filter_map(|(_, leaf)| leaf.session.synchronized_update_deadline())
+            .filter_map(|(_, leaf)| bt_compose::deadlines(&leaf.session).synchronized_update)
             .min();
         // Every leaf of the tab on screen, for the reason the line above gives:
         // a stability window is a property of one pane's rows, and the pane that
@@ -2423,10 +2427,11 @@ impl Runtime<'_> {
             application_clocks
                 .then(|| self.app.storage_watch.deadline())
                 .flatten(),
-            // The debounce a change notification started (R31's D). Absent —
-            // and therefore costing nothing — for every window that is not
-            // currently holding unanswered news about a repository, which is
-            // every window most of the time.
+            // The debounce a change notification started (R31's D): the
+            // application's clock, folded by the window that turns the
+            // application's clocks; the next pass ripens it for every window.
+            // Absent — and therefore costing nothing — while no repository any
+            // window shows has unanswered news, which is most of the time.
             application_clocks
                 .then(|| self.app.git_watch.deadline())
                 .flatten(),

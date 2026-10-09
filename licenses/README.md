@@ -56,7 +56,7 @@ exist upstream, so `bundled-assets.md` quotes what does.
 | File | Covers |
 |---|---|
 | `../LICENSE-MIT`, `../LICENSE-APACHE` | Folio's own code |
-| `../vendor/alacritty_terminal/LICENSE-APACHE` | The vendored terminal core; `../vendor/alacritty_terminal/CHANGES-FOLIO.md` indexes the twenty-three files changed under §4(b) |
+| `../vendor/alacritty_terminal/LICENSE-APACHE` | The vendored terminal core; `../vendor/alacritty_terminal/CHANGES-FOLIO.md` indexes the twenty-four files changed under §4(b) |
 | `../vendor/conpty/LICENSE-MICROSOFT-TERMINAL` | The two ConPTY `.nupkg` files and the `conpty.dll` / `OpenConsole.exe` extracted from them |
 | `../vendor/conpty/portable-pty/LICENSE.md` | The patched `portable-pty` 0.9.0 |
 | `../assets/fonts/NotoColorEmoji-LICENSE` | The embedded colour emoji font (OFL-1.1) |

@@ -17,7 +17,7 @@ use crate::{
     session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
     tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
 };
-use crate::{LeafView, TextScale, owner_door};
+use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{SeatId, SizePolicy, WorkAreaHint};
@@ -25,7 +25,7 @@ use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -79,12 +79,12 @@ impl Runtime<'_> {
         plan: &NewWindowPlan,
         like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
     ) -> Result<(WindowId, WindowRuntime)> {
-        let default_profile = profiles::default_profile(
+        // The default as a seed spells it — the decided row's id, or the unresolved default while
+        // the program walk has not answered the rows it reads (see `Runtime::default_profile_id`).
+        let default_profile_id = profiles::default_profile_identity(
             &app.settings_store.loaded().default_profile,
             &app.profile_programs,
         );
-        // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::id(default_profile);
         // **Where this window opens** (multiwindow slice D). The saved rectangle
         // when the file asked for the window, and the product's own size when a
         // verb did: a second window opened exactly on top of the first is a
@@ -99,7 +99,7 @@ impl Runtime<'_> {
             .flatten()
             .and_then(|saved| restore_window_placement(event_loop, saved));
         let attributes = opening_window_attributes(
-            profiles::title(default_profile),
+            profiles::identity_title(&default_profile_id),
             placement.map_or(
                 LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
                 |placement| placement.size,
@@ -410,6 +410,7 @@ impl Runtime<'_> {
                 seed,
                 &app.profile_programs,
                 &default_profile_id,
+                &app.settings_store.loaded().default_profile,
                 // The opening rectangle is this program's, exactly as the first
                 // window's is: nobody has taken hold of a frame that has not been
                 // shown yet.
@@ -791,25 +792,22 @@ impl Runtime<'_> {
                 // read for a Recent row: the shell you are asking back is the
                 // shell you had, and "whatever the default is today" is a
                 // different tab wearing this one's folder.
+                // The saved id, or the fallback's when this build has no such row —
+                // `revive_plan`'s own reading, for the same reason.
+                let (profile, unknown_profile_id) = revived_profile(&profile_id);
                 let leaves = BTreeMap::from([(
                     seats.identity(),
                     LeafSeed {
-                        // The saved id, or the fallback's when this build has no
-                        // such row — `revive_plan`'s own line, for the same reason.
-                        profile: if profiles::has_id(&profile_id) {
-                            profile_id.clone()
-                        } else {
-                            profiles::fallback_profile_id().to_owned()
-                        },
-                        cwd: profiles::revived_cwd(
-                            profiles::index_of_id(&profile_id),
-                            Path::new(&cwd),
-                        )
-                        .map(profiles::SeedPlace::Carried),
-                        unknown_profile_id: (!profiles::has_id(&profile_id))
-                            .then(|| profile_id.clone()),
+                        profile,
+                        // Whether the folder still stands is asked by the pane's birth
+                        // (`profiles::BirthPlace`), never this thread.
+                        cwd: Some(cwd)
+                            .filter(|cwd| !cwd.is_empty())
+                            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
+                        unknown_profile_id,
                         card_skip: 0,
                         prefill: None,
+                        carried_environment: None,
                     },
                 )]);
                 (seats, manual_name, leaves, BTreeMap::new())
@@ -932,9 +930,12 @@ impl Runtime<'_> {
                 // asked for it now, which is not the same as promising to bring
                 // it back every time.
                 pinned: false,
+                // A new tab owns no launch's environment.
+                carried_environment: None,
             },
             &self.app.profile_programs,
             &self.default_profile_id(),
+            &self.app.settings_store.loaded().default_profile,
             self.window.size_policy,
             // The posture, for [`Self::resolve_seat_layout`]'s reason.
             self.rail_posture(),
@@ -1015,6 +1016,7 @@ impl Runtime<'_> {
                 seed,
                 &self.app.profile_programs,
                 &self.default_profile_id(),
+                &self.app.settings_store.loaded().default_profile,
                 self.window.size_policy,
                 // The posture, for [`Self::resolve_seat_layout`]'s reason.
                 self.rail_posture(),
@@ -1497,31 +1499,22 @@ impl Runtime<'_> {
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
-        if answer == restore::GateAnswer::Cancel {
+        match (request, answer) {
+            // **The two exits answer all three buttons in one place**
+            // ([`Self::answer_exit`]): a window's own shut, and the run's end
+            // asked in the summoned terminal, whose confirmed answer re-runs the
+            // close of the ordinary window that ends it.
+            (restore::GateRequest::Shut, answer) => self.answer_exit(self.window_id(), answer),
+            (restore::GateRequest::ShutWithTheRun(closing), answer) => {
+                self.answer_exit(closing, answer)
+            }
             // "取消不关" — nothing happens, and nothing is lost. The one answer a
             // gate must be able to give.
-            return Ok(());
-        }
-        // **`Save all` writes first and closes only if all of it landed** (B1,
-        // user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
-        // surface down and for its reason: a shut that closed the window after a
-        // half-finished save would take the half that is still only in memory
-        // with it. The failures are already named on their own pane by
-        // `quit_save`; the window stays, so the reader can see them there.
-        //
-        // Only the shut can be answered this way (`GateRequest::offers_save`),
-        // so there is no per-request branch here — the button that would send
-        // any other request down this path is not drawn.
-        if answer == restore::GateAnswer::Save {
-            let report = self.quit_save()?;
-            if !report.is_complete() {
-                return Ok(());
-            }
-            self.window.window_close_requested = true;
-            return Ok(());
-        }
-        match request {
-            restore::GateRequest::ClosePane(seat) => {
+            (_, restore::GateAnswer::Cancel) => Ok(()),
+            // Only an exit offers `Save all` (`GateRequest::offers_save`), so from
+            // here the answer goes through with the request: the button that
+            // would send any of these down a save is not drawn.
+            (restore::GateRequest::ClosePane(seat), _) => {
                 // The pool is the tab's, so emptying it leaves *every* surface
                 // naming a buffer that is gone — the view each of them was on has
                 // to be filed and let go, not only the pane being closed.
@@ -1531,44 +1524,25 @@ impl Runtime<'_> {
                 }
                 self.close_pane(seat)
             }
-            restore::GateRequest::CloseTab(index) => {
+            (restore::GateRequest::CloseTab(index), _) => {
                 if let Some(tab) = self.window.tabs.get_mut(index) {
                     tab.preview_pool.clear();
                 }
                 self.close_tab(index)
-            }
-            restore::GateRequest::Shut => {
-                // **Only the dirty ones.** A shut is the one answer whose pool
-                // has somewhere to go afterwards: every tab is about to be
-                // written to `session.json`, and its pool goes with it as the
-                // list of files the switcher will list next launch
-                // (`TabState::preview_content`). Emptying it here would answer
-                // "discard my unsaved changes" by also throwing away a browsing
-                // history nobody was asked about — measured on the real machine,
-                // where one dirty buffer wrote `"pool": []` and a three-file
-                // history came back empty. The gate raises itself off
-                // `dirty_names`, so dropping the dirty buffers is all it takes
-                // for the re-requested shut not to ask again.
-                for tab in &mut self.window.tabs {
-                    tab.preview_pool.discard_dirty();
-                }
-                // The shut is the one verb this does not own: it is the event
-                // loop's, and it is re-requested rather than performed here so
-                // that everything else `CloseRequested` does still happens in the
-                // order it always did.
-                self.window.window_close_requested = true;
-                Ok(())
             }
             // The one request whose confirmed verb is not a re-run of something
             // that was interrupted: nothing was in flight, because the gate is in
             // front of the write rather than behind it. So this is where the
             // question is actually asked of the repository (R13's pessimism
             // starts one line later, when the row dims).
-            restore::GateRequest::GitDiscard {
-                origin,
-                path,
-                untracked,
-            } => {
+            (
+                restore::GateRequest::GitDiscard {
+                    origin,
+                    path,
+                    untracked,
+                },
+                _,
+            ) => {
                 let verb = if untracked {
                     git::GitWriteVerb::DiscardUntracked
                 } else {
@@ -1581,7 +1555,7 @@ impl Runtime<'_> {
             // and either surface on this repository can carry the write — every
             // cache on it re-reads when the receipt lands
             // ([`git::GitWriteVerb::moves_refs`]).
-            restore::GateRequest::GitDeleteBranch { root, name } => {
+            (restore::GateRequest::GitDeleteBranch { root, name }, _) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1591,7 +1565,7 @@ impl Runtime<'_> {
                     Vec::new(),
                 )
             }
-            restore::GateRequest::GitDeleteTag { root, name } => {
+            (restore::GateRequest::GitDeleteTag { root, name }, _) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1600,9 +1574,12 @@ impl Runtime<'_> {
             // **The detaching checkout**, on the two deletions' own shape: the
             // gate stands in front of the verb rather than behind it, so this is
             // where the repository is actually asked.
-            restore::GateRequest::GitCheckout {
-                root, target, kind, ..
-            } => {
+            (
+                restore::GateRequest::GitCheckout {
+                    root, target, kind, ..
+                },
+                _,
+            ) => {
                 let Some(origin) = self.git_origin_for_root(&root) else {
                     return Ok(());
                 };
@@ -1611,8 +1588,39 @@ impl Runtime<'_> {
             // The gate stands *in front of* this one too (`GitDiscard`'s shape),
             // so the confirmed answer is the deletion itself rather than a re-run
             // of something that was interrupted.
-            restore::GateRequest::ClearScrollback(seat) => self.clear_pane_scrollback(seat),
+            (restore::GateRequest::ClearScrollback(seat), _) => self.clear_pane_scrollback(seat),
         }
+    }
+
+    /// **Spend an answer to one of the two exits**, whose confirmed verb is the
+    /// close of `closes` — this window for its own shut, the run's last ordinary
+    /// window for the run's end asked in the summoned terminal
+    /// (T-SUMMON-DIRTY-PREVIEW).
+    ///
+    /// **`Save all` writes first and closes only if all of it landed** (B1,
+    /// user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
+    /// surface down and for its reason: a shut that closed the window after a
+    /// half-finished save would take the half that is still only in memory
+    /// with it. The failures are already named on their own pane by
+    /// `quit_save`; the window stays, so the reader can see them there.
+    ///
+    /// **`Discard` drops only the dirty buffers**: every tab is about to be
+    /// written to `session.json`, and its pool goes with it as the list of files
+    /// the switcher will list next launch (`TabState::preview_content`) —
+    /// measured on the real machine, where emptying it wrote `"pool": []` and a
+    /// three-file history came back empty. See [`crate::answer_an_exit_over`],
+    /// which is the whole of this but the write.
+    ///
+    /// The close is the one verb this does not own: it is the event loop's, and
+    /// it is re-requested ([`crate::WindowRuntime::window_close_requested`]) rather than
+    /// performed here so that everything else a close does still happens in the
+    /// order it always did — and, for the run's end, so that `Cancel` leaves the
+    /// ordinary window open and the summoned terminal never stands alone.
+    fn answer_exit(&mut self, closes: WindowId, answer: restore::GateAnswer) -> Result<()> {
+        let saved_all = answer == restore::GateAnswer::Save && self.quit_save()?.is_complete();
+        self.window.window_close_requested =
+            crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, saved_all);
+        Ok(())
     }
 
     /// **What this window would lose if the process left now**, by name.
@@ -1696,6 +1704,20 @@ impl Runtime<'_> {
         // the disk, and the ones that failed are still dirty and still say so.
         self.repaint_preview()?;
         Ok(report)
+    }
+
+    /// **Keep what this window would lose, on a stop that cannot ask** (D-4,
+    /// 0.4.8 G7): every dirty preview buffer of every tab, through the quit's
+    /// judged write and, where that is refused, into `recovery`
+    /// ([`crate::keep_unsaved_edits_over`]), each said in `diagnostics.log` with
+    /// where its edit is. No card and no repaint: the window is about to be
+    /// closed by a process that is stopping.
+    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
+        for kept in
+            crate::keep_unsaved_edits_over(&mut self.window.tabs, recovery, SystemTime::now())
+        {
+            crate::diagnostics::note(&kept.line());
+        }
     }
 
     /// **Take this window off the screen and let go of everything it holds**

@@ -114,8 +114,8 @@ pub(crate) enum State {
 #[must_use]
 pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
-        std::env::var_os(HOME_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(HOME_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
@@ -151,8 +151,8 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 #[must_use]
 pub(crate) fn config_path_shown() -> String {
     config_path_shown_from(
-        std::env::var_os(HOME_VARIABLE),
-        std::env::var_os(bt_platform::home_variable()),
+        crate::attention_hooks::agent_variable(HOME_VARIABLE),
+        crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
@@ -490,6 +490,7 @@ fn rendered(document: &DocumentMut, existing: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{host_path, host_spelling};
 
     #[test]
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
@@ -580,13 +581,16 @@ mod tests {
     fn the_only_file_this_writes_is_the_one_the_environment_names() {
         let named = |text: &str| Some(OsString::from(text));
         assert_eq!(
-            config_dir_from(named(r"D:\scratch\codex-home"), named(r"C:\Users\someone")),
-            Some(PathBuf::from(r"D:\scratch\codex-home"))
+            config_dir_from(
+                named(&host_spelling(r"D:\scratch\codex-home")),
+                named(&host_spelling(r"C:\Users\someone"))
+            ),
+            Some(host_path(r"D:\scratch\codex-home"))
         );
         // Set-but-empty is not set.
         assert_eq!(
-            config_dir_from(named(""), named(r"C:\Users\someone")),
-            Some(PathBuf::from(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
+            config_dir_from(named(""), named(&host_spelling(r"C:\Users\someone"))),
+            Some(host_path(r"C:\Users\someone").join(DEFAULT_DIRECTORY))
         );
         assert_eq!(config_dir_from(None, None), None);
         assert_eq!(config_dir_from(None, named("")), None);
@@ -602,7 +606,7 @@ mod tests {
             );
         }
         assert!(
-            config_dir_from(named(r"D:\scratch\codex-home"), None)
+            config_dir_from(named(&host_spelling(r"D:\scratch\codex-home")), None)
                 .is_some_and(|path| path.is_absolute())
         );
     }
@@ -853,11 +857,7 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/tb-tests")
-            .join(format!(
-                "folio-codex-{name}-{}-{}",
-                std::process::id(),
-                crate::attention_hooks::today()
-            ));
+            .join(bt_testpath::unique_name(&format!("folio-codex-{name}")));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir

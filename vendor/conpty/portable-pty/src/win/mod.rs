@@ -23,7 +23,9 @@ pub mod conpty;
 mod procthreadattr;
 mod psuedocon;
 
-pub use psuedocon::{CONPTY_SIDECAR_VERSION, ConPtySource, conpty_fallback_reason, conpty_source};
+pub use psuedocon::{
+    CONPTY_SIDECAR_VERSION, ConPtySource, conpty_fallback_reason, conpty_source, use_sidecars_in,
+};
 
 use filedescriptor::OwnedHandle;
 

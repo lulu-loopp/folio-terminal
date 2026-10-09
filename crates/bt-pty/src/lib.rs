@@ -59,9 +59,34 @@ impl std::fmt::Display for ConPtySource {
     }
 }
 
+/// **Name the folder this program's own files are in — where the packaged ConPTY pair is looked
+/// for** (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS): once, before the first pseudoconsole, from the
+/// program's resolved image (`bt_platform::running_image`, which this crate cannot ask: the
+/// shipped `bt-pty` has no edge to `bt-platform`). A process that names none runs on the inbox
+/// ConPTY and says so (`conpty_fallback_reason`). `false` when a folder was already named.
+#[cfg(windows)]
+pub fn use_sidecars_in(folder: Result<PathBuf, String>) -> bool {
+    portable_pty::win::use_sidecars_in(folder)
+}
+
+/// There is no ConPTY, and so no sidecar, off Windows.
+#[cfg(not(windows))]
+pub fn use_sidecars_in(_folder: Result<PathBuf, String>) -> bool {
+    true
+}
+
+/// A test process's sidecar folder, named before its first pseudoconsole: the test executable's
+/// own folder, where the build puts the pair (`test_shell::name_the_sidecars`).
+#[cfg(any(test, feature = "test-shell"))]
+fn sidecars_named() {
+    test_shell::name_the_sidecars();
+}
+
 /// Resolve the same process-wide ConPTY implementation used by subsequent PTY creation.
 #[cfg(windows)]
 pub fn conpty_source() -> ConPtySource {
+    #[cfg(any(test, feature = "test-shell"))]
+    sidecars_named();
     portable_pty::win::conpty_source()
 }
 
@@ -136,6 +161,8 @@ impl ConPtyKind {
 #[cfg(windows)]
 #[must_use]
 pub fn conpty_fallback_reason() -> Option<String> {
+    #[cfg(any(test, feature = "test-shell"))]
+    sidecars_named();
     portable_pty::win::conpty_fallback_reason()
 }
 
@@ -321,42 +348,51 @@ const PTY_DUMP_PUBLISH_INTERVAL: Duration = Duration::from_millis(200);
 static PTY_DUMP_RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl PtyDump {
-    fn from_environment() -> Result<(Option<Self>, Option<Self>), PtyError> {
+    /// This pane's recordings, as `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` ask for them; a recording
+    /// that cannot be opened is said on standard error and left out (G-SWEEP-048).
+    fn from_environment() -> (Option<Self>, Option<Self>) {
         Self::from_paths(
             pty_dump_path(std::env::var_os(PTY_DUMP_ENV)),
             pty_dump_path(std::env::var_os(PTY_INPUT_DUMP_ENV)),
             || (Instant::now(), unix_millis()),
+            &mut |line| eprintln!("{line}"),
         )
     }
 
+    /// **A debugging switch that names a file this process cannot write records nothing and
+    /// stops nothing** (G-SWEEP-048): its one line goes to `report`, and the pane starts as it
+    /// would with the switch off. In 0.4.7 a folder that was not there failed the pane's spawn,
+    /// and the first pane's took the whole start with it.
     fn from_paths(
         output: Option<PathBuf>,
         input: Option<PathBuf>,
         clock: impl FnOnce() -> (Instant, u128),
-    ) -> Result<(Option<Self>, Option<Self>), PtyError> {
+        report: &mut dyn FnMut(&str),
+    ) -> (Option<Self>, Option<Self>) {
         if output.is_none() && input.is_none() {
-            return Ok((None, None));
+            return (None, None);
         }
         let ordinal = PTY_DUMP_RECORDINGS.fetch_add(1, Ordering::Relaxed);
         let (started, started_unix_ms) = clock();
-        let open = |base: PathBuf| {
-            Self::create_at(
-                &pty_dump_session_path(&base, ordinal),
-                ordinal,
-                started,
-                started_unix_ms,
-            )
+        let mut open = |variable: &str, base: PathBuf| {
+            let path = pty_dump_session_path(&base, ordinal);
+            Self::create_at(&path, ordinal, started, started_unix_ms)
+                .map_err(|error| {
+                    report(&format!(
+                        "{variable}: {} cannot be written ({error}); this pane is not recorded",
+                        path.display()
+                    ));
+                })
+                .ok()
         };
-        let output = output.map(open).transpose()?;
+        let output = output.and_then(|base| open(PTY_DUMP_ENV, base));
         // A separate suffix also prevents an input path equal to the output path from truncating it.
-        let input = input
-            .map(|base| {
-                let mut path = base.into_os_string();
-                path.push(".in");
-                open(PathBuf::from(path))
-            })
-            .transpose()?;
-        Ok((output, input))
+        let input = input.and_then(|base| {
+            let mut path = base.into_os_string();
+            path.push(".in");
+            open(PTY_INPUT_DUMP_ENV, PathBuf::from(path))
+        });
+        (output, input)
     }
 
     /// Open this run's next recording under `base` — the named path for the first, a name beside
@@ -2195,7 +2231,7 @@ impl PtySession {
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        let (dump, input_dump) = PtyDump::from_environment()?;
+        let (dump, input_dump) = PtyDump::from_environment();
         let dump = dump.map(|dump| Arc::new(Mutex::new(dump)));
         let input_dump = input_dump.map(Mutex::new);
         let conpty_source = conpty_source();
@@ -2209,6 +2245,8 @@ impl PtySession {
                 &profile_environment,
             )
         });
+        #[cfg(any(test, feature = "test-shell"))]
+        sidecars_named();
         let pair = native_pty_system()
             .openpty(size.backend())
             .map_err(backend)?;
@@ -2945,12 +2983,7 @@ mod tests {
     #[cfg(windows)]
     impl ProbeLatch {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "bt-probe-latch-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let path = bt_testpath::temp_path("bt-probe-latch");
             // The filesystem is the boundary here and a run that was killed between `release` and
             // `drop` really does leave this name behind. An inherited latch is already open, which
             // would let the child out before the storm had started — the exact failure this type
@@ -3679,21 +3712,51 @@ mod tests {
 
     #[test]
     fn input_dump_unset_does_not_open_files_or_construct_a_clock() {
-        let (output, input) = PtyDump::from_paths(None, None, || {
-            panic!("disabled dumps must not even construct their clock")
-        })
-        .unwrap();
+        let (output, input) = PtyDump::from_paths(
+            None,
+            None,
+            || panic!("disabled dumps must not even construct their clock"),
+            &mut |line| panic!("nothing to say: {line}"),
+        );
         assert!(output.is_none());
         assert!(input.is_none());
         assert!(pty_dump_path(Some(std::ffi::OsString::new())).is_none());
     }
 
+    /// RED (mutation: a recording that cannot be opened fails the pane's spawn, the 0.4.7 road —
+    /// `from_paths` handing the open's error back) — **a debugging switch naming a folder that is
+    /// not there says so and records nothing** (G-SWEEP-048): one line per recording, naming
+    /// its variable and its file, and the pane is made without them.
+    #[test]
+    fn a_dump_that_cannot_be_opened_is_said_and_left_out() {
+        let missing = bt_testpath::temp_path("bt-dump-没有这个文件夹").join("recording.bin");
+        let mut said = Vec::new();
+        let (output, input) = PtyDump::from_paths(
+            Some(missing.clone()),
+            Some(missing.clone()),
+            || (Instant::now(), 1),
+            &mut |line| said.push(line.to_owned()),
+        );
+        assert!(output.is_none() && input.is_none());
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("BT_PTY_DUMP: ") && said[0].contains("没有这个文件夹"));
+        assert!(said[1].starts_with("BT_PTY_INPUT_DUMP: "), "{said:?}");
+        assert!(
+            said.iter()
+                .all(|line| line.ends_with("this pane is not recorded"))
+        );
+    }
+
     #[test]
     fn input_dump_and_output_share_one_pane_and_clock() {
-        let path = std::env::temp_dir().join(format!("bt-input-clock-{}", std::process::id()));
+        let path = bt_testpath::temp_path("bt-input-clock");
         let origin = Instant::now();
-        let (output, input) =
-            PtyDump::from_paths(Some(path.clone()), Some(path), || (origin, 9876)).unwrap();
+        let (output, input) = PtyDump::from_paths(
+            Some(path.clone()),
+            Some(path),
+            || (origin, 9876),
+            &mut |line| panic!("both open: {line}"),
+        );
         let mut output = output.unwrap();
         let mut input = input.unwrap();
         assert_eq!(output.started, origin);
@@ -3742,7 +3805,7 @@ mod tests {
 
     #[test]
     fn input_dump_is_reached_by_labelled_and_plain_session_writes() {
-        let path = std::env::temp_dir().join(format!("bt-input-writes-{}", std::process::id()));
+        let path = bt_testpath::temp_path("bt-input-writes");
         let dump = PtyDump::create_at(&path, 3, Instant::now(), 1234).unwrap();
         // No process or pipe: exercise the product queue and recording door with synthetic bytes.
         let session = PtySession {
@@ -3796,7 +3859,7 @@ mod tests {
 
     #[test]
     fn input_dump_records_each_write_with_time_pane_reason_and_exact_bytes() {
-        let path = std::env::temp_dir().join(format!("bt-input-dump-{}", std::process::id()));
+        let path = bt_testpath::temp_path("bt-input-dump");
         let mut dump = PtyDump::create_at(&path, 17, Instant::now(), 1234).unwrap();
         dump.write_input_at(b"a\r\n\0\xff", "keyboard input", 42)
             .unwrap();
@@ -3825,12 +3888,8 @@ mod tests {
 
     #[test]
     fn pty_dump_is_an_exact_byte_sidecar_with_replayable_chunk_metadata() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
         let path =
-            std::env::temp_dir().join(format!("bt-pty-dump-{}-{unique}.vt", std::process::id()));
+            std::env::temp_dir().join(format!("{}.vt", bt_testpath::unique_name("bt-pty-dump")));
         let chunks_path = pty_dump_chunks_path(&path);
         let dump = PtyDump::create(&path, 0).unwrap();
         let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
@@ -3913,13 +3972,9 @@ mod tests {
     /// recording was cut to nothing under a reader that went on writing past the hole.
     #[test]
     fn a_second_recording_does_not_truncate_the_first_ones_file() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
         let base = std::env::temp_dir().join(format!(
-            "bt-pty-two-panes-{}-{unique}.vt",
-            std::process::id()
+            "{}.vt",
+            bt_testpath::unique_name("bt-pty-two-panes")
         ));
 
         let first = PtyDump::open(&base).unwrap();
@@ -3958,12 +4013,7 @@ mod tests {
     /// began, and says out loud that it reached the end of the stream with nothing in hand.
     #[test]
     fn a_recording_that_caught_nothing_still_says_whose_it_was() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base =
-            std::env::temp_dir().join(format!("bt-pty-silent-{}-{unique}.vt", std::process::id()));
+        let base = bt_testpath::temp_path("bt-pty-silent").with_extension("vt");
 
         let dump = PtyDump::open(&base).unwrap();
         let path = dump.path().to_path_buf();
@@ -4027,36 +4077,38 @@ mod tests {
         }
         output.extend(session.read_output());
         session.shutdown().unwrap();
+        // The output is the child's whole environment: a failure says which line is missing and
+        // never prints the output.
         let output = String::from_utf8_lossy(&output);
         assert!(
             output
                 .lines()
                 .any(|line| line.trim() == "COLORTERM=truecolor"),
-            "child environment did not contain COLORTERM=truecolor: {output:?}"
+            "child environment did not contain COLORTERM=truecolor"
         );
         assert!(
             output
                 .lines()
                 .any(|line| line.trim() == "TERM=xterm-256color"),
-            "child environment did not contain TERM=xterm-256color: {output:?}"
+            "child environment did not contain TERM=xterm-256color"
         );
         assert!(
             output
                 .lines()
                 .any(|line| line.trim() == "TERM_PROGRAM=Folio"),
-            "child environment did not contain TERM_PROGRAM=Folio: {output:?}"
+            "child environment did not contain TERM_PROGRAM=Folio"
         );
         let expected_version = format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION"));
         assert!(
             output.lines().any(|line| line.trim() == expected_version),
-            "child environment did not contain {expected_version}: {output:?}"
+            "child environment did not contain {expected_version}"
         );
         assert!(
             !output.lines().any(|line| line
                 .trim_start()
                 .to_ascii_uppercase()
                 .starts_with("NO_COLOR=")),
-            "child environment still carried an inherited NO_COLOR: {output:?}"
+            "child environment still carried an inherited NO_COLOR"
         );
     }
 
@@ -4522,12 +4574,8 @@ mod tests {
     #[cfg(windows)]
     fn nonexistent_program(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "bt-pty-missing-{label}-{}-{}.exe",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "{}.exe",
+            bt_testpath::unique_name(&format!("bt-pty-missing-{label}"))
         ))
     }
 

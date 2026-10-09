@@ -132,11 +132,7 @@ impl Runtime<'_> {
     /// is the honest answer for a press that then does nothing — and it is the same lookup the
     /// dialog's own caps come through, so the box a press opens is the box it was drawn on.
     pub(crate) fn summon_shortcut_line(&self) -> Option<usize> {
-        self.app
-            .shortcuts
-            .editor_rows()
-            .iter()
-            .position(|line| line.ids.contains(&shortcuts::SUMMON_QUAKE_ID))
+        shortcuts::summon_line(&self.app.shortcuts.editor_rows())
     }
 
     /// Whether the summoned terminal goes away when the keyboard leaves it

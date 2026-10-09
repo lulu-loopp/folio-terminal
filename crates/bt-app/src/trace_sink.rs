@@ -565,7 +565,10 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("bt-sink-{}-{name}.log", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "{}.log",
+            bt_testpath::unique_name(&format!("bt-sink-{name}"))
+        ));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -764,10 +767,7 @@ mod tests {
     /// [`FLUSH_TIMEOUT`], and the captured output holds no report.
     #[test]
     fn a_failed_trace_open_reports_without_the_process_stderr_lock() {
-        let folder = std::env::temp_dir().join(format!(
-            "bt-sink-{}-a-folder-not-a-file",
-            std::process::id()
-        ));
+        let folder = bt_testpath::temp_path("bt-sink-a-folder-not-a-file");
         std::fs::create_dir_all(&folder).expect("the scratch folder");
         let offer_two = |queue: &Queue, file: &Arc<TraceFile>| {
             for text in ["first", "second"] {
@@ -931,7 +931,7 @@ mod tests {
     #[test]
     fn the_trace_is_flushed_through_its_door_only_on_the_way_out() {
         std::thread::spawn(|| {
-            crate::tests::on_the_window_thread();
+            crate::test_support::on_the_window_thread();
             drop(Shutdown);
             assert!(
                 crate::hang_watch::admissions_on_this_thread().is_empty(),

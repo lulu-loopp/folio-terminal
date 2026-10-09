@@ -132,3 +132,10 @@ attention_ownership::tests::attention_a_linked_config_is_edited_at_its_target_in
 # `cargo test -p bt-platform --lib the_released_windows_assets -- --ignored --nocapture`.
 # Expiry: when the updater's Windows acceptance (U-20) reads a real release in CI.
 trust::tests::the_released_windows_assets_carry_an_identity_oid
+
+# T-ADMIN-2: the clean-VM row of the elevated pane's pipe and launch primitives. It
+# performs a real `ShellExecuteExW(runas)` launch, which on an ordinary machine shows a
+# UAC prompt, so only the guest harness runs it (BT_ELEVATED_PIPE_VM_ROW / _DIR / _PROGRAM,
+# docs/BT-ENVIRONMENT.md). Everything it exercises except the real elevation is pinned in
+# the normal suite by the fake-peer tests of elevated_pipe::tests.
+elevated_pipe::tests::vm_row

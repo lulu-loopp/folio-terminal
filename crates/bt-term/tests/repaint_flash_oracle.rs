@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 use std::{num::NonZeroU32, time::Duration};
 
-use bt_math::{MathRaster, MathRenderError};
+use bt_doc::math::{MathRaster, MathRenderError};
 use bt_term::{
     DualPlaneSession, FormulaFlashOracle, FormulaFrameState, LIVE_MATH_STABLE_INTERVAL,
     SessionMathTask,

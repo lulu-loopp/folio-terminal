@@ -10,6 +10,7 @@
 
 use super::tests::{complete_detected_live_tasks, nz, synthetic_raster};
 use super::*;
+use bt_compose::MathEngine;
 
 /// An alternate-screen repaint of these rows, each addressed and cleared to its end.
 fn repaint(rows: &[String]) -> Vec<u8> {
@@ -49,7 +50,7 @@ fn complete_for_real(session: &mut DualPlaneSession) -> usize {
     let engine = MathEngine::new();
     let mut completed = 0;
     while let Some(mut task) = session.take_live_worker_task() {
-        let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+        let result = bt_compose::render_live_detection_task(&engine, &mut task, [220, 220, 220]);
         let proven = task.resolved;
         if session.complete_live_worker_result(task, result) && proven {
             completed += 1;

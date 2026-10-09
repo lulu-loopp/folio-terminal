@@ -502,13 +502,16 @@ pub struct SystemSettingsWatch {
     /// Windows — a wake that could fire after the watch was dropped is the one
     /// defect this type's shape exists to make impossible. Held for its drop and
     /// never called here, hence the leading underscore.
-    _wake: Box<dyn Fn()>,
+    _wake: Box<dyn Fn(crate::SystemNews)>,
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl SystemSettingsWatch {
     /// Install the watch. Constructs, subscribes to nothing, and never wakes.
-    pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
+    pub fn install(
+        window: NativeWindow,
+        wake: Box<dyn Fn(crate::SystemNews)>,
+    ) -> Result<Self, String> {
         let _ = window;
         Ok(Self { _wake: wake })
     }
@@ -1779,6 +1782,7 @@ pub fn install_console_ctrl_handler() -> bool {
 pub fn leave_process(code: i32) -> ! {
     use std::io::Write;
 
+    #[cfg(unix)]
     crate::end_probe_children_for_process_exit();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
@@ -1883,7 +1887,7 @@ mod refusal_tests {
         // and macOS have native broadcasts, and Linux has the portal source.
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         assert!(
-            SystemSettingsWatch::install(window(), Box::new(|| {})).is_ok(),
+            SystemSettingsWatch::install(window(), Box::new(|_| {})).is_ok(),
             "the system settings watch"
         );
         // `ImeSystemCaret::new` returns `Self` and has no failure to test; that
@@ -2130,11 +2134,7 @@ mod stream_tests {
         let _turn = ONE_AT_A_TIME
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        let log = std::env::temp_dir().join(format!(
-            "folio-m3-7-{}-{:?}.log",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let log = bt_testpath::temp_path("folio-m3-7").with_extension("log");
         let _ = std::fs::remove_file(&log);
         let put_back = StreamsPutBack::taken();
         assert!(

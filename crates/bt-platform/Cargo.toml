@@ -922,7 +922,19 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "std",
 ] }
 
-# **The macOS test venue** (M3-1; `tests/macos_dock_menu.rs` is the second
+[dev-dependencies]
+bt-testpath = { path = "../bt-testpath" }
+# **A real shell for a test** (T-PROBE-CHILD): the Unix probe tests stand a
+# `/bin/sh -c` child and grandchild in for a probed tool, and the Windows
+# running-image test makes its directory junction with `cmd /C mklink /J`
+# (G-SWEEP-048); every test shell in the workspace starts through
+# `bt_pty::test_shell` (T-TEST-SHELL-HYGIENE). A path crate already in the
+# workspace, so it adds no package, and being a *dev*-dependency it is not in
+# the shipped graph.
+bt-pty = { path = "../bt-pty", features = ["test-shell"] }
+
+# **A dev-dependency that is a test venue
+# rather than a dependency** (M3-1; `tests/macos_dock_menu.rs` is the second
 # target to need it). `tests/macos_app_delegate.rs` proves that the selectors
 # added to `WinitApplicationDelegate` are delivered and that every
 # `ApplicationHandler` callback keeps arriving afterwards; there is no way to
@@ -934,14 +946,6 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 # untouched.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 winit.workspace = true
-
-# **A real shell for a test** (T-PROBE-CHILD): the Unix probe tests stand a
-# `/bin/sh -c` child and grandchild in for a probed tool, and every test shell
-# in the workspace starts through `bt_pty::test_shell` (T-TEST-SHELL-HYGIENE).
-# A path crate already in the workspace, so it adds no package, and being a
-# *dev*-dependency it is not in the shipped graph.
-[target.'cfg(unix)'.dev-dependencies]
-bt-pty = { path = "../bt-pty", features = ["test-shell"] }
 
 [target.'cfg(windows)'.dependencies]
 # The web preview's engine (`src/webview.rs`). It is a thin, generated binding
@@ -1115,6 +1119,10 @@ windows = { version = "0.62.2", features = [
     # manifest, and `folio.exe` has none; this decides whether the machine has a
     # first-page context menu at all (`src/msix.rs`).
     "Wdk_System_SystemServices",
+    # `NtQueryInformationThread(ThreadSuspendCount)`: whether a probe that showed no life is held
+    # suspended by another program (`ProbeChild::suspended`, G-SWEEP-048). A feature, not a
+    # package — `docs/DESIGN.md` §8's bar.
+    "Wdk_System_Threading",
     # `NtCreateFile` with a `RootDirectory` and `OBJECT_ATTRIBUTES`: the update
     # archive's members created **under the staging directory's handle**, never
     # through a path that could be re-pointed between the check and the write
@@ -1174,9 +1182,6 @@ libc = "0.2"
 # `fontdb` already comes through `glyphon`; this direct edge reads the configured
 # Linux font directories without adding a package or notice.
 fontdb.workspace = true
-# `fontdb` already uses this parser; Linux SVG text uses its ordered installed
-# family aliases instead of an alias name that is absent from the font database.
-fontconfig-parser.workspace = true
 # The desktop appearance is the XDG Settings portal's one process-wide fact.
 # zbus is pure Rust and stays Linux-scoped. Its Tokio integration runs on the
 # named worker's current-thread runtime, so the subscription adds no executor
@@ -1194,8 +1199,10 @@ zbus.workspace = true
 # ephemeral keys, and small PE files signed and time-stamped under them. For
 # tests only: `bt-app` names it on its *dev-dependency* on this crate, so its
 # tests can verify a release signed here, and a build of the shipped program
-# never has it. It adds no package.
-trust-harness = []
+# never has it. It adds no package. The other test-only doors a dependent's tests
+# need ride on it too: `install_flip::hold_unshared` and the engine ledger's wait
+# (`video::engine::engines_outstanding_reaching`).
+trust-harness = ["dep:bt-testpath"]
 
 [lints.clippy]
 todo = "deny"
@@ -1203,6 +1210,9 @@ unimplemented = "deny"
 dbg_macro = "deny"
 
 [dependencies]
+# **Only with `trust-harness`**, and for this crate's own tests: every test's scratch name comes
+# from one place (`bt_testpath`, T-TEST-HYGIENE-048). The shipped program never has it.
+bt-testpath = { path = "../bt-testpath", optional = true }
 ttf-parser.workspace = true
 bt-unicode = { path = "../bt-unicode" }
 # One owner for encoding and decoding `file:` addresses. Windows package
@@ -1211,3 +1221,6 @@ bt-unicode = { path = "../bt-unicode" }
 # `bt-transcript`. Keeping those grammars together is why this edge is general.
 bt-transcript = { path = "../bt-transcript" }
 bt-winres = { path = "../bt-winres" }
+# The admission vocabulary and the file-read ledger (`admission`, `file_reads`):
+# re-exported whole; this crate keeps the thread door, which sets the band.
+bt-effects = { path = "../bt-effects" }

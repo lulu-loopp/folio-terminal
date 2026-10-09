@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use bt_detect::DetectionTask;
 use bt_transcript::TranscriptId;

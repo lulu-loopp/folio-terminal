@@ -4,9 +4,8 @@
 use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
-    attention, attention_codex, attention_copilot, attention_hooks, attention_trace,
-    emit_attention_lines, float, i18n, marks, native_window, next_attention_stop, notice, notify,
-    profiles, seats, taskbar_lane, toast,
+    attention, attention_trace, emit_attention_lines, float, i18n, marks, native_window,
+    next_attention_stop, notice, notify, profiles, seats, taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -624,18 +623,7 @@ impl Runtime<'_> {
     /// only way a machine that has been put right becomes a machine Folio will act on again
     /// without a relaunch.
     pub(crate) fn refresh_agent_rows(&mut self) {
-        (
-            self.app.claude_hooks_installed,
-            self.app.agent_config_refusals[0],
-        ) = attention_hooks::row_state();
-        (
-            self.app.codex_notify_installed,
-            self.app.agent_config_refusals[1],
-        ) = attention_codex::row_state();
-        (
-            self.app.copilot_hooks_installed,
-            self.app.agent_config_refusals[2],
-        ) = attention_copilot::row_state();
+        crate::read_the_agent_rows_again(self.app);
     }
 
     /// Whether one of the built-in agent profiles has its program on this

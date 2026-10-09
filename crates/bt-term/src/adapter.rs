@@ -4,8 +4,9 @@ use std::{
     hash::{BuildHasher, Hasher},
     num::NonZeroU32,
     sync::{Arc, Mutex, MutexGuard},
-    time::Instant,
 };
+
+use web_time::Instant;
 
 use alacritty_terminal::{
     Term,
@@ -426,8 +427,9 @@ fn discard_listener_output(listener: &CaptureListener) {
 /// The mouse modes a program owns and a shell never uses: the three tracking
 /// levels (`1000`/`1002`/`1003`) and the two report encodings the vendor terminal
 /// knows (`1005`/`1006`; `1015` is not a mode this terminal can be in). One list
-/// for the two roads that retire them — the prompt's
-/// ([`TerminalAdapter::retire_program_input_modes`]) and the person's
+/// for the three roads that retire them — the prompt's
+/// ([`TerminalAdapter::retire_program_input_modes`]), the command end's
+/// ([`TerminalAdapter::retire_dead_program_modes`]) and the person's
 /// ([`TerminalAdapter::reset_program_modes`]).
 const PROGRAM_MOUSE_MODES: [NamedPrivateMode; 5] = [
     NamedPrivateMode::ReportMouseClicks,
@@ -458,10 +460,11 @@ pub enum PtyTransport {
 /// stack, colours, cursor style, scrollback and ConPTY's win32-input mode are not
 /// program-mode cleanup. Focus reporting goes back to what the `transport` keeps.
 fn reset_program_modes_on(term: &mut Term<CaptureListener>, transport: PtyTransport) {
-    for mode in PROGRAM_MOUSE_MODES.into_iter().chain([
+    retire_program_mouse_modes_on(term);
+    for mode in [
         NamedPrivateMode::BracketedPaste,
         NamedPrivateMode::CursorKeys,
-    ]) {
+    ] {
         term.unset_private_mode(PrivateMode::Named(mode));
     }
     let focus = PrivateMode::Named(NamedPrivateMode::ReportFocusInOut);
@@ -480,9 +483,24 @@ fn reset_program_modes_on(term: &mut Term<CaptureListener>, transport: PtyTransp
     // `?25h`: a full-screen program hides the cursor, and one that died never
     // showed it again.
     term.set_private_mode(PrivateMode::Named(NamedPrivateMode::ShowCursor));
+    retire_program_keyboard_modes_on(term);
+    term.unset_keypad_application_mode();
+}
+
+/// [`PROGRAM_MOUSE_MODES`] off, through the vendor's own handler.
+fn retire_program_mouse_modes_on(term: &mut Term<CaptureListener>) {
+    for mode in PROGRAM_MOUSE_MODES {
+        term.unset_private_mode(PrivateMode::Named(mode));
+    }
+}
+
+/// The key encodings a program asks for, back to the legacy bytes: the kitty
+/// keyboard flags on the showing screen (an exhaustive pop empties its stack and
+/// clears the flags in force, including a value `CSI = … u` installed without a
+/// push) and xterm's modifyOtherKeys, which is one setting for the whole terminal.
+fn retire_program_keyboard_modes_on(term: &mut Term<CaptureListener>) {
     term.pop_keyboard_modes(u16::MAX);
     term.set_modify_other_keys(VendorModifyOtherKeys::Reset);
-    term.unset_keypad_application_mode();
 }
 
 /// Vendor-facing terminal adapter. It translates upstream facts into stable Folio facts
@@ -1854,8 +1872,20 @@ impl TerminalAdapter {
     /// tracking levels (`1000`/`1002`/`1003`) and the two report encodings the
     /// vendor terminal knows (`1005`/`1006` — `1015` is not a mode this terminal
     /// can be in, so there is nothing of it to retire). Bracketed paste, the
-    /// alternate screen, alternate scroll and the keyboard modes are deliberately
-    /// absent: a shell and its line editor use those themselves.
+    /// alternate screen and alternate scroll are deliberately absent: a shell and
+    /// its line editor use those themselves. **The keyboard modes are absent from
+    /// this road and retired on another**: fish and reedline turn the kitty flags or
+    /// modifyOtherKeys on *before* the prompt start of the line they read, and a
+    /// prompt redraw writes this marker again, so at a prompt start those modes may
+    /// be the line editor's own. The shell's command end is the moment they are
+    /// not, and [`Self::retire_dead_program_modes`] retires them, with the mouse
+    /// modes, there.
+    ///
+    /// **A program that died on the alternate screen** leaves the shell speaking
+    /// through a screen it does not own. That is not retired here either: the
+    /// session recognises the shell's own command end arriving there and runs the
+    /// whole of [`Self::reset_program_modes`], screen included (see the session's
+    /// `OSC 133;D` handler for the rule and the one false trigger it accepts).
     ///
     /// **Focus reporting (`1004`) is deliberately absent too, and it is the one
     /// entry that had to be taken back off** (user ruling, 2026-08-21). It reads
@@ -1877,11 +1907,42 @@ impl TerminalAdapter {
     /// every other byte: a shadow terminal that disagreed about the modes would
     /// answer a resize as a different terminal.
     pub fn retire_program_input_modes(&mut self) {
-        for mode in PROGRAM_MOUSE_MODES {
-            self.term.unset_private_mode(PrivateMode::Named(mode));
-            if let Some(canonical) = self.resize_canonical.as_mut() {
-                canonical.term.unset_private_mode(PrivateMode::Named(mode));
-            }
+        retire_program_mouse_modes_on(&mut self.term);
+        if let Some(canonical) = self.resize_canonical.as_mut() {
+            retire_program_mouse_modes_on(&mut canonical.term);
+        }
+    }
+
+    /// **The shell has just said its command is over: turn off every input mode
+    /// that command's program could have left behind** — the mouse modes
+    /// [`Self::retire_program_input_modes`] retires, and the key encodings too: the
+    /// kitty keyboard flags on the showing screen (stack emptied, flags 0) and
+    /// modifyOtherKeys (back to `Reset`).
+    ///
+    /// The caller is the session's handler for a shell's `OSC 133;D` on the
+    /// primary screen, once no command it watched start there is still running (a
+    /// live program that started a nested shell keeps its modes). `D` is the one marker that stands between a program's life
+    /// and the shell's next line, and it is the moment every line editor's own
+    /// keyboard modes are provably not on (`docs/DESIGN.md`, T-RESET-MODES): fish
+    /// writes `D` after the command and turns its kitty flags or modifyOtherKeys
+    /// on only when its next read begins; reedline pushes its flags inside
+    /// `read_line`, after the prompt update that wrote `D`; zsh writes `D` before
+    /// `zleread` and `zle-line-init`; and no shell writes `D` while it redraws a
+    /// prompt. `A` cannot carry this: fish and reedline turn their modes on
+    /// *before* the `A` of the prompt they then read at, and every prompt redraw
+    /// writes `A` again (as `folio.zsh`'s `PS1` does), so a keyboard retirement at
+    /// `A` would take a line editor's own modes away under it.
+    ///
+    /// Bracketed paste, DECCKM, keypad mode, alternate scroll and focus reporting
+    /// stay out, for the reasons [`Self::retire_program_input_modes`] gives.
+    /// Through the vendor's own handlers, with the resize canonical stepped
+    /// alongside.
+    pub fn retire_dead_program_modes(&mut self) {
+        retire_program_mouse_modes_on(&mut self.term);
+        retire_program_keyboard_modes_on(&mut self.term);
+        if let Some(canonical) = self.resize_canonical.as_mut() {
+            retire_program_mouse_modes_on(&mut canonical.term);
+            retire_program_keyboard_modes_on(&mut canonical.term);
         }
     }
 

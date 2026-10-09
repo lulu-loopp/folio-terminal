@@ -3389,6 +3389,14 @@ impl PrintedPathLinks {
 /// placeholder learned **longest ago** is forgotten first.
 pub const IMAGE_PLACEHOLDER_CAP: usize = 64;
 
+/// **The extensions Claude Code names a stored picture with** (T-IMAGE-N-GAPS, 2026-10-08).
+///
+/// Claude Code stores a pasted picture as `<k>.<ext>` in one folder per conversation, the extension
+/// chosen per picture from the picture's own content type — PNG, JPEG, GIF or WebP — and it resizes
+/// a large picture into JPEG before storing it. So one conversation's folder holds `3.png` beside
+/// `4.jpg`, and a number's file is one of these four names.
+pub const PLACEHOLDER_PICTURE_EXTENSIONS: [&str; 4] = ["png", "jpg", "gif", "webp"];
+
 /// The number an `[Image #k]` label names, when the whole label (surrounding blanks aside) is
 /// exactly that placeholder — the shape Claude Code writes into its input line for a pasted picture
 /// and links, in the transcript it prints, to the file it saved.
@@ -3443,6 +3451,53 @@ pub fn image_placeholder_ranges(text: &str) -> Vec<(HyperlinkRange, u32)> {
     found
 }
 
+/// **A placeholder a program's own word wrap split at its inner blank** (T-IMAGE-N-GAPS): `upper`
+/// ends with `[Image` and `lower` begins with `#k]`, blanks aside — the head's range in `upper`, the
+/// tail's range in `lower`, and the number.
+///
+/// Claude Code wraps its input line itself, at word boundaries, and draws each wrapped row as a
+/// line of its own; the space inside `[Image #k]` is a boundary, so a placeholder at the right edge
+/// is drawn as `…[Image` over `#k]…`, with no terminal wrap flag to join them. The two halves are
+/// read across that one seam and nowhere else: the head is the last word of its row and the tail
+/// the first of the next.
+#[must_use]
+pub fn image_placeholder_across(
+    upper: &str,
+    lower: &str,
+) -> Option<(HyperlinkRange, HyperlinkRange, u32)> {
+    const HEAD: &str = "[Image";
+    let head_end = upper.trim_end_matches(' ').len();
+    let head_start = head_end.checked_sub(HEAD.len())?;
+    if upper.get(head_start..head_end)? != HEAD {
+        return None;
+    }
+    let tail_start = lower.len() - lower.trim_start_matches(' ').len();
+    if lower.as_bytes().get(tail_start) != Some(&b'#') {
+        return None;
+    }
+    let digits_start = tail_start + 1;
+    let digits = lower[digits_start..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    let close = digits_start + digits;
+    if digits == 0 || lower.as_bytes().get(close) != Some(&b']') {
+        return None;
+    }
+    let number = lower[digits_start..close].parse::<u32>().ok()?;
+    Some((
+        HyperlinkRange {
+            byte_start: head_start,
+            byte_end: head_end,
+        },
+        HyperlinkRange {
+            byte_start: tail_start,
+            byte_end: close + 1,
+        },
+        number,
+    ))
+}
+
 /// **What one pane has learned about its `[Image #k]` placeholders**: the file each number was
 /// linked to, the last time a program linked it (T-IMAGE-N, owner ask 2026-09-27).
 ///
@@ -3491,22 +3546,38 @@ impl ImagePlaceholderTargets {
         self.order.back().and_then(|number| self.target(*number))
     }
 
-    /// **Where a number this pane never saw linked would be, if the agent keeps it beside the
-    /// newest one** (owner ruling 2026-09-29): `<folder of the most recently learned target>/
-    /// <number>.<that target's extension>`.
+    /// **Where a number this pane never saw linked can be, if the agent keeps it beside the newest
+    /// one** (owner ruling 2026-09-29; T-IMAGE-N-GAPS 2026-10-08): `<folder of the most recently
+    /// learned target>/<number>.<ext>`, for that target's own extension first and then each other
+    /// extension of [`PLACEHOLDER_PICTURE_EXTENSIONS`].
     ///
-    /// An inference, not a link: it names a candidate the pane's worker is asked about, and it is
-    /// a link only once the disk says the file is there. It is bounded to that one folder and that
-    /// one extension — never another folder, never a list of spellings tried in turn — and it goes
+    /// Candidates, not links: each is a question for the pane's worker, and the first one the disk
+    /// holds is the link. Bounded to the one folder the program itself named and to the names the
+    /// program gives a picture there — the extension is chosen per picture by its content, so the
+    /// newest target's extension alone misses every picture stored in another format — and gone
     /// with the table when the table is emptied.
     #[must_use]
-    pub fn inferred_target(latest: &Path, number: u32) -> Option<PathBuf> {
-        let folder = latest.parent()?;
-        let name = match latest.extension() {
-            Some(extension) => format!("{number}.{}", extension.to_string_lossy()),
-            None => number.to_string(),
+    pub fn inferred_targets(latest: &Path, number: u32) -> Vec<PathBuf> {
+        let Some(folder) = latest.parent() else {
+            return Vec::new();
         };
-        Some(folder.join(name))
+        let own = latest
+            .extension()
+            .map(|extension| extension.to_string_lossy().into_owned());
+        let mut names = vec![match &own {
+            Some(extension) => format!("{number}.{extension}"),
+            None => number.to_string(),
+        }];
+        names.extend(
+            PLACEHOLDER_PICTURE_EXTENSIONS
+                .iter()
+                .filter(|extension| {
+                    own.as_deref()
+                        .is_none_or(|own| !own.eq_ignore_ascii_case(extension))
+                })
+                .map(|extension| format!("{number}.{extension}")),
+        );
+        names.into_iter().map(|name| folder.join(name)).collect()
     }
 
     /// Forget every number. Answers whether there was anything to forget.
@@ -3546,9 +3617,11 @@ impl PrintedPathLinks {
     /// through the same sink every printed path's question goes through. Only a "yes" is a link.
     ///
     /// The target is the learned one when the number was learned — a learned target always wins
-    /// — and otherwise the one [`ImagePlaceholderTargets::inferred_target`] infers beside the most
-    /// recently learned target (owner ruling 2026-09-29). A pane that has learned nothing has no
-    /// folder to infer from, and its placeholders are text.
+    /// — and otherwise the first of the candidates [`ImagePlaceholderTargets::inferred_targets`]
+    /// infers beside the most recently learned target that the disk holds (owner ruling
+    /// 2026-09-29, T-IMAGE-N-GAPS). A "yes" ends the question: once one candidate is a link, the
+    /// others are not asked. A pane that has learned nothing has no folder to infer from, and its
+    /// placeholders are text.
     ///
     /// The caller decides *where* this is read: the rows an agent's input line can stand on, and
     /// nowhere else (`bt_viewport`'s `implicit_hyperlinks`).
@@ -3560,30 +3633,59 @@ impl PrintedPathLinks {
         if self.image_placeholders.is_empty() {
             return Vec::new();
         }
-        let mut links = Vec::new();
-        for (range, number) in image_placeholder_ranges(text) {
-            let target = match self.image_placeholders.get(&number) {
-                Some(learned) => learned.clone(),
-                None => {
-                    let Some(inferred) =
-                        self.latest_image_placeholder.as_deref().and_then(|latest| {
-                            ImagePlaceholderTargets::inferred_target(latest, number)
-                        })
-                    else {
-                        continue;
-                    };
-                    inferred
-                }
-            };
-            match self.verdicts.get(&target) {
-                Some(true) => links.push((range, local_path_to_file_uri(&target))),
-                Some(false) => {}
-                None => {
-                    unknown.insert(target);
-                }
-            }
+        image_placeholder_ranges(text)
+            .into_iter()
+            .filter_map(|(range, number)| {
+                self.image_placeholder_target(number, unknown)
+                    .map(|target| (range, local_path_to_file_uri(&target)))
+            })
+            .collect()
+    }
+
+    /// The link a placeholder split across one application newline offers
+    /// ([`image_placeholder_across`]): the head's range in `upper`, the tail's in `lower`, and the
+    /// `file:` target — under exactly the rule [`Self::image_placeholder_links_in`] applies to a
+    /// placeholder drawn whole, unknowns recorded the same way.
+    pub fn image_placeholder_link_across(
+        &self,
+        upper: &str,
+        lower: &str,
+        unknown: &mut BTreeSet<PathBuf>,
+    ) -> Option<(HyperlinkRange, HyperlinkRange, String)> {
+        if self.image_placeholders.is_empty() {
+            return None;
         }
-        links
+        let (head, tail, number) = image_placeholder_across(upper, lower)?;
+        let target = self.image_placeholder_target(number, unknown)?;
+        Some((head, tail, local_path_to_file_uri(&target)))
+    }
+
+    /// The file `number` is a link to, when the disk has said yes for one of its candidates — and,
+    /// when none is yes, every candidate nobody has answered, into `unknown`.
+    fn image_placeholder_target(
+        &self,
+        number: u32,
+        unknown: &mut BTreeSet<PathBuf>,
+    ) -> Option<PathBuf> {
+        let candidates = match self.image_placeholders.get(&number) {
+            Some(learned) => vec![learned.clone()],
+            None => ImagePlaceholderTargets::inferred_targets(
+                self.latest_image_placeholder.as_deref()?,
+                number,
+            ),
+        };
+        if let Some(found) = candidates
+            .iter()
+            .find(|candidate| self.verdicts.get(*candidate) == Some(&true))
+        {
+            return Some(found.clone());
+        }
+        unknown.extend(
+            candidates
+                .into_iter()
+                .filter(|candidate| !self.verdicts.contains_key(candidate)),
+        );
+        None
     }
 }
 
@@ -4636,8 +4738,8 @@ mod tests {
 
     /// A scratch directory of this test's own, removed when the test that made it ends.
     ///
-    /// `std::env::temp_dir` and the process id rather than a crate: this workspace has no tempfile
-    /// dependency, and the one thing the hanging-indent cases want from a real disk is that the
+    /// A name from `bt_testpath` under `std::env::temp_dir` rather than a tempfile crate, which
+    /// this workspace does not have; the one thing the hanging-indent cases want from a real disk is that the
     /// name the two halves spell between them is a file somebody could actually open.
     ///
     /// **The caller's word comes first** so that the directory's own 8.3 short name is this test's
@@ -4648,8 +4750,7 @@ mod tests {
 
     impl Scratch {
         fn named(name: &str) -> Self {
-            let directory = std::env::temp_dir()
-                .join(format!("{name}-folio-rejoin-indent-{}", std::process::id()));
+            let directory = bt_testpath::temp_path(&format!("{name}-folio-rejoin-indent"));
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             Self(directory)
         }
@@ -8430,8 +8531,8 @@ mod posix_tests {
 
     /// A scratch directory of this test's own, removed when the test that made it ends.
     ///
-    /// `std::env::temp_dir` and the process id rather than a crate: this workspace has no tempfile
-    /// dependency, and the one thing the hanging-indent cases want from a real disk is that the
+    /// A name from `bt_testpath` under `std::env::temp_dir` rather than a tempfile crate, which
+    /// this workspace does not have; the one thing the hanging-indent cases want from a real disk is that the
     /// name the two halves spell between them is a file somebody could actually open.
     ///
     /// **The caller's word comes first** so that the directory's own 8.3 short name is this test's
@@ -8442,8 +8543,7 @@ mod posix_tests {
 
     impl Scratch {
         fn named(name: &str) -> Self {
-            let directory = std::env::temp_dir()
-                .join(format!("{name}-folio-rejoin-indent-{}", std::process::id()));
+            let directory = bt_testpath::temp_path(&format!("{name}-folio-rejoin-indent"));
             std::fs::create_dir_all(&directory).expect("a scratch directory");
             Self(directory)
         }
@@ -9209,10 +9309,12 @@ mod image_placeholder_tests {
             vec![("[Image #3]", local_path_to_file_uri(&picture(3)))],
             "3 is verified; 4 is unanswered, 5 is gone, 6 is only inferred and unanswered"
         );
+        let mut asked = vec![picture(4)];
+        asked.extend(ImagePlaceholderTargets::inferred_targets(&picture(5), 6));
         assert_eq!(
             unknown,
-            [picture(4), picture(6)].into_iter().collect(),
-            "only unanswered targets are questions: the learned 4, and 6 inferred beside 5"
+            asked.into_iter().collect(),
+            "only unanswered targets are questions: the learned 4, and 6's names beside 5"
         );
         let mut none = BTreeSet::new();
         assert!(
@@ -9228,10 +9330,9 @@ mod image_placeholder_tests {
     /// inferred beside the most recently learned picture, and is a link only when the disk says
     /// that file is there; a learned number keeps its learned target.**
     ///
-    /// The inference is `<folder of the newest learned target>/<k>.<its extension>` and nothing
-    /// else: not another learned target's folder, not another extension. It is bounded by the
-    /// disk — a "yes" links, a "no" is text, silence is text and a question — so a wrong guess
-    /// costs one question and draws nothing.
+    /// The inference is `<folder of the newest learned target>/<k>.<ext>` and nothing else: not
+    /// another learned target's folder. It is bounded by the disk — a "yes" links, a "no" is text,
+    /// silence is text and a question — so a wrong candidate costs one question and draws nothing.
     ///
     /// MUTATIONS: link an inferred target with no verdict, and `[Image #6]` is a link before
     /// anybody asked; infer before looking the number up, and `[Image #3]` points at the newest
@@ -9273,13 +9374,152 @@ mod image_placeholder_tests {
         );
         assert_eq!(
             unknown,
-            [newer.join("6.jpg")].into_iter().collect(),
-            "the unanswered inference is a question for the worker"
+            [
+                "5.png", "5.gif", "5.webp", "6.jpg", "6.png", "6.gif", "6.webp"
+            ]
+            .into_iter()
+            .map(|name| newer.join(name))
+            .collect(),
+            "every unanswered name in the newest folder is a question for the worker; 5.jpg \
+             was answered"
         );
         assert_eq!(
-            ImagePlaceholderTargets::inferred_target(&newer.join("9"), 4),
-            Some(newer.join("4")),
-            "a target without an extension infers a name without one"
+            ImagePlaceholderTargets::inferred_targets(&newer.join("9"), 4),
+            ["4", "4.png", "4.jpg", "4.gif", "4.webp"]
+                .into_iter()
+                .map(|name| newer.join(name))
+                .collect::<Vec<_>>(),
+            "a target without an extension infers a name without one first"
         );
+    }
+
+    /// RED (T-IMAGE-N-GAPS, owner report 2026-10-08) — **an unlearned number is looked for under
+    /// every name Claude Code gives a picture in the newest folder, the newest picture's own
+    /// extension first, and the first the disk holds is the link; a "yes" ends the question.**
+    ///
+    /// Claude Code names a stored picture by its content and resizes a large one into JPEG, so the
+    /// folder that holds the learned `103.png` holds `104.jpg` too. A number none of whose names
+    /// the disk holds is text, and so is a number in a pane that learned nothing.
+    ///
+    /// MUTATIONS: infer only the newest target's own extension, and `[Image #104]` is text; keep
+    /// asking after a yes, and `106.jpg` is asked although `106.png` is already the link.
+    #[test]
+    fn an_unlearned_number_is_looked_for_under_every_name_the_program_gives_a_picture() {
+        let folder = std::env::temp_dir().join("conversation");
+        let mut table = ImagePlaceholderTargets::default();
+        table.learn(103, folder.join("103.png"));
+        assert_eq!(
+            ImagePlaceholderTargets::inferred_targets(&folder.join("103.png"), 104),
+            ["104.png", "104.jpg", "104.gif", "104.webp"]
+                .into_iter()
+                .map(|name| folder.join(name))
+                .collect::<Vec<_>>(),
+            "the newest picture's own extension first, then the program's others"
+        );
+        assert_eq!(
+            ImagePlaceholderTargets::inferred_targets(&folder.join("103.JPG"), 104)
+                .iter()
+                .filter(|candidate| candidate
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("jpg")))
+                .count(),
+            1,
+            "an extension already tried is not tried again in another case"
+        );
+        let mut verdicts = BTreeMap::new();
+        verdicts.insert(folder.join("104.png"), false);
+        verdicts.insert(folder.join("104.jpg"), true);
+        verdicts.insert(folder.join("106.png"), true);
+        for name in ["107.png", "107.jpg", "107.gif", "107.webp"] {
+            verdicts.insert(folder.join(name), false);
+        }
+        let links = PrintedPathLinks::new(None, verdicts).with_image_placeholders(&table);
+        let line = "你好世界[Image #104] 你好 [Image #106] [Image #107] [Image #108]";
+        let mut unknown = BTreeSet::new();
+        let found = links.image_placeholder_links_in(line, &mut unknown);
+        assert_eq!(
+            found
+                .iter()
+                .map(|(range, uri)| (&line[range.byte_start..range.byte_end], uri.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "[Image #104]",
+                    local_path_to_file_uri(&folder.join("104.jpg"))
+                ),
+                (
+                    "[Image #106]",
+                    local_path_to_file_uri(&folder.join("106.png"))
+                ),
+            ],
+            "104 is the JPEG the disk holds; 106 the PNG; 107's every name is gone; 108 is \
+             unanswered"
+        );
+        assert_eq!(
+            unknown,
+            ["108.png", "108.jpg", "108.gif", "108.webp"]
+                .into_iter()
+                .map(|name| folder.join(name))
+                .collect(),
+            "a yes ends the question, a no is not asked again here, and silence is asked"
+        );
+        let mut none = BTreeSet::new();
+        assert!(
+            PrintedPathLinks::new(None, BTreeMap::new())
+                .image_placeholder_links_in("[Image #104]", &mut none)
+                .is_empty()
+                && none.is_empty(),
+            "a number with no source is text and asks nothing"
+        );
+    }
+
+    /// RED (T-IMAGE-N-GAPS) — **a placeholder the program's own word wrap split at its inner blank
+    /// is read across that one seam: the head ends its row, the tail begins the next.**
+    ///
+    /// Claude Code wraps its input line at word boundaries and draws each row as a line of its
+    /// own, so `[Image #104]` at the right edge is `…[Image ` over `  #104] …`.
+    ///
+    /// MUTATIONS: let the head stand anywhere in the upper row (search instead of the row's last
+    /// word), and `[Image here` over `#104]` joins; drop the closing-bracket check, and `#104 ok`
+    /// joins.
+    #[test]
+    fn a_placeholder_split_at_its_inner_blank_is_read_across_the_seam() {
+        let upper = "> 你好世界你好世界你[Image ";
+        let lower = "  #104] 你好";
+        let (head, tail, number) =
+            image_placeholder_across(upper, lower).expect("the split placeholder");
+        assert_eq!(&upper[head.byte_start..head.byte_end], "[Image");
+        assert_eq!(&lower[tail.byte_start..tail.byte_end], "#104]");
+        assert_eq!(number, 104);
+        for (upper, lower) in [
+            ("[Image here", "#104]"),
+            ("[Image", "#104 ok"),
+            ("[Image", "x #104]"),
+            ("[Image", "#]"),
+            ("Image", "#104]"),
+            ("[Image #104]", "#105]"),
+        ] {
+            assert_eq!(
+                image_placeholder_across(upper, lower),
+                None,
+                "{upper:?} over {lower:?}"
+            );
+        }
+
+        let folder = std::env::temp_dir().join("conversation");
+        let mut table = ImagePlaceholderTargets::default();
+        table.learn(103, folder.join("103.png"));
+        let links =
+            PrintedPathLinks::new(None, [(folder.join("104.png"), true)].into_iter().collect())
+                .with_image_placeholders(&table);
+        let mut unknown = BTreeSet::new();
+        assert_eq!(
+            links
+                .image_placeholder_link_across(upper, lower, &mut unknown)
+                .map(|(_, _, uri)| uri),
+            Some(local_path_to_file_uri(&folder.join("104.png"))),
+            "and it is a link under the rule a whole placeholder follows"
+        );
+        assert!(unknown.is_empty());
     }
 }

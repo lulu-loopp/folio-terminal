@@ -28,6 +28,17 @@ and `win::conpty_fallback_reason` hands that sentence back (`None` on the
 packaged pair). Folio writes it to `diagnostics.log` when a pane is born on the
 inbox ConPTY, because on that path it writes no win32-input-mode key records.
 
+## The sidecar folder is named by the application (`src/win/psuedocon.rs`, `src/win/mod.rs`) — G-SWEEP-048
+
+`load_conpty` no longer looks beside `std::env::current_exe()`: started through a
+symbolic link (winget's portable alias), that is the link's folder, which holds
+neither `conpty.dll` nor `OpenConsole.exe`, and every pane ran on the inbox
+ConPTY. The application names the folder once, before its first
+pseudoconsole, through `win::use_sidecars_in` (Folio names the folder of its
+resolved image, `bt_platform::running_image`); a process that names none, or
+names why it cannot, runs on the operating system's implementation and
+`conpty_fallback_reason` says so.
+
 ## A job object around each child (`src/win/mod.rs`, `src/win/psuedocon.rs`) — R2-6
 
 The child is created with `CREATE_SUSPENDED`, put in an unnamed job object
