@@ -2000,6 +2000,7 @@ fn rolled_back_is_retired_at_the_next_start() {
             argv: &argv,
             trial: None,
             failed: Some(&journal),
+            journal_held: None,
         },
         &mut world,
     );
@@ -2275,6 +2276,7 @@ fn start_then_recover(install: &Install, argv: &[&str], hands: Fake, limits: Lim
             argv: &argv,
             trial: None,
             failed: None,
+            journal_held: None,
         },
         &mut starting,
     );
@@ -2866,6 +2868,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
                 argv: words,
                 trial: request.update_trial.as_ref(),
                 failed: request.update_failed.as_deref(),
+                journal_held: None,
             },
             &mut starting,
         );
@@ -2877,6 +2880,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
     let incomplete = |install: &Install| crate::update_job::Failure::Incomplete {
         folder: Some(install.home.root().to_path_buf()),
         held: false,
+        untried: false,
     };
 
     // A folder where the transaction lock should be: the lock cannot be

@@ -95,6 +95,10 @@ pub(crate) const STUCK_ATTEMPT_LIMIT: u8 = 3;
 /// (`H\<txn>\health-<nonce>`, (b).2's objects table).
 pub(crate) const RECEIPT_FILE_PREFIX: &str = "health-";
 
+/// The trial's mark that a person's change it held was never committed
+/// (`H\<txn>\unkept`, [`Home::unkept`]; 0.4.8 E4).
+pub(crate) const UNKEPT_FILE: &str = "unkept";
+
 // ───────────────────────────── fixed-length values ─────────────────────────────
 
 /// Why bytes offered as a header, a receipt or a journal are not one.
@@ -904,6 +908,38 @@ impl Phase {
         match self {
             Phase::TrialStarting { nonce, .. } => Some(*nonce),
             _ => None,
+        }
+    }
+
+    /// **Whether a trial of the new build was ever begun in this
+    /// transaction**, as the journal records it (0.4.8 E4): a trial recorded
+    /// (`Trial`, a rollback or `Stuck` that names one, a retrial over `Stuck`),
+    /// reserved and asked to start (`TrialStarting`, and a rollback declared
+    /// over it), or a `Committed` one; a retired transaction keeps the answer
+    /// in its `untried` word. `false` before the moves end (`Allocated` through
+    /// `Moving`) and for an abandoned one. The one owner of the fact: the
+    /// rollback's `untried` is its negation ([`next`]), and the card a start
+    /// sent past an unfinished transaction raises reads it
+    /// (`update_startup::unfinished`).
+    pub(crate) fn trial_begun(&self) -> bool {
+        match self {
+            Phase::Allocated
+            | Phase::Prepared { .. }
+            | Phase::Handoff { .. }
+            | Phase::Armed
+            | Phase::Moving
+            | Phase::Abandoned => false,
+            Phase::TrialStarting { .. } | Phase::Trial { .. } | Phase::Committed => true,
+            Phase::RollbackIntent {
+                trial,
+                trial_started,
+            }
+            | Phase::Stuck {
+                trial,
+                trial_started,
+                ..
+            } => trial.is_some() || *trial_started,
+            Phase::RolledBack { untried } | Phase::Retired { untried, .. } => !*untried,
         }
     }
 
@@ -2031,20 +2067,11 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
             trial: Some(*process),
             trial_started: false,
         }),
-        (
-            Phase::RollbackIntent {
-                trial,
-                trial_started,
-            }
-            | Phase::Stuck {
-                trial,
-                trial_started,
-                ..
-            },
-            Event::RolledBack,
-        ) => Ok(Phase::RolledBack {
-            untried: trial.is_none() && !trial_started,
-        }),
+        (Phase::RollbackIntent { .. } | Phase::Stuck { .. }, Event::RolledBack) => {
+            Ok(Phase::RolledBack {
+                untried: !phase.trial_begun(),
+            })
+        }
         (
             Phase::RollbackIntent {
                 trial,
@@ -3029,6 +3056,16 @@ impl Home {
     /// `H\<txn>\health-<nonce>`: the trial's receipt ((b).2's objects table).
     pub(crate) fn receipt_path(&self, txn: TxnId, nonce: &Nonce) -> PathBuf {
         self.transaction(txn).join(Receipt::file_name(nonce))
+    }
+
+    /// **`H\<txn>\unkept`: a trial of `txn` held a person's change it never
+    /// saw committed** (0.4.8 E4, R3) — written by the trial's watch
+    /// (`update_trial`), taken back when the watch reads the commit, and read
+    /// by the start that retires a committed transaction
+    /// (`update_startup::changes_not_kept`); it goes with the transaction's
+    /// folder. Empty: its being there is the fact.
+    pub(crate) fn unkept(&self, txn: TxnId) -> PathBuf {
+        self.transaction(txn).join(UNKEPT_FILE)
     }
 
     /// **The installed bundle this macOS home belongs to**:

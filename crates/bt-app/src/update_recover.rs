@@ -236,6 +236,7 @@ pub(crate) fn run_here(
                         handed,
                         worker: None,
                         actor: None,
+                        journal_held: None,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -506,6 +507,7 @@ pub(crate) fn run_windows(
         handed: then_launch.unwrap_or(&[]),
         worker: Some(worker),
         actor: Some(Actor::Recovery),
+        journal_held: None,
     });
     let (log, whereabouts) = log_file(&road.home, &road.data);
     let appended = appended_to(&log);
@@ -518,6 +520,7 @@ pub(crate) fn run_windows(
         },
         then_launch,
     );
+    guard.inner().journal_held = recovered.journal_held.clone();
     guard.succeeded_by(recovered.successor);
     if !recovered.waiting {
         guard.nobody_waiting();

@@ -8,6 +8,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
+- The card after an unfinished update says what happened — that the update stopped before the new version started, or that it did not finish while the new version is already running — instead of always saying the new version did not start. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
+- If you change a setting in the first window of a new version and the update is only finished later, the next start says those changes were not kept, instead of losing them without a word. <!-- zh: pending T-UPDATE-RENAME-RETRY -->
 - After Restart to update, Folio always comes back, also when the update cannot write to its own folder and the closing Folio takes a long time to go away — before, nothing reopened until you started Folio again. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - If the updater stops on an internal error before it starts working, one Folio opens afterwards, not two. <!-- zh: pending T-UPDATE-LOCK-RACE -->
 - A second window's Git page now follows changes on disk as the first window's does.

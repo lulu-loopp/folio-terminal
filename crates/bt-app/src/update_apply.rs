@@ -23,8 +23,9 @@
 //!   `update_txn::Journal::advance` (the protocol's refusal), only when
 //!   `update_txn::may_record` says the actor may, and written with
 //!   [`write_journal`] — `install_txn::durable_write`, asked again for
-//!   [`JOURNAL_WRITE_WITHIN`] while another program holds the journal open
-//!   (U-34); an effect is asked of `update_txn::may` first;
+//!   [`Limits::journal_held_within`] while another program holds the journal
+//!   open, each round said (U-34, 0.4.8 E4); an effect is asked of
+//!   `update_txn::may` first;
 //! * [`wait_for_the_claim`] — §C.4's authoritative test that the old build is
 //!   gone: the data directory's claim, tried until had and let go at once;
 //! * [`watch_trial`] — a trial waited for (W7, W8, M7, M8), on both platforms:
@@ -103,6 +104,10 @@ pub(crate) struct Limits {
     /// How long an ended trial has to leave the process list before the
     /// rollback records that it would not end.
     pub(crate) end_within: Duration,
+    /// **How long a journal write refused because another program holds
+    /// `journal.json` open is asked again** ([`JOURNAL_HELD_WITHIN`] in the
+    /// product; [`write_journal`]).
+    pub(crate) journal_held_within: Duration,
 }
 
 impl Limits {
@@ -113,6 +118,7 @@ impl Limits {
         poll: Duration::from_millis(250),
         quit_within: Duration::from_secs(5),
         end_within: Duration::from_secs(5),
+        journal_held_within: JOURNAL_HELD_WITHIN,
     };
 }
 
@@ -213,11 +219,12 @@ impl Ended {
     }
 }
 
-/// **How long a journal write refused because another program has
-/// `journal.json` open is asked again** (0.4.6 ticket U-34): a scanner, an
-/// indexer, a backup or sync tool that opened it without delete sharing lets
-/// go within moments; about 2 s in all, the first pause 10 ms and each next
-/// one twice the last.
+/// **How long a read of `journal.json`, or a read or replacement of the
+/// window's mark, refused because another program has the file open is
+/// asked again** (0.4.6 ticket U-34): a scanner, an indexer, a backup or sync
+/// tool lets go within moments; about 2 s in all, the first pause 10 ms and
+/// each next one twice the last. Inside the window election's own budget, so
+/// shorter than a journal write's [`JOURNAL_HELD_WITHIN`].
 pub(crate) const JOURNAL_WRITE_WITHIN: Duration = Duration::from_secs(2);
 
 fn retry_within<T, E>(
@@ -242,29 +249,124 @@ fn retry_within<T, E>(
     }
 }
 
+/// **How long a journal write refused because another program holds
+/// `journal.json` open is asked again** (0.4.8 E4, the clean VM's row W14): an
+/// antivirus scan of the file just renamed into place, an indexer, a backup
+/// or sync tool holding it without delete sharing. Ten seconds outlasts an
+/// ordinary on-access scan of a small file by a wide margin, and is as long as
+/// Microsoft Defender holds a file by default while it asks its cloud service
+/// about it ("block at first sight"); it is still small against every budget
+/// the road spends around a write — the trial's 90 s deadline, and the
+/// watchdog's period that adds it ([`crate::update_trial::WATCHDOG`], pinned
+/// under two minutes).
+pub(crate) const JOURNAL_HELD_WITHIN: Duration = Duration::from_secs(10);
+
+/// **The longest pause between two asks of a held journal write**: the pause
+/// doubles from 10 ms, so the first rounds catch a hold of a moment at once,
+/// and a long one is asked about twice a second rather than at ever wider
+/// intervals that would overshoot its end by seconds.
+const JOURNAL_HELD_PAUSE_CAP: Duration = Duration::from_millis(500);
+
+/// **A journal write that did not land** ([`write_journal`]).
+#[derive(Debug)]
+pub(crate) struct Unwritten {
+    /// The last failure, as a sentence.
+    pub(crate) said: String,
+    /// **The operating system's refusal when another program still held
+    /// `journal.json` open at the window's end** — the hold outlasted it.
+    /// `None` for any other failure.
+    pub(crate) held: Option<String>,
+}
+
 /// **Write the journal's bytes durably** (`install_txn::durable_write`), and
 /// while the rename is refused because another program holds `journal.json`
 /// open (`install_txn::Failure::refused_while_open`: Windows only), ask again
-/// with a growing pause through the wait door until [`JOURNAL_WRITE_WITHIN`]
-/// has passed (U-34; the clean VM's rows W4 and W12 lost a Restart to one
-/// such refusal). The door itself never waits: it has other callers and no
-/// wait door, so the bound and the sleep are the applier's.
+/// through the wait door until `within` has passed since the first ask (U-34;
+/// 0.4.8 E4: [`JOURNAL_HELD_WITHIN`] in the product). **Each refused round says
+/// one line** through `say` — the system's refusal and how long the journal
+/// has been held — so a hold is in the log whether or not it outlasts the
+/// window. The door itself never waits: it has other callers and no wait
+/// door, so the bound and the sleep are the caller's worker's.
 ///
 /// # Errors
-/// The last failure, as a sentence; the journal keeps its last durable
-/// bytes.
-pub(crate) fn write_journal(worker: &WorkerCtx, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut wait = |pause| {
-        bt_platform::wait::sleep_within(worker, pause);
-        true
-    };
-    retry_within(
-        Instant::now() + JOURNAL_WRITE_WITHIN,
+/// The last failure, and the refusal when it was a hold that outlasted the
+/// window; the journal keeps its last durable bytes.
+pub(crate) fn write_journal(
+    worker: &WorkerCtx,
+    path: &Path,
+    bytes: &[u8],
+    within: Duration,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Unwritten> {
+    let began = Instant::now();
+    write_held_within(
+        within,
         || install_txn::durable_write(path, bytes),
         install_txn::Failure::refused_while_open,
-        &mut wait,
+        |failure| failure.error.to_string(),
+        &mut || began.elapsed(),
+        &mut |pause| {
+            bt_platform::wait::sleep_within(worker, pause);
+            true
+        },
+        say,
     )
-    .map_err(|failure| failure.to_string())
+}
+
+/// [`write_journal`]'s rounds, with the write, its two readings of a failure,
+/// the time since the first ask and the pause handed in. No clock of its own:
+/// `elapsed` answers how long the write has been asked, and `wait` pauses
+/// (and answers whether to ask again).
+fn write_held_within<E: fmt::Display>(
+    within: Duration,
+    mut write: impl FnMut() -> Result<(), E>,
+    is_held: impl Fn(&E) -> bool,
+    refusal: impl Fn(&E) -> String,
+    elapsed: &mut dyn FnMut() -> Duration,
+    wait: &mut dyn FnMut(Duration) -> bool,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Unwritten> {
+    let mut pause = Duration::from_millis(10);
+    loop {
+        let failure = match write() {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        if !is_held(&failure) {
+            return Err(Unwritten {
+                said: failure.to_string(),
+                held: None,
+            });
+        }
+        let spent = elapsed();
+        let left = within.saturating_sub(spent);
+        if left.is_zero() {
+            say(&format!(
+                "BT_UPDATE_JOURNAL held by another program for {:.2} s, past the {} s window: {}; the write is given up",
+                spent.as_secs_f64(),
+                within.as_secs(),
+                refusal(&failure)
+            ));
+            return Err(Unwritten {
+                said: failure.to_string(),
+                held: Some(refusal(&failure)),
+            });
+        }
+        let next = pause.min(left);
+        say(&format!(
+            "BT_UPDATE_JOURNAL held by another program for {:.2} s: {}; asked again in {} ms",
+            spent.as_secs_f64(),
+            refusal(&failure),
+            next.as_millis()
+        ));
+        if !wait(next) {
+            return Err(Unwritten {
+                said: failure.to_string(),
+                held: Some(refusal(&failure)),
+            });
+        }
+        pause = pause.saturating_mul(2).min(JOURNAL_HELD_PAUSE_CAP);
+    }
 }
 
 /// **A holder of the journal under its lock**, as [`watch_trial`] needs it:
@@ -273,12 +375,18 @@ pub(crate) trait Recording {
     /// The journal as it stands durably.
     fn journal(&self) -> &Journal;
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
-    /// to this actor, then durable.
+    /// to this actor, then durable — each round of a write another program's
+    /// hold refuses said through `say` ([`write_journal`]).
     ///
     /// # Errors
     /// The protocol's refusal, the writer table's, or the write's failure; the
     /// journal stays at its last durable phase.
-    fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String>;
+    fn record(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String>;
 }
 
 /// **The journal of one transaction under its lock**: as it stands durably,
@@ -289,19 +397,33 @@ pub(crate) struct Journaled<'w> {
     /// `H\journal.json`.
     path: PathBuf,
     worker: &'w WorkerCtx,
+    /// How long a write another program's hold refuses is asked again
+    /// ([`write_journal`]).
+    held_within: Duration,
     pub(crate) journal: Journal,
     pub(crate) written: Vec<PhaseKind>,
+    /// **The refusal of the last write another program's hold outlasted the
+    /// window for** (0.4.8 E4): what the build the holder leaves behind is
+    /// told (`--update-journal-held`), so its card names the hold.
+    pub(crate) held: Option<String>,
 }
 
 impl<'w> Journaled<'w> {
     /// The journal `journal`, as read from the home `home`, written from
-    /// `worker`.
-    pub(crate) fn of(home: &Home, worker: &'w WorkerCtx, journal: Journal) -> Self {
+    /// `worker`, a held write asked again for `held_within`.
+    pub(crate) fn of(
+        home: &Home,
+        worker: &'w WorkerCtx,
+        journal: Journal,
+        held_within: Duration,
+    ) -> Self {
         Self {
             path: home.journal(),
             worker,
+            held_within,
             journal,
             written: Vec::new(),
+            held: None,
         }
     }
 
@@ -310,12 +432,19 @@ impl<'w> Journaled<'w> {
     }
 
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
-    /// to this actor, then durable.
+    /// to this actor, then durable — a write another program's hold refuses
+    /// asked again for the window, each round said through `say`
+    /// ([`write_journal`]).
     ///
     /// # Errors
     /// The protocol's refusal, the writer table's, or the write's failure; the
     /// journal on disk and here stays at its last durable phase.
-    pub(crate) fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
+    pub(crate) fn record(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
         if !event.kind().authors().contains(&actor) {
             return Err(format!("{actor:?} may not record {:?}", event.kind()));
         }
@@ -327,7 +456,18 @@ impl<'w> Journaled<'w> {
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
         }
-        write_journal(self.worker, &self.path, &next.encode())?;
+        if let Err(unwritten) = write_journal(
+            self.worker,
+            &self.path,
+            &next.encode(),
+            self.held_within,
+            say,
+        ) {
+            if unwritten.held.is_some() {
+                self.held = unwritten.held;
+            }
+            return Err(unwritten.said);
+        }
         self.journal = next;
         self.written.push(phase);
         Ok(())
@@ -354,8 +494,13 @@ impl Recording for Journaled<'_> {
         &self.journal
     }
 
-    fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
-        Journaled::record(self, actor, event)
+    fn record(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        Journaled::record(self, actor, event, say)
     }
 }
 
@@ -477,6 +622,7 @@ pub(crate) fn reserve_last_trial(
     worker: &WorkerCtx,
     home: &Home,
     actor: Actor,
+    say: &mut dyn FnMut(&str),
 ) -> Result<Reserved, String> {
     let _lock = match install_txn::try_hold(&home.lock(), Hold::Exclusive) {
         Ok(Some(lock)) => lock,
@@ -494,13 +640,14 @@ pub(crate) fn reserve_last_trial(
         return Ok(Reserved::NotEligible);
     }
     let nonce = crate::update_job::mint_nonce();
-    let mut journaled = Journaled::of(home, worker, journal);
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
     journaled.record(
         actor,
         &Event::TrialPlanned {
             nonce,
             began_ms: now_ms(),
         },
+        say,
     )?;
     Ok(Reserved::Trial(journaled.journal.txn, nonce))
 }
@@ -657,8 +804,14 @@ fn commit_last_trial_reading(
     {
         return Ok(LastTrialCommit::Pending);
     }
-    let mut journaled = Journaled::of(home, worker, journal);
-    journaled.record(Actor::Trial, &Event::LastTrialReady { receipt, process })?;
+    // On the trial's watch worker, whose lines go to this process's
+    // diagnostics like the watch's own.
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
+    journaled.record(
+        Actor::Trial,
+        &Event::LastTrialReady { receipt, process },
+        &mut |line| eprintln!("{line}"),
+    )?;
     Ok(LastTrialCommit::Committed)
 }
 
@@ -775,7 +928,7 @@ pub(crate) fn watch_trial(
                             began_ms,
                         }
                     };
-                    if let Err(why) = txn.record(actor, &event) {
+                    if let Err(why) = txn.record(actor, &event, say) {
                         return Ok(Watched::Unrecorded { process, why });
                     }
                     continue;
@@ -794,7 +947,7 @@ pub(crate) fn watch_trial(
                         let event = Event::ReceiptAccepted(receipt);
                         match txn.journal().advance(&event) {
                             Ok(_) => {
-                                txn.record(actor, &event)?;
+                                txn.record(actor, &event, say)?;
                                 return Ok(Watched::Committed);
                             }
                             Err(refusal) if !said_refusal => {
@@ -1501,7 +1654,7 @@ pub(crate) fn election_within(until: Instant, now: Instant) -> Duration {
 /// applier road has not been taken; the outgoing build, which holds the
 /// transaction lock while it asks, may claim without either
 /// ([`Contender`]).** A mark read or replacement refused by a scanner is
-/// re-asked with [`write_journal`]'s [`JOURNAL_WRITE_WITHIN`] discipline. After
+/// re-asked within [`JOURNAL_WRITE_WITHIN`], as [`write_journal`] asks. After
 /// a successful rename the visible mark records the duty. **A mark that does
 /// not land before its rename** (0.4.8 E2) is [`Contender::unrecorded`]'s: an
 /// applier stands aside — it lets the lock go, runs no road and starts
@@ -2439,6 +2592,16 @@ pub(crate) fn failed_words(home: &Home) -> [OsString; 2] {
     ]
 }
 
+/// **The words that tell the build started after a road that another
+/// program's hold of the journal outlasted its window what refused it**:
+/// `--update-journal-held <error>` (0.4.8 E4), after [`failed_words`].
+pub(crate) fn journal_held_words(error: &str) -> [OsString; 2] {
+    [
+        OsString::from(cli::UPDATE_JOURNAL_HELD_FLAG),
+        OsString::from(error),
+    ]
+}
+
 /// **The words that start the installed build as the trial of `txn`**:
 /// `--update-trial <txn> <nonce>` (U-12's frozen v1 flag).
 pub(crate) fn trial_words(txn: TxnId, nonce: &Nonce) -> [OsString; 3] {
@@ -2480,6 +2643,12 @@ pub(crate) enum Opens {
 }
 
 impl Opens {
+    /// **Whether this start is sent to report** — it carries `--update-failed
+    /// <journal>`: every start but the installed build as an ordinary one.
+    pub(crate) fn reports(&self) -> bool {
+        !matches!(self, Opens::Installed { failed: false })
+    }
+
     /// The words the build is started with, before a handed command line.
     pub(crate) fn words(&self, home: &Home) -> Vec<OsString> {
         match self {
@@ -2606,8 +2775,9 @@ mod beyond_tests {
         for (what, bytes) in beyond_inputs(&known) {
             install_txn::durable_write(&home.journal(), &bytes).unwrap();
             let at = home.clone();
-            let reserved =
-                on_a_worker(move |worker| reserve_last_trial(worker, &at, Actor::Applier));
+            let reserved = on_a_worker(move |worker| {
+                reserve_last_trial(worker, &at, Actor::Applier, &mut |_| {})
+            });
             assert!(
                 matches!(reserved, Ok(Reserved::StoodAside(_))),
                 "{what}: {reserved:?}"
@@ -2877,5 +3047,137 @@ mod exit_guard_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod held_journal_tests {
+    //! The rounds of a journal write another program holds (0.4.8 E4, the
+    //! clean VM's row W14), on a clock of the test's own: `elapsed` advances
+    //! by exactly the pauses asked for, so nothing here waits.
+    use super::*;
+
+    /// The refusal of a rename over a held file, as the door reports it.
+    #[derive(Debug)]
+    struct Refusal(&'static str);
+
+    impl fmt::Display for Refusal {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    /// A journal held for `held` by another program — "拒绝访问。" in the
+    /// system's words on this machine's language, a mixed-script refusal —
+    /// written through [`write_held_within`] with `within`: the answer, every
+    /// line said, and the time asked for in all.
+    fn held_for(
+        held: Duration,
+        within: Duration,
+    ) -> (Result<(), Unwritten>, Vec<String>, Duration) {
+        let now = std::cell::Cell::new(Duration::ZERO);
+        let mut said = Vec::new();
+        let answer = write_held_within(
+            within,
+            || {
+                if now.get() < held {
+                    Err(Refusal("拒绝访问。 Access is denied. (os error 5)"))
+                } else {
+                    Ok(())
+                }
+            },
+            |_| true,
+            |refusal| refusal.0.to_owned(),
+            &mut || now.get(),
+            &mut |pause| {
+                now.set(now.get() + pause);
+                true
+            },
+            &mut |line| said.push(line.to_owned()),
+        );
+        (answer, said, now.get())
+    }
+
+    /// RED (0.4.8 E4, W14) — **a journal held for longer than the old 2 s
+    /// window and shorter than the product's is written once it is let go**:
+    /// the 3 s hold the clean VM staged (and 3.9 s past it) lands, after
+    /// rounds that ask about a long hold twice a second; and the product's
+    /// window is the one every road uses.
+    ///
+    /// MUTATION: `JOURNAL_HELD_WITHIN` back to the old window, 2 s — the
+    /// 3 s hold is given up (`Err`).
+    #[test]
+    fn a_journal_held_longer_than_the_old_window_is_written_within_the_new_one() {
+        assert_eq!(Limits::PRODUCT.journal_held_within, JOURNAL_HELD_WITHIN);
+        for held in [Duration::from_secs(3), Duration::from_millis(3_900)] {
+            let (answer, said, asked) = held_for(held, JOURNAL_HELD_WITHIN);
+            assert!(answer.is_ok(), "{held:?}: {answer:?} {said:?}");
+            assert!(asked >= held, "{held:?}: written while still held?");
+            assert!(
+                asked - held <= JOURNAL_HELD_PAUSE_CAP,
+                "{held:?}: written {:?} after it was let go",
+                asked - held
+            );
+        }
+        // Past the window: given up, with the refusal kept for the card.
+        let (answer, said, asked) = held_for(Duration::from_secs(60), JOURNAL_HELD_WITHIN);
+        let refused = answer.expect_err("a hold past the window is given up");
+        assert_eq!(asked, JOURNAL_HELD_WITHIN, "asked for the whole window");
+        assert_eq!(
+            refused.held.as_deref(),
+            Some("拒绝访问。 Access is denied. (os error 5)")
+        );
+        assert!(said.last().unwrap().contains("given up"), "{said:?}");
+    }
+
+    /// RED (0.4.8 E4, W14) — **every refused round says one line: the
+    /// system's refusal and how long the journal has been held**, the last one
+    /// that the write is given up; a hold that is let go says only its own
+    /// rounds, and a refusal that is no hold is not asked again.
+    ///
+    /// MUTATION: say nothing in `write_held_within` (both `say(..)` calls
+    /// removed) — no line.
+    #[test]
+    fn every_held_round_is_said_with_its_refusal_and_its_time() {
+        let (answer, said, _) = held_for(Duration::from_millis(1_000), JOURNAL_HELD_WITHIN);
+        assert!(answer.is_ok());
+        // 10, 20, 40, 80, 160, 320 and 500 ms: seven refused rounds.
+        assert_eq!(said.len(), 7, "{said:?}");
+        for (round, line) in said.iter().enumerate() {
+            assert!(
+                line.starts_with("BT_UPDATE_JOURNAL held by another program for ")
+                    && line.contains("拒绝访问。 Access is denied. (os error 5)")
+                    && line.contains("; asked again in "),
+                "round {round}: {line}"
+            );
+        }
+        assert!(said[0].contains(" for 0.00 s:"), "{}", said[0]);
+        assert!(said[6].contains(" for 0.63 s:"), "{}", said[6]);
+
+        let (_, said, _) = held_for(Duration::from_secs(60), Duration::from_secs(2));
+        assert_eq!(
+            said.last().map(String::as_str),
+            Some(
+                "BT_UPDATE_JOURNAL held by another program for 2.00 s, past the 2 s window: 拒绝访问。 Access is denied. (os error 5); the write is given up"
+            )
+        );
+
+        // Not a hold: one ask, nothing said.
+        let mut asks = 0;
+        let mut said = Vec::new();
+        let answer = write_held_within(
+            JOURNAL_HELD_WITHIN,
+            || {
+                asks += 1;
+                Err(Refusal("磁盘已满 the disk is full"))
+            },
+            |_| false,
+            |refusal| refusal.0.to_owned(),
+            &mut || Duration::ZERO,
+            &mut |_| true,
+            &mut |line| said.push(line.to_owned()),
+        );
+        let refused = answer.expect_err("refused");
+        assert_eq!((asks, said.len(), refused.held), (1, 0, None));
     }
 }

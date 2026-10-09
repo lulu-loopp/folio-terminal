@@ -1465,6 +1465,7 @@ fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathere
         argv: &[],
         trial: None,
         failed: None,
+        journal_held: None,
     };
     let mut world = Quiet::default();
     let crate::update_startup::Verdict::Continue { waiting, .. } =

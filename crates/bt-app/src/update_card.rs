@@ -34,7 +34,9 @@
 use std::path::PathBuf;
 
 use crate::i18n::{self, Lang, Text};
-use crate::update_job::{Bytes, Effect, Failure, Job, NotEligible, Offer, State, Stop, Verb};
+use crate::update_job::{
+    Bytes, Effect, Failure, Job, NotEligible, Offer, State, Stop, TrialChanges, Verb,
+};
 
 // ── the verbs ──────────────────────────────────────────────────────────────
 
@@ -321,9 +323,16 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
         // The trial over `Stuck` committed forward after its card said the
         // update was incomplete (U-32): the version this build is, and one
         // word.
-        State::Updated(version) => Some(Paint {
+        // Committed after its trial ended (0.4.8 E4, R3): the same card, and
+        // the sentence that says the trial's changes were not kept.
+        State::Updated(version, changes) => Some(Paint {
             heading: Some(format!("Folio {version}")),
-            detail: Some(Text::UpdateCardUpdated.text().to_owned()),
+            detail: Some(match changes {
+                TrialChanges::Kept => Text::UpdateCardUpdated.text().to_owned(),
+                TrialChanges::NotKept => {
+                    i18n::update_card_trial_not_kept(Text::UpdateCardUpdated.text())
+                }
+            }),
             ..bare(vec![CardVerb::Close])
         }),
     }
@@ -417,7 +426,11 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
         Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
-        Failure::RolledBack | Failure::Incomplete { .. } => Text::UpdateFailedTrial,
+        Failure::RolledBack | Failure::Incomplete { untried: false, .. } => Text::UpdateFailedTrial,
+        Failure::Incomplete { untried: true, .. } => Text::UpdateFailedUntried,
+        Failure::JournalHeld { error, .. } => return i18n::update_failed_journal_held(error),
+        // Never a failed card: the job raises it as `State::Updated`.
+        Failure::ChangesNotKept { version } => return format!("Folio {version}"),
         Failure::TrialIncomplete { .. } => Text::UpdateFailedTrialRunning,
         Failure::Interrupted => Text::UpdateFailedInterrupted,
         Failure::Newer {
@@ -451,10 +464,13 @@ fn outcome(failure: &Failure) -> Outcome {
         },
         Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
         Failure::RolledBack | Failure::Interrupted => Outcome::Restored,
-        Failure::Incomplete { folder, held } => Outcome::Incomplete {
+        Failure::Incomplete { folder, held, .. } => Outcome::Incomplete {
             folder: folder.clone(),
             held: *held,
         },
+        Failure::JournalHeld { then, .. } => outcome(then),
+        // Never a failed card ([`reason`]); the update was committed.
+        Failure::ChangesNotKept { .. } => Outcome::NothingChanged,
         Failure::Newer {
             folder,
             version,
@@ -1287,6 +1303,7 @@ mod tests {
             considered(RUNNING, Channel::Ours).after_rollback(Some(Failure::Incomplete {
                 folder: Some(PathBuf::from("journal")),
                 held: false,
+                untried: false,
             }));
         assert!(
             updated.after_commit(RUNNING),
@@ -1396,6 +1413,7 @@ mod tests {
                 after(Failure::Incomplete {
                     folder: Some(PathBuf::from("journal")),
                     held: false,
+                    untried: false,
                 }),
                 CheckView::default(),
                 Some("v0.4.7"),
@@ -1481,6 +1499,7 @@ mod tests {
                 after(Failure::Incomplete {
                     folder: Some(PathBuf::from("journal")),
                     held: false,
+                    untried: false,
                 }),
                 format!("{banner} · The update to v0.4.7 is incomplete."),
                 false,
@@ -2141,6 +2160,7 @@ mod tests {
                 Failure::Incomplete {
                     folder: Some(folder.clone()),
                     held: true,
+                    untried: false,
                 },
                 "The new version did not start.",
                 "Update incomplete. Changes made in this session are not kept.",
@@ -2217,6 +2237,7 @@ mod tests {
             Failure::Incomplete {
                 folder: Some(folder.clone()),
                 held: false,
+                untried: false,
             },
         ))
         .expect("a failed job has a card");

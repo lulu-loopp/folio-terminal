@@ -1121,6 +1121,22 @@ impl<'a> Txn<'a> {
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
     /// to this actor, then durable.
     fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
+        // A replacing rename is never refused for an open target on macOS
+        // (`install_txn::Failure::refused_while_open`), so a write here has no
+        // held rounds to say; the sink is standard error, which is the
+        // diagnostics log of the Folio that started this process.
+        self.record_saying(actor, event, &mut |line| {
+            bt_platform::write_std_error(format!("{line}\n").as_bytes());
+        })
+    }
+
+    /// [`Self::record`], the rounds of a held write said through `say`.
+    fn record_saying(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
         let next = self
             .journal
             .advance(event)
@@ -1129,7 +1145,14 @@ impl<'a> Txn<'a> {
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
         }
-        crate::update_apply::write_journal(self.worker, &self.road.home.journal(), &next.encode())?;
+        crate::update_apply::write_journal(
+            self.worker,
+            &self.road.home.journal(),
+            &next.encode(),
+            crate::update_apply::JOURNAL_HELD_WITHIN,
+            say,
+        )
+        .map_err(|unwritten| unwritten.said)?;
         self.journal = next;
         self.written.push(phase);
         if let Event::TrialBegan { process, .. } | Event::RetrialBegan { process, .. } = event {
@@ -1971,8 +1994,13 @@ impl Recording for Txn<'_> {
         &self.journal
     }
 
-    fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
-        Txn::record(self, actor, event)
+    fn record(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        Txn::record_saying(self, actor, event, say)
     }
 }
 
