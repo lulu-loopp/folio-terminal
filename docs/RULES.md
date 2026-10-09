@@ -431,7 +431,9 @@ text surface so a patch never gets a text area) and by declaring which chrome
 paints it. **A document's links are answered by the terminal's table**
 (2026-09-23): `preview::link_action` says what a target names and
 `reference_activation` — the table row 6 reads — says what a press spends; plain
-click stays in the window, `Ctrl`/`⌘`+click hands it over.
+click stays in the window, `Ctrl`/`⌘`+click hands it over. A `file:` link this
+machine names no path from (a share's `file://server/…` off Windows) is the terminal's
+own row for that URI, never the anchor's nothing (M-SWEEP-048).
 **From.** §7.1.3 *the file tree, the preview minimum contract, and the tab-level
 shared buffer pool*; §7.10 *a local file can also be a web page*; §7.32 *when a
 name cannot answer, ask the file itself: text is decided by content, and a page's

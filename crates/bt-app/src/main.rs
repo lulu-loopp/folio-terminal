@@ -3658,9 +3658,9 @@ fn resolve_document_pictures(
             preview::LinkAction::Web(url) => MarkdownPicture::Remote(url),
             // A picture addressed by a scheme this window has no reader for is nothing to draw:
             // a source is fetched, never handed over.
-            preview::LinkAction::Nowhere | preview::LinkAction::Scheme(_) => {
-                MarkdownPicture::Nowhere
-            }
+            preview::LinkAction::Nowhere
+            | preview::LinkAction::Scheme(_)
+            | preview::LinkAction::Unnamed(_) => MarkdownPicture::Nowhere,
             // **A source this window will not go looking at** (route E of the untrusted-path
             // audit, 2026-09-08). `![](\\attacker\share\x.png)` inside a document rendered on a
             // hover used to reach `ask` — which is `request_peek_pixels` — and the picture was
@@ -26467,6 +26467,7 @@ fn preview_reference_row(target: &str, document: &Path) -> ReferenceRow {
         preview::LinkAction::Web(url) => ReferenceRow::Web(url),
         preview::LinkAction::Refused(path) => ReferenceRow::Unasked(path, None),
         preview::LinkAction::Scheme(uri) => ReferenceRow::Scheme(uri),
+        preview::LinkAction::Unnamed(_) => ReferenceRow::Unnamed,
         preview::LinkAction::Nowhere => ReferenceRow::Nothing,
     }
 }
