@@ -4636,6 +4636,52 @@ fn the_macos_recovery_carries_a_start_it_defers_to_an_election_in_flight() {
     drop(in_flight);
 }
 
+/// RED (0.4.8 E3, #12, review round 2) — **the macOS recovery door carries
+/// the person's start it defers**: `update_recover::run` over a bundle home
+/// at `Handoff`, its applier's election in flight, starts nothing and hands
+/// the `--then-launch` line's request to the world's carry (the product's
+/// `update_apply::carry_the_start`), waiting on that election; taken, the door
+/// leaves `Left::Carried` with exit 0. This shape case runs on every host.
+///
+/// MUTATION: in `update_recover::run`, drop the `carry_on` block (the door
+/// leaves the start behind, as before E3).
+#[test]
+fn the_macos_recovery_door_hands_a_deferred_start_to_the_window() {
+    let install = shape_install("e3-door-入口");
+    let in_flight = install_txn::try_hold(
+        &crate::update_apply::owner_lock_path(&install.home, install.txn),
+        Hold::Exclusive,
+    )
+    .unwrap()
+    .expect("the election lock is free");
+    let handed: Vec<OsString> = vec![
+        OsString::from("--from-explorer"),
+        OsString::from("--cwd"),
+        OsString::from("/工作/文件夹"),
+    ];
+    let (code, hands) = recover_door(&install, handed.clone(), Fake::default());
+    drop(in_flight);
+    assert_eq!(code, 0, "{:?}", hands.said);
+    let here = std::env::current_dir().ok();
+    assert_eq!(
+        hands.carried,
+        vec![(
+            crate::update_apply::Ahead::Election {
+                home: install.home.clone(),
+                txn: install.txn,
+                me: crate::update_apply::this_process(),
+            },
+            crate::launch_wire::carried(&handed, here.as_deref()).expect("a folder crosses"),
+        )],
+        "{:?}",
+        hands.said
+    );
+    assert!(
+        hands.relaunched.is_empty(),
+        "nothing is started beside the window"
+    );
+}
+
 /// RED (U-41a1, managed-update §1.1 R1–R2) — **the macOS road calls the
 /// layout its journal names, each point once at the phase the note's table
 /// gives it: `Activate` once, with `Moving` durable; `Activate` back once,

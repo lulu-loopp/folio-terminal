@@ -841,7 +841,10 @@ pub(crate) fn previous_run_ended_orderly() -> bool {
     previous_exit(&storage_dir().join(SENTINEL_FILE_NAME)) == ExitState::Normal
 }
 
-/// The one probe of the sentinel at `sentinel`, kept for the process.
+/// The one probe of the sentinel at `sentinel`, kept for the process: the first
+/// answer stands whatever path a later call names, so a test that seeds a
+/// sentinel of its own asks in a process of its own (`update_trial`'s
+/// `run_in_a_process_of_its_own` harness), never in the shared test process.
 fn previous_exit(sentinel: &Path) -> ExitState {
     static PREVIOUS: OnceLock<ExitState> = OnceLock::new();
     *PREVIOUS.get_or_init(|| probe_sentinel(sentinel).unwrap_or(ExitState::Normal))
