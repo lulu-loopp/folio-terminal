@@ -142,6 +142,7 @@ mod pty_door;
 mod quake;
 mod quit;
 mod recent_folders;
+mod recovered;
 mod restore;
 mod runtime;
 mod scheme_watch;
@@ -616,6 +617,11 @@ enum AppEvent {
     /// a turn for it, and a window about to put up its first modal may have
     /// nothing else coming.
     InstallChannelRead,
+    /// **The recovered folder holds copies no start has said yet** (T-RECOVERED-FOLDER): the
+    /// answer is in `recovered`'s slot, and the handler raises the one toast that says where
+    /// they are. Owed a wake because the listing lands after the first frame, on a
+    /// window that may have nothing else coming.
+    RecoveredEditsListed,
     /// **An update's trial was committed, and what it held back may be
     /// written** (`update_trial`, F-7).
     ///
@@ -878,7 +884,8 @@ impl AppEvent {
             | Self::InputLanguageChanged
             | Self::WindowChromeChanged
             | Self::NotificationClicked
-            | Self::HandoffAnswered => Station::Chrome,
+            | Self::HandoffAnswered
+            | Self::RecoveredEditsListed => Station::Chrome,
             // The station winit's own pan event would have been charged to:
             // this is the same gesture, answered by the system instead.
             Self::TouchPanned => Station::EventPan,
@@ -13660,6 +13667,9 @@ struct WindowRuntime {
     /// [`Self::profile_undo`]'s shape exactly, and for its reason: a verb pressed
     /// on a card that is not the one holding the offer does nothing.
     checkout_undo: Option<(toast::ToastId, std::path::PathBuf, String)>,
+    /// The card that said where the edits a stop kept are, and the folder a press on it opens
+    /// (T-RECOVERED-FOLDER) — [`Self::checkout_undo`]'s shape, for its reason.
+    recovered_card: Option<recovered::Raised>,
     /// How far into the open picker's thumb the hand took hold, while it is
     /// holding it (§7.1.6c-5).
     ///
@@ -43231,6 +43241,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         powershell_profile_undo: None,
         checkout_from: None,
         checkout_undo: None,
+        recovered_card: None,
         settings_scroll: 0.0,
         profile_menu: profiles::ProfileMenu::default(),
         chevron_turn: ChevronTurn::default(),
@@ -43955,6 +43966,14 @@ impl Runtime<'_> {
             });
         }
         install_channel::begin();
+        // **And the recovered folder's** (T-RECOVERED-FOLDER): asked at the first frame on the
+        // glass (`recovered::begin`), its wake installed here, before anything can ask.
+        {
+            let proxy = proxy.clone();
+            recovered::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::RecoveredEditsListed);
+            });
+        }
         // **The data directory's two endpoints, opened by its writer and by nobody else** (§7.59,
         // audit 3 A-3). One call and one gate, so that a third door added beside them cannot be
         // added outside it.
@@ -53356,6 +53375,8 @@ impl App {
                         eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
                     }
                 }
+                // On its worker, as at any start's first frame.
+                Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
             }
         }
     }
@@ -64711,6 +64732,29 @@ impl FolioApp {
         })
     }
 
+    /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): the worker's answer, raised
+    /// once on the window the keyboard is on, or on the oldest open window when none has it.
+    fn announce_recovered_edits(&mut self) -> Result<()> {
+        let Some(announcement) = recovered::take() else {
+            return Ok(());
+        };
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let Some(id) = self.frontmost_window().or_else(|| oldest_standing(self)) else {
+            return Ok(());
+        };
+        self.runtime(id).map_or(Ok(()), |mut runtime| {
+            runtime.announce_recovered_edits(&announcement)
+        })
+    }
+
     /// **Carry what is true now onto the bar** (M3-2).
     ///
     /// Three things move under a menu bar and none of them announces itself to
@@ -66787,6 +66831,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
                 Ok(())
             }
+            // **The edits a stop kept, said** (T-RECOVERED-FOLDER).
+            AppEvent::RecoveredEditsListed => self.announce_recovered_edits(),
             // **The update job decides** (U-18), on whatever has landed.
             AppEvent::UpdateJobOffer => {
                 self.consider_update_offer();

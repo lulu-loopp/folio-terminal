@@ -165,6 +165,10 @@ pub(crate) enum Writer {
     /// The toast sender's identity in the registry (`NotificationDesk::show` →
     /// `bt_platform::Notifier::register_identity`).
     ToastIdentity,
+    /// The record of the recovered copies a start has said
+    /// (`recovered::ANNOUNCED_RECORD`, written by `recovered::begin`'s worker before its toast):
+    /// held back, the question is not asked, and the release asks it.
+    RecoveredAnnouncement,
 }
 
 impl Writer {
@@ -186,13 +190,14 @@ impl Writer {
             | Writer::PowerShellScript
             | Writer::PsReadLineUpgrade
             | Writer::ExplorerRepair
-            | Writer::ToastIdentity => false,
+            | Writer::ToastIdentity
+            | Writer::RecoveredAnnouncement => false,
         }
     }
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 16] = [
+    pub(crate) const ALL: [Writer; 17] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -209,6 +214,7 @@ impl Writer {
         Writer::PsReadLineUpgrade,
         Writer::ExplorerRepair,
         Writer::ToastIdentity,
+        Writer::RecoveredAnnouncement,
     ];
 }
 

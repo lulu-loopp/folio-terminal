@@ -1682,7 +1682,13 @@ the quit's judged write (`PreviewBuffer::save`, its conflict check included), an
 where the file refuses or has changed on disk, copied into the data directory's
 `recovered` folder under the instant and the file's name, never over the file — each
 said in `diagnostics.log` with where its edit is; no card, no question, and the
-writes are done before the road goes on. It then closes **every** window with the
+writes are done before the road goes on. **The next start says it** (T-RECOVERED-FOLDER,
+owner ruling 2026-10-09): after the first frame, the `bt-recovered` worker lists the
+`recovered` folder, and copies no start has said yet raise one toast — "An unsaved edit
+was kept at <folder>", "N unsaved edits were kept at …" — whose press opens the folder in
+the system's file manager. The names said are recorded in the data directory's
+`recovered-announced.json` before the toast is raised, so no copy is said twice, a crash
+loop included; nothing in the folder is ever pruned, and there is no switch. It then closes **every** window with the
 ending flag through `Runtime::close_window` so that no shell outlives its window, **abandons the
 spare web controller without waiting (its controller closed, its parent left to process
 exit; `exiting` does the same)**, finishes the application and exits the loop. `install_panic_log_hook` / `install_panic_log_hook_at`

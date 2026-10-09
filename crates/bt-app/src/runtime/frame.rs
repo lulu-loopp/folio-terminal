@@ -1431,6 +1431,10 @@ impl Runtime<'_> {
                     self.window.unpainted_pane_output = false;
                     if self.window.window_shown && !self.window.first_visible_present_dpi_checked {
                         self.window.first_visible_present_dpi_checked = true;
+                        // **The recovered folder is asked about after the first frame and
+                        // never before it** (T-RECOVERED-FOLDER): on its own worker, once per
+                        // process (`recovered::begin`).
+                        crate::recovered::begin(&crate::persist::storage_dir());
                         self.reconcile_authoritative_dpi("first-present")?;
                     }
                     let latency = receipt.map(|receipt| receipt.latency());

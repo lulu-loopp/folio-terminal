@@ -9,6 +9,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Added
 
 - A Folio installed with Homebrew now updates itself in place from About, like a copy you dragged to Applications; Homebrew keeps managing and uninstalling it. <!-- zh: pending D1 -->
+- After a graphics failure, Folio tells you at its next start where it kept your unsaved edit; click the message to open the folder. <!-- zh: pending T-RECOVERED-FOLDER -->
 
 ### Fixed
 

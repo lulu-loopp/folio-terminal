@@ -935,6 +935,11 @@ text_entries! {
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
     PreviewNothingToSave,
+    /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
+    /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
+    RecoveredEditKept,
+    /// The same, for `{count}` copies.
+    RecoveredEditsKept,
     PreviewFailedImageLoad,
     /// **A picture file longer than the picture lane will read** (owner's ruling
     /// 2026-09-12; `bt_term::MAX_LOCAL_IMAGE_FILE_BYTES`).
@@ -3770,6 +3775,16 @@ impl Text {
             Self::PreviewNothingToSave => {
                 pick(lang, "there is nothing to save", "没有要保存的内容")
             }
+            Self::RecoveredEditKept => pick(
+                lang,
+                "An unsaved edit was kept at {folder}",
+                "An unsaved edit was kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+            ),
+            Self::RecoveredEditsKept => pick(
+                lang,
+                "{count} unsaved edits were kept at {folder}",
+                "{count} unsaved edits were kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+            ),
             Self::PreviewFailedImageLoad => pick(
                 lang,
                 "Preview failed: image could not be loaded",
@@ -6223,6 +6238,11 @@ impl Text {
         // 0.4.8 G7-SWEEP-048: a one-click `$PROFILE` edit against a file changed elsewhere.
         (Self::ShellProfileChangedElsewhere, HostPlatform::Windows),
         (Self::ShellProfileChangedElsewhere, HostPlatform::MacOs),
+        // T-RECOVERED-FOLDER: the start's toast for the edits a stop kept in the recovered folder.
+        (Self::RecoveredEditKept, HostPlatform::Windows),
+        (Self::RecoveredEditKept, HostPlatform::MacOs),
+        (Self::RecoveredEditsKept, HostPlatform::Windows),
+        (Self::RecoveredEditsKept, HostPlatform::MacOs),
     ];
 }
 
@@ -7256,6 +7276,27 @@ pub fn ago_hours(hours: u64) -> String {
 /// English has no plural to get wrong here (`more` does not inflect) and Chinese
 /// has none at all, which is the one place this pair is simpler in translation
 /// than in the original.
+/// **The start's one sentence about the edits a stop kept** (T-RECOVERED-FOLDER): the folder
+/// they are in, and how many when more than one.
+#[must_use]
+pub fn recovered_edits_kept(count: usize, folder: &str) -> String {
+    recovered_edits_kept_in(current(), count, folder)
+}
+
+/// [`recovered_edits_kept`] in a named language.
+#[must_use]
+pub fn recovered_edits_kept_in(lang: Lang, count: usize, folder: &str) -> String {
+    let template = if count == 1 {
+        Text::RecoveredEditKept
+    } else {
+        Text::RecoveredEditsKept
+    };
+    template
+        .in_lang(lang)
+        .replace("{count}", &count.to_string())
+        .replace("{folder}", folder)
+}
+
 #[must_use]
 pub fn files_more_not_shown(count: usize) -> String {
     match current() {

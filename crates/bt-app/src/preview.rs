@@ -7053,8 +7053,9 @@ pub enum SaveOutcome {
 }
 
 /// **The folder in the data directory where a stop that cannot ask keeps the edits it could not
-/// write back** ([`PreviewPool::keep_dirty`]; D-4, 0.4.8 G7). Nothing reads it again: it is
-/// the reader's, and the diagnostics line names each copy in it.
+/// write back** ([`PreviewPool::keep_dirty`]; D-4, 0.4.8 G7). It is the reader's: Folio never
+/// removes anything in it, the diagnostics line names each copy, and the next start says where
+/// they are ([`crate::recovered`], T-RECOVERED-FOLDER).
 pub const RECOVERED_FOLDER: &str = "recovered";
 
 /// **What became of one dirty buffer on a stop that could not ask** ([`PreviewPool::keep_dirty`]).
