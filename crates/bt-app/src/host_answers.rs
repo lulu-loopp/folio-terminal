@@ -1,19 +1,33 @@
 //! **What this program answers for `bt-term`, said once, before the first session**
 //! (`docs/ARCHITECTURE.md` §3.2).
 //!
-//! `bt-term` builds without the platform layer, so the two facts about the machine a terminal
-//! session needs are installed into it by the host: the names this machine answers to, which a
-//! `file://<host>/` working-directory report is compared against, and what every thread of its
-//! image resample pool runs first. [`install`] gives both, and `main` calls it before the event
-//! loop exists — every session this process makes is made by that loop. The third answer, the
-//! name a hand-off door would open, is handed to `bt_term::verify_path` by the path-verification
-//! lane, its one product caller.
+//! `bt-term` builds without the platform layer and without a rasterizer, so the two facts about
+//! the machine a terminal session needs, and the codec its inline pictures need, are installed
+//! into it by the host: the names this machine answers to, which a `file://<host>/`
+//! working-directory report is compared against; what every thread of its image resample pool
+//! runs first; and the SVG codec ([`SVG_CODEC`]). [`install`] gives all three, and `main` calls it
+//! before the event loop exists — every session this process makes is made by that loop. The
+//! fourth answer, the name a hand-off door would open, is handed to `bt_term::verify_path` by the
+//! path-verification lane, its one product caller.
 
 /// Install this machine's answers into `bt-term`. Called once, by `main`, before the event loop.
 pub(crate) fn install() {
-    bt_term::install_host_names(this_machines_names());
+    install_the_repeatable_answers();
     bt_term::install_pool_thread_start(enter_the_band_below_normal);
 }
+
+/// The two answers a second installation of which is nothing: this machine's names and the SVG
+/// codec. [`install`] gives them, and so does every test of this program that makes a session or
+/// decodes a picture (`test_support::install_host_answers`) — the pool's thread-start hook
+/// installs once, so a test process does not.
+pub(crate) fn install_the_repeatable_answers() {
+    bt_term::install_host_names(this_machines_names());
+    bt_term::install_svg_rasterizer(SVG_CODEC);
+}
+
+/// The codec an inline picture's SVG bytes are rasterized by: the math crate's resvg rasterizer,
+/// at the document's intrinsic size, with the machine's fonts and no `<image href>` door.
+pub(crate) const SVG_CODEC: bt_term::SvgRasterizer = bt_math::rasterize_svg_document;
 
 /// Every spelling of this machine's name a shell on it may put in a `file://<host>/` report —
 /// the operating system's answer (`bt_platform::host_names`), never an environment variable.
@@ -30,6 +44,43 @@ fn enter_the_band_below_normal() {
 #[cfg(test)]
 mod tests {
     use crate::test_support::{free_fn_body, squeezed};
+
+    /// RED (CC-7) — **the SVG codec this program installs rasterizes an inline SVG through
+    /// `bt-term` at the document's intrinsic size, in straight alpha** (design T-COMPOSE-CRATE
+    /// §6.1 CC-7: `svg_document_rasterizes_at_intrinsic_size_with_straight_alpha`, through the
+    /// installed codec). The fill is half transparent, so a premultiplied answer has half the red.
+    ///
+    /// MUTATION ①: make `SVG_CODEC` `bt_term::test_svg_rasterizer` — red: the document is not
+    /// that codec's one document, and the decode answers `UnsupportedFormat`. MUTATION ②: drop
+    /// `unpremultiply_srgb_rgba` from `bt_math::rasterize_svg_document` — the pixel assertion goes
+    /// red. MUTATION ③: drop the codec's installation from `install_the_repeatable_answers` — red:
+    /// nothing in this process installs a codec, and the decode panics with "the SVG rasterizer
+    /// read before the host installed it".
+    #[test]
+    fn an_svg_document_decodes_through_the_installed_codec_at_intrinsic_size_with_straight_alpha() {
+        use base64::Engine as _;
+        super::install_the_repeatable_answers();
+        let document = br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6">
+            <rect x="0" y="0" width="8" height="6" fill="#ff0000" fill-opacity="0.5"/>
+        </svg>"##;
+        let decoded = bt_term::decode_inline_image(bt_term::InlineImageTask {
+            occurrence_id: 1,
+            source: bt_term::InlineImageSource::Osc1337(
+                base64::engine::general_purpose::STANDARD
+                    .encode(document)
+                    .into_bytes(),
+            ),
+        })
+        .expect("an SVG document decodes through the installed codec");
+        assert_eq!((decoded.width_px, decoded.height_px), (8, 6));
+        assert_eq!(decoded.rgba.len(), 8 * 6 * 4);
+        assert!(!decoded.animated);
+        assert_eq!(
+            &decoded.rgba[..4],
+            &[255, 0, 0, 128],
+            "full red at half coverage: straight alpha"
+        );
+    }
 
     /// RED (B-AUDIT-046 TRM-3, moved here by CC-4) — **the names this program installs are the
     /// machine's own, and a working-directory report naming the machine is this machine's

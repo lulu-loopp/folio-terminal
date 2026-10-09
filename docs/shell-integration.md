@@ -220,7 +220,12 @@ When a PowerShell row must instead be spawned as written (`File`, `CommandWithAr
 `NonInteractive`, or an unknown/invalid host line), Settings > Profiles offers one **Enable via
 profile** button for that edition. One click uses the existing managed-line writer to add Folio's
 guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation is interposed, and the success
-toast offers Undo. The line takes effect in panes started after it; the pane that showed the
+toast offers Undo. The click is made against the file as the check its row is drawn from read it,
+and the Undo against the file as the click wrote it: the writer reads the file again immediately
+before the edit and, when it differs, writes nothing and says the profile was changed elsewhere and
+the page should be reloaded. Undo puts back the bytes the file held before the click, so it never
+takes out a line the person wrote or edited; a click that finds a line Folio owns already there
+writes nothing and offers no Undo. The line takes effect in panes started after it; the pane that showed the
 button keeps running without it. The installed fact is per edition, so every such row for that
 edition changes to the ordinary capability sentence together. The one existing **PowerShell
 `$PROFILE` line** row remains the only lasting removal surface, and it stands only while a line in
@@ -283,11 +288,13 @@ Folio records — in `integration-profile-files.json` beside its marks record, u
 which edition named the file, whether it is creating the file and which folders it is creating for
 it, and, for a file that was there, the one copy it takes before its first write into that file
 (`<profile>.bak-YYYYMMDD[-n]`), with the SHA-256 of the bytes it will hold. A later write while
-the line is installed takes no further copy, and a removal takes none: it takes out the managed
-line and its own line ending and keeps every other byte, including any edit made since. It does not
-take out the blank line Enable put in front of the managed line when the file already held text, so
-a file that was there before keeps one more blank line than it had — inert to PowerShell, and the
-one byte-level difference a removal leaves. When the line is taken out — by Undo, by the Settings
+the line is installed takes no further copy, and a removal takes none. The Settings row, the
+command-line remover and the uninstall verbs take out the managed line and its own line ending and
+keep every other byte, including any edit made since. They do not take out the blank line Enable
+put in front of the managed line when the file already held text, so a file that was there before
+keeps one more blank line than it had — inert to PowerShell, and the one byte-level difference such
+a removal leaves. Undo, made only while the file is exactly what its click wrote, puts back every
+byte, that blank line included. When the line is taken out — by Undo, by the Settings
 row, by `--remove-shell-integration` or by either uninstall verb — the copy is deleted, since the
 write it guarded is undone, but only while it still holds the recorded bytes: a file of that name
 Folio did not write stays; a file Folio

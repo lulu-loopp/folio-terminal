@@ -1143,6 +1143,7 @@ mod tests {
                 line,
                 std::time::UNIX_EPOCH,
                 None,
+                &ProfileRevision::read(&profile),
             )
             .unwrap();
             assert_eq!(fs::read_to_string(&profile).unwrap(), line);

@@ -406,6 +406,7 @@ text_entries! {
     CleanupMarkRecovery,
     CleanupMarkUpdateEntrances,
     CleanupMarkUpdateHome,
+    CleanupMarkTrialFolder,
     CleanupMarkRuntimeClaims,
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
@@ -2155,9 +2156,10 @@ text_entries! {
     // One contiguous block at the end, per this table's standing rule. Fifteen
     // entries and no more: the three navigation buttons and the stop they turn
     // into, the four rows this slice puts in the shortcut table, and the five
-    // failure cards' sentences and verbs. Everything else the seat says is
+    // failure cards' sentences and their verbs, where a card has one (an
+    // address that does not open has none since 2026-10-09). Everything else the seat says is
     // either a value (a host name, a scheme, an error string — see
-    // `web_fail_did_not_respond` below) or a word this table already owns
+    // `web_fail_blocked_scheme` below) or a word this table already owns
     // (`HyperlinkBlockedSuffix` is the foot's `· blocked`, and it is the same
     // ruling's same word).
     /// The `Address` row of the shortcut table, and the name of the verb
@@ -2224,11 +2226,13 @@ text_entries! {
     /// that is the fact a reader can act on: the window did not die, one page's
     /// renderer did.
     WebFailCrashSay,
-    /// The `Blocked` card's sentence when the address carries no scheme to name.
-    /// The spelling that *can* name one is `web_fail_blocked_scheme` below.
+    /// **The headline of a card for an address that does not open** — one that did not load
+    /// and one that was refused alike (owner's ruling 2026-10-09). The address and why are the
+    /// two lines under it.
+    WebFailCannotOpen,
+    /// The refused address's fact line when the scheme is not why it was refused, or there is
+    /// no scheme to name. The spelling that *does* name one is `web_fail_blocked_scheme` below.
     WebFailBlockedSay,
-    /// Its one verb — the address is on the card, so the verb is to take it.
-    WebFailBlockedVerb,
     /// The `Download refused` card's two sentences. The second is the fact, not
     /// prose: it says which property of the request cannot cross a plain link,
     /// which is the difference between this card and one that could offer a
@@ -2870,6 +2874,9 @@ text_entries! {
     ShellProfileHardLink,
     ShellProfileReadOnly,
     ShellProfileChanged,
+    /// A one-click edit of `$PROFILE` refused because the file is not what the check, or the
+    /// write being undone, saw (0.4.8 G7).
+    ShellProfileChangedElsewhere,
     ShellProfileNothing,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
@@ -5024,6 +5031,11 @@ impl Text {
             Self::CleanupMarkUpdateHome => {
                 pick(lang, "Update home beside the bundle", "应用旁的更新目录")
             }
+            Self::CleanupMarkTrialFolder => pick(
+                lang,
+                "Update trial folder",
+                "Update trial folder", // zh: pending G7-SWEEP-048
+            ),
             Self::CleanupMarkRuntimeClaims => pick(lang, "Unix runtime claims", "Unix 运行时锁"),
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
@@ -5310,12 +5322,16 @@ impl Text {
             Self::WebFailCrashSay => {
                 pick(lang, "This page stopped running.", "这个页面停止运行了。")
             }
+            Self::WebFailCannotOpen => pick(
+                lang,
+                "Cannot open",
+                "Cannot open", // zh: pending T-WEB-PANE-ADDRESS
+            ),
             Self::WebFailBlockedSay => pick(
                 lang,
                 "This address does not open in a preview.",
                 "这个地址不在预览中打开。",
             ),
-            Self::WebFailBlockedVerb => pick(lang, "Copy address", "复制地址"),
             Self::WebFailDownloadSay => pick(
                 lang,
                 "Start this download in your browser instead.",
@@ -5713,6 +5729,11 @@ impl Text {
                 lang,
                 "The profile is read-only or is not a regular file.",
                 "$PROFILE 为只读，或不是普通文件。",
+            ),
+            Self::ShellProfileChangedElsewhere => pick(
+                lang,
+                "$PROFILE was changed elsewhere. Reload this page and try again.",
+                "$PROFILE was changed elsewhere. Reload this page and try again.", // zh: pending G7-SWEEP-048
             ),
             Self::ShellProfileChanged => pick(
                 lang,
@@ -6115,6 +6136,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // 0.4.8 F5 (T-WEB-PANE-ADDRESS): the headline of a card for an address that does not
+        // open.
+        (Self::WebFailCannotOpen, HostPlatform::Windows),
+        (Self::WebFailCannotOpen, HostPlatform::MacOs),
         // 0.4.8 E1: the cards of an update another Folio left unfinished.
         (Self::UpdateFailedNewer, HostPlatform::Windows),
         (Self::UpdateFailedNewer, HostPlatform::MacOs),
@@ -6145,6 +6170,12 @@ impl Text {
         // 0.4.8 T-BIRTH-OFF-WINDOW: a pane whose shell could not be started.
         (Self::ShellDidNotStart, HostPlatform::Windows),
         (Self::ShellDidNotStart, HostPlatform::MacOs),
+        // 0.4.8 G7-SWEEP-048: the uninstall's row for an update trial's folder.
+        (Self::CleanupMarkTrialFolder, HostPlatform::Windows),
+        (Self::CleanupMarkTrialFolder, HostPlatform::MacOs),
+        // 0.4.8 G7-SWEEP-048: a one-click `$PROFILE` edit against a file changed elsewhere.
+        (Self::ShellProfileChangedElsewhere, HostPlatform::Windows),
+        (Self::ShellProfileChangedElsewhere, HostPlatform::MacOs),
     ];
 }
 
@@ -6154,24 +6185,8 @@ impl Text {
 // return `String` and every one of the table's entries is `&'static str`. Mixing
 // the two would make the whole table allocate to serve fifteen of its members.
 
-/// The `Did not load` card's sentence (§7.7 ④), which names the host that was
-/// asked and nothing else.
-///
-/// The host and not the whole URL: the URL is on the head, in full, three
-/// centimetres above this card, and a sentence that repeated it would be the
-/// window reading its own address field back to a reader who is looking at it.
-/// What the sentence adds is *which name did not answer*, which is the half of
-/// a URL that a connection failure is about.
-#[must_use]
-pub fn web_fail_did_not_respond(host: &str) -> String {
-    match current() {
-        Lang::English => format!("{host} did not respond."),
-        Lang::Chinese => format!("{host} 没有响应。"),
-    }
-}
-
-/// The `Blocked` card's sentence when the refused address named a scheme
-/// (§7.7 ④). The scheme comes from `webnav::scheme_of` and from nowhere else —
+/// The refused address's fact line when its scheme is why it was refused
+/// (§7.7 ④; the card's headline since 2026-10-09 is `Cannot open`). The scheme comes from `webnav::scheme_of` and from nowhere else —
 /// a second reading of an address is a second answer about it.
 ///
 /// The colon stays glued to the scheme in both columns because it is part of

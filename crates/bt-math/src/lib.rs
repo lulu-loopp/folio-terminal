@@ -5,6 +5,7 @@
 use std::{collections::BTreeSet, num::NonZeroU32, sync::OnceLock, time::Duration};
 
 pub use bt_doc::math::{MathFailureStage, MathRaster, MathRenderError, MathRenderKey};
+pub use bt_doc::svg::{SvgRaster, SvgRasterError};
 pub use bt_doc::{InlineRunPlacement, MathMode};
 use mitex_spec_gen::DEFAULT_SPEC;
 use typst_as_lib::{TypstEngine, typst_kit_options::TypstKitFontOptions};
@@ -983,23 +984,6 @@ fn vertical_alpha_bounds(rgba: &[u8], width_px: u32) -> Option<(u32, u32)> {
     Some((first as u32, last as u32))
 }
 
-/// A standalone SVG document rasterized at its intrinsic size, in straight (unpremultiplied)
-/// sRGB RGBA — the same byte contract the math rasters and decoded images share.
-pub struct SvgRaster {
-    pub rgba: Vec<u8>,
-    pub width_px: u32,
-    pub height_px: u32,
-}
-
-/// The two ways an SVG payload fails, kept apart so callers can classify honestly: bytes that do
-/// not parse are simply not an SVG (an unsupported payload), while a valid document with an
-/// absurd intrinsic size is a dimensions problem.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SvgRasterError {
-    Parse(String),
-    Dimensions(String),
-}
-
 /// The base parse options every SVG this crate reads is parsed under.
 ///
 /// **An `<image href>` is not a door onto this machine.** usvg's stock string
@@ -1051,7 +1035,8 @@ fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
 /// Rasterize a standalone SVG document at its intrinsic size (one user unit per pixel). Serves
 /// the inline-image pipeline's SVG admission (M2 preview matrix §2: SVG displays as a static
 /// raster); this crate owns the resvg dependency, so image decoding borrows the rasterizer
-/// instead of growing its own.
+/// instead of growing its own. The terminal crate names no rasterizer: the host installs this
+/// function as its SVG codec (`bt_term::install_svg_rasterizer`).
 pub fn rasterize_svg_document(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
     let options = svg_document_options();
     let tree = resvg::usvg::Tree::from_data(bytes, options)

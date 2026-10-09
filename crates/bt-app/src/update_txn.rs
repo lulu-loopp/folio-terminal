@@ -1399,7 +1399,7 @@ impl ReceiptSight {
 }
 
 /// **Who reads a journal or a receipt another build may have written**: the
-/// sixteen reader and decision roles of the escape hatch (`docs/DESIGN.md`,
+/// seventeen reader and decision roles of the escape hatch (`docs/DESIGN.md`,
 /// 2026-10-08), each with its row of [`Role::beyond`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Role {
@@ -1437,12 +1437,16 @@ pub(crate) enum Role {
     /// The job owner at a launch (`update_prepare::at_launch`) and the press
     /// (Prepare).
     JobOwner,
+    /// The uninstall (`uninstall::trial_folder`, 0.4.8 G7): it reads which
+    /// transaction this copy's journal names, for the name of that
+    /// transaction's temporary folder.
+    Uninstall,
 }
 
 impl Role {
     /// Every role.
     #[cfg(test)]
-    pub(crate) const ALL: [Role; 16] = [
+    pub(crate) const ALL: [Role; 17] = [
         Role::Start,
         Role::TrialWatch,
         Role::TrialHandBack,
@@ -1459,6 +1463,7 @@ impl Role {
         Role::RecoveryDoor,
         Role::OutgoingExit,
         Role::JobOwner,
+        Role::Uninstall,
     ];
 
     /// **The one reading of a journal's bytes, made by this role** —
@@ -1481,9 +1486,11 @@ impl Role {
     /// whole.**
     pub(crate) const fn beyond(self) -> BeyondAction {
         match self {
-            Role::Start | Role::TrialWatch | Role::TrialHandBack | Role::OutgoingExit => {
-                BeyondAction::ActOnHeader
-            }
+            Role::Start
+            | Role::TrialWatch
+            | Role::TrialHandBack
+            | Role::OutgoingExit
+            | Role::Uninstall => BeyondAction::ActOnHeader,
             Role::ReceiptWrite | Role::WindowsReceiptWatch | Role::MacReceiptWatch => {
                 BeyondAction::NeverAccept
             }
@@ -6864,6 +6871,7 @@ mod tests {
             (Role::RecoveryDoor, BeyondAction::UnknownLiveSet),
             (Role::OutgoingExit, BeyondAction::ActOnHeader),
             (Role::JobOwner, BeyondAction::LeaveToItsRescue),
+            (Role::Uninstall, BeyondAction::ActOnHeader),
         ];
         assert_eq!(table.map(|(role, _)| role), Role::ALL);
         let beyond = [
@@ -7903,6 +7911,14 @@ mod parse_sites {
             1,
             Is::Reader(Role::JobOwner),
             "crate::update_prepare::tests::the_job_owner_leaves_what_it_cannot_read_whole_and_the_press_says_why",
+        ),
+        site(
+            "U1",
+            "crate::uninstall::trial_folder",
+            Reads::SightOfRead,
+            1,
+            Is::Reader(Role::Uninstall),
+            "crate::uninstall::tests::uninstall_removes_the_folder_of_the_trial_its_journal_names",
         ),
         site(
             "R1",
