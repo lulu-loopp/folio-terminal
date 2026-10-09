@@ -68912,6 +68912,16 @@ fn profile_banner_name(id: &str) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
+/// An executable as [`fallback_banner`] names it: by file name, never by path
+/// (`pwsh.exe`, `powershell.exe`, `sh`).
+fn executable_banner_name(program: &std::ffi::OsStr) -> String {
+    Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// The first line of a pane whose profile's shell would not start —
 /// `M2-restart-shell-contract.md` §3's "首行可见降级横幅", and §5#3's ruling that
 /// the swap is *never* silent.
@@ -68955,21 +68965,18 @@ fn profile_banner_name(id: &str) -> String {
 /// on their prompt line, and a person who wants to know *what they are typing
 /// into now* learns it from exactly this.
 fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: &str) -> String {
-    // The record's `started` is `powershell.exe`, and `fallback_profile()` is the
-    // profile that resolves to it — one shell, and the name the user knows it
-    // by is the profile's.
-    debug_assert!(
-        fallback
-            .started
-            .eq_ignore_ascii_case(bt_pty::WINDOWS_POWERSHELL)
-    );
+    // The record's `started` is this platform's last-resort shell
+    // (`powershell.exe` on Windows, `/bin/sh` elsewhere), and
+    // `fallback_profile()` is the profile that resolves to it — one shell, and
+    // the name the user knows it by is the profile's.
+    debug_assert_eq!(fallback.started, bt_pty::LAST_RESORT_SHELL);
     let (requested, started) = if requested == profiles::fallback_profile_id() {
         // **The one case the profiles cannot name**, and it is reachable rather
-        // than theoretical: `BT_SHELL` points the PowerShell profile at a shell
-        // that is not there, or a `pwsh` install is removed between sessions, and
-        // the swap happens *inside* one profile. Both names would be "PowerShell",
-        // and "PowerShell failed to start; using PowerShell instead" is a sentence
-        // that answers nothing.
+        // than theoretical: `BT_SHELL` points the floor profile at a shell that
+        // is not there, or a `pwsh` install is removed between sessions, and the
+        // swap happens *inside* one profile. Both names would be the floor's,
+        // and "PowerShell failed to start; using PowerShell instead" is a
+        // sentence that answers nothing.
         //
         // So the two executables are named, which is the only thing that differs
         // here, and by file name rather than path: `pwsh.exe` → `powershell.exe`
@@ -68977,12 +68984,8 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: &str) -> String 
         // the launcher's bookkeeping — the same reason the rest of this line does
         // not carry one.
         (
-            Path::new(&fallback.requested)
-                .file_name()
-                .unwrap_or(fallback.requested.as_os_str())
-                .to_string_lossy()
-                .into_owned(),
-            fallback.started.to_owned(),
+            executable_banner_name(&fallback.requested),
+            executable_banner_name(std::ffi::OsStr::new(fallback.started)),
         )
     } else {
         (

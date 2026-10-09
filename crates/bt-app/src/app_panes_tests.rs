@@ -6,8 +6,8 @@
 use super::*;
 use crate::test_support::{
     ResizeGateHarness, calls_of, grid_of, item_body, item_declaration, leaf_saying, method_body,
-    on_the_window_thread, pane_box_of, pane_rects_of, reader_names, solved_lopsided_split,
-    split_window, squeezed, squeezed_body,
+    on_the_window_thread, on_this_host, pane_box_of, pane_rects_of, reader_names,
+    solved_lopsided_split, split_window, squeezed, squeezed_body,
 };
 use bt_source::ItemQuery;
 use std::time::Duration;
@@ -459,13 +459,20 @@ fn alt_and_a_notch_aims_the_seat_under_the_pointer() {
 #[test]
 fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
     // What `bt-pty` hands up, including the shape that used to reach the
-    // glass: the vendored launcher `Debug`-quotes the command line it built
-    // for `CreateProcessW`, `NUL` terminator and all.
+    // glass: the vendored Windows launcher `Debug`-quotes the command line it
+    // built for `CreateProcessW`, `NUL` terminator and all. The record's
+    // `started` is this platform's last-resort shell, which is the only value
+    // `bt-pty` ever writes there; the profile that would not start is a row
+    // this platform ships that is not the floor.
+    let (requested_profile, requested_program) = on_this_host(
+        ("gitbash", "D:\\App\\Tool\\Git\\bin\\bash.exe\0"),
+        ("zsh", "/opt/工具/bin/zsh\0"),
+    );
     let fallback = bt_pty::ShellFallback {
-        requested: std::ffi::OsString::from("D:\\App\\Tool\\Git\\bin\\bash.exe\0"),
-        started: bt_pty::WINDOWS_POWERSHELL,
+        requested: std::ffi::OsString::from(requested_program),
+        started: bt_pty::LAST_RESORT_SHELL,
     };
-    let banner = fallback_banner(&fallback, "gitbash");
+    let banner = fallback_banner(&fallback, requested_profile);
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
         nonzero_u32(80),
         nonzero_u32(6),
@@ -477,7 +484,10 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
     let visible = session.terminal().visible_text();
     assert_eq!(
         visible[0].trim_end(),
-        "[Folio] Git Bash failed to start; using Windows PowerShell 5.1 instead.",
+        on_this_host(
+            "[Folio] Git Bash failed to start; using Windows PowerShell 5.1 instead.",
+            "[Folio] zsh failed to start; using sh instead.",
+        ),
         "the line names the terminal and both profiles by the names the \
              picker offers them under, and is not mistakable for the shell's \
              own output"
@@ -485,7 +495,11 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
     // Red gate on the whole point of the rework: the executable path, the
     // operating system's account of the failure, and the `NUL` the command
     // line carried are all diagnosis, and diagnosis belongs in the log.
-    for debris in [r"D:\App", "bash.exe", "os error", "CreateProcess", "\0"] {
+    let path_debris = on_this_host([r"D:\App", "bash.exe"], ["/opt/", "工具"]);
+    for debris in path_debris
+        .into_iter()
+        .chain(["os error", "CreateProcess", "\0", "/bin/sh"])
+    {
         assert!(
             !visible[0].contains(debris),
             "{debris:?} is debugging output and must not reach the pane: {:?}",
@@ -493,13 +507,15 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
         );
     }
     // **The swap inside one profile**, which `BT_SHELL` and a removed `pwsh`
-    // install both reach. Naming the profiles here would print "PowerShell
-    // failed to start; using PowerShell instead", so the executables are
-    // named — by file name, the one thing that differs and the only part a
-    // reader needs.
+    // install both reach. Naming the profiles here would print the floor's
+    // name twice, so the executables are named — by file name, the one thing
+    // that differs and the only part a reader needs.
     let inside = bt_pty::ShellFallback {
-        requested: std::ffi::OsString::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
-        started: bt_pty::WINDOWS_POWERSHELL,
+        requested: std::ffi::OsString::from(on_this_host(
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "/usr/local/bin/dash",
+        )),
+        started: bt_pty::LAST_RESORT_SHELL,
     };
     let banner = fallback_banner(&inside, profiles::fallback_profile_id());
     let mut one = DualPlaneSession::with_quotas_and_cell_height(
@@ -512,7 +528,10 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
     one.feed(banner.as_bytes()).unwrap();
     assert_eq!(
         one.terminal().visible_text()[0].trim_end(),
-        "[Folio] pwsh.exe failed to start; using powershell.exe instead.",
+        on_this_host(
+            "[Folio] pwsh.exe failed to start; using powershell.exe instead.",
+            "[Folio] dash failed to start; using sh instead.",
+        ),
         "one profile, two shells: the shells are what the line can tell apart"
     );
 
