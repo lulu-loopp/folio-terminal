@@ -1350,7 +1350,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
             deferred_launches: 0,
-            restart_missed: false
+            restart_missed: true
         }
     );
     assert!(!install.plist().exists());
@@ -1443,7 +1443,7 @@ fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
             deferred_launches: 0,
-            restart_missed: false
+            restart_missed: true
         }
     );
     assert!(!install.plist().exists());
@@ -2153,7 +2153,7 @@ fn a_plain_relaunch_after_abandoned_and_after_a_revert() {
         install.on_disk().unwrap().body.phase,
         Phase::Prepared {
             deferred_launches: 0,
-            restart_missed: false
+            restart_missed: true
         }
     );
 }
@@ -4777,7 +4777,7 @@ fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
         install.on_disk().map(|journal| journal.body.phase),
         Some(Phase::Prepared {
             deferred_launches: 0,
-            restart_missed: false
+            restart_missed: true
         })
     );
     assert!(!install.plist().exists(), "the entrance is removed");
