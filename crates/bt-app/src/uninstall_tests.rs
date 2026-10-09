@@ -717,6 +717,11 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             "try_claim_data_directory",
         ),
         (
+            Remover::TrialFolder,
+            include_str!("shell_integration.rs"),
+            "trial_script_directory",
+        ),
+        (
             Remover::Data(HostPlatform::Windows, Base::Roaming, "Folio"),
             include_str!("persist.rs"),
             "storage_location",
@@ -817,7 +822,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 28);
+    assert_eq!(INVENTORY.len(), 29);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
     // is the one function that writes a `Run` value, and the row names it.
@@ -3167,4 +3172,132 @@ fn a_purge_takes_a_removers_folder_left_behind() {
         );
     }
     fs::remove_dir_all(home).unwrap();
+}
+
+/// RED (0.4.8 G7, ledger #32; journal role U1, `Role::Uninstall`) — **the uninstall
+/// removes the temporary folder of the update trial its copy's journal names**, and
+/// reads that journal as every reader does: a journal it cannot read whole still
+/// names its transaction by its header, and one of which nothing reads names no folder
+/// and leaves it, saying the record cannot be read.
+///
+/// The journal is at `Trial` and the trial's folder holds its script, as a trial that
+/// was running when the uninstall started leaves them (its process gone: the door's
+/// own wait). The copy is the platform's own shape — a Windows install folder, a macOS
+/// bundle — because the journal is where `update_txn::Home` says it is; on another
+/// Unix there is no updater home and the row is `not present`.
+///
+/// MUTATION: in `trial_folder`, answer `Fate::Absent` without removing anything (leave
+/// the folder) — the first assertion goes red.
+#[test]
+fn uninstall_removes_the_folder_of_the_trial_its_journal_names() {
+    use crate::update_txn::{
+        Adapter, Body, Inventories, Journal, Layout, Nonce, Phase, TrialProcess, beyond_inputs,
+    };
+    let root = bt_testpath::link_free_temp_path("folio-uninstall-trial-folder");
+    let exe = match bt_platform::host_platform() {
+        HostPlatform::MacOs => bundle_exe(&root),
+        HostPlatform::Windows | HostPlatform::OtherUnix => root.join("app/folio.exe"),
+    };
+    fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    fs::write(&exe, b"fixture executable").unwrap();
+    let scope = Scope::sandbox(&root, exe).unwrap();
+    let label = "Update trial folder (per-copy)";
+    let Some(journal) = scope.journal.clone() else {
+        assert_eq!(bt_platform::host_platform(), HostPlatform::OtherUnix);
+        assert_eq!(super::trial_folder(label, &scope).fate, Fate::Absent);
+        fs::remove_dir_all(root).unwrap();
+        return;
+    };
+    fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let txn = crate::update_job::mint_txn();
+    let known = Journal {
+        txn,
+        rescue: "rescue/folio.exe — 救援".to_owned(),
+        body: Body {
+            phase: Phase::Trial {
+                nonce: Nonce::new([7; 32]),
+                process: TrialProcess { pid: 1, started: 1 },
+                began_ms: 0,
+            },
+            layout: Layout::Members(Inventories {
+                old_shipped: Vec::new(),
+                old_present: Vec::new(),
+                new: Vec::new(),
+            }),
+            adapter: Adapter::Ours,
+            marker: None,
+        },
+    }
+    .encode();
+    let folder = scope.temp.join(crate::update_trial::temp_folder_name(txn));
+    let stage = |folder: &Path| {
+        let script = folder.join("shell-integration").join("folio.ps1");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(script, "# 集成脚本 script").unwrap();
+    };
+
+    stage(&folder);
+    fs::write(&journal, &known).unwrap();
+    let report = execute(&scope, false, system_absent);
+    assert!(!folder.exists(), "the trial's folder is left behind");
+    assert!(
+        report.stdout().contains(&format!(
+            "{label}: {}: removed",
+            resolved(&scope.temp)
+                .join(crate::update_trial::temp_folder_name(txn))
+                .display()
+        )),
+        "{}",
+        report.stdout()
+    );
+    assert_eq!(
+        journal.exists(),
+        scope.update_home.is_none(),
+        "the row reads the journal and writes nothing; on macOS the update home's row, after it, removes the home and the journal with it"
+    );
+    fs::create_dir_all(journal.parent().unwrap()).unwrap();
+
+    for (what, bytes) in beyond_inputs(&known) {
+        stage(&folder);
+        fs::write(&journal, &bytes).unwrap();
+        let entry = super::trial_folder(label, &scope);
+        if what == "bytes that are no journal" {
+            assert_eq!(
+                entry.fate,
+                Fate::Kept(Text::UpdateFailedUnreadable),
+                "{what}: {}",
+                entry.line(Lang::English)
+            );
+            assert!(
+                folder.exists(),
+                "{what}: no transaction is named, nothing goes"
+            );
+            assert!(
+                entry.mark.contains(&journal.display().to_string()),
+                "{what}"
+            );
+        } else {
+            assert_eq!(
+                entry.fate,
+                Fate::Removed,
+                "{what}: {}",
+                entry.line(Lang::English)
+            );
+            assert!(!folder.exists(), "{what}: its header names the folder");
+        }
+    }
+    let _ = crate::update_txn::a_journal_that_cannot_be_read(&journal);
+    let entry = super::trial_folder(label, &scope);
+    assert_eq!(entry.fate, Fate::Kept(Text::UpdateFailedUnreadable));
+    assert!(
+        folder.exists(),
+        "a journal that cannot be read names nothing"
+    );
+    fs::remove_dir_all(&journal).unwrap();
+    assert_eq!(
+        super::trial_folder(label, &scope).fate,
+        Fate::Absent,
+        "no journal: no transaction, nothing to remove"
+    );
+    fs::remove_dir_all(root).unwrap();
 }

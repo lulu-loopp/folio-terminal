@@ -411,15 +411,18 @@ impl Runtime<'_> {
 
     /// **`Enable via $PROFILE` on row `index`**, from its button or its `⋯`: the
     /// install worker is asked for that row's program and arguments, on behalf of
-    /// this window.
+    /// this window — against the profile as the check the row is drawn from read
+    /// it (0.4.8 G7), which the writer compares with the file before it edits.
     pub(crate) fn enable_via_profile(&mut self, index: usize) {
         let id = profiles::id(index);
         if let Some(program) = self.app.profile_programs.program(&id).map(PathBuf::from)
             && shell_integration::is_powershell(&program)
         {
+            let seen = shell_integration::powershell_profile_seen(&program);
             shell_integration::begin_profile_install(
                 program,
                 profiles::launch_arguments_of(index),
+                seen,
                 self.window_id(),
             );
         }
@@ -427,14 +430,14 @@ impl Runtime<'_> {
 
     /// Remove the one managed line added by the toast this window is holding.
     pub(in crate::runtime) fn take_powershell_profile_undo(&mut self, card: toast::ToastId) {
-        let Some((id, program, profile)) = self.window.powershell_profile_undo.take() else {
+        let Some((id, program, edit)) = self.window.powershell_profile_undo.take() else {
             return;
         };
         if id != card {
-            self.window.powershell_profile_undo = Some((id, program, profile));
+            self.window.powershell_profile_undo = Some((id, program, edit));
             return;
         }
-        shell_integration::begin_profile_install_undo(program, profile, self.window_id());
+        shell_integration::begin_profile_install_undo(program, edit, self.window_id());
     }
 
     /// Write the table to `profiles.json` and re-probe what it can start.

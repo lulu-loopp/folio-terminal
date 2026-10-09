@@ -8,13 +8,15 @@ use std::{
 use thiserror::Error;
 
 /// **The answers `bt-term` asks its host for, given as Folio's desktop build gives them**
-/// (`bt-app`'s `host_answers`; `docs/ARCHITECTURE.md` §3.2): this machine's names, and the band
-/// below normal for every resample-pool thread. Each tool here that replays a pane's bytes calls
-/// it first, so a `file://<host>/` report in a recording made on this machine is read the way the
-/// pane read it.
+/// (`bt-app`'s `host_answers`; `docs/ARCHITECTURE.md` §3.2): this machine's names, the band
+/// below normal for every resample-pool thread, and the math crate's SVG rasterizer as the inline
+/// pictures' SVG codec. Each tool here that replays a pane's bytes calls it first, so a
+/// `file://<host>/` report in a recording made on this machine is read the way the pane read it,
+/// and an SVG it printed decodes the way the pane decoded it.
 pub fn install_host_answers() {
     bt_term::install_host_names(bt_platform::host_names());
     bt_term::install_pool_thread_start(enter_the_band_below_normal);
+    bt_term::install_svg_rasterizer(bt_math::rasterize_svg_document);
 }
 
 fn enter_the_band_below_normal() {

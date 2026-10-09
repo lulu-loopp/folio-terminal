@@ -33,9 +33,12 @@ fn subpixels(px: i64) -> NonZeroI64 {
 }
 
 /// A session and its view, with printed paths detected and the cell metrics an inline formula
-/// can be placed in (a 24 px row, 19 px ASCII baseline, 12 px cells, 20 px em).
+/// can be placed in (a 24 px row, 19 px ASCII baseline, 12 px cells, 20 px em). The process gets
+/// the test host names and the desktop build's SVG codec first: a pasted picture whose bytes no
+/// raster container claims is handed to the codec.
 fn pane_of(columns: u32, rows: u32) -> (DualPlaneSession, ViewportProjection) {
     bt_term::install_test_host_names();
+    bt_term::install_svg_rasterizer(bt_math::rasterize_svg_document);
     let mut session = DualPlaneSession::new(nz(columns), nz(rows));
     session.set_math_layout_options(MathLayoutOptions {
         detect_image_paths: true,

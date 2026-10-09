@@ -3475,32 +3475,18 @@ impl Runtime<'_> {
         };
         match kind {
             seats::PreviewRailKind::Address => {
-                let page = self.web_of(surface).map(|web| web.page().clone())?;
-                // **The committed address, and the refused one when a seat's one
-                // navigation was turned away** — the same pair the head's name
-                // cell used to fall back through, arriving where it belongs now
-                // that the name is a title again. A blank row over a page that
-                // was handed an address it would not go to would be this window
-                // forgetting what it was asked for.
-                let refused_address = self
-                    .web_of(surface)
-                    .and_then(webhost::WebSeat::fault)
-                    .and_then(webhost::WebFault::refused_address);
-                frame.address = shown_address(&if page.url.is_empty() {
-                    refused_address.unwrap_or_default()
-                } else {
-                    page.url.clone()
-                });
+                let web = self.web_of(surface)?;
+                let page = web.page().clone();
+                // **The address asked for until it is reached, then the committed one, then the
+                // refused one** (`WebSeat::row_address`; owner's ruling 2026-10-09) — a page on
+                // its way, or one that failed to load, is named by what was asked rather than by
+                // nothing or by the page before it. The field opens on the same string.
+                let address = shown_address(&web.row_address());
                 frame.web = seats::WebHeadState {
                     can_go_back: page.can_go_back,
                     can_go_forward: page.can_go_forward,
                     loading: page.loading,
                 };
-                frame.measure.address_width = self.window.renderer.measure_chrome_text(
-                    &mut self.app.gpu,
-                    &frame.address,
-                    font,
-                );
                 // **`</>` on a page's row too** (user ruling 2026-08-26; DESIGN
                 // §7.7 ⑭). The offer and the state are two questions and both
                 // are asked here: whether this page has a file on this disk that
@@ -3512,6 +3498,27 @@ impl Runtime<'_> {
                 // The glyph names the *destination*, exactly as it does one arm
                 // down.
                 frame.flip_to_source = self.page_source_shown_on(surface).is_none();
+                // **Folded to the room the row gives it** (owner's ruling 2026-10-09,
+                // `seats::fold_address`): the room is the field the row would grant a draft —
+                // everything the buttons leave, `</>` included — less the field's own inset, and
+                // the folded text is what the field is then measured and centred for.
+                let inset = (seats::PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
+                let room = self.rail_band(surface, scale).and_then(|band| {
+                    let whole = seats::PreviewRailMeasure {
+                        address_width: ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD,
+                        ..frame.measure.clone()
+                    };
+                    seats::preview_rail_geometry_in(band, scale, &whole)
+                        .address
+                        .map(|field| (field[2] - field[0] - inset * 2.0).max(0.0))
+                });
+                let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+                let mut measure = |text: &str| renderer.measure_chrome_text(gpu, text, font);
+                frame.address = match room {
+                    Some(room) => seats::fold_address(&address, room, &mut measure),
+                    None => address,
+                };
+                frame.measure.address_width = measure(&frame.address);
             }
             seats::PreviewRailKind::Crumbs => {
                 let path = self.preview_rail_path(surface)?;
@@ -4007,10 +4014,13 @@ impl Runtime<'_> {
     /// what makes the two rows' identical glyph an honest promise: one verb,
     /// two kinds of address.
     fn copy_preview_address(&mut self, surface: PreviewSurface) -> Result<()> {
+        // **What the row names, in full** (`WebSeat::row_address`): the failure card has no
+        // button since the owner's ruling of 2026-10-09, so this `⧉` is what copies an address
+        // that did not load or was refused.
         let Some(url) = self
             .rail_page(surface)
             .and_then(|leaf| self.window.web.get(&leaf))
-            .map(|web| web.page().url.clone())
+            .map(webhost::WebSeat::row_address)
         else {
             return Ok(());
         };
