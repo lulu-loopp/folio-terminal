@@ -2619,17 +2619,36 @@ mod tests {
         copy
     }
 
-    /// **The folder the copies of one test stand in**, beside this binary's own, emptied first.
+    /// **The folder the copies of one test stand in**, beside this binary's own: emptied when it
+    /// is made and removed when it is dropped — after the run, and on a panic too — so a build
+    /// folder (a CI runner's among them) keeps no copy of the test binary.
     ///
     /// One name per test and not a unique one: on Windows a copy that has just been run can
     /// still be held for a moment after its process has been waited for, so the removal at the
     /// end of a run may not land; the next run of the same test clears what it left, and a
     /// build folder holds at most one copy per test.
-    fn copies_folder(tag: &str) -> PathBuf {
+    struct Copies(PathBuf);
+
+    impl std::ops::Deref for Copies {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Copies {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// [`Copies`] for one test, named by `tag`.
+    fn copies_folder(tag: &str) -> Copies {
         let this = std::env::current_exe().unwrap();
         let folder = this.parent().unwrap().join(format!("launch-wire-{tag}"));
         let _ = std::fs::remove_dir_all(&folder);
-        folder
+        Copies(folder)
     }
 
     /// The folder a launch hands over, named in two scripts, made for one test.
@@ -2668,7 +2687,7 @@ mod tests {
             &words,
             false,
         );
-        let _ = std::fs::remove_dir_all(&copies);
+        drop(copies);
         let _ = std::fs::remove_dir_all(&folder);
         let Some(run) = run else {
             return;
@@ -2723,7 +2742,7 @@ mod tests {
             &words,
             true,
         );
-        let _ = std::fs::remove_dir_all(&copies);
+        drop(copies);
         let _ = std::fs::remove_dir_all(&folder);
         let Some(run) = run else {
             return;
@@ -2779,7 +2798,7 @@ mod tests {
         let folder = handed_folder();
         let words = vec!["--cwd".to_owned(), folder.to_string_lossy().into_owned()];
         let run = two_copies(SELECTOR, &impostor, &this, &words, false);
-        let _ = std::fs::remove_dir_all(&copies);
+        drop(copies);
         let _ = std::fs::remove_dir_all(&folder);
         let Some(run) = run else {
             return;
