@@ -14,6 +14,7 @@ All notable changes to Folio are recorded here. The format follows
 
 - On a Mac with two copies of Folio installed, opening the second one joins the one already running instead of opening a window that saves nothing; this includes the copy an update restores after it fails. <!-- zh: pending T-MAC-CROSS-COPY-HANDOVER -->
 - An unsaved edit in a preview survives Folio stopping on a graphics failure: it is saved to its file, or, when the file cannot be written or was changed by another program, kept as a copy in Folio's `recovered` folder, and `diagnostics.log` says where. <!-- zh: pending G7-SWEEP-048 -->
+- Closing the last window no longer throws away an unsaved edit in the summoned terminal: Folio shows it and asks first, and Cancel keeps the window open. <!-- zh: pending T-SUMMON-DIRTY-PREVIEW -->
 - Enabling and undoing the PowerShell integration from two windows never removes your own line from your PowerShell profile: if the profile changed since the page looked at it, Folio changes nothing and asks you to reload the page. <!-- zh: pending G7-SWEEP-048 -->
 - Uninstalling Folio while an update's new version is still being tried no longer leaves a `folio-trial-…` folder behind in your temporary folder. <!-- zh: pending G7-SWEEP-048 -->
 - An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: pending T-UPDATE-RENAME-RETRY -->

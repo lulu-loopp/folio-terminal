@@ -15099,12 +15099,15 @@ struct WindowRuntime {
     /// persisted: it is a fact about this sitting, and a file that remembered it
     /// would let a refusal from last month be re-opened by a font change today.
     psreadline_size_changed: bool,
-    /// Whether the gate's `Discard` has asked for the window to go.
+    /// **Which window the gate's confirmed answer has asked to go**, if it has —
+    /// this window after its own shut, or the run's last ordinary window after
+    /// the run's end was answered here, in the summoned terminal
+    /// (T-SUMMON-DIRTY-PREVIEW).
     ///
-    /// A flag rather than a call, because the shut belongs to the event loop:
-    /// `CloseRequested` is what performs it, and the gate re-requests it rather
-    /// than performing half of it here (see [`Runtime::answer_dirty_gate`]).
-    window_close_requested: bool,
+    /// A request rather than a call, because the close belongs to the event
+    /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
+    /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
+    window_close_requested: Option<WindowId>,
     /// Which preview pane has its filename switcher up (P130-P137).
     ///
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
@@ -18429,7 +18432,11 @@ fn dirty_gate_names(
             }
         }
         restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
-        restore::GateRequest::Shut => tabs.iter().flat_map(one_tab).collect(),
+        // The run's end, asked in the summoned terminal, loses what its shut
+        // would: every tab's dirty buffers.
+        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
+            tabs.iter().flat_map(one_tab).collect()
+        }
         // A discard names one file, and it is never empty — which matters,
         // because `raise_dirty_gate` treats an empty list as "there is
         // nothing to ask about" and lets the verb through. There is always
@@ -18495,6 +18502,37 @@ fn keep_unsaved_edits_over(
     tabs.iter_mut()
         .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
         .collect()
+}
+
+/// **What an answer to one of the two exits comes to over the asking window's
+/// tabs** (B1; T-SUMMON-DIRTY-PREVIEW): the window whose close the loop is asked
+/// to re-run — `closes`, the window itself for a shut and the run's last ordinary
+/// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
+/// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
+/// has already made through [`Runtime::quit_save`] (`saved_all`: whether all of
+/// it landed).
+///
+/// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
+/// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
+/// the dirty buffers and only those: the rest of each pool is the list of files
+/// the switcher shows next launch (`TabState::preview_content`), and the gate
+/// raises itself off the dirty ones, so the re-run close finds nothing to ask.
+fn answer_an_exit_over(
+    tabs: &mut [TabState],
+    closes: WindowId,
+    answer: restore::GateAnswer,
+    saved_all: bool,
+) -> Option<WindowId> {
+    match answer {
+        restore::GateAnswer::Cancel => None,
+        restore::GateAnswer::Save => saved_all.then_some(closes),
+        restore::GateAnswer::Discard => {
+            for tab in tabs {
+                tab.preview_pool.discard_dirty();
+            }
+            Some(closes)
+        }
+    }
 }
 
 /// **Which of the tabs whose shells have all exited the loop may close on its
@@ -43146,7 +43184,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
-        window_close_requested: false,
+        window_close_requested: None,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
@@ -63215,6 +63253,14 @@ impl FolioApp {
         // program: it goes when the windows go, and comes back holding what the
         // restore row says — see `retire_the_summon_with_the_run` below.
         let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id));
+        // **And a close that ends the run asks the summoned terminal first**
+        // (T-SUMMON-DIRTY-PREVIEW): it goes with this window, so this close is
+        // its shut too, and an unsaved buffer in it is asked about in it before
+        // anything is told. Asked, this window stays open: the summoned terminal
+        // never stands alone.
+        if ending && !self.the_summon_lets_the_run_end(id)? {
+            return Ok(());
+        }
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -63309,6 +63355,39 @@ impl FolioApp {
                     .is_some_and(|window| window.leaving.is_none())
             })
             .count()
+    }
+
+    /// **Whether the summoned terminal lets the run end with `closing`**
+    /// (T-SUMMON-DIRTY-PREVIEW) — its dirty gate, put the run's end
+    /// ([`restore::GateRequest::ShutWithTheRun`]) over its own tabs.
+    ///
+    /// The run's end is a normal close of the summoned terminal, not a failure,
+    /// so it goes through the gate every other close of a window goes through:
+    /// nothing to ask lets the run end; a question raised — or one already up in
+    /// it, which no second request slips past (ticket 58) — holds the close, and
+    /// the summoned terminal is brought up by its own door
+    /// ([`Self::summon_quake`]) so that the question is on the screen. Its
+    /// confirmed answer re-runs the close of `closing`
+    /// ([`WindowRuntime::window_close_requested`]); `Cancel` leaves `closing` open, so
+    /// the summoned terminal never stands alone (§7.54e ①).
+    ///
+    /// No summoned window, or one already leaving, has nothing to ask.
+    fn the_summon_lets_the_run_end(&mut self, closing: WindowId) -> Result<bool> {
+        let Some(id) = self.app.as_ref().and_then(|app| app.quake.window()) else {
+            return Ok(true);
+        };
+        if self.is_leaving(id) {
+            return Ok(true);
+        }
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(true);
+        };
+        let raised = runtime.raise_dirty_gate(restore::GateRequest::ShutWithTheRun(closing))?;
+        if raised.proceeds() {
+            return Ok(true);
+        }
+        self.summon_quake()?;
+        Ok(false)
     }
 
     /// **The summoned terminal goes with the run** (§7.54).
@@ -67374,13 +67453,25 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // shut belongs to the event loop, and re-requesting it means closing goes
             // through the one door it always went through instead of a second one
             // opened for the gate.
-            shutting |= std::mem::take(&mut runtime.window.window_close_requested);
+            let requested = std::mem::take(&mut runtime.window.window_close_requested);
+            shutting |= requested == Some(window_id);
             let result = if shutting {
                 result.and(hang_watch::during(hang_watch::Station::EventShut, || {
                     self.close(window_id)
                 }))
             } else {
                 result
+            };
+            // **And the window another window's answer closes**
+            // (T-SUMMON-DIRTY-PREVIEW): the run's end, answered in the summoned
+            // terminal, re-runs the close of the ordinary window that ends the run
+            // — through the same door, which asks again and now finds nothing.
+            let result = match requested.filter(|closing| *closing != window_id) {
+                Some(closing) => result
+                    .and(hang_watch::during(hang_watch::Station::EventShut, || {
+                        self.close(closing)
+                    })),
+                None => result,
             };
             // Whatever this event changed about the *application*, handed to the
             // windows that were not this one. Before the door below, because a window
