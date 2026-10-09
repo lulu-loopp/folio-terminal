@@ -63825,7 +63825,7 @@ impl FolioApp {
         if raised.proceeds() {
             return Ok(true);
         }
-        self.summon_quake()?;
+        self.summon_quake(None)?;
         Ok(false)
     }
 
