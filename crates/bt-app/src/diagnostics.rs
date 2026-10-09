@@ -37,12 +37,13 @@
 //! **Except when the run asked for the console**, which is what the trace
 //! variables are: `BT_STARTUP_TRACE`, `BT_MOUSE_TRACE`, `BT_WEB_TRACE_V` and
 //! the rest of that family exist to be watched from a shell, and a person who
-//! sets one has named the console as the destination. The rule is the family
-//! and not a list — any `BT_…TRACE…` in the environment — because a list is a
-//! thing the next trace variable gets left off. `BT_PTY_DUMP` deliberately does
-//! **not** qualify: it names a file of its own, it asks for nothing on a screen,
-//! and it is the one variable the project's own test windows always carry, which
-//! would have reinstated the fault in exactly the case that reported it.
+//! gives one a nonempty value has named the console as the destination. The rule
+//! is the family and not a list — any nonempty `BT_…TRACE…` in the environment —
+//! because a list is a thing the next trace variable gets left off.
+//! `BT_PTY_DUMP` deliberately does **not** qualify: it names a file of its own,
+//! it asks for nothing on a screen, and it is the one variable the project's own
+//! test windows always carry, which would have reinstated the fault in exactly
+//! the case that reported it.
 //!
 //! # Letting the console go is also the fix for a second thing
 //!
@@ -142,17 +143,17 @@ pub fn switched_on(value: Option<OsString>) -> bool {
 /// **Did this run name the console as the place diagnostics go?**
 ///
 /// The whole family of trace switches and nothing else: a variable whose name
-/// begins `BT_` and mentions `TRACE`. Stated as a shape rather than a list
-/// because a list is what the next trace variable is left off, and the failure
-/// mode of being left off is silent — the trace is written and lands in a file
-/// the developer is not watching.
+/// begins `BT_`, mentions `TRACE` and has a nonempty value. Stated as a shape
+/// rather than a list because a list is what the next trace variable is left
+/// off, and the failure mode of being left off is silent — the trace is written
+/// and lands in a file the developer is not watching.
 ///
 /// Takes the environment as an iterator so this is a decision a test can make
 /// without touching the process's own.
-pub fn console_was_asked_for<I: IntoIterator<Item = OsString>>(names: I) -> bool {
-    names.into_iter().any(|name| {
+pub fn console_was_asked_for<I: IntoIterator<Item = (OsString, OsString)>>(variables: I) -> bool {
+    variables.into_iter().any(|(name, value)| {
         let name = name.to_string_lossy().to_ascii_uppercase();
-        name.starts_with("BT_") && name.contains("TRACE")
+        name.starts_with("BT_") && name.contains("TRACE") && switched_on(Some(value))
     })
 }
 
@@ -398,7 +399,7 @@ pub fn resident_channel() -> Option<Channel> {
 static RESIDENT_CHANNEL: std::sync::OnceLock<Channel> = std::sync::OnceLock::new();
 
 fn choose_resident_channel(storage: &Path, previous_run_last_wrote: Option<SystemTime>) -> Channel {
-    if console_was_asked_for(std::env::vars_os().map(|(name, _)| name)) {
+    if console_was_asked_for(std::env::vars_os()) {
         // The console was named by this run. Keep it, keep the group membership
         // that comes with it, and rely on the control handler installed at the
         // front door for the `Ctrl+C` that membership exposes.
@@ -592,8 +593,10 @@ mod tests {
         names_a_crash_report, newest_crash_report, rotate_if_oversized, switched_on,
     };
 
-    fn names(list: &[&str]) -> Vec<OsString> {
-        list.iter().map(|name| OsString::from(*name)).collect()
+    fn variables(list: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        list.iter()
+            .map(|(name, value)| (OsString::from(*name), OsString::from(*value)))
+            .collect()
     }
 
     /// This file's own text, for the two source pins below.
@@ -998,6 +1001,7 @@ mod tests {
     #[test]
     fn the_console_is_kept_for_the_trace_family_and_for_nothing_else() {
         for asked in [
+            "BT_PERF_TRACE",
             "BT_STARTUP_TRACE",
             "BT_MOUSE_TRACE",
             "BT_MOUSE_TRACE_V",
@@ -1006,22 +1010,59 @@ mod tests {
             "BT_PREVIEW_TRACE",
             "BT_CARD_TRACE",
         ] {
-            assert!(
-                console_was_asked_for(names(&["PATH", asked, "APPDATA"])),
-                "{asked} is a request for output on the shell that set it"
-            );
+            for value in ["1", "0", " "] {
+                assert!(
+                    console_was_asked_for(variables(&[
+                        ("PATH", "bin"),
+                        (asked, value),
+                        ("APPDATA", "data"),
+                    ])),
+                    "{asked}={value:?} requests output on the shell that set it"
+                );
+            }
         }
         assert!(
-            !console_was_asked_for(names(&["PATH", "BT_PTY_DUMP", "BT_HANG_SELFTEST"])),
+            !console_was_asked_for(variables(&[
+                ("PATH", "bin"),
+                ("BT_PTY_DUMP", "probe.vt"),
+                ("BT_HANG_SELFTEST", "5"),
+            ])),
             "a dump that names its own file, and a switch that wedges the window \
              thread, ask for nothing on anybody's screen"
         );
         assert!(
-            !console_was_asked_for(names(&["PATH", "APPDATA", "TRACE_ME", "TERM"])),
+            !console_was_asked_for(variables(&[
+                ("PATH", "bin"),
+                ("APPDATA", "data"),
+                ("TRACE_ME", "1"),
+                ("TERM", "xterm"),
+            ])),
             "and the family is `BT_` first — a variable somebody else's tooling \
              set is not this product's instruction"
         );
-        assert!(!console_was_asked_for(names(&[])));
+        assert!(!console_was_asked_for(variables(&[])));
+    }
+
+    #[test]
+    fn an_emptied_trace_does_not_keep_the_console() {
+        for name in ["BT_PERF_TRACE", "BT_STARTUP_TRACE", "BT_MOUSE_TRACE_V"] {
+            assert!(
+                !console_was_asked_for(variables(&[("PATH", "bin"), (name, "")])),
+                "{name}= does not request console routing"
+            );
+        }
+        assert!(!console_was_asked_for(variables(&[
+            ("BT_PERF_TRACE", ""),
+            ("BT_MOUSE_TRACE_V", ""),
+        ])));
+        assert!(console_was_asked_for(variables(&[
+            ("BT_PERF_TRACE", ""),
+            ("BT_MOUSE_TRACE_V", "1"),
+        ])));
+        assert!(console_was_asked_for(variables(&[
+            ("BT_MOUSE_TRACE_V", "1"),
+            ("BT_PERF_TRACE", ""),
+        ])));
     }
 
     /// PIN — **the log is bounded to two generations, and the rotation happens
