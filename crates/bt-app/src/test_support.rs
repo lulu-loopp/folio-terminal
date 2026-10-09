@@ -2739,11 +2739,21 @@ pub(crate) fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
 /// So the wait is on the ledger's own signal: it ends the moment an engine
 /// thread moves the count onto `target`, whatever the machine's load, and
 /// [`crate::lane::PATIENCE`] only bounds a wait for a movement that is never
-/// coming — the answer is then the count that stands, and the caller's
-/// comparison is red. Under [`ledger_gate`], so nothing else is moving the
-/// number while this watches it.
+/// coming — **which is a red here, by this helper**, naming the patience and
+/// the count that stood, so no caller can pass by the wait running out. A
+/// caller that wants the count itself asks
+/// `bt_platform::video::engine::engines_outstanding_reaching`. Under
+/// [`ledger_gate`], so nothing else is moving the number while this watches it.
 pub(crate) fn engines_settling_to(target: u64) -> u64 {
-    bt_platform::video::engine::engines_outstanding_reaching(target, crate::lane::PATIENCE)
+    let reached =
+        bt_platform::video::engine::engines_outstanding_reaching(target, crate::lane::PATIENCE);
+    assert_eq!(
+        reached,
+        target,
+        "the engine ledger did not reach {target} within the lane suite's patience ({:?});          {reached} engines stood",
+        crate::lane::PATIENCE
+    );
+    reached
 }
 
 /// A real folder with a real file in it, for the glance-foot tests: the path

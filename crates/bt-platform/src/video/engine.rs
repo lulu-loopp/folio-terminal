@@ -1583,7 +1583,9 @@ mod tests {
     fn ledger_gate() -> std::sync::MutexGuard<'static, ()> {
         static GATE: Mutex<()> = Mutex::new(());
         let gate = GATE.lock().unwrap_or_else(|held| held.into_inner());
-        engines_settling_to(0);
+        // The raw door, not `engines_settling_to`: a quiet that never comes is
+        // the caller's baseline, not this gate's red.
+        let _ = engines_outstanding_reaching(0, PATIENCE);
         gate
     }
 
@@ -1611,11 +1613,18 @@ mod tests {
     /// the truth it is meant to tell; the count comes off when that thread
     /// gets there, and the ledger says so.
     ///
-    /// Under the [`ledger_gate`] — including from the gate itself, which is
-    /// where the previous test's engine is waited out — so nothing else is
-    /// moving this number.
+    /// **Running out of [`PATIENCE`] is a red here, by this helper**, naming
+    /// the patience and the count that stood, so no caller can pass by the
+    /// wait running out; the gate, which wants the count, asks
+    /// [`engines_outstanding_reaching`] itself. Under the [`ledger_gate`], so
+    /// nothing else is moving this number.
     fn engines_settling_to(target: u64) -> u64 {
-        engines_outstanding_reaching(target, PATIENCE)
+        let reached = engines_outstanding_reaching(target, PATIENCE);
+        assert_eq!(
+            reached, target,
+            "the engine ledger did not reach {target} within this module's patience              ({PATIENCE:?}); {reached} engines stood"
+        );
+        reached
     }
 
     /// RED — **opening a video never blocks the thread that asked** (the freeze
