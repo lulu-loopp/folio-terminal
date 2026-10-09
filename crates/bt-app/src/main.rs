@@ -102,6 +102,8 @@ mod lane;
 #[cfg(test)]
 mod lane_contract_tests;
 mod launch_wire;
+#[cfg(target_os = "linux")]
+mod linux_hang_probe;
 mod layout_tables;
 mod linebreak;
 mod marks;
@@ -449,6 +451,8 @@ const PANIC_LOG_FILENAME: &str = "folio-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    #[cfg(target_os = "linux")]
+    HangWatchQuestion(u64),
     #[cfg(target_os = "linux")]
     NativeDialogReady,
     #[cfg(target_os = "linux")]
@@ -872,6 +876,8 @@ impl AppEvent {
     fn station(&self) -> hang_watch::Station {
         use hang_watch::Station;
         match self {
+            #[cfg(target_os = "linux")]
+            Self::HangWatchQuestion(_) => Station::Woken,
             #[cfg(target_os = "linux")]
             Self::NativeDialogReady
             | Self::NativeHotkeyReady { .. }
@@ -67492,6 +67498,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        #[cfg(target_os = "linux")]
+        if let AppEvent::HangWatchQuestion(id) = event {
+            linux_hang_probe::answer(id);
+            if self.app.as_ref().is_some_and(|app| app.trace_perf) {
+                trace_sink::stderr_line(format!("BT_HANG_PROBE dispatched={id}"));
+            }
+            return;
+        }
         if matches!(
             event,
             AppEvent::QuakeSummoned | AppEvent::NotificationClicked
@@ -67512,6 +67526,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // from — a second address for the same answer, and one that can be
         // wrong the moment a pane moves between windows.
         let applied = match event {
+            #[cfg(target_os = "linux")]
+            AppEvent::HangWatchQuestion(_) => Ok(()),
             // **Nothing is done here** — the same answer, and for the same
             // reason, as [`AppEvent::GitChanged`] below.
             //
@@ -76234,6 +76250,13 @@ fn main() -> Result<()> {
     };
     let _ = SUMMON_PROXY.set(event_loop.create_proxy());
     #[cfg(target_os = "linux")]
+    let linux_hang_registration = {
+        let proxy = event_loop.create_proxy();
+        linux_hang_probe::install(move |id| {
+            proxy.send_event(AppEvent::HangWatchQuestion(id)).is_ok()
+        })
+    };
+    #[cfg(target_os = "linux")]
     {
         let proxy = event_loop.create_proxy();
         bt_platform::install_dialog_wake(move || {
@@ -76323,6 +76346,8 @@ fn main() -> Result<()> {
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
+    #[cfg(target_os = "linux")]
+    drop(linux_hang_registration);
     // The loop has returned, and what follows is the way out (§5.3 rows 15–17) — from `Running`,
     // or from `Starting` when the loop stopped before its first turn.
     bt_platform::admission::exiting();
@@ -76621,7 +76646,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 42] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 43] = [
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -76645,6 +76670,8 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
+        // Linux asks through winit; Windows and macOS keep their native loop probes.
+        "hang_watch.rs",
         // Linux hands process work its WorkerCtx; the other hand-off doors are synchronous.
         "handoff_lane.rs",
         // The Linux drop notice is compiled with its native consumer and every translation test.

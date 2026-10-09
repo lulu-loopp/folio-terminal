@@ -66,6 +66,11 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_SHELL_INTEGRATION` | `login` \| `interactive` | Not read by `folio.exe` — **written** into the environment of a bash launched with `--init-file`, and read by the shipped `folio.bash` to decide **which** startup chain it must source in place of the one the flag displaced. `login` is `/etc/profile` then the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile`; `interactive` is `~/.bashrc` alone. Which of the two is a fact about the profile's own arguments. | — | not set |
 | `BT_USER_ZDOTDIR` | a directory | Not read by `folio.exe` — **written** into the environment of a zsh whose `ZDOTDIR` this terminal has taken, carrying the one the session already had so that the shipped `folio.zsh` can source the reader's own startup files out of it. Absent when the session had none, which says the files are in `$HOME`. | — | not set |
 
+On Linux, `BT_PERF_TRACE` also emits `BT_HANG_PROBE dispatched=<id>` when the
+window's user-event handler receives a watchdog question. A trace run asks once
+when the event loop becomes available, as well as when a stall is suspected. It carries a numeric
+question ID only. See [Linux hang diagnostics](plans/port/linux-hang-diagnostics.md).
+
 ### `BT_IME_TRACE` line formats
 
 All lines share the existing `Instant` timestamp and file-writer queue. Shared

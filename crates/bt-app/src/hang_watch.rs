@@ -3515,11 +3515,20 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
     let mut open_report: Option<PathBuf> = None;
     // The question, bound to the thread it is about. Not called unless the
     // arithmetic has already run out of innocent explanations.
+    #[cfg(target_os = "linux")]
+    let mut ask = || crate::linux_hang_probe::ask(ANSWER_WITHIN);
+    #[cfg(not(target_os = "linux"))]
     let mut ask = move || bt_platform::hang::ask_thread_to_answer(ui_thread_id, ANSWER_WITHIN);
     // The budget lines lost as of the last one printed; the next line printed says how many more.
     let mut lost_printed = 0;
+    #[cfg(target_os = "linux")]
+    let mut trace_probe_asked = !trace_perf;
     loop {
         std::thread::sleep(WATCH_INTERVAL);
+        #[cfg(target_os = "linux")]
+        if !trace_probe_asked {
+            trace_probe_asked = !matches!(ask(), Answer::NoWindow);
+        }
         let heart = heartbeat();
         // **The other instrument, drained first and said last** (X-7): a hold
         // that ran long and then healed is exactly what the poll below is about

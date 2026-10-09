@@ -1358,6 +1358,9 @@ jobs:
       - name: test X11 and Wayland window handles
         run: cargo test -p bt-app --bin folio --locked -j 2 linux_window_tests
 
+      - name: test Linux event-loop hang questions
+        run: cargo test -p bt-app --bin folio --locked -j 2 linux_hang_probe::tests
+
       - name: present terminal text on a private X11 display
         run: python3 scripts/ci/linux-smoke.py x11 --exe target/debug/folio
 
