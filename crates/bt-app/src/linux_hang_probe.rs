@@ -63,10 +63,11 @@ impl Instance {
     fn ask(&self, timeout: Duration) -> Answer {
         let started = Instant::now();
         let (id, wake, reply_rx) = {
-            let mut state: MutexGuard<'_, State> = self
+            let mut guard: MutexGuard<'_, State> = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state: &mut State = &mut guard;
             let Some(wake) = state.wake.as_ref().cloned() else {
                 return Answer::NoWindow;
             };
@@ -98,10 +99,11 @@ impl Instance {
 
     fn answer(&self, id: u64) {
         let pending = {
-            let mut state: MutexGuard<'_, State> = self
+            let mut guard: MutexGuard<'_, State> = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state: &mut State = &mut guard;
             if state.pending.as_ref().map(|pending| pending.id) == Some(id) {
                 state.pending.take()
             } else {
@@ -114,10 +116,11 @@ impl Instance {
     }
 
     fn clear_pending(&self, id: u64) {
-        let mut state: MutexGuard<'_, State> = self
+        let mut guard: MutexGuard<'_, State> = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state: &mut State = &mut guard;
         if state.pending.as_ref().map(|pending| pending.id) == Some(id) {
             state.pending.take();
         }
@@ -125,10 +128,11 @@ impl Instance {
 
     fn close(&self) {
         let pending = {
-            let mut state: MutexGuard<'_, State> = self
+            let mut guard: MutexGuard<'_, State> = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state: &mut State = &mut guard;
             state.wake = None;
             state.pending.take()
         };
