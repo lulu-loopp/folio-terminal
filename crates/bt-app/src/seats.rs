@@ -16348,6 +16348,38 @@ pub const PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX: f32 = PREVIEW_NAV_GLYPH_LOGICAL_PX;
 pub const PREVIEW_RAIL_FONT_LOGICAL_PX: f32 = 12.0;
 /// `.pv-addr { padding: 0 10px }` — the address's own inset inside its field.
 pub const PREVIEW_ADDRESS_PAD_X_LOGICAL_PX: f32 = 10.0;
+/// The gap between an open draft and the refusal sentence standing at the
+/// field's end (M-SWEEP-048) — the address's own inset, so the two read as two
+/// things in one field.
+pub const PREVIEW_ADDRESS_REFUSAL_GAP_LOGICAL_PX: f32 = PREVIEW_ADDRESS_PAD_X_LOGICAL_PX;
+
+/// **Where an address field's text is laid out, left to right** — the draft's
+/// run, and the refusal sentence's when one stands (M-SWEEP-048).
+///
+/// One function for the painter and for the dress that measures the draft into
+/// it, [`files_row_name_box`]'s rule: a caret placed against a run the painter
+/// did not use is a caret in the wrong place. Without a refusal the draft has
+/// the field less its inset at both ends, as it always had; with one, the
+/// sentence takes its measured width at the right end and the draft keeps what
+/// is left of the field, one gap short of it.
+#[must_use]
+pub fn preview_address_runs(
+    field: [f32; 4],
+    scale: f32,
+    refusal_width: Option<f32>,
+) -> ([f32; 2], Option<[f32; 2]>) {
+    let inset = (PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
+    let left = field[0] + inset;
+    let right = (field[2] - inset).max(left);
+    match refusal_width {
+        None => ([left, right], None),
+        Some(width) => {
+            let gap = (PREVIEW_ADDRESS_REFUSAL_GAP_LOGICAL_PX * scale).round();
+            let sentence = [(right - width).max(left), right];
+            ([left, (sentence[0] - gap).max(left)], Some(sentence))
+        }
+    }
+}
 /// The address field remains 20 points tall inside the strip (UI-SPEC.md R12).
 pub const PREVIEW_ADDRESS_HEIGHT_LOGICAL_PX: f32 = 20.0;
 /// UI-SPEC.md R12: the 20-point address chip shares the crumb radius, 4.
@@ -19524,6 +19556,11 @@ pub struct PreviewRailContent<'a> {
     pub web: WebHeadState,
     /// The open address editor, when this rail is the one holding it.
     pub edit: Option<PreviewNameEdit<'a>>,
+    /// **The sentence the commit refused the open draft with, and its measured
+    /// width** (M-SWEEP-048) — drawn at the field's right end in the refused
+    /// ink, and the draft is laid out in what is left of the field
+    /// ([`preview_address_draft_box`]).
+    pub refusal: Option<(&'a str, f32)>,
 }
 
 /// Draw one preview rail.
@@ -19754,13 +19791,27 @@ pub(crate) fn push_preview_rail(
                     palette.pane_close_pill,
                 ));
             }
-            let inset = (PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
-            let text_box = [
-                field[0] + inset,
-                geometry.band[1],
-                (field[2] - inset).max(field[0] + inset),
-                geometry.edge[1],
-            ];
+            // A refusal is the open draft's, so it stands only while one is.
+            let refusal = content.refusal.filter(|_| editing);
+            let (draft, sentence) =
+                preview_address_runs(field, scale, refusal.map(|(_, width)| width));
+            let text_box = [draft[0], geometry.band[1], draft[1], geometry.edge[1]];
+            if let (Some((said, _)), Some(sentence)) = (refusal, sentence) {
+                let sentence_box = [sentence[0], geometry.band[1], sentence[1], geometry.edge[1]];
+                labels.push(ChromeLabel {
+                    mono: false,
+                    text: said.to_owned(),
+                    rect: sentence_box,
+                    font_size_px: PREVIEW_RAIL_FONT_LOGICAL_PX * scale,
+                    color: palette.status_err,
+                    align_right: true,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(sentence_box),
+                });
+            }
             // The editor's own furniture, from the same call the tab strip and
             // the preview head make: one field, one selection band, one caret,
             // centred on the line rather than filling the row.
@@ -51479,6 +51530,17 @@ mod tests {",
         web: WebHeadState,
         pointer: ChromePointer,
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        page_rail_editing(web, pointer, None, None)
+    }
+
+    /// [`page_rail`] with the address field open on `edit`, and the sentence
+    /// the commit refused it with standing at the field's end.
+    fn page_rail_editing(
+        web: WebHeadState,
+        pointer: ChromePointer,
+        edit: Option<PreviewNameEdit<'_>>,
+        refusal: Option<(&str, f32)>,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.add_preview(&metrics).expect("the preview seat lands");
@@ -51501,7 +51563,8 @@ mod tests {",
                 meta: "",
                 flip_to_source: false,
                 web,
-                edit: None,
+                edit,
+                refusal,
             },
         )];
         let chrome = build_chrome_for_tabs(
@@ -51554,6 +51617,89 @@ mod tests {",
         );
         let WindowChrome { seats, .. } = chrome;
         (seats.quads, seats.labels, seats.sprites)
+    }
+
+    /// RED (M-SWEEP-048) — **what the commit refused an open address with is
+    /// said in the field: at its end, in the draft's refused ink, and the draft
+    /// keeps the rest of the field.**
+    ///
+    /// The field's colour is computed on every keystroke and never asks the
+    /// disk, so "the path names no file" is known only at Enter; the field says
+    /// it where the typing is (§7.7 ④). The runs are
+    /// [`preview_address_runs`]'s, which the dress fits the caret into.
+    ///
+    /// MUTATION: drop the sentence's label from `push_preview_rail` and the
+    /// first assertion goes red; lay the draft over the whole field (the runs
+    /// without the refusal) and the overlap assertion does.
+    #[test]
+    fn a_refused_address_says_why_at_the_end_of_its_field() {
+        const SAID: &str = "No such file";
+        const DRAFT: &str = "./缺失的笔记.md";
+        let edit = PreviewNameEdit {
+            text: DRAFT,
+            caret_px: 0.0,
+            selection: None,
+            caret_lit: false,
+            refused: true,
+        };
+        let (_, labels, _) = page_rail_editing(
+            WebHeadState::default(),
+            ChromePointer::default(),
+            Some(edit),
+            Some((SAID, 70.0)),
+        );
+        let said = labels
+            .iter()
+            .find(|label| label.text == SAID)
+            .expect("the refusal is said in the field");
+        let draft = labels
+            .iter()
+            .find(|label| label.text == DRAFT)
+            .expect("the draft is drawn");
+        assert_eq!(said.color, draft.color, "in the draft's refused ink");
+        assert!(said.align_right, "at the field's end");
+        assert!(
+            draft.rect[2] <= said.rect[0],
+            "the draft ends before the sentence starts: {:?} against {:?}",
+            draft.rect,
+            said.rect
+        );
+        assert!(
+            said.rect[2] - said.rect[0] + 0.5 >= 70.0,
+            "the sentence has the width it was measured at: {:?}",
+            said.rect
+        );
+        // A refusal is the open draft's: a field at rest says none.
+        let (_, resting, _) = page_rail_editing(
+            WebHeadState::default(),
+            ChromePointer::default(),
+            None,
+            Some((SAID, 70.0)),
+        );
+        assert!(!resting.iter().any(|label| label.text == SAID));
+    }
+
+    /// PIN (M-SWEEP-048) — **the draft's run and the sentence's are one
+    /// arithmetic**: without a refusal the draft has the field less its inset
+    /// at both ends; with one, the sentence takes its width at the right end
+    /// and the draft stops one gap short of it, never past the field's left.
+    #[test]
+    fn an_address_field_lays_its_draft_beside_a_refusal() {
+        let field = [100.0, 0.0, 400.0, 20.0];
+        let inset = PREVIEW_ADDRESS_PAD_X_LOGICAL_PX;
+        let gap = PREVIEW_ADDRESS_REFUSAL_GAP_LOGICAL_PX;
+        assert_eq!(
+            preview_address_runs(field, 1.0, None),
+            ([100.0 + inset, 400.0 - inset], None)
+        );
+        let (draft, sentence) = preview_address_runs(field, 1.0, Some(80.0));
+        assert_eq!(sentence, Some([400.0 - inset - 80.0, 400.0 - inset]));
+        assert_eq!(draft, [100.0 + inset, 400.0 - inset - 80.0 - gap]);
+        // A sentence wider than the field leaves the draft no room, not less
+        // than none.
+        let (draft, sentence) = preview_address_runs(field, 1.0, Some(1_000.0));
+        assert_eq!(draft, [100.0 + inset, 100.0 + inset]);
+        assert_eq!(sentence, Some([100.0 + inset, 400.0 - inset]));
     }
 
     fn glyphs(sprites: &[ChromeSprite], mark: ChromeMark) -> Vec<ChromeSprite> {

@@ -13,7 +13,7 @@ use crate::{
     restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
     strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
 };
-use crate::{LeafView, TextScale};
+use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -3228,15 +3228,20 @@ impl Runtime<'_> {
             // up red.
             if commit && !editor.text().trim().is_empty() {
                 let engine = self.app.settings_store.loaded().search_engine;
-                let compositor_outcomes = {
+                let home = profiles::home_directory(&bt_pty::SystemShellEnvironment);
+                let commit = {
                     let window = &mut *self.window;
-                    window
-                        .web
-                        .get_mut(&leaf)
-                        .map(|web| web.go_to(editor.text(), engine, &window.compositor))
+                    window.web.get_mut(&leaf).map(|web| {
+                        let folder = web.local_folder();
+                        let frame = webhost::LocalFrame {
+                            home: home.as_deref(),
+                            folder: folder.as_deref(),
+                        };
+                        web.go_to(editor.text(), engine, frame, &window.compositor)
+                    })
                 };
-                if let Some((taken, outcomes)) = compositor_outcomes {
-                    if taken {
+                match commit {
+                    Some(webhost::AddressCommit::Taken(outcomes)) => {
                         // The seat has been asked to go somewhere, so it is a
                         // page whatever comes back — a failure has a card of its
                         // own to stand on it. Spent before the outcomes are
@@ -3244,11 +3249,27 @@ impl Runtime<'_> {
                         // would ask again.
                         self.forget_a_blank_page(leaf);
                         self.apply_web_outcomes(leaf, outcomes)?;
-                    } else if exit.may_stay_open() {
+                    }
+                    // **A local file that is not a page opens on this pane as a
+                    // document** (M-SWEEP-048) — the door a file dropped here
+                    // takes, on the surface the page is drawn on. The pane is
+                    // the document's now, so a blank page minted for the field
+                    // is not withdrawn under it.
+                    Some(webhost::AddressCommit::Document(path)) => {
+                        self.forget_a_blank_page(leaf);
+                        let surface = self.surface_of_page(leaf);
+                        self.open_preview_onto(surface, path)?;
+                    }
+                    Some(webhost::AddressCommit::Refused(refusal)) if exit.may_stay_open() => {
                         // Enter, refused: the field stays exactly where the
                         // typing is, and the page does not move. Nothing else on
                         // this path runs — a blank page kept for a field that is
-                        // still open is a blank page still being used.
+                        // still open is a blank page still being used. What
+                        // only the commit could know is said in the field.
+                        let mut editor = editor;
+                        if let Some(refusal) = refusal {
+                            editor.refuse_address(refusal);
+                        }
                         self.window.rename = Some(editor);
                         self.refresh_chrome();
                         return self.present_chrome_change();
@@ -3256,6 +3277,7 @@ impl Runtime<'_> {
                     // A blur the door refused falls through: the address was not
                     // taken, so the page does not move — and the field goes,
                     // because leaving is what a blur already is.
+                    Some(webhost::AddressCommit::Refused(_)) | None => {}
                 }
             }
             // Escape, a click away, or an empty box: the field is gone, and a

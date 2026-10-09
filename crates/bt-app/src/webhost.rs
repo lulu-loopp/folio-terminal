@@ -1445,21 +1445,129 @@ pub(crate) enum AddressVerdict {
     /// a path that names nothing presses to nothing, which is the answer §7.10 ③
     /// already gives for a row naming a file that has moved.
     LocalPage(PathBuf),
+    /// **A local file that is not a page**, spelled as a path on this machine
+    /// (M-SWEEP-048, ruling 2026-10-09) — absolute, under `~`, or relative to
+    /// the folder of the local page this seat shows.
+    ///
+    /// It opens the way a file dropped on this pane does: as a document preview
+    /// on this pane, never handed to the engine as a page. The disk is asked at
+    /// the commit, for [`Self::LocalPage`]'s reason.
+    Document(PathBuf),
     /// An address the door takes, or the search a phrase was composed into.
     Address(String),
     /// The door said no, and the field says so where the typing is.
     Refuse,
 }
 
+/// **What a commit of the address field did** — [`WebSeat::go_to`]'s answer.
+#[derive(Debug)]
+pub(crate) enum AddressCommit {
+    /// The seat was asked to go somewhere: these are the outcomes the state
+    /// machine had to say about starting it.
+    Taken(Vec<WebOutcome>),
+    /// A local file that is not a page, and it is there: the window opens it
+    /// on this seat's surface through the document door, which is a window's
+    /// verb and not a seat's.
+    Document(PathBuf),
+    /// Not taken, and the page does not move. `Some` is the sentence the field
+    /// says; `None` is a refusal the field's own colour already says.
+    Refused(Option<AddressRefusal>),
+}
+
+/// **A refusal only the commit can know**, said in the field at its end
+/// (M-SWEEP-048) — the colour is computed on every keystroke and never asks
+/// the disk, so what the disk said at Enter is said in words.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AddressRefusal {
+    /// The path names no file on this machine.
+    NoSuchFile,
+}
+
+impl AddressRefusal {
+    /// The sentence, in the reader's language.
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::NoSuchFile => crate::i18n::Text::WebAddressNoSuchFile.text(),
+        }
+    }
+}
+
+/// What the disk says about a local path an address commit names — the half of
+/// [`WebSeat::go_to`] that needs no engine.
+#[derive(Debug, PartialEq)]
+enum LocalCommit {
+    /// A page, minted from the disk's own spelling of it.
+    Page { mint: Mint, url: String },
+    /// A file that is not a page, and it is there.
+    Document(PathBuf),
+    /// Not taken; `Some` is what the field says.
+    Refused(Option<AddressRefusal>),
+}
+
+/// **The one disk question an address commit asks, for a page and a document
+/// alike** — and a file that is not there is said in the field (M-SWEEP-048)
+/// rather than pressing to nothing.
+///
+/// A page then takes **the three steps every stored spelling of a local page
+/// takes** (§7.10 ③): back to the disk, canonicalise, and mint from *that*. The
+/// typed string contributed a name and no permission, exactly as a switcher row
+/// does — and it goes out under a mint, because the engine's own gate refuses
+/// `file:` to everything else. A document keeps the spelling typed and not the
+/// disk's: the document door names what it opens from the path it is handed,
+/// as it does for a file dropped on the pane.
+fn commit_local(path: PathBuf, page: bool) -> LocalCommit {
+    let Ok(canonical) = std::fs::canonicalize(&path) else {
+        return LocalCommit::Refused(Some(AddressRefusal::NoSuchFile));
+    };
+    if !page {
+        return LocalCommit::Document(path);
+    }
+    let Ok(mint) = Mint::file(&canonical) else {
+        return LocalCommit::Refused(None);
+    };
+    let Some(url) = mint.target().map(ToOwned::to_owned) else {
+        return LocalCommit::Refused(None);
+    };
+    LocalCommit::Page { mint, url }
+}
+
+/// **The folders a path typed into an address field can stand in** — the
+/// account's home for a `~` spelling, and the folder of the local page the seat
+/// shows for a `./` or `../` one, which is the frame a relative reference in
+/// that page means as well.
+///
+/// Either may be absent: a seat showing a web page has no folder, and a
+/// relative spelling there names nothing on this machine.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LocalFrame<'a> {
+    pub(crate) home: Option<&'a Path>,
+    pub(crate) folder: Option<&'a Path>,
+}
+
 /// The judgement. [`WebSeat::go_to`] and [`WebSeat::would_go_to`] are its two
 /// readers and it has no third.
-pub(crate) fn judge_address(input: &str, engine: SearchEngineV1) -> AddressVerdict {
+///
+/// **A path on this machine is judged before the address door** (M-SWEEP-048):
+/// the door never takes a bare path (`D:` is a scheme to it, which
+/// `webnav::a_local_file_is_shown_and_typed_as_a_path_and_loaded_as_a_uri`
+/// pins), and a string that is a path here is a file's address, never a search
+/// phrase — on a Mac `/Users/x/notes.md` was searched for, where the same
+/// question on Windows was refused.
+pub(crate) fn judge_address(
+    input: &str,
+    engine: SearchEngineV1,
+    frame: LocalFrame<'_>,
+) -> AddressVerdict {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return AddressVerdict::Draft;
     }
-    if let Some(path) = local_page_path(trimmed) {
-        return AddressVerdict::LocalPage(path);
+    if let Some(spelling) = crate::webnav::local_path_spelling(trimmed) {
+        return match local_path_of(spelling, frame) {
+            Some(path) if local_page(&path) => AddressVerdict::LocalPage(path),
+            Some(path) => AddressVerdict::Document(path),
+            None => AddressVerdict::Refuse,
+        };
     }
     // **A non-address is a search, and the search is an address** (方案 §0). The
     // composed URL goes back through the same door a typed one does — this
@@ -1475,7 +1583,22 @@ pub(crate) fn judge_address(input: &str, engine: SearchEngineV1) -> AddressVerdi
     }
 }
 
-/// Whether this text is a local page, spelled as a path.
+/// The path a [`crate::webnav::LocalSpelling`] names in `frame`, its `.` and
+/// `..` folded out the way a document's relative link is
+/// ([`crate::preview::normalized`]) — `None` for a share, and for a spelling
+/// whose folder this seat does not have.
+fn local_path_of(spelling: crate::webnav::LocalSpelling, frame: LocalFrame<'_>) -> Option<PathBuf> {
+    use crate::webnav::LocalSpelling;
+    let path = match spelling {
+        LocalSpelling::Absolute(path) => path,
+        LocalSpelling::Home(rest) => frame.home?.join(rest),
+        LocalSpelling::Relative(rest) => frame.folder?.join(rest),
+        LocalSpelling::Network => return None,
+    };
+    Some(crate::preview::normalized(&path))
+}
+
+/// Whether this local path is a page.
 ///
 /// Two questions and both of them are somebody else's: `webnav` owns "is this a
 /// path this window could mint at all" (drive-absolute, no `..`, no network
@@ -1487,10 +1610,9 @@ pub(crate) fn judge_address(input: &str, engine: SearchEngineV1) -> AddressVerdi
 /// spelling this window ever shows, and it is the string that may have been
 /// edited into something else; it stays refused, which is what
 /// `the_field_reddens_for_a_refusal_and_not_for_a_word` has always pinned.
-fn local_page_path(trimmed: &str) -> Option<PathBuf> {
-    crate::webnav::file_url_of_local_path(trimmed)?;
-    let path = PathBuf::from(trimmed);
-    crate::preview::path_names_a_page(&path).then_some(path)
+fn local_page(path: &Path) -> bool {
+    crate::webnav::file_url_of_local_path(&path.to_string_lossy()).is_some()
+        && crate::preview::path_names_a_page(path)
 }
 
 // ── Zoom ───────────────────────────────────────────────────────────────────
@@ -4104,37 +4226,17 @@ impl WebSeat {
     /// turning `--err` (§7.7 ④'s 「说在打字的地方」). A card would be telling a
     /// reader what they are already looking at.
     ///
-    /// The bool is whether the address was taken; the outcomes are whatever the
-    /// state machine had to say about starting it.
+    /// What the commit did is [`AddressCommit`]; the outcomes it carries are
+    /// whatever the state machine had to say about starting a navigation.
     pub(crate) fn go_to(
         &mut self,
         input_ref: &str,
         engine: SearchEngineV1,
+        frame: LocalFrame<'_>,
         compositor: &bt_platform::Compositor,
-    ) -> (bool, Vec<WebOutcome>) {
-        match judge_address(input_ref, engine) {
-            AddressVerdict::Draft | AddressVerdict::Refuse => (false, Vec::new()),
-            // **The three steps every stored spelling of a local page takes**
-            // (§7.10 ③): back to the disk, canonicalise, and mint from *that*.
-            // The typed string contributed a name and no permission, exactly as
-            // a switcher row does — and it goes out under a mint, because the
-            // engine's own gate refuses `file:` to everything else.
-            //
-            // A file that is not there is a target this window cannot mint, and
-            // nothing happens: the same answer §7.10 ③ already gives for a row
-            // naming a file that has been moved away.
-            AddressVerdict::LocalPage(path) => {
-                let Ok(canonical) = std::fs::canonicalize(&path) else {
-                    return (false, Vec::new());
-                };
-                let Ok(mint) = Mint::file(&canonical) else {
-                    return (false, Vec::new());
-                };
-                let Some(url) = mint.target().map(ToOwned::to_owned) else {
-                    return (false, Vec::new());
-                };
-                (true, self.go(&url, mint, compositor))
-            }
+    ) -> AddressCommit {
+        let (path, page) = match judge_address(input_ref, engine, frame) {
+            AddressVerdict::Draft | AddressVerdict::Refuse => return AddressCommit::Refused(None),
             // Through the machine and not straight at the engine: §4's
             // `desired_url` is what a seat that is still coming up remembers, and
             // a navigation issued around it would be one the recovery model never
@@ -4143,8 +4245,17 @@ impl WebSeat {
                 let effect = self.machine.request(&target);
                 let mut outcomes = Vec::new();
                 self.apply(effect, compositor, &mut outcomes);
-                (true, outcomes)
+                return AddressCommit::Taken(outcomes);
             }
+            AddressVerdict::LocalPage(path) => (path, true),
+            AddressVerdict::Document(path) => (path, false),
+        };
+        match commit_local(path, page) {
+            LocalCommit::Page { mint, url } => {
+                AddressCommit::Taken(self.go(&url, mint, compositor))
+            }
+            LocalCommit::Document(path) => AddressCommit::Document(path),
+            LocalCommit::Refused(refusal) => AddressCommit::Refused(refusal),
         }
     }
 
@@ -4155,8 +4266,16 @@ impl WebSeat {
     /// since the day the two drifted apart cost a reader a red line over this
     /// window's own answer. An empty field is not wrong — it is unfinished — so
     /// it does not light up red.
-    pub(crate) fn would_go_to(input: &str, engine: SearchEngineV1) -> bool {
-        !matches!(judge_address(input, engine), AddressVerdict::Refuse)
+    pub(crate) fn would_go_to(input: &str, engine: SearchEngineV1, frame: LocalFrame<'_>) -> bool {
+        !matches!(judge_address(input, engine, frame), AddressVerdict::Refuse)
+    }
+
+    /// **The folder of the local page this seat shows** — the frame a `./` or
+    /// `../` spelling typed into its address field stands in ([`LocalFrame`]).
+    /// `None` for a seat that shows a web address, or nothing yet.
+    pub(crate) fn local_folder(&self) -> Option<PathBuf> {
+        let page = crate::webnav::LocalFileUrl::parse(self.identity()?)?;
+        page.path().parent().map(Path::to_path_buf)
     }
 
     /// One notch of `Ctrl`+wheel.
@@ -6091,7 +6210,9 @@ mod search_tests {
     /// searched. An empty field is unfinished rather than wrong.
     #[test]
     fn the_field_reddens_for_a_refusal_and_not_for_a_word() {
-        let red = |input: &str| !WebSeat::would_go_to(input, SearchEngineV1::DuckDuckGo);
+        let red = |input: &str| {
+            !WebSeat::would_go_to(input, SearchEngineV1::DuckDuckGo, LocalFrame::default())
+        };
         assert!(!red(""));
         assert!(!red("   "));
         assert!(!red("localhost:5173/app"));
@@ -6118,25 +6239,17 @@ mod search_tests {
     #[test]
     fn the_path_this_window_seeds_is_not_red_while_it_is_being_typed() {
         let engine = SearchEngineV1::DuckDuckGo;
+        let taken = |input: &str| WebSeat::would_go_to(input, engine, LocalFrame::default());
         // The draft is this machine's own spelling of the page's path.
         let seeded = crate::test_support::host_spelling;
-        assert!(WebSeat::would_go_to(
-            &seeded(r"D:\Developer\folio-pdf-test.pdf"),
-            engine
-        ));
-        assert!(WebSeat::would_go_to(
-            &seeded(r"C:\Users\me\report.html"),
-            engine
-        ));
-        assert!(WebSeat::would_go_to(
-            &seeded(r"D:\a folder\notes#1.html"),
-            engine
-        ));
+        assert!(taken(&seeded(r"D:\Developer\folio-pdf-test.pdf")));
+        assert!(taken(&seeded(r"C:\Users\me\report.html")));
+        assert!(taken(&seeded(r"D:\a folder\notes#1.html")));
         // And nothing was loosened: rubbish is still rubbish, and a `file:`
         // *string* is still somebody else's string.
-        assert!(!WebSeat::would_go_to("javascript:alert(1)", engine));
-        assert!(!WebSeat::would_go_to("file:///C:/Windows/win.ini", engine));
-        assert!(WebSeat::would_go_to("https://example.com/", engine));
+        assert!(!taken("javascript:alert(1)"));
+        assert!(!taken("file:///C:/Windows/win.ini"));
+        assert!(taken("https://example.com/"));
     }
 
     /// PIN (user report 2026-08-25) — **the colour and the commit are one
@@ -6148,15 +6261,73 @@ mod search_tests {
     /// business, and a name this window does not open as a page is not made into
     /// one by being typed into a page's address field.
     ///
-    /// MUTATION: drop `path_names_a_page` from `local_page_path` and the
-    /// `notes.md` line goes red — a document would be handed to the engine
-    /// because it was typed at a seat that happened to hold a page.
+    /// RED (M-SWEEP-048) — **the commit asks the disk once, for a page and a
+    /// document alike, and a path that names no file is said in the field.**
+    ///
+    /// A document that is there is handed back in the spelling typed — the
+    /// document door names what it opens from it — and a page is minted from
+    /// the disk's own spelling.
+    ///
+    /// MUTATION: answer `Refused(None)` for a missing file in `commit_local` and
+    /// the first assertion goes red: Enter over a path to nothing would press to
+    /// nothing, with no word said.
+    #[test]
+    fn a_path_that_names_no_file_is_said_in_the_field() {
+        let folder = bt_testpath::temp_path("m-sweep-address-commit");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("a scratch folder");
+        let notes = folder.join("笔记.md");
+        let page = folder.join("报告.html");
+        std::fs::write(&notes, "# 笔记").expect("a document");
+        std::fs::write(&page, "<p>报告</p>").expect("a page");
+
+        assert_eq!(
+            commit_local(folder.join("不在.md"), false),
+            LocalCommit::Refused(Some(AddressRefusal::NoSuchFile))
+        );
+        assert_eq!(
+            commit_local(folder.join("不在.html"), true),
+            LocalCommit::Refused(Some(AddressRefusal::NoSuchFile)),
+            "a page that is not there is said the same way"
+        );
+        assert_eq!(
+            commit_local(notes.clone(), false),
+            LocalCommit::Document(notes)
+        );
+        assert!(
+            matches!(
+                commit_local(page, true),
+                LocalCommit::Page { ref url, .. } if url.starts_with("file:")
+            ),
+            "a page is minted into the one `file:` URL the seat may load"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// **And a path is a path on every platform** (M-SWEEP-048, ruling
+    /// 2026-10-09): a string that parses as a local filesystem path *here* —
+    /// absolute, under `~`, or `./`/`../`-relative — is a document address and
+    /// never a search phrase. The table is each spelling against both
+    /// platforms; a run asserts its own platform's column.
+    ///
+    /// MUTATION: drop `path_names_a_page` from `local_page` and the `notes.md`
+    /// line goes red — a document would be handed to the engine because it was
+    /// typed at a seat that happened to hold a page. Answer `None` from
+    /// `webnav::local_path_spelling` (search everything with a slash) and the
+    /// table goes red: the POSIX path on a Mac, and the `~` and relative rows on
+    /// both.
     #[test]
     fn the_field_and_the_commit_read_one_judgement() {
         let engine = SearchEngineV1::DuckDuckGo;
-        let judged = |input: &str| judge_address(input, engine);
         // A path typed into the field, in this machine's own spelling.
         let host_path = crate::test_support::host_path;
+        let home = host_path(r"C:\Users\张三");
+        let folder = host_path(r"D:\Developer\报告");
+        let frame = LocalFrame {
+            home: Some(&home),
+            folder: Some(&folder),
+        };
+        let judged = |input: &str| judge_address(input, engine, frame);
         let report = host_path(r"D:\Developer\report.html");
         let notes = host_path(r"D:\Developer\notes.md");
 
@@ -6177,8 +6348,78 @@ mod search_tests {
         // A document is not made into a page by the field it was typed into: the
         // engine lane is `path_names_a_page`'s answer everywhere else in this
         // window, and a second answer here would be a `.md` that opens as a page
-        // from the address row and as text from every other door.
-        assert_eq!(judged(&notes.to_string_lossy()), AddressVerdict::Refuse);
+        // from the address row and as text from every other door. It opens as a
+        // document, as a file dropped on the pane does.
+        assert_eq!(
+            judged(&notes.to_string_lossy()),
+            AddressVerdict::Document(notes.clone())
+        );
+
+        // The table: one spelling per row, the Windows column and the Mac
+        // column. `Search` is the phrase composed into the engine's address.
+        #[derive(Debug, PartialEq)]
+        enum Lands {
+            Document(PathBuf),
+            Search,
+            Refused,
+        }
+        let lands = |verdict: AddressVerdict| match verdict {
+            AddressVerdict::LocalPage(path) | AddressVerdict::Document(path) => {
+                Lands::Document(path)
+            }
+            AddressVerdict::Address(target) if target.starts_with(search_prefix(engine)) => {
+                Lands::Search
+            }
+            AddressVerdict::Refuse => Lands::Refused,
+            other => panic!("{other:?} is not a row of this table"),
+        };
+        let rows = [
+            // A Windows path: a document there, an unknown scheme on a Mac.
+            (
+                r"D:\Developer\notes.md",
+                Lands::Document(PathBuf::from(r"D:\Developer\notes.md")),
+                Lands::Refused,
+            ),
+            // A POSIX path: a root-relative name on Windows, which is no path
+            // this rule takes, and a document on a Mac.
+            (
+                "/Users/me/笔记.md",
+                Lands::Search,
+                Lands::Document(PathBuf::from("/Users/me/笔记.md")),
+            ),
+            // Under the account's home, on both.
+            (
+                "~/notes.md",
+                Lands::Document(home.join("notes.md")),
+                Lands::Document(home.join("notes.md")),
+            ),
+            // Relative to the folder of the page the seat shows, `..` folded.
+            (
+                "./notes.md",
+                Lands::Document(folder.join("notes.md")),
+                Lands::Document(folder.join("notes.md")),
+            ),
+            (
+                "../说明.md",
+                Lands::Document(host_path(r"D:\Developer\说明.md")),
+                Lands::Document(host_path(r"D:\Developer\说明.md")),
+            ),
+            // A phrase with a slash in it is a phrase.
+            ("a/b c", Lands::Search, Lands::Search),
+        ];
+        for (typed, on_windows, on_a_mac) in rows {
+            assert_eq!(
+                lands(judged(typed)),
+                crate::test_support::on_this_host(on_windows, on_a_mac),
+                "{typed:?} typed into a page's address field"
+            );
+        }
+        // A relative spelling on a seat with no folder — a web page's — names no
+        // file here, and the field says so rather than searching for it.
+        assert_eq!(
+            judge_address("./notes.md", engine, LocalFrame::default()),
+            AddressVerdict::Refuse
+        );
         // A network path never becomes a local page: it is refused at the mint,
         // which is where this product has always refused one.
         assert!(

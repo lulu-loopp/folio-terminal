@@ -19777,6 +19777,10 @@ struct PreviewRailFrame {
     /// written in `--err` where it is being typed. It moved down here with the
     /// field on 2026-08-24.
     refused: bool,
+    /// **What the commit said about the draft standing in the field** — the
+    /// sentence and its measured width — when only the commit could know it
+    /// (M-SWEEP-048: a path that names no file). Drawn at the field's end.
+    refusal: Option<(String, f32)>,
     flip_to_source: bool,
     web: seats::WebHeadState,
 }
@@ -23025,7 +23029,17 @@ struct TabRename {
     /// itself, and typing the refused name back in shows the refusal again —
     /// which is right, because it is still refused. One field, and no hook in
     /// any verb.
-    refused: Option<(String, files::NewNameRefusal)>,
+    refused: Option<(String, EditorRefusal)>,
+}
+
+/// The two kinds of refusal a submission of [`TabRename`]'s draft can raise —
+/// one per door that refuses at the commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorRefusal {
+    /// A new entry's name the folder would not take (D8(a)).
+    NewName(files::NewNameRefusal),
+    /// A page's address the disk said no to (M-SWEEP-048).
+    Address(webhost::AddressRefusal),
 }
 
 impl TabRename {
@@ -23372,12 +23386,40 @@ impl TabRename {
     /// The draft is kept with it; see [`Self::refused`] for why that is the
     /// whole of the invalidation.
     fn refuse(&mut self, refusal: files::NewNameRefusal) {
-        self.refused = Some((self.field.text().to_owned(), refusal));
+        self.refused = Some((
+            self.field.text().to_owned(),
+            EditorRefusal::NewName(refusal),
+        ));
+    }
+
+    /// [`Self::refuse`] for a page's address: what the disk said at the commit,
+    /// kept against the draft it was said about.
+    fn refuse_address(&mut self, refusal: webhost::AddressRefusal) {
+        self.refused = Some((
+            self.field.text().to_owned(),
+            EditorRefusal::Address(refusal),
+        ));
     }
 
     /// The refusal standing against the draft **as it is now** — `None` the
     /// moment a character changes it.
     fn refusal(&self) -> Option<files::NewNameRefusal> {
+        match self.standing_refusal()? {
+            EditorRefusal::NewName(refusal) => Some(refusal),
+            EditorRefusal::Address(_) => None,
+        }
+    }
+
+    /// [`Self::refusal`] for a page's address field.
+    fn address_refusal(&self) -> Option<webhost::AddressRefusal> {
+        match self.standing_refusal()? {
+            EditorRefusal::Address(refusal) => Some(refusal),
+            EditorRefusal::NewName(_) => None,
+        }
+    }
+
+    /// Whichever refusal stands against the draft as it is now.
+    fn standing_refusal(&self) -> Option<EditorRefusal> {
         self.refused
             .as_ref()
             .filter(|(draft, _)| draft == self.field.text())

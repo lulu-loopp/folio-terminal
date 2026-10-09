@@ -13,6 +13,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - On a Mac, a pane whose shell would not start and fell back to another one says so in its first line instead of closing. <!-- zh: pending M-SWEEP-048 -->
+- Typing a file path into a page's address bar — `/Users/you/notes.md`, `~/notes.md` or `./notes.md` — opens the file on a Mac as it does on Windows, instead of searching the web for it; a document opens as a document, and a path to nothing says No such file in the address bar. <!-- zh: pending M-SWEEP-048 -->
 - On a Mac, a document's link to a network share answers Ctrl+click the same way the same link in the terminal does. <!-- zh: pending M-SWEEP-048 -->
 - On a Mac with two copies of Folio installed, opening the second one joins the one already running instead of opening a window that saves nothing; this includes the copy an update restores after it fails. <!-- zh: pending T-MAC-CROSS-COPY-HANDOVER -->
 - An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: pending T-UPDATE-RENAME-RETRY -->

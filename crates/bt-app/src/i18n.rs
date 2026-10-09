@@ -2229,6 +2229,10 @@ text_entries! {
     WebFailBlockedSay,
     /// Its one verb — the address is on the card, so the verb is to take it.
     WebFailBlockedVerb,
+    /// What a page's address field says when the path typed into it names no
+    /// file on this machine (M-SWEEP-048) — said in the field, at its end, in
+    /// the field's refused ink.
+    WebAddressNoSuchFile,
     /// The `Download refused` card's two sentences. The second is the fact, not
     /// prose: it says which property of the request cannot cross a plain link,
     /// which is the difference between this card and one that could offer a
@@ -5316,6 +5320,11 @@ impl Text {
                 "这个地址不在预览中打开。",
             ),
             Self::WebFailBlockedVerb => pick(lang, "Copy address", "复制地址"),
+            Self::WebAddressNoSuchFile => pick(
+                lang,
+                "No such file",
+                "No such file", // zh: pending M-SWEEP-048
+            ),
             Self::WebFailDownloadSay => pick(
                 lang,
                 "Start this download in your browser instead.",
@@ -6115,6 +6124,9 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
+        (Self::WebAddressNoSuchFile, HostPlatform::Windows),
+        (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
         // 0.4.8 E1: the cards of an update another Folio left unfinished.
         (Self::UpdateFailedNewer, HostPlatform::Windows),
         (Self::UpdateFailedNewer, HostPlatform::MacOs),

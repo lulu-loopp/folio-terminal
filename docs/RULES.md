@@ -1703,6 +1703,12 @@ again on every theme or setting change; nothing else about a page is changed.
 (0.4.5 ticket 60; owner's ruling 2026-09-25, option A): only for a profile whose receipt
 says a page has committed there, one spare per process, never replenished, handed over by
 `WebSeat::rehost`; the controller stays on the window thread (§5.2, ruling 2026-09-24).
+2026-10-09 *a path typed into a page's address field is a file's address on every
+platform* (M-SWEEP-048): a string that parses as a local path on this machine —
+absolute, `~`-rooted, or `./`/`../`-relative to the folder of the local page the seat
+shows — is never a search phrase; a page opens in the seat as before, any other file
+opens as a document on the same pane through the document door, and a path that names
+no file is refused in the field with the words *No such file*. A share is refused.
 
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,

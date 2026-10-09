@@ -941,7 +941,7 @@ impl Runtime<'_> {
 
     /// **The surface a page is drawn on** — its pane, or the float carrying it — so that what is
     /// said about the page is said where it is.
-    fn surface_of_page(&self, leaf: LeafId) -> PreviewSurface {
+    pub(in crate::runtime) fn surface_of_page(&self, leaf: LeafId) -> PreviewSurface {
         self.window
             .float
             .drawn()

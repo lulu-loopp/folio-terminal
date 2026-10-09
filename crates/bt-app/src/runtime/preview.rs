@@ -1103,7 +1103,11 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         scale: f32,
         measure_in: seats::PreviewRailMeasure,
-    ) -> (seats::PreviewRailMeasure, Option<seats::TabEdit>) {
+    ) -> (
+        seats::PreviewRailMeasure,
+        Option<seats::TabEdit>,
+        Option<(String, f32)>,
+    ) {
         // **The page this surface is showing, docked or torn off** (§7.7 ⑩ 欠账,
         // 2026-08-25). The editor was keyed by leaf on the day it was written
         // and is keyed by leaf still — what moved is only the question of which
@@ -1113,27 +1117,39 @@ impl Runtime<'_> {
             |editor| matches!(editor.subject, RenameSubject::WebAddress { leaf: at } if Some(at) == here),
         );
         if !editing {
-            return (measure_in, None);
+            return (measure_in, None, None);
         }
         let measure_in = seats::PreviewRailMeasure {
             address_width: ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD,
             ..measure_in
         };
         let Some(band) = self.rail_band(surface, scale) else {
-            return (measure_in, None);
+            return (measure_in, None, None);
         };
         let Some(field) = seats::preview_rail_geometry_in(band, scale, &measure_in).address else {
-            return (measure_in, None);
+            return (measure_in, None, None);
         };
-        let inset = (seats::PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
-        let box_ = [
-            field[0] + inset,
-            field[1],
-            (field[2] - inset).max(field[0] + inset),
-            field[3],
-        ];
-        let box_width = box_[2] - box_[0];
         let font = seats::PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
+        // **What the commit said, measured before the draft is** (M-SWEEP-048):
+        // the sentence takes its width at the field's end, so the draft is
+        // fitted into what is left — the painter's own runs.
+        let refusal = self
+            .window
+            .rename
+            .as_ref()
+            .and_then(TabRename::address_refusal)
+            .map(|refusal| {
+                let said = refusal.text();
+                let width = self
+                    .window
+                    .renderer
+                    .measure_chrome_text(&mut self.app.gpu, said, font);
+                (said.to_owned(), width)
+            });
+        let (draft, _) =
+            seats::preview_address_runs(field, scale, refusal.as_ref().map(|(_, width)| *width));
+        let box_ = [draft[0], field[1], draft[1], field[3]];
+        let box_width = box_[2] - box_[0];
         let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
             .round()
             .max(1.0);
@@ -1142,7 +1158,7 @@ impl Runtime<'_> {
         // a string is, and this is the one place the two have to meet.
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let Some(editor) = self.window.rename.as_mut() else {
-            return (measure_in, None);
+            return (measure_in, None, None);
         };
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
         // An address has no address under it either: the field is seeded with
@@ -1158,7 +1174,7 @@ impl Runtime<'_> {
         // ruling moved as far as an IME is concerned.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        (measure_in, Some(edit))
+        (measure_in, Some(edit), refusal)
     }
 
     /// **The open crumb editor, measured into the segment it is drawn in** (B5,
@@ -3470,6 +3486,7 @@ impl Runtime<'_> {
             meta: String::new(),
             edit: None,
             refused: false,
+            refusal: None,
             flip_to_source: false,
             web: seats::WebHeadState::default(),
         };
@@ -3579,10 +3596,11 @@ impl Runtime<'_> {
                 };
             }
         }
-        let (tools, edit) =
+        let (tools, edit, refusal) =
             self.dress_preview_address_editor(surface, scale, frame.measure.clone());
         frame.measure = tools;
         frame.edit = edit;
+        frame.refusal = refusal;
         // **And the tail's box, when this rail is the one holding it** (B5). The
         // two are mutually exclusive by construction — an `Address` rail has no
         // crumbs and a `Crumbs` rail has no address — so this cannot overwrite an
@@ -3598,15 +3616,27 @@ impl Runtime<'_> {
         // predicate that judged a phrase against a different engine's template
         // than the one Enter would use is a second door wearing the first one's
         // name.
+        //
+        // **And the same frame a path is resolved in** (M-SWEEP-048): this
+        // account's home and the folder of the local page the seat shows, read
+        // where the commit reads them.
         let engine = self.app.settings_store.loaded().search_engine;
-        frame.refused = matches!(
-            self.window.rename.as_ref().map(|editor| &editor.subject),
-            Some(RenameSubject::WebAddress { .. })
-        ) && !self
-            .window
-            .rename
-            .as_ref()
-            .is_some_and(|editor| webhost::WebSeat::would_go_to(editor.text(), engine));
+        let home = profiles::home_directory(&bt_pty::SystemShellEnvironment);
+        let folder = self
+            .web_of(surface)
+            .and_then(webhost::WebSeat::local_folder);
+        let local = webhost::LocalFrame {
+            home: home.as_deref(),
+            folder: folder.as_deref(),
+        };
+        frame.refused =
+            matches!(
+                self.window.rename.as_ref().map(|editor| &editor.subject),
+                Some(RenameSubject::WebAddress { .. })
+            ) && (frame.refusal.is_some()
+                || !self.window.rename.as_ref().is_some_and(|editor| {
+                    webhost::WebSeat::would_go_to(editor.text(), engine, local)
+                }));
         self.window
             .preview_rail_measures
             .insert(surface, frame.measure.clone());
@@ -11884,6 +11914,10 @@ impl Runtime<'_> {
                         caret_lit: edit.caret_lit,
                         refused: frame.refused,
                     }),
+                    refusal: frame
+                        .refusal
+                        .as_ref()
+                        .map(|(sentence, width)| (sentence.as_str(), *width)),
                 },
                 match hover {
                     Some(float::FloatPart::Rail(part)) => Some(part),

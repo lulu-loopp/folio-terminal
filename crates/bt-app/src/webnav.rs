@@ -551,6 +551,65 @@ pub fn file_url_of_local_path(input: &str) -> Option<String> {
     }
 }
 
+/// **How a string an address field holds spells a path on this machine** — by
+/// its text alone (M-SWEEP-048, ruling 2026-10-09).
+///
+/// The address field's judgement is the same on every platform: a string that
+/// parses as a local filesystem path *here* is a document address and not a
+/// search phrase. Three spellings are paths, and each is asked of this
+/// machine's own grammar — `std::path::Path::is_absolute` and
+/// `std::path::is_separator` — so `D:\notes.md` is absolute on Windows and an
+/// unknown scheme on a Mac, `/Users/x/notes.md` the other way round, and `\`
+/// is a separator only where the platform says it is.
+///
+/// No disk is asked and no home is read: what the spelling resolves to is the
+/// caller's (`webhost::judge_address`), which knows which folder a relative
+/// spelling stands in. A share is not a local path — two separators open
+/// another machine's name — and it has a spelling of its own so that the field
+/// refuses it rather than searching for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LocalSpelling {
+    /// Absolute on this machine: `D:\Developer\notes.md`, `/Users/x/notes.md`.
+    Absolute(PathBuf),
+    /// Under the account's home: `~` and a separator, then what is under it
+    /// (`~/notes.md` is `notes.md`).
+    Home(PathBuf),
+    /// Relative to a folder: `./` or `../` and what follows, as written.
+    Relative(PathBuf),
+    /// Another machine's: two separators first (`\\server\share`, `//server/share`).
+    Network,
+}
+
+/// The spelling [`LocalSpelling`] names, or `None` when the text is not a path
+/// on this machine — an address, a phrase, a word, a phrase with a slash in it.
+#[must_use]
+pub fn local_path_spelling(input: &str) -> Option<LocalSpelling> {
+    let trimmed = input.trim();
+    let mut leading = trimmed.chars();
+    if leading.next().is_some_and(std::path::is_separator)
+        && leading.next().is_some_and(std::path::is_separator)
+    {
+        return Some(LocalSpelling::Network);
+    }
+    if Path::new(trimmed).is_absolute() {
+        return Some(LocalSpelling::Absolute(PathBuf::from(trimmed)));
+    }
+    // `~`, `..` and `.`, each followed by a separator: a bare `~` or `..` is a
+    // word somebody may search for, and `.x` is a name, not a place.
+    let after = |prefix: &str| {
+        trimmed
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix(std::path::is_separator))
+    };
+    if let Some(rest) = after("~") {
+        return Some(LocalSpelling::Home(PathBuf::from(rest)));
+    }
+    if after("..").is_some() || after(".").is_some() {
+        return Some(LocalSpelling::Relative(PathBuf::from(trimmed)));
+    }
+    None
+}
+
 /// Which door a candidate arrived at — the only thing that makes two identical
 /// strings get two different answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

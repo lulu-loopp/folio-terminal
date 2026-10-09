@@ -7554,7 +7554,7 @@ fn resolved_link(path: PathBuf) -> LinkAction {
 /// wrong tool twice over: it asks the disk, so it fails for a link to a file
 /// that does not exist yet, and it returns a `\\?\` extended path that no
 /// caption should ever show.
-fn normalized(path: &Path) -> PathBuf {
+pub(crate) fn normalized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
