@@ -385,12 +385,20 @@ makes its sessions. The tests that start a real shell through `bt_pty::test_shel
 — whose door reaches the platform layer — live in `bt-pty/tests`, beside the
 transport they run on.
 
-**`bt-term → bt-math` — real coupling, recorded debt.** `session.rs` imports six
-math types and calls into the math crate in product code,
-`inline_image::decode_svg_bytes` rasterises through it,
-and `crates/bt-term/src/lib.rs` re-exports the engine. Hiding it behind
-re-exports changes nothing. **Recorded as
-debt** until the composition layer is designed.
+**`bt-term → bt-math` — real coupling, recorded debt (D-15).** The math data
+types — `MathRenderKey`, `MathRaster`, `MathRenderError` and `MathFailureStage` —
+are `bt-doc`'s (`bt_doc::math`, since CC-5): renderer-neutral, standard-library
+types only, so `bt-term` files a render, carries its raster and records its
+failure without naming the engine. `bt-math` re-exports the four at its root, so
+every `bt_math::MathRaster`-style path still resolves; the two limits their
+messages name (`MAX_NESTING_DEPTH`, `MAX_LAYOUT_CELLS`) are `bt_doc::math`
+constants that `bt-math` asserts at compile time equal the limits it enforces.
+What still couples the crates is execution: `session.rs` typesets through
+`MathEngine` and `key_for_em_px`, `inline_image::decode_svg_bytes` rasterises
+through `rasterize_svg_document`, and `crates/bt-term/src/lib.rs` re-exports the
+engine. Hiding that behind re-exports changes nothing. **Recorded as debt**
+until the composition layer takes math execution (design T-COMPOSE-CRATE §3.4:
+CC-6b moves `typeset`, CC-7 the SVG codec).
 
 ### 3.3 The dependency policy — this file is now its address
 
