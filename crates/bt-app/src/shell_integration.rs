@@ -8559,7 +8559,9 @@ mod tests {
     // ── the PowerShell profile (§7.1.6j) ───────────────────────────────────
 
     pub(super) fn temp_dir(tag: &str) -> PathBuf {
-        let dir = bt_testpath::temp_path(&format!("folio-ps-profile-{tag}"));
+        // The writer refuses a profile with a link among its ancestors, so the sandbox stands
+        // where the temporary directory's own spelling carries none.
+        let dir = bt_testpath::link_free_temp_path(&format!("folio-ps-profile-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
