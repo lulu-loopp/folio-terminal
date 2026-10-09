@@ -651,6 +651,18 @@ impl Runtime<'_> {
         {
             self.select_git_row(seat, index);
         }
+        // **A row that is its own button is pressed as that button** — `Load more commits`, which
+        // `Enter` reaches through here and the pointer through its act box
+        // (`git_panel::row_is_its_act`): one verb on both roads.
+        if let Some(act) = self
+            .window
+            .git_pages_shown
+            .get(&seat)
+            .and_then(|page| page.rows.get(index))
+            .and_then(git_panel::row_is_its_act)
+        {
+            return self.press_git_act(seat, index, act);
+        }
         let active = self.window.active_tab;
         // The rows as they are **on screen**, and the root as the *cache* has
         // it: a document opened against a root the column has since left would

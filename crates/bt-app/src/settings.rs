@@ -8458,6 +8458,24 @@ impl SettingsPanel {
             // action, and the press leaves through `apply_settings_choice`'s `Link` arm on both
             // roads. This arm was missing, so the keyboard reached every door and opened none.
             Some(target @ SettingsTarget::Link(_)) => SettingsKeyVerdict::Chose(target),
+            // **Every stop answers `Enter` with what its press does** (F-SWEEP-048): the Profiles
+            // list's `↑`/`↓` move the row, and an environment ghost is adopted, each through
+            // `apply_settings_choice` — the door the pointer's press on them already leaves by.
+            Some(
+                target @ (SettingsTarget::ProfileUp(_)
+                | SettingsTarget::ProfileDown(_)
+                | SettingsTarget::EnvGhost(_)),
+            ) => SettingsKeyVerdict::Chose(target),
+            // The summoned terminal's caps box starts the capture on the summon line, as its press
+            // does (`Runtime::press_settings`), and as `Record` starts it here: starting to listen
+            // changes nothing outside this dialog. A build with no summon row has nothing to record.
+            Some(SettingsTarget::QuakeChord) => {
+                let Some(line) = crate::shortcuts::summon_line(content.shortcuts) else {
+                    return SettingsKeyVerdict::Inert;
+                };
+                self.begin_recording(line);
+                SettingsKeyVerdict::Moved
+            }
             // A field has already taken its own `Enter` before the walk got
             // here (`Runtime::settings_field_key`), so reaching this arm means
             // the field is not the focus after all.
@@ -8466,7 +8484,17 @@ impl SettingsPanel {
                 | SettingsTarget::EnvName(_)
                 | SettingsTarget::EnvValue(_),
             ) => SettingsKeyVerdict::Inert,
-            _ => SettingsKeyVerdict::Inert,
+            // **Not stops**: the scrim, the dialog's own body, an open picker's body and a greyed
+            // item are never in `page_order`, so the ring is never on them; and with nothing
+            // focused there is nothing to press. Listed rather than caught by a wildcard, so that a
+            // target added to this enum has to say here what `Enter` on it does.
+            Some(
+                SettingsTarget::Scrim
+                | SettingsTarget::Panel
+                | SettingsTarget::Menu(_)
+                | SettingsTarget::ChoiceRefused(..),
+            )
+            | None => SettingsKeyVerdict::Inert,
         }
     }
 
@@ -22438,6 +22466,167 @@ mod tests {
                 .iter()
                 .any(|sprite| sprite.mark == ChromeMark::chevron(0.0)),
             "and the same chevron at rest while it is shut"
+        );
+    }
+
+    /// What `Enter` (or Space) on one kind of target does — **the table every stop of
+    /// [`page_order`] is held to** (F-SWEEP-048). Exhaustive with no wildcard, so a target added
+    /// to [`SettingsTarget`] does not compile here until it says which of the three it is.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum EnterOn {
+        /// The press's own verb: something opens, moves, is chosen or starts listening.
+        Acts,
+        /// The control takes its own keys: a slider's arrows, a field's caret (a field's `Enter`
+        /// is taken before the walk, `Runtime::settings_field_key`).
+        OwnKeys,
+        /// Never a keyboard stop.
+        NotAStop,
+    }
+
+    fn enter_on(target: SettingsTarget) -> EnterOn {
+        match target {
+            SettingsTarget::Close
+            | SettingsTarget::Nav(_)
+            | SettingsTarget::Combo(_)
+            | SettingsTarget::Link(_)
+            | SettingsTarget::Choice(..)
+            | SettingsTarget::QuakeChord
+            | SettingsTarget::Record(_)
+            | SettingsTarget::RestoreRow(_)
+            | SettingsTarget::RestoreAll
+            | SettingsTarget::ProfileUp(_)
+            | SettingsTarget::ProfileDown(_)
+            | SettingsTarget::ProfileEnable(_)
+            | SettingsTarget::ProfileCopyPolicyCommand(_)
+            | SettingsTarget::ProfileRow(_)
+            | SettingsTarget::ProfileEdit(_)
+            | SettingsTarget::ProfileMore(_)
+            | SettingsTarget::ProfileMoreItem(..)
+            | SettingsTarget::ProfileNew
+            | SettingsTarget::EditorBack
+            | SettingsTarget::EditorBrowse
+            | SettingsTarget::EnvGhost(_)
+            | SettingsTarget::EnvRemove(_)
+            | SettingsTarget::EnvAdd
+            | SettingsTarget::EditorRestore
+            | SettingsTarget::EditorDelete
+            | SettingsTarget::Advanced(_)
+            | SettingsTarget::ResetAdvanced(_)
+            | SettingsTarget::MenuAction(_)
+            | SettingsTarget::MenuItemEdit(..)
+            | SettingsTarget::MenuItemDelete(..) => EnterOn::Acts,
+            SettingsTarget::Slider(_)
+            | SettingsTarget::Field(_)
+            | SettingsTarget::EnvName(_)
+            | SettingsTarget::EnvValue(_) => EnterOn::OwnKeys,
+            SettingsTarget::Scrim
+            | SettingsTarget::Panel
+            | SettingsTarget::Menu(_)
+            | SettingsTarget::ChoiceRefused(..) => EnterOn::NotAStop,
+        }
+    }
+
+    /// RED (F-SWEEP-048, the About `Link` bug's twins) — **every stop in [`page_order`] answers
+    /// `Enter` with what its press does**, on every page: the rows pages, the shortcut page, the
+    /// Profiles list (every row's buttons placed) and the profile editor with its ghosts.
+    ///
+    /// Each stop is focused on a fresh panel and `Enter` is pressed. A stop the table calls
+    /// [`EnterOn::Acts`] must not answer `Inert` — except a row this machine cannot honour, which
+    /// refuses `Enter` as a greyed item does; one it calls [`EnterOn::OwnKeys`] must; and no stop
+    /// may be one it calls [`EnterOn::NotAStop`]. `ProfileUp`/`ProfileDown` and `EnvGhost` are
+    /// `Chose` themselves, which is the door their press leaves by, and the summoned terminal's
+    /// caps box starts the capture on the summon line, exactly as a press on it does.
+    ///
+    /// MUTATION: answer `ProfileUp` with `Inert` in `activate` (the stand-in for "a stop added to
+    /// `page_order` without an arm" — with the wildcard gone, a missing arm does not compile);
+    /// or drop the `QuakeChord` arm's `begin_recording` (the caps box answers `Inert`).
+    #[test]
+    fn every_stop_on_every_page_answers_enter_as_its_press_does() {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let profiles = profile_lines();
+        let placed = (0..profiles.len()).collect::<Vec<_>>();
+        let pages = content(&rows, &lines);
+        let list = SettingsContent {
+            profiles: &profiles,
+            ..pages
+        };
+        let editor = editing_content(&rows, &profiles, editor_subject(true));
+        let mut seen = std::collections::HashSet::new();
+        let mut asked = 0;
+        for (content, categories) in [
+            (pages, SettingsCategory::ALL.to_vec()),
+            (list, vec![SettingsCategory::Profiles]),
+            (editor, vec![SettingsCategory::Profiles]),
+        ] {
+            for category in categories {
+                for stop in page_order(content, category, &placed) {
+                    let mut panel = SettingsPanel::default();
+                    panel.toggle(content);
+                    panel.select_category(category);
+                    panel.note_placed(placed.clone());
+                    panel.press(stop);
+                    assert_eq!(
+                        panel.focus(),
+                        Some(stop),
+                        "{stop:?} on {category:?} takes the ring"
+                    );
+                    let verdict = panel.key(SettingsKey::Activate, content, content.values);
+                    let unavailable = matches!(
+                        stop,
+                        SettingsTarget::Combo(row) if !row.available(content.values)
+                    );
+                    match enter_on(stop) {
+                        EnterOn::Acts if !unavailable => assert_ne!(
+                            verdict,
+                            SettingsKeyVerdict::Inert,
+                            "Enter on {stop:?} ({category:?}) does what its press does"
+                        ),
+                        EnterOn::Acts => {}
+                        EnterOn::OwnKeys => assert_eq!(
+                            verdict,
+                            SettingsKeyVerdict::Inert,
+                            "{stop:?} takes its own keys"
+                        ),
+                        EnterOn::NotAStop => panic!("{stop:?} is in {category:?}'s page_order"),
+                    }
+                    seen.insert(std::mem::discriminant(&stop));
+                    asked += 1;
+                }
+            }
+        }
+        for named in [
+            SettingsTarget::ProfileUp(0),
+            SettingsTarget::ProfileDown(0),
+            SettingsTarget::EnvGhost(0),
+            SettingsTarget::QuakeChord,
+        ] {
+            assert!(
+                seen.contains(&std::mem::discriminant(&named)),
+                "the walk reached a {named:?} — the four stops this ticket is about"
+            );
+        }
+        assert!(asked > 100, "every page was walked: {asked} stops");
+
+        // The caps box's capture is the summon line's, the same index the pointer's road finds.
+        let summon_page = SettingsCategory::ALL
+            .into_iter()
+            .find(|category| {
+                page_order(pages, *category, &[]).contains(&SettingsTarget::QuakeChord)
+            })
+            .expect("a page holds the caps box");
+        let mut panel = SettingsPanel::default();
+        panel.toggle(pages);
+        panel.select_category(summon_page);
+        panel.press(SettingsTarget::QuakeChord);
+        assert_eq!(
+            panel.key(SettingsKey::Activate, pages, pages.values),
+            SettingsKeyVerdict::Moved
+        );
+        assert_eq!(
+            panel.recording_row(),
+            crate::shortcuts::summon_line(&lines),
+            "Enter on the caps box records the summon line"
         );
     }
 
