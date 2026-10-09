@@ -11,9 +11,11 @@
 //! 1. **The road** ([`eligible`]): the running bundle's installation home
 //!    (`update_txn::Home::for_bundle`, beside the bundle — its own name, so a
 //!    `Folio Beta.app` updates only itself), how this copy was installed
-//!    (only `Channel::Ours`), and whether the folder the bundle stands in may
-//!    be written: a translocated bundle, run from its read-only randomized
-//!    mount, or a folder this account may not write, is
+//!    (`Channel::Ours`, or a Homebrew copy at the app target its Caskroom
+//!    records, whose marks the layout reads here: [`PreparePoint::carried`]),
+//!    and whether the folder the bundle stands in may be written: a
+//!    translocated bundle, run from its read-only randomized mount, or a
+//!    folder this account may not write, is
 //!    [`NotEligible::NotWritable`] → [`Stop::NotWritable`], the releases page.
 //!    Nothing is written before this answer.
 //! 2. **Allocate**: the home is made if it is not there, its transaction lock
@@ -463,7 +465,8 @@ impl Road<'_> {
 /// **Whether `bundle` may take the macOS road, its home, and the adapter it
 /// takes**: an `.app` with a parent, installed as a channel whose adapter's
 /// road is built on macOS (`update_adapter::built_on`; managed-update §1.5 —
-/// in this build only [`Channel::Ours`]), standing in a folder this process
+/// [`Channel::Ours`] and Homebrew's, whose own precondition is its
+/// layout's [`PreparePoint::carried`]), standing in a folder this process
 /// may write that is not on a read-only mount (a translocated bundle is: C7).
 ///
 /// # Errors

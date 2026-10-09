@@ -1449,12 +1449,20 @@ that wrote it**, all reachable through one door, `folio --uninstall-cleanup`
 to **this copy**, compared by executable path, and a mark naming a vanished path
 is nobody's and is removed; per-account marks (the `$PROFILE` line, the module)
 are removed and reported. **How Folio was installed is read from a written
-channel marker, never inferred from a path.** The marker is written by the
-package manager, never by Folio: on Windows the file `folio-install.json`
+channel marker, never inferred from a path.** **The marker is composed by the
+package manager; Folio may carry those exact bytes across an update it
+performs** (managed-update §4, M1–M5: read before the transaction is
+allocated, recorded in its journal, written only onto the staged new set and
+read back equal, found again on the live side, and back unchanged with the old
+set on a rollback; 0.4.8 D1): on Windows the file `folio-install.json`
 beside `folio.exe`, on macOS the extended attribute
 `io.github.lulu-loopp.folio.install` on the `.app` bundle, both holding
 `{"v":1,"manager":"scoop"|"homebrew"|"winget","uninstall_hook":true|false}`
 (exactly those keys; a byte-order mark and surrounding whitespace allowed).
+The cask writes a second attribute beside it,
+`io.github.lulu-loopp.folio.caskroom`, holding its Caskroom folder; Folio
+carries it the same way, and updates a Homebrew copy in place only where that
+Caskroom's own record names this very bundle as the app it installed.
 scoop's own receipt in the version folder (`install.json` with `manifest.json`)
 also says scoop. **The one exception to "a marker written by a hook" is winget**,
 which runs no hook and so writes no marker: its own uninstall record stands in —
