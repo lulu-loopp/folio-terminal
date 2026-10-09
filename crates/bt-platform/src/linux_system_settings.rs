@@ -932,9 +932,9 @@ mod tests {
     use super::{
         APPEARANCE_NAMESPACE, COLOR_SCHEME_KEY, Message, MessageStream, NativeWindow,
         PORTAL_INTERFACE, PORTAL_PATH, PORTAL_SERVICE, PortalEvent, SystemNews,
-        SystemSettingsWatch,
-        appearance_signal, light_apps_for_portal_value, light_apps_from_settings, lock,
-        portal_signal_rule, shutdown_system_settings, system_uses_light_apps,
+        SystemSettingsWatch, appearance_signal, light_apps_for_portal_value,
+        light_apps_from_settings, lock, portal_signal_rule, shutdown_system_settings,
+        system_uses_light_apps,
     };
     use futures_util::TryStreamExt;
     use std::collections::HashMap;
@@ -1109,7 +1109,11 @@ mod tests {
         let news = receiver
             .recv()
             .unwrap_or_else(|error| panic!("{what} was not delivered: {error}"));
-        assert_eq!(news, SystemNews::Preferences, "{what} must wake for preferences");
+        assert_eq!(
+            news,
+            SystemNews::Preferences,
+            "{what} must wake for preferences"
+        );
     }
 
     fn reap_provider() -> Result<(), String> {
