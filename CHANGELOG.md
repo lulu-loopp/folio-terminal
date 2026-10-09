@@ -8,7 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
-- Alt+Backspace (Option+Backspace with "Option key sends Alt" on) deletes a word and Ctrl+Space reaches the program, as in other terminals, in panes that do not carry key records — every pane on macOS, and Windows panes on the system's own console host. <!-- zh: pending F-SWEEP-048 -->
+- Alt+Backspace (on a Mac, Option+Backspace as well) deletes a word and Ctrl+Space reaches the program, as in other terminals, in panes that do not carry key records — every pane on macOS, and Windows panes on the system's own console host. <!-- zh: pending F-SWEEP-048 -->
 - In a web preview, a link or a page that asks for a new window opens it as a new pane beside the page (issue #27). Addresses a preview would not open when typed stay refused, and so does a pop-up you did not ask for. <!-- zh: pending F-SWEEP-048 -->
 - Enter works on every item in Settings — moving a profile up or down, taking over one of a profile's suggested environment variables, and the summoned terminal's key box — and on Load more commits on the Git page. <!-- zh: pending F-SWEEP-048 -->
 - After Restart to update, Folio always comes back, also when the update cannot write to its own folder and the closing Folio takes a long time to go away — before, nothing reopened until you started Folio again. <!-- zh: pending T-UPDATE-LOCK-RACE -->

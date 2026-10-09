@@ -8399,9 +8399,8 @@ impl SettingsPanel {
                 SettingsKeyVerdict::Chose(target)
             }
             // **`Enter` on a row of the Profiles list opens its editor** (plan
-            // §3.5). `Space` does not, and the asymmetry is the point: a row is
-            // not a switch, and the key that toggles things everywhere else in
-            // this dialog must not half-open a page here.
+            // §3.5). `Space` reaches here as the same `Activate`
+            // (`settings_key_of` maps both keys to it), so it opens the editor too.
             Some(SettingsTarget::ProfileRow(index)) => {
                 SettingsKeyVerdict::Chose(SettingsTarget::ProfileEdit(index))
             }
@@ -8461,11 +8460,15 @@ impl SettingsPanel {
             // **Every stop answers `Enter` with what its press does** (F-SWEEP-048): the Profiles
             // list's `↑`/`↓` move the row, and an environment ghost is adopted, each through
             // `apply_settings_choice` — the door the pointer's press on them already leaves by.
-            Some(
-                target @ (SettingsTarget::ProfileUp(_)
-                | SettingsTarget::ProfileDown(_)
-                | SettingsTarget::EnvGhost(_)),
-            ) => SettingsKeyVerdict::Chose(target),
+            Some(target @ (SettingsTarget::ProfileUp(_) | SettingsTarget::ProfileDown(_))) => {
+                SettingsKeyVerdict::Chose(target)
+            }
+            // The ghost's press shuts an open picker before it adopts the row ([`Self::press_verb`]),
+            // and so does its `Enter`.
+            Some(target @ SettingsTarget::EnvGhost(_)) => {
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
+            }
             // The summoned terminal's caps box starts the capture on the summon line, as its press
             // does (`Runtime::press_settings`), and as `Record` starts it here: starting to listen
             // changes nothing outside this dialog. A build with no summon row has nothing to record.
@@ -8495,6 +8498,103 @@ impl SettingsPanel {
                 | SettingsTarget::ChoiceRefused(..),
             )
             | None => SettingsKeyVerdict::Inert,
+        }
+    }
+
+    /// **A press on one target, as far as this dialog's own state goes** — the pointer's road,
+    /// spoken in the verdict [`Self::activate`] answers `Enter` with, so the two roads can be
+    /// held to one another (F-SWEEP-048).
+    ///
+    /// The focus follows the finger (with the ring off, [`Self::press`]); then the press's own
+    /// change to the dialog is made here, and what only the window can do is returned: `Chose` for
+    /// a verb `apply_settings_choice` (or, for the shortcut page's resets, `apply_shortcut_edit`)
+    /// runs, `Moved` when the dialog changed, `Closed` when it shut, `Inert` when the press
+    /// did nothing here. `Runtime::press_settings` runs what comes back; a slider's value at the
+    /// pointer and a picker's scroll to its ticked item are the window's halves of `Slider` and
+    /// `Combo`, because they need the layout.
+    pub fn press_verb(
+        &mut self,
+        target: SettingsTarget,
+        content: SettingsContent<'_>,
+    ) -> SettingsKeyVerdict {
+        self.press(target);
+        match target {
+            SettingsTarget::Scrim | SettingsTarget::Close => {
+                self.close();
+                SettingsKeyVerdict::Closed
+            }
+            SettingsTarget::Combo(row) => {
+                self.toggle_menu(row);
+                SettingsKeyVerdict::Moved
+            }
+            SettingsTarget::Slider(_) => {
+                self.close_menu();
+                SettingsKeyVerdict::Moved
+            }
+            SettingsTarget::Choice(..) => {
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
+            }
+            // A press on a greyed item leaves the picker standing and still speaks (§7.47): it
+            // leaves through the door a chosen press leaves by, so a row that knows why its item
+            // is dark can say so.
+            SettingsTarget::ChoiceRefused(..) => SettingsKeyVerdict::Chose(target),
+            SettingsTarget::Nav(category) => {
+                SettingsKeyVerdict::from_moved(self.select_category(category))
+            }
+            SettingsTarget::Record(line) => {
+                self.begin_recording(line);
+                SettingsKeyVerdict::Moved
+            }
+            // The capture on the summon line (§7.54e ⑤); a build with no summon row has nothing
+            // to record.
+            SettingsTarget::QuakeChord => match crate::shortcuts::summon_line(content.shortcuts) {
+                Some(line) => {
+                    self.begin_recording(line);
+                    SettingsKeyVerdict::Moved
+                }
+                None => SettingsKeyVerdict::Inert,
+            },
+            SettingsTarget::RestoreRow(_)
+            | SettingsTarget::RestoreAll
+            | SettingsTarget::Advanced(_)
+            | SettingsTarget::ResetAdvanced(_)
+            | SettingsTarget::ProfileUp(_)
+            | SettingsTarget::ProfileDown(_)
+            | SettingsTarget::ProfileEnable(_)
+            | SettingsTarget::ProfileCopyPolicyCommand(_)
+            | SettingsTarget::MenuAction(_)
+            | SettingsTarget::MenuItemEdit(..)
+            | SettingsTarget::MenuItemDelete(..)
+            | SettingsTarget::Link(_) => SettingsKeyVerdict::Chose(target),
+            // The dialog's own body and an open menu's body land nowhere and do not close; a press
+            // on a Profiles row's band is a press on the row and not on a verb — it moves the
+            // focus so that `Enter` opens the editor from there.
+            SettingsTarget::Panel | SettingsTarget::Menu(_) | SettingsTarget::ProfileRow(_) => {
+                SettingsKeyVerdict::Inert
+            }
+            SettingsTarget::ProfileMore(index) => {
+                self.toggle_row_menu(index);
+                SettingsKeyVerdict::Moved
+            }
+            SettingsTarget::ProfileEdit(_)
+            | SettingsTarget::ProfileMoreItem(..)
+            | SettingsTarget::ProfileNew
+            | SettingsTarget::EditorBack
+            | SettingsTarget::EditorBrowse
+            | SettingsTarget::EnvRemove(_)
+            | SettingsTarget::EnvGhost(_)
+            | SettingsTarget::EnvAdd
+            | SettingsTarget::EditorRestore
+            | SettingsTarget::EditorDelete => {
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
+            }
+            // A press into a field puts the caret there and nothing more.
+            SettingsTarget::Field(_) | SettingsTarget::EnvName(_) | SettingsTarget::EnvValue(_) => {
+                self.close_menu();
+                SettingsKeyVerdict::Inert
+            }
         }
     }
 
@@ -9233,8 +9333,8 @@ pub enum SettingsTarget {
     /// folder button and the pane head's run are shown the same way — and a
     /// reveal that only triggered on the buttons themselves would be a set of
     /// buttons you have to already be on to see. `Enter` on the row opens the
-    /// editor, which is the plan's own keyboard model (§3.5); `Space` does
-    /// nothing, so that a row is never confused with a switch.
+    /// editor, which is the plan's own keyboard model (§3.5), and so does `Space`,
+    /// which this dialog reads as the same `Activate`.
     ProfileRow(usize),
     /// `Edit` on one row — the one verb in the open, and what a person came to
     /// this list to do.
@@ -22469,13 +22569,17 @@ mod tests {
         );
     }
 
-    /// What `Enter` (or Space) on one kind of target does — **the table every stop of
-    /// [`page_order`] is held to** (F-SWEEP-048). Exhaustive with no wildcard, so a target added
-    /// to [`SettingsTarget`] does not compile here until it says which of the three it is.
+    /// What `Enter` (or Space) on one kind of target is held to — **the table every stop of
+    /// [`page_order`] answers to** (F-SWEEP-048). Exhaustive with no wildcard, so a target added
+    /// to [`SettingsTarget`] does not compile here until it says which of these it is.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum EnterOn {
-        /// The press's own verb: something opens, moves, is chosen or starts listening.
-        Acts,
+        /// `Enter` does what a press does: the same verdict and the same dialog afterwards.
+        AsPress,
+        /// `Enter` acts, but not as the press does, by ruling: on a rail item it steps into the
+        /// page the press selects (the arrows already selected it), and on a Profiles row it opens
+        /// the editor where the press only lands on the row (plan §3.5).
+        ActsOtherwise,
         /// The control takes its own keys: a slider's arrows, a field's caret (a field's `Enter`
         /// is taken before the walk, `Runtime::settings_field_key`).
         OwnKeys,
@@ -22486,7 +22590,6 @@ mod tests {
     fn enter_on(target: SettingsTarget) -> EnterOn {
         match target {
             SettingsTarget::Close
-            | SettingsTarget::Nav(_)
             | SettingsTarget::Combo(_)
             | SettingsTarget::Link(_)
             | SettingsTarget::Choice(..)
@@ -22498,7 +22601,6 @@ mod tests {
             | SettingsTarget::ProfileDown(_)
             | SettingsTarget::ProfileEnable(_)
             | SettingsTarget::ProfileCopyPolicyCommand(_)
-            | SettingsTarget::ProfileRow(_)
             | SettingsTarget::ProfileEdit(_)
             | SettingsTarget::ProfileMore(_)
             | SettingsTarget::ProfileMoreItem(..)
@@ -22514,7 +22616,8 @@ mod tests {
             | SettingsTarget::ResetAdvanced(_)
             | SettingsTarget::MenuAction(_)
             | SettingsTarget::MenuItemEdit(..)
-            | SettingsTarget::MenuItemDelete(..) => EnterOn::Acts,
+            | SettingsTarget::MenuItemDelete(..) => EnterOn::AsPress,
+            SettingsTarget::Nav(_) | SettingsTarget::ProfileRow(_) => EnterOn::ActsOtherwise,
             SettingsTarget::Slider(_)
             | SettingsTarget::Field(_)
             | SettingsTarget::EnvName(_)
@@ -22526,20 +22629,47 @@ mod tests {
         }
     }
 
-    /// RED (F-SWEEP-048, the About `Link` bug's twins) — **every stop in [`page_order`] answers
-    /// `Enter` with what its press does**, on every page: the rows pages, the shortcut page, the
-    /// Profiles list (every row's buttons placed) and the profile editor with its ghosts.
+    /// What one road left behind: its verdict — which, for `Chose`, names the verb the window
+    /// runs — and every part of the dialog a press or a key can change apart from where the ring
+    /// stands (the keyboard moves the ring into what it opened; the pointer does not).
+    type RoadResult = (
+        SettingsKeyVerdict,
+        bool,
+        Option<SettingsRow>,
+        Option<usize>,
+        Option<usize>,
+        SettingsCategory,
+    );
+
+    fn road_result(panel: &SettingsPanel, verdict: SettingsKeyVerdict) -> RoadResult {
+        (
+            verdict,
+            panel.is_open(),
+            panel.menu(),
+            panel.recording_row(),
+            panel.row_menu(),
+            panel.category(),
+        )
+    }
+
+    /// RED (F-SWEEP-048, the About `Link` bug's twins; round 2) — **every stop in
+    /// [`page_order`] answers `Enter` with what its press does**, on every page: the rows pages,
+    /// the shortcut page, the Profiles list (every row's buttons placed) and the profile editor
+    /// with its ghosts.
     ///
-    /// Each stop is focused on a fresh panel and `Enter` is pressed. A stop the table calls
-    /// [`EnterOn::Acts`] must not answer `Inert` — except a row this machine cannot honour, which
-    /// refuses `Enter` as a greyed item does; one it calls [`EnterOn::OwnKeys`] must; and no stop
-    /// may be one it calls [`EnterOn::NotAStop`]. `ProfileUp`/`ProfileDown` and `EnvGhost` are
-    /// `Chose` themselves, which is the door their press leaves by, and the summoned terminal's
-    /// caps box starts the capture on the summon line, exactly as a press on it does.
+    /// Each stop is driven down both roads on two fresh panels in the same state: the pointer's
+    /// ([`SettingsPanel::press_verb`], what `Runtime::press_settings` runs) and the keyboard's (the
+    /// ring put on it, then `Enter`). For an [`EnterOn::AsPress`] stop the two must leave the
+    /// same verdict — so `Chose` names the same verb for the window to run — and the same dialog
+    /// (open or shut, the open picker, the capture, the open row menu, the page), and neither may
+    /// be `Inert` unless the row is one this machine cannot honour. An [`EnterOn::ActsOtherwise`]
+    /// stop must still not be `Inert`; an [`EnterOn::OwnKeys`] stop must be; no stop may be one the
+    /// table calls [`EnterOn::NotAStop`].
     ///
-    /// MUTATION: answer `ProfileUp` with `Inert` in `activate` (the stand-in for "a stop added to
-    /// `page_order` without an arm" — with the wildcard gone, a missing arm does not compile);
-    /// or drop the `QuakeChord` arm's `begin_recording` (the caps box answers `Inert`).
+    /// MUTATION: answer `ProfileUp`'s `Enter` with `Chose(ProfileDown)` — a wrong arm that is not
+    /// `Inert` — or start the caps box's capture on line 0; or answer `ProfileUp` with `Inert` (the
+    /// stand-in for "a stop added to `page_order` without an arm": with the wildcard gone, a
+    /// missing arm does not compile).
     #[test]
     fn every_stop_on_every_page_answers_enter_as_its_press_does() {
         let rows = flat_rows();
@@ -22553,45 +22683,74 @@ mod tests {
         };
         let editor = editing_content(&rows, &profiles, editor_subject(true));
         let mut seen = std::collections::HashSet::new();
-        let mut asked = 0;
+        let mut compared = 0;
         for (content, categories) in [
             (pages, SettingsCategory::ALL.to_vec()),
             (list, vec![SettingsCategory::Profiles]),
             (editor, vec![SettingsCategory::Profiles]),
         ] {
-            for category in categories {
+            // A page the dialog does not hold is not walked: `keep_focus_reachable` leaves it (the
+            // rows-only fixture has no profiles, so its Profiles page is not there; the list and
+            // the editor below are).
+            for category in categories
+                .into_iter()
+                .filter(|category| content.has_content(*category))
+            {
                 for stop in page_order(content, category, &placed) {
-                    let mut panel = SettingsPanel::default();
-                    panel.toggle(content);
-                    panel.select_category(category);
-                    panel.note_placed(placed.clone());
-                    panel.press(stop);
+                    let fresh = || {
+                        let mut panel = SettingsPanel::default();
+                        panel.toggle(content);
+                        panel.select_category(category);
+                        panel.note_placed(placed.clone());
+                        panel
+                    };
+                    let mut pressed = fresh();
+                    let by_press = pressed.press_verb(stop, content);
+                    let by_press = road_result(&pressed, by_press);
+                    let mut keyed = fresh();
+                    keyed.press(stop);
                     assert_eq!(
-                        panel.focus(),
+                        keyed.focus(),
                         Some(stop),
                         "{stop:?} on {category:?} takes the ring"
                     );
-                    let verdict = panel.key(SettingsKey::Activate, content, content.values);
+                    let by_enter = keyed.key(SettingsKey::Activate, content, content.values);
+                    let by_enter = road_result(&keyed, by_enter);
                     let unavailable = matches!(
                         stop,
                         SettingsTarget::Combo(row) if !row.available(content.values)
                     );
                     match enter_on(stop) {
-                        EnterOn::Acts if !unavailable => assert_ne!(
-                            verdict,
+                        EnterOn::AsPress if unavailable => assert_eq!(
+                            by_enter.0,
                             SettingsKeyVerdict::Inert,
-                            "Enter on {stop:?} ({category:?}) does what its press does"
+                            "{stop:?} cannot be honoured here and refuses Enter"
                         ),
-                        EnterOn::Acts => {}
+                        EnterOn::AsPress => {
+                            assert_eq!(
+                                by_enter, by_press,
+                                "Enter on {stop:?} ({category:?}) does what its press does"
+                            );
+                            assert_ne!(
+                                by_enter.0,
+                                SettingsKeyVerdict::Inert,
+                                "and {stop:?} ({category:?}) does something"
+                            );
+                            compared += 1;
+                        }
+                        EnterOn::ActsOtherwise => assert_ne!(
+                            by_enter.0,
+                            SettingsKeyVerdict::Inert,
+                            "Enter on {stop:?} ({category:?}) acts"
+                        ),
                         EnterOn::OwnKeys => assert_eq!(
-                            verdict,
+                            by_enter.0,
                             SettingsKeyVerdict::Inert,
                             "{stop:?} takes its own keys"
                         ),
                         EnterOn::NotAStop => panic!("{stop:?} is in {category:?}'s page_order"),
                     }
                     seen.insert(std::mem::discriminant(&stop));
-                    asked += 1;
                 }
             }
         }
@@ -22606,9 +22765,12 @@ mod tests {
                 "the walk reached a {named:?} — the four stops this ticket is about"
             );
         }
-        assert!(asked > 100, "every page was walked: {asked} stops");
+        assert!(
+            compared > 80,
+            "every page was walked: {compared} stops compared"
+        );
 
-        // The caps box's capture is the summon line's, the same index the pointer's road finds.
+        // The caps box's capture is the summon line's, on both roads.
         let summon_page = SettingsCategory::ALL
             .into_iter()
             .find(|category| {

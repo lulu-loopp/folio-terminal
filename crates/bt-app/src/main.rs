@@ -47173,126 +47173,44 @@ impl Runtime<'_> {
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
         // a shut dialog remembering one.
-        self.window.settings.press(target);
-        match target {
-            settings::SettingsTarget::Scrim => self.window.settings.close(),
-            settings::SettingsTarget::Close => self.window.settings.close(),
-            settings::SettingsTarget::Combo(row) => {
-                self.window.settings.toggle_menu(row);
-                // The list opens showing the answer it already has, whatever
-                // page of it that answer is on — a capped picker whose thirty
-                // faces begin at `Agency FB` would otherwise open nowhere near
-                // the one that is ticked. Asked after the open, because only
-                // then is there a menu whose body can say where the item is.
-                self.show_open_settings_choice(row);
-            }
-            // A press on a track is a jump to the pointer AND the first frame of
-            // a drag — one gesture, so one door (`SettingsLayout::slider_at`).
-            // Grabbing the thumb and not moving is a press that asked for the
-            // value it already had, which costs nothing.
-            settings::SettingsTarget::Slider(row) => {
-                self.window.settings.close_menu();
+        // **The dialog's half of the press is the panel's** (`SettingsPanel::press_verb`), in the
+        // vocabulary `Enter` answers in, so the two roads are one model (F-SWEEP-048): the focus
+        // follows the finger with the ring off — stated before the verb, because closing the
+        // dialog drops the focus — and what comes back is what only the window can do.
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        let verdict = self.window.settings.press_verb(target, content);
+        match (target, verdict) {
+            // The list opens showing the answer it already has, whatever page of it that answer
+            // is on. Asked after the open, because only then is there a menu whose body can say
+            // where the item is.
+            (settings::SettingsTarget::Combo(row), _) => self.show_open_settings_choice(row),
+            // A press on a track is a jump to the pointer AND the first frame of a drag — one
+            // gesture, so one door (`SettingsLayout::slider_at`).
+            (settings::SettingsTarget::Slider(row), _) => {
                 if let Some(value) = layout.slider_at(row, position.x) {
                     self.apply_slider(row, value)?;
                 }
                 self.window.settings_slider_drag = Some(row);
             }
-            target @ settings::SettingsTarget::Choice(..) => {
-                self.window.settings.close_menu();
-                self.apply_settings_choice(target)?;
+            // Turning a page puts the reader at the top of it.
+            (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
+                self.window.settings_scroll = 0.0;
             }
-            // **A press on a greyed item leaves the picker standing and still
-            // speaks** (§7.47). Nothing was chosen, so nothing closes and no
-            // value moves — that half is exactly what it always was. What is
-            // new is that it leaves through the same door a chosen press
-            // leaves by, so a row that knows why its item is dark gets to say
-            // it. Rows with nothing to say answer `None` all the way down the
-            // chain and this is a press that did nothing, as before.
-            target @ settings::SettingsTarget::ChoiceRefused(..) => {
-                self.apply_settings_choice(target)?;
+            (
+                _,
+                settings::SettingsKeyVerdict::Chose(
+                    target @ (settings::SettingsTarget::RestoreRow(_)
+                    | settings::SettingsTarget::RestoreAll),
+                ),
+            ) => self.apply_shortcut_edit(target)?,
+            // Every verb that leaves the dialog goes through the door `Enter` on it goes through:
+            // a verb reachable two ways whose body lives on one of them is a verb that half works.
+            (_, settings::SettingsKeyVerdict::Chose(target)) => {
+                self.apply_settings_choice(target)?
             }
-            // Turning a page puts the reader at the top of it. The distance
-            // belonged to the page they were on, and carrying it across would
-            // open the next one somewhere in its middle.
-            settings::SettingsTarget::Nav(category) => {
-                if self.window.settings.select_category(category) {
-                    self.window.settings_scroll = 0.0;
-                }
-            }
-            settings::SettingsTarget::Record(index) => self.window.settings.begin_recording(index),
-            // **The same capture, started from the other page** (§7.54e ⑤). The
-            // recorder is indexed by a line of the shortcut table and this row is
-            // not on that page, so the index is resolved here — the one place
-            // that holds both the press and the table — and everything after it
-            // is the road the Shortcuts page's own `Record` goes down:
-            // `record_settings_key`, `Shortcuts::set`, `store_keybindings`, and
-            // `settle_quake`'s reconciliation on the very next turn.
-            //
-            // A build with no summon row is a build with nothing to record, and
-            // the press does nothing rather than opening a capture on whatever
-            // line happened to be first.
-            settings::SettingsTarget::QuakeChord => {
-                if let Some(index) = self.summon_shortcut_line() {
-                    self.window.settings.begin_recording(index);
-                }
-            }
-            target @ (settings::SettingsTarget::RestoreRow(_)
-            | settings::SettingsTarget::RestoreAll) => self.apply_shortcut_edit(target)?,
-            // Both leave through the same door the keyboard's Enter leaves
-            // through, which is `apply_settings_choice`'s founding rule: a verb
-            // reachable two ways whose body lives on one of them is a verb that
-            // half works.
-            target @ (settings::SettingsTarget::Advanced(_)
-            | settings::SettingsTarget::ResetAdvanced(_)
-            | settings::SettingsTarget::ProfileUp(_)
-            | settings::SettingsTarget::ProfileDown(_)
-            | settings::SettingsTarget::ProfileEnable(_)
-            | settings::SettingsTarget::ProfileCopyPolicyCommand(_)
-            | settings::SettingsTarget::MenuAction(_)
-            | settings::SettingsTarget::MenuItemEdit(..)
-            | settings::SettingsTarget::MenuItemDelete(..)
-            // The About page's three doors, on that rule exactly
-            // (T-SETTINGS-ABOUT): the pointer and `Enter` open the same address
-            // or the same file, because both arrive at
-            // `apply_settings_choice`'s `Link` arm and neither carries a body of
-            // its own. No `close_menu` beside it, unlike the run below — the
-            // page this target can be drawn on holds no picker to close.
-            | settings::SettingsTarget::Link(_)) => {
-                self.apply_settings_choice(target)?;
-            }
-            // A press on the dialog's own body, or inside the open menu but on
-            // none of its items, lands nowhere. It notably does *not* close: the
-            // mock-up closes on the scrim and on the `×`, and nothing else.
-            settings::SettingsTarget::Panel => {}
-            settings::SettingsTarget::Menu(_) => {}
-            // A press on a row's band is a press on the row and not on a verb.
-            // It moves the focus (see `SettingsPanel::press`) so that `Enter`
-            // opens the editor from where the finger left the keyboard, and does
-            // nothing else: a single click that opened a sub-page would make the
-            // row a button, and the row is a row with buttons on it.
-            settings::SettingsTarget::ProfileRow(_) => {}
-            settings::SettingsTarget::ProfileMore(index) => {
-                self.window.settings.toggle_row_menu(index);
-            }
-            target @ (settings::SettingsTarget::ProfileEdit(_)
-            | settings::SettingsTarget::ProfileMoreItem(..)
-            | settings::SettingsTarget::ProfileNew
-            | settings::SettingsTarget::EditorBack
-            | settings::SettingsTarget::EditorBrowse
-            | settings::SettingsTarget::EnvRemove(_)
-            | settings::SettingsTarget::EnvGhost(_)
-            | settings::SettingsTarget::EnvAdd
-            | settings::SettingsTarget::EditorRestore
-            | settings::SettingsTarget::EditorDelete) => {
-                self.window.settings.close_menu();
-                self.apply_settings_choice(target)?;
-            }
-            // A press into a field puts the caret there and nothing more: the
-            // field already holds the table's own value, and this dialog writes
-            // on change rather than on commit.
-            settings::SettingsTarget::Field(_)
-            | settings::SettingsTarget::EnvName(_)
-            | settings::SettingsTarget::EnvValue(_) => self.window.settings.close_menu(),
+            _ => {}
         }
         if let Some(position) = self.window.pointer_position {
             let hover = self.settings_layout().map(|layout| {

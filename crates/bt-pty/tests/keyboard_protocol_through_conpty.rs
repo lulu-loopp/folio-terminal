@@ -497,14 +497,15 @@ Write-Output ('BT_KKP_' + 'KEYS=' + ($t -join ' '))
         1,
         "`ESC DEL` is one key press, not an Escape and then a Backspace: {keys:?}"
     );
-    assert!(
-        segments[0][0].starts_with("Backspace/1/"),
-        "and it is Backspace with Alt: {keys:?}"
+    assert_eq!(
+        segments[0][0], "Backspace/1/08",
+        "and it is Backspace with Alt, character 0x08: {keys:?}"
     );
     assert_eq!(segments[1].len(), 1, "NUL is one key press: {keys:?}");
-    assert!(
-        segments[1][0].starts_with("D2/6/"),
-        "and it is Ctrl+@ — `D2` with Control and Shift — the key PSReadLine binds beside          Ctrl+Spacebar: {keys:?}"
+    assert_eq!(
+        segments[1][0], "D2/6/00",
+        "and it is Ctrl+@ (`D2` with Control and Shift), character 0 — the key PSReadLine binds \
+         beside Ctrl+Spacebar: {keys:?}"
     );
     probe.finish();
 }

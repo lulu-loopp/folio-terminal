@@ -920,20 +920,19 @@ impl Runtime<'_> {
     /// landing rule would do when that page is the tab's reusable preview.
     ///
     /// A page that is not a pane of the tab in front — one carried in a float — has nothing to
-    /// split, and its new page goes where any newly opened page goes (`Self::open_web_page`),
-    /// which is never into a float. A split the solver refuses for want of room opens nothing and
-    /// says so on `stderr`, as a refused split from the pane menu does.
+    /// split (the split answers `None` for a seat its tree does not hold; it no longer refuses
+    /// one for size), and its new page goes where any newly opened page goes
+    /// (`Self::open_web_page`), which is never into a float.
     pub(crate) fn open_web_page_beside(&mut self, opener: LeafId, url: &str) -> Result<()> {
-        let docked_here =
-            opener.tab == self.id && self.seats.tree().find_seat(opener.seat).is_some();
-        if !docked_here {
+        let arriving = if opener.tab == self.id {
+            let metrics = self.seat_metrics();
+            let dir = self.settings_split_axis(opener.seat);
+            self.seats.split_preview(&metrics, opener.seat, dir)
+        } else {
+            None
+        };
+        let Some(arriving) = arriving else {
             return self.open_web_page(url);
-        }
-        let metrics = self.seat_metrics();
-        let dir = self.settings_split_axis(opener.seat);
-        let Some(arriving) = self.seats.split_preview(&metrics, opener.seat, dir) else {
-            eprintln!("BT_WEB no room beside the page for a new pane for {url}");
-            return Ok(());
         };
         self.settle_seat_set_change()?;
         self.open_web_page_on(self.leaf_here(arriving), url, webnav::Mint::Nothing)?;

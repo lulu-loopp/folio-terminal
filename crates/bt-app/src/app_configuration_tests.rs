@@ -74,9 +74,8 @@ fn each_claim_wears_its_own_colour_and_silence_draws_nothing() {
 ///    the third and fourth, which are the 08-30 report;
 /// ③ let the ground arm fall through instead of returning, so a press on the
 ///    scrim shuts the dialog under an open list — the fifth;
-/// ④ move the gate below `SettingsPanel::press` or below the verb match,
-///    where the focus has already moved and the scrim has already answered —
-///    the sixth and seventh;
+/// ④ move the gate below `SettingsPanel::press_verb`, where the focus has
+///    already moved and the scrim has already answered — the sixth and seventh;
 /// ⑤ judge it against a rectangle of its own instead of the hit test's
 ///    answer — the second, which pins that `hit` is asked first.
 #[test]
@@ -101,9 +100,11 @@ fn a_press_outside_an_open_dropdown_closes_it_and_still_lands() {
              own rectangle was already asked"
     );
     // ③ the popup goes away on both of the outside answers.
+    // The focus move and every verb of the dialog's own — the scrim's close among them — are
+    // `SettingsPanel::press_verb`'s (F-SWEEP-048 round 2), so its call is where both start.
     let press = router
-        .find("self.window.settings.press(target);")
-        .expect("the router moves the focus to what was pressed");
+        .find("self.window.settings.press_verb(target, content)")
+        .expect("the router moves the focus to what was pressed, and runs its verb");
     let arm = &router[gate..press];
     let land = arm
         .find("settings::PopupPress::DismissAndLand(popup)")
@@ -135,11 +136,12 @@ fn a_press_outside_an_open_dropdown_closes_it_and_still_lands() {
         "a press on the dialog's ground is the whole gesture: {arm}"
     );
     // ⑥ before the focus moves.
-    assert!(gate < press, "the gate stands above `SettingsPanel::press`");
-    // ⑦ and before every verb, the scrim's close included.
-    let verbs = router
-        .find("settings::SettingsTarget::Scrim => self.window.settings.close()")
-        .expect("the scrim closes the dialog");
+    assert!(
+        gate < press,
+        "the gate stands above `SettingsPanel::press_verb`"
+    );
+    // ⑦ and before every verb, the scrim's close included — which `press_verb` makes first.
+    let verbs = press;
     assert!(
         gate < verbs,
         "a press on the scrim while a list is open shuts the list, not the \

@@ -257,7 +257,7 @@ pub(crate) fn pressed_button_of_gesture(
 /// as this window is concerned, and it is taken off here, once, at the door
 /// every modifier state in this process comes through
 /// (`WindowEvent::ModifiersChanged`). Downstream nothing changes and nothing
-/// asks: the encoder does not prefix `ESC`, the search capsule's `Alt`-toggles
+/// asks: the encoder does not prefix `ESC` (Backspace aside, [`encoder_modifiers`]), the search capsule's `Alt`-toggles
 /// do not fire, a field inserts the character the layout produced, and the chord
 /// table is not consulted about a modifier nobody is holding. With the setting
 /// on, winit reports the raw letter instead and the Alt comes through untouched,
@@ -275,6 +275,29 @@ pub(crate) fn effective_modifiers(
         reported.difference(ModifiersState::ALT)
     } else {
         reported
+    }
+}
+
+/// **Option+Backspace is Alt+Backspace on a Mac whatever *Option key sends Alt* says** — the one
+/// key [`effective_modifiers`]' Option-as-text policy does not take Alt from (owner ruling
+/// 2026-10-09, design note `keyboard-protocol-2026-09-29.md` revision (k)).
+///
+/// Option-as-text is about the characters Option composes, and Backspace composes none: Terminal.app
+/// and iTerm2 both delete a word on Option+Delete with their Option-as-Meta switch off. So the
+/// encoder is handed the Alt the hand is holding (`held`, `WindowRuntime::modifiers_held`) for
+/// Backspace, and [`legacy_bytes`] sends `ESC DEL`. Every other key keeps `effective` — Option+a
+/// is still `å` or `ESC a` as the setting decides. Off macOS the two states are one, so this
+/// changes nothing there.
+#[must_use]
+pub(crate) fn encoder_modifiers(
+    key: &Key,
+    effective: ModifiersState,
+    held: ModifiersState,
+) -> ModifiersState {
+    if matches!(key, Key::Named(NamedKey::Backspace)) && held.alt_key() {
+        effective | ModifiersState::ALT
+    } else {
+        effective
     }
 }
 
@@ -5409,6 +5432,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// RED (owner ruling 2026-10-09, design note revision (k)) — **on a Mac, Option+Backspace
+    /// sends `ESC DEL` whether or not *Option key sends Alt* is on**, and Option on a text key
+    /// still follows the setting.
+    ///
+    /// With the setting off, [`effective_modifiers`] takes Alt off at the door, so Backspace
+    /// alone gets the hand's Alt back ([`encoder_modifiers`]) — what Terminal.app and iTerm2 send
+    /// with their Option-as-Meta switch off. Option+a, with the setting off, is the composed
+    /// `å` (here the 2-byte `c3 a5`) and no ESC; and a Backspace with no Option is `DEL`.
+    ///
+    /// MUTATION: strip Alt from Backspace too (`encoder_modifiers` returns `effective`): the
+    /// first row reads `7f`.
+    #[test]
+    fn macos_option_backspace_deletes_a_word_whatever_the_option_setting() {
+        const MAC: HostPlatform = HostPlatform::MacOs;
+        let option = ModifiersState::ALT;
+        let sent = |logical: &Key, base: &Key, held: ModifiersState, option_sends_alt: bool| {
+            let effective = effective_modifiers(held, option_sends_alt, MAC);
+            keyboard_bytes(
+                logical,
+                base,
+                KeyLocation::Standard,
+                encoder_modifiers(logical, effective, held),
+                false,
+                UNASKED,
+                UsPress::new("Backspace", held).on(MAC),
+            )
+        };
+        let backspace = Key::Named(NamedKey::Backspace);
+        for option_sends_alt in [false, true] {
+            assert_eq!(
+                sent(&backspace, &backspace, option, option_sends_alt).as_deref(),
+                Some(&b"\x1b\x7f"[..]),
+                "Option+Backspace with Option key sends Alt {option_sends_alt}"
+            );
+        }
+        assert_eq!(
+            sent(&backspace, &backspace, ModifiersState::empty(), false).as_deref(),
+            Some(&b"\x7f"[..]),
+            "Backspace with no Option is DEL"
+        );
+        let composed = Key::Character("å".into());
+        let a = Key::Character("a".into());
+        assert_eq!(
+            sent(&composed, &a, option, false).as_deref(),
+            Some("å".as_bytes()),
+            "Option+a with the setting off is the composed character, with no ESC"
+        );
+        assert_eq!(
+            encoder_modifiers(&composed, effective_modifiers(option, false, MAC), option),
+            ModifiersState::empty(),
+            "and only Backspace gets the hand's Alt back"
+        );
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **on a Mac, Option types text unless the setting makes it

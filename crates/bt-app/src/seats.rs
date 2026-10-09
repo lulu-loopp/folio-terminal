@@ -725,7 +725,8 @@ impl Seats {
     /// shell for: a Terminal seat with no session behind it is a black rectangle,
     /// so the two happen together or not at all.
     ///
-    /// `None` when the solver refuses — the run cannot be divided at this size —
+    /// `None` when `target` is not a seat of this tree — since the 2026-08-08 ruling
+    /// the edit no longer refuses a split for size (`bt_layout::EditError::Refused`) —
     /// and refusing leaves the tree untouched, so the caller has nothing to undo.
     /// The names are spent only on success, for the reason `adopt_drop` gives at
     /// length: an id handed out twice is a `find_seat` answering about the wrong
@@ -745,7 +746,7 @@ impl Seats {
     /// one of its own after it, the side every direction-less split puts a new pane on.
     ///
     /// [`Self::split_terminal`]'s edit with the other kind of leaf, and its answers: `None` when
-    /// the solver refuses, with the tree untouched and no name spent.
+    /// `target` is not a seat of this tree, with the tree untouched and no name spent.
     pub fn split_preview(
         &mut self,
         metrics: &SeatMetrics,
