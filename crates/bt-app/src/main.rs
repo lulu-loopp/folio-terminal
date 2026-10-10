@@ -12973,7 +12973,9 @@ struct App {
     /// not change A·b or B21: a different button can still begin a gesture
     /// beside the slot's gesture, as the independent legacy fields allowed.
     /// One record per `(window, owner kind)` bounds the list to the live
-    /// gestures the removed fields could have represented.
+    /// gestures the removed fields could have represented. A write to the same
+    /// field replaces its prior record, and releases keep the fields' old
+    /// release-road order rather than the records' latch order.
     pointer_capture_overlaps: Vec<runtime::pointer::PointerCapture>,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).

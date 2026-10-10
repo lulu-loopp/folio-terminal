@@ -14676,3 +14676,11 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** Cut 3 changes A·a and B20 only. Arrival in another window never changes the owner of a release or delays stale-capture cancellation. A·b and cross-window B21 keep the independent overlaps the removed fields allowed until cut 4 records the owner's R-8 ruling; cut 3 does not make one field's overwrite general.
 
 **Pinned by** `pointer_app_tests::a_release_reaches_its_owner_over_every_layer_that_eats_releases` (an independent arrived-in window), `a_press_of_the_held_button_cancels_the_stale_capture_first` (owner state is cancelled before routing and there are never two live payloads), `another_button_keeps_the_legacy_overlap_until_cut_4`, and `a_divider_released_anywhere_commits_through_the_whole_dispatch` (the divider's own dispatch arm).
+
+### 2026-10-09 — The cut-3 compatibility list keeps each removed field's overwrite and release precedence
+
+**What is built.** Until cut 4 decides the second button, writing another capture of the same legacy `(window, owner kind)` replaces the old record even when the button differs. When several removed fields are represented, a release selects them in the order their old release roads used: the cell route, settings, glance and float roads, then the chrome ladder from the video bar through the tab press. Latch recency does not change that order.
+
+**The rule.** `pointer_capture_overlaps` is a bounded compatibility representation, not a new multi-capture policy. It preserves the removed fields' overwrite and release behavior exactly until cut 4 replaces it.
+
+**Pinned by** `pointer_app_tests::a_new_latch_of_the_same_legacy_field_overwrites_the_old_one` and `legacy_overlaps_release_in_the_old_ladders_order`.

@@ -100,6 +100,35 @@ impl CaptureOwner {
             | Self::Route(MouseRoute::Local(_) | MouseRoute::Forward { .. }) => false,
         }
     }
+
+    /// **Where this legacy field's release stood before cut 3.** Several
+    /// independent fields could be live together, and the first matching arm
+    /// ended the release. The compatibility list keeps that order until cut 4
+    /// replaces the other-button rule.
+    const fn legacy_release_precedence(&self) -> u8 {
+        match self {
+            Self::Route(_) => 0,
+            Self::SettingsSlider(_) => 1,
+            Self::SettingsMenuBar(_) => 2,
+            Self::GlanceThumb(_) => 3,
+            Self::GlanceHeadPress(_) => 4,
+            Self::FloatHeadPress(_) => 5,
+            Self::FloatDrag(_) => 6,
+            Self::VideoBar(_) => 7,
+            Self::PreviewBodyThumb(..) => 8,
+            Self::TerminalThumb(..) => 9,
+            Self::TerminalFootMark(..) => 10,
+            Self::BlockThumb(..) => 11,
+            Self::PicturePan(..) => 12,
+            Self::EditSelection(..) => 13,
+            Self::RenderedSelection(..) => 14,
+            Self::Drag(_) => 15,
+            Self::Divider(_) => 16,
+            Self::PanePress(..) => 17,
+            Self::RowPress(_) => 18,
+            Self::TabPress(_) => 19,
+        }
+    }
 }
 
 /// **One latched gesture** (§2.2).
@@ -164,7 +193,7 @@ fn same_legacy_field(left: &PointerCapture, right: &PointerCapture) -> bool {
 pub(crate) fn capture_index_for_button_event(
     primary: Option<&PointerCapture>,
     overlaps: &[PointerCapture],
-    _arrived_in: WindowId,
+    arrived_in: WindowId,
     state: ElementState,
     button: MouseButton,
 ) -> Option<CaptureIndex> {
@@ -172,13 +201,32 @@ pub(crate) fn capture_index_for_button_event(
         ElementState::Pressed => capture.button == button,
         ElementState::Released => release_ends_the_capture(capture, button),
     };
-    if primary.is_some_and(matches) {
-        return Some(CaptureIndex::Primary);
+    if state == ElementState::Pressed {
+        if primary.is_some_and(matches) {
+            return Some(CaptureIndex::Primary);
+        }
+        return overlaps
+            .iter()
+            .rposition(matches)
+            .map(CaptureIndex::Overlap);
     }
-    overlaps
-        .iter()
-        .rposition(matches)
-        .map(CaptureIndex::Overlap)
+    primary
+        .into_iter()
+        .map(|capture| (CaptureIndex::Primary, capture))
+        .chain(
+            overlaps
+                .iter()
+                .enumerate()
+                .map(|(index, capture)| (CaptureIndex::Overlap(index), capture)),
+        )
+        .filter(|(_, capture)| matches(capture))
+        .min_by_key(|(_, capture)| {
+            (
+                capture.owner.legacy_release_precedence(),
+                capture.window != arrived_in,
+            )
+        })
+        .map(|(index, _)| index)
 }
 
 pub(crate) fn latch_in(
@@ -188,7 +236,7 @@ pub(crate) fn latch_in(
 ) {
     overlaps.retain(|held| !same_legacy_field(held, &capture));
     match primary.take() {
-        Some(held) if held.button != capture.button => {
+        Some(held) if held.button != capture.button && !same_legacy_field(&held, &capture) => {
             overlaps.retain(|older| !same_legacy_field(older, &held));
             overlaps.push(held);
         }

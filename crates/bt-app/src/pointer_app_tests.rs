@@ -1085,6 +1085,88 @@ fn another_button_keeps_the_legacy_overlap_until_cut_4() {
     );
 }
 
+/// RED (T-POINTER-CAPTURE cut 3 boundary) — **a new value of the same
+/// legacy field overwrites its old value**, even when another button wrote it.
+/// The removed field was one `Option`, not one slot per button.
+///
+/// MUTATION: keep the old primary beside the new capture in `latch_in`; the
+/// overlap count is one and the assertion fails.
+#[test]
+fn a_new_latch_of_the_same_legacy_field_overwrites_the_old_one() {
+    let window = winit::window::WindowId::from(1_u64);
+    let mut primary = None;
+    let mut overlaps = Vec::new();
+    latch_in(
+        &mut primary,
+        &mut overlaps,
+        a_capture(window, CaptureOwner::GlanceThumb(2.0), MouseButton::Left),
+    );
+    latch_in(
+        &mut primary,
+        &mut overlaps,
+        a_capture(window, CaptureOwner::GlanceThumb(7.0), MouseButton::Right),
+    );
+    assert!(
+        overlaps.is_empty(),
+        "the old value of the same window's same legacy field was overwritten"
+    );
+    assert!(matches!(
+        primary.as_ref().map(|capture| &capture.owner),
+        Some(CaptureOwner::GlanceThumb(7.0))
+    ));
+}
+
+/// RED (T-POINTER-CAPTURE cut 3 boundary) — **matching overlaps release in
+/// the legacy roads' order**, not newest-first or list order. The cell route
+/// stood before the chrome ladder, and within that ladder the video bar stood
+/// before the edit selection.
+///
+/// MUTATION: select the newest matching capture, or reverse the legacy release
+/// precedence; each assertion selects a different index and fails.
+#[test]
+fn legacy_overlaps_release_in_the_old_ladders_order() {
+    let window = winit::window::WindowId::from(1_u64);
+
+    let route = a_capture(
+        window,
+        CaptureOwner::Route(MouseRoute::MathBlock),
+        MouseButton::Right,
+    );
+    let video = a_capture(
+        window,
+        CaptureOwner::VideoBar(PreviewSurface::Peek),
+        MouseButton::Left,
+    );
+    assert_eq!(
+        capture_index_for_button_event(
+            Some(&video),
+            std::slice::from_ref(&route),
+            window,
+            ElementState::Released,
+            MouseButton::Left,
+        ),
+        Some(CaptureIndex::Overlap(0)),
+        "the cell route still precedes the chrome release ladder"
+    );
+
+    let selection = a_capture(
+        window,
+        CaptureOwner::EditSelection(TabId(3), PreviewSurface::Peek),
+        MouseButton::Left,
+    );
+    assert_eq!(
+        capture_index_for_button_event(
+            Some(&selection),
+            std::slice::from_ref(&video),
+            window,
+            ElementState::Released,
+            MouseButton::Left,
+        ),
+        Some(CaptureIndex::Overlap(0)),
+        "the video bar still precedes the edit selection inside the chrome ladder"
+    );
+}
+
 /// RED (T-POINTER-CAPTURE cut 3, cell C1·0) — **a divider let go anywhere
 /// commits, through the whole dispatch.**
 ///
