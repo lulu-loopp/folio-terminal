@@ -703,7 +703,9 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Toast,
             platform,
-            ItemQuery::method("Notifier", "new").one_per_variant(),
+            ItemQuery::method("Notifier", "new")
+                .in_module("crate::windows_impl")
+                .one_per_variant(),
             "Notifier::new",
         ),
         (
