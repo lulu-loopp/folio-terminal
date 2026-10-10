@@ -5160,41 +5160,56 @@ mod rehost_address_tests {
     /// through the state machine on their way: the environment callback and the
     /// controller callback arriving with an error each set `Failed`. The third
     /// — the start deadline passing with no callback at all — only drew the
-    /// card. The card's one verb is `WebMachine::restart`, which answers
-    /// `Ignore` from anywhere but `Failed`, so the seat came up with a card, a
-    /// button, and nothing behind the button for the rest of the session. Gate
-    /// 5 photographed exactly this shape on a machine with no runtime.
+    /// card. When the loader says a runtime is present, its verb is
+    /// `WebMachine::restart`, which answers `Ignore` from anywhere but `Failed`;
+    /// when the loader says this build has no runtime, the card links to the
+    /// runtime download instead. Both still leave the machine in `Failed`.
     ///
     /// RED GATE: take `self.machine.the_engine_did_not_start()` out of
-    /// [`WebSeat::the_engine_did_not_start`] and the second assertion fails —
-    /// which on the machine is a `Retry` that does nothing when it is pressed.
+    /// [`WebSeat::the_engine_did_not_start`] and the state assertion fails; on
+    /// a machine with a runtime, the restart verb would then do nothing too.
     #[test]
     fn a_card_for_an_engine_that_said_nothing_has_a_button_that_can_fire() {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
             window: window(1),
         });
+        let runtime_is_available = bt_platform::webview2_runtime_version().is_ok();
         // The seat has asked for an engine and is waiting on the answer, which
         // is the state the deadline exists for.
         let _ = seat.machine.request("https://example.com/");
         seat.engine_owes_an_answer = Some(Instant::now() - Duration::from_millis(1));
         let outcomes = seat.engine_that_said_nothing(Instant::now());
 
-        assert!(
-            matches!(seat.fault, Some(WebFault::EngineDidNotStart { .. })),
-            "the card is raised: {:?}",
-            seat.fault
-        );
+        let fault = seat.fault.as_ref().expect("the silence raises a card");
         assert_eq!(
             seat.machine.state(),
             WebState::Failed,
             "and the machine is where the card's verb can act"
         );
-        assert_eq!(
-            seat.machine.restart(),
-            WebEffect::RebuildFromScratch,
-            "so the button on it actually asks for an engine again"
-        );
+        match (runtime_is_available, fault) {
+            (true, WebFault::EngineDidNotStart { .. }) => {
+                assert_eq!(
+                    fault.verb_text(),
+                    Some(crate::i18n::Text::WebFailEngineVerb)
+                );
+                assert_eq!(fault.verb(), Some(WebFaultVerb::RestartTheEngine));
+                assert_eq!(
+                    seat.machine.restart(),
+                    WebEffect::RebuildFromScratch,
+                    "the restart button asks for an engine again"
+                );
+            }
+            (false, WebFault::RuntimeMissing { .. }) => {
+                assert_eq!(
+                    fault.verb_text(),
+                    Some(crate::i18n::Text::WebFailRuntimeVerb)
+                );
+                assert_eq!(fault.verb(), Some(WebFaultVerb::DownloadTheRuntime));
+            }
+            (true, _) => panic!("an available runtime gets the engine-start card: {fault:?}"),
+            (false, _) => panic!("a missing runtime gets the runtime card: {fault:?}"),
+        }
         assert!(
             !outcomes.is_empty(),
             "and the reason is on its way to the log either way"
