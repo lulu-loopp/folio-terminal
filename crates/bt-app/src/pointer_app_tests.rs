@@ -4,9 +4,10 @@
 
 use super::*;
 use crate::runtime::pointer::{
-    BANDS_THAT_TAKE_NO_POINTER, CaptureOwner, FloatFacts, POINTER_LAYERS_TOP_FIRST, Plane,
-    PointerCapture, PointerFacts, PointerHit, PointerScene, PressVerdict, Visits,
-    press_against_the_slot, release_ends_the_capture, walk_pointer_layers,
+    BANDS_THAT_TAKE_NO_POINTER, CaptureIndex, CaptureOwner, FloatFacts, POINTER_LAYERS_TOP_FIRST,
+    Plane, PointerCapture, PointerFacts, PointerHit, PointerScene, PressVerdict, Visits,
+    cancel_then_route, capture_index_for_button_event, latch_in, press_against_the_slot,
+    release_ends_the_capture, walk_pointer_layers,
 };
 use crate::test_support::{calls_of, source};
 use bt_source::{Pattern, Search, View, needle};
@@ -489,14 +490,15 @@ fn on_the_front_body(facts: &PointerFacts, tenant: Tenant) -> [f64; 2] {
     [f64::from(x), f64::from(y)]
 }
 
-/// RED (T-POINTER-CAPTURE cut 1, R-4) — **one walk allocates nothing**, at
-/// every stack size and over every tenant's body.
+/// RED (T-POINTER-CAPTURE cut 1, R-4) — **the overlay-layer part of one walk
+/// allocates nothing**, at every stack size and over every tenant's body.
 ///
 /// The walk reads the frame's facts and the window's kept layouts in place:
 /// it iterates the floating windows where they stand, borrows a Git page's
 /// rows and a graph by the window's id, and finds a row's verb without
 /// building the row's list of verbs. Counted by the test build's allocator on
-/// this thread only, around exactly one walk.
+/// this thread only, around exactly one walk. `walk_counted` answers `None`
+/// for planes 13–16, whose allocation budget remains open until cut 9.
 ///
 /// MUTATION: collect the floating windows' ids into a `Vec` before walking
 /// them (what `float_hit_at` does, `floats.rs`), or find a Git row's verb
@@ -534,10 +536,11 @@ fn the_walk_allocates_nothing() {
 ///
 /// The walk has one caller in the product, the door that opens an event
 /// ([`Runtime::open_pointer_event`], which keeps the answer for the event's
-/// readers), and each of the three doors a pointer event comes through — a
-/// move, a button, a burst of notches being spent — opens its event exactly
-/// once. Every other reader reads the answer the door kept (the readers move
-/// onto it in cut 8, family by family, each extending this pin).
+/// readers), and each door that handles pointer geometry — a move, a button,
+/// a burst of notches being spent, or an application-routed release in the
+/// owner window — opens its event exactly once. Every other reader reads the
+/// answer the door kept (the readers move onto it in cut 8, family by family,
+/// each extending this pin).
 ///
 /// MUTATION: let any reader call `pointer_layer_at` itself instead of reading
 /// the kept answer — the first assertion names it; open an event twice in one
@@ -570,6 +573,7 @@ fn a_complete_event_walks_once() {
             ("Runtime::flush_wheel".to_owned(), 1),
             ("Runtime::mouse_input".to_owned(), 1),
             ("Runtime::pointer_moved".to_owned(), 1),
+            ("Runtime::release_capture_from_application".to_owned(), 1),
         ],
         "each door opens its event once"
     );
@@ -596,6 +600,25 @@ fn a_complete_event_walks_once() {
 
 /// The module every pointer read belongs to.
 const POINTER_MODULE: &str = "crate::runtime::pointer";
+
+fn is_pointer_module(module: &str) -> bool {
+    module == POINTER_MODULE
+        || module
+            .strip_prefix(POINTER_MODULE)
+            .is_some_and(|suffix| suffix.starts_with("::"))
+}
+
+/// RED (T-POINTER-CAPTURE cut 1 guard) — the exemption is one module and its
+/// descendants, not every module whose name begins with the same bytes.
+///
+/// MUTATION: use `module.starts_with(POINTER_MODULE)`; the
+/// `crate::runtime::pointer_escape` row becomes exempt and this test fails.
+#[test]
+fn the_pointer_guard_exemption_ends_at_the_module_boundary() {
+    assert!(is_pointer_module("crate::runtime::pointer"));
+    assert!(is_pointer_module("crate::runtime::pointer::capture"));
+    assert!(!is_pointer_module("crate::runtime::pointer_escape"));
+}
 
 /// **The six ways pointer data enters Folio** (§4.2), each a set of
 /// `bt_source` needles: the pointer fields (N-P), the position type (N-E), the
@@ -641,7 +664,7 @@ fn pointer_reads_outside_the_module() -> Vec<String> {
             .unwrap_or_else(|failure| panic!("{failure}"))
             .in_the_product(index);
         for (owner, count) in found.owners(index) {
-            if owner.module_path.starts_with(POINTER_MODULE) {
+            if is_pointer_module(&owner.module_path) {
                 continue;
             }
             rows.extend(std::iter::repeat_n(format!("{owner}\t{door}"), count));
@@ -658,7 +681,7 @@ fn pointer_reads_outside_the_module() -> Vec<String> {
                 .file_at(occurrence.span.start())
                 .expect("an occurrence stands in a file");
             for owner in file.owners() {
-                if !owner.module_path.starts_with(POINTER_MODULE) {
+                if !is_pointer_module(&owner.module_path) {
                     rows.push(format!("{} (outside any item)\t{door}", owner.module_path));
                 }
             }
@@ -766,17 +789,63 @@ fn a_capture(
 
 /// The layers that took a release before it reached the gesture that owned it
 /// (§3.1 column a), each by the door its press arm calls in `mouse_input`.
-const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 7] = [
-    ("a full-window card", "self.quit_card_layout()"),
+const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 24] = [
+    ("the quit card", "self.quit_card_layout()"),
+    ("the dirty gate", "self.dirty_gate_layout()"),
+    ("the first-run card", "self.first_run_layout()"),
+    (
+        "the PSReadLine invitation",
+        "self.psreadline_invite_layout()",
+    ),
+    ("the paste card", "self.paste_card_layout()"),
+    ("the update card", "self.update_card_layout()"),
+    ("the uninstall card", "self.uninstall_card_layout()"),
     ("the toasts", "self.press_toast("),
     ("the settings sheet", "self.settings_mouse_input("),
+    ("the restore card", "self.restore_layout()"),
+    ("the Git menu", "self.git_menu_layout()"),
+    ("the terminal menu", "self.term_menu_layout()"),
+    ("the file menu", "self.file_menu_layout()"),
+    ("the pane menu", "self.pane_menu_layout()"),
+    ("the tab menu", "self.tab_menu_layout()"),
+    ("the palette", "self.window.palette_layout.clone()"),
+    ("the graph-filter menu", "self.graph_filter_menu_layout()"),
     ("the glance card's head", "self.press_file_peek(button)"),
     ("a floating window", "self.press_float(position)"),
+    ("the profile menu", "self.profile_menu_layout()"),
+    ("the root menu", "self.root_menu_layout()"),
+    ("the preview menu", "self.preview_menu_layout()"),
     (
         "a hosted page",
         "self.press_web_page(state,button,position)",
     ),
     ("the chrome's own router", "self.chrome_mouse_input("),
+];
+
+/// Every payload arm in the capture record. The release test below keeps both
+/// the button-ending table and the owner dispatch exhaustive by name, while
+/// its value table exercises the distinct ending policies.
+const CAPTURE_OWNER_ARMS: [&str; 20] = [
+    "Divider",
+    "TabPress",
+    "PanePress",
+    "RowPress",
+    "Drag",
+    "FloatHeadPress",
+    "FloatDrag",
+    "GlanceHeadPress",
+    "GlanceThumb",
+    "VideoBar",
+    "PreviewBodyThumb",
+    "BlockThumb",
+    "PicturePan",
+    "EditSelection",
+    "RenderedSelection",
+    "TerminalThumb",
+    "TerminalFootMark",
+    "Route",
+    "SettingsSlider",
+    "SettingsMenuBar",
 ];
 
 /// RED (T-POINTER-CAPTURE cut 3, R-6) — **a release reaches its owner over
@@ -821,6 +890,36 @@ fn a_release_reaches_its_owner_over_every_layer_that_eats_releases() {
             );
         }
     }
+    let owned_in_a = a_capture(
+        a,
+        CaptureOwner::EditSelection(tab, surface),
+        MouseButton::Left,
+    );
+    assert_eq!(
+        capture_index_for_button_event(
+            Some(&owned_in_a),
+            &[],
+            b,
+            ElementState::Released,
+            MouseButton::Left,
+        ),
+        Some(CaptureIndex::Primary),
+        "a release reported by window B selects the capture owned by window A"
+    );
+    let ending = crate::test_support::squeezed_body("CaptureOwner", "ends_on_any_release");
+    let dispatch = crate::test_support::squeezed_body("Runtime", "release_capture");
+    for owner in CAPTURE_OWNER_ARMS {
+        let ending_arm = format!("Self::{owner}");
+        let dispatch_arm = format!("CaptureOwner::{owner}");
+        assert!(
+            ending.contains(&ending_arm),
+            "the release-ending table names {owner}"
+        );
+        assert!(
+            dispatch.contains(&dispatch_arm),
+            "the release dispatch names {owner}"
+        );
+    }
     let road = crate::test_support::squeezed_body("Runtime", "mouse_input");
     let release = road
         .find("self.release_capture(")
@@ -846,9 +945,8 @@ fn a_release_reaches_its_owner_over_every_layer_that_eats_releases() {
 /// 4. The door asks it before any arm of the press road, and a stale capture of
 /// another window is handed to that window, which runs its owner's cancel.
 ///
-/// MUTATION: answer `Route` for the held button (route without cancelling) —
-/// the verdicts fail; drop `cancel_stale_capture` from the door — the last
-/// assertion fails.
+/// MUTATION: answer `Route` for the held button, or route the continuation
+/// before `cancel_owner`; the state assertions fail.
 #[test]
 fn a_press_of_the_held_button_cancels_the_stale_capture_first() {
     let (a, b) = (
@@ -872,18 +970,118 @@ fn a_press_of_the_held_button_cancels_the_stale_capture_first() {
             "another button is routed as it always was (cut 4 rules on it)"
         );
     }
-    let road = crate::test_support::squeezed_body("Runtime", "mouse_input");
-    let precedence = road
-        .find("self.press_against_the_capture(button)?;")
-        .expect("the press asks the slot");
-    for (layer, door) in LAYERS_THAT_ATE_RELEASES {
-        let at = road.find(door).expect("the arm is on the press road");
-        assert!(precedence < at, "the slot is asked before {layer}");
+    #[derive(Default)]
+    struct State {
+        owner_active: bool,
+        live_payloads: usize,
+        routed: bool,
     }
-    assert!(
-        crate::test_support::squeezed_body("Runtime", "press_against_the_capture")
-            .contains("PressVerdict::CancelThenRoute=>self.cancel_stale_capture(),"),
-        "a stale capture is cancelled before the press goes on"
+    for arrived_in in [a, b] {
+        assert_eq!(
+            capture_index_for_button_event(
+                Some(&held),
+                &[],
+                arrived_in,
+                ElementState::Pressed,
+                MouseButton::Left,
+            ),
+            Some(CaptureIndex::Primary),
+            "the application finds A's stale capture when the press arrives in {arrived_in:?}"
+        );
+        let mut state = State {
+            owner_active: true,
+            live_payloads: 1,
+            routed: false,
+        };
+        cancel_then_route(
+            &mut state,
+            |state| {
+                assert!(state.owner_active, "the owner-specific cancel runs once");
+                state.owner_active = false;
+                state.live_payloads -= 1;
+                Ok::<(), ()>(())
+            },
+            |state| {
+                assert!(
+                    !state.owner_active,
+                    "the old owner is cancelled before routing"
+                );
+                assert_eq!(
+                    state.live_payloads, 0,
+                    "routing starts with no live payload"
+                );
+                state.routed = true;
+                state.live_payloads += 1;
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("the model has no fallible step");
+        assert!(state.routed);
+        assert_eq!(
+            state.live_payloads, 1,
+            "two gesture payloads are never live"
+        );
+    }
+}
+
+/// RED (T-POINTER-CAPTURE cut 3 boundary) — another button keeps the bounded
+/// legacy overlap until cut 4 decides A·b and B21. The primary is the newest
+/// gesture and the earlier gesture remains independently releasable.
+///
+/// MUTATION: replace the primary unconditionally in `latch_in`; the overlap
+/// count is zero and the left release finds nothing.
+#[test]
+fn another_button_keeps_the_legacy_overlap_until_cut_4() {
+    let (a, b) = (
+        winit::window::WindowId::from(1_u64),
+        winit::window::WindowId::from(2_u64),
+    );
+    let mut primary = None;
+    let mut overlaps = Vec::new();
+    latch_in(
+        &mut primary,
+        &mut overlaps,
+        a_capture(
+            a,
+            CaptureOwner::EditSelection(TabId(3), PreviewSurface::Peek),
+            MouseButton::Left,
+        ),
+    );
+    latch_in(
+        &mut primary,
+        &mut overlaps,
+        a_capture(
+            b,
+            CaptureOwner::VideoBar(PreviewSurface::Peek),
+            MouseButton::Right,
+        ),
+    );
+    assert_eq!(
+        overlaps.len(),
+        1,
+        "the older independent field remains live"
+    );
+    assert_eq!(
+        capture_index_for_button_event(
+            primary.as_ref(),
+            &overlaps,
+            b,
+            ElementState::Released,
+            MouseButton::Left,
+        ),
+        Some(CaptureIndex::Overlap(0)),
+        "A·b and cross-window B21 keep the first button's gesture"
+    );
+    assert_eq!(
+        capture_index_for_button_event(
+            primary.as_ref(),
+            &overlaps,
+            a,
+            ElementState::Released,
+            MouseButton::Right,
+        ),
+        Some(CaptureIndex::Primary),
+        "the other button's gesture remains independently live too"
     );
 }
 
@@ -907,8 +1105,8 @@ fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
     );
     let release = crate::test_support::squeezed_body("Runtime", "release_capture");
     assert!(
-        release.contains("|CaptureOwner::TerminalFootMark(..)=>matchposition{Some(position)=>self.release_chrome_capture(button,position),"),
-        "the divider's release goes to the chrome capture's own let-go"
+        release.contains("CaptureOwner::Divider(_)=>matchposition{Some(position)=>self.release_chrome_capture(button,position),None=>Ok(false),}"),
+        "the divider's own arm routes to the chrome capture's let-go"
     );
     let let_go = crate::test_support::squeezed_body("Runtime", "release_chrome_capture");
     let divider = let_go

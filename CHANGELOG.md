@@ -44,7 +44,7 @@ All notable changes to Folio are recorded here. The format follows
 - Programs installed while Folio is running appear in the new-tab menu, Split with, the default profile and the Agents page without a restart, and a Git installed while Folio is running is found by the Git page. Folio looks again when one of those menus or pages opens and when Windows says the environment changed; a menu that is open when the answer arrives updates in place.
 - A page that cannot open in a web pane says why in one line under "Cannot open" and the address — the name that did not resolve, or the kind of address a preview does not open — and the card no longer carries a button: reload, the address and copy are in the row right above it. <!-- zh: 网页窗格无法打开页面时，在「无法打开」和地址下用一行说明原因——无法解析的域名，或预览不打开的地址类型——卡片不再带按钮：重新加载、地址和复制都在它正上方的一行。 -->
 - While a page loads, the address bar shows the address you asked for, and after a page fails to load it still shows it, so you can correct it instead of retyping it. <!-- zh: 页面加载时，地址栏显示你请求的地址；页面加载失败后仍保留，可以直接修改，不必重新输入。 -->
-- Letting go of a divider, a tab, a scroll thumb or a selection while a card, a menu or a web page is under the pointer now ends the drag; before, the drag could stay stuck to the pointer. <!-- zh: pending -->
+- Letting go of a divider, tab or scroll thumb while a card or menu is over it now ends the drag. <!-- zh: pending -->
 
 ### Changed
 

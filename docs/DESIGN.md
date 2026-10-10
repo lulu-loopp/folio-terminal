@@ -14668,3 +14668,11 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** While a gesture is held, the release that ends it goes to its owner wherever the pointer is; a card, a menu, the palette, the glance card, a floating window or a hosted page under the pointer can no longer leave a divider, a tab, a thumb or a selection stuck to the hand (cells A·a). Which button's release ends a gesture is unchanged until cut 4.
 
 **Pinned by** `pointer_app_tests::a_release_reaches_its_owner_over_every_layer_that_eats_releases`, `a_press_of_the_held_button_cancels_the_stale_capture_first` (cell B20, both windows) and `a_divider_released_anywhere_commits_through_the_whole_dispatch` (cell C1·0); `app_mouse_tests::a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to` stays green.
+
+### 2026-10-09 — Capture ownership crosses windows without deciding the second button (T-POINTER-CAPTURE cut 3 correction)
+
+**What is built.** The application selects a matching button-up before borrowing the window in which it arrived. A capture owned by another window is released there immediately, using that owner's pointer and frame geometry; a repeated press of its button likewise runs the owner's cancellation before the arrived window routes the press. There is no deferred stale payload. `App::pointer_capture` remains the current authoritative record, and a bounded `pointer_capture_overlaps` list keeps at most one record per legacy `(window, owner kind)` when another button begins a gesture.
+
+**The rule.** Cut 3 changes A·a and B20 only. Arrival in another window never changes the owner of a release or delays stale-capture cancellation. A·b and cross-window B21 keep the independent overlaps the removed fields allowed until cut 4 records the owner's R-8 ruling; cut 3 does not make one field's overwrite general.
+
+**Pinned by** `pointer_app_tests::a_release_reaches_its_owner_over_every_layer_that_eats_releases` (an independent arrived-in window), `a_press_of_the_held_button_cancels_the_stale_capture_first` (owner state is cancelled before routing and there are never two live payloads), `another_button_keeps_the_legacy_overlap_until_cut_4`, and `a_divider_released_anywhere_commits_through_the_whole_dispatch` (the divider's own dispatch arm).

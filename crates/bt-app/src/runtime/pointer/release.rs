@@ -7,17 +7,112 @@
 //! glance card's two and the settings sheet's — each of which a layer above it could pre-empt.
 
 use crate::{
-    MouseRoute, PressedCellTarget, Runtime, TabClick, UserInputKind, mouse_trace,
+    FolioApp, MouseRoute, PressedCellTarget, Runtime, TabClick, UserInputKind, input, mouse_trace,
     protocol_mouse_button, route_forwarded_mouse_button, seats, settings,
 };
 use anyhow::Result;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton};
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::window::WindowId;
 
 use super::capture::{
-    CaptureOwner, PressVerdict, press_against_the_slot, release_ends_the_capture,
+    CaptureIndex, CaptureOwner, PressVerdict, cancel_then_route, capture_index_for_button_event,
+    press_against_the_slot, release_ends_the_capture,
 };
+
+impl FolioApp {
+    /// **Application-wide capture precedence** (T-POINTER-CAPTURE R-5/R-6).
+    /// A button event can arrive in a window other than the capture's. Select
+    /// the matching capture before the arrived window is borrowed; if its owner
+    /// is elsewhere, run that owner's release or cancel now. The arrived
+    /// window is routed only after this method returns.
+    pub(crate) fn capture_before_pointer_event(
+        &mut self,
+        arrived_in: WindowId,
+        event: &WindowEvent,
+    ) -> Result<bool> {
+        let WindowEvent::MouseInput { state, button, .. } = event else {
+            return Ok(false);
+        };
+        let Some(app) = self.app.as_mut() else {
+            return Ok(false);
+        };
+        let reported_button = *button;
+        let button = match state {
+            ElementState::Pressed => self
+                .windows
+                .values()
+                .find(|window| window.window.id() == arrived_in)
+                .map_or(reported_button, |window| {
+                    input::pressed_button(
+                        reported_button,
+                        window.modifiers_held,
+                        bt_platform::host_platform(),
+                    )
+                }),
+            ElementState::Released if reported_button == MouseButton::Left => {
+                let secondary_capture = |capture: &super::capture::PointerCapture| {
+                    capture.button == MouseButton::Right
+                        && self.windows.values().any(|window| {
+                            window.window.id() == capture.window && window.secondary_press
+                        })
+                };
+                if app.pointer_capture.as_ref().is_some_and(secondary_capture)
+                    || app.pointer_capture_overlaps.iter().any(secondary_capture)
+                {
+                    MouseButton::Right
+                } else {
+                    reported_button
+                }
+            }
+            ElementState::Released => reported_button,
+        };
+        let index = capture_index_for_button_event(
+            app.pointer_capture.as_ref(),
+            &app.pointer_capture_overlaps,
+            arrived_in,
+            *state,
+            button,
+        );
+        let Some(index) = index else {
+            return Ok(false);
+        };
+        app.focus_capture(index);
+        let owner_window = app
+            .pointer_capture
+            .as_ref()
+            .map(|capture| capture.window)
+            .expect("the selected capture is primary");
+        if owner_window == arrived_in {
+            return Ok(false);
+        }
+        if !self.windows.contains(owner_window) {
+            if let Some(app) = self.app.as_mut() {
+                let _ = app.take_capture_at(CaptureIndex::Primary);
+            }
+            return Ok(false);
+        }
+        match state {
+            ElementState::Pressed => cancel_then_route(
+                self,
+                |this| {
+                    this.runtime(owner_window).map_or(Ok(()), |mut owner| {
+                        owner.window.secondary_press = false;
+                        owner.cancel_own_capture()
+                    })
+                },
+                |_this| Ok(false),
+            ),
+            ElementState::Released => self.runtime(owner_window).map_or(Ok(false), |mut owner| {
+                if reported_button != button {
+                    owner.window.secondary_press = false;
+                }
+                owner.release_capture_from_application(button)
+            }),
+        }
+    }
+}
 
 impl Runtime<'_> {
     /// **A press against the slot** (R-5): a press of the held capture's own button proves the
@@ -27,21 +122,8 @@ impl Runtime<'_> {
     pub(crate) fn press_against_the_capture(&mut self, button: MouseButton) -> Result<()> {
         match press_against_the_slot(self.app.pointer_capture.as_ref(), button) {
             PressVerdict::Route => Ok(()),
-            PressVerdict::CancelThenRoute => self.cancel_stale_capture(),
+            PressVerdict::CancelThenRoute => self.cancel_own_capture(),
         }
-    }
-
-    /// **Cancel a capture whose release was lost.** This window's own is ended by its owner's
-    /// cancel: a divider puts its ratio back, a drag goes home, a rendered selection drops its
-    /// link, everything else lets go keeping what it already wrote. Another window's is handed to
-    /// that window (`App::stale_capture`), which runs the same ending on its next turn; the slot
-    /// is empty either way before the press is routed.
-    fn cancel_stale_capture(&mut self) -> Result<()> {
-        if self.own_capture().is_none() {
-            self.app.stale_capture = self.app.pointer_capture.take();
-            return Ok(());
-        }
-        self.cancel_own_capture()
     }
 
     /// End this window's capture with its owner's cancel.
@@ -74,10 +156,25 @@ impl Runtime<'_> {
             | CaptureOwner::Route(_)
             | CaptureOwner::SettingsSlider(_)
             | CaptureOwner::SettingsMenuBar(_) => {
-                self.app.pointer_capture = None;
+                self.drop_own_capture();
             }
         }
         Ok(())
+    }
+
+    /// Deliver a release selected by the application to this capture's owner,
+    /// using the owner's window geometry rather than the window in which the
+    /// platform reported the button-up.
+    pub(crate) fn release_capture_from_application(&mut self, button: MouseButton) -> Result<bool> {
+        let position = crate::button_router_position(
+            ElementState::Released,
+            self.window.pointer_position,
+            self.window.pointer_last_seen,
+        );
+        if let Some(position) = position {
+            self.open_pointer_event(position);
+        }
+        self.release_capture(button, position)
     }
 
     /// **The release of the capture's button, delivered to its owner** (R-6) — asked first of
@@ -89,7 +186,7 @@ impl Runtime<'_> {
         button: MouseButton,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
-        let Some(capture) = self.own_capture() else {
+        let Some(capture) = self.app.pointer_capture.as_ref() else {
             return Ok(false);
         };
         if !release_ends_the_capture(capture, button) {
@@ -123,7 +220,7 @@ impl Runtime<'_> {
             }
             // A slider or a menu bar of the settings sheet ends wherever the button comes up.
             CaptureOwner::SettingsSlider(_) | CaptureOwner::SettingsMenuBar(_) => {
-                self.app.pointer_capture = None;
+                self.drop_own_capture();
                 if let (Some(layout), Some(position)) =
                     (self.settings_layout(), self.window.pointer_position)
                 {
@@ -136,8 +233,11 @@ impl Runtime<'_> {
                 }
                 Ok(true)
             }
-            CaptureOwner::Divider(_)
-            | CaptureOwner::TabPress(_)
+            CaptureOwner::Divider(_) => match position {
+                Some(position) => self.release_chrome_capture(button, position),
+                None => Ok(false),
+            },
+            CaptureOwner::TabPress(_)
             | CaptureOwner::PanePress(..)
             | CaptureOwner::RowPress(_)
             | CaptureOwner::Drag(_)

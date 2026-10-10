@@ -1,11 +1,9 @@
 //! **The capture** (`docs/plans/design/pointer-capture-2026-10-09.md` §2.2):
 //! one record per latched gesture, in one application slot.
 //!
-//! `App::pointer_capture` holds at most one [`PointerCapture`]: the window
-//! whose press latched it, the gesture with its own payload ([`CaptureOwner`],
-//! one variant per row of §1.2, a tab's own gesture naming its tab), the
-//! button, and the router's answer at the press. Two latches at once, two
-//! windows at once and a latch nobody owns are not representable.
+//! `App::pointer_capture` is the authority for the current gesture. Until cut
+//! 4 decides what another button does, `App::pointer_capture_overlaps` keeps
+//! the independent legacy-field overlaps cut 3 is not allowed to change.
 //!
 //! Every gesture is read and written through the accessors below, so a
 //! window reads only its own capture and a tab's gesture is read only on that
@@ -15,11 +13,11 @@
 //! ([`press_against_the_slot`], R-5 rule 2).
 
 use crate::{
-    DividerDrag, Drag, FilePeekPress, FloatDrag, FloatHeadPress, ImageDrag, MouseRoute, PanePress,
-    PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowPress, Runtime, TabId,
-    TabPress, TerminalColumnDrag, TerminalThumbDrag, settings,
+    App, DividerDrag, Drag, FilePeekPress, FloatDrag, FloatHeadPress, ImageDrag, MouseRoute,
+    PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowPress,
+    Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, settings,
 };
-use winit::event::MouseButton;
+use winit::event::{ElementState, MouseButton};
 use winit::window::WindowId;
 
 use super::PointerHit;
@@ -152,197 +150,522 @@ pub(crate) fn release_ends_the_capture(capture: &PointerCapture, button: MouseBu
     capture.button == button || capture.owner.ends_on_any_release()
 }
 
-/// **The doors of one gesture** — read, read to change in place, take, latch,
-/// drop — each answering only for this window's capture, and, for a gesture
-/// that belongs to a tab, only while that tab is in front. Each gesture names
-/// the doors its road uses.
-macro_rules! gesture_doors {
-    ($scope:ident $variant:ident $ty:ty { $($door:ident $name:ident),* $(,)? }) => {
-        impl Runtime<'_> {
-            $(gesture_doors!(@$scope $door $name $variant $ty);)*
-        }
-    };
-    (@window held $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&self) -> Option<&$ty> {
-            match &self.own_capture()?.owner {
-                CaptureOwner::$variant(value) => Some(value),
-                _ => None,
-            }
-        }
-    };
-    (@window held_mut $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self) -> Option<&mut $ty> {
-            match &mut self.own_capture_mut()?.owner {
-                CaptureOwner::$variant(value) => Some(value),
-                _ => None,
-            }
-        }
-    };
-    (@window take $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self) -> Option<$ty> {
-            let window = self.window.window.id();
-            let capture = self.app.pointer_capture.take_if(|capture| {
-                capture.window == window && matches!(capture.owner, CaptureOwner::$variant(..))
-            })?;
-            match capture.owner {
-                CaptureOwner::$variant(value) => Some(value),
-                _ => None,
-            }
-        }
-    };
-    (@window latch $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self, value: $ty) {
-            self.latch_capture(CaptureOwner::$variant(value), MouseButton::Left);
-        }
-    };
-    (@window drop $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self) {
-            let window = self.window.window.id();
-            let _ = self.app.pointer_capture.take_if(|capture| {
-                capture.window == window && matches!(capture.owner, CaptureOwner::$variant(..))
-            });
-        }
-    };
-    (@tab held $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&self) -> Option<&$ty> {
-            match &self.own_capture()?.owner {
-                CaptureOwner::$variant(tab, value) if *tab == self.id => Some(value),
-                _ => None,
-            }
-        }
-    };
-    (@tab held_mut $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self) -> Option<&mut $ty> {
-            let id = self.id;
-            match &mut self.own_capture_mut()?.owner {
-                CaptureOwner::$variant(tab, value) if *tab == id => Some(value),
-                _ => None,
-            }
-        }
-    };
-    (@tab take $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self) -> Option<$ty> {
-            let (window, id) = (self.window.window.id(), self.id);
-            let capture = self.app.pointer_capture.take_if(|capture| {
-                capture.window == window
-                    && matches!(capture.owner, CaptureOwner::$variant(tab, _) if tab == id)
-            })?;
-            match capture.owner {
-                CaptureOwner::$variant(_, value) => Some(value),
-                _ => None,
-            }
-        }
-    };
-    (@tab latch $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self, value: $ty) {
-            let tab = self.id;
-            self.latch_capture(CaptureOwner::$variant(tab, value), MouseButton::Left);
-        }
-    };
-    (@tab drop $name:ident $variant:ident $ty:ty) => {
-        pub(crate) fn $name(&mut self) {
-            let (window, id) = (self.window.window.id(), self.id);
-            let _ = self.app.pointer_capture.take_if(|capture| {
-                capture.window == window
-                    && matches!(capture.owner, CaptureOwner::$variant(tab, _) if tab == id)
-            });
-        }
-    };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CaptureIndex {
+    Primary,
+    Overlap(usize),
 }
 
-gesture_doors!(window Divider DividerDrag {
-    held held_divider_drag, take take_divider_drag, latch latch_divider_drag, drop drop_divider_drag,
-});
-gesture_doors!(window TabPress TabPress {
-    held held_tab_press, held_mut held_tab_press_mut, take take_tab_press,
-    latch latch_tab_press, drop drop_tab_press,
-});
-gesture_doors!(window RowPress RowPress {
-    held held_row_press, held_mut held_row_press_mut, take take_row_press,
-    latch latch_row_press, drop drop_row_press,
-});
-gesture_doors!(window FloatHeadPress FloatHeadPress {
-    held held_float_head_press, held_mut held_float_head_press_mut,
-    latch latch_float_head_press, drop drop_float_head_press,
-});
-gesture_doors!(window FloatDrag FloatDrag {
-    held held_float_drag, latch latch_float_drag, drop drop_float_drag,
-});
-gesture_doors!(window GlanceHeadPress FilePeekPress {
-    held_mut held_file_peek_press_mut, take take_file_peek_press,
-    latch latch_file_peek_press, drop drop_file_peek_press,
-});
-gesture_doors!(window GlanceThumb f32 {
-    held held_glance_thumb, take take_glance_thumb, drop drop_glance_thumb,
-});
-gesture_doors!(window VideoBar PreviewSurface {
-    held held_video_bar_drag, take take_video_bar_drag, latch latch_video_bar_drag,
-});
-gesture_doors!(window SettingsSlider settings::SettingsRow {
-    held held_settings_slider_drag, latch latch_settings_slider_drag,
-});
-gesture_doors!(window SettingsMenuBar f32 {
-    held held_settings_menu_bar_drag, latch latch_settings_menu_bar_drag,
-});
-gesture_doors!(tab PanePress PanePress {
-    held held_pane_press, held_mut held_pane_press_mut, take take_pane_press,
-    latch latch_pane_press, drop drop_pane_press,
-});
-gesture_doors!(tab PreviewBodyThumb PreviewBodyDrag {
-    held held_preview_body_drag, take take_preview_body_drag,
-    latch latch_preview_body_drag, drop drop_preview_body_drag,
-});
-gesture_doors!(tab BlockThumb PreviewBlockDrag {
-    held held_preview_block_drag, take take_preview_block_drag,
-    latch latch_preview_block_drag, drop drop_preview_block_drag,
-});
-gesture_doors!(tab PicturePan ImageDrag {
-    held held_preview_image_drag, take take_preview_image_drag, latch latch_preview_image_drag,
-});
-gesture_doors!(tab EditSelection PreviewSurface {
-    held held_preview_selecting, take take_preview_selecting,
-    latch latch_preview_selecting, drop drop_preview_selecting,
-});
-gesture_doors!(tab RenderedSelection PreviewTextDrag {
-    held held_preview_text_drag, held_mut held_preview_text_drag_mut,
-    take take_preview_text_drag, latch latch_preview_text_drag, drop drop_preview_text_drag,
-});
-gesture_doors!(tab TerminalThumb TerminalThumbDrag {
-    held held_terminal_thumb_drag, take take_terminal_thumb_drag, latch latch_terminal_thumb_drag,
-});
-gesture_doors!(tab TerminalFootMark TerminalColumnDrag {
-    held held_terminal_column_drag, take take_terminal_column_drag,
-    latch latch_terminal_column_drag,
-});
+fn same_legacy_field(left: &PointerCapture, right: &PointerCapture) -> bool {
+    left.window == right.window
+        && std::mem::discriminant(&left.owner) == std::mem::discriminant(&right.owner)
+}
+
+pub(crate) fn capture_index_for_button_event(
+    primary: Option<&PointerCapture>,
+    overlaps: &[PointerCapture],
+    _arrived_in: WindowId,
+    state: ElementState,
+    button: MouseButton,
+) -> Option<CaptureIndex> {
+    let matches = |capture: &PointerCapture| match state {
+        ElementState::Pressed => capture.button == button,
+        ElementState::Released => release_ends_the_capture(capture, button),
+    };
+    if primary.is_some_and(matches) {
+        return Some(CaptureIndex::Primary);
+    }
+    overlaps
+        .iter()
+        .rposition(matches)
+        .map(CaptureIndex::Overlap)
+}
+
+pub(crate) fn latch_in(
+    primary: &mut Option<PointerCapture>,
+    overlaps: &mut Vec<PointerCapture>,
+    capture: PointerCapture,
+) {
+    overlaps.retain(|held| !same_legacy_field(held, &capture));
+    match primary.take() {
+        Some(held) if held.button != capture.button => {
+            overlaps.retain(|older| !same_legacy_field(older, &held));
+            overlaps.push(held);
+        }
+        Some(_) | None => {}
+    }
+    *primary = Some(capture);
+}
+
+pub(crate) fn cancel_then_route<S, T, E>(
+    state: &mut S,
+    cancel_owner: impl FnOnce(&mut S) -> Result<(), E>,
+    route_press: impl FnOnce(&mut S) -> Result<T, E>,
+) -> Result<T, E> {
+    cancel_owner(state)?;
+    route_press(state)
+}
+
+impl App {
+    pub(crate) fn capture_index_where(
+        &self,
+        mut predicate: impl FnMut(&PointerCapture) -> bool,
+    ) -> Option<CaptureIndex> {
+        if self.pointer_capture.as_ref().is_some_and(&mut predicate) {
+            return Some(CaptureIndex::Primary);
+        }
+        self.pointer_capture_overlaps
+            .iter()
+            .rposition(predicate)
+            .map(CaptureIndex::Overlap)
+    }
+
+    pub(crate) fn focus_capture(&mut self, index: CaptureIndex) {
+        let CaptureIndex::Overlap(index) = index else {
+            return;
+        };
+        let Some(primary) = self.pointer_capture.as_mut() else {
+            self.pointer_capture = Some(self.pointer_capture_overlaps.remove(index));
+            return;
+        };
+        std::mem::swap(primary, &mut self.pointer_capture_overlaps[index]);
+    }
+
+    pub(crate) fn take_capture_at(&mut self, index: CaptureIndex) -> Option<PointerCapture> {
+        match index {
+            CaptureIndex::Primary => {
+                let taken = self.pointer_capture.take();
+                self.pointer_capture = self.pointer_capture_overlaps.pop();
+                taken
+            }
+            CaptureIndex::Overlap(index) => (index < self.pointer_capture_overlaps.len())
+                .then(|| self.pointer_capture_overlaps.remove(index)),
+        }
+    }
+
+    fn take_capture_where(
+        &mut self,
+        predicate: impl FnMut(&PointerCapture) -> bool,
+    ) -> Option<PointerCapture> {
+        let index = self.capture_index_where(predicate)?;
+        self.take_capture_at(index)
+    }
+
+    fn latch_capture(&mut self, capture: PointerCapture) {
+        latch_in(
+            &mut self.pointer_capture,
+            &mut self.pointer_capture_overlaps,
+            capture,
+        );
+    }
+}
+
+/// **One door body's access to a gesture.** The methods themselves are written
+/// below so the source index can see every `Runtime` item; this macro expands
+/// expressions only. Each body answers only for this window's capture and, for
+/// a gesture that belongs to a tab, only while that tab is in front.
+macro_rules! gesture_door {
+    (@window held $this:ident $variant:ident) => {{
+        match &$this.capture_where(|capture| matches!(capture.owner, CaptureOwner::$variant(..)))?.owner {
+            CaptureOwner::$variant(value) => Some(value),
+            _ => None,
+        }
+    }};
+    (@window held_mut $this:ident $variant:ident) => {{
+        match &mut $this.capture_where_mut(|capture| matches!(capture.owner, CaptureOwner::$variant(..)))?.owner {
+            CaptureOwner::$variant(value) => Some(value),
+            _ => None,
+        }
+    }};
+    (@window take $this:ident $variant:ident) => {{
+        let window = $this.window.window.id();
+        let capture = $this.app.take_capture_where(|capture| {
+            capture.window == window && matches!(capture.owner, CaptureOwner::$variant(..))
+        })?;
+        match capture.owner {
+            CaptureOwner::$variant(value) => Some(value),
+            _ => None,
+        }
+    }};
+    (@window latch $this:ident $variant:ident $value:ident) => {{
+        $this.latch_capture(CaptureOwner::$variant($value), MouseButton::Left);
+    }};
+    (@window drop $this:ident $variant:ident) => {{
+        let window = $this.window.window.id();
+        let _ = $this.app.take_capture_where(|capture| {
+            capture.window == window && matches!(capture.owner, CaptureOwner::$variant(..))
+        });
+    }};
+    (@tab held $this:ident $variant:ident) => {{
+        let id = $this.id;
+        match &$this.capture_where(|capture| matches!(capture.owner, CaptureOwner::$variant(tab, _) if tab == id))?.owner {
+            CaptureOwner::$variant(tab, value) if *tab == $this.id => Some(value),
+            _ => None,
+        }
+    }};
+    (@tab held_mut $this:ident $variant:ident) => {{
+        let id = $this.id;
+        match &mut $this.capture_where_mut(|capture| matches!(capture.owner, CaptureOwner::$variant(tab, _) if tab == id))?.owner {
+            CaptureOwner::$variant(tab, value) if *tab == id => Some(value),
+            _ => None,
+        }
+    }};
+    (@tab take $this:ident $variant:ident) => {{
+        let (window, id) = ($this.window.window.id(), $this.id);
+        let capture = $this.app.take_capture_where(|capture| {
+            capture.window == window
+                && matches!(capture.owner, CaptureOwner::$variant(tab, _) if tab == id)
+        })?;
+        match capture.owner {
+            CaptureOwner::$variant(_, value) => Some(value),
+            _ => None,
+        }
+    }};
+    (@tab latch $this:ident $variant:ident $value:ident) => {{
+        let tab = $this.id;
+        $this.latch_capture(CaptureOwner::$variant(tab, $value), MouseButton::Left);
+    }};
+    (@tab drop $this:ident $variant:ident) => {{
+        let (window, id) = ($this.window.window.id(), $this.id);
+        let _ = $this.app.take_capture_where(|capture| {
+            capture.window == window
+                && matches!(capture.owner, CaptureOwner::$variant(tab, _) if tab == id)
+        });
+    }};
+}
 
 impl Runtime<'_> {
-    /// **This window's capture**, if the slot holds one.
+    pub(crate) fn held_divider_drag(&self) -> Option<&DividerDrag> {
+        gesture_door!(@window held self Divider)
+    }
+
+    pub(crate) fn take_divider_drag(&mut self) -> Option<DividerDrag> {
+        gesture_door!(@window take self Divider)
+    }
+
+    pub(crate) fn latch_divider_drag(&mut self, value: DividerDrag) {
+        gesture_door!(@window latch self Divider value)
+    }
+
+    pub(crate) fn drop_divider_drag(&mut self) {
+        gesture_door!(@window drop self Divider)
+    }
+
+    pub(crate) fn held_tab_press(&self) -> Option<&TabPress> {
+        gesture_door!(@window held self TabPress)
+    }
+
+    pub(crate) fn held_tab_press_mut(&mut self) -> Option<&mut TabPress> {
+        gesture_door!(@window held_mut self TabPress)
+    }
+
+    pub(crate) fn take_tab_press(&mut self) -> Option<TabPress> {
+        gesture_door!(@window take self TabPress)
+    }
+
+    pub(crate) fn latch_tab_press(&mut self, value: TabPress) {
+        gesture_door!(@window latch self TabPress value)
+    }
+
+    pub(crate) fn drop_tab_press(&mut self) {
+        gesture_door!(@window drop self TabPress)
+    }
+
+    pub(crate) fn held_row_press(&self) -> Option<&RowPress> {
+        gesture_door!(@window held self RowPress)
+    }
+
+    pub(crate) fn held_row_press_mut(&mut self) -> Option<&mut RowPress> {
+        gesture_door!(@window held_mut self RowPress)
+    }
+
+    pub(crate) fn take_row_press(&mut self) -> Option<RowPress> {
+        gesture_door!(@window take self RowPress)
+    }
+
+    pub(crate) fn latch_row_press(&mut self, value: RowPress) {
+        gesture_door!(@window latch self RowPress value)
+    }
+
+    pub(crate) fn drop_row_press(&mut self) {
+        gesture_door!(@window drop self RowPress)
+    }
+
+    pub(crate) fn held_float_head_press(&self) -> Option<&FloatHeadPress> {
+        gesture_door!(@window held self FloatHeadPress)
+    }
+
+    pub(crate) fn held_float_head_press_mut(&mut self) -> Option<&mut FloatHeadPress> {
+        gesture_door!(@window held_mut self FloatHeadPress)
+    }
+
+    pub(crate) fn latch_float_head_press(&mut self, value: FloatHeadPress) {
+        gesture_door!(@window latch self FloatHeadPress value)
+    }
+
+    pub(crate) fn drop_float_head_press(&mut self) {
+        gesture_door!(@window drop self FloatHeadPress)
+    }
+
+    pub(crate) fn held_float_drag(&self) -> Option<&FloatDrag> {
+        gesture_door!(@window held self FloatDrag)
+    }
+
+    pub(crate) fn latch_float_drag(&mut self, value: FloatDrag) {
+        gesture_door!(@window latch self FloatDrag value)
+    }
+
+    pub(crate) fn drop_float_drag(&mut self) {
+        gesture_door!(@window drop self FloatDrag)
+    }
+
+    pub(crate) fn held_file_peek_press_mut(&mut self) -> Option<&mut FilePeekPress> {
+        gesture_door!(@window held_mut self GlanceHeadPress)
+    }
+
+    pub(crate) fn take_file_peek_press(&mut self) -> Option<FilePeekPress> {
+        gesture_door!(@window take self GlanceHeadPress)
+    }
+
+    pub(crate) fn latch_file_peek_press(&mut self, value: FilePeekPress) {
+        gesture_door!(@window latch self GlanceHeadPress value)
+    }
+
+    pub(crate) fn drop_file_peek_press(&mut self) {
+        gesture_door!(@window drop self GlanceHeadPress)
+    }
+
+    pub(crate) fn held_glance_thumb(&self) -> Option<&f32> {
+        gesture_door!(@window held self GlanceThumb)
+    }
+
+    pub(crate) fn take_glance_thumb(&mut self) -> Option<f32> {
+        gesture_door!(@window take self GlanceThumb)
+    }
+
+    pub(crate) fn drop_glance_thumb(&mut self) {
+        gesture_door!(@window drop self GlanceThumb)
+    }
+
+    pub(crate) fn held_video_bar_drag(&self) -> Option<&PreviewSurface> {
+        gesture_door!(@window held self VideoBar)
+    }
+
+    pub(crate) fn take_video_bar_drag(&mut self) -> Option<PreviewSurface> {
+        gesture_door!(@window take self VideoBar)
+    }
+
+    pub(crate) fn latch_video_bar_drag(&mut self, value: PreviewSurface) {
+        gesture_door!(@window latch self VideoBar value)
+    }
+
+    pub(crate) fn held_settings_slider_drag(&self) -> Option<&settings::SettingsRow> {
+        gesture_door!(@window held self SettingsSlider)
+    }
+
+    pub(crate) fn latch_settings_slider_drag(&mut self, value: settings::SettingsRow) {
+        gesture_door!(@window latch self SettingsSlider value)
+    }
+
+    pub(crate) fn held_settings_menu_bar_drag(&self) -> Option<&f32> {
+        gesture_door!(@window held self SettingsMenuBar)
+    }
+
+    pub(crate) fn latch_settings_menu_bar_drag(&mut self, value: f32) {
+        gesture_door!(@window latch self SettingsMenuBar value)
+    }
+
+    pub(crate) fn held_pane_press(&self) -> Option<&PanePress> {
+        gesture_door!(@tab held self PanePress)
+    }
+
+    pub(crate) fn held_pane_press_mut(&mut self) -> Option<&mut PanePress> {
+        gesture_door!(@tab held_mut self PanePress)
+    }
+
+    pub(crate) fn take_pane_press(&mut self) -> Option<PanePress> {
+        gesture_door!(@tab take self PanePress)
+    }
+
+    pub(crate) fn latch_pane_press(&mut self, value: PanePress) {
+        gesture_door!(@tab latch self PanePress value)
+    }
+
+    pub(crate) fn drop_pane_press(&mut self) {
+        gesture_door!(@tab drop self PanePress)
+    }
+
+    pub(crate) fn held_preview_body_drag(&self) -> Option<&PreviewBodyDrag> {
+        gesture_door!(@tab held self PreviewBodyThumb)
+    }
+
+    pub(crate) fn take_preview_body_drag(&mut self) -> Option<PreviewBodyDrag> {
+        gesture_door!(@tab take self PreviewBodyThumb)
+    }
+
+    pub(crate) fn latch_preview_body_drag(&mut self, value: PreviewBodyDrag) {
+        gesture_door!(@tab latch self PreviewBodyThumb value)
+    }
+
+    pub(crate) fn drop_preview_body_drag(&mut self) {
+        gesture_door!(@tab drop self PreviewBodyThumb)
+    }
+
+    pub(crate) fn held_preview_block_drag(&self) -> Option<&PreviewBlockDrag> {
+        gesture_door!(@tab held self BlockThumb)
+    }
+
+    pub(crate) fn take_preview_block_drag(&mut self) -> Option<PreviewBlockDrag> {
+        gesture_door!(@tab take self BlockThumb)
+    }
+
+    pub(crate) fn latch_preview_block_drag(&mut self, value: PreviewBlockDrag) {
+        gesture_door!(@tab latch self BlockThumb value)
+    }
+
+    pub(crate) fn drop_preview_block_drag(&mut self) {
+        gesture_door!(@tab drop self BlockThumb)
+    }
+
+    pub(crate) fn held_preview_image_drag(&self) -> Option<&ImageDrag> {
+        gesture_door!(@tab held self PicturePan)
+    }
+
+    pub(crate) fn take_preview_image_drag(&mut self) -> Option<ImageDrag> {
+        gesture_door!(@tab take self PicturePan)
+    }
+
+    pub(crate) fn latch_preview_image_drag(&mut self, value: ImageDrag) {
+        gesture_door!(@tab latch self PicturePan value)
+    }
+
+    pub(crate) fn held_preview_selecting(&self) -> Option<&PreviewSurface> {
+        gesture_door!(@tab held self EditSelection)
+    }
+
+    pub(crate) fn take_preview_selecting(&mut self) -> Option<PreviewSurface> {
+        gesture_door!(@tab take self EditSelection)
+    }
+
+    pub(crate) fn latch_preview_selecting(&mut self, value: PreviewSurface) {
+        gesture_door!(@tab latch self EditSelection value)
+    }
+
+    pub(crate) fn drop_preview_selecting(&mut self) {
+        gesture_door!(@tab drop self EditSelection)
+    }
+
+    pub(crate) fn held_preview_text_drag(&self) -> Option<&PreviewTextDrag> {
+        gesture_door!(@tab held self RenderedSelection)
+    }
+
+    pub(crate) fn held_preview_text_drag_mut(&mut self) -> Option<&mut PreviewTextDrag> {
+        gesture_door!(@tab held_mut self RenderedSelection)
+    }
+
+    pub(crate) fn take_preview_text_drag(&mut self) -> Option<PreviewTextDrag> {
+        gesture_door!(@tab take self RenderedSelection)
+    }
+
+    pub(crate) fn latch_preview_text_drag(&mut self, value: PreviewTextDrag) {
+        gesture_door!(@tab latch self RenderedSelection value)
+    }
+
+    pub(crate) fn drop_preview_text_drag(&mut self) {
+        gesture_door!(@tab drop self RenderedSelection)
+    }
+
+    pub(crate) fn held_terminal_thumb_drag(&self) -> Option<&TerminalThumbDrag> {
+        gesture_door!(@tab held self TerminalThumb)
+    }
+
+    pub(crate) fn take_terminal_thumb_drag(&mut self) -> Option<TerminalThumbDrag> {
+        gesture_door!(@tab take self TerminalThumb)
+    }
+
+    pub(crate) fn latch_terminal_thumb_drag(&mut self, value: TerminalThumbDrag) {
+        gesture_door!(@tab latch self TerminalThumb value)
+    }
+
+    pub(crate) fn held_terminal_column_drag(&self) -> Option<&TerminalColumnDrag> {
+        gesture_door!(@tab held self TerminalFootMark)
+    }
+
+    pub(crate) fn take_terminal_column_drag(&mut self) -> Option<TerminalColumnDrag> {
+        gesture_door!(@tab take self TerminalFootMark)
+    }
+
+    pub(crate) fn latch_terminal_column_drag(&mut self, value: TerminalColumnDrag) {
+        gesture_door!(@tab latch self TerminalFootMark value)
+    }
+}
+
+impl Runtime<'_> {
+    /// **This window's most recently latched capture**, including the bounded
+    /// legacy-overlap list retained until cut 4.
     pub(crate) fn own_capture(&self) -> Option<&PointerCapture> {
+        let window = self.window.window.id();
+        self.capture_where(|capture| capture.window == window)
+    }
+
+    fn capture_where(
+        &self,
+        mut predicate: impl FnMut(&PointerCapture) -> bool,
+    ) -> Option<&PointerCapture> {
         let window = self.window.window.id();
         self.app
             .pointer_capture
             .as_ref()
-            .filter(|capture| capture.window == window)
+            .filter(|capture| capture.window == window && predicate(capture))
+            .or_else(|| {
+                self.app
+                    .pointer_capture_overlaps
+                    .iter()
+                    .rev()
+                    .find(|capture| capture.window == window && predicate(capture))
+            })
     }
 
-    fn own_capture_mut(&mut self) -> Option<&mut PointerCapture> {
+    fn capture_where_mut(
+        &mut self,
+        mut predicate: impl FnMut(&PointerCapture) -> bool,
+    ) -> Option<&mut PointerCapture> {
         let window = self.window.window.id();
-        self.app
+        if self
+            .app
             .pointer_capture
-            .as_mut()
-            .filter(|capture| capture.window == window)
+            .as_ref()
+            .is_some_and(|capture| capture.window == window && predicate(capture))
+        {
+            return self.app.pointer_capture.as_mut();
+        }
+        self.app
+            .pointer_capture_overlaps
+            .iter_mut()
+            .rev()
+            .find(|capture| capture.window == window && predicate(capture))
     }
 
     /// **Whether a gesture of this window holds the pointer** — any of them,
     /// by the one slot ([`crate::Runtime::a_gesture_holds_the_pointer`]).
     pub(crate) fn a_capture_holds_the_pointer(&self) -> bool {
-        self.own_capture().is_some()
+        let window = self.window.window.id();
+        self.app
+            .capture_index_where(|capture| capture.window == window)
+            .is_some()
     }
 
-    /// **Latch a gesture**: it takes the application's one slot. A slot that
-    /// still held another gesture held one whose release was lost (R-5); the
-    /// press door has already cancelled a stale capture of the same button,
-    /// and what a press of another button replaces is ruled in cut 4.
+    pub(crate) fn drop_own_capture(&mut self) {
+        let window = self.window.window.id();
+        let _ = self
+            .app
+            .take_capture_where(|capture| capture.window == window);
+    }
+
+    /// **Latch a gesture.** A gesture of the same button replaces the current
+    /// stage (for example pane press → drag). A gesture of another button is
+    /// retained beside it exactly as the independent legacy fields allowed;
+    /// cut 4 removes or changes that overlap after the owner rules on R-8.
     pub(crate) fn latch_capture(&mut self, owner: CaptureOwner, button: MouseButton) {
         let started = self
             .window
@@ -351,7 +674,7 @@ impl Runtime<'_> {
             .as_ref()
             .and_then(|(_, hit)| hit.clone());
         let window = self.window.window.id();
-        self.app.pointer_capture = Some(PointerCapture {
+        self.app.latch_capture(PointerCapture {
             window,
             owner,
             button,
@@ -361,22 +684,34 @@ impl Runtime<'_> {
 
     /// The drag in the hand.
     pub(crate) fn held_drag(&self) -> Option<&Drag> {
-        match &self.own_capture()?.owner {
+        match &self
+            .capture_where(|capture| matches!(capture.owner, CaptureOwner::Drag(_)))?
+            .owner
+        {
             CaptureOwner::Drag(drag) => Some(drag),
             _ => None,
         }
     }
 
     pub(crate) fn held_drag_mut(&mut self) -> Option<&mut Drag> {
-        match &mut self.own_capture_mut()?.owner {
+        match &mut self
+            .capture_where_mut(|capture| matches!(capture.owner, CaptureOwner::Drag(_)))?
+            .owner
+        {
             CaptureOwner::Drag(drag) => Some(drag),
             _ => None,
         }
     }
 
     pub(crate) fn take_drag(&mut self) -> Option<Drag> {
-        self.held_drag()?;
-        match self.app.pointer_capture.take()?.owner {
+        let window = self.window.window.id();
+        match self
+            .app
+            .take_capture_where(|capture| {
+                capture.window == window && matches!(capture.owner, CaptureOwner::Drag(_))
+            })?
+            .owner
+        {
             CaptureOwner::Drag(drag) => Some(*drag),
             _ => None,
         }
@@ -392,15 +727,24 @@ impl Runtime<'_> {
 
     /// The route a press on a terminal pane's cells latched.
     pub(crate) fn held_mouse_route(&self) -> Option<&MouseRoute> {
-        match &self.own_capture()?.owner {
+        match &self
+            .capture_where(|capture| matches!(capture.owner, CaptureOwner::Route(_)))?
+            .owner
+        {
             CaptureOwner::Route(route) => Some(route),
             _ => None,
         }
     }
 
     pub(crate) fn take_mouse_route(&mut self) -> Option<MouseRoute> {
-        self.held_mouse_route()?;
-        match self.app.pointer_capture.take()?.owner {
+        let window = self.window.window.id();
+        match self
+            .app
+            .take_capture_where(|capture| {
+                capture.window == window && matches!(capture.owner, CaptureOwner::Route(_))
+            })?
+            .owner
+        {
             CaptureOwner::Route(route) => Some(route),
             _ => None,
         }

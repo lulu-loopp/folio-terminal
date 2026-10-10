@@ -12969,9 +12969,12 @@ struct App {
     /// gesture that holds the pointer, in whichever window latched it. See
     /// [`runtime::pointer::PointerCapture`].
     pointer_capture: Option<runtime::pointer::PointerCapture>,
-    /// **A stale capture taken out of the slot by a press in another window**
-    /// (R-5): ended by its own window right after that press is dispatched.
-    stale_capture: Option<runtime::pointer::PointerCapture>,
+    /// **Legacy other-button overlaps, until cut 4 rules on them.** Cut 3 may
+    /// not change A·b or B21: a different button can still begin a gesture
+    /// beside the slot's gesture, as the independent legacy fields allowed.
+    /// One record per `(window, owner kind)` bounds the list to the live
+    /// gestures the removed fields could have represented.
+    pointer_capture_overlaps: Vec<runtime::pointer::PointerCapture>,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).
     ///
@@ -44567,7 +44570,7 @@ impl Runtime<'_> {
             pending_new_windows: Vec::new(),
             drag_broker: None,
             pointer_capture: None,
-            stale_capture: None,
+            pointer_capture_overlaps: Vec::new(),
             pending_handover: None,
             quit_requested: false,
             quit: None,
@@ -58851,25 +58854,27 @@ mod pointer_chord_site_tests {
         );
     }
 
-    /// PIN (§13.45 ②) — **the gesture's latch has one writer and one reader,
-    /// and both of them are that door.**
+    /// PIN (§13.45 ②) — **the gesture's latch has one writer; its readers
+    /// are the arrived window's door and the application capture door.**
     ///
-    /// The field is a `bool` that travels with the hand; a second place that
-    /// set it would be a second opinion about which press is still down.
+    /// `mouse_input` writes it for the press and reads it for a same-window
+    /// release. The application capture door reads the owner's copy when a
+    /// release arrives in another window and clears it when that remote release
+    /// or cancellation ends the gesture.
     #[test]
     fn one_field_remembers_which_press_is_under_the_hand() {
         let needle = ["window", ".", "secondary_press"].concat();
         let touches = found(needle!(Pattern::text(&needle)), View::CodeKeepingLiterals);
         assert_eq!(
             owner_names(&touches),
-            ["mouse_input×1"],
-            "§4.1: the latch is touched at the one door and nowhere else, and it is named by \
-             the item it is touched in rather than by a line of a file:\n{}",
+            ["capture_before_pointer_event×3", "mouse_input×1"],
+            "§4.1: the latch is touched only at the window's button door and the \
+             application's cross-window capture door:\n{}",
             touches.report(source())
         );
         assert!(
             method_body("Runtime", "mouse_input").contains(&format!("&mut self.{needle},")),
-            "and that item is the one door every button event comes through"
+            "and the window door remains the one writer"
         );
     }
 }
@@ -62379,28 +62384,6 @@ impl FolioApp {
     fn runtime_at(&mut self, index: usize) -> Option<Runtime<'_>> {
         let id = self.windows.key_at(index)?;
         self.runtime(id)
-    }
-
-    /// **End a stale capture in the window that holds it** (T-POINTER-CAPTURE R-5): a
-    /// press of its button in another window took it out of the slot, and its own
-    /// window runs its owner's cancel now, with the slot lent back to it for the call
-    /// and whatever the press latched kept.
-    fn end_a_stale_capture(&mut self) -> Result<()> {
-        let Some(app) = self.app.as_mut() else {
-            return Ok(());
-        };
-        let Some(stale) = app.stale_capture.take() else {
-            return Ok(());
-        };
-        let window = stale.window;
-        let latched = app.pointer_capture.replace(stale);
-        let ended = self
-            .runtime(window)
-            .map_or(Ok(()), |mut runtime| runtime.cancel_own_capture());
-        if let Some(app) = self.app.as_mut() {
-            app.pointer_capture = latched;
-        }
-        ended
     }
 
     /// Answer for every **open** window in turn, oldest first, stopping at the
@@ -67109,6 +67092,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             if self.is_leaving(window_id) {
                 return;
             }
+            match self.capture_before_pointer_event(window_id, &event) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            }
             let Some(mut runtime) =
                 hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
             else {
@@ -67475,9 +67466,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     self.settle_application_change()
                 })
             });
-            // **A stale capture a press here took from another window** is ended there
-            // (T-POINTER-CAPTURE R-5).
-            let result = result.and_then(|()| self.end_a_stale_capture());
             // The prompt's one answer, if this event was it — before the door below,
             // because accepting is one of the three things that queues a window.
             let result = result.and_then(|()| {
