@@ -497,33 +497,63 @@ mod tests {
     /// `bt_platform::handoff`): a `ShellThread` entered on a second thread the thread door started,
     /// handed the same two requests — not through the lane under test.
     ///
-    /// The program is a folder so that one fixture is a program on both machines without touching
-    /// a mode bit: `payload.exe` is one by name to Windows, `Payload.app` is one by bundle to
-    /// macOS, and `bt_term::verify_path` answers both. A third platform's door refuses everything
-    /// with its own sentence, and the line is held to that sentence the same way.
+    /// The fixture reaches each platform's real program refusal: Windows recognizes `.exe`,
+    /// macOS recognizes an `.app` bundle, and Linux reads the execute bit from an owned file.
+    /// The missing path stays as a second refusal. Both are rejected before any platform calls
+    /// its opener, and the lane's words are compared with the door's own answer.
     ///
     /// MUTATION: format the line as `"{lead}: {reason}"` in [`Refusal::words`], or drop the
     /// `contains(PROGRAM_REFUSED)` test, and the words differ.
     #[test]
     fn a_refused_handoff_raises_the_same_words_it_did_before() {
         let scratch = bt_testpath::temp_path("folio-handoff-refusal");
-        let program = scratch.join(match bt_platform::host_platform() {
-            bt_platform::HostPlatform::MacOs => "Payload.app",
-            _ => "payload.exe",
-        });
-        std::fs::create_dir_all(&program).expect("a scratch program");
+        let host = bt_platform::host_platform();
+        let program = match host {
+            bt_platform::HostPlatform::Windows => scratch.join("payload.exe"),
+            bt_platform::HostPlatform::MacOs => scratch.join("Payload.app"),
+            bt_platform::HostPlatform::OtherUnix => {
+                #[cfg(target_os = "linux")]
+                {
+                    scratch.join("payload")
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    PathBuf::from("folio\0handoff")
+                }
+            }
+        };
+        if host == bt_platform::HostPlatform::OtherUnix {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                std::fs::create_dir_all(&scratch).expect("the Linux scratch folder");
+                std::fs::write(&program, b"").expect("the executable fixture");
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+                    .expect("mark the fixture executable");
+            }
+        } else {
+            std::fs::create_dir_all(&program).expect("a scratch program");
+        }
+        let facts = if host == bt_platform::HostPlatform::OtherUnix && !cfg!(target_os = "linux") {
+            bt_platform::VerifiedTarget::absent()
+        } else {
+            let facts = crate::verified_target_of(Some(&bt_term::verify_path(
+                &program,
+                &bt_platform::resolved_for_a_door,
+            )));
+            assert!(facts.exists, "the verifier saw the fixture");
+            facts
+        };
+        #[cfg(target_os = "linux")]
+        assert!(facts.executable, "the Linux verifier saw the execute bit");
         let missing = scratch.join("gone.md");
-        let facts = crate::verified_target_of(Some(&bt_term::verify_path(
-            &program,
-            &bt_platform::resolved_for_a_door,
-        )));
-        assert!(facts.exists, "the verifier saw the fixture");
 
         let (wake, wakes) = crate::lane::wake_channel();
         let mut lane = HandoffLane::spawn(wake).expect("the lane starts");
         let requests = [
             Handoff::OpenVerified(program.clone(), facts.clone()),
-            Handoff::OpenVerified(missing.clone(), bt_platform::VerifiedTarget::absent()),
+            Handoff::OpenVerified(missing, bt_platform::VerifiedTarget::absent()),
         ];
         for request in &requests {
             lane.submit(window(), request.clone());
@@ -579,16 +609,14 @@ mod tests {
                 .expect_err("the lane carried the door's refusal");
             assert_eq!(refusal.words(reason), old, "{completion:?}");
         }
-        if bt_platform::host_platform() != bt_platform::HostPlatform::OtherUnix {
-            assert_eq!(
-                refusal
-                    .words(answered[0].outcome.as_ref().unwrap_err())
-                    .notice,
-                Some(crate::files_program_refused_notice()),
-                "a program is refused in the reader's words"
-            );
-        }
-
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+        assert_eq!(
+            refusal
+                .words(answered[0].outcome.as_ref().unwrap_err())
+                .notice,
+            Some(crate::files_program_refused_notice()),
+            "a program is refused in the reader's words"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 

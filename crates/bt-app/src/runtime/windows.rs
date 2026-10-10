@@ -1985,11 +1985,28 @@ impl Runtime<'_> {
     /// ([`crate::keep_unsaved_edits_over`]), each said in `diagnostics.log` with
     /// where its edit is. No card and no repaint: the window is about to be
     /// closed by a process that is stopping.
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
         for kept in
             crate::keep_unsaved_edits_over(&mut self.window.tabs, recovery, SystemTime::now())
         {
             crate::diagnostics::note(&kept.line());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn keep_unsaved_edits_on_stop(
+        &mut self,
+        recovery: &Path,
+        copy: &mut dyn FnMut(
+            &bt_platform::install_txn::RecoveryCopyRequest,
+        ) -> Result<PathBuf, bt_platform::install_txn::Failure>,
+    ) {
+        let at = SystemTime::now();
+        for tab in &mut self.window.tabs {
+            for kept in tab.preview_pool.keep_dirty_on_stop(recovery, at, copy) {
+                crate::diagnostics::note(&kept.line());
+            }
         }
     }
 
