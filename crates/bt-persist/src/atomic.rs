@@ -306,6 +306,33 @@ fn unique_suffix() -> String {
 mod tests {
     use super::*;
 
+    /// RED (T-STORE-PWSH-AND-SESSION-BACKUP) — **a sibling written from a
+    /// source carries the source's access, not the destination's.**
+    ///
+    /// MUTATION: remove `carry_metadata` from `atomic_write_carrying_from`;
+    /// the sibling keeps its owner-only birth mode instead of `0640`.
+    #[cfg(unix)]
+    #[test]
+    fn a_sibling_write_carries_its_sources_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = bt_testpath::temp_path("bt-carrying-sibling");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("session.json");
+        fs::write(&source, b"source").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+        let sibling = dir.join("session.prev.json");
+
+        atomic_write_carrying_from(&sibling, "备份 backup".as_bytes(), &source).unwrap();
+
+        assert_eq!(fs::read(&sibling).unwrap(), "备份 backup".as_bytes());
+        assert_eq!(
+            fs::metadata(&sibling).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn preserving_replace_writes_content_and_refuses_hardlinks() {
         let dir = bt_testpath::temp_path("bt-preserving");

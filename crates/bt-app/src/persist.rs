@@ -20,9 +20,9 @@ use bt_persist::{
     BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1,
     KeybindingsV1, ProfilesV1, ReadReport, SessionV1, SettingsV1, WriteAlertAction,
     WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
-    read_keybindings_keeping, read_profiles, read_profiles_keeping, read_session,
-    read_session_keeping, read_settings, read_settings_keeping, remove_sentinel,
-    write_keybindings_atomic, write_profiles_atomic, write_settings_atomic,
+    read_keybindings_keeping, read_profiles, read_profiles_keeping, read_session, read_settings,
+    read_settings_keeping, remove_sentinel, write_keybindings_atomic, write_profiles_atomic,
+    write_settings_atomic,
 };
 
 /// The name the session document wears on disk, which is also what a notice
@@ -921,26 +921,20 @@ pub struct SessionStore {
 
 /// Make the one snapshot a launch may owe. Missing, refused and tabless
 /// documents leave an older backup untouched; only a successfully loaded
-/// layout with at least one tab replaces it.
+/// layout with at least one tab replaces it. The bytes are the reader's exact
+/// input, not a serialization of the migrated and degraded model.
 fn launch_backup_request(
     session_path: &Path,
     session: &SessionV1,
     report: &ReadReport,
+    loaded_bytes: Option<Vec<u8>>,
 ) -> Option<SessionBackupRequest> {
     if !matches!(report, ReadReport::Loaded)
         || !session.windows.iter().any(|window| !window.tabs.is_empty())
     {
         return None;
     }
-    let bytes = match bt_persist::serialize_session(session) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            crate::diagnostics::note(&format!(
-                "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
-            ));
-            return None;
-        }
-    };
+    let bytes = loaded_bytes?;
     Some(SessionBackupRequest {
         source: session_path.to_path_buf(),
         path: session_path.with_file_name(PREVIOUS_SESSION_FILE_NAME),
@@ -972,8 +966,8 @@ impl SessionStore {
         // the first report a crash. Read once for the process
         // ([`previous_run_ended_orderly`] answers the same probe).
         let previous_exit = previous_exit(&sentinel_path);
-        let (session, report, degradation) =
-            read_session_keeping(&session_path, crate::update_trial::keeping());
+        let (session, report, degradation, loaded_bytes) =
+            bt_persist::read_session_keeping_bytes(&session_path, crate::update_trial::keeping());
         crate::update_trial::owe_copy(&report, &session_path, |path| {
             let _ = read_session(path);
         });
@@ -1016,7 +1010,7 @@ impl SessionStore {
             && !writes_deferred
             && create_sentinel(&sentinel_path).is_ok();
         let launch_backup = if writer_of_record {
-            launch_backup_request(&session_path, &session, &report)
+            launch_backup_request(&session_path, &session, &report, loaded_bytes)
         } else {
             None
         };
@@ -1085,11 +1079,14 @@ impl SessionStore {
     /// queues the launch backup, without touching the machine's data folder or
     /// sentinel. Only tests need to observe a launch at this seam.
     #[cfg(test)]
-    fn launched_at(session_path: PathBuf, sentinel_path: PathBuf) -> Self {
+    pub(crate) fn launched_at(session_path: PathBuf, sentinel_path: PathBuf) -> Self {
         let writer_of_record = is_writer_of_document(&session_path);
-        let (session, report, _degradation) = read_session(&session_path);
+        let (session, report, _degradation, loaded_bytes) =
+            bt_persist::read_session_keeping_bytes(&session_path, bt_persist::Keeping::Now);
+        let writes_deferred =
+            writer_of_record && crate::update_trial::defer(crate::update_trial::Writer::Session);
         let launch_backup = if writer_of_record {
-            launch_backup_request(&session_path, &session, &report)
+            launch_backup_request(&session_path, &session, &report, loaded_bytes)
         } else {
             None
         };
@@ -1106,7 +1103,9 @@ impl SessionStore {
             writer_of_record,
             fault: None,
         };
-        store.queue_launch_backup();
+        if !writes_deferred {
+            store.queue_launch_backup();
+        }
         store
     }
 
@@ -1226,6 +1225,7 @@ impl SessionStore {
             self.debouncer.mark_flushed();
             return;
         }
+        self.queue_launch_backup();
         let bytes = match bt_persist::serialize_session(&self.session) {
             Ok(bytes) => bytes,
             // A document that cannot be turned into JSON is not a disk problem and no thread will
@@ -1344,6 +1344,7 @@ impl SessionStore {
             self.debouncer.mark_flushed();
             return Ok(());
         }
+        self.queue_launch_backup();
         self.take_receipts(now);
         if !self.debouncer.is_dirty() {
             // Clean, but not necessarily *landed*: a document handed over a moment ago can still
@@ -1393,6 +1394,7 @@ impl SessionStore {
             self.debouncer.mark_flushed();
             return Ok(None);
         }
+        self.queue_launch_backup();
         self.take_receipts(now);
         let bytes = bt_persist::serialize_session(&self.session).map_err(|error| {
             let error = error.to_string();
@@ -2462,13 +2464,19 @@ pub(crate) mod tests {
         }
     }
 
+    fn write_session_fixture(path: &Path, session: &SessionV1) -> Vec<u8> {
+        let bytes = bt_persist::serialize_session(session).expect("the fixture serialises");
+        std::fs::write(path, &bytes).expect("the fixture session is laid down");
+        bytes
+    }
+
     /// RED (T-STORE-PWSH-AND-SESSION-BACKUP item 2) — **the backup is the
     /// layout read at launch, not the first layout this run later saves.**
     ///
     /// MUTATION: enqueue `SessionBackup` after `Session`, or serialize
     /// `self.session` from `hand_over`; the backup contains one tab instead of
-    /// three. Drop the launch request and it is absent. Use the plain atomic
-    /// writer and its mode differs from the source on Unix.
+    /// three. Drop the launch request and it is absent. Reserialize the loaded
+    /// model and the unknown mixed-script field is lost.
     #[test]
     fn launch_keeps_the_session_it_read_before_this_runs_first_write() {
         crate::test_support::on_the_window_thread_exiting();
@@ -2477,13 +2485,11 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&root).expect("a private session directory");
         let path = root.join(SESSION_FILE_NAME);
         let previous = session_with_tabs(3);
-        bt_persist::write_session_atomic(&path, &previous).expect("the previous run's session");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
-                .expect("a distinctive source mode");
-        }
+        let serialized = bt_persist::serialize_session(&previous).expect("the fixture serialises");
+        let mut launch_text = String::from_utf8(serialized).expect("session JSON is UTF-8");
+        launch_text = launch_text.replacen("{\n", "{\n  \"future_note\": \"保留—keep\",\n", 1);
+        let launch_bytes = launch_text.into_bytes();
+        std::fs::write(&path, &launch_bytes).expect("the previous run's session");
 
         let mut store = SessionStore::launched_at(path.clone(), root.join(SENTINEL_FILE_NAME));
         let current = session_with_tabs(1);
@@ -2492,20 +2498,12 @@ pub(crate) mod tests {
 
         let backup_path = root.join(PREVIOUS_SESSION_FILE_NAME);
         assert_eq!(read_session(&backup_path).0, previous);
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            launch_bytes,
+            "the backup is the exact document read, including fields this build ignores"
+        );
         assert_eq!(read_session(&path).0, current);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(&backup_path)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o640,
-                "the backup carries the session document's permissions"
-            );
-        }
 
         retire(&mut store.writer);
         let _ = std::fs::remove_dir_all(&root);
@@ -2525,8 +2523,8 @@ pub(crate) mod tests {
         let path = root.join(SESSION_FILE_NAME);
         let backup_path = root.join(PREVIOUS_SESSION_FILE_NAME);
         let useful = session_with_tabs(3);
-        bt_persist::write_session_atomic(&backup_path, &useful).unwrap();
-        bt_persist::write_session_atomic(&path, &SessionV1::default()).unwrap();
+        write_session_fixture(&backup_path, &useful);
+        write_session_fixture(&path, &SessionV1::default());
 
         let mut store = SessionStore::launched_at(path, root.join(SENTINEL_FILE_NAME));
         retire(&mut store.writer);

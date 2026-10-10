@@ -140,14 +140,25 @@ pub fn read_session_keeping(
     path: &Path,
     keeping: Keeping,
 ) -> (SessionV1, ReadReport, DegradationReport) {
-    let (mut session, report) = migrate::read_with_fallback::<SessionV1>(
+    let (session, report, degradation, _loaded_bytes) = read_session_keeping_bytes(path, keeping);
+    (session, report, degradation)
+}
+
+/// [`read_session_keeping`], also returning the exact source bytes when the
+/// document loaded. The bytes precede migration and degradation, so a sibling
+/// copy can preserve fields and leaves this build does not understand.
+pub fn read_session_keeping_bytes(
+    path: &Path,
+    keeping: Keeping,
+) -> (SessionV1, ReadReport, DegradationReport, Option<Vec<u8>>) {
+    let (mut session, report, loaded_bytes) = migrate::read_with_fallback_bytes::<SessionV1>(
         path,
         SESSION_SCHEMA_VERSION,
         SESSION_MIGRATIONS,
         keeping,
     );
     let degradation = session.degrade_in_place();
-    (session, report, degradation)
+    (session, report, degradation, loaded_bytes)
 }
 
 /// Serializes `settings` and writes it to `path` via [`atomic_write`].
