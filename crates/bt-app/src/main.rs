@@ -63303,17 +63303,22 @@ impl FolioApp {
         // its shut too, and an unsaved buffer in it is asked about in it before
         // anything is told. Asked, this window stays open: the summoned terminal
         // never stands alone.
+        // The close request's cause is one-shot even when that question refuses this attempt:
+        // a later hand-close must describe the later request, not this one.
+        let last_window_cause = if ending {
+            let Some(runtime) = self.runtime(id) else {
+                return Ok(());
+            };
+            exit_diagnostics::take_last_window_cause(&mut runtime.window.shell_exit_close_requested)
+        } else {
+            exit_diagnostics::LastWindowCause::PersonClosedIt
+        };
         if ending && !self.the_summon_lets_the_run_end(id)? {
             return Ok(());
         }
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
-        };
-        let last_window_cause = if std::mem::take(&mut runtime.window.shell_exit_close_requested) {
-            exit_diagnostics::LastWindowCause::EveryPaneShellExited
-        } else {
-            exit_diagnostics::LastWindowCause::PersonClosedIt
         };
         let closed = runtime.close_window(ending);
         // Set whatever the teardown answered: a child that refused to die is
