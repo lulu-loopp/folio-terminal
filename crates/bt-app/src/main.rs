@@ -73927,17 +73927,21 @@ mod linux_window_tests {
 
     #[test]
     fn app_close_requests_reach_the_existing_close_event() {
-        let mouse = include_str!("runtime/mouse.rs");
-        let tabs = include_str!("runtime/tabs.rs");
-        let windows = include_str!("runtime/windows.rs");
+        let mouse = crate::test_support::method_body("Runtime", "chrome_mouse_input");
+        let tabs = crate::test_support::method_body("Runtime", "close_tab");
+        let windows = crate::test_support::method_body("Runtime", "request_window_close");
         assert!(mouse.contains("self.request_window_close()"));
         assert!(tabs.contains("self.request_window_close()"));
         assert!(windows.contains(
             "crate::request_owned_window_close(&self.window.window, &self.app.event_proxy)"
         ));
 
-        let app = include_str!("main.rs");
-        assert!(app.contains("AppEvent::WindowCloseRequested(window.id())"));
+        let request = crate::test_support::free_fn_body("request_owned_window_close");
+        let app = crate::test_support::item_body(
+            &bt_source::ItemQuery::method("FolioApp", "user_event")
+                .of_trait("ApplicationHandler"),
+        );
+        assert!(request.contains("AppEvent::WindowCloseRequested(window.id())"));
         assert!(app.contains("AppEvent::WindowCloseRequested(window_id) =>"));
         assert!(
             app.contains("self.window_event(event_loop, window_id, WindowEvent::CloseRequested);")
