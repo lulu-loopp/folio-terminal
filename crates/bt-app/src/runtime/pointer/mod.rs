@@ -40,8 +40,12 @@ use anyhow::Result;
 #[cfg(not(target_os = "linux"))]
 use bt_platform::NativeWindow;
 use std::time::Instant;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{MouseButton, WindowEvent};
+use winit::dpi::PhysicalPosition;
+#[cfg(target_os = "linux")]
+use winit::dpi::PhysicalSize;
+#[cfg(target_os = "linux")]
+use winit::event::MouseButton;
+use winit::event::WindowEvent;
 
 /// **Whether a window event is a pointer event** — the dispatcher's one
 /// question about the pointer, answered here so that it names no pointer kind
