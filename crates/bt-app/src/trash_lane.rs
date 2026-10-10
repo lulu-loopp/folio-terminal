@@ -153,11 +153,14 @@ impl TrashLane {
 fn run_trash_lane(
     worker: &WorkerCtx,
     requests: mpsc::Receiver<Request>,
-    answers: mpsc::Sender<TrashCompletion>,
+    answer_sender: mpsc::Sender<TrashCompletion>,
     mut execute: impl FnMut(&WorkerCtx, &Path) -> std::result::Result<bool, String>,
     wake: impl Fn(),
 ) {
     let _wake_on_exit = WakeOnExit(&wake);
+    // Locals drop in reverse declaration order: close the answer channel
+    // before the exit guard wakes its receiver, on both return and unwind.
+    let answers = answer_sender;
     while let Ok(Request { id, path }) = requests.recv() {
         let outcome = execute(worker, &path);
         let _ = answers.send(TrashCompletion { id, outcome });
