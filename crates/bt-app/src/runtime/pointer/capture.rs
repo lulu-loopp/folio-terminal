@@ -254,6 +254,34 @@ pub(crate) fn cancel_then_route<S, T, E>(
     route_press(state)
 }
 
+fn capture_is_transferred_preview_surface(
+    capture: &PointerCapture,
+    window: WindowId,
+    tab: TabId,
+    surface: PreviewSurface,
+) -> bool {
+    capture.window == window
+        && match &capture.owner {
+            CaptureOwner::PreviewBodyThumb(owner_tab, drag) => {
+                *owner_tab == tab && drag.surface == surface
+            }
+            CaptureOwner::BlockThumb(owner_tab, drag) => {
+                *owner_tab == tab && drag.surface == surface
+            }
+            CaptureOwner::PicturePan(owner_tab, drag) => {
+                *owner_tab == tab && drag.surface == surface
+            }
+            CaptureOwner::EditSelection(owner_tab, owner_surface) => {
+                *owner_tab == tab && *owner_surface == surface
+            }
+            CaptureOwner::RenderedSelection(owner_tab, drag) => {
+                *owner_tab == tab && drag.surface == surface
+            }
+            CaptureOwner::VideoBar(owner_surface) => *owner_surface == surface,
+            _ => false,
+        }
+}
+
 impl App {
     pub(crate) fn capture_index_where(
         &self,
@@ -297,6 +325,20 @@ impl App {
     ) -> Option<PointerCapture> {
         let index = self.capture_index_where(predicate)?;
         self.take_capture_at(index)
+    }
+
+    pub(crate) fn retire_transferred_preview_capture(
+        &mut self,
+        window: WindowId,
+        tab: TabId,
+        surface: PreviewSurface,
+    ) {
+        while self
+            .take_capture_where(|capture| {
+                capture_is_transferred_preview_surface(capture, window, tab, surface)
+            })
+            .is_some()
+        {}
     }
 
     fn latch_capture(&mut self, capture: PointerCapture) {
@@ -810,5 +852,148 @@ impl Runtime<'_> {
 
     pub(crate) fn drop_mouse_route(&mut self) {
         let _ = self.take_mouse_route();
+    }
+}
+
+#[cfg(test)]
+mod transferred_preview_capture_tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum OwnerKind {
+        BodyThumb,
+        BlockThumb,
+        PicturePan,
+        EditSelection,
+        RenderedSelection,
+    }
+
+    fn owner(kind: OwnerKind, tab: TabId, surface: PreviewSurface) -> CaptureOwner {
+        match kind {
+            OwnerKind::BodyThumb => CaptureOwner::PreviewBodyThumb(
+                tab,
+                PreviewBodyDrag {
+                    surface,
+                    axis: crate::preview::ScrollAxis::Vertical,
+                    grab: 0.25,
+                },
+            ),
+            OwnerKind::BlockThumb => CaptureOwner::BlockThumb(
+                tab,
+                PreviewBlockDrag {
+                    surface,
+                    index: 7,
+                    grab: 0.5,
+                },
+            ),
+            OwnerKind::PicturePan => CaptureOwner::PicturePan(
+                tab,
+                ImageDrag {
+                    surface,
+                    last: [13.0, 17.0],
+                },
+            ),
+            OwnerKind::EditSelection => CaptureOwner::EditSelection(tab, surface),
+            OwnerKind::RenderedSelection => CaptureOwner::RenderedSelection(
+                tab,
+                PreviewTextDrag {
+                    surface,
+                    latch: crate::DragLatch::new(winit::dpi::PhysicalPosition::new(13.0, 17.0)),
+                    link: None,
+                    control: false,
+                    pressed: None,
+                    seated: false,
+                    reached: None,
+                },
+            ),
+        }
+    }
+
+    fn capture(window: WindowId, owner: CaptureOwner) -> PointerCapture {
+        PointerCapture {
+            window,
+            owner,
+            button: MouseButton::Left,
+            started: None,
+        }
+    }
+
+    #[test]
+    fn transferred_preview_capture_matches_the_exact_window_tab_and_surface() {
+        let window = WindowId::from(31_u64);
+        let other_window = WindowId::from(37_u64);
+        let tab = TabId(41);
+        let other_tab = TabId(43);
+        let surface = PreviewSurface::Float(47);
+        let other_surface = PreviewSurface::Float(53);
+
+        for kind in [
+            OwnerKind::BodyThumb,
+            OwnerKind::BlockThumb,
+            OwnerKind::PicturePan,
+            OwnerKind::EditSelection,
+            OwnerKind::RenderedSelection,
+        ] {
+            let matching = capture(window, owner(kind, tab, surface));
+            assert!(capture_is_transferred_preview_surface(
+                &matching, window, tab, surface
+            ));
+            assert!(!capture_is_transferred_preview_surface(
+                &matching,
+                other_window,
+                tab,
+                surface
+            ));
+
+            let other_tab_capture = capture(window, owner(kind, other_tab, surface));
+            assert!(!capture_is_transferred_preview_surface(
+                &other_tab_capture,
+                window,
+                tab,
+                surface
+            ));
+
+            let other_surface_capture = capture(window, owner(kind, tab, other_surface));
+            assert!(!capture_is_transferred_preview_surface(
+                &other_surface_capture,
+                window,
+                tab,
+                surface
+            ));
+        }
+
+        let other_owner = capture(window, CaptureOwner::GlanceThumb(0.5));
+        assert!(!capture_is_transferred_preview_surface(
+            &other_owner,
+            window,
+            tab,
+            surface
+        ));
+    }
+
+    #[test]
+    fn a_transferred_video_bar_matches_its_own_window_and_float() {
+        let window = WindowId::from(31_u64);
+        let other_window = WindowId::from(37_u64);
+        let surface = PreviewSurface::Float(47);
+        let held = capture(window, CaptureOwner::VideoBar(surface));
+        assert!(capture_is_transferred_preview_surface(
+            &held,
+            window,
+            TabId(41),
+            surface
+        ));
+        assert!(!capture_is_transferred_preview_surface(
+            &held,
+            other_window,
+            TabId(41),
+            surface
+        ));
+        assert!(!capture_is_transferred_preview_surface(
+            &held,
+            window,
+            TabId(41),
+            PreviewSurface::Float(53)
+        ));
     }
 }

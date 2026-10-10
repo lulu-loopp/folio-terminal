@@ -98,22 +98,10 @@ impl TabState {
             self.preview_edit_focus = Some(to);
         }
         if self
-            .preview_block_drag
-            .is_some_and(|drag| drag.surface == from)
-        {
-            self.preview_block_drag = None;
-        }
-        if self
             .preview_block_hover
             .is_some_and(|(surface, _)| surface == from)
         {
             self.preview_block_hover = None;
-        }
-        if self
-            .preview_body_drag
-            .is_some_and(|drag| drag.surface == from)
-        {
-            self.preview_body_drag = None;
         }
         if self
             .preview_body_hover
@@ -127,22 +115,6 @@ impl TabState {
             .is_some_and(|(surface, _)| *surface == from)
         {
             self.preview_link_hover = None;
-        }
-        if self.preview_selecting == Some(from) {
-            self.preview_selecting = None;
-        }
-        if self
-            .preview_text_drag
-            .as_ref()
-            .is_some_and(|drag| drag.surface == from)
-        {
-            self.preview_text_drag = None;
-        }
-        if self
-            .preview_image_drag
-            .is_some_and(|drag| drag.surface == from)
-        {
-            self.preview_image_drag = None;
         }
         if self
             .preview_text_clicks

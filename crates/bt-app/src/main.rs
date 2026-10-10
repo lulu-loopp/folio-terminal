@@ -63774,6 +63774,9 @@ impl FolioApp {
             debug_assert_eq!(received.tab, tab);
             let from_surface = PreviewSurface::Float(old_id);
             let to_surface = PreviewSurface::Float(target_id);
+            if let Some(app) = self.app.as_mut() {
+                app.retire_transferred_preview_capture(from, tab, from_surface);
+            }
             let rekeyed = runtime::carry_floated_preview_surface_state(
                 &mut carried,
                 source,
