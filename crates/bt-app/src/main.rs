@@ -81531,7 +81531,13 @@ mod clipboard_path_tests {
             &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
         );
         assert!(dispatch.contains("runtime.refuse_pending_linux_pointer_actions()"));
-        assert!(dispatch.contains("WindowEvent::CursorMoved { .. }"));
+        assert!(dispatch.contains(
+            "event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event)"
+        ));
+        let pointer_events = item_body(
+            &ItemQuery::function("is_pointer_event").in_module("crate::runtime::pointer"),
+        );
+        assert!(pointer_events.contains("WindowEvent::CursorMoved { .. }"));
     }
 
     /// **The Linux runtime uses only observed resize events or its configured surface allocation.**
@@ -81818,7 +81824,12 @@ mod clipboard_path_tests {
         let x11_toggle = toggle.split("Backend::Wayland").next().unwrap();
         assert!(x11_toggle.contains("maximize_intent.toggle()"));
         assert!(!x11_toggle.contains("is_maximized()"));
-        let edge = method_body("Runtime", "mouse_input");
+        let mouse = method_body("Runtime", "mouse_input");
+        assert!(mouse.contains("self.try_begin_linux_border_resize(button)"));
+        let edge = item_body(
+            &ItemQuery::method("Runtime", "try_begin_linux_border_resize")
+                .in_module("crate::runtime::pointer"),
+        );
         assert!(edge.contains("window_maximized_state() == Some(false)"));
         assert!(!edge.contains("is_maximized()"));
 
