@@ -97,9 +97,7 @@ impl Runtime<'_> {
         // Only a tab drag lifts a tab out of the strip; a pane in the air leaves
         // the strip exactly as it was.
         let carried = self
-            .window
-            .drag
-            .as_ref()
+            .held_drag()
             .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
         // The panes this window has pages on **and the icon each page's site
         // wears**, threaded into the strip so that a tab whose identity pane is
@@ -116,7 +114,7 @@ impl Runtime<'_> {
         // Which tabs are making a sound (§7.23 ⑩) — one walk of the page map
         // for the whole strip, beside the one that reads their icons.
         let audible = self.audible_tabs();
-        let grabbed = self.window.drag.as_ref().and_then(|drag| {
+        let grabbed = self.held_drag().and_then(|drag| {
             let tab = drag.tab()?;
             self.window
                 .tabs
@@ -140,9 +138,7 @@ impl Runtime<'_> {
         // the two are never both set (the pointer is over one window), and one
         // `Option<TabId>` is the whole of what the strip needs to know.
         let aimed = self
-            .window
-            .drag
-            .as_ref()
+            .held_drag()
             .and_then(|drag| drag.landing)
             .or_else(|| self.window.foreign.as_ref().and_then(|visit| visit.landing))
             .and_then(|landing| match landing {
@@ -835,6 +831,10 @@ impl Runtime<'_> {
                             caret_lit: edit.caret_lit,
                             refused: frame.refused,
                         }),
+                        refusal: frame
+                            .refusal
+                            .as_ref()
+                            .map(|(sentence, width)| (sentence.as_str(), *width)),
                     },
                 )
             })
@@ -969,7 +969,7 @@ impl Runtime<'_> {
             // the runtime, and the way for a mirror of it to go wrong is for one
             // of those places to be added later and forget.
             seats::ChromePointer {
-                other_drag_in_flight: self.window.drag.is_some(),
+                other_drag_in_flight: self.held_drag().is_some(),
                 ..self.window.seat_pointer
             },
             seats::ChromeContent {
@@ -1982,7 +1982,7 @@ impl Runtime<'_> {
         // list for the length of a drag). A menu dropped under a pane being
         // carried across the window would be a menu nobody asked for, standing
         // in the way of the drop.
-        if self.window.drag.is_some() || self.window.float_drag.is_some() {
+        if self.held_drag().is_some() || self.held_float_drag().copied().is_some() {
             self.window.chevrons.clear();
             return;
         }
@@ -2908,15 +2908,15 @@ impl Runtime<'_> {
     /// window* every time any window closed, which is the bug a list invites and
     /// the reason this is asked by identity.
     pub(crate) fn forget_dead_float_gestures(&mut self) {
-        if let Some(drag) = self.window.float_drag
+        if let Some(drag) = self.held_float_drag().copied()
             && self.window.float.live(drag.win).is_none()
         {
-            self.window.float_drag = None;
+            self.drop_float_drag();
         }
-        if let Some(press) = self.window.float_head_press
+        if let Some(press) = self.held_float_head_press().copied()
             && self.window.float.peek_id() != Some(press.win)
         {
-            self.window.float_head_press = None;
+            self.drop_float_head_press();
         }
         if let Some((id, _)) = self.window.float_hover
             && self.window.float.live(id).is_none()

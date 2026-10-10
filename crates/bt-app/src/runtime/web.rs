@@ -1019,7 +1019,7 @@ impl Runtime<'_> {
 
     /// **The surface a page is drawn on** — its pane, or the float carrying it — so that what is
     /// said about the page is said where it is.
-    fn surface_of_page(&self, leaf: LeafId) -> PreviewSurface {
+    pub(in crate::runtime) fn surface_of_page(&self, leaf: LeafId) -> PreviewSurface {
         self.window
             .float
             .drawn()
@@ -1829,6 +1829,16 @@ impl Runtime<'_> {
         {
             return None;
         }
+        self.web_page_shown_at(position)
+    }
+
+    /// **The page whose shown bounds hold this point**, asking nothing about
+    /// what stands over it — [`Self::web_page_at`] subtracts that, and the
+    /// pointer router asks the layers above the page first.
+    pub(in crate::runtime) fn web_page_shown_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<LeafId> {
         self.window.web.iter().find_map(|(leaf, web)| {
             let bounds = web.shown_at()?;
             (position.x >= f64::from(bounds.x)
@@ -2086,8 +2096,17 @@ struct WindowHandoff<'a> {
 }
 
 impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for WindowHandoff<'_> {
-    fn park(&mut self, seat: &mut webhost::WebSeat) {
-        seat.park_for_handoff();
+    fn park(&mut self, seat: &mut webhost::WebSeat) -> Result<(), String> {
+        match seat.park_for_handoff() {
+            Ok(visible) => {
+                crate::diagnostics::note(&crate::web_spare::taken_line(visible));
+                Ok(())
+            }
+            Err(error) => {
+                self.answered = Some("KeptSource");
+                Err(error)
+            }
+        }
     }
 
     fn rehost(

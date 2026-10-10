@@ -942,6 +942,11 @@ text_entries! {
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
     PreviewNothingToSave,
+    /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
+    /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
+    RecoveredEditKept,
+    /// The same, for `{count}` copies.
+    RecoveredEditsKept,
     PreviewFailedImageLoad,
     /// **A picture file longer than the picture lane will read** (owner's ruling
     /// 2026-09-12; `bt_term::MAX_LOCAL_IMAGE_FILE_BYTES`).
@@ -2249,6 +2254,10 @@ text_entries! {
     /// The refused address's fact line when the scheme is not why it was refused, or there is
     /// no scheme to name. The spelling that *does* name one is `web_fail_blocked_scheme` below.
     WebFailBlockedSay,
+    /// What a page's address field says when the path typed into it names no
+    /// file on this machine (M-SWEEP-048) — said in the field, at its end, in
+    /// the field's refused ink.
+    WebAddressNoSuchFile,
     /// The blocked card's fact when the text is not an address at all (F-SWEEP-2-048).
     WebFailAddressInvalidSay,
     /// The `Download refused` card's two sentences. The second is the fact, not
@@ -3081,6 +3090,11 @@ text_entries! {
     /// After *Updated.*, when the update was committed after its trial ended holding a person's
     /// change (`update_job::TrialChanges::NotKept`; 0.4.8 E4); `{detail}` is the detail it follows.
     UpdateCardTrialNotKept,
+    /// The heading after a rollback over a Folio whose changes it did not keep
+    /// (`update_job::Failure::Undone`; 0.4.8 E5).
+    UpdateFailedUndone,
+    /// Its detail; `{version}` is the version whose changes were not kept (0.4.8 E5).
+    UpdateCardUndone,
 }
 
 impl Text {
@@ -3783,6 +3797,16 @@ impl Text {
             Self::PreviewNothingToSave => {
                 pick(lang, "there is nothing to save", "没有要保存的内容")
             }
+            Self::RecoveredEditKept => pick(
+                lang,
+                "An unsaved edit was kept at {folder}",
+                "An unsaved edit was kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+            ),
+            Self::RecoveredEditsKept => pick(
+                lang,
+                "{count} unsaved edits were kept at {folder}",
+                "{count} unsaved edits were kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+            ),
             Self::PreviewFailedImageLoad => pick(
                 lang,
                 "Preview failed: image could not be loaded",
@@ -5360,6 +5384,11 @@ impl Text {
                 "This address does not open in a preview.",
                 "这个地址不在预览中打开。",
             ),
+            Self::WebAddressNoSuchFile => pick(
+                lang,
+                "No such file",
+                "No such file", // zh: pending M-SWEEP-048
+            ),
             Self::WebFailAddressInvalidSay => {
                 pick(lang, "This address is not valid.", "这个地址无效。")
             }
@@ -5988,6 +6017,16 @@ impl Text {
                 "{detail} Changes made before Folio confirmed the update were not kept.",
                 "{detail}更新确认前所做的更改没有保留。",
             ),
+            Self::UpdateFailedUndone => pick(
+                lang,
+                "The update was undone.",
+                "The update was undone.", // zh: pending E5
+            ),
+            Self::UpdateCardUndone => pick(
+                lang,
+                "Changes made in Folio {version} were not kept.",
+                "Changes made in Folio {version} were not kept.", // zh: pending E5
+            ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
@@ -6165,6 +6204,20 @@ impl Text {
         (Self::CleanupMarkUnixConfig, HostPlatform::MacOs),
         (Self::CleanupMarkUnixCache, HostPlatform::Windows),
         (Self::CleanupMarkUnixCache, HostPlatform::MacOs),
+        // zh: pending T-RECOVERED-FOLDER — the start's toast for the edits a stop kept in the
+        // recovered folder.
+        (Self::RecoveredEditKept, HostPlatform::Windows),
+        (Self::RecoveredEditKept, HostPlatform::MacOs),
+        (Self::RecoveredEditsKept, HostPlatform::Windows),
+        (Self::RecoveredEditsKept, HostPlatform::MacOs),
+        // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
+        (Self::UpdateFailedUndone, HostPlatform::Windows),
+        (Self::UpdateFailedUndone, HostPlatform::MacOs),
+        (Self::UpdateCardUndone, HostPlatform::Windows),
+        (Self::UpdateCardUndone, HostPlatform::MacOs),
+        // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
+        (Self::WebAddressNoSuchFile, HostPlatform::Windows),
+        (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
     ];
 }
 
@@ -6531,6 +6584,14 @@ pub fn update_failed_journal_held(error: &str) -> String {
     Text::UpdateFailedJournalHeld
         .text()
         .replace("{error}", error)
+}
+
+/// **The line of a rollback that did not keep what a Folio ran over it
+/// changed** — `Changes made in Folio 0.4.9 were not kept.` (0.4.8 E5),
+/// filled from [`Text::UpdateCardUndone`].
+#[must_use]
+pub fn update_card_undone(version: &str) -> String {
+    Text::UpdateCardUndone.text().replace("{version}", version)
 }
 
 /// **A completed update's line when its trial's changes were not kept**
@@ -7198,6 +7259,27 @@ pub fn ago_hours(hours: u64) -> String {
 /// English has no plural to get wrong here (`more` does not inflect) and Chinese
 /// has none at all, which is the one place this pair is simpler in translation
 /// than in the original.
+/// **The start's one sentence about the edits a stop kept** (T-RECOVERED-FOLDER): the folder
+/// they are in, and how many when more than one.
+#[must_use]
+pub fn recovered_edits_kept(count: usize, folder: &str) -> String {
+    recovered_edits_kept_in(current(), count, folder)
+}
+
+/// [`recovered_edits_kept`] in a named language.
+#[must_use]
+pub fn recovered_edits_kept_in(lang: Lang, count: usize, folder: &str) -> String {
+    let template = if count == 1 {
+        Text::RecoveredEditKept
+    } else {
+        Text::RecoveredEditsKept
+    };
+    template
+        .in_lang(lang)
+        .replace("{count}", &count.to_string())
+        .replace("{folder}", folder)
+}
+
 #[must_use]
 pub fn files_more_not_shown(count: usize) -> String {
     match current() {

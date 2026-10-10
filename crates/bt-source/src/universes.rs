@@ -3,9 +3,13 @@
 //! They are here as values so that the readers that own them can be migrated
 //! onto the same words they are written in today — and so that the difference
 //! between a text walk and a declaration walk is a diff somebody reads rather
-//! than a change nobody notices. P1a builds them and wires none of them: the
-//! guards named below are untouched, and the tickets that migrate them are P7,
-//! P12 and P13.
+//! than a change nobody notices. The guards named below read through them, and
+//! each says what it does with a file under its scope that no declaration
+//! reaches ([`crate::FileSetDiff::only_on_disk`]): the three `bt-platform`
+//! guards refuse one by name, and the `BT_` catalogue reads it as text, because
+//! a crate patched in by path (`vendor/conpty/portable-pty`) is compiled into
+//! the program without being a workspace member whose targets this crate
+//! reads.
 //!
 //! | Guard | Its universe |
 //! | --- | --- |

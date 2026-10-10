@@ -889,6 +889,23 @@ fn close_orphan(orphan: ICoreWebView2CompositionController) {
     }
 }
 
+/// Hide a controller before its creation callback is published to the application's next turn.
+#[cfg(windows)]
+fn hide_new_controller(controller: &ICoreWebView2Controller) -> Result<(), String> {
+    unsafe { controller.SetIsVisible(false) }
+        .map_err(|error| failure("ICoreWebView2Controller::SetIsVisible(false)", &error))?;
+    #[cfg(test)]
+    NEW_CONTROLLER_HIDES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// The real-engine probe's receipt that the creation-edge hide was actually issued. The engine's
+/// current runtime can begin false on some machines, so `IsVisible == false` alone cannot prove
+/// the call whose regression the test is meant to catch.
+#[cfg(all(windows, test))]
+static NEW_CONTROLLER_HIDES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// **The spare web controller's parent: a window that exists and is never shown**
 /// (0.4.5 ticket 60; `docs/ARCHITECTURE.md` §6) — **the one `CreateWindowExW` in
 /// product code**, and the door that kind of effect goes through.
@@ -966,7 +983,8 @@ pub fn spare_parent(
     token: WaitToken<'_, doors::CompositorBirth>,
 ) -> Result<Option<SpareParent>, String> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, RegisterClassW, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        CreateWindowExW, GetSystemMetrics, RegisterClassW, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
     };
     let class = HSTRING::from("FolioSpareWebParent");
     let wnd = WNDCLASSW {
@@ -978,14 +996,24 @@ pub fn spare_parent(
     // class from the first is the one used. There is only ever one spare.
     unsafe { RegisterClassW(&wnd) };
     let title = HSTRING::new();
+    // A hidden parent is not enough: WebView2 owns a separate top-level runtime window, and its
+    // default-visible controller used to put that window at the parent's screen coordinates even
+    // though this HWND was never shown. Stand one whole parent rectangle beyond the virtual
+    // screen's top-left edge as a second boundary behind the controller's visibility invariant.
+    let (x, y) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN).saturating_sub(801),
+            GetSystemMetrics(SM_YVIRTUALSCREEN).saturating_sub(601),
+        )
+    };
     let hwnd = unsafe {
         CreateWindowExW(
             WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
             PCWSTR(class.as_ptr()),
             PCWSTR(title.as_ptr()),
             WS_POPUP,
-            0,
-            0,
+            x,
+            y,
             800,
             600,
             None,
@@ -1873,8 +1901,26 @@ impl WebHost {
             move |result, controller| {
                 let error = match (result, controller) {
                     (Ok(()), Some(controller)) => {
-                        sink.deliver(Some(controller));
-                        None
+                        // A composition controller is visible by default, independently of
+                        // whether its parent HWND has ever been shown. Hide it in the creation
+                        // callback itself, before another turn can expose the runtime's layered
+                        // top-level window to hit testing. The ordinary presence road is the one
+                        // that later shows a controller when a real pane owns it.
+                        let hidden = controller
+                            .cast::<ICoreWebView2Controller>()
+                            .map_err(|error| failure("ICoreWebView2Controller", &error))
+                            .and_then(|controller| hide_new_controller(&controller));
+                        match hidden {
+                            Ok(()) => {
+                                sink.deliver(Some(controller));
+                                None
+                            }
+                            Err(error) => {
+                                close_orphan(controller);
+                                sink.deliver(None);
+                                Some(error)
+                            }
+                        }
                     }
                     (Ok(()), None) => {
                         sink.deliver(None);
@@ -3042,6 +3088,20 @@ impl WebHost {
             .map_err(|error| failure("ICoreWebView2Controller::SetIsVisible", &error))
     }
 
+    /// The controller's own visibility, read rather than inferred from the last setter.
+    ///
+    /// The spare lifecycle uses this for its diagnostics and as the fact that admits a seat to
+    /// `Parked`. `None` means there is no controller to ask.
+    fn is_visible(&self) -> Result<Option<bool>, String> {
+        let Some(controller) = self.controller.as_ref() else {
+            return Ok(None);
+        };
+        let mut visible = BOOL::default();
+        unsafe { controller.IsVisible(&mut visible) }
+            .map_err(|error| failure("ICoreWebView2Controller::IsVisible", &error))?;
+        Ok(Some(visible.as_bool()))
+    }
+
     pub fn navigate(&self, url: &str) -> Result<(), String> {
         let Some(webview) = self.webview.as_ref() else {
             return Ok(());
@@ -3932,17 +3992,19 @@ mod engine_settings_tests {
 /// folders removed however the run ends.
 #[cfg(all(test, windows))]
 mod webview2_runtime_probe {
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
-        PeekMessageW, RegisterClassW, TranslateMessage, WNDCLASSW, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
+        GetClassNameW, GetWindowRect, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW,
+        RegisterClassW, TranslateMessage, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
     };
-    use windows::core::{HSTRING, PCWSTR};
+    use windows::core::{BOOL, HSTRING, PCWSTR};
 
     use super::*;
     use crate::{Compositor, PageVisual};
@@ -4022,6 +4084,15 @@ mod webview2_runtime_probe {
             let root = bt_testpath::temp_path(&format!("folio-web-probe-{tag}"));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("a scratch directory");
+            Self(root)
+        }
+
+        /// Ticket 048's live-engine scratch stays under this worktree's `target/spare`.
+        fn make_in_target(tag: &str) -> Self {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/spare")
+                .join(bt_testpath::unique_name(tag));
+            std::fs::create_dir_all(&root).expect("a worktree-local scratch directory");
             Self(root)
         }
     }
@@ -4106,6 +4177,75 @@ mod webview2_runtime_probe {
             turn_the_pump();
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// The runtime top-level windows a newly created controller added. A handle already present
+    /// before this probe is not this probe's window (the test runner may be sharing a cached
+    /// environment with another ignored probe).
+    fn new_visible_engine_windows(before: &HashSet<usize>) -> Vec<(usize, RECT)> {
+        struct Look<'a> {
+            before: &'a HashSet<usize>,
+            found: Vec<(usize, RECT)>,
+        }
+
+        unsafe extern "system" fn keep(window: HWND, state: LPARAM) -> BOOL {
+            // SAFETY: `state` points at `look` below for this synchronous enumeration.
+            let look = unsafe { &mut *(state.0 as *mut Look<'_>) };
+            let mut class = [0u16; 64];
+            // SAFETY: the HWND is supplied by EnumWindows and the buffer is writable.
+            let length = unsafe { GetClassNameW(window, &mut class) };
+            if length <= 0
+                || String::from_utf16_lossy(&class[..length as usize]) != "Chrome_WidgetWin_1"
+            {
+                return BOOL(1);
+            }
+            let key = window.0 as usize;
+            // SAFETY: all reads use the live enumerated HWND and a local out parameter.
+            if look.before.contains(&key) || !unsafe { IsWindowVisible(window) }.as_bool() {
+                return BOOL(1);
+            }
+            let mut rect = RECT::default();
+            if unsafe { GetWindowRect(window, &mut rect) }.is_err() {
+                return BOOL(1);
+            }
+            // `MONITOR_DEFAULTTONULL` is exactly the intersection question: no nearest-monitor
+            // fallback can turn an off-screen rectangle into an on-screen one.
+            let monitor = unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) };
+            if !monitor.is_invalid() {
+                look.found.push((key, rect));
+            }
+            BOOL(1)
+        }
+
+        let mut look = Look {
+            before,
+            found: Vec::new(),
+        };
+        // SAFETY: `keep` uses `look` only during this synchronous call.
+        let _ = unsafe { EnumWindows(Some(keep), LPARAM((&raw mut look) as isize)) };
+        look.found
+    }
+
+    /// Every current WebView2 top-level handle, visible or not, for a before/after attribution.
+    fn engine_window_handles() -> HashSet<usize> {
+        unsafe extern "system" fn keep(window: HWND, state: LPARAM) -> BOOL {
+            // SAFETY: `state` points at the set below for this synchronous enumeration.
+            let found = unsafe { &mut *(state.0 as *mut HashSet<usize>) };
+            let mut class = [0u16; 64];
+            // SAFETY: the HWND is supplied by EnumWindows and the buffer is writable.
+            let length = unsafe { GetClassNameW(window, &mut class) };
+            if length > 0
+                && String::from_utf16_lossy(&class[..length as usize]) == "Chrome_WidgetWin_1"
+            {
+                found.insert(window.0 as usize);
+            }
+            BOOL(1)
+        }
+
+        let mut found = HashSet::new();
+        // SAFETY: `keep` uses `found` only during this synchronous call.
+        let _ = unsafe { EnumWindows(Some(keep), LPARAM((&raw mut found) as isize)) };
+        found
     }
 
     /// The last title the document gave itself, which is where the page writes
@@ -4219,6 +4359,112 @@ mod webview2_runtime_probe {
             asked,
             guards: report.guards,
         }
+    }
+
+    /// RED (T-SPARE-WEBVIEW-STEALS-INPUT) — **a real spare controller is hidden from creation,
+    /// its parent is off every monitor, and `about:blank` still lands inside the existing engine
+    /// budget.** No top-level runtime window created by this controller may be both visible and
+    /// intersecting a monitor.
+    ///
+    /// MUTATION: skip the creation callback's `SetIsVisible(false)` and the issuance receipt is
+    /// absent (a runtime that defaults true is also caught by the readback/intersection facts).
+    #[test]
+    #[ignore = "needs a WebView2 runtime, a window and a message pump: run it with --ignored"]
+    fn a_parked_spare_is_hidden_and_warms_off_every_monitor() {
+        use crate::admission::{Role, admitted, doors, enter_window_thread, loop_running, role};
+
+        webview2_runtime_version().expect("a WebView2 runtime on this machine");
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .expect("an apartment for the engine's callbacks");
+        if role() != Role::Window {
+            assert!(enter_window_thread());
+            assert!(loop_running());
+        }
+
+        let before = engine_window_handles();
+        let hides_before = NEW_CONTROLLER_HIDES.load(std::sync::atomic::Ordering::SeqCst);
+        let profile = Scratch::make_in_target("spare-profile");
+        let parent = admitted::<doors::CompositorBirth, _>(spare_parent)
+            .expect("admitted on the window thread")
+            .expect("the spare parent was made")
+            .expect("Windows has a spare parent");
+        let mut parent_rect = RECT::default();
+        unsafe { GetWindowRect(parent.window().as_hwnd(), &mut parent_rect) }
+            .expect("the spare parent's screen rectangle");
+        assert!(
+            unsafe { MonitorFromRect(&parent_rect, MONITOR_DEFAULTTONULL) }.is_invalid(),
+            "the spare parent intersects a monitor: {parent_rect:?}"
+        );
+
+        let mut host = WebHost::new(
+            Box::new(|_| WebNavigationVerdict::Proceed),
+            Box::new(|_| WebRequestVerdict::Allow),
+            Box::new(|| {}),
+        );
+        let mut seen = Vec::new();
+        admitted::<doors::WebEnvironment, _>(|token| {
+            host.request_environment(token, &profile.0, 1)
+        })
+        .expect("admitted on the window thread")
+        .expect("the environment was asked for");
+        pump_until(&host, &mut seen, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, WebEvent::Environment { .. }))
+        });
+        admitted::<doors::WebController, _>(|token| {
+            host.request_controller(token, parent.window(), 1)
+        })
+        .expect("admitted on the window thread")
+        .expect("the controller was asked for");
+        pump_until(&host, &mut seen, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, WebEvent::Controller { .. }))
+        });
+
+        let page = PageVisual { tab: 1, seat: 1 };
+        parent
+            .compositor()
+            .attach_web_visual(page)
+            .expect("a web visual for the spare");
+        host.install(parent.compositor(), page, 1)
+            .expect("the controller was taken into service");
+        let initial_visibility = host.is_visible().expect("the controller's visibility");
+        host.set_bounds(0, 0, 800, 600).expect("parked bounds");
+        admitted::<doors::CompositorCommit, _>(|token| parent.compositor().commit(token))
+            .expect("admitted on the window thread")
+            .expect("the parked tree was committed");
+        host.navigate("about:blank").expect("the spare navigation");
+        pump_until(&host, &mut seen, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, WebEvent::NavigationCompleted { success: true, .. }))
+        });
+        pump_for(&host, &mut seen, Duration::from_millis(500));
+        let offenders = new_visible_engine_windows(&before);
+        host.close();
+        settle();
+        // The cached environment owns COM interfaces too. Release it while this apartment is
+        // still alive and pumping, as the older real-engine probe below does after its passes.
+        forget_web_environment();
+        settle();
+        assert_eq!(
+            initial_visibility,
+            Some(false),
+            "creation delivered a hidden controller"
+        );
+        assert_eq!(
+            NEW_CONTROLLER_HIDES.load(std::sync::atomic::Ordering::SeqCst),
+            hides_before + 1,
+            "the creation callback issued one SetIsVisible(false)"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a new visible WebView2 top-level window intersects a monitor: {:?}",
+            offenders
+        );
     }
 
     /// RED — **an `<img>` and an `<iframe>` in a previewed local page reach the
@@ -4757,6 +5003,23 @@ pub use portable::{
     SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
     web_environment_epoch, webview2_runtime_version,
 };
+
+/// A controller's own visibility where that is a platform fact.
+///
+/// WebView2 exposes `IsVisible`; the other engines have no parked spare controller to ask, so
+/// they answer `None`. Keeping the distinction here lets the application own one platform-neutral
+/// spare lifecycle.
+pub fn web_controller_visibility(host: &WebHost) -> Result<Option<bool>, String> {
+    #[cfg(windows)]
+    {
+        host.is_visible()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = host;
+        Ok(None)
+    }
+}
 
 /// **A window a page asks for is the host's** (F-SWEEP-048, #27).
 #[cfg(test)]

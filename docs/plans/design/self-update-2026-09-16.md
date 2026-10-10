@@ -3193,3 +3193,32 @@ takes is never a reason. The longest a download can run follows from its ceiling
 download the rule keeps. The sentence "a monotonic end-to-end deadline that periodic bytes cannot
 defeat" above is replaced by this rule; cancel, the ceiling, the temporary file and progress are
 unchanged. It helps from 0.4.7 on: the 0.4.6 → 0.4.7 hop runs 0.4.6's downloader.
+
+## Revision 2026-10-09 (j) — a rollback over a Folio whose changes it did not keep says so (0.4.8 E5, census #16)
+
+Census #16 (an interrupted update whose rescue copy cannot be started: the new build runs, and the
+later rollback overwrites what it wrote, with no card) was ruled by the owner on 2026-10-08:
+**accept the overwrite, with a card that says so**. E1-a1 built its first half on Windows — such a
+start continues with its writes held and says, in that session, that its changes are not kept
+(RULES §36). This revision adds the second half, the card on the restored build:
+
+- **Who marks.** A start that continues over a `destructive` transaction it could hand to no
+  recovery — held on Windows, and on macOS the start that could start neither the rescue clone nor
+  its own program while it is the transaction's new bundle (it writes as always: the overwrite the
+  ruling accepts) — writes `H\<txn>\unkept` holding its version. The trial's watch writes the same
+  mark (E4) when it holds a person's change, now holding its version too.
+- **Who records.** The lock holder that retires a rollback (W11/M11, both appliers) reads the mark
+  and records its version in the journal's body as `unkept`, with `Retired`. A macOS holder removes
+  `H/<txn>` with the retirement, so the journal is the only carrier that reaches the next start.
+  `unkept` is a body word, additive (0.4.6 and 0.4.7 ignore it and lose the card alone), written by
+  the rescue copy; it is a row of the journal's grammar.
+- **Who says.** The start that retires a `Retired{RolledBack}` journal noting a version — the
+  restored build's first, sent with `--update-failed` or plain after a rollback at logon — raises
+  *The update was undone.* / *Changes made in Folio {version} were not kept.* (`Failure::Undone`),
+  over the rollback's own card and under a held journal's, once. The launch wire carries it as the
+  rolled-back word with a key of its own, `failed_undone`.
+- **Not built: keeping the new build's data when it is compatible.** The journal does not record
+  the data folder's document versions of either build (the Windows layout names no version at all;
+  the macOS one names the bundles' versions, not their documents'), a held session has written
+  nothing to keep, and `persist` has no revision preconditions to prove the folder unchanged since
+  the session read it (E4's §2c). Keeping would need those facts first; the ruling is the card.

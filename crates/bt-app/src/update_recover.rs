@@ -930,6 +930,7 @@ mod tests {
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
                     marker: None,
+                    unkept: None,
                     phase,
                     layout: Layout::Members(Inventories {
                         old_shipped: Vec::new(),
