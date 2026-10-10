@@ -168,6 +168,7 @@ bt-app::retire_linux_desktop	DesktopRetire
 
 # effects
 crate	arm	item	effects	kind	authority	door
+bt-platform	[not(any(target_os = "macos", windows))] [target_os = "linux"]	crate::install_flip::imp::running_from_on_worker	std::fs::metadata 2, std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::git::GitLocation::located	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
