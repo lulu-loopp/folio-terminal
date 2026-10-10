@@ -59,7 +59,7 @@
 //! operation (`io::ErrorKind::Unsupported`), never answered as if it had
 //! happened.
 //! Linux's transaction writes take a [`WorkerCtx`]; preview recovery copies
-//! take one batch's [`WaitToken`]. Context-free durable mutations refuse in
+//! take one batch's `WaitToken`. Context-free durable mutations refuse in
 //! Linux product builds.
 //!
 //! **The OS calls come through a small trait, `Surface`,** so the one order
@@ -69,7 +69,7 @@
 //! **Worker only.** Every call here blocks on the disk (a flush waits for the
 //! device), and [`hold_within`] sleeps until its deadline. None of it may run
 //! on a window thread except the one admitted Linux preview-recovery batch
-//! ([`durable_recovery_copies`]). The thread door's `WorkerCtx` (A1b) and its
+//! (`durable_recovery_copies`). The thread door's `WorkerCtx` (A1b) and its
 //! prohibitions (A1e) are what make worker effects a type. **The other
 //! exception is the start** (U-12, `bt-app::update_startup`): in
 //! `fn main`, before the event loop exists, the window thread takes the
@@ -306,7 +306,7 @@ pub fn durable_write_on_worker(
 /// A [`Failure`] naming the stage that failed; on a platform with no arm, one
 /// at [`Stage::CreateTemp`] whose error is `Unsupported` and names this door.
 /// Linux product callers get the same refusal. Recovery copies use the
-/// admitted [`durable_recovery_copies`] batch.
+/// admitted `durable_recovery_copies` batch.
 pub fn durable_create(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
     #[cfg(target_os = "linux")]
     {
