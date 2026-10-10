@@ -1197,6 +1197,82 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     );
 }
 
+/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS, Windows regression) — **the holder
+/// that commits a trial whose mark names a version carries that fact in the
+/// journal, and the next start shows E4's card once from the field even when
+/// the intermediate mark is gone.** Windows uses the same field road as
+/// macOS; the mark is only the writer's input.
+///
+/// MUTATIONS: make `Journaled::record` record `Committed` without
+/// `noting_unkept` (no field, no card); make `changes_not_kept` ignore the
+/// field (no card). Removing the mark before the start must not change the
+/// answer.
+#[test]
+fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
+    let Some(install) = Install::new("commit-unkept") else {
+        return;
+    };
+    let version = crate::version::VERSION;
+    std::fs::write(install.home.unkept(install.txn), version.as_bytes()).unwrap();
+    let (ended, world) = applied(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Answers),
+    );
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(
+        install.on_disk().body.unkept.as_deref(),
+        Some(version),
+        "the committed outcome carries the trial's fact"
+    );
+
+    std::fs::remove_file(install.home.unkept(install.txn)).unwrap();
+    let mut starting = StartWorld {
+        said: Vec::new(),
+        registry: install.registry.clone(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed,
+            home: &install.home,
+            argv: &[],
+            trial: None,
+            failed: None,
+            journal_held: None,
+        },
+        &mut starting,
+    );
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", starting.said);
+    };
+    assert_eq!(
+        failed,
+        Some(Failure::ChangesNotKept {
+            version: version.to_owned(),
+        })
+    );
+    assert!(!install.home.journal().exists(), "the note is read once");
+
+    let mut again = StartWorld {
+        said: Vec::new(),
+        registry: install.registry.clone(),
+    };
+    let crate::update_startup::Verdict::Continue { failed, .. } = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed,
+            home: &install.home,
+            argv: &[],
+            trial: None,
+            failed: None,
+            journal_held: None,
+        },
+        &mut again,
+    ) else {
+        panic!("the next start continues: {:?}", again.said);
+    };
+    assert_eq!(failed, None, "the card is shown once");
+}
+
 /// RED (U-23) — **after the commit, the `Run` value goes first, then exactly
 /// the recorded old files in `backup\`, and only then the class is
 /// `terminal`**: at the instant the entrance is removed the journal says

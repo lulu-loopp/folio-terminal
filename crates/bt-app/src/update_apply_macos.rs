@@ -56,7 +56,8 @@
 //!    whole deadline with no window).
 //! 6. **Commit** (M7 → M8): a receipt the journal accepts — this transaction's,
 //!    this trial's nonce, while the journal says `Trial` — →
-//!    `Committed{outcome: committed}`, durable; **then** the old bundle in
+//!    `Committed{outcome: committed}`, durable, carrying the version named by
+//!    the trial's `unkept` mark when there is one; **then** the old bundle in
 //!    `stage/` (checked to be the old identity) is removed, the plist removed,
 //!    `Retired{Committed}` recorded, and `H/<txn>` removed with the rescue
 //!    clone this process runs from (a Unix process may remove its own image).
@@ -1217,13 +1218,23 @@ impl<'a> Txn<'a> {
         event: &Event,
         say: &mut dyn FnMut(&str),
     ) -> Result<(), String> {
-        let next = self
+        let mut next = self
             .journal
             .advance(event)
             .map_err(|refusal| format!("{refusal:?}"))?;
         let phase = next.body.phase.kind();
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
+        }
+        if phase == PhaseKind::Committed {
+            let unkept = crate::update_apply::unkept_version(&self.road.home, self.road.txn, say);
+            if let Some(version) = &unkept {
+                say(&crate::update_apply::unkept_committed_said(
+                    self.road.txn,
+                    version,
+                ));
+            }
+            next = next.noting_unkept(unkept);
         }
         crate::update_apply::write_journal(
             self.worker,
@@ -1674,8 +1685,9 @@ impl<'a> Txn<'a> {
         }
     }
 
-    /// M8 and M11 after `Committed` is durable: the old bundle, the entrance,
-    /// then `Retired{Committed}` and `H/<txn>`. Every failure here is debt.
+    /// M8 and M11 after `Committed` is durable (including the trial's
+    /// `unkept` note when it left one): the old bundle, the entrance, then
+    /// `Retired{Committed}` and `H/<txn>`. Every failure here is debt.
     fn commit(&mut self, worker: &WorkerCtx, places: &Places<'_>, actor: Actor) -> Ended {
         let mut debt = Vec::new();
         let (_, stage) = self.layout.locate(worker, places);
@@ -1704,7 +1716,9 @@ impl<'a> Txn<'a> {
     /// this process may run from included (a Unix process may remove its own
     /// image). The journal is kept: after a commit for the trial's watch,
     /// after a rollback for the relaunched build's card; the next ordinary
-    /// start retires it. **A rollback's `Retired` notes the version the
+    /// start retires it. A committed journal already carries the trial's
+    /// `unkept` note from the write of `Committed`. **A rollback's `Retired`
+    /// notes the version the
     /// transaction's mark names** (0.4.8 E5, `update_apply::unkept_version`):
     /// the mark goes with the folder here, so the journal is what carries to
     /// the restored build that the changes made in that version were not kept.

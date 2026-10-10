@@ -1253,9 +1253,10 @@ runs there); the new version did not start only when a trial was begun. A
 person's change a trial held — the settings, the shortcuts, the profiles, the
 pins — is marked in the transaction's folder until the trial reads its
 commit; a commit made after the trial ended (its applier dead, a recovery
-committing from its receipt) cannot carry what the trial held, and the start
-that retires it says that the changes made before Folio confirmed the update
-were not kept. **On Windows, a start whose rescue build cannot
+committing from its receipt) cannot carry what the trial held, so the journal
+writer copies the mark's version into `Committed` before retirement can remove
+the folder, and the start that retires it says that the changes made before
+Folio confirmed the update were not kept. **On Windows, a start whose rescue build cannot
 be started — its folder gone, its file held, the operating system refusing it —
 continues with its writes held** (E1, the owner's ruling E5 of 2026-10-08),
 over every destructive phase but `TrialStarting`, which keeps U-35's road

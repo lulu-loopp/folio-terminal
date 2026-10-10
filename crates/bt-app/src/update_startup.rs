@@ -74,7 +74,8 @@
 //! (`H\<txn>\unkept`, its version: what it changes is not kept, which a later
 //! rollback's card says — 0.4.8 E5). The start that retires a rollback whose
 //! journal notes such a version raises *The update was undone.* over the
-//! rollback's own card.
+//! rollback's own card. The start that retires a commit whose journal notes
+//! the trial's version raises E4's card that its held changes were not kept.
 //!
 //! # Where it runs, and its doors
 //!
@@ -563,7 +564,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
                         },
                         _ => undone,
                     }),
-                    None => failed.or_else(|| changes_not_kept(&seen, start.home, world)),
+                    None => failed.or_else(|| changes_not_kept(&seen, world)),
                 },
                 _ => failed,
             };
@@ -608,13 +609,13 @@ fn unfinished(seen: &Sight, home: &Home, held: bool) -> Failure {
     }
 }
 
-/// **The card of a transaction committed after its trial ended holding a
-/// person's change** (0.4.8 E4, R3): the journal is retired `committed` and
-/// the transaction's folder holds the trial's mark (`Home::unkept`,
-/// `update_trial`), read by the start that retires it, before the retirement
-/// removes the folder. `None` for every other journal, and when the mark
-/// cannot be read.
-fn changes_not_kept(seen: &Sight, home: &Home, world: &mut impl World) -> Option<Failure> {
+/// **The card of a transaction committed after its trial held a person's
+/// change** (0.4.8 E4, R3): the journal is retired `committed` and its body
+/// notes the version from the trial's intermediate mark (`Home::unkept`,
+/// `update_trial`), copied by the writer that recorded `Committed` before a
+/// macOS retirement can remove the folder. `None` for every other journal or
+/// one that notes no version.
+fn changes_not_kept(seen: &Sight, world: &mut impl World) -> Option<Failure> {
     let Sight::Known(journal) = seen else {
         return None;
     };
@@ -627,28 +628,12 @@ fn changes_not_kept(seen: &Sight, home: &Home, world: &mut impl World) -> Option
     ) {
         return None;
     }
-    let mark = home.unkept(journal.txn);
-    match file_reads::read(Lane::Install, &mark) {
-        Ok(_) => {
-            world.say(&format!(
-                "BT_UPDATE_START transaction {} was committed after its trial ended; {} says the trial's changes were not kept",
-                journal.txn,
-                mark.display()
-            ));
-            Some(Failure::ChangesNotKept {
-                version: crate::version::VERSION.to_owned(),
-            })
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => {
-            world.say(&format!(
-                "BT_UPDATE_START transaction {}: {} could not be read ({error}); no card",
-                journal.txn,
-                mark.display()
-            ));
-            None
-        }
-    }
+    let version = journal.body.unkept.clone()?;
+    world.say(&format!(
+        "BT_UPDATE_START transaction {} was committed after its trial held a change; the journal, Retired, notes that Folio {version}'s changes were not kept",
+        journal.txn
+    ));
+    Some(Failure::ChangesNotKept { version })
 }
 
 /// **The card of a rollback that did not keep what a Folio ran over it
@@ -3060,10 +3045,10 @@ mod tests {
         }
 
         /// RED (0.4.8 E4, R3) — **the start that retires a transaction
-        /// committed after its trial ended says that the changes made before
-        /// the commit were not kept, when the trial left its mark** — once:
-        /// the retirement removes the transaction's folder with the mark — and
-        /// says nothing without the mark, or over a rollback.
+        /// committed after its trial held a person's change says that the
+        /// changes made before the commit were not kept, when the journal
+        /// carries the mark's version** — once: retirement removes the
+        /// journal — and says nothing without the field, or over a rollback.
         ///
         /// MUTATION: `changes_not_kept` answers `None` (the silent loss of the
         /// clean VM's R3).
@@ -3079,35 +3064,27 @@ mod tests {
                 outcome: Outcome::Committed,
                 untried: false,
             };
-            // No mark: the trial saw its commit, or held no person's change.
+            // No note: the trial held no person's change.
             write_phase(&scene, committed.clone());
             let mut world = Recorded::default();
             let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
             assert_eq!(failed, None);
 
-            // The mark: a person's change held past the trial's end.
-            write_phase(&scene, committed.clone());
-            std::fs::create_dir_all(scene.home.transaction(txn())).unwrap();
-            std::fs::write(scene.home.unkept(txn()), b"").unwrap();
+            // The journal note copied from the writer's intermediate mark.
+            write_noted(&scene, committed.clone(), Some("0.4.9"));
             let mut world = Recorded::default();
             let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
             assert_eq!(
                 failed,
                 Some(Failure::ChangesNotKept {
-                    version: crate::version::VERSION.to_owned(),
+                    version: "0.4.9".to_owned(),
                 })
             );
-            assert!(
-                !scene.home.transaction(txn()).exists(),
-                "retired: the folder and its mark are gone"
-            );
+            assert!(!scene.home.journal().exists(), "retired: read once");
             let job: Job<u32> = Job::with_offers(true).after_rollback(failed);
             assert_eq!(
                 job.state(),
-                &State::Updated(
-                    crate::version::VERSION.to_owned(),
-                    crate::update_job::TrialChanges::NotKept
-                )
+                &State::Updated("0.4.9".to_owned(), crate::update_job::TrialChanges::NotKept)
             );
             let card = update_card::paint(job.state()).expect("a card");
             assert_eq!(
@@ -3116,20 +3093,23 @@ mod tests {
             );
             assert!(job.last_failure().is_none(), "About names no failure");
 
-            // A rollback's mark goes with its folder, unsaid: the rollback's
-            // own card speaks for it.
-            write_phase(
+            // A rollback's note belongs to E5's card, not this one.
+            write_noted(
                 &scene,
                 Phase::Retired {
                     outcome: Outcome::RolledBack,
                     untried: false,
                 },
+                Some("0.4.9"),
             );
-            std::fs::create_dir_all(scene.home.transaction(txn())).unwrap();
-            std::fs::write(scene.home.unkept(txn()), b"").unwrap();
             let mut world = Recorded::default();
             let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
-            assert_eq!(failed, None);
+            assert_eq!(
+                failed,
+                Some(Failure::Undone {
+                    version: "0.4.9".to_owned()
+                })
+            );
         }
 
         /// RED (0.4.8 E5, census #16) — **a Folio that ran over an unfinished

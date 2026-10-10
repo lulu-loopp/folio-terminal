@@ -63,7 +63,8 @@
 //!    start: the journal never outlives its knowledge of a running trial.
 //! 7. **Commit** (W7 → W8, `update_apply::watch_trial`): a receipt of this
 //!    transaction and this trial's nonce while the journal says `Trial` →
-//!    `Committed{outcome: committed}`, durable; any other receipt is said once
+//!    `Committed{outcome: committed}`, durable, carrying the version named by
+//!    the trial's `unkept` mark when there is one; any other receipt is said once
 //!    and waited past. The trial gone without one, or 90 s → `RollbackIntent`,
 //!    and the rollback. **After `Committed`** (W8, W12; the coordinator's
 //!    order of U-23): the `Run` value removed and flushed; then exactly the
@@ -1982,7 +1983,8 @@ impl<'a> Txn<'a> {
     /// is durable; the entrance removed and flushed; then exactly the recorded
     /// old files `backup\` holds, by their digests (`update_txn::decide`'s
     /// `FinishCommit`) — never a file the journal does not record; then
-    /// `Retired{Committed}`. Every failure is debt, never a rollback; `H\<txn>`
+    /// `Retired{Committed}`, carrying the `unkept` note written with
+    /// `Committed`. Every failure is debt, never a rollback; `H\<txn>`
     /// — the emptied `backup\`, and the rescue folder this process runs from —
     /// is the next ordinary start's.
     fn retire_committed(&mut self, actor: Actor, world: &mut impl World) -> Ended {

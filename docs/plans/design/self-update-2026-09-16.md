@@ -3222,3 +3222,20 @@ start continues with its writes held and says, in that session, that its changes
   the macOS one names the bundles' versions, not their documents'), a held session has written
   nothing to keep, and `persist` has no revision preconditions to prove the folder unchanged since
   the session read it (E4's §2c). Keeping would need those facts first; the ruling is the card.
+
+## Revision 2026-10-10 (k) — E4's committed card survives macOS retirement
+
+E4's intermediate `H/<txn>/unkept` mark could reach the retiring start on Windows, where the
+holder leaves the transaction folder, but not on macOS: `Txn::retire` removes the folder before
+any start can read it. The same additive body field E5 introduced is the carrier for both outcomes:
+
+- **Who records.** Every journal writer that advances a trial to `Committed` reads the mark first
+  and writes its version as body field `unkept` on that outcome. `Retired{Committed}` carries it.
+  The macOS holder may then remove `H/<txn>` without removing the fact; Windows uses this field too.
+  The mark remains the writer's intermediate and remains E5's input when a rollback is retired.
+- **Who says.** The start retiring `Retired{Committed}` reads `unkept` through its existing journal
+  read and raises E4's existing `UpdateCardTrialNotKept` once. No mark-file fallback and no new parse
+  site are added.
+- **Compatibility.** `unkept` keeps its grammar row: body, additive since 0.4.8, now written by a
+  rescue lock holder or the reserved trial. The frozen 0.4.6 and 0.4.7 readers ignore it and settle
+  the same committed journal forward, losing only the card.

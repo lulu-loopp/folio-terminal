@@ -1021,6 +1021,94 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     assert_eq!(journal.header().outcome, HeaderOutcome::Committed);
 }
 
+/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS) — **a trial that held a person's
+/// change leaves its version mark; the macOS holder commits it into the
+/// journal before retirement removes `H/<txn>`; and the committed build's
+/// next start shows E4's card once.**
+///
+/// MUTATIONS: make `Txn::record_saying` record `Committed` without
+/// `noting_unkept` (the folder removes the only fact, so no card); make
+/// `changes_not_kept` ignore the field (the field is present, but no card).
+#[test]
+fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("commit-unkept");
+    let (home, txn) = (install.home.clone(), install.txn);
+    let version = crate::version::VERSION;
+    let world = launching(Box::new(move |_, args| {
+        let nonce = trial_nonce(args);
+        std::fs::write(home.unkept(txn), version.as_bytes()).unwrap();
+        let receipt = Receipt {
+            txn,
+            nonce,
+            pid: std::process::id(),
+            version: "2.0".to_owned(),
+            started: None,
+        };
+        install_txn::durable_create(&home.receipt_path(txn, &nonce), &receipt.encode()).unwrap();
+        Ok(())
+    }));
+    let (ended, hands) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::Committed, "{:?}", hands.said);
+    assert!(
+        !install.home.transaction(install.txn).exists(),
+        "macOS retirement removed the intermediate mark"
+    );
+    assert_eq!(
+        install.on_disk().unwrap().body.unkept.as_deref(),
+        Some(version),
+        "the committed outcome carries the fact past the folder"
+    );
+
+    let journal = install.home.journal();
+    let mut starting = StartWorld {
+        agents: install.agents.clone(),
+        said: Vec::new(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed.join(EXE),
+            home: &install.home,
+            argv: &[],
+            trial: None,
+            failed: None,
+            journal_held: None,
+        },
+        &mut starting,
+    );
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", starting.said);
+    };
+    assert_eq!(
+        failed,
+        Some(crate::update_job::Failure::ChangesNotKept {
+            version: version.to_owned(),
+        })
+    );
+    assert!(!journal.exists(), "the note is read once");
+
+    let mut again = StartWorld {
+        agents: install.agents.clone(),
+        said: Vec::new(),
+    };
+    let crate::update_startup::Verdict::Continue { failed, .. } = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed.join(EXE),
+            home: &install.home,
+            argv: &[],
+            trial: None,
+            failed: None,
+            journal_held: None,
+        },
+        &mut again,
+    ) else {
+        panic!("the next start continues: {:?}", again.said);
+    };
+    assert_eq!(failed, None, "the card is shown once");
+}
+
 /// RED (U-28, M8) — **the old bundle leaves `stage/` only once `Committed`
 /// is durable**, then the plist and `H/<txn>` go; the journal stays at
 /// `Retired{Committed}` for the trial's watch, and the lock is free.

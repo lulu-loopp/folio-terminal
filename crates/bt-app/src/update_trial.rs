@@ -32,10 +32,12 @@
 //! commit may be written by the older rescue build, and the start that
 //! retires it removes the transaction's folder). So once a document a person
 //! edits is held ([`Writer::is_a_persons_change`]), the watch marks the
-//! transaction's folder (`H\<txn>\unkept`, `update_txn::Home::unkept`) and
-//! takes the mark back when it reads the commit; the start that retires a
-//! committed transaction with the mark still there says that the changes made
-//! before the commit were not kept (`update_startup`).
+//! transaction's folder (`H\<txn>\unkept`, `update_txn::Home::unkept`). The
+//! journal writer that commits reads the mark into `Body::unkept` before a
+//! macOS retirement can remove the folder; the start that retires the
+//! committed journal says that the changes made before the commit were not
+//! kept (`update_startup`). The watch still takes the intermediate mark back
+//! when it reads the commit.
 //!
 //! **The watch** is a worker of its own (`folio-trial-watch`, below normal):
 //! one read of `H\journal.json` every [`WATCH_INTERVAL`] through `file_reads`

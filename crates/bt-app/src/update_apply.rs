@@ -394,6 +394,8 @@ pub(crate) trait Recording {
 /// the holder runs on, whose wait door a refused write sleeps through
 /// ([`write_journal`]).
 pub(crate) struct Journaled<'w> {
+    /// The transaction's home, including the trial's `unkept` mark.
+    home: Home,
     /// `H\journal.json`.
     path: PathBuf,
     worker: &'w WorkerCtx,
@@ -418,6 +420,7 @@ impl<'w> Journaled<'w> {
         held_within: Duration,
     ) -> Self {
         Self {
+            home: home.clone(),
             path: home.journal(),
             worker,
             held_within,
@@ -448,13 +451,20 @@ impl<'w> Journaled<'w> {
         if !event.kind().authors().contains(&actor) {
             return Err(format!("{actor:?} may not record {:?}", event.kind()));
         }
-        let next = self
+        let mut next = self
             .journal
             .advance(event)
             .map_err(|refusal| format!("{refusal:?}"))?;
         let phase = next.body.phase.kind();
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
+        }
+        if phase == PhaseKind::Committed {
+            let unkept = unkept_version(&self.home, next.txn, say);
+            if let Some(version) = &unkept {
+                say(&unkept_committed_said(next.txn, version));
+            }
+            next = next.noting_unkept(unkept);
         }
         if let Err(unwritten) = write_journal(
             self.worker,
@@ -504,15 +514,15 @@ impl Recording for Journaled<'_> {
     }
 }
 
-/// **What a rollback did not keep** (0.4.8 E5): the version the
+/// **What an update outcome did not keep** (0.4.8 E4, E5): the version the
 /// transaction's mark names (`H\<txn>\unkept`, `Home::unkept` — a start that
 /// ran over the transaction with no recovery to hand it to, or a trial that
-/// held a person's change), read by the lock holder that retires a rollback
-/// before it records `Retired`, so that the journal carries it
-/// (`update_txn::Body::unkept`, `Journal::noting_unkept`) past the folder — a
-/// macOS holder removes the folder at once. `None` without a mark; a mark that
-/// cannot be read, or names no version, is said through `say` and is `None`:
-/// the restored build's card is then the rollback's own.
+/// held a person's change), read by the journal writer before it records
+/// `Committed`, or by the lock holder before it retires a rollback, so that
+/// the journal carries it (`update_txn::Body::unkept`,
+/// `Journal::noting_unkept`) past the folder — a macOS holder removes the
+/// folder at once. `None` without a mark; a mark that cannot be read, or names
+/// no version, is said through `say` and is `None`, so no not-kept card follows.
 pub(crate) fn unkept_version(home: &Home, txn: TxnId, say: &mut dyn FnMut(&str)) -> Option<String> {
     let mark = home.unkept(txn);
     match file_reads::read(Lane::UpdateJournal, &mark) {
@@ -523,7 +533,7 @@ pub(crate) fn unkept_version(home: &Home, txn: TxnId, say: &mut dyn FnMut(&str))
                 .filter(|text| crate::update::Version::parse(text).is_some());
             if named.is_none() {
                 say(&format!(
-                    "BT_UPDATE_ROLLBACK transaction {txn}: {} names no version; the rollback is recorded without it",
+                    "BT_UPDATE transaction {txn}: {} names no version; the outcome is recorded without it",
                     mark.display()
                 ));
             }
@@ -532,12 +542,21 @@ pub(crate) fn unkept_version(home: &Home, txn: TxnId, say: &mut dyn FnMut(&str))
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => {
             say(&format!(
-                "BT_UPDATE_ROLLBACK transaction {txn}: {} could not be read ({error}); the rollback is recorded without it",
+                "BT_UPDATE transaction {txn}: {} could not be read ({error}); the outcome is recorded without it",
                 mark.display()
             ));
             None
         }
     }
+}
+
+/// The line a journal writer says when `Committed` records that the trial's
+/// held changes were not kept (0.4.8 E4): the transaction and the version,
+/// never what the changes were.
+pub(crate) fn unkept_committed_said(txn: TxnId, version: &str) -> String {
+    format!(
+        "BT_UPDATE_COMMIT transaction {txn}: Folio {version}'s trial held changes that were not kept; Committed notes it"
+    )
 }
 
 /// **The line a lock holder says as it records a rollback's retirement that

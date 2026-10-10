@@ -14734,3 +14734,11 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** A canary proves the adapter guard can refuse without invalidating the crate whose test binary holds the guard. The copied tree is still followed through its `mod` declarations and read with the same raw identifier query, so the refusal remains `the adapter seam names a policy crate` and an unset or empty switch preserves the real-tree test.
 
 **Pinned by** `bt_term::adapter_boundary_tests::the_adapter_seam_imports_no_policy_crate`: red with the forbidden import in the alternate root, green on the real tree. The CI step `the adapter boundary gate can actually fail` owns the planted-copy mutation and refusal-message assertion.
+
+### 2026-10-10 — A trial's not-kept card survives the macOS holder removing its folder (T-MAC-TRIAL-CARD-NEVER-SHOWS)
+
+**What is built.** E4's `H/<txn>/unkept` mark remains the trial watch's intermediate fact, but every journal writer that advances the trial to `Committed` now copies the version it names into the existing body field `unkept`. `Retired{Committed}` carries the field, so macOS `Txn::retire` can remove the transaction folder and the committed build's next start still raises the existing *Changes made before Folio confirmed the update were not kept.* card once. Windows now uses the same journal-field road; startup has no mark-file fallback. E5's rollback retirement continues to read the mark into the same field.
+
+**The rule.** `unkept` keeps its one grammar row: body, additive since 0.4.8, written by the rescue holder or the reserved trial. A 0.4.6 or 0.4.7 reader ignores it and settles the committed journal as before, losing only the card. Startup uses its existing journal read, so `update_txn::parse_sites::SITES` gains no row.
+
+**Pinned by** `update_apply_macos::tests::a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so`, the Windows twin of that test, `update_startup::tests::on_disk::a_commit_after_the_trial_ended_says_its_changes_were_not_kept`, `update_txn::tests::{a_rollbacks_note_is_carried_by_retired_and_an_earlier_reader_settles_it_as_ever, every_grammar_word_has_its_row_and_the_header_vocabularies_are_closed}`, and `update_txn::parse_sites::every_read_of_a_journal_or_a_receipt_is_a_row_of_the_registry`.
