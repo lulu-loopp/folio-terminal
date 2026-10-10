@@ -26,6 +26,7 @@ mod mouse;
 mod palette;
 mod panes;
 mod peek;
+pub(crate) mod pointer;
 mod preview;
 mod profiles;
 mod quake;

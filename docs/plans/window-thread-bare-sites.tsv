@@ -97,7 +97,7 @@ bt-app	-	crate::update::Claim::take	std::fs::File::create	1
 bt-app	-	crate::update::Claim::take	std::io::Write::write_fmt	2
 bt-app	-	crate::update_trial::take_the_claim_within	std::thread::sleep	1
 bt-app	-	crate::update_trial::watch	std::thread::sleep	1
-bt-app	-	crate::webhost::WebSeat::go_to	std::fs::canonicalize	1
+bt-app	-	crate::webhost::commit_local	std::fs::canonicalize	1
 bt-app	[debug_assertions]	crate::hang_watch::run_selftest_if_due	std::thread::sleep	1
 bt-app	-	crate::shell_integration::run_powershell_probe	std::thread::sleep	1
 bt-persist	-	crate::atomic::commit_rename	std::fs::rename	1

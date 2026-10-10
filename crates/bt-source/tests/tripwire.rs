@@ -531,15 +531,17 @@ fn complaint(
 fn no_source_reader_names_a_file_outside_the_two_lists() {
     let root = workspace_root();
     let hits = scan(&root);
-    // The independent traversal floor: a walk that lost its way finds a handful
-    // of readers, not hundreds, and the list comparison below cannot tell — a
-    // lone listed reader is no stray. 195 on 2026-09-30, after T-GATES-047
-    // retired the portable-core array reader and its twins; the floor sits
-    // below that with room for the list to keep shrinking.
+    // The independent traversal floor: a walk that lost its way reads a handful
+    // of files, not hundreds, and the list comparison below cannot tell — a
+    // lone listed reader is no stray. The floor is on the files the walk read
+    // and not on the readers it found, because the readers are what every
+    // migration ticket removes: 718 `.rs` and `.ps1` files on 2026-10-09.
+    let mut walked = Vec::new();
+    gather(&root, &mut walked);
     assert!(
-        hits.len() > 150,
-        "the scan found {} readers, which is not this workspace — it read {} as its root",
-        hits.len(),
+        walked.len() > 400,
+        "the scan read {} files, which is not this workspace — it read {} as its root",
+        walked.len(),
         root.display()
     );
 

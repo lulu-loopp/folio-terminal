@@ -1954,7 +1954,7 @@ impl Runtime<'_> {
     /// both a glance and a flyout nor — which is the failure that matters —
     /// neither because two readings of "is this a folder" disagreed.
     pub(in crate::runtime) fn folder_reference_trigger(&self) -> Option<float::FloatTrigger> {
-        if self.window.mouse_route.is_some() || self.math_hit().is_some() {
+        if self.held_mouse_route().is_some() || self.math_hit().is_some() {
             return None;
         }
         let (seat, hit) = self.pane_frame_hit()?;
