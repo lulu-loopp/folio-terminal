@@ -56,6 +56,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- A copy installed with winget still updates with `winget upgrade`; the card is for zip, scoop and Homebrew copies. <!-- // zh: pending D2 -->
+- A Homebrew-installed copy is recognized from Homebrew's own record even when an official cask does not add Folio's install attributes. <!-- // zh: pending D2 -->
 - A long address in a web pane shows its site and page instead of being cut off: the middle of the path folds into …, and a narrow pane keeps the site. <!-- zh: 网页窗格中的长地址显示站点和页面，不再被截断：路径中段折叠为 …，窄窗格保留站点。 -->
 - What you install or change while Folio runs is seen without a restart: a Copilot CLI (or the Node.js it needs) on the Agents page, a display's refresh rate, a keyboard layout that moves the summon key, and a new `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `COPILOT_HOME`; files added inside folded folders appear the next time you open the command palette, a picture that was not ready the first time you hovered it shows on the next hover, and on macOS a font installed while Folio runs can be chosen and used. <!-- zh: Folio 运行期间安装或更改的内容无需重启即可识别：Agent 页上的 Copilot CLI（或它所需的 Node.js）、显示器刷新率、改变快捷终端快捷键位置的键盘布局，以及新的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或 `COPILOT_HOME`；折叠文件夹中新增的文件在下次打开搜索面板时出现，首次悬停时未就绪的图片在下次悬停时显示；macOS 上，Folio 运行期间安装的字体可以选用。 -->
 - Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts.

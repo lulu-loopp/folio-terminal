@@ -70,8 +70,9 @@ a **Copy** button, and the manager does the updating.
 
 On a Mac the card and the row are the same, and so is what a press does until
 the restart; what differs is what is replaced and where the pieces live. A copy
-Homebrew installed gets no card: its row names `brew upgrade --cask folio`, with
-a **Copy** button. A copy macOS runs from a read-only place (an application
+Homebrew installed gets the same card when Homebrew's own record names that
+bundle, and Folio keeps Homebrew's existing install attributes on the new
+bundle. A copy macOS runs from a read-only place (an application
 opened where it was downloaded, without being moved, runs from a randomized
 copy), or from a folder your account may not write, cannot replace itself:
 **Update** says so before anything is written, and the card offers the
@@ -245,11 +246,18 @@ profile. Do not put a secret in one.
   and it writes nothing on its own: pressing **Done** presses the same Settings rows listed
   above, and **Not now** presses none of them. The only thing the card itself
   records is that it has been shown.
-- **A copy installed with scoop or Homebrew carries a note of that**, written
-  by the package manager and not by Folio: `folio-install.json` in scoop's
-  version folder, or an extended attribute on `Folio.app` from Homebrew. It says
-  which manager installed the copy and whether it runs Folio's cleanup when it
-  uninstalls it, nothing else, and it goes with the folder or the app.
+- **The install channel is read locally at start.** A scoop copy carries
+  `folio-install.json` in its version folder. A Homebrew copy may carry the
+  extended attributes `io.github.lulu-loopp.folio.install` (the manager and
+  whether uninstall runs Folio's cleanup) and
+  `io.github.lulu-loopp.folio.caskroom` (the Caskroom to inspect). When the
+  second attribute is absent, Folio checks only
+  `/opt/homebrew/Caskroom/folio` and `/usr/local/Caskroom/folio`, then lists
+  the selected Caskroom's `.metadata` folders and reads its `Folio.app` link
+  to see whether it names this bundle. These are read-only directory and
+  attribute reads: Folio does not read `HOMEBREW_PREFIX`, start `brew`, send
+  anything, or change Homebrew's files. The package manager composes every
+  attribute; an update by Folio carries only the exact attributes that exist.
 - **A copy installed with winget is told by winget's own record of it.** winget
   writes no note into the folder; at start Folio reads, without changing
   anything, the uninstall entries of your account in the Windows registry
@@ -317,7 +325,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 
 ### 更新（macOS）
 
-在 Mac 上，卡片、设置行以及按下后到重启之前的流程与 Windows 相同；不同的是替换对象和文件所在位置。通过 Homebrew 安装的副本不会看到卡片：对应行显示 `brew upgrade --cask folio` 和一个 **Copy** 按钮。若 macOS 从只读位置运行该副本（下载后未移动就打开的应用会从一个随机副本运行），或该副本所在文件夹不允许当前账户写入，则无法自行替换：**Update** 会先告知，不写入任何内容，卡片转而提供发布页。
+在 Mac 上，卡片、设置行以及按下后到重启之前的流程与 Windows 相同；不同的是替换对象和文件所在位置。A Homebrew-installed copy gets the same card when Homebrew's own record names that bundle, and Folio carries only the install attributes that already exist. <!-- // zh: pending D2 --> 若 macOS 从只读位置运行该副本（下载后未移动就打开的应用会从一个随机副本运行），或该副本所在文件夹不允许当前账户写入，则无法自行替换：**Update** 会先告知，不写入任何内容，卡片转而提供发布页。
 
 | | |
 | --- | --- |
@@ -431,6 +439,7 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
 - **更新进行中（macOS）**：一个 LaunchAgent 文件 `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`，更新结束时删除；应用旁边的隐藏文件夹 `.Folio.app.folio-update`，存放暂存的更新并在完成后保留两个小锁文件——见上文「更新（macOS）」一节。
 - PowerShell 整合被要求时，在 PowerShell 自己报出的 `$PROFILE` 末尾追加一行，追加前先
   在旁边留一份带日期的原件副本。删除该行可撤销。
+- At start, Folio reads the scoop marker or the Homebrew install and Caskroom attributes. If the Homebrew Caskroom attribute is absent, it checks only `/opt/homebrew/Caskroom/folio` and `/usr/local/Caskroom/folio`, lists the selected Caskroom's `.metadata` record and reads its `Folio.app` link. It starts no `brew` process and changes nothing. <!-- // zh: pending D2 -->
 - **以上五项加上更新检查，正是初次设置卡所问的全部。** 它在从未运行过 Folio 的机器上
   出现一次，自己什么也不写：按下**完成**按的就是上面列举的那几行设置，而**暂不**一行
   也不按。卡本身记下的只有一件事：它已经出现过。
