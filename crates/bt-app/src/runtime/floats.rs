@@ -2907,7 +2907,7 @@ impl Runtime<'_> {
     /// screen the old blanket `float_drag = None` would cancel a *drag of another
     /// window* every time any window closed, which is the bug a list invites and
     /// the reason this is asked by identity.
-    pub(in crate::runtime) fn forget_dead_float_gestures(&mut self) {
+    pub(crate) fn forget_dead_float_gestures(&mut self) {
         if let Some(drag) = self.held_float_drag().copied()
             && self.window.float.live(drag.win).is_none()
         {

@@ -378,6 +378,65 @@ fn uninstall_purge_only_resolved_roots_and_never_application() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn uninstall_purge_is_scoped_to_this_data_tags_config_and_cache() {
+    let (root, scope) = sandbox("xdg-namespaces");
+    let data = &scope.data[0];
+    let tag = bt_platform::instance::directory_tag(data);
+    let config = root.join("home/.config/Folio").join(&tag);
+    let cache = root.join("home/.cache/Folio").join(&tag).join("Chromium");
+    let config_sibling = root.join("home/.config/Folio/other-data-tag");
+    let cache_sibling = root.join("home/.cache/Folio/other-data-tag");
+    assert!(
+        scope
+            .purge_roots
+            .iter()
+            .any(|(mark, path)| mark.name == "Unix configuration" && path == &resolved(&config))
+    );
+    assert!(
+        scope
+            .purge_roots
+            .iter()
+            .any(|(mark, path)| mark.name == "Unix Chromium cache" && path == &resolved(&cache))
+    );
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("settings.json"), b"settings").unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("Chromium-cache"), b"cache").unwrap();
+    fs::create_dir_all(&config_sibling).unwrap();
+    fs::write(config_sibling.join("settings.json"), b"keep").unwrap();
+    fs::create_dir_all(&cache_sibling).unwrap();
+    fs::write(cache_sibling.join("Chromium-cache"), b"keep").unwrap();
+
+    let _report = execute(&scope, false, system_absent);
+    assert!(config.exists(), "ordinary cleanup preserves user config");
+    assert!(
+        cache.exists(),
+        "ordinary cleanup preserves the browser cache"
+    );
+
+    let report = execute(&scope, true, system_absent);
+    assert_eq!(report.code, 0, "{}", report.stderr());
+    assert!(
+        !config.exists(),
+        "explicit purge removes this data tag's config"
+    );
+    assert!(
+        !cache.exists(),
+        "explicit purge removes this data tag's cache"
+    );
+    assert_eq!(
+        fs::read(config_sibling.join("settings.json")).unwrap(),
+        b"keep"
+    );
+    assert_eq!(
+        fs::read(cache_sibling.join("Chromium-cache")).unwrap(),
+        b"keep"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// PIN (U-6) — **`--purge` removes `update-check.json` at schema v2 as it removed v1**: the
 /// file lives in the data root the purge removes whole, and schema v2 adds no file elsewhere.
 ///
@@ -703,7 +762,9 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Toast,
             platform,
-            ItemQuery::method("Notifier", "new").one_per_variant(),
+            ItemQuery::method("Notifier", "new")
+                .in_module("crate::windows_impl")
+                .one_per_variant(),
             "Notifier::new",
         ),
         (
@@ -768,6 +829,22 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             app,
             function("crate::persist", "storage_location"),
             "storage_location",
+        ),
+        #[cfg(target_os = "linux")]
+        (
+            Remover::LinuxConfig,
+            app,
+            ItemQuery::method("SettingsStore", "open")
+                .in_module("crate::persist")
+                .one_per_variant(),
+            "SettingsStore::open",
+        ),
+        #[cfg(target_os = "linux")]
+        (
+            Remover::LinuxCache,
+            platform,
+            function("crate::linux_web_dirs", "prepare_linux_web_dirs"),
+            "prepare_linux_web_dirs",
         ),
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio/clipboard"),
@@ -842,6 +919,9 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
+    #[cfg(target_os = "linux")]
+    assert_eq!(INVENTORY.len(), 31);
+    #[cfg(not(target_os = "linux"))]
     assert_eq!(INVENTORY.len(), 29);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`

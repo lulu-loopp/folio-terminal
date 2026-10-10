@@ -180,6 +180,13 @@ pub enum VideoStage {
     /// captions, which is what puts a float's hairlines, its head and this
     /// video's own control bar over the picture instead of under it.
     Overlay(usize),
+    /// **A software-composited page in one overlay layer**, after that layer's
+    /// opaque fills and before its hole, icons and text (Linux WebActor).
+    ///
+    /// It uses the same layer identity and fade group as `Overlay`, but a web
+    /// frame is the content *inside* a float. Putting it at the video's
+    /// `Overlay` stage lets the float's own body fill cover the page.
+    OverlayContent(usize),
 }
 
 /// **A playing video, and the box it plays in.**

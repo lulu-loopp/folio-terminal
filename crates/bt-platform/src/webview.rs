@@ -160,6 +160,67 @@ pub struct WebKey {
     pub down: bool,
 }
 
+/// Modifier state on a key sent by the window to its page.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebKeyModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+/// One key transition forwarded from the focused Folio window to its page.
+///
+/// `key` and `code` use the DOM `KeyboardEvent.key` and `KeyboardEvent.code`
+/// spellings. `text` is committed text belonging to this key-down; an IME
+/// preedit travels through [`WebImeEvent`] so the engine can keep composition
+/// separate from insertion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebKeyEvent {
+    pub key: String,
+    pub code: String,
+    pub text: Option<String>,
+    pub modifiers: WebKeyModifiers,
+    /// DOM key location: 0 standard, 1 left, 2 right, or 3 numpad.
+    pub location: u32,
+    pub down: bool,
+    pub repeat: bool,
+}
+
+/// Text composition forwarded to the focused page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WebImeEvent {
+    /// Replace the active preedit. Selection offsets are UTF-16 code units in
+    /// `text`, matching the engine's composition API.
+    Preedit {
+        text: String,
+        selection_utf16: Option<(u32, u32)>,
+    },
+    /// Commit text and end the active preedit.
+    Commit(String),
+    /// End composition without inserting text.
+    Cancel,
+}
+
+/// The newest software frame from a platform web host.
+///
+/// `generation` is the controller generation supplied to
+/// [`WebHost::request_controller`]. `sequence` increases from one for that
+/// generation. Pixels are immutable top-down BGRA8; their byte length is
+/// `width_px * height_px * 4`. `bounds_px` and `visible` report the host's last
+/// placement state when the engine produced this frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebFrame {
+    pub page: PageVisual,
+    pub generation: u64,
+    pub sequence: u64,
+    pub bounds_px: (i32, i32, u32, u32),
+    pub visible: bool,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub bgra: std::sync::Arc<[u8]>,
+}
+
 /// Everything the engine says, in the window's own vocabulary.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WebEvent {
@@ -182,7 +243,7 @@ pub enum WebEvent {
         success: bool,
         status: i32,
         /// **The HTTP status the server answered this navigation with**, when one answered
-        /// (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — [`http_status_of`] over WebView2's
+        /// (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — `http_status_of` over WebView2's
         /// `HttpStatusCode` (`ICoreWebView2NavigationCompletedEventArgs2`) or the main-frame
         /// `NSHTTPURLResponse` WebKit showed this navigation. `None` when nothing was reached: a
         /// name that did not resolve, a connection refused or cut before a response, a scheme
@@ -224,6 +285,18 @@ pub enum WebEvent {
     /// `IDC_*` — 32512 arrow, 32513 I-beam, 32649 hand.
     CursorChanged {
         system_cursor_id: u32,
+    },
+    /// The browser's current editable caret bounds for its IME candidate UI.
+    /// `rect` is `(left, top, right, bottom)` in physical pixels relative to
+    /// the page viewport; `None` clears a position after focus leaves editable
+    /// content. The page and controller generation let the seat discard a
+    /// delayed result after a move or rebuild, and the reported rasterization
+    /// scale lets it reject geometry computed before the latest resize.
+    ImeCursorChanged {
+        page: PageVisual,
+        generation: u64,
+        rect: Option<[f64; 4]>,
+        rasterization_scale: f64,
     },
     /// The navigation stack moved: a page was pushed onto it, popped off it, or
     /// replaced through the history API.
@@ -361,7 +434,7 @@ pub enum WebEvent {
     /// aimed at a new window (F-SWEEP-048, issue #27).
     ///
     /// The engine opens nothing: the request is answered as handled inside the callback
-    /// ([`new_window_answer`]), because `SetHandled` — and WebKit's `nil` — cannot be decided
+    /// (`new_window_answer`), because `SetHandled` — and WebKit's `nil` — cannot be decided
     /// later. What happens instead is the caller's: the address is asked of the same door a typed
     /// address is, and a new page is opened, or the refusal said, by the window. `user_initiated`
     /// is the engine's own reading of whether a gesture is behind the request.
@@ -374,6 +447,7 @@ pub enum WebEvent {
 /// **An engine's HTTP status code, as the answer of a server or as none** — `0` (and anything
 /// that is not a status) is "no HTTP response", which is how both engines spell it. One reading
 /// for the two arms (T-WEB-404-SAYS-UNKNOWN).
+#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 #[must_use]
 pub fn http_status_of(code: i32) -> Option<u16> {
     u16::try_from(code)
@@ -389,6 +463,7 @@ pub fn http_status_of(code: i32) -> Option<u16> {
 /// `ICoreWebView2NewWindowRequestedEventArgs::SetHandled` takes [`NewWindowAnswer::handled`],
 /// and WebKit's `createWebViewWithConfiguration:` returns no view and its navigation action is
 /// cancelled when it is `true`.
+#[cfg(any(windows, target_os = "macos", test))]
 #[must_use]
 pub fn new_window_answer(uri: String, user_initiated: bool) -> NewWindowAnswer {
     NewWindowAnswer {
@@ -401,6 +476,7 @@ pub fn new_window_answer(uri: String, user_initiated: bool) -> NewWindowAnswer {
 }
 
 /// What [`new_window_answer`] decides inside the engine's callback.
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewWindowAnswer {
     /// Whether the engine is told the request is taken care of, so that it opens nothing itself.
@@ -3284,6 +3360,24 @@ impl WebHost {
         .map_err(|error| failure(&format!("SendMouseInput({})", event.name()), &error))
     }
 
+    /// The window's native input route already delivers keys to WebView2.
+    pub fn send_key(&self, event: WebKeyEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// The window's native input route already delivers IME composition to WebView2.
+    pub fn send_ime(&self, event: WebImeEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// WebView2 composes its pixels underneath the window surface, so this host has no CPU frame.
+    #[must_use]
+    pub fn take_frame(&self) -> Option<WebFrame> {
+        None
+    }
+
     /// **Ask the engine for a picture of what is on its glass** (W2 slice ⑥).
     ///
     /// `CapturePreview` is the only pixel channel the SDK offers a hosted page
@@ -4877,20 +4971,34 @@ pub use macos::{
     web_environment_epoch, webview2_runtime_version,
 };
 
+/// **The Linux page host**: a Chromium target rendered back through Folio's
+/// software frame path.
+#[cfg(target_os = "linux")]
+#[path = "webview_linux.rs"]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::{
+    SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
+    web_environment_epoch, webview2_runtime_version,
+};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn shutdown_linux_actor() {
+    linux::shutdown_actor();
+}
+
 /// **The page host, on a platform whose engine has not been written yet.**
-///
-/// Neither of the two real ones: a Linux build has no web engine this product
-/// hosts, and this is what says so honestly rather than pretending.
 ///
 /// **`WebHost::new` cannot refuse**, because its return type is `Self`: the
 /// window builds one per web seat and holds it. So the refusal lives where a
 /// page is actually asked for — `request_environment` — and everything after
 /// that is unreachable until a seat gets past it, which no seat does.
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 #[path = "webview_portable.rs"]
 mod portable;
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 pub use portable::{
     SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
     web_environment_epoch, webview2_runtime_version,

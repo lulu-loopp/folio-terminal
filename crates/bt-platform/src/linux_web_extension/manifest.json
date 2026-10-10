@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Folio web preview policy",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy/0jJhQFDsLDwG+EZW3upuE3kTAfTSomtD8RjItXRgzp8PrSn9DRXjOgu+e5FF6qQi/2j2NvCiJ7NjkS1XhS7Twz9mCrd8SjPdy98eTAwmUHBlnmAhP05NgSPPF5uy1eOY6n4W9dB19/GhqctwxzfrZrKZ167CkBv8OoWZvq+sgqQkVuEzFVzR77BjTS2BVxMZxVPvEU8x+mSrxcq3DjDluyIwHm9W0KK+IG9EHCfYdu46QrmLNtLOA/zM8t8YFeofZIjc7e05de07MFiEuDo52jPBpzZu7BppPdt0TflzoCZPUleikBuGNhuP72VdRoWUK+0nmJXtvogqG4yluRBQIDAQAB",
+  "permissions": ["declarativeNetRequest", "debugger"],
+  "host_permissions": ["<all_urls>"],
+  "background": {"service_worker": "background.js"}
+}

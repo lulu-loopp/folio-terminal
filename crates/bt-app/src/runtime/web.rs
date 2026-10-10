@@ -1,10 +1,14 @@
 //! `web` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+#[cfg(not(target_os = "linux"))]
+use crate::hole_for;
+#[cfg(target_os = "linux")]
+use crate::take_owned_keyboard_focus;
 use crate::{
     AppEvent, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime, TabRename, WebHeadVerb,
     WebPlacement, a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
-    a_retirement_happens_on_this_turn, hang_watch, hole_for, input, marks, native_window, preview,
+    a_retirement_happens_on_this_turn, hang_watch, input, marks, native_window, preview,
     preview_image_placement, restore, revived_page_of, seats, shown_address, web_mouse_button,
     web_trace, web_warmup, webhost, webnav, websheet,
 };
@@ -14,6 +18,50 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WebKeyboardTransfer {
+    front: Option<LeafId>,
+    held: Option<LeafId>,
+}
+
+impl WebKeyboardTransfer {
+    pub(crate) fn new(front: Option<LeafId>, held: Option<LeafId>) -> Self {
+        Self { front, held }
+    }
+
+    pub(crate) fn recipient(self) -> Option<LeafId> {
+        self.held.or(self.front)
+    }
+
+    pub(crate) fn takes_focus(self, page: LeafId) -> bool {
+        self.recipient() == Some(page)
+    }
+}
+
+pub(crate) fn carry_transferred_web_keyboard(
+    source: &mut Option<LeafId>,
+    target: &mut Option<LeafId>,
+    target_float: &mut crate::float::FloatHost,
+    transfer: WebKeyboardTransfer,
+) {
+    let Some(leaf) = transfer.recipient() else {
+        return;
+    };
+    if *source == Some(leaf) {
+        *source = None;
+    }
+    *target = Some(leaf);
+    target_float.focus_web_page(leaf);
+}
+
+pub(crate) fn record_web_page_focus(receipt: &mut Option<LeafId>, leaf: LeafId, focused: bool) {
+    if focused {
+        *receipt = Some(leaf);
+    } else if *receipt == Some(leaf) {
+        *receipt = None;
+    }
+}
 
 impl Runtime<'_> {
     /// **The web engine, asked for on an idle turn after startup** (0.4.5 ticket 54,
@@ -471,7 +519,10 @@ impl Runtime<'_> {
             // own face, which is drawn a whole overlay pass after the seats are.
             // A docked page keeps the older answer, `None`, which is under the
             // entire stack.
+            #[cfg(not(target_os = "linux"))]
             let above = floated.and_then(|id| self.float_hole_level(id));
+            #[cfg(target_os = "linux")]
+            let above = floated.map(|id| self.float_hole_level(id).unwrap_or(usize::MAX));
             // **One line per decision, and none while the answer stands still**
             // — `BT_WEB_TRACE`'s fourth station, and the one that separates the
             // ways a page comes up empty: it was never given a rectangle, it was
@@ -521,6 +572,7 @@ impl Runtime<'_> {
         // *takes* and nothing at all about the focus it should no longer have.
         self.settle_the_web_keyboard();
         let window = &mut *self.window;
+        #[cfg(not(target_os = "linux"))]
         let mut holes = Vec::new();
         for placement in placements {
             // **The placement is what answers the hole**, so it is asked for its
@@ -530,6 +582,8 @@ impl Runtime<'_> {
             // whole slice is about.
             let floored = match window.web.get_mut(&placement.leaf) {
                 Some(web) => {
+                    #[cfg(target_os = "linux")]
+                    web.set_frame_above(placement.above);
                     match web.place(
                         &window.compositor,
                         placement.presence,
@@ -545,9 +599,15 @@ impl Runtime<'_> {
                 }
                 None => false,
             };
+            #[cfg(not(target_os = "linux"))]
             holes.extend(hole_for(placement.presence, floored, placement.above));
+            #[cfg(target_os = "linux")]
+            let _ = floored;
         }
+        #[cfg(not(target_os = "linux"))]
         window.renderer.set_web_holes(holes);
+        #[cfg(target_os = "linux")]
+        window.renderer.set_web_holes(Vec::new());
         self.keep_what_the_modal_covers(keepsakes, now);
         hang_watch::at(leaving_station);
     }
@@ -567,11 +627,27 @@ impl Runtime<'_> {
         if self.page_is_the_typing_target(held) {
             return;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(web) = self.window.web.get_mut(&held) {
+            web.clear_web_input();
+        }
         self.window.web_keyboard = None;
+        #[cfg(target_os = "linux")]
+        if let Err(error) = take_owned_keyboard_focus(&self.window.window) {
+            eprintln!("BT_WEB focus return failed: {error}");
+        }
+        #[cfg(not(target_os = "linux"))]
         if let Ok(native) = native_window(&self.window.window)
             && let Err(error) = bt_platform::take_keyboard_focus(native)
         {
             eprintln!("BT_WEB focus return failed: {error}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clear_web_input(&mut self) {
+        for web in self.window.web.values_mut() {
+            web.clear_web_input();
         }
     }
 
@@ -604,7 +680,12 @@ impl Runtime<'_> {
         // Asked of `refresh_chrome` rather than tracked per field: it already
         // answers "did anything move", which is the same question and one
         // answer.
-        if self.refresh_chrome() {
+        let chrome_changed = self.refresh_chrome();
+        #[cfg(target_os = "linux")]
+        let changed = self.refresh_video_layers() || chrome_changed;
+        #[cfg(not(target_os = "linux"))]
+        let changed = chrome_changed;
+        if changed {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -677,14 +758,9 @@ impl Runtime<'_> {
                 // the receipt is torn up, because the keyboard leaving a page is
                 // not always this window taking it.
                 webhost::WebOutcome::PageFocus(focused) => {
+                    record_web_page_focus(&mut self.window.web_keyboard, leaf, focused);
                     if focused {
-                        // The receipt is written first either way — it names the
-                        // page that has the keys *right now* — and the one place
-                        // that decides whether it may keep them decides here too.
-                        self.window.web_keyboard = Some(leaf);
                         self.settle_the_web_keyboard();
-                    } else if self.window.web_keyboard == Some(leaf) {
-                        self.window.web_keyboard = None;
                     }
                 }
                 // **The page committed, so this seat now has an identity** (slice
@@ -2061,5 +2137,186 @@ impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for W
         };
         self.answered = Some(word);
         handed
+    }
+}
+
+#[cfg(test)]
+mod transfer_focus_tests {
+    use super::*;
+    use crate::float::{FloatHost, FloatMode, FloatPreview, FloatTenant};
+    use crate::{SeatId, TabId};
+
+    fn leaf(tab: u64, seat: u64) -> LeafId {
+        LeafId {
+            tab: TabId(tab),
+            seat: SeatId(seat),
+        }
+    }
+
+    fn open_page(host: &mut FloatHost, page: LeafId) -> crate::float::FloatId {
+        host.open(
+            FloatMode::Pinned,
+            None,
+            FloatTenant::Preview(FloatPreview {
+                tab: page.tab,
+                page: Some(page),
+            }),
+            [80.0, 60.0, 480.0, 360.0],
+            None,
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn rehosting_requests_keyboard_focus_for_only_the_transferred_recipient() {
+        let front_docked = leaf(7, 1);
+        let held_float = leaf(7, 2);
+        let other_page = leaf(7, 3);
+        let transfer = WebKeyboardTransfer::new(Some(front_docked), Some(held_float));
+        let requested: Vec<_> = [front_docked, held_float, other_page]
+            .into_iter()
+            .filter(|page| transfer.takes_focus(*page))
+            .collect();
+        assert_eq!(requested, [held_float]);
+        assert_eq!(transfer.recipient(), Some(held_float));
+    }
+
+    #[test]
+    fn a_transferred_float_page_is_the_only_keyboard_recipient_in_either_outcome_order() {
+        let front_docked = leaf(7, 1);
+        let held_float = leaf(7, 2);
+        let other_moved_float = leaf(7, 3);
+        let unrelated_target_float = leaf(9, 1);
+
+        for held_first in [true, false] {
+            let mut source_float = FloatHost::default();
+            let held_id = open_page(&mut source_float, held_float);
+            let other_id = open_page(&mut source_float, other_moved_float);
+            source_float.raise(held_id);
+            assert!(source_float.live(held_id).expect("held page").focused);
+            assert!(!source_float.live(other_id).expect("other page").focused);
+
+            let mut target_float = FloatHost::default();
+            let unrelated_id = open_page(&mut target_float, unrelated_target_float);
+            target_float.raise(unrelated_id);
+            let batch = if held_first {
+                [held_id, other_id]
+            } else {
+                [other_id, held_id]
+            };
+            let moved = source_float
+                .transfer_previews_to(
+                    &mut target_float,
+                    &batch,
+                    1.0,
+                    1.0,
+                    [0.0, 0.0, 1200.0, 900.0],
+                )
+                .expect("the two preview surfaces transfer as one batch");
+            let target_held_id = moved
+                .iter()
+                .find(|(_, _, preview)| preview.page == Some(held_float))
+                .map(|(_, target, _)| *target)
+                .expect("held page moved");
+            let target_other_id = moved
+                .iter()
+                .find(|(_, _, preview)| preview.page == Some(other_moved_float))
+                .map(|(_, target, _)| *target)
+                .expect("other moved page moved");
+
+            let mut source_receipt = Some(held_float);
+            let mut target_receipt = Some(unrelated_target_float);
+            let transfer = WebKeyboardTransfer::new(Some(front_docked), source_receipt);
+            let recipient = transfer.recipient();
+            assert_eq!(recipient, Some(held_float));
+            assert_ne!(recipient, Some(front_docked));
+            assert_ne!(recipient, Some(other_moved_float));
+
+            carry_transferred_web_keyboard(
+                &mut source_receipt,
+                &mut target_receipt,
+                &mut target_float,
+                transfer,
+            );
+            assert_eq!(source_receipt, None);
+            assert_eq!(target_receipt, Some(held_float));
+            assert!(
+                target_float
+                    .live(target_held_id)
+                    .expect("held page arrived")
+                    .focused
+            );
+            assert!(
+                !target_float
+                    .live(target_other_id)
+                    .expect("other page arrived")
+                    .focused
+            );
+            assert!(
+                !target_float
+                    .live(unrelated_id)
+                    .expect("target page remains")
+                    .focused
+            );
+
+            for order in [
+                [(front_docked, false), (held_float, true)],
+                [(held_float, true), (front_docked, false)],
+            ] {
+                let mut receipt = target_receipt;
+                for (page, focused) in order {
+                    record_web_page_focus(&mut receipt, page, focused);
+                }
+                assert_eq!(receipt, Some(held_float));
+                assert!(
+                    target_float
+                        .live(target_held_id)
+                        .expect("held page arrived")
+                        .focused
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_front_docked_page_takes_focus_when_no_page_already_holds_the_keyboard() {
+        let front_docked = leaf(7, 1);
+        let unrelated_target_float = leaf(9, 1);
+        let mut source_float = FloatHost::default();
+        let mut target_float = FloatHost::default();
+        let unrelated_id = open_page(&mut target_float, unrelated_target_float);
+        target_float.raise(unrelated_id);
+        assert!(
+            target_float
+                .live(unrelated_id)
+                .expect("target page")
+                .focused
+        );
+
+        let mut source_receipt = None;
+        let mut target_receipt = None;
+        let transfer = WebKeyboardTransfer::new(Some(front_docked), source_receipt);
+        let recipient = transfer.recipient();
+        assert_eq!(recipient, Some(front_docked));
+        assert!(transfer.takes_focus(front_docked));
+        assert!(
+            source_float
+                .transfer_previews_to(&mut target_float, &[], 1.0, 1.0, [0.0, 0.0, 1200.0, 900.0],)
+                .expect("a tab with no floated pages transfers an empty preview batch")
+                .is_empty()
+        );
+        carry_transferred_web_keyboard(
+            &mut source_receipt,
+            &mut target_receipt,
+            &mut target_float,
+            transfer,
+        );
+        assert_eq!(target_receipt, Some(front_docked));
+        assert!(
+            !target_float
+                .live(unrelated_id)
+                .expect("target page remains")
+                .focused
+        );
     }
 }

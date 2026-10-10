@@ -1,6 +1,8 @@
 use bt_platform::HostPlatform;
 use bt_pty::ConPtyKind;
 use bt_term::{KeyboardProtocol, ModifyOtherKeys, SUPPORTED_KITTY_FLAGS};
+#[cfg(any(target_os = "linux", test))]
+use winit::event::Ime;
 use winit::event::{ElementState, MouseButton};
 use winit::keyboard::{
     Key, KeyCode, KeyLocation, ModifiersState, NamedKey, NativeKey, PhysicalKey,
@@ -730,6 +732,91 @@ pub(crate) fn keyboard_bytes(
     }
     modify_other_keys_bytes(key, key_without_modifiers, modifiers, mode, origin)
         .or_else(|| legacy_bytes(key, modifiers, application_cursor_mode))
+}
+
+/// Translate a winit press into the DOM key names a Linux page input host needs.
+///
+/// Winit's `Key` and `KeyCode` follow the W3C key/code tables, with the two
+/// platform-neutral Super spelling exceptions handled here. IME preedit is not
+/// key text; it travels through `WebImeEvent` instead.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn web_key_event(
+    logical_key: &Key,
+    physical_key: PhysicalKey,
+    location: KeyLocation,
+    modifiers: ModifiersState,
+    text: Option<&str>,
+    down: bool,
+    repeat: bool,
+) -> bt_platform::WebKeyEvent {
+    let key = match logical_key {
+        Key::Character(text) => text.to_string(),
+        Key::Dead(_) => "Dead".to_owned(),
+        Key::Named(NamedKey::Space) => " ".to_owned(),
+        Key::Named(NamedKey::Super) => "Meta".to_owned(),
+        Key::Named(named) => format!("{named:?}"),
+        Key::Unidentified(_) => "Unidentified".to_owned(),
+    };
+    let code = match physical_key {
+        PhysicalKey::Code(KeyCode::SuperLeft) => "MetaLeft".to_owned(),
+        PhysicalKey::Code(KeyCode::SuperRight) => "MetaRight".to_owned(),
+        PhysicalKey::Code(code) => format!("{code:?}"),
+        PhysicalKey::Unidentified(_) => "Unidentified".to_owned(),
+    };
+    let text = if down && !modifiers.control_key() && !modifiers.super_key() {
+        text.filter(|text| {
+            !text.is_empty() && text.chars().all(|character| !character.is_control())
+        })
+        .map(str::to_owned)
+    } else {
+        None
+    };
+
+    bt_platform::WebKeyEvent {
+        key,
+        code,
+        text,
+        modifiers: bt_platform::WebKeyModifiers {
+            ctrl: modifiers.control_key(),
+            shift: modifiers.shift_key(),
+            alt: modifiers.alt_key(),
+            meta: modifiers.super_key(),
+        },
+        location: match location {
+            KeyLocation::Standard => 0,
+            KeyLocation::Left => 1,
+            KeyLocation::Right => 2,
+            KeyLocation::Numpad => 3,
+        },
+        down,
+        repeat,
+    }
+}
+
+/// Convert winit's UTF-8 byte selection into the UTF-16 offsets CDP accepts.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn web_ime_event(event: &Ime) -> Option<bt_platform::WebImeEvent> {
+    match event {
+        Ime::Preedit(text, cursor_range) => {
+            let selection_utf16 = cursor_range.and_then(|(start, end)| {
+                Some((utf16_offset(text, start)?, utf16_offset(text, end)?))
+            });
+            Some(bt_platform::WebImeEvent::Preedit {
+                text: text.clone(),
+                selection_utf16,
+            })
+        }
+        Ime::Commit(text) => Some(bt_platform::WebImeEvent::Commit(text.clone())),
+        Ime::Enabled | Ime::Disabled => None,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn utf16_offset(text: &str, byte_offset: usize) -> Option<u32> {
+    if !text.is_char_boundary(byte_offset) {
+        return None;
+    }
+    u32::try_from(text[..byte_offset].encode_utf16().count()).ok()
 }
 
 /// Rule 1 of both protocols (§4.2): a composing key, a paste chord, or a chord that holds
@@ -1881,6 +1968,124 @@ mod tests {
         )
     }
 
+    #[test]
+    fn web_key_event_uses_dom_names_and_keeps_modifier_location_and_repeat() {
+        let event = web_key_event(
+            &Key::Named(NamedKey::Super),
+            PhysicalKey::Code(KeyCode::SuperLeft),
+            KeyLocation::Left,
+            ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::SUPER,
+            Some("x"),
+            true,
+            true,
+        );
+
+        assert_eq!(event.key, "Meta");
+        assert_eq!(event.code, "MetaLeft");
+        assert_eq!(
+            event.modifiers,
+            bt_platform::WebKeyModifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+                meta: true,
+            }
+        );
+        assert_eq!(event.location, 1);
+        assert!(event.down);
+        assert!(event.repeat);
+        assert_eq!(event.text, None, "a control chord has no committed text");
+    }
+
+    #[test]
+    fn web_key_event_keeps_layout_text_but_not_preedit_or_control_text() {
+        let cjk = web_key_event(
+            &Key::Character("中".into()),
+            PhysicalKey::Code(KeyCode::KeyA),
+            KeyLocation::Standard,
+            ModifiersState::ALT,
+            Some("中"),
+            true,
+            false,
+        );
+        assert_eq!(cjk.key, "中");
+        assert_eq!(cjk.code, "KeyA");
+        assert_eq!(cjk.location, 0);
+        assert_eq!(cjk.text.as_deref(), Some("中"));
+        assert!(cjk.modifiers.alt);
+
+        let space = web_key_event(
+            &Key::Named(NamedKey::Space),
+            PhysicalKey::Code(KeyCode::Space),
+            KeyLocation::Standard,
+            ModifiersState::empty(),
+            Some(" "),
+            true,
+            false,
+        );
+        assert_eq!(space.key, " ");
+        assert_eq!(space.code, "Space");
+        assert_eq!(space.location, 0);
+        assert_eq!(space.text.as_deref(), Some(" "));
+
+        let numpad_enter = web_key_event(
+            &Key::Named(NamedKey::Enter),
+            PhysicalKey::Code(KeyCode::NumpadEnter),
+            KeyLocation::Numpad,
+            ModifiersState::empty(),
+            Some("\r"),
+            true,
+            false,
+        );
+        assert_eq!(numpad_enter.key, "Enter");
+        assert_eq!(numpad_enter.code, "NumpadEnter");
+        assert_eq!(numpad_enter.location, 3);
+        assert_eq!(
+            numpad_enter.text, None,
+            "Enter's control text is not printable input"
+        );
+
+        let released = web_key_event(
+            &Key::Character("x".into()),
+            PhysicalKey::Unidentified(NativeKeyCode::Xkb(53)),
+            KeyLocation::Standard,
+            ModifiersState::empty(),
+            Some("x"),
+            false,
+            false,
+        );
+        assert_eq!(released.code, "Unidentified");
+        assert!(!released.down);
+        assert_eq!(released.text, None);
+    }
+
+    #[test]
+    fn web_ime_selection_converts_utf8_byte_offsets_to_utf16_units() {
+        let event = web_ime_event(&Ime::Preedit("你😀好".to_owned(), Some((3, 7))));
+        assert_eq!(
+            event,
+            Some(bt_platform::WebImeEvent::Preedit {
+                text: "你😀好".to_owned(),
+                selection_utf16: Some((1, 3)),
+            })
+        );
+
+        let invalid = web_ime_event(&Ime::Preedit("😀".to_owned(), Some((1, 1))));
+        assert_eq!(
+            invalid,
+            Some(bt_platform::WebImeEvent::Preedit {
+                text: "😀".to_owned(),
+                selection_utf16: None,
+            })
+        );
+        assert_eq!(
+            web_ime_event(&Ime::Commit("好😀".to_owned())),
+            Some(bt_platform::WebImeEvent::Commit("好😀".to_owned()))
+        );
+        assert_eq!(web_ime_event(&Ime::Enabled), None);
+        assert_eq!(web_ime_event(&Ime::Disabled), None);
+    }
+
     /// The ticket itself: `这` sent from a phone keyboard is the key that would
     /// have typed `这`, and so reaches the child as its own UTF-8.
     #[test]
@@ -2938,6 +3143,7 @@ mod tests {
 
     const MAC: HostPlatform = HostPlatform::MacOs;
     const WINDOWS: HostPlatform = HostPlatform::Windows;
+    const OTHER_UNIX: HostPlatform = HostPlatform::OtherUnix;
     const CMD: ModifiersState = ModifiersState::SUPER;
 
     /// **This host's command modifier** — Control, or Command on a Mac — read off
@@ -3042,13 +3248,34 @@ mod tests {
         );
 
         // And off macOS the answer never moves: Alt is Alt on a keyboard with an
-        // Alt key printed on it, whichever way the row is set.
-        for setting in [false, true] {
-            assert_eq!(
-                effective_modifiers(ModifiersState::ALT, setting, WINDOWS),
-                ModifiersState::ALT,
-            );
+        // Alt key printed on it, whichever way the row is set. This is also the
+        // Linux path from winit's XKB modifier state to the bytes the PTY hears.
+        for platform in [WINDOWS, OTHER_UNIX] {
+            for setting in [false, true] {
+                assert_eq!(
+                    effective_modifiers(ModifiersState::ALT, setting, platform),
+                    ModifiersState::ALT,
+                    "{platform:?}, Option-as-Alt={setting}"
+                );
+            }
         }
+        let linux_modifiers = effective_modifiers(ModifiersState::ALT, false, OTHER_UNIX);
+        assert_eq!(
+            keyboard_bytes(
+                &character("å"),
+                &character("å"),
+                KeyLocation::Standard,
+                linux_modifiers,
+                false,
+                UNASKED,
+                KeyOrigin {
+                    platform: OTHER_UNIX,
+                    ..NOWHERE
+                },
+            ),
+            Some(b"\x1b\xc3\xa5".to_vec()),
+            "the XKB-produced text and Alt modifier reach a Unix child together"
+        );
     }
 
     /// RED (T-MAC-LIVE, §13.33 ①) — **what this door answers is a question
@@ -4352,45 +4579,23 @@ mod tests {
     /// combinations of Shift, Alt, Ctrl and Super, with DECCKM off and on.
     ///
     /// `key_encoding_legacy_windows.tsv` and `key_encoding_legacy_macos.tsv` were captured, each on
-    /// its platform, from the encoder as it stood on main before T-KEYBOARD-PROTOCOL. This is the promise the design note makes of PowerShell, cmd and
-    /// Codex on Windows: byte-identical.
+    /// its platform, from the encoder as it stood on main before T-KEYBOARD-PROTOCOL. Other Unix
+    /// uses the Windows capture for the shared Ctrl and Shift+Insert paste rules, with Alt+F4
+    /// taken from the Mac capture: the existing platform test holds Alt+F4 as an ordinary VT key
+    /// there. No Linux capture is claimed, and the historical files stay unchanged.
     ///
     /// MUTATION: let the kitty rules run when no protocol is in force (Esc sends `CSI 27u`).
     #[test]
     fn a_program_that_never_asked_gets_exactly_the_bytes_it_got_before() {
-        let baseline = match bt_platform::host_platform() {
-            HostPlatform::Windows => KEY_ENCODING_LEGACY_WINDOWS,
-            HostPlatform::MacOs => KEY_ENCODING_LEGACY_MACOS,
-            other => panic!("no pre-ticket capture was made on {other:?}"),
-        };
         let mut compared = 0;
-        for line in baseline
-            .lines()
-            .filter(|line| !line.starts_with('#') && !line.is_empty())
-        {
-            let cells = line.split('\t').collect::<Vec<_>>();
-            let [key, bits, decckm, hex] = cells[..] else {
-                panic!("four columns: {line:?}");
-            };
-            let bits = bits.parse::<u8>().expect("modifier bits");
-            let mut modifiers = ModifiersState::empty();
-            for (bit, modifier) in [
-                (1, ModifiersState::SHIFT),
-                (2, ModifiersState::ALT),
-                (4, ModifiersState::CONTROL),
-                (8, ModifiersState::SUPER),
-            ] {
-                if bits & bit != 0 {
-                    modifiers |= modifier;
-                }
-            }
+        for (key, modifiers, decckm, expected) in legacy_sweep() {
             let (logical, base) = windows_us(key, modifiers.shift_key());
             let sent = keyboard_bytes(
                 &logical,
                 &base,
                 KeyLocation::Standard,
                 modifiers,
-                decckm == "1",
+                decckm,
                 UNASKED,
                 NOWHERE,
             );
@@ -4398,19 +4603,16 @@ mod tests {
                 || "-".to_owned(),
                 |bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
             );
-            assert_eq!(sent, hex, "{key} mods {bits} DECCKM {decckm}");
+            assert_eq!(sent, expected, "{key} mods {modifiers:?} DECCKM {decckm}");
             compared += 1;
         }
         assert_eq!(compared, 2368, "the whole captured sweep");
     }
 
-    /// The captured sweep of this host, as `(key, modifiers, DECCKM, hex or "-")`.
-    fn legacy_sweep() -> Vec<(&'static str, ModifiersState, bool, &'static str)> {
-        let baseline = match bt_platform::host_platform() {
-            HostPlatform::Windows => KEY_ENCODING_LEGACY_WINDOWS,
-            HostPlatform::MacOs => KEY_ENCODING_LEGACY_MACOS,
-            other => panic!("no pre-ticket capture was made on {other:?}"),
-        };
+    /// One historical sweep, parsed as `(key, modifiers, DECCKM, hex or "-")`.
+    fn parse_legacy_sweep(
+        baseline: &'static str,
+    ) -> Vec<(&'static str, ModifiersState, bool, &'static str)> {
         baseline
             .lines()
             .filter(|line| !line.starts_with('#') && !line.is_empty())
@@ -4434,6 +4636,34 @@ mod tests {
                 (key, modifiers, decckm == "1", hex)
             })
             .collect()
+    }
+
+    /// The historical sweep for this host. Other Unix shared Windows' command and paste
+    /// modifiers, but it did not reserve Alt+F4 for closing the window. That third-platform
+    /// expectation is therefore the Windows capture with those rows taken from the Mac capture,
+    /// where Alt+F4 was an ordinary VT key too. It does not use today's encoder to generate its
+    /// own expected output.
+    fn legacy_sweep() -> Vec<(&'static str, ModifiersState, bool, &'static str)> {
+        match bt_platform::host_platform() {
+            HostPlatform::Windows => parse_legacy_sweep(KEY_ENCODING_LEGACY_WINDOWS),
+            HostPlatform::MacOs => parse_legacy_sweep(KEY_ENCODING_LEGACY_MACOS),
+            HostPlatform::OtherUnix => {
+                let mut other_unix = parse_legacy_sweep(KEY_ENCODING_LEGACY_WINDOWS);
+                let macos = parse_legacy_sweep(KEY_ENCODING_LEGACY_MACOS);
+                for row in &mut other_unix {
+                    if row.0 == "F4" && row.1.alt_key() && !row.1.super_key() {
+                        row.3 = macos
+                            .iter()
+                            .find(|candidate| {
+                                candidate.0 == row.0 && candidate.1 == row.1 && candidate.2 == row.2
+                            })
+                            .expect("the Mac capture holds this Alt+F4 chord")
+                            .3;
+                    }
+                }
+                other_unix
+            }
+        }
     }
 
     fn hex_of(bytes: Option<Vec<u8>>) -> String {

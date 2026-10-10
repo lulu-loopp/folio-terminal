@@ -1760,8 +1760,9 @@ pub enum RenderError {
         context: wgpu::TextureFormat,
         surface: wgpu::TextureFormat,
     },
-    /// The adapter did not offer the one composite alpha mode this target has to
-    /// be configured with.
+    /// The adapter did not offer a supported composite alpha mode for this
+    /// target. Linux's `required` value is its preferred mode; `Opaque` is also
+    /// accepted when the adapter does not offer `PreMultiplied`.
     ///
     /// An error and never a substitution, for the same reason as
     /// [`RenderError::FormatMismatch`]: a composition-visual surface quietly
@@ -1769,7 +1770,7 @@ pub enum RenderError {
     /// have destroyed the property the whole slice exists to establish, with no
     /// symptom until a web preview is asked to show through it.
     #[error(
-        "a {target:?} surface must be configured {required:?}, and this adapter offered {offered:?}"
+        "the {target:?} surface cannot use a supported alpha mode (primary {required:?}); this adapter offered {offered:?}"
     )]
     AlphaModeUnavailable {
         target: WindowTargetKind,
@@ -4698,7 +4699,7 @@ pub struct GpuContext {
 
 /// What a window's swapchain is built upon.
 ///
-/// # Three doors, and the alpha they are offered is the difference
+/// # Four doors, and the alpha they are offered is the difference
 ///
 /// wgpu's dx12 backend answers a window-handle target with exactly one
 /// composite alpha mode — `vec![Opaque]`,
@@ -4721,20 +4722,16 @@ pub struct GpuContext {
 /// mode declared to wgpu and the representation Folio writes are different
 /// words, and [`alpha_representation`] is where that is said once.
 ///
-/// Both arms produce the same picture today. Nothing above this layer knows
-/// which door it came through except [`SurfaceAlphaReport`], which records the
-/// answer for the startup trace.
+/// **Linux has its own door because its window surface reports the modes the
+/// adapter can actually use.** It prefers `PreMultiplied`, which matches the
+/// pixels Folio writes, and accepts `Opaque` when that is the only supported
+/// mode. [`SurfaceAlphaReport`] records the chosen mode for the settings and
+/// startup paths.
 pub enum WindowTarget {
-    /// The window itself — on Windows, its `HWND`. wgpu builds the swapchain
-    /// with `CreateSwapChainForHwnd` and the desktop compositor owns the
-    /// presentation entirely.
-    ///
-    /// **This is also the portable door.** Off Windows there is no second one:
-    /// a `SurfaceTarget` is built from whatever raw window handle winit hands
-    /// out — an `NSView`'s on macOS — and wgpu's own backend decides what to
-    /// attach to it. Composition is the arm that does not travel, and it is
-    /// gated below rather than stubbed, so a platform that has no visual tree
-    /// cannot name one by accident.
+    /// A winit surface target. Windows gives wgpu an HWND; other platforms use
+    /// the raw handle winit provides. This remains the fallback when the macOS
+    /// owned-layer path cannot provide its view. Linux uses
+    /// [`Self::LinuxWindow`] so its alpha mode follows that surface's offers.
     Hwnd(wgpu::SurfaceTarget<'static>),
     /// An `IDCompositionVisual` the caller owns, as a raw COM pointer.
     ///
@@ -4777,21 +4774,26 @@ pub enum WindowTarget {
     /// there is no `NSView` to name anywhere else.
     #[cfg(target_os = "macos")]
     MetalLayerOnOwnedView(*mut std::ffi::c_void),
+    /// A Linux winit window surface whose alpha mode is selected from the
+    /// adapter's actual capabilities.
+    #[cfg(target_os = "linux")]
+    LinuxWindow(wgpu::SurfaceTarget<'static>),
 }
 
-/// Which of [`WindowTarget`]'s three doors a window came through, kept after
+/// Which of [`WindowTarget`]'s doors a window came through, kept after
 /// the target itself has been consumed into a surface.
 ///
 /// **Not gated by platform, unlike the variants it names.** The alpha policy
 /// below is a decision, and a decision that only compiles on the machine it is
 /// about is a decision no gate on any other machine can hold: every arm's
-/// required mode and representation is therefore checkable from a Windows
-/// workstation and from CI's Linux runner as well as from the Mac.
+/// alpha choice and representation can be checked from a Windows workstation,
+/// a Linux runner and a Mac.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowTargetKind {
     Hwnd,
     CompositionVisual,
     MetalLayerOnOwnedView,
+    LinuxWindow,
 }
 
 impl WindowTarget {
@@ -4803,6 +4805,8 @@ impl WindowTarget {
             Self::CompositionVisual(_) => WindowTargetKind::CompositionVisual,
             #[cfg(target_os = "macos")]
             Self::MetalLayerOnOwnedView(_) => WindowTargetKind::MetalLayerOnOwnedView,
+            #[cfg(target_os = "linux")]
+            Self::LinuxWindow(_) => WindowTargetKind::LinuxWindow,
         }
     }
 }
@@ -4829,18 +4833,19 @@ impl SurfaceAlphaReport {
     /// the one place the equivalence "premultiplied ⇒ the ground may be
     /// translucent" is written down.
     ///
-    /// **It reads the door and not the mode** (M1-4). Until the Metal arm the
-    /// two were the same question: the mode a target requires was also the name
-    /// of the representation Folio writes into it. On Metal they part —
+    /// **It reads the door for Windows and macOS, and the chosen mode for Linux.**
+    /// On Windows and macOS, the required mode and the representation Folio
+    /// writes follow the target's fixed contract. On Metal they part —
     /// `PostMultiplied` is the only non-opaque mode offered there and the
     /// pixels under it are read premultiplied all the same — so the question a
     /// settings row is really asking is *"does this surface composite the alpha
     /// I write"*, which is [`alpha_representation`]'s question and not
-    /// `chosen`'s. The Windows answers are unchanged in both arms: `Hwnd` is
-    /// opaque, `CompositionVisual` is premultiplied.
+    /// `chosen`'s. A Linux window can be either premultiplied or opaque, so its
+    /// answer follows the mode the adapter actually accepted.
     #[must_use]
     pub fn is_premultiplied(&self) -> bool {
-        alpha_representation(self.target) == Some(SurfaceAlphaRepresentation::Premultiplied)
+        alpha_representation(self.target, self.chosen)
+            == Some(SurfaceAlphaRepresentation::Premultiplied)
     }
 }
 
@@ -4868,16 +4873,12 @@ pub enum SurfaceAlphaRepresentation {
 
 /// How Folio writes alpha into a surface that came through each door.
 ///
-/// **The Metal arm goes through exactly the path `CompositionVisual` goes
-/// through, and that is the claim this function makes.** The premultiply in
-/// this crate happens in two places, both on the CPU and both before anything
-/// reaches a pipeline: [`ground::premultiplied_clear`], which is the clear
-/// colour a frame begins with, and [`premultiplied_by_ground`], which every
-/// rectangle instance whose colour has to sit flush with that ground passes
-/// through ([`premultiplied_surface_pixel_rect`] is that with a rectangle
-/// around it). Neither reads the target. So there is no shader change here and
-/// there is nothing for one to change: the two arms differ in the mode declared
-/// to wgpu and in nothing else.
+/// The Windows composition and macOS Metal targets both write premultiplied
+/// pixels. Linux writes that representation when its selected mode is
+/// `PreMultiplied`; an `Opaque` Linux surface reports `Opaque`. The CPU helpers
+/// remain the only premultiplication: [`ground::premultiplied_clear`] prepares
+/// the clear colour and [`premultiplied_by_ground`] prepares rectangle colors.
+/// The report tells callers whether the surface can carry translucent ground.
 ///
 /// **The caveat X-1 leaves behind, recorded rather than acted on here.** Both
 /// premultiplies above are done **in linear light** and then encoded by the
@@ -4889,23 +4890,33 @@ pub enum SurfaceAlphaRepresentation {
 /// glyph output on the Metal path at scale 2 — and a change made here before
 /// that measurement would be a correction nobody has looked at.
 #[must_use]
-fn alpha_representation(target: WindowTargetKind) -> Option<SurfaceAlphaRepresentation> {
+fn alpha_representation(
+    target: WindowTargetKind,
+    chosen: wgpu::CompositeAlphaMode,
+) -> Option<SurfaceAlphaRepresentation> {
     match target {
         WindowTargetKind::Hwnd => Some(SurfaceAlphaRepresentation::Opaque),
         WindowTargetKind::CompositionVisual | WindowTargetKind::MetalLayerOnOwnedView => {
             Some(SurfaceAlphaRepresentation::Premultiplied)
         }
+        WindowTargetKind::LinuxWindow => match chosen {
+            wgpu::CompositeAlphaMode::PreMultiplied => {
+                Some(SurfaceAlphaRepresentation::Premultiplied)
+            }
+            wgpu::CompositeAlphaMode::Opaque => Some(SurfaceAlphaRepresentation::Opaque),
+            _ => None,
+        },
     }
 }
 
-/// The composite alpha mode a target **must** be configured with.
+/// The primary composite alpha mode for a target.
 ///
-/// Not a preference and not a search through a ranked list: each door has one
-/// right answer, and the surface that cannot give it is a surface this program
-/// will not present through. An HWND target is `Opaque` because that is the
-/// only thing dx12 offers it; a visual target is `PreMultiplied` because that
-/// is the whole reason for going through a visual at all, and configuring one
-/// `Opaque` would build the ground for the web slice and then pave over it.
+/// Windows and macOS targets have one required mode. Linux prefers
+/// `PreMultiplied` and lets [`choose_alpha_mode`] use `Opaque` as a fallback.
+/// An HWND target is `Opaque` because that is the only thing dx12 offers it; a
+/// visual target is `PreMultiplied` because that is the whole reason for going
+/// through a visual at all, and configuring one `Opaque` would build the ground
+/// for the web slice and then pave over it.
 ///
 /// **A Metal target is `PostMultiplied`, and that is not this function
 /// changing its mind about premultiplied pixels** ([`alpha_representation`]
@@ -4915,12 +4926,15 @@ fn alpha_representation(target: WindowTargetKind) -> Option<SurfaceAlphaRepresen
 /// mode that would be refused here for a composition visual is the mode that is
 /// *required* here for a `CAMetalLayer`, and asking for `PreMultiplied` on
 /// Metal would refuse every window this program can open on that platform.
+/// Linux prefers `PreMultiplied`; [`choose_alpha_mode`] also accepts `Opaque`
+/// when the adapter does not offer premultiplied alpha.
 #[must_use]
 fn primary_alpha_mode(target: WindowTargetKind) -> wgpu::CompositeAlphaMode {
     match target {
         WindowTargetKind::Hwnd => wgpu::CompositeAlphaMode::Opaque,
         WindowTargetKind::CompositionVisual => wgpu::CompositeAlphaMode::PreMultiplied,
         WindowTargetKind::MetalLayerOnOwnedView => wgpu::CompositeAlphaMode::PostMultiplied,
+        WindowTargetKind::LinuxWindow => wgpu::CompositeAlphaMode::PreMultiplied,
     }
 }
 
@@ -4934,6 +4948,19 @@ fn choose_alpha_mode(
     target: WindowTargetKind,
     offered: &[wgpu::CompositeAlphaMode],
 ) -> Result<wgpu::CompositeAlphaMode, RenderError> {
+    if target == WindowTargetKind::LinuxWindow {
+        if offered.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+            return Ok(wgpu::CompositeAlphaMode::PreMultiplied);
+        }
+        if offered.contains(&wgpu::CompositeAlphaMode::Opaque) {
+            return Ok(wgpu::CompositeAlphaMode::Opaque);
+        }
+        return Err(RenderError::AlphaModeUnavailable {
+            target,
+            required: primary_alpha_mode(target),
+            offered: offered.to_vec(),
+        });
+    }
     let required = primary_alpha_mode(target);
     if offered.contains(&required) {
         Ok(required)
@@ -5021,6 +5048,8 @@ fn create_surface(
                 })
             }
         }
+        #[cfg(target_os = "linux")]
+        WindowTarget::LinuxWindow(target) => instance.create_surface(target),
     }
     .map_err(|error| RenderError::Wgpu(error.to_string()))
 }
@@ -7464,8 +7493,8 @@ impl GpuContext {
     /// on: polling a device that has just been destroyed is expected to fail,
     /// and the fact the test is after is the latch.
     ///
-    /// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
-    #[cfg(all(test, target_os = "windows"))]
+    /// Used by the real-device recovery tests on Windows and Linux.
+    #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
     fn lose_the_device_on_purpose(&self) {
         self.device.destroy();
         let _ = self.device.poll(wgpu::PollType::Wait {
@@ -12091,6 +12120,23 @@ impl WindowRenderer {
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..6, 0..layer.rect_count);
         }
+        // **The browser's software frame is this layer's content**, after the
+        // opaque fills that form its face and before the controls that sit over
+        // that content. Videos keep `Overlay(index)` above the ground and below
+        // the layer's fills; a web page fills the body itself, so giving it the
+        // same stage makes a float paint the page black. Draw it in this layer's
+        // pass so a later float still covers it and a fading layer carries it
+        // through the same overlay-group texture.
+        if let Some((vertex_buffer, draws)) = video {
+            draw_video_stage(
+                pass,
+                gpu,
+                vertex_buffer,
+                draws,
+                VideoStage::OverlayContent(index),
+                surface,
+            );
+        }
         // **And then the part of this layer that is not there** (§7.14c): a float
         // carrying a page has just painted its own face across the rectangle the
         // page lives in, and the page is composed *under* this whole surface. So
@@ -16150,6 +16196,25 @@ fn terminal_font_system() -> FontSystem {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn terminal_font_system() -> FontSystem {
     let mut font_system = FontSystem::new();
+    // The system may already provide a `Noto Color Emoji` family. On Linux the
+    // COLRv1 face can win a same-style fontdb tie before this bundled CBDT/CBLC
+    // face, but Swash returns zero-area mask glyphs for that system face. Keep
+    // the same-named system face out of Folio's private font database so the
+    // bundled color bitmap glyphs are the ones the emoji route actually draws.
+    let superseded_emoji_faces = font_system
+        .db()
+        .faces()
+        .filter(|face| {
+            face.families
+                .iter()
+                .any(|(family, _)| family == COLOR_EMOJI_FONT_FAMILY)
+                && !matches!(face.source, glyphon::fontdb::Source::Binary(_))
+        })
+        .map(|face| face.id)
+        .collect::<Vec<_>>();
+    for face in superseded_emoji_faces {
+        font_system.db_mut().remove_face(face);
+    }
     font_system
         .db_mut()
         .load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
@@ -16890,7 +16955,7 @@ fn primary_font_supports_text(font_system: &mut FontSystem, text: &str) -> bool 
     text.chars().all(|character| charmap.map(character) != 0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
 fn font_family_supports_text(font_system: &mut FontSystem, family: &str, text: &str) -> bool {
     let Some(font_id) = font_system.db().query(&glyphon::fontdb::Query {
         families: &[Family::Name(family)],
@@ -18556,6 +18621,67 @@ mod tests {
     use bt_transcript::CapturedCell;
     use bt_viewport::horizontal::HorizontalProjection;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_color_emoji_uses_bundled_face_with_nonempty_color_rasters() {
+        let mut font_system = terminal_font_system();
+        assert!(font_system.db().faces().all(|face| {
+            !face
+                .families
+                .iter()
+                .any(|(family, _)| family == COLOR_EMOJI_FONT_FAMILY)
+                || matches!(face.source, glyphon::fontdb::Source::Binary(_))
+        }));
+        let cjk = resolve_terminal_cjk_families("", &mut font_system);
+        let mut swash = SwashCache::new();
+        let mut trials = 0;
+        for scale in [1.0, 1.5, 2.0] {
+            let metrics = CellMetrics::measure(&mut font_system, scale).unwrap();
+            for text in ["😀", "👍🏽", "👨‍👩‍👧‍👦"] {
+                let key = ShapeKey {
+                    text: text.to_owned().into(),
+                    bold: false,
+                    italic: false,
+                };
+                let (buffer, policy) = shape_wide_buffer_for_key(
+                    &key,
+                    &mut font_system,
+                    &mut swash,
+                    metrics,
+                    &cjk,
+                    &mut trials,
+                );
+                assert!(matches!(policy, WideSizePolicy::ColorEmojiBox { .. }));
+                let glyphs = buffer
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs.iter())
+                    .collect::<Vec<_>>();
+                assert!(!glyphs.is_empty(), "scale {scale}: {text} has no glyphs");
+                for glyph in glyphs {
+                    let face = font_system.db().face(glyph.font_id).unwrap();
+                    assert!(
+                        face.families
+                            .iter()
+                            .any(|(family, _)| { family == COLOR_EMOJI_FONT_FAMILY }),
+                        "scale {scale}: {text} selected {:?}",
+                        face.families
+                    );
+                    assert!(matches!(face.source, glyphon::fontdb::Source::Binary(_)));
+                    assert_ne!(glyph.glyph_id, 0, "scale {scale}: {text} shaped .notdef");
+                    let image = swash
+                        .get_image_uncached(
+                            &mut font_system,
+                            glyph.physical((0.0, 0.0), 1.0).cache_key,
+                        )
+                        .unwrap_or_else(|| panic!("scale {scale}: {text} has no raster image"));
+                    assert_eq!(image.content, glyphon::SwashContent::Color);
+                    assert!(image.placement.width > 0 && image.placement.height > 0);
+                    assert!(image.data.iter().any(|byte| *byte != 0));
+                }
+            }
+        }
+    }
+
     /// PIN (D2 of the 2026-09-11 adversarial review) — **one shaping pass
     /// answers every offset in a run, and the last of them is the width the
     /// sibling measurement answers.**
@@ -20141,6 +20267,7 @@ mod tests {
         )
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn shape_wide_for_test(
         cells: &[CapturedCell],
         font_system: &mut FontSystem,
@@ -20210,6 +20337,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn first_layout_glyph(buffer: &Buffer) -> glyphon::cosmic_text::LayoutGlyph {
         buffer
             .layout_runs()
@@ -20219,6 +20347,7 @@ mod tests {
             .expect("shaped buffer has a glyph")
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn glyph_family(font_system: &FontSystem, glyph: &glyphon::cosmic_text::LayoutGlyph) -> String {
         font_system
             .db()
@@ -20228,6 +20357,7 @@ mod tests {
             .expect("glyph font has a family")
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn wide_text_cells(text: &str) -> Vec<CapturedCell> {
         text.chars()
             .flat_map(|character| {
@@ -30398,9 +30528,11 @@ mod tests {
                     wgpu::CompositeAlphaMode::PostMultiplied,
                     wgpu::CompositeAlphaMode::PreMultiplied,
                 ],
-                WindowTargetKind::MetalLayerOnOwnedView => unreachable!(
-                    "dx12 never answers a Metal target; that backend's list is `metal_offers`"
-                ),
+                WindowTargetKind::MetalLayerOnOwnedView | WindowTargetKind::LinuxWindow => {
+                    unreachable!(
+                        "dx12 never answers a Metal target; that backend's list is `metal_offers`"
+                    )
+                }
             }
         }
 
@@ -30451,7 +30583,10 @@ mod tests {
                  would refuse every window this program can open there"
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::MetalLayerOnOwnedView),
+                alpha_representation(
+                    WindowTargetKind::MetalLayerOnOwnedView,
+                    wgpu::CompositeAlphaMode::PostMultiplied
+                ),
                 Some(SurfaceAlphaRepresentation::Premultiplied),
                 "the pixels are the same pixels DirectComposition is given"
             );
@@ -30491,7 +30626,7 @@ mod tests {
                 wgpu::CompositeAlphaMode::Opaque
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::Hwnd),
+                alpha_representation(WindowTargetKind::Hwnd, wgpu::CompositeAlphaMode::Opaque),
                 Some(SurfaceAlphaRepresentation::Opaque)
             );
             assert_eq!(
@@ -30499,7 +30634,10 @@ mod tests {
                 wgpu::CompositeAlphaMode::PreMultiplied
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::CompositionVisual),
+                alpha_representation(
+                    WindowTargetKind::CompositionVisual,
+                    wgpu::CompositeAlphaMode::PreMultiplied
+                ),
                 Some(SurfaceAlphaRepresentation::Premultiplied)
             );
             // Against the lists the backends really answer, so the claim is
@@ -30530,6 +30668,79 @@ mod tests {
                 choose_alpha_mode(WindowTargetKind::CompositionVisual, &metal_offers()),
                 Err(RenderError::AlphaModeUnavailable { .. })
             ));
+        }
+
+        /// The Linux window target uses an offered representation and reports
+        /// that choice to callers. The first list is the CI Xvfb result; the
+        /// opaque-only list is the previously observed NVIDIA fallback.
+        #[test]
+        fn linux_windows_prefer_premultiplied_and_accept_opaque() {
+            let xvfb = [
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+            ];
+            let chosen = choose_alpha_mode(WindowTargetKind::LinuxWindow, &xvfb)
+                .expect("Xvfb offers the premultiplied mode Folio writes");
+            assert_eq!(chosen, wgpu::CompositeAlphaMode::PreMultiplied);
+            let premultiplied = SurfaceAlphaReport {
+                target: WindowTargetKind::LinuxWindow,
+                offered: xvfb.to_vec(),
+                chosen,
+            };
+            assert!(premultiplied.is_premultiplied());
+            assert_eq!(
+                alpha_representation(WindowTargetKind::LinuxWindow, chosen),
+                Some(SurfaceAlphaRepresentation::Premultiplied)
+            );
+
+            let opaque_first = [
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+            ];
+            assert_eq!(
+                choose_alpha_mode(WindowTargetKind::LinuxWindow, &opaque_first)
+                    .expect("preference does not depend on offer ordering"),
+                wgpu::CompositeAlphaMode::PreMultiplied
+            );
+
+            let opaque_only = [wgpu::CompositeAlphaMode::Opaque];
+            let chosen = choose_alpha_mode(WindowTargetKind::LinuxWindow, &opaque_only)
+                .expect("an opaque-only Linux surface is usable");
+            assert_eq!(chosen, wgpu::CompositeAlphaMode::Opaque);
+            let opaque = SurfaceAlphaReport {
+                target: WindowTargetKind::LinuxWindow,
+                offered: opaque_only.to_vec(),
+                chosen,
+            };
+            assert!(!opaque.is_premultiplied());
+            assert_eq!(
+                alpha_representation(WindowTargetKind::LinuxWindow, chosen),
+                Some(SurfaceAlphaRepresentation::Opaque)
+            );
+        }
+
+        /// Linux does not guess a pixel representation from postmultiplied or
+        /// inherited modes that its renderer cannot write.
+        #[test]
+        fn linux_refuses_postmultiplied_and_inherited_only_surfaces() {
+            let offered = [
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+            ];
+            match choose_alpha_mode(WindowTargetKind::LinuxWindow, &offered) {
+                Err(RenderError::AlphaModeUnavailable {
+                    target,
+                    required,
+                    offered: observed,
+                }) => {
+                    assert_eq!(target, WindowTargetKind::LinuxWindow);
+                    assert_eq!(required, wgpu::CompositeAlphaMode::PreMultiplied);
+                    assert_eq!(observed, offered);
+                }
+                other => {
+                    panic!("expected the unsupported Linux modes to be refused, got {other:?}")
+                }
+            }
         }
 
         /// PIN (WebView2 spike, Q1) — **a visual target is `PreMultiplied` and
@@ -31154,6 +31365,41 @@ mod tests {
             }
         }
 
+        fn raised_float_fill() -> OverlayLayer {
+            OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [100.0, 100.0, 180.0, 150.0],
+                    color: [0x55, 0x55, 0x55],
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            }
+        }
+
+        fn web_frame(stage: VideoStage) -> VideoLayer {
+            let body = SeatViewport {
+                x: 80,
+                y: 70,
+                width: 160,
+                height: 100,
+            };
+            VideoLayer {
+                key: "web:page:1".to_owned(),
+                box_: body,
+                clip: body,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(vec![0_u8, 255, 0, 255].into_boxed_slice()),
+                    width_px: 1,
+                    height_px: 1,
+                    generation: 1,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+                stage,
+            }
+        }
+
         fn group(layers: std::ops::Range<usize>, opacity: f32) -> OverlayGroup {
             OverlayGroup {
                 layers,
@@ -31414,6 +31660,55 @@ mod tests {
                 "green at one half over #1B should read #0E8D0E, read \
                  r={red:#04x} g={green:#04x} b={blue:#04x}"
             );
+        }
+
+        /// RED — **a Linux web page is the content of its float, so the float's
+        /// opaque fill cannot cover it; a higher float still covers it and its
+        /// own fade carries the page with it.**
+        ///
+        /// The page frame is given the same overlay index as its host. The first
+        /// point is inside the lower float and outside the next one; the second
+        /// is under the higher float's fill. A half-opacity group then checks
+        /// that the new stage is drawn inside the same group as the float.
+        ///
+        /// MUTATION: draw `OverlayContent` before `rect_buffer` and the first
+        /// pixel is the card plate instead of the green page; move it outside
+        /// `draw_overlay_layer` and the half-opacity frame returns at full
+        /// strength; draw it after the whole stack and the higher float cannot
+        /// cover it.
+        #[test]
+        fn web_content_sits_over_its_float_fill_under_later_floats_and_fades() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let green_page = web_frame(VideoStage::OverlayContent(1));
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer(), raised_float_fill()],
+                Vec::new(),
+            );
+            window.set_video_layers(vec![green_page.clone()]);
+            let stacked = present(&mut window, &mut gpu);
+            let content = stacked[(80 * WIDTH + 130) as usize];
+            assert!(
+                content[1] > 0xE0 && content[2] < 0x20,
+                "the web frame must be above its float's opaque fill, read {content:?}"
+            );
+            let covered = stacked[(110 * WIDTH + 110) as usize];
+            assert!(
+                (i16::from(covered[1]) - i16::from(covered[2])).abs() < 4 && covered[1] > 0x40,
+                "the later float still covers lower web content, read {covered:?}"
+            );
+
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 0.5)]);
+            let fading = present(&mut window, &mut gpu);
+            let [blue, green, red, _] = fading[(80 * WIDTH + 130) as usize];
+            assert!(
+                (0x8C..=0x8E).contains(&green) && (0x0D..=0x0F).contains(&red),
+                "the web frame fades with its owning float over #1B, read \
+                 r={red:#04x} g={green:#04x} b={blue:#04x}"
+            );
+            assert_eq!(window.overlay_groups_composited(), 1);
         }
 
         /// RED (46) — **spans nest, and a surface fading inside a fading
@@ -32911,9 +33206,7 @@ mod tests {
         use super::*;
         use std::{cell::Cell, rc::Rc};
 
-        /// Windows only (ticket 55, D-62): its only readers are the
-        /// Windows-gated tests below.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
         /// A device that is gone until somebody gets it back, and the ledger of
@@ -33162,8 +33455,8 @@ mod tests {
         }
 
         /// The ink of the one label these tests draw, counted off the readback.
-        /// `[b, g, r, a]`. Windows only (ticket 55, D-62), with the tests that read it.
-        #[cfg(target_os = "windows")]
+        /// `[b, g, r, a]`.
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         fn ink_pixels(pixels: &[[u8; 4]]) -> usize {
             pixels
                 .iter()
@@ -33178,9 +33471,8 @@ mod tests {
                 .count()
         }
 
-        /// One red label, said once and never said again. Windows only (ticket
-        /// 55, D-62), with the tests that read it.
-        #[cfg(target_os = "windows")]
+        /// One red label, said once and never said again.
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         fn a_sentence_this_window_keeps() -> Vec<OverlayLayer> {
             vec![OverlayLayer {
                 labels: vec![ChromeLabel {
@@ -33200,8 +33492,7 @@ mod tests {
             }]
         }
 
-        /// Windows only (ticket 55, D-62), with the tests that read it.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         fn one_frame(
             window: &mut WindowRenderer,
             gpu: &mut GpuContext,
@@ -33251,7 +33542,7 @@ mod tests {
         /// non-existent resource BufferId(1,1)` — which is exactly the shape
         /// §7.1.3m named: a resource handed out quietly and the *use* of it
         /// blamed, several calls away from what actually went wrong.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         #[test]
         fn a_device_that_is_really_taken_away_is_rebuilt_and_the_window_says_it_again() {
             const WIDTH: u32 = 360;
@@ -33320,7 +33611,7 @@ mod tests {
         /// MUTATION: drop `math_textures.clear()` from the rebuild and this
         /// panics inside `wgpu-core`'s storage naming a resource id, which is
         /// the failure a reader of the log cannot trace back to a device.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         #[test]
         fn a_picture_uploaded_before_the_loss_is_uploaded_again_after_it() {
             const WIDTH: u32 = 200;
@@ -33481,7 +33772,7 @@ mod tests {
         /// here, because that lane grows a renderer per layer on demand and a
         /// short vector simply grows again. What is fatal is a *stale* renderer,
         /// and that is what mutation ② of the test above holds.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         #[test]
         fn every_window_on_a_rebuilt_device_comes_back_from_one_call() {
             let mut gpu = on_this_machines_adapter(FORMAT);
@@ -33539,7 +33830,7 @@ mod tests {
         /// MUTATION: install the latch before the adopt loop again and the
         /// second assertion is what happens — a machine reporting a device
         /// while a window of its own has none.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         #[test]
         fn a_window_that_could_not_adopt_leaves_the_device_still_lost() {
             let mut gpu = on_this_machines_adapter(FORMAT);
@@ -33636,7 +33927,7 @@ mod tests {
         ///
         /// MUTATION: put `create_buffer_init` back and this test does not fail,
         /// it aborts — which is precisely what it is for.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         #[test]
         fn the_buffer_a_frame_mints_after_the_device_went_away_does_not_end_the_process() {
             let mut gpu = on_this_machines_adapter(FORMAT);

@@ -3,10 +3,11 @@
 //! One file per topic, each holding one `impl Runtime<'_>` block and the
 //! methods of that topic byte for byte as `main.rs` wrote them.
 //!
-//! **This file declares modules and imports nothing.** Twelve of the topic
-//! stems are also the name of a crate-root module, and `mod settings;` beside
-//! `use crate::settings;` is `error[E0255]`. A topic file writes its own
-//! imports, where the two names cannot collide.
+//! **This file declares modules and only re-exports the two cross-layer
+//! handoff doors below.** Twelve of the topic stems are also the name of a
+//! crate-root module, and `mod settings;` beside `use crate::settings;` is
+//! `error[E0255]`. A topic file writes its own imports, where the two names
+//! cannot collide.
 
 mod attention;
 mod clipboard;
@@ -37,3 +38,6 @@ mod tooltips;
 mod update_card;
 mod web;
 mod windows;
+
+pub(crate) use preview::carry_floated_preview_surface_state;
+pub(crate) use web::{WebKeyboardTransfer, carry_transferred_web_keyboard};

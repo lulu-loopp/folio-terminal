@@ -85,6 +85,7 @@ fn a_door_answers_by_role_and_phase<D: bt_platform::admission::Door>(
 ///
 /// MUTATION: widen a door's phases in `bt_platform::admission::doors` (`CompositorBirth` to
 /// `[Running, Exiting]`), or narrow one (`WebController` back to `[Running]`), and this names it.
+/// Linux shutdown also pins the `DesktopRetire` and `VideoShutdown` phase contracts below.
 #[test]
 fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     use bt_platform::admission::Phase::{Exiting, Running, Starting};
@@ -104,18 +105,23 @@ fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     a_door_answers_by_role_and_phase::<doors::SessionWriterRetire>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::TraceFlush>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::UpdateLeave>(&[Exiting]);
+    // Desktop retirement waits only after the event loop enters Exiting.
+    a_door_answers_by_role_and_phase::<doors::DesktopRetire>(&[Exiting]);
+    a_door_answers_by_role_and_phase::<doors::PreviewRecoveryCopies>(&[Starting, Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::LaunchHandOver>(&[Starting]);
     a_door_answers_by_role_and_phase::<doors::WebController>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::WebEnvironment>(&[Running]);
     a_door_answers_by_role_and_phase::<doors::WebRehost>(&[Running]);
     a_door_answers_by_role_and_phase::<doors::ImeCaretArea>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::GpuOpen>(&[Running]);
+    // Linux video workers may be retired while running or while shutdown drains.
+    a_door_answers_by_role_and_phase::<doors::VideoShutdown>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::FocusWindow>(&[Running]);
     a_door_answers_by_role_and_phase::<doors::SetVisible>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::SetCursor>(&[Running]);
     assert_eq!(
         doors::ALL.len(),
-        24,
+        27,
         "a door added to the registry is a door this list has to name"
     );
 }

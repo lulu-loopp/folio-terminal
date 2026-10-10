@@ -33,6 +33,8 @@ Windows 上也可以用 winget：
 winget install --id WeiyiShi.Folio --exact
 ```
 
+**Linux 开发版**——从源码构建，使用原生 X11 或 Wayland。[Linux 说明](docs/linux.zh-CN.md)列出构建、安装、卸载命令和当前限制。
+
 其余内容见 [`docs/install.zh-CN.md`](docs/install.zh-CN.md)：压缩包里有什么、初次启动询问什么，以及系统弹出提示时该怎么办。
 
 ## 卸载
