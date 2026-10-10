@@ -250,7 +250,10 @@ fn alt_wheel_finds_the_seat_under_the_pointer_after_a_scale_change() {
 /// either modifier, and its file the seat under `Ctrl`.
 ///
 /// MUTATION: map `preview::LinkAction::Refused(_)` to `ReferenceRow::Nothing` in
-/// `preview_reference_row` — the base's answer — and the share rows go red.
+/// `preview_reference_row` — the base's answer — and the share rows go red on Windows; map
+/// `preview::LinkAction::Unnamed(_)` to `ReferenceRow::Nothing` (the document road skipping the
+/// terminal's judgement, M-SWEEP-048) and the `file://server/…` row goes red on a Mac, where no
+/// path is read out of a remote authority.
 #[test]
 fn a_document_link_answers_the_same_row_as_a_terminal_reference() {
     let directory = bt_testpath::temp_path("folio-t14-document-links");

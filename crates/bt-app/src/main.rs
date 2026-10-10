@@ -56,6 +56,7 @@ mod context_menu;
 mod diagnostics;
 mod dir_news;
 mod elevated_host;
+mod exit_diagnostics;
 mod explorer_menu;
 mod favicon;
 mod file_peek;
@@ -145,6 +146,7 @@ mod pty_door;
 mod quake;
 mod quit;
 mod recent_folders;
+mod recovered;
 mod restore;
 mod runtime;
 mod scheme_watch;
@@ -224,7 +226,10 @@ mod webhost;
 mod webnav;
 mod websheet;
 mod window_news;
+mod window_origin;
 mod wsl;
+
+pub(crate) use window_origin::WindowOrigin;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::LayoutKey;
@@ -644,6 +649,11 @@ enum AppEvent {
     /// a turn for it, and a window about to put up its first modal may have
     /// nothing else coming.
     InstallChannelRead,
+    /// **The recovered folder holds copies no start has said yet** (T-RECOVERED-FOLDER): the
+    /// answer is in `recovered`'s slot, and the handler raises the one toast that says where
+    /// they are. Owed a wake because the listing lands after the first frame, on a
+    /// window that may have nothing else coming.
+    RecoveredEditsListed,
     /// **An update's trial was committed, and what it held back may be
     /// written** (`update_trial`, F-7).
     ///
@@ -926,7 +936,8 @@ impl AppEvent {
             | Self::InputLanguageChanged
             | Self::WindowChromeChanged
             | Self::NotificationClicked
-            | Self::HandoffAnswered => Station::Chrome,
+            | Self::HandoffAnswered
+            | Self::RecoveredEditsListed => Station::Chrome,
             // The station winit's own pan event would have been charged to:
             // this is the same gesture, answered by the system instead.
             Self::TouchPanned => Station::EventPan,
@@ -3714,9 +3725,9 @@ fn resolve_document_pictures(
             preview::LinkAction::Web(url) => MarkdownPicture::Remote(url),
             // A picture addressed by a scheme this window has no reader for is nothing to draw:
             // a source is fetched, never handed over.
-            preview::LinkAction::Nowhere | preview::LinkAction::Scheme(_) => {
-                MarkdownPicture::Nowhere
-            }
+            preview::LinkAction::Nowhere
+            | preview::LinkAction::Scheme(_)
+            | preview::LinkAction::Unnamed(_) => MarkdownPicture::Nowhere,
             // **A source this window will not go looking at** (route E of the untrusted-path
             // audit, 2026-09-08). `![](\\attacker\share\x.png)` inside a document rendered on a
             // hover used to reach `ask` — which is `request_peek_pixels` — and the picture was
@@ -11572,6 +11583,13 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// Whether this shell's one exit diagnostics line has been written.
+    ///
+    /// A dead shell can remain in a tab while a dirty preview keeps that tab open, and
+    /// `PtySession::try_wait` deliberately remembers its answer for every later reaper pass. This
+    /// bit is the pane-level complement: the answer stays true, while the resident diagnostic is
+    /// emitted once.
+    shell_exit_said: bool,
     /// **A shell still being born** (T-PROGRAMS-REFRESH, T-LAUNCH-PROBE's invariant): `Some`
     /// while the rule that decides which program this pane starts needs a row the program walk
     /// has not answered, `None` for every pane whose shell was decided at creation. Such a pane
@@ -12243,34 +12261,11 @@ struct TabState {
     /// re-introduce the fork the ruling exists to forbid. It is content, so red
     /// line L1 keeps it out of the layout tree and out of `seats` entirely.
     preview_pool: preview::PreviewPool,
-    /// A block's scroll thumb in hand (user report, 2026-08-12).
-    ///
-    /// Only the surface, the block's identity and where in the thumb the hand
-    /// took hold: the bar's geometry is re-read from the current frame on every
-    /// move, which is [`DividerDrag`]'s discipline and its reason — the answer to
-    /// "where is this thumb" must not be a second copy of the layout.
-    ///
-    /// **Tab-level and not per surface, because there is one pointer.** A field
-    /// on every pane would be three answers to a question that has one, and the
-    /// two that said "no" would be saying it about a hand they cannot see.
-    preview_block_drag: Option<PreviewBlockDrag>,
     /// The surface and block whose thumb is lit because the pointer is over it.
     preview_block_hover: Option<(PreviewSurface, usize)>,
-    /// A **body**'s scroll thumb in hand, and the surface whose bar is lit —
-    /// the two above with the block taken out, kept beside them for the same
-    /// reason and answering the same "there is one pointer".
-    preview_body_drag: Option<PreviewBodyDrag>,
     /// Which bar the pointer is on — the surface *and* the axis, because a
     /// surface can wear two and only the one under the hand lights.
     preview_body_hover: Option<(PreviewSurface, preview::ScrollAxis)>,
-    /// **A terminal pane's scroll thumb in hand** (P2-9 slice 1) — the two
-    /// above again, for the instrument in the reserved lane.
-    ///
-    /// The seat and the grip and nothing else, on [`PreviewBodyDrag`]'s
-    /// discipline and for its reason: the bar's geometry is re-read from the
-    /// current projection on every move, because the answer to "where is this
-    /// thumb" must not be a second copy of the scroll state.
-    terminal_thumb_drag: Option<TerminalThumbDrag>,
     /// Which pane's lane the pointer is in, which is what lights that pane's
     /// mark and what holds it on the glass while a hand is near.
     terminal_thumb_hover: Option<SeatId>,
@@ -12283,15 +12278,6 @@ struct TabState {
     /// rebuild the overlay, which is the difference between a bar that goes away
     /// and a bar that goes away when you next touch something.
     terminal_thumb_owed_frame: bool,
-    /// **A terminal pane's foot bar in hand** — the two above once more, for the
-    /// instrument that lies along the bottom edge (horizontal scroll, level
-    /// three).
-    ///
-    /// A second pair and not a widened first pair, because a hand can only be on
-    /// one of them and the two answer different questions: this one moves a
-    /// **column**, and the seat it holds is the seat whose flattened lines it is
-    /// travelling along.
-    terminal_column_drag: Option<TerminalColumnDrag>,
     /// Which pane's foot mark the pointer is on. Unlike
     /// [`Self::terminal_thumb_hover`] this **lights and never summons** — see
     /// `termscroll::column_visibility` for why the bottom row is not a lane.
@@ -12321,21 +12307,9 @@ struct TabState {
     preview_edit_focus: Option<PreviewSurface>,
     /// What every buffer looked like the last time a pane was on it.
     preview_views: PreviewViewStore,
-    /// Which surface the pointer is drawing a selection across.
-    preview_selecting: Option<PreviewSurface>,
-    /// **The same thing on a rendered page**, and its own slot because it is its
-    /// own gesture: the quick edit's selection is a caret being dragged through
-    /// a monospace grid, and this is a range of a *document* being drawn out
-    /// across paragraphs, tables and pictures. It also carries a press that may
-    /// still turn out to have been a click on a link.
-    preview_text_drag: Option<PreviewTextDrag>,
     /// How many presses in a row have landed in the same few pixels of the same
     /// page — one for a caret, two for a word, three for a paragraph.
     preview_text_clicks: PreviewTextClicks,
-    /// The picture in the hand, and the press that may still become a double
-    /// click on one (ticket #60). Beside the drags above and singletons for
-    /// their reason: there is one pointer.
-    preview_image_drag: Option<ImageDrag>,
     preview_image_clicks: ImageClicks,
     /// The arc's easing toward the reading it is now showing, if it is moving.
     ring_tween: Option<SweepTween>,
@@ -13103,6 +13077,18 @@ struct App {
     /// (Esc, and the release) take it down from inside the window that was
     /// holding the payload.
     drag_broker: Option<DragBroker>,
+    /// **The application's pointer capture** (T-POINTER-CAPTURE §2.2): the one
+    /// gesture that holds the pointer, in whichever window latched it. See
+    /// [`runtime::pointer::PointerCapture`].
+    pointer_capture: Option<runtime::pointer::PointerCapture>,
+    /// **Legacy other-button overlaps, until cut 4 rules on them.** Cut 3 may
+    /// not change A·b or B21: a different button can still begin a gesture
+    /// beside the slot's gesture, as the independent legacy fields allowed.
+    /// One record per `(window, owner kind)` bounds the list to the live
+    /// gestures the removed fields could have represented. A write to the same
+    /// field replaces its prior record, and releases keep the fields' old
+    /// release-road order rather than the records' latch order.
+    pointer_capture_overlaps: Vec<runtime::pointer::PointerCapture>,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).
     ///
@@ -13745,13 +13731,6 @@ struct WindowRuntime {
     background_decode: BackgroundDecodeMailbox,
     /// Where the clipboard picture worker leaves its one answer (§7.61).
     clipboard_picture: ClipboardPictureMailbox,
-    /// Which slider the pointer is currently dragging, if any.
-    ///
-    /// A drag is the press that began it, asked again with a new `x` — see
-    /// `SettingsLayout::slider_at`. Cleared on release and whenever the dialog
-    /// shuts, because a button-up that arrives after the dialog is gone is a
-    /// button-up with nothing to end.
-    settings_slider_drag: Option<settings::SettingsRow>,
     /// **The profile a standing card can put back** — which card it belongs to,
     /// the row itself, and where it was (§7.1.6c-6b).
     ///
@@ -13786,14 +13765,9 @@ struct WindowRuntime {
     /// [`Self::profile_undo`]'s shape exactly, and for its reason: a verb pressed
     /// on a card that is not the one holding the offer does nothing.
     checkout_undo: Option<(toast::ToastId, std::path::PathBuf, String)>,
-    /// How far into the open picker's thumb the hand took hold, while it is
-    /// holding it (§7.1.6c-5).
-    ///
-    /// The distance and not the fact, for `file_peek`'s reason: a thumb grabbed
-    /// two thirds of the way down must not jump its own head under the pointer,
-    /// so what is remembered is where the hand landed on it. Cleared on release
-    /// and whenever the dialog shuts.
-    settings_menu_bar_drag: Option<f32>,
+    /// The card that said where the edits a stop kept are, and the folder a press on it opens
+    /// (T-RECOVERED-FOLDER) — [`Self::checkout_undo`]'s shape, for its reason.
+    recovered_card: Option<recovered::Raised>,
     /// The last dark/light this window told DWM it was wearing
     /// (`bt_platform::set_window_dark_mode`), or `None` before it has said
     /// anything (§7.1.6c-4f amendment).
@@ -14146,8 +14120,8 @@ struct WindowRuntime {
     /// **The system's pan gestures this window's touch door has answered and
     /// the loop has not yet read** (0.4.4 ticket 11). Written by the door from
     /// inside message dispatch, emptied by [`Runtime::spend_parked_pans`] on
-    /// the wake the door sent; see [`ParkedPans`].
-    parked_pans: ParkedPans,
+    /// the wake the door sent; see [`runtime::pointer::touch::ParkedPans`].
+    parked_pans: runtime::pointer::touch::ParkedPans,
     /// **The drop this window is holding, waiting for the turn boundary**
     /// (GitHub issue #1 ②).
     ///
@@ -14363,7 +14337,13 @@ struct WindowRuntime {
     /// exactly one caller, the release. It is never a substitute for the live
     /// answer: a hover asked of a hand that has gone is a hover that lies.
     pointer_last_seen: Option<PhysicalPosition<f64>>,
-    mouse_route: Option<MouseRoute>,
+    /// **What the frame measured for the pointer router** (T-POINTER-CAPTURE
+    /// §2.1): rebuilt where the overlay is built, read by every walk until the
+    /// next frame. See [`runtime::pointer::PointerFacts`].
+    pointer_facts: runtime::pointer::PointerFacts,
+    /// **The router's answer for the event being handled**, walked once at the
+    /// event's door (R-4). See [`runtime::pointer::PointerMemo`].
+    pointer_memo: runtime::pointer::PointerMemo,
     click_tracker: ClickTracker,
     line_wheel_remainder: f64,
     pixel_wheel_remainder: f64,
@@ -15015,33 +14995,6 @@ struct WindowRuntime {
     /// of alpha are the finest differences that can be drawn, and a tween settling
     /// in the last thousandth of one would otherwise owe a frame forever.
     last_drawn_rail: Option<(i32, u8)>,
-    /// The left press being held on a tab, and what it still owes it (J105).
-    ///
-    /// One at a time, because a mouse has one left button. It survives the
-    /// activation it pays for — a press that has already switched the view is
-    /// still a press, and T5's drag needs to find it there.
-    tab_press: Option<TabPress>,
-    /// The left press being held on a pane head (J118).
-    ///
-    /// A second field rather than a second variant of [`Self::tab_press`],
-    /// because the two hold different things — a tab press carries an unpaid
-    /// activation and a pane press carries only the six pixels — and because
-    /// they cannot both exist: `chrome_mouse_input` routes one press to one
-    /// target, and the one it did not choose is cleared.
-    pane_press: Option<PanePress>,
-    /// The left press being held on a **files tree row** (P81).
-    ///
-    /// A third field for [`Self::pane_press`]'s reason, and a fourth thing it
-    /// holds: a row press has to remember *which host and which row*, because
-    /// the payload is resolved out of the live tree at the moment the six pixels
-    /// are crossed rather than at the press — a directory that finished loading
-    /// in between has moved every row below it.
-    ///
-    /// **Arming it costs the click nothing**, which is what P81's own sentence
-    /// is about ("startDrag's 6px threshold keeps click/dblclick intact"): the
-    /// press goes on to select the row and toggle the folder exactly as it did,
-    /// and the latch simply waits beside it.
-    row_press: Option<RowPress>,
     /// The glance card's intent and, once it has matured, the card itself
     /// (P143-P150).
     ///
@@ -15049,16 +15002,6 @@ struct WindowRuntime {
     /// is one pointer: "which row is being glanced at" is a singleton for the
     /// same reason "what is hovered" is.
     file_peek: Option<FilePeek>,
-    /// **A left press being held on the card's head** (user ruling 2026-08-27,
-    /// §7.29) — six pixels away from turning the card into a window.
-    ///
-    /// Beside the card rather than inside it, for [`FilePeek::thumb_grab`]'s
-    /// reason turned inside out: a thumb drag dies with the card it is
-    /// scrolling, and so does this — but this one *consumes* its card, so it has
-    /// to outlive the field by exactly the one statement that empties it. Kept
-    /// here and cleared by [`Runtime::hide_file_peek`], which is the one door
-    /// every way the card ends already goes through.
-    file_peek_press: Option<FilePeekPress>,
     /// The body the glance is reading, for a file the pool does not hold.
     ///
     /// **Not in the pool, and that is the whole reason it is a field.** The pool
@@ -15135,19 +15078,6 @@ struct WindowRuntime {
     /// pointer coming back to a row it just left is the one case worth remembering. What keeps
     /// that memory honest is `PeekPageOutcome`, not the card's lifetime.
     peek_page: Option<PeekPageSlot>,
-    /// The gesture in flight, whatever it is carrying (J111).
-    ///
-    /// Separate from the presses rather than a further promise state, because
-    /// they answer different questions and outlive each other in both
-    /// directions: a press that has not travelled is not a drag, and a drag that
-    /// has been cancelled still has to hand the press back its answer (J108).
-    ///
-    /// `is_some()` is this window's `body.dragging` (J117), and it is read
-    /// rather than mirrored: every suppression in the window — the cursor's
-    /// shape, the divider's silence, the tip, the peek, the terminal's own
-    /// selection — asks this one field, so a source added later is silenced by
-    /// all of them without touching any of them.
-    drag: Option<Drag>,
     /// **A gesture another window is holding, over this window's glass**
     /// (multiwindow slice F2). See [`ForeignDrag`].
     ///
@@ -15275,6 +15205,11 @@ struct WindowRuntime {
     /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
     /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
     window_close_requested: Option<WindowId>,
+    /// The final tab asked the native close because its last shell exited.
+    ///
+    /// Kept until the close event comes back through `FolioApp::close`; without it that event is
+    /// indistinguishable from the window's close button.
+    shell_exit_close_requested: bool,
     /// Which preview pane has its filename switcher up (P130-P137).
     ///
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
@@ -15439,17 +15374,6 @@ struct WindowRuntime {
     /// was — [`Self::tooltip_drawn_opacity`]'s own frame-debt question, asked
     /// about the card's fade (owner's ruling 2026-09-13).
     file_peek_drawn_opacity: Option<f32>,
-    /// **Which surface's control bar has a track in hand** (route B slice ②,
-    /// 2026-08-28; §7.44 ②).
-    ///
-    /// One `Option` per gesture kind, which is the shape every other drag in
-    /// this window has and is not a matter of taste: `TerminalThumbDrag`'s own
-    /// note refuses a shared "which am I dragging" enum because the gestures can
-    /// never be in hand at once. The scrubber and the volume are the exception
-    /// that proves it — they *are* two tracks — so which of them is held lives
-    /// on the seat itself (`video_seat::VideoSeat::is_grabbing`) and what lives
-    /// here is only which surface owns the pointer.
-    video_bar_drag: Option<PreviewSurface>,
     /// **A card's engine is on its way into a float** — see
     /// [`Runtime::promote_file_peek`] and [`Runtime::hide_file_peek`].
     ///
@@ -15522,24 +15446,6 @@ struct WindowRuntime {
     /// tabs and opening new ones, because it stopped belonging to the tab it was
     /// summoned from the moment it was torn off.
     float: float::FloatHost,
-    /// A pinned float being moved or resized by hand, or `None`.
-    ///
-    /// Beside [`WindowRuntime::divider_drag`] rather than folded into it: a divider
-    /// drag is one axis of one seam and writes a ratio into the tree, while this
-    /// is two axes of a surface that is not in the tree at all
-    /// (`M2-tiny-window-priority.md` §3.1 — 浮窗对布局是只读消费者). Sharing a
-    /// state machine would put a rewrite of the layout one typo away from a
-    /// gesture that must never perform one.
-    float_drag: Option<FloatDrag>,
-    /// A press on a peek's header that has not yet travelled far enough to mean
-    /// anything (user ruling 2026-08-12) — see [`FloatHeadPress`].
-    ///
-    /// Its own field rather than a third arm of [`FloatDrag`], because it is not
-    /// a drag: nothing is being moved while it is held, the window is still a
-    /// peek, and a release inside the six pixels leaves the world exactly as it
-    /// found it. It becomes a `FloatDrag::Move` at the moment it stops being
-    /// this, which is the one transition it exists to carry.
-    float_head_press: Option<FloatHeadPress>,
     /// Which float the pointer is over and what part of it, or `None`.
     ///
     /// Stored rather than recomputed at paint time because the float's boxes are
@@ -15590,7 +15496,6 @@ struct WindowRuntime {
     /// because `ChromeMarkRasters::resolve` keeps exactly what the call asked
     /// for: one cache serving two lists would evict each on the other's turn.
     settings_marks: marks::ChromeMarkRasters,
-    divider_drag: Option<DividerDrag>,
     /// **B22 — how far F63's resizing cards have pulled in**, and which split
     /// they belong to.
     ///
@@ -20008,6 +19913,10 @@ struct PreviewRailFrame {
     /// written in `--err` where it is being typed. It moved down here with the
     /// field on 2026-08-24.
     refused: bool,
+    /// **What the commit said about the draft standing in the field** — the
+    /// sentence and its measured width — when only the commit could know it
+    /// (M-SWEEP-048: a path that names no file). Drawn at the field's end.
+    refusal: Option<(String, f32)>,
     flip_to_source: bool,
     web: seats::WebHeadState,
 }
@@ -23331,7 +23240,17 @@ struct TabRename {
     /// itself, and typing the refused name back in shows the refusal again —
     /// which is right, because it is still refused. One field, and no hook in
     /// any verb.
-    refused: Option<(String, files::NewNameRefusal)>,
+    refused: Option<(String, EditorRefusal)>,
+}
+
+/// The two kinds of refusal a submission of [`TabRename`]'s draft can raise —
+/// one per door that refuses at the commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorRefusal {
+    /// A new entry's name the folder would not take (D8(a)).
+    NewName(files::NewNameRefusal),
+    /// A page's address the disk said no to (M-SWEEP-048).
+    Address(webhost::AddressRefusal),
 }
 
 impl TabRename {
@@ -23678,12 +23597,40 @@ impl TabRename {
     /// The draft is kept with it; see [`Self::refused`] for why that is the
     /// whole of the invalidation.
     fn refuse(&mut self, refusal: files::NewNameRefusal) {
-        self.refused = Some((self.field.text().to_owned(), refusal));
+        self.refused = Some((
+            self.field.text().to_owned(),
+            EditorRefusal::NewName(refusal),
+        ));
+    }
+
+    /// [`Self::refuse`] for a page's address: what the disk said at the commit,
+    /// kept against the draft it was said about.
+    fn refuse_address(&mut self, refusal: webhost::AddressRefusal) {
+        self.refused = Some((
+            self.field.text().to_owned(),
+            EditorRefusal::Address(refusal),
+        ));
     }
 
     /// The refusal standing against the draft **as it is now** — `None` the
     /// moment a character changes it.
     fn refusal(&self) -> Option<files::NewNameRefusal> {
+        match self.standing_refusal()? {
+            EditorRefusal::NewName(refusal) => Some(refusal),
+            EditorRefusal::Address(_) => None,
+        }
+    }
+
+    /// [`Self::refusal`] for a page's address field.
+    fn address_refusal(&self) -> Option<webhost::AddressRefusal> {
+        match self.standing_refusal()? {
+            EditorRefusal::Address(refusal) => Some(refusal),
+            EditorRefusal::NewName(_) => None,
+        }
+    }
+
+    /// Whichever refusal stands against the draft as it is now.
+    fn standing_refusal(&self) -> Option<EditorRefusal> {
         self.refused
             .as_ref()
             .filter(|(draft, _)| draft == self.field.text())
@@ -26841,6 +26788,7 @@ fn preview_reference_row(target: &str, document: &Path) -> ReferenceRow {
         preview::LinkAction::Web(url) => ReferenceRow::Web(url),
         preview::LinkAction::Refused(path) => ReferenceRow::Unasked(path, None),
         preview::LinkAction::Scheme(uri) => ReferenceRow::Scheme(uri),
+        preview::LinkAction::Unnamed(_) => ReferenceRow::Unnamed,
         preview::LinkAction::Nowhere => ReferenceRow::Nothing,
     }
 }
@@ -32163,7 +32111,27 @@ impl OverlayStack {
             + self.layout_peek.len()
     }
 
+    /// The whole overlay, bottom to top, **as one list** — what
+    /// [`Self::bands_bottom_first`] names, folded.
     fn flattened(self) -> marks::Band {
+        self.bands_bottom_first().into_iter().fold(
+            marks::Band::default(),
+            |mut stack, (_, band)| {
+                stack.append(band);
+                stack
+            },
+        )
+    }
+
+    /// **Every band of the overlay, bottom to top, each with its name** — the
+    /// z-order as a value (T-POINTER-CAPTURE cut 1).
+    ///
+    /// The order is the paint's ([`Self::flattened`] folds this list and
+    /// nothing else) and, read top first, the pointer's: the router's layer
+    /// list ([`runtime::pointer::POINTER_LAYERS_TOP_FIRST`]) names the bands it
+    /// stands for, and `every_band_is_a_pointer_layer_or_takes_no_pointer`
+    /// requires the two to agree band for band.
+    fn bands_bottom_first(self) -> [(OverlayBand, marks::Band); OVERLAY_BANDS] {
         let Self {
             preview_bars,
             video_bars,
@@ -32210,39 +32178,70 @@ impl OverlayStack {
             },
         );
         [
-            preview_bars,
-            video_bars,
-            terminal_bars,
-            command_rail,
-            formula_tools,
-            rail,
-            flight,
-            ground,
-            in_pane,
-            web_sheet,
-            layout_peek,
-            float,
-            modal,
-            file_menu,
-            pane_menu,
-            git_menu,
-            term_menu,
-            tab_menu,
-            palette,
-            toast,
-            key_hint,
-            card_hint,
-            tooltip,
-            file_peek,
-            drag_ghost,
-            window_ring,
+            (OverlayBand::PreviewBars, preview_bars),
+            (OverlayBand::VideoBars, video_bars),
+            (OverlayBand::TerminalBars, terminal_bars),
+            (OverlayBand::CommandRail, command_rail),
+            (OverlayBand::FormulaTools, formula_tools),
+            (OverlayBand::Rail, rail),
+            (OverlayBand::Flight, flight),
+            (OverlayBand::Ground, ground),
+            (OverlayBand::InPane, in_pane),
+            (OverlayBand::WebSheet, web_sheet),
+            (OverlayBand::LayoutPeek, layout_peek),
+            (OverlayBand::Float, float),
+            (OverlayBand::Modal, modal),
+            (OverlayBand::FileMenu, file_menu),
+            (OverlayBand::PaneMenu, pane_menu),
+            (OverlayBand::GitMenu, git_menu),
+            (OverlayBand::TermMenu, term_menu),
+            (OverlayBand::TabMenu, tab_menu),
+            (OverlayBand::Palette, palette),
+            (OverlayBand::Toast, toast),
+            (OverlayBand::KeyHint, key_hint),
+            (OverlayBand::CardHint, card_hint),
+            (OverlayBand::Tooltip, tooltip),
+            (OverlayBand::FilePeek, file_peek),
+            (OverlayBand::DragGhost, drag_ghost),
+            (OverlayBand::WindowRing, window_ring),
         ]
-        .into_iter()
-        .fold(marks::Band::default(), |mut stack, band| {
-            stack.append(band);
-            stack
-        })
     }
+}
+
+/// How many bands [`OverlayStack::bands_bottom_first`] names.
+const OVERLAY_BANDS: usize = 26;
+
+/// **One band of the overlay, by name** — a field of [`OverlayStack`], with
+/// `InPane` standing for the search capsule and the notice strips, which are
+/// painted as one band in the order [`IN_PANE_SURFACES_TOP_FIRST`] states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverlayBand {
+    PreviewBars,
+    VideoBars,
+    TerminalBars,
+    CommandRail,
+    FormulaTools,
+    Rail,
+    Flight,
+    Ground,
+    InPane,
+    WebSheet,
+    LayoutPeek,
+    Float,
+    Modal,
+    FileMenu,
+    PaneMenu,
+    GitMenu,
+    TermMenu,
+    TabMenu,
+    Palette,
+    Toast,
+    KeyHint,
+    CardHint,
+    Tooltip,
+    FilePeek,
+    DragGhost,
+    WindowRing,
 }
 
 /// K115 — how far from its slot a grabbed tab is drawn, given where the hand
@@ -34950,20 +34949,20 @@ impl OverInPane {
 
 #[cfg(test)]
 impl OverInPane {
-    /// The [`OverlayStack`] field this family is painted in.
-    const fn band(self) -> &'static str {
+    /// The [`OverlayStack`] band this family is painted in.
+    const fn band(self) -> OverlayBand {
         match self {
-            Self::FilePeek => "file_peek",
-            Self::Toast => "toast",
-            Self::Palette => "palette",
-            Self::TabMenu => "tab_menu",
-            Self::TermMenu => "term_menu",
-            Self::GitMenu => "git_menu",
-            Self::PaneMenu => "pane_menu",
-            Self::FileMenu => "file_menu",
-            Self::Modal => "modal",
-            Self::Float => "float",
-            Self::WebSheet => "web_sheet",
+            Self::FilePeek => OverlayBand::FilePeek,
+            Self::Toast => OverlayBand::Toast,
+            Self::Palette => OverlayBand::Palette,
+            Self::TabMenu => OverlayBand::TabMenu,
+            Self::TermMenu => OverlayBand::TermMenu,
+            Self::GitMenu => OverlayBand::GitMenu,
+            Self::PaneMenu => OverlayBand::PaneMenu,
+            Self::FileMenu => OverlayBand::FileMenu,
+            Self::Modal => OverlayBand::Modal,
+            Self::Float => OverlayBand::Float,
+            Self::WebSheet => OverlayBand::WebSheet,
         }
     }
 }
@@ -34982,18 +34981,6 @@ const OVER_IN_PANE_TOP_FIRST: [OverInPane; 11] = [
     OverInPane::Modal,
     OverInPane::Float,
     OverInPane::WebSheet,
-];
-
-/// The bands painted above the in-pane surfaces that never take the pointer:
-/// pictures that follow it or explain it, which a hand points *through*.
-#[cfg(test)]
-const BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER: [&str; 6] = [
-    "layout_peek",
-    "key_hint",
-    "card_hint",
-    "tooltip",
-    "drag_ghost",
-    "window_ring",
 ];
 
 /// Which surface a files tree is drawn on — the two hosts P81 asks to be wired.
@@ -35193,10 +35180,6 @@ struct FilePeek {
     ///
     /// `None` whenever the pointer is somewhere the card is alive.
     closing_at: Option<Instant>,
-    /// The hand on the scroll thumb, and how far into the thumb it took hold —
-    /// [`PreviewBlockDrag::grab`]'s twin, and kept here rather than beside it
-    /// because a card that comes down takes its drag with it.
-    thumb_grab: Option<f32>,
     /// **The card the pointer is about to move to** (user ruling, 2026-08-14:
     /// *停留即换*) — another row's glance, already armed, waiting for its own
     /// [`file_peek::PEEK_INTENT_MS`] to run out.
@@ -40616,6 +40599,7 @@ fn bare_leaf(
         incarnation: next_incarnation(),
         wake,
         pty: None,
+        shell_exit_said: false,
         foreground_program_cadence: foreground_program::Cadence::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
@@ -41504,19 +41488,12 @@ fn assemble_tab_state(
         preview_pool,
         preview_edit_focus: None,
         preview_views: PreviewViewStore::default(),
-        preview_selecting: None,
-        preview_image_drag: None,
         preview_image_clicks: ImageClicks::default(),
-        preview_text_drag: None,
         preview_text_clicks: PreviewTextClicks::default(),
-        preview_block_drag: None,
         preview_block_hover: None,
-        preview_body_drag: None,
         preview_body_hover: None,
-        terminal_thumb_drag: None,
         terminal_thumb_hover: None,
         terminal_thumb_owed_frame: false,
-        terminal_column_drag: None,
         terminal_column_hover: None,
         preview_link_hover: None,
     };
@@ -43244,7 +43221,7 @@ struct NewWindowParts {
     /// Where this window's touch door parks the pans the system recognised —
     /// see [`WindowRuntime::parked_pans`]. Made where the door is opened,
     /// because the door is opened before there is a window runtime to hold it.
-    parked_pans: ParkedPans,
+    parked_pans: runtime::pointer::touch::ParkedPans,
     /// The application's favicon store, handed to this window's mark rasterizer
     /// so that a page drawn here wears what any window in the process learned
     /// about its site — see [`App::favicons`].
@@ -43424,8 +43401,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         background_picture: None,
         background_decode: BackgroundDecodeMailbox::default(),
         clipboard_picture: ClipboardPictureMailbox::default(),
-        settings_slider_drag: None,
-        settings_menu_bar_drag: None,
         dwm_dark_mode: None,
         translucency_available,
         custom_window_frame,
@@ -43542,7 +43517,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         ime_system_caret,
         pointer_position: None,
         pointer_last_seen: None,
-        mouse_route: None,
+        pointer_facts: runtime::pointer::PointerFacts::default(),
+        pointer_memo: runtime::pointer::PointerMemo::default(),
         click_tracker: ClickTracker::default(),
         line_wheel_remainder: 0.0,
         pixel_wheel_remainder: 0.0,
@@ -43613,6 +43589,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         powershell_profile_undo: None,
         checkout_from: None,
         checkout_undo: None,
+        recovered_card: None,
         settings_scroll: 0.0,
         profile_menu: profiles::ProfileMenu::default(),
         chevron_turn: ChevronTurn::default(),
@@ -43635,11 +43612,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         rail_chrome: seats::ChromeGroup::default(),
         flight_chrome: seats::ChromeGroup::default(),
         last_drawn_rail: None,
-        tab_press: None,
-        pane_press: None,
-        row_press: None,
         file_peek: None,
-        file_peek_press: None,
         peek_buffer: None,
         peek_pane: PreviewPane::default(),
         peek_picture: None,
@@ -43647,7 +43620,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_facts: None,
         video_facts: BTreeMap::new(),
         peek_page: None,
-        drag: None,
         foreign: None,
         tearing_out: false,
         drop_preview: None,
@@ -43666,6 +43638,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
         window_close_requested: None,
+        shell_exit_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
@@ -43680,8 +43653,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         chevrons: ChevronGates::default(),
         graph_filter_menu: None,
         float: float::FloatHost::default(),
-        float_drag: None,
-        float_head_press: None,
         float_hover: None,
         revealed_foot: None,
         files_name_widths: BTreeMap::new(),
@@ -43691,7 +43662,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         float_video_level: BTreeMap::new(),
         file_peek_level: None,
         file_peek_drawn_opacity: None,
-        video_bar_drag: None,
         video_carried_off_the_card: false,
         git_graphs_shown: BTreeMap::new(),
         files_view_widths: BTreeMap::new(),
@@ -43702,7 +43672,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         blank_page: None,
         rename_blink: CursorBlink::new(Instant::now(), motion),
         settings_marks: marks::ChromeMarkRasters::default(),
-        divider_drag: None,
         resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
         resizing_card_split: None,
         last_drawn_resizing_card: None,
@@ -43929,13 +43898,13 @@ impl settings::geometry::PointerHost for Runtime<'_> {
 
     fn settings_drag(&mut self, layout: &settings::SettingsLayout, x: f64, y: f64) -> Result<bool> {
         // Captured gestures own the pointer, even outside their original track.
-        if let Some(row) = self.window.settings_slider_drag {
+        if let Some(row) = self.held_settings_slider_drag().copied() {
             if let Some(value) = layout.slider_at(row, x) {
                 self.apply_slider(row, value)?;
             }
             return Ok(true);
         }
-        if self.window.settings_menu_bar_drag.is_some()
+        if self.held_settings_menu_bar_drag().copied().is_some()
             && let Some(bar) = layout.menu_bar()
         {
             self.drag_settings_menu_bar(&bar, PhysicalPosition::new(x, y))?;
@@ -44337,6 +44306,14 @@ impl Runtime<'_> {
             });
         }
         install_channel::begin();
+        // **And the recovered folder's** (T-RECOVERED-FOLDER): asked at the first frame on the
+        // glass (`recovered::begin`), its wake installed here, before anything can ask.
+        {
+            let proxy = proxy.clone();
+            recovered::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::RecoveredEditsListed);
+            });
+        }
         // **The data directory's two endpoints, opened by its writer and by nobody else** (§7.59,
         // audit 3 A-3). One call and one gate, so that a third door added beside them cannot be
         // added outside it.
@@ -44604,7 +44581,7 @@ impl Runtime<'_> {
         // winit made the registration this undoes when it built the window.
         // Reported and never propagated: a window that answers nothing to a
         // finger is a window, and a launch that died instead is not.
-        let parked_pans = let_the_system_translate_touch(native, &proxy);
+        let parked_pans = runtime::pointer::touch::let_the_system_translate_touch(native, &proxy);
         // **This window's own chrome, read where it was measured** (M3-3;
         // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
         // where the platform is asked what it still draws in this bar, and the
@@ -45107,6 +45084,8 @@ impl Runtime<'_> {
             #[cfg(target_os = "linux")]
             pending_drag_guard_screen: None,
             drag_broker: None,
+            pointer_capture: None,
+            pointer_capture_overlaps: Vec::new(),
             pending_handover: None,
             quit_requested: false,
             quit: None,
@@ -45340,7 +45319,7 @@ impl Runtime<'_> {
     /// picture of that is no card at all.
     fn sync_resizing_cards(&mut self, now: Instant) {
         let motion = self.app.motion;
-        if let Some(drag) = self.window.divider_drag {
+        if let Some(drag) = self.held_divider_drag().copied() {
             self.window.resizing_card_split = Some(drag.split);
             self.window
                 .resizing_card_transition
@@ -46211,7 +46190,7 @@ impl Runtime<'_> {
     /// What the plan on screen must be a function of, or `None` when there is no
     /// dock to draw.
     fn plan_inputs(&self) -> Option<PlanInputs> {
-        self.plan_inputs_for(self.window.drag.as_ref()?)
+        self.plan_inputs_for(self.held_drag()?)
     }
 
     /// The same question asked of a drag the caller is holding.
@@ -47888,23 +47867,6 @@ impl Runtime<'_> {
         button: MouseButton,
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
-        // A release ends a slider drag wherever it lands, before the press gate
-        // below turns it away: a gesture that began on a track can finish
-        // anywhere, and a thumb that kept following the pointer after the button
-        // came up would be a control stuck to the hand.
-        if state == ElementState::Released
-            && (self.window.settings_slider_drag.take().is_some()
-                || self.window.settings_menu_bar_drag.take().is_some())
-        {
-            if let Some(position) = self.window.pointer_position {
-                let hover = settings::hit(layout, &self.settings_values(), position.x, position.y);
-                self.window.settings.set_hover(Some(hover));
-            }
-            if self.refresh_chrome() {
-                self.present_chrome_change()?;
-            }
-            return Ok(());
-        }
         if state != ElementState::Pressed || button != MouseButton::Left {
             return Ok(());
         }
@@ -47918,7 +47880,7 @@ impl Runtime<'_> {
             && contains_point(bar.grab, position)
         {
             let held = (position.y as f32 - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1]);
-            self.window.settings_menu_bar_drag = Some(held);
+            self.latch_settings_menu_bar_drag(held);
             self.drag_settings_menu_bar(&bar, position)?;
             return Ok(());
         }
@@ -47987,7 +47949,7 @@ impl Runtime<'_> {
                 if let Some(value) = layout.slider_at(row, position.x) {
                     self.apply_slider(row, value)?;
                 }
-                self.window.settings_slider_drag = Some(row);
+                self.latch_settings_slider_drag(row);
             }
             // Turning a page puts the reader at the top of it.
             (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
@@ -49413,7 +49375,8 @@ impl Runtime<'_> {
             scrolled: leaf.projection.horizontal().is_scrolled(),
             near: self.terminal_column_hover == Some(seat),
             held: self
-                .terminal_column_drag
+                .held_terminal_column_drag()
+                .copied()
                 .is_some_and(|drag| drag.seat == seat),
             since_rest: now.saturating_duration_since(leaf.column_awake),
         };
@@ -49432,7 +49395,7 @@ impl Runtime<'_> {
         };
         let at = [position.x as f32, position.y as f32];
         self.terminal_column_hover = Some(seat);
-        self.terminal_column_drag = Some(TerminalColumnDrag {
+        self.latch_terminal_column_drag(TerminalColumnDrag {
             seat,
             grab: bar.grip(at[0]),
         });
@@ -49445,7 +49408,7 @@ impl Runtime<'_> {
 
     /// The pointer travelling with a foot mark in hand.
     fn drag_terminal_column_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(drag) = self.terminal_column_drag else {
+        let Some(drag) = self.held_terminal_column_drag().copied() else {
             return Ok(false);
         };
         // The gesture's own pane, not the one under the pointer, and re-derived
@@ -49505,7 +49468,7 @@ impl Runtime<'_> {
         let at = [position.x as f32, position.y as f32];
         self.terminal_thumb_hover = Some(seat);
         if bar.thumb_holds(at) {
-            self.terminal_thumb_drag = Some(TerminalThumbDrag {
+            self.latch_terminal_thumb_drag(TerminalThumbDrag {
                 seat,
                 // Where in the thumb the hand took hold, so the mark stays under
                 // the pointer rather than jumping its top edge there.
@@ -49529,7 +49492,7 @@ impl Runtime<'_> {
     /// copy of the geometry it started with would drift away from the text it is
     /// scrolling.
     fn drag_terminal_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(drag) = self.terminal_thumb_drag else {
+        let Some(drag) = self.held_terminal_thumb_drag().copied() else {
             return Ok(false);
         };
         // The gesture's own pane, not the one under the pointer: a hand that has
@@ -49618,7 +49581,8 @@ impl Runtime<'_> {
                     && !leaf.projection.is_scrolled()
                     && self.terminal_thumb_hover != Some(**seat)
                     && self
-                        .terminal_thumb_drag
+                        .held_terminal_thumb_drag()
+                        .copied()
                         .is_none_or(|drag| drag.seat != **seat)
             })
             .map(|(_, leaf)| leaf.thumb_awake)
@@ -49635,7 +49599,8 @@ impl Runtime<'_> {
                             && !leaf.session.terminal_modes().alternate_screen
                             && !leaf.projection.horizontal().is_scrolled()
                             && self
-                                .terminal_column_drag
+                                .held_terminal_column_drag()
+                                .copied()
                                 .is_none_or(|drag| drag.seat != **seat)
                     })
                     .map(|(_, leaf)| leaf.column_awake),
@@ -52016,7 +51981,7 @@ impl Runtime<'_> {
     /// you are holding cannot be carried out over the caption buttons, off the
     /// window's left edge, or past the rail's head or foot.
     fn track_grabbed(&self, position: PhysicalPosition<f64>) -> Option<f32> {
-        let drag = self.window.drag.as_ref()?;
+        let drag = self.held_drag()?;
         let (tab, carry) = (drag.tab()?, drag.tab_carry()?);
         let index = self
             .window
@@ -53228,7 +53193,10 @@ impl Runtime<'_> {
         bar: &preview::ScrollBar,
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
-        let held = self.window.settings_menu_bar_drag.unwrap_or_default();
+        let held = self
+            .held_settings_menu_bar_drag()
+            .copied()
+            .unwrap_or_default();
         let along = bar.along([position.x as f32, position.y as f32]);
         let scrolled = preview::scroll_dragged_to(bar, along, held);
         if !self.window.settings.scroll_menu(scrolled) {
@@ -53943,6 +53911,8 @@ impl App {
                         eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
                     }
                 }
+                // On its worker, as at any start's first frame.
+                Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
             }
         }
         #[cfg(target_os = "linux")]
@@ -55094,7 +55064,7 @@ mod key_hint_spend_tests {
     //
     // Both claims are about which line stands before which in a handler that
     // needs a whole window to reach, so they are source pins. They used to read
-    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // the text of `main.rs`; they now ask `bt-source` about an *item* of
     // this crate, so neither is bound to the file the handler happens to be
     // written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
     // before this one ran both readings side by side and asserted they agree.
@@ -55187,7 +55157,7 @@ mod key_hint_spend_tests {
 mod git_hover_heal_tests {
     // ── what this module asks the crate ───────────────────────────────────
     //
-    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // Both pins used to read the text of `main.rs`; they now ask
     // `bt-source` about an *item* of this crate, so neither is bound to the
     // file the method happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -55620,7 +55590,10 @@ mod mouse_trace_station_tests {
         // 29 → 25 on 2026-09-23 (0.4.4 ticket 42): the preview body's five rungs
         // became one ladder a float walks too, and one exit, whose trace names the
         // rung that took the press (`PreviewBodyRung::trace_name`).
-        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 25);
+        // 25 → 12 + 13 on 2026-10-09 (T-POINTER-CAPTURE cut 3): the release ladder's
+        // thirteen exits moved, unchanged, to the capture's own let-go.
+        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 12);
+        assert_every_return_is_traced("release_chrome_capture", "return Ok(true);", 13);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -55697,7 +55670,7 @@ mod recent_folder_door_tests {
     //
     // The two rulings below are about *where* one call is made, which has no
     // value to read back — so they are counted. That count used to be taken off
-    // `include_str!("main.rs")` line by line; it is now asked of `bt-source`,
+    // the text of `main.rs` line by line; it is now asked of `bt-source`,
     // of an *item* of this crate or of the package, so neither ruling is bound
     // to the file the doors happen to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -56732,7 +56705,8 @@ mod files_locate_door_tests {
         // And the drag that draws the selection is keyed on the press's own
         // surface, not on which pane the pointer is over — the one model, shared.
         assert!(
-            method_body("Runtime", "drag_preview_text").contains("self.preview_text_drag"),
+            method_body("Runtime", "drag_preview_text")
+                .contains("self.held_preview_text_drag_mut()"),
             "the float's selection drag spins up a second model instead of the pane's own"
         );
     }
@@ -57159,7 +57133,7 @@ mod file_peek_fade_tests {
 
     // ── what this module asks the crate ───────────────────────────────────
     //
-    // The wiring pins used to read `include_str!("main.rs")`; they now ask
+    // The wiring pins used to read the text of `main.rs`; they now ask
     // `bt-source` about an *item* of this crate, so none of them is bound to
     // the file the method happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -59584,25 +59558,27 @@ mod pointer_chord_site_tests {
         );
     }
 
-    /// PIN (§13.45 ②) — **the gesture's latch has one writer and one reader,
-    /// and both of them are that door.**
+    /// PIN (§13.45 ②) — **the gesture's latch has one writer; its readers
+    /// are the arrived window's door and the application capture door.**
     ///
-    /// The field is a `bool` that travels with the hand; a second place that
-    /// set it would be a second opinion about which press is still down.
+    /// `mouse_input` writes it for the press and reads it for a same-window
+    /// release. The application capture door reads the owner's copy when a
+    /// release arrives in another window and clears it when that remote release
+    /// or cancellation ends the gesture.
     #[test]
     fn one_field_remembers_which_press_is_under_the_hand() {
         let needle = ["window", ".", "secondary_press"].concat();
         let touches = found(needle!(Pattern::text(&needle)), View::CodeKeepingLiterals);
         assert_eq!(
             owner_names(&touches),
-            ["mouse_input×1"],
-            "§4.1: the latch is touched at the one door and nowhere else, and it is named by \
-             the item it is touched in rather than by a line of a file:\n{}",
+            ["capture_before_pointer_event×3", "mouse_input×1"],
+            "§4.1: the latch is touched only at the window's button door and the \
+             application's cross-window capture door:\n{}",
             touches.report(source())
         );
         assert!(
             method_body("Runtime", "mouse_input").contains(&format!("&mut self.{needle},")),
-            "and that item is the one door every button event comes through"
+            "and the window door remains the one writer"
         );
     }
 }
@@ -59966,7 +59942,7 @@ mod page_under_a_laden_hand_tests {
     //
     // Both claims are about where one question is asked and about how wide a
     // list is, and neither returns a value — so they are source pins. They used
-    // to read `include_str!("main.rs")`; they now ask `bt-source` about *items*
+    // to read the text of `main.rs`; they now ask `bt-source` about *items*
     // of this crate, so neither is bound to the file a method or a struct
     // happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -60001,11 +59977,6 @@ mod page_under_a_laden_hand_tests {
         item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
-    /// The braces one type's members are written in, and what is between them.
-    fn type_body(name: &str) -> &'static str {
-        item_body(&bt_source::ItemQuery::type_item(name))
-    }
-
     /// **The carry is asked, and asked before any rectangle is.**
     ///
     /// Red gate: this is the defect. Before the repair `web_page_at` subtracted
@@ -60023,48 +59994,11 @@ mod page_under_a_laden_hand_tests {
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
         let scan = web_page_at
-            .find("self.window.web")
+            .find("self.web_page_shown_at(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
             "a page was claimed before anybody asked whether the hand was full"
-        );
-    }
-
-    /// **Every carry this window can hold is named by the one predicate.**
-    ///
-    /// The repair is only as wide as the list, and the list is exactly the
-    /// window's and the tab's own `…_drag` fields: each of them is a press that
-    /// has not finished, and each of their endings is answered below the page
-    /// arm of the press ladder. A thirteenth gesture added without a line here
-    /// would be a thirteenth gesture that cannot be let go of over a page, which
-    /// is the defect coming back under a new name.
-    ///
-    /// MUTATION: drop any one `…_drag` arm from the predicate and this names it.
-    #[test]
-    fn every_carry_this_window_can_hold_is_named_by_the_one_predicate() {
-        let predicate = method_body("Runtime", "a_gesture_holds_the_pointer");
-        let mut found = 0;
-        for owner in ["WindowRuntime", "TabState"] {
-            for line in type_body(owner).lines() {
-                let field = line.trim_start();
-                let Some((name, _)) = field.split_once(": Option<") else {
-                    continue;
-                };
-                if !(name == "drag" || name.ends_with("_drag")) || name.contains(' ') {
-                    continue;
-                }
-                found += 1;
-                assert!(
-                    predicate.contains(&[name, ".is_some()"].concat()),
-                    "{owner}::{name} is a carry the pages are never told about"
-                );
-            }
-        }
-        assert!(
-            found >= 12,
-            "only {found} carries were read out of the two layers, so this pin is \
-             reading the wrong text"
         );
     }
 }
@@ -60139,7 +60073,7 @@ mod page_under_the_tab_list_tests {
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");
         let scan = web_page_at
-            .find("self.window.web")
+            .find("self.web_page_shown_at(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
@@ -61020,7 +60954,7 @@ mod quit_transaction_tests {
         // own `#[cfg(test)]` declaration — holds the one test that drives a
         // shutdown by hand. So the crate's answer is filtered to the files a
         // product build compiles, which is the question this pin was always
-        // asking and the one `include_str!("main.rs")` could only approximate.
+        // asking and the one the text of `main.rs` could only approximate.
         assert_eq!(
             in_product(&found(needle!(Pattern::text(&on_this_thread)), View::Raw)),
             // None at all, counted over every file a product build of this package
@@ -62566,7 +62500,7 @@ mod textless_present_tests {
     // A `WindowRuntime` is a surface, a compositor and four Win32 bridges, so
     // the two present sites cannot be stood up and what can be held about them
     // is the shape of their `match`. That used to be read out of
-    // `include_str!("main.rs")`; it is now asked of `bt-source` about an *item*
+    // the text of `main.rs`; it is now asked of `bt-source` about an *item*
     // of this crate, so no claim here is bound to the file the method happens to
     // be written in (`docs/plans/bt-app-split-prep.md` §6.3). The commit before
     // this one ran both readings side by side and asserted they agree.
@@ -64199,7 +64133,21 @@ impl FolioApp {
         // program: it goes when the windows go, and comes back holding what the
         // restore row says — see `retire_the_summon_with_the_run` below.
         let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id));
-        // A dirty summoned window answers before this last visible window leaves.
+        // **And a close that ends the run asks the summoned terminal first**
+        // (T-SUMMON-DIRTY-PREVIEW): it goes with this window, so this close is
+        // its shut too, and an unsaved buffer in it is asked about in it before
+        // anything is told. Asked, this window stays open: the summoned terminal
+        // never stands alone.
+        // The close request's cause is one-shot even when that question refuses this attempt:
+        // a later hand-close must describe the later request, not this one.
+        let last_window_cause = if ending {
+            let Some(runtime) = self.runtime(id) else {
+                return Ok(());
+            };
+            exit_diagnostics::take_last_window_cause(&mut runtime.window.shell_exit_close_requested)
+        } else {
+            exit_diagnostics::LastWindowCause::PersonClosedIt
+        };
         if ending && !self.the_summon_lets_the_run_end(id)? {
             return Ok(());
         }
@@ -64253,6 +64201,7 @@ impl FolioApp {
             if let Some(app) = self.app.as_mut() {
                 app.finish();
             }
+            exit_diagnostics::say_last_window_closed(last_window_cause, diagnostics::note);
         }
         closed
     }
@@ -65506,6 +65455,9 @@ impl FolioApp {
         }
         self.termination = Some(answer);
         if let Some(app) = self.app.as_mut() {
+            if app.quit.is_none() && !app.quit_requested {
+                app.quit_reason = quit::Reason::LaunchWireQuit;
+            }
             app.ask_to_quit();
         }
     }
@@ -65697,6 +65649,29 @@ impl FolioApp {
             let id = self.windows.key_at(index)?;
             let window = self.windows.get_mut(id)?;
             (window.window_focused && window.leaving.is_none()).then_some(id)
+        })
+    }
+
+    /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): the worker's answer, raised
+    /// once on the window the keyboard is on, or on the oldest open window when none has it.
+    fn announce_recovered_edits(&mut self) -> Result<()> {
+        let Some(announcement) = recovered::take() else {
+            return Ok(());
+        };
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let Some(id) = self.frontmost_window().or_else(|| oldest_standing(self)) else {
+            return Ok(());
+        };
+        self.runtime(id).map_or(Ok(()), |mut runtime| {
+            runtime.announce_recovered_edits(&announcement)
         })
     }
 
@@ -66993,11 +66968,27 @@ impl FolioApp {
                     // The run's sentinel, dropped once — `App::finish`, spent
                     // here for the reason `FolioApp::close` spends it there: this
                     // is where "there are no windows left" becomes true.
+                    let cause = match self
+                        .app
+                        .as_ref()
+                        .and_then(|app| app.quit.as_ref())
+                        .map(quit::Quit::reason)
+                    {
+                        Some(quit::Reason::Asked) => exit_diagnostics::LastWindowCause::Quit,
+                        Some(quit::Reason::LaunchWireQuit) => {
+                            exit_diagnostics::LastWindowCause::LaunchWireQuit
+                        }
+                        Some(quit::Reason::UpdateRestart { .. }) => {
+                            exit_diagnostics::LastWindowCause::UpdateRestart
+                        }
+                        None => exit_diagnostics::LastWindowCause::UnknownRoad("settle_quit"),
+                    };
                     if let Some(app) = self.app.as_mut() {
                         app.quit = None;
                         app.finish();
                     }
                     self.windows.clear();
+                    exit_diagnostics::say_last_window_closed(cause, diagnostics::note);
                     // **And AppKit, if it was AppKit that asked** (M3-1).
                     // `NSTerminateNow`, said here rather than a line earlier:
                     // answering it lets `-[NSApplication terminate:]` go on to
@@ -67370,7 +67361,16 @@ impl FolioApp {
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
             announce_panic(path);
         });
-        if let Err(shutdown_error) = self.stop_every_window() {
+        let had_windows = !self.windows.is_empty();
+        let failure = format!("{error:#}");
+        let stopped = self.stop_every_window();
+        if had_windows {
+            exit_diagnostics::say_last_window_closed(
+                exit_diagnostics::LastWindowCause::ControlledFailure(&failure),
+                diagnostics::note,
+            );
+        }
+        if let Err(shutdown_error) = stopped {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
         // **The spare is abandoned, not waited for** (ticket 60, SW-2): its controller closed now,
@@ -68171,6 +68171,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
                 Ok(())
             }
+            // **The edits a stop kept, said** (T-RECOVERED-FOLDER).
+            AppEvent::RecoveredEditsListed => self.announce_recovered_edits(),
             // **The update job decides** (U-18), on whatever has landed.
             AppEvent::UpdateJobOffer => {
                 self.consider_update_offer();
@@ -68695,6 +68697,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             if self.is_leaving(window_id) {
                 return;
             }
+            match self.capture_before_pointer_event(window_id, &event) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            }
             let Some(mut runtime) =
                 hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
             else {
@@ -68705,26 +68715,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // costs one frame instead of one frame each, and this is the line that
             // keeps that from being a reordering — whatever arrives next answers the
             // window the wheel has already moved.
-            if !matches!(event, WindowEvent::MouseWheel { .. })
+            if !runtime::pointer::is_wheel_event(&event)
                 && let Err(error) = runtime.flush_wheel()
             {
                 self.fail(event_loop, error);
                 return;
             }
             #[cfg(target_os = "linux")]
-            if matches!(
-                event,
-                WindowEvent::CursorMoved { .. }
-                    | WindowEvent::CursorEntered { .. }
-                    | WindowEvent::CursorLeft { .. }
-                    | WindowEvent::MouseInput { .. }
-                    | WindowEvent::MouseWheel { .. }
-                    | WindowEvent::KeyboardInput { .. }
-                    | WindowEvent::Resized(_)
-                    | WindowEvent::Moved(_)
-                    | WindowEvent::ScaleFactorChanged { .. }
-                    | WindowEvent::CloseRequested
-            ) && let Err(error) = runtime.refuse_pending_linux_pointer_actions()
+            if (runtime::pointer::is_pointer_event(&event)
+                || matches!(
+                    event,
+                    WindowEvent::KeyboardInput { .. }
+                        | WindowEvent::Resized(_)
+                        | WindowEvent::Moved(_)
+                        | WindowEvent::ScaleFactorChanged { .. }
+                        | WindowEvent::CloseRequested
+                ))
+                && let Err(error) = runtime.refuse_pending_linux_pointer_actions()
             {
                 self.fail(event_loop, error);
                 return;
@@ -68849,10 +68856,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     // after it is written.
                     runtime.note_key_hint(Instant::now())
                 }
-                WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
-                WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
-                WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
-                WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
+                // **Every pointer event goes through one door** (T-POINTER-CAPTURE
+                // cut 1): the pointer module names the kinds and owns their
+                // answers, so this dispatcher reads no pointer field.
+                event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event),
                 // **A file let go of over this window** (GitHub issue #1 ②). One
                 // event per file and no marker between drops, so the path is
                 // written down here and the batch is spent at the turn boundary —
@@ -68886,7 +68893,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // than on a page's clock: a window can be dragged with nothing on
                 // the glass but a shell, and the engine still has to be right the
                 // next time a page is opened in it.
-                WindowEvent::Moved(position) => runtime.window_moved(position),
+                WindowEvent::Moved(position) => runtime.window_moved(WindowOrigin {
+                    x: position.x,
+                    y: position.y,
+                }),
                 WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
                 // The payload is deliberately dropped: `os_theme_changed` asks the
                 // one reader this process trusts rather than taking a second
@@ -68922,9 +68932,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     // (owner's ruling 2026-09-23).
                     let cancelled = cancelled
                         .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
-                    runtime.window.tab_press = None;
-                    runtime.window.pane_press = None;
-                    runtime.window.row_press = None;
+                    runtime.drop_tab_press();
+                    runtime.drop_pane_press();
+                    runtime.drop_row_press();
                     // P149's `window blur`: a glance is about where the pointer is,
                     // and a window that is not listening has no pointer.
                     runtime.hide_file_peek();
@@ -69188,7 +69198,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // stopping, and every window still up at that moment is a window the
         // reader had open — its unsaved edits are kept, the file says so and the
         // next launch opens them.
-        if let Err(error) = self.stop_every_window() {
+        let stopped = self.stop_every_window();
+        exit_diagnostics::say_last_window_closed(
+            exit_diagnostics::LastWindowCause::ControlledFailure("event loop exited"),
+            diagnostics::note,
+        );
+        if let Err(error) = stopped {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.windows.clear();
@@ -69218,7 +69233,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
 /// gates, early returns, the match, and application follow-up work alike.
 fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
     use hang_watch::Station;
-    match event {
+    // **The pointer kinds are the pointer module's to name** (T-POINTER-CAPTURE
+    // cut 1). Its answer is exhaustive over every kind winit has, so a kind added
+    // to winit stops that match compiling, and every kind it does not claim is
+    // one of the rows below.
+    runtime::pointer::station_of(event).unwrap_or_else(|| match event {
         WindowEvent::CloseRequested => Station::EventClose,
         WindowEvent::KeyboardInput { .. } => Station::EventKey,
         WindowEvent::Ime(Ime::Enabled) => Station::ImeEnabled,
@@ -69226,10 +69245,6 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         WindowEvent::Ime(Ime::Commit(_)) => Station::ImeCommit,
         WindowEvent::Ime(Ime::Disabled) => Station::ImeDisabled,
         WindowEvent::ModifiersChanged(_) => Station::EventModifiers,
-        WindowEvent::CursorMoved { .. } => Station::EventPointer,
-        WindowEvent::CursorLeft { .. } => Station::EventCursorLeft,
-        WindowEvent::MouseInput { .. } => Station::EventMouse,
-        WindowEvent::MouseWheel { .. } => Station::EventWheel,
         WindowEvent::Resized(_) => Station::EventResize,
         WindowEvent::ScaleFactorChanged { .. } => Station::EventScale,
         WindowEvent::Moved(_) => Station::EventMoved,
@@ -69242,7 +69257,6 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         WindowEvent::Destroyed => Station::EventDestroyed,
         WindowEvent::HoveredFile(_) => Station::EventHoveredFile,
         WindowEvent::HoveredFileCancelled => Station::EventHoverCancelled,
-        WindowEvent::CursorEntered { .. } => Station::EventCursorEntered,
         WindowEvent::PinchGesture { .. } => Station::EventPinch,
         WindowEvent::PanGesture { .. } => Station::EventPan,
         WindowEvent::DoubleTapGesture { .. } => Station::EventDoubleTap,
@@ -69250,9 +69264,9 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         WindowEvent::TouchpadPressure { .. } => Station::EventPressure,
         WindowEvent::AxisMotion { .. } => Station::EventAxis,
         WindowEvent::Touch(_) => Station::EventTouch,
-    }
+        pointer => unreachable!("the pointer module names every pointer kind: {pointer:?}"),
+    })
 }
-
 /// One of this window's mouse buttons, in the vocabulary `SendMouseInput`
 /// speaks.
 ///
@@ -70661,6 +70675,16 @@ fn profile_banner_name(id: &str) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
+/// An executable as [`fallback_banner`] names it: by file name, never by path
+/// (`pwsh.exe`, `powershell.exe`, `sh`).
+fn executable_banner_name(program: &std::ffi::OsStr) -> String {
+    Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// The first line of a pane whose profile's shell would not start —
 /// `M2-restart-shell-contract.md` §3's "首行可见降级横幅", and §5#3's ruling that
 /// the swap is *never* silent.
@@ -70704,21 +70728,18 @@ fn profile_banner_name(id: &str) -> String {
 /// on their prompt line, and a person who wants to know *what they are typing
 /// into now* learns it from exactly this.
 fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: &str) -> String {
-    // The record's `started` is `powershell.exe`, and `fallback_profile()` is the
-    // profile that resolves to it — one shell, and the name the user knows it
-    // by is the profile's.
-    debug_assert!(
-        fallback
-            .started
-            .eq_ignore_ascii_case(bt_pty::WINDOWS_POWERSHELL)
-    );
+    // The record's `started` is this platform's last-resort shell
+    // (`powershell.exe` on Windows, `/bin/sh` elsewhere), and
+    // `fallback_profile()` is the profile that resolves to it — one shell, and
+    // the name the user knows it by is the profile's.
+    debug_assert_eq!(fallback.started, bt_pty::LAST_RESORT_SHELL);
     let (requested, started) = if requested == profiles::fallback_profile_id() {
         // **The one case the profiles cannot name**, and it is reachable rather
-        // than theoretical: `BT_SHELL` points the PowerShell profile at a shell
-        // that is not there, or a `pwsh` install is removed between sessions, and
-        // the swap happens *inside* one profile. Both names would be "PowerShell",
-        // and "PowerShell failed to start; using PowerShell instead" is a sentence
-        // that answers nothing.
+        // than theoretical: `BT_SHELL` points the floor profile at a shell that
+        // is not there, or a `pwsh` install is removed between sessions, and the
+        // swap happens *inside* one profile. Both names would be the floor's,
+        // and "PowerShell failed to start; using PowerShell instead" is a
+        // sentence that answers nothing.
         //
         // So the two executables are named, which is the only thing that differs
         // here, and by file name rather than path: `pwsh.exe` → `powershell.exe`
@@ -70726,12 +70747,8 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: &str) -> String 
         // the launcher's bookkeeping — the same reason the rest of this line does
         // not carry one.
         (
-            Path::new(&fallback.requested)
-                .file_name()
-                .unwrap_or(fallback.requested.as_os_str())
-                .to_string_lossy()
-                .into_owned(),
-            fallback.started.to_owned(),
+            executable_banner_name(&fallback.requested),
+            executable_banner_name(std::ffi::OsStr::new(fallback.started)),
         )
     } else {
         (
@@ -71580,7 +71597,7 @@ mod resize_skirt_order_tests {
 
     // ── what this module asks the crate ───────────────────────────────────
     //
-    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // Both pins used to read the text of `main.rs`; they now ask
     // `bt-source` about an *item* of this crate, so neither is bound to the
     // file the method happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -73963,7 +73980,10 @@ fn stand_the_window_at(
                 rect.right.abs_diff(rect.left),
                 rect.bottom.abs_diff(rect.top),
             ));
-            window.set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+            window.set_outer_position(WindowOrigin {
+                x: rect.left,
+                y: rect.top,
+            });
         })
         .map_err(|error| error.to_string())
     };
@@ -74277,36 +74297,6 @@ fn linux_window_request(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_resize_direction(
-    position: PhysicalPosition<f64>,
-    size: PhysicalSize<u32>,
-    scale: f64,
-) -> Option<winit::window::ResizeDirection> {
-    use winit::window::ResizeDirection;
-    let width = f64::from(size.width);
-    let height = f64::from(size.height);
-    if position.x < 0.0 || position.y < 0.0 || position.x >= width || position.y >= height {
-        return None;
-    }
-    let edge = 4.0 * scale;
-    let west = position.x < edge;
-    let east = position.x >= width - edge;
-    let north = position.y < edge;
-    let south = position.y >= height - edge;
-    match (west, east, north, south) {
-        (true, _, true, _) => Some(ResizeDirection::NorthWest),
-        (_, true, true, _) => Some(ResizeDirection::NorthEast),
-        (true, _, _, true) => Some(ResizeDirection::SouthWest),
-        (_, true, _, true) => Some(ResizeDirection::SouthEast),
-        (true, _, _, _) => Some(ResizeDirection::West),
-        (_, true, _, _) => Some(ResizeDirection::East),
-        (_, _, true, _) => Some(ResizeDirection::North),
-        (_, _, _, true) => Some(ResizeDirection::South),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn linux_hotkey_is_current(
     claim: Option<&bt_platform::hotkey::GlobalHotkey>,
     id: i32,
@@ -74613,17 +74603,20 @@ mod linux_window_tests {
 
     #[test]
     fn app_close_requests_reach_the_existing_close_event() {
-        let mouse = include_str!("runtime/mouse.rs");
-        let tabs = include_str!("runtime/tabs.rs");
-        let windows = include_str!("runtime/windows.rs");
+        let mouse = crate::test_support::method_body("Runtime", "chrome_mouse_input");
+        let tabs = crate::test_support::method_body("Runtime", "close_tab");
+        let windows = crate::test_support::method_body("Runtime", "request_window_close");
         assert!(mouse.contains("self.request_window_close()"));
         assert!(tabs.contains("self.request_window_close()"));
         assert!(windows.contains(
             "crate::request_owned_window_close(&self.window.window, &self.app.event_proxy)"
         ));
 
-        let app = include_str!("main.rs");
-        assert!(app.contains("AppEvent::WindowCloseRequested(window.id())"));
+        let request = crate::test_support::free_fn_body("request_owned_window_close");
+        let app = crate::test_support::item_body(
+            &bt_source::ItemQuery::method("FolioApp", "user_event").of_trait("ApplicationHandler"),
+        );
+        assert!(request.contains("AppEvent::WindowCloseRequested(window.id())"));
         assert!(app.contains("AppEvent::WindowCloseRequested(window_id) =>"));
         assert!(
             app.contains("self.window_event(event_loop, window_id, WindowEvent::CloseRequested);")
@@ -74707,97 +74700,6 @@ mod linux_trash_app_source_tests {
         let end = method("FolioApp", "run_end");
         assert!(end.contains("app.trash_pending_count() > 0"));
     }
-}
-
-/// **Hand this window's touch input to the system that already knows what to do
-/// with it** (owner ruling 2026-09-21), and say so once when a finger arrives.
-///
-/// Folio writes no translation from touch to anything. Tap becomes click, drag
-/// becomes scroll and press-and-hold becomes the menu because Windows makes
-/// them so, with the system's own inertia and timings, the way every ordinary
-/// program gets them — and `bt_platform::let_the_system_translate_touch` is the
-/// one door that says it. On macOS the door does nothing, because a trackpad's
-/// gestures already arrive as mouse and scroll events.
-///
-/// **The line is the self-report** (`docs/CONVENTIONS.md` §十 rule 2). Touch
-/// reaches this program from a touch screen or from a remote-desktop tool, both
-/// of which are somebody else's machine as far as this session is concerned, so
-/// the road says once per window that it was walked: what is in
-/// `diagnostics.log` afterwards separates "the finger never reached Folio" from
-/// "it reached Folio and the system did something else with it". Once per
-/// window, no position, nothing about what was touched.
-///
-/// Both window constructors call it, and neither lets it decide whether a
-/// window opens: a refusal is a window that answers nothing to a finger, which
-/// is precisely what it did before this door existed.
-///
-/// **And the one gesture the window answers** (0.4.4 ticket 11): a slide the
-/// system recognised as a pan. The door hands each step of it to the closure
-/// below from inside the window's message dispatch, where no `Runtime` can be
-/// reached, so the closure parks the step and wakes the loop — one value and
-/// one wake per `WM_GESTURE`, and nothing at all while no finger is down — and
-/// [`Runtime::spend_parked_pans`] puts it on the wheel's road on the turn that
-/// wake buys. The slot it parks in is returned, for the window runtime to own.
-fn let_the_system_translate_touch(
-    native: bt_platform::NativeWindow,
-    proxy: &EventLoopProxy<AppEvent>,
-) -> ParkedPans {
-    let parked = ParkedPans::default();
-    let panned = {
-        let parked = Rc::clone(&parked);
-        let proxy = proxy.clone();
-        Box::new(move |step| {
-            parked.borrow_mut().push(step);
-            let _ = proxy.send_event(AppEvent::TouchPanned);
-        })
-    };
-    if let Err(error) = bt_platform::let_the_system_translate_touch(
-        native,
-        Box::new(|| diagnostics::note("touch arrived; handed to the system")),
-        panned,
-    ) {
-        diagnostics::note(&format!("touch door: {error}"));
-    }
-    parked
-}
-
-/// **The pans a window's touch door has answered, waiting for the loop**
-/// (0.4.4 ticket 11).
-///
-/// `Rc<RefCell<_>>` and not a lock: the writer is the door's subclass and the
-/// reader is [`Runtime::spend_parked_pans`], and both run on the window's own
-/// thread — the subclass inside message dispatch, the reader on the turn after
-/// it. A `Vec` rather than a sum, because a pan's opening step carries a point
-/// and two pans in one turn would otherwise have one point between them.
-type ParkedPans = Rc<RefCell<Vec<bt_platform::PanStep>>>;
-
-/// **What one answered pan step is on the wheel's road** (0.4.4 ticket 11):
-/// where the pointer is to be before the wheel turns, if the step opens a
-/// pan, and the wheel report it makes, if it moved.
-///
-/// A pan is answered as a wheel turned under a still pointer. The pointer is
-/// put where the pan went down because the wheel routes by where the pointer
-/// is and a recognised pan is not promoted to mouse input — nothing else says
-/// where the finger is — and it is put there **once**, so the pane under the
-/// finger when it went down keeps the whole pan, the system's inertia
-/// included, the way a pane under a still mouse keeps a spun wheel.
-///
-/// The report is **pixels, one for one**: the travel is physical pixels, which
-/// is `PixelDelta`'s currency, and the sign is already the wheel's — a finger
-/// moving down is positive `y`, which the wheel road reads as travel back up
-/// the document, so the content follows the finger. It is the currency a
-/// precision touchpad speaks, so every scroller that already answers a
-/// trackpad answers a finger without learning anything.
-fn pan_on_the_wheel_road(
-    step: bt_platform::PanStep,
-) -> (Option<PhysicalPosition<f64>>, Option<MouseScrollDelta>) {
-    let pointer = step
-        .began_at
-        .map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y)));
-    let (x, y) = step.travel;
-    let wheel = ((x, y) != (0, 0))
-        .then(|| MouseScrollDelta::PixelDelta(PhysicalPosition::new(f64::from(x), f64::from(y))));
-    (pointer, wheel)
 }
 
 fn cell_width_subpixels(metrics: bt_render::CellMetrics) -> NonZeroI64 {
@@ -77308,6 +77210,8 @@ mod palette_app_tests;
 #[cfg(test)]
 mod persist_app_tests;
 #[cfg(test)]
+mod pointer_app_tests;
+#[cfg(test)]
 mod preview_app_tests;
 #[cfg(test)]
 mod preview_edit_app_tests;
@@ -77437,11 +77341,11 @@ mod webnav_app_tests;
 ///   §13.6). Nothing `cli.rs` *does* is platform-shaped any more.
 #[cfg(test)]
 mod platform_gate_tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 51] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 52] = [
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -77512,6 +77416,8 @@ mod platform_gate_tests {
         "runtime/panes.rs",
         // Linux preview paste adopts its delayed text reply only at the original document instance.
         "runtime/preview.rs",
+        // Linux client-edge resize starts from the pointer inside this authority module.
+        "runtime/pointer/mod.rs",
         // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
         "runtime/quake.rs",
         // Linux tear-out plans carry the worker's work-area and DPI answer to window creation.
@@ -77560,27 +77466,33 @@ mod platform_gate_tests {
     /// and `feature = …` are not statements about a machine and are not counted.
     const PLATFORM_WORDS: [&str; 5] = ["windows", "unix", "macos", "target_os", "target_family"];
 
-    /// Every `.rs` file under this crate's `src`, relative path first.
-    fn sources() -> Vec<(String, String)> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut found = Vec::new();
-        let mut stack = vec![root.clone()];
-        while let Some(directory) = stack.pop() {
-            for entry in std::fs::read_dir(&directory).expect("a directory of this crate") {
-                let path: PathBuf = entry.expect("a directory entry").path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    let relative = path
-                        .strip_prefix(&root)
-                        .expect("a file under src")
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let text = std::fs::read_to_string(&path).expect("a source file");
-                    found.push((relative, text));
-                }
-            }
-        }
+    /// Every file this crate's declarations reach, relative path first, with
+    /// its text — read through `bt-source` ([`source`] below), so a module added
+    /// under a new directory is read the day it is declared. A file under `src/`
+    /// that no declaration reaches is refused by name, because this reading
+    /// would pass it by.
+    fn sources() -> Vec<(String, &'static str)> {
+        let index = source();
+        let unreached = &index.cross_check().only_on_disk;
+        assert!(
+            unreached.is_empty(),
+            "these files are under bt-app's src/ and no `mod` declaration reaches them: \
+             {unreached:#?}"
+        );
+        let root = bt_source::normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+        let mut found: Vec<(String, &'static str)> = index
+            .files()
+            .iter()
+            .map(|file| {
+                let relative = file
+                    .path()
+                    .strip_prefix(&root)
+                    .expect("a file of this crate's own src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (relative, index.text(file.span()))
+            })
+            .collect();
         found.sort();
         found
     }
@@ -77615,9 +77527,9 @@ mod platform_gate_tests {
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
     // both readings side by side and asserted they agree.
     //
-    // `sources()` above stays a directory walk because this Rust test is the
-    // single owner of the file-list rule. T-GATES-047 retired the PowerShell
-    // twin and its agreement test; a second reader added no protection.
+    // `sources()` above reads the same index: this Rust test is the single
+    // owner of the file-list rule, and the files it judges are the ones the
+    // crate's declarations reach.
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
     // module's header is where the six points behind `source`, `item_body` and
@@ -77672,7 +77584,7 @@ mod platform_gate_tests {
         let mut asking: Vec<String> = Vec::new();
         let mut strangers: Vec<String> = Vec::new();
         for (relative, text) in sources() {
-            let Some((line, _)) = code_lines(&text).find(|(_, line)| names_a_platform(line)) else {
+            let Some((line, _)) = code_lines(text).find(|(_, line)| names_a_platform(line)) else {
                 continue;
             };
             asking.push(relative.clone());
@@ -80447,7 +80359,7 @@ mod quit_with_no_window_tests {
     //
     // Both rulings are about the order of two lines and about which doors write
     // one flag, neither of which returns a value — so they are source pins.
-    // They used to read `include_str!("main.rs")`; they now ask `bt-source`
+    // They used to read the text of `main.rs`; they now ask `bt-source`
     // about an *item* of this crate, so no claim here is bound to the file the
     // door happens to be written in today
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
@@ -81261,7 +81173,7 @@ mod refused_preview_card_tests {
     //
     // Eleven of the joints below are wiring, and wiring has no value to assert
     // without a window — so they are held as source pins. They used to read
-    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // the text of `main.rs`; they now ask `bt-source` about an *item* of
     // this crate, so no claim here is bound to the file the method happens to
     // be written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
     // before this one ran both readings side by side and asserted they agree.
@@ -84147,7 +84059,9 @@ mod printed_path_provenance_tests {
             .find("WindowEvent::ModifiersChanged(modifiers) => {")
             .expect("the one door every modifier state comes through");
         let arm = &loop_body[at..];
-        let arm = &arm[..arm.find("WindowEvent::CursorMoved").unwrap_or(arm.len())];
+        let arm = &arm[..arm
+            .find("event if runtime::pointer::is_pointer_event")
+            .unwrap_or(arm.len())];
         assert!(
             arm.contains(pointer_door.as_str()),
             "the hand-over modifier going down is a gesture that meets a reference"

@@ -52,7 +52,7 @@ impl Runtime<'_> {
         // length of the gesture — the same rule hover, the peek flyout and the
         // terminal's own selection already live by. An empty list is how that is
         // said here: there is nothing to be over.
-        if self.window.drag.is_none() {
+        if self.held_drag().is_none() {
             // **First, so it wins.** The picker floats over whichever surface
             // opened it, and first-match-wins is this list's whole ordering rule
             // — a row registered after the chevron under it would never be
@@ -160,7 +160,7 @@ impl Runtime<'_> {
         // which is this list's innermost-first order read literally: a pane head
         // sits over its own pane and under the popups, and nothing else in the
         // window claims these nineteen pixels.
-        if self.window.drag.is_none() {
+        if self.held_drag().is_none() {
             // **Every control on every pane's own run** (user ruling
             // 2026-08-27). One walk of `seats::pane_control_boxes`, which
             // answers for whichever layout the pane is in — its head's run, or
@@ -349,7 +349,7 @@ impl Runtime<'_> {
         // the pane-level anchors and inside the same `drag.is_none()` guard as
         // everything above them, because a page under a drag is a page nobody is
         // pointing at.
-        if self.window.drag.is_none() {
+        if self.held_drag().is_none() {
             let git_scale = scale;
             let pages: Vec<(SeatId, git_panel::GitPanelContent)> = self
                 .window
@@ -464,7 +464,7 @@ impl Runtime<'_> {
         // leaves the rail, and the wait in front of it is the card's own
         // `PEEK_INTENT_DELAY` (user report, 2026-08-19): the tip's single host and
         // single fade are still shared, only the length of the countdown is not.
-        if self.window.drag.is_none()
+        if self.held_drag().is_none()
             && let Some((id, host, text, face)) = self.command_tick_card()
         {
             anchors.push_faced(id, host, text, face);
@@ -476,7 +476,7 @@ impl Runtime<'_> {
         // preview's body, and the two cannot overlap — this one is a token in a
         // source file and that one is a run of a rendered page, which are two
         // faces the same pane is never showing at once.
-        if self.window.drag.is_none()
+        if self.held_drag().is_none()
             && let Some(hover) = self.window.preview_hex_hover.as_ref()
         {
             anchors.push_faced(
@@ -497,7 +497,7 @@ impl Runtime<'_> {
         // ([`Runtime::note_preview_link_hover`]) rather than hit-tested again
         // here, so the pill that lights and the card that comes up cannot come
         // to disagree about which chip the hand is on.
-        if self.window.drag.is_none()
+        if self.held_drag().is_none()
             && let Some((surface, link)) = self.preview_link_hover.as_ref()
             && let Some(chip) = link.chip.as_ref()
         {

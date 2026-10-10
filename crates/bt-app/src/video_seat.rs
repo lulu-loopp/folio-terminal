@@ -763,6 +763,15 @@ impl VideoSeat {
         self.engine.state()
     }
 
+    /// **Wait for the engine to publish a state `until` accepts**, within
+    /// [`crate::lane::PATIENCE`] — the engine's own door
+    /// (`Engine::state_reaching`), so a test waits on the engine thread and not
+    /// on a clock. Answers the state the wait ended on.
+    #[cfg(test)]
+    pub fn state_reaching(&self, until: impl Fn(&EngineState) -> bool) -> EngineState {
+        self.engine.state_reaching(until, crate::lane::PATIENCE)
+    }
+
     /// **The one thing that went wrong**, if one did — which on a machine
     /// missing a Store codec is [`EngineError::Unsupported`] and is the honest
     /// source of `Text::VideoFormatCannotPlay` now that no table can know it.

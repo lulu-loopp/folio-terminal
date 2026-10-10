@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -915,6 +915,34 @@ impl Engine {
         state
     }
 
+    /// **Wait until the engine thread publishes a state `until` accepts**, woken
+    /// by each publication rather than by a clock, and answer the state the wait
+    /// ended on — the accepted one, or what stood when `patience` ran out, which
+    /// the caller then reads as its red.
+    ///
+    /// Tests only: this crate's, and those of a crate that names the
+    /// `trust-harness` feature. A caller drives the engine with its own verbs and
+    /// waits here for the GStreamer worker to publish the resulting state.
+    #[cfg(any(test, feature = "trust-harness"))]
+    #[doc(hidden)]
+    pub fn state_reaching(
+        &self,
+        until: impl Fn(&EngineState) -> bool,
+        patience: Duration,
+    ) -> EngineState {
+        let held = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let (state, _) = self
+            .shared
+            .published
+            .wait_timeout_while(held, patience, |state| !until(state))
+            .unwrap_or_else(|held| held.into_inner());
+        *state
+    }
+
     /// Take the newest decoded frame if its generation is newer than this
     /// handle's last returned frame.
     pub fn frame(&mut self) -> Option<Frame> {
@@ -1061,6 +1089,8 @@ fn wait_for_shutdown(
 #[derive(Default)]
 struct Shared {
     state: Mutex<EngineState>,
+    /// Wakes state observers whenever the player worker publishes a snapshot.
+    published: Condvar,
     frame: Mutex<Option<Frame>>,
     cost: Mutex<FrameCost>,
     generation: AtomicU64,
@@ -1159,6 +1189,7 @@ fn pump_engine(
         }
         player.publish_ready_if_metadata_arrived(current, pending);
         *shared.state.lock().unwrap_or_else(|held| held.into_inner()) = player.state;
+        shared.published.notify_all();
         #[cfg(test)]
         if let Some(acknowledge) = pause_ack.take() {
             let error = player.state.error.is_some();
@@ -1178,6 +1209,8 @@ fn pump_engine(
 fn publish_failure(shared: &Shared, error: EngineError) {
     let mut state = shared.state.lock().unwrap_or_else(|held| held.into_inner());
     state.error.get_or_insert(error);
+    drop(state);
+    shared.published.notify_all();
 }
 
 #[cfg(test)]
