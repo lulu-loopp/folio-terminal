@@ -1362,7 +1362,21 @@ mod tests {
     #[test]
     fn a_pid_with_another_start_instant_is_not_the_waited_process() {
         let pid = std::process::id();
-        let started = crate::install_flip::started_of(pid).unwrap();
+        let Some(started) = crate::install_flip::started_of(pid) else {
+            assert_eq!(crate::host_platform(), crate::HostPlatform::OtherUnix);
+            let executable = std::env::current_exe().unwrap();
+            assert_eq!(
+                crate::install_flip::running_from(&executable)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert!(!crate::install_flip::still_running(Running {
+                pid,
+                started: 0,
+            }));
+            return;
+        };
         assert!(crate::install_flip::still_running(Running { pid, started }));
         assert!(!crate::install_flip::still_running(Running {
             pid,

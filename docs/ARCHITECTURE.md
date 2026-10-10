@@ -1634,7 +1634,7 @@ The `BT_*` catalogue is held complete by `bt_app::diagnostics::bt_environment_do
 which scans every non-binary, non-integration-test `.rs` file under `crates/`
 and `vendor/` for `BT_` literals and fails if the document and the scan disagree
 in either direction. Two conventions apply to all of them: **set-but-empty is
-off**, and **a name containing `TRACE` keeps the console**.
+off**, and **a nonempty `BT_…TRACE…` variable keeps the console**.
 
 **The rule for a fourth entrance.** 0.5's outward interface (CLI and MCP
 adapters) is a fourth entrance. It declares, in this table, its audience, what

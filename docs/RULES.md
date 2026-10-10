@@ -994,7 +994,7 @@ and total over the raw arguments, producing a request or a fault, and `resolve`
 asks this machine once, at launch.
 *Environment* — audience: whoever can already run programs as this user; carries
 diagnostics only and grants no privilege; read at process start with no reload;
-**set-but-empty is off**, and a name containing `TRACE` keeps the console.
+**set-but-empty is off**, and a nonempty `BT_…TRACE…` variable keeps the console.
 This configuration entrance is not a pane's inherited process block. On Windows
 each pane birth reads the current account block and then applies only launcher
 overrides a caller identified explicitly, followed by Folio's declarations and
@@ -1655,9 +1655,9 @@ to the command just typed goes to the console; a resident asynchronous diagnosti
 goes to the log.** The front door borrows the console for its answer only;
 everything resident goes to `diagnostics.log` under the data directory, which
 rolls to a previous copy at its size limit; the console is kept for the whole run
-**only** when some `BT_…TRACE…` name is set. A log file that will not open goes
-to the null device, never back to somebody else's shell. Trace lines go through
-`trace_sink::Queue` — one writer, a bounded queue, dropped lines counted — while
+**only** when some `BT_…TRACE…` name has a nonempty value. A log file that will not
+open goes to the null device, never back to somebody else's shell. Trace lines go
+through `trace_sink::Queue` — one writer, a bounded queue, dropped lines counted — while
 `diagnostics::note` opens and closes its own handle per line and shares no lock
 with a trace. Hang reports go to their own directory, written by the watchdog
 before it says anything. **A new `BT_*` variable is admitted only by documenting
