@@ -1727,7 +1727,7 @@ fn a_homebrew_copys_press_records_its_marks_and_carries_them_onto_the_staged_bun
     assert!(!calls.exists(), "Homebrew is never run");
 }
 
-/// RED (D2, managed-update revision (d)) — **the carry writes only the
+/// RED (D2, managed-update revision (f)) — **the carry writes only the
 /// attributes that the old bundle actually had.** A marker-only copy stays
 /// marker-only and a Caskroom-only copy stays Caskroom-only; Folio does not
 /// compose the missing mark.
@@ -1944,8 +1944,13 @@ fn homebrews_record_is_read_as_homebrew_reads_it() {
             app.as_os_str(),
         ],
     );
+    // The default prefixes are injected, never the host's own Caskrooms: on a Mac where Folio is
+    // installed with Homebrew the real defaults would record an app and the answer would depend on
+    // the machine the test runs on.
+    let absent_arm = scratch.root.join("opt").join("homebrew").join("Caskroom").join("folio");
+    let absent_intel = scratch.root.join("usr").join("local").join("Caskroom").join("folio");
     assert_eq!(
-        crate::install_channel::homebrew_record(&app).map(drop),
+        crate::install_channel::homebrew_record_in(&app, [&absent_arm, &absent_intel]).map(drop),
         Err("the default Caskrooms record no app"),
         "a custom prefix without its attribute is not discovered"
     );

@@ -12,7 +12,7 @@ tap by hand is taken away by the next release.
 Before the rendered cask is committed to the tap, check it with Homebrew 7:
 
 ```sh
-HOMEBREW_CACHE="$HOME/folio-port/wt/brew-cache" HOMEBREW_NO_AUTO_UPDATE=1 \
+HOMEBREW_CACHE="$(mktemp -d)" HOMEBREW_NO_AUTO_UPDATE=1 \
   brew audit --cask --strict --online --new /path/to/folio.rb
 ```
 

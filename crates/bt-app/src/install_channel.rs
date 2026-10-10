@@ -708,7 +708,7 @@ pub(crate) fn homebrew_record(bundle: &Path) -> Result<HomebrewRecord, &'static 
     homebrew_record_in(bundle, DEFAULT_HOMEBREW_CASKROOMS.map(Path::new))
 }
 
-fn homebrew_record_in(
+pub(crate) fn homebrew_record_in(
     bundle: &Path,
     default_caskrooms: [&Path; 2],
 ) -> Result<HomebrewRecord, &'static str> {
@@ -1017,7 +1017,7 @@ mod tests {
         );
     }
 
-    /// RED (D2, managed-update revision (d)) — **Homebrew's own link is
+    /// RED (D2, managed-update revision (f)) — **Homebrew's own link is
     /// sufficient install-channel evidence without either cask attribute.**
     ///
     /// The two defaults are test paths standing in for the fixed Apple
@@ -1077,7 +1077,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// RED (D2, managed-update revision (d)) — **a default Caskroom whose
+    /// RED (D2, managed-update revision (f)) — **a default Caskroom whose
     /// link names another bundle is not evidence for this copy, and missing
     /// default Caskrooms are not evidence either.** Both remain on the bare
     /// Copy row.
