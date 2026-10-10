@@ -5075,15 +5075,9 @@ impl Text {
             }
             Self::CleanupMarkUnixData => pick(lang, "Unix data", "Unix 数据"),
             #[cfg(any(target_os = "linux", test))]
-            Self::CleanupMarkUnixConfig => match platform {
-                HostPlatform::OtherUnix => pick(lang, "Unix configuration", "Unix 配置"),
-                _ => pick(lang, "Unix configuration", "Unix configuration"),
-            },
+            Self::CleanupMarkUnixConfig => pick(lang, "Unix configuration", "Unix 配置"),
             #[cfg(any(target_os = "linux", test))]
-            Self::CleanupMarkUnixCache => match platform {
-                HostPlatform::OtherUnix => pick(lang, "Unix Chromium cache", "Unix Chromium 缓存"),
-                _ => pick(lang, "Unix Chromium cache", "Unix Chromium cache"),
-            },
+            Self::CleanupMarkUnixCache => pick(lang, "Unix Chromium cache", "Unix Chromium 缓存"),
             Self::CleanupMarkRecovery => {
                 pick(lang, "User configuration recovery copies", "用户配置备份")
             }
@@ -6204,10 +6198,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        (Self::CleanupMarkUnixConfig, HostPlatform::Windows),
-        (Self::CleanupMarkUnixConfig, HostPlatform::MacOs),
-        (Self::CleanupMarkUnixCache, HostPlatform::Windows),
-        (Self::CleanupMarkUnixCache, HostPlatform::MacOs),
         // zh: pending T-RECOVERED-FOLDER — the start's toast for the edits a stop kept in the
         // recovered folder.
         (Self::RecoveredEditKept, HostPlatform::Windows),
