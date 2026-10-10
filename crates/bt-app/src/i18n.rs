@@ -5075,11 +5075,15 @@ impl Text {
             }
             Self::CleanupMarkUnixData => pick(lang, "Unix data", "Unix 数据"),
             #[cfg(any(target_os = "linux", test))]
-            // zh: pending
-            Self::CleanupMarkUnixConfig => pick(lang, "Unix config", "Unix config"),
+            Self::CleanupMarkUnixConfig => match platform {
+                HostPlatform::OtherUnix => pick(lang, "Unix configuration", "Unix 配置"),
+                _ => pick(lang, "Unix configuration", "Unix configuration"),
+            },
             #[cfg(any(target_os = "linux", test))]
-            // zh: pending
-            Self::CleanupMarkUnixCache => pick(lang, "Unix cache", "Unix cache"),
+            Self::CleanupMarkUnixCache => match platform {
+                HostPlatform::OtherUnix => pick(lang, "Unix Chromium cache", "Unix Chromium 缓存"),
+                _ => pick(lang, "Unix Chromium cache", "Unix Chromium cache"),
+            },
             Self::CleanupMarkRecovery => {
                 pick(lang, "User configuration recovery copies", "用户配置备份")
             }
