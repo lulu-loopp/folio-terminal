@@ -26,9 +26,6 @@
 //! restore prompt's election — a question about a window nobody can see is a
 //! question nobody can answer.
 
-#[cfg(not(target_os = "linux"))]
-use bt_platform::NativeWindow;
-
 use bt_platform::WindowRect;
 use bt_platform::hotkey::{Foreground, GlobalHotkey, Hotkey, HotkeyFault};
 use winit::keyboard::{ModifiersState, NamedKey};
@@ -222,32 +219,6 @@ pub(crate) struct SummonScreen {
     /// The dpi of **this** display, which is not the window's cached scale: between summons the
     /// window is parked on whichever display it last came down on.
     pub(crate) dpi: u32,
-}
-
-impl SummonScreen {
-    /// **The display the reader is working on**, which is the display the pointer is on.
-    ///
-    /// The pointer and not the window, because the pointer is the only thing on the desk that says
-    /// which screen the person is at. When Windows will not say where the pointer is, the window's
-    /// own display answers, and when it will not say that either the virtual screen does — in that
-    /// order, because each fallback is one step further from the question actually asked.
-    ///
-    /// This is the machine-reading half of the one summon door; the deciding half is
-    /// [`Quake::placement`], which is pure and is where the rules live.
-    #[cfg(not(target_os = "linux"))]
-    #[must_use]
-    pub(crate) fn under_the_pointer(window: NativeWindow, cached_dpi: u32) -> Self {
-        let pointer = bt_platform::pointer_position();
-        let work = pointer
-            .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
-            .or_else(|| bt_platform::get_work_area(window).ok())
-            .unwrap_or_else(bt_platform::virtual_screen_rect);
-        Self {
-            work,
-            monitor_id: pointer.and_then(|(x, y)| bt_platform::monitor_id_at(x, y)),
-            dpi: pointer.map_or(cached_dpi, |(x, y)| bt_platform::dpi_at(x, y)),
-        }
-    }
 }
 
 /// **A chord as this machine's hotkey door will be asked for it**, or `None`

@@ -4207,17 +4207,7 @@ impl Runtime<'_> {
             // glance, and pressing is you saying you are done glancing.
             self.hide_layout_peek()?;
             #[cfg(target_os = "linux")]
-            if button == MouseButton::Left
-                && self.window_maximized_state() == Some(false)
-                && self.window.window.fullscreen().is_none()
-                && let Some(position) = self.window.pointer_position
-                && let Some(direction) = crate::linux_resize_direction(
-                    position,
-                    self.client_size(),
-                    self.window.window.scale_factor(),
-                )
-                && self.window.window.drag_resize_window(direction).is_ok()
-            {
+            if self.try_begin_linux_border_resize(button) {
                 return Ok(());
             }
             // **A press outside the capsule hands the keyboard back — and leaves
@@ -5776,44 +5766,6 @@ impl Runtime<'_> {
             }
         }
         Ok(true)
-    }
-
-    /// **Where the cursor is, this instant, in this window's own pixels**
-    /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
-    /// under the cursor).
-    ///
-    /// **Two readers, and they are the two gestures that put a path on a command
-    /// line.** [`Self::collect_dropped_file`] asks it as an external drop
-    /// arrives, and [`Self::keep_the_paste_offer`] asks it as an internal drag is
-    /// let go of (review 2026-09-17). Both for one reason: there is only one
-    /// instant at which "where is the cursor" and "where was this let go of" are
-    /// the same question, and it is the one this process is standing in while
-    /// the platform delivers the release. Nothing else in this window reads it,
-    /// and the name is the platform's rather than either gesture's so that
-    /// neither road can grow a second door.
-    ///
-    /// **The units are `CursorMoved`'s and no conversion happens here**, which
-    /// was checked rather than assumed. On Windows a pointer event is
-    /// `WM_MOUSEMOVE`'s `lParam` — physical pixels from the client area's
-    /// top-left — which is precisely what `GetCursorPos` put through
-    /// `ScreenToClient` answers. On macOS winit takes its view's point and
-    /// multiplies by the window's backing scale, which is precisely what the
-    /// AppKit arm does with `NSEvent.mouseLocation` after the same two
-    /// conversions. So the platform's answer is already in the window's physical
-    /// pixels and is used as it stands; scaling it again here would square the
-    /// factor on every Retina and every 150% display.
-    ///
-    /// Neither `pointer_position` nor [`WindowRuntime::pointer_last_seen`] is
-    /// read: both say where the hand was *before* the drag, which is not where
-    /// this drop landed, and a routing built on either would be a guess wearing
-    /// a measurement's clothes.
-    #[cfg(not(target_os = "linux"))]
-    pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
-        platform_pointer_of(
-            native_window(&self.window.window)
-                .ok()
-                .and_then(bt_platform::pointer_position_in_window),
-        )
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {

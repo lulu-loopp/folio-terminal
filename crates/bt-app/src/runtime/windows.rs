@@ -2221,7 +2221,7 @@ impl Runtime<'_> {
     /// which is not a reason to fail a window move.
     pub(crate) fn window_moved(
         &mut self,
-        position: winit::dpi::PhysicalPosition<i32>,
+        position: crate::WindowOrigin,
     ) -> Result<()> {
         self.note_winit_position(position);
         self.remember_summoned_arrangement();
@@ -2246,7 +2246,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    fn note_winit_position(&mut self, position: winit::dpi::PhysicalPosition<i32>) {
+    fn note_winit_position(&mut self, position: crate::WindowOrigin) {
         #[cfg(target_os = "linux")]
         {
             self.window.native_client_origin = None;

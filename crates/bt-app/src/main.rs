@@ -222,7 +222,10 @@ mod webhost;
 mod webnav;
 mod websheet;
 mod window_news;
+mod window_origin;
 mod wsl;
+
+pub(crate) use window_origin::WindowOrigin;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::LayoutKey;
@@ -68145,19 +68148,16 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 return;
             }
             #[cfg(target_os = "linux")]
-            if matches!(
-                event,
-                WindowEvent::CursorMoved { .. }
-                    | WindowEvent::CursorEntered { .. }
-                    | WindowEvent::CursorLeft { .. }
-                    | WindowEvent::MouseInput { .. }
-                    | WindowEvent::MouseWheel { .. }
-                    | WindowEvent::KeyboardInput { .. }
-                    | WindowEvent::Resized(_)
-                    | WindowEvent::Moved(_)
-                    | WindowEvent::ScaleFactorChanged { .. }
-                    | WindowEvent::CloseRequested
-            ) && let Err(error) = runtime.refuse_pending_linux_pointer_actions()
+            if (runtime::pointer::is_pointer_event(&event)
+                || matches!(
+                    event,
+                    WindowEvent::KeyboardInput { .. }
+                        | WindowEvent::Resized(_)
+                        | WindowEvent::Moved(_)
+                        | WindowEvent::ScaleFactorChanged { .. }
+                        | WindowEvent::CloseRequested
+                ))
+                && let Err(error) = runtime.refuse_pending_linux_pointer_actions()
             {
                 self.fail(event_loop, error);
                 return;
@@ -68319,7 +68319,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // than on a page's clock: a window can be dragged with nothing on
                 // the glass but a shell, and the engine still has to be right the
                 // next time a page is opened in it.
-                WindowEvent::Moved(position) => runtime.window_moved(position),
+                WindowEvent::Moved(position) => runtime.window_moved(WindowOrigin {
+                    x: position.x,
+                    y: position.y,
+                }),
                 WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
                 // The payload is deliberately dropped: `os_theme_changed` asks the
                 // one reader this process trusts rather than taking a second
@@ -73398,7 +73401,10 @@ fn stand_the_window_at(
                 rect.right.abs_diff(rect.left),
                 rect.bottom.abs_diff(rect.top),
             ));
-            window.set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+            window.set_outer_position(WindowOrigin {
+                x: rect.left,
+                y: rect.top,
+            });
         })
         .map_err(|error| error.to_string())
     };
@@ -73709,36 +73715,6 @@ fn linux_window_request(
         return Err(anyhow!(reason));
     }
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn linux_resize_direction(
-    position: PhysicalPosition<f64>,
-    size: PhysicalSize<u32>,
-    scale: f64,
-) -> Option<winit::window::ResizeDirection> {
-    use winit::window::ResizeDirection;
-    let width = f64::from(size.width);
-    let height = f64::from(size.height);
-    if position.x < 0.0 || position.y < 0.0 || position.x >= width || position.y >= height {
-        return None;
-    }
-    let edge = 4.0 * scale;
-    let west = position.x < edge;
-    let east = position.x >= width - edge;
-    let north = position.y < edge;
-    let south = position.y >= height - edge;
-    match (west, east, north, south) {
-        (true, _, true, _) => Some(ResizeDirection::NorthWest),
-        (_, true, true, _) => Some(ResizeDirection::NorthEast),
-        (true, _, _, true) => Some(ResizeDirection::SouthWest),
-        (_, true, _, true) => Some(ResizeDirection::SouthEast),
-        (true, _, _, _) => Some(ResizeDirection::West),
-        (_, true, _, _) => Some(ResizeDirection::East),
-        (_, _, true, _) => Some(ResizeDirection::North),
-        (_, _, _, true) => Some(ResizeDirection::South),
-        _ => None,
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -76571,7 +76547,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 43] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 44] = [
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -76636,6 +76612,8 @@ mod platform_gate_tests {
         // Linux path drops and tear-out placement use worker answers; other platforms keep their
         // existing synchronous gesture path.
         "runtime/panes.rs",
+        // Linux client-edge resize starts from the pointer inside this authority module.
+        "runtime/pointer/mod.rs",
         // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
         "runtime/quake.rs",
         // Linux tear-out plans carry the worker's work-area and DPI answer to window creation.

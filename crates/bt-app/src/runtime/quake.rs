@@ -93,7 +93,10 @@ impl Runtime<'_> {
         #[cfg(target_os = "linux")]
         self.window
             .window
-            .set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+            .set_outer_position(crate::WindowOrigin {
+                x: rect.left,
+                y: rect.top,
+            });
         #[cfg(not(target_os = "linux"))]
         if let Err(error) = bt_platform::stand_window_at(native, rect) {
             eprintln!("BT_QUAKE {error}");
@@ -186,7 +189,10 @@ impl Runtime<'_> {
         );
         self.window
             .window
-            .set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+            .set_outer_position(crate::WindowOrigin {
+                x: rect.left,
+                y: rect.top,
+            });
         self.window
             .window
             .set_window_level(winit::window::WindowLevel::AlwaysOnTop);

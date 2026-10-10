@@ -2,14 +2,16 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+#[cfg(not(target_os = "linux"))]
+use crate::seats;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
     TextFieldSeat, UserInputKind, copy_selection, hang_watch, input_line_needs_a_space_first,
-    offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
-    paste_target_is_live, pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste,
-    profile_banner_name, recoverable_clipboard_write, restore, seats, stage_paste,
-    take_pending_paste, text_field, toast, write_selection_text, write_terminal_clipboard_text,
+    offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_target_is_live,
+    pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name,
+    recoverable_clipboard_write, restore, stage_paste, take_pending_paste, text_field, toast,
+    write_selection_text, write_terminal_clipboard_text,
 };
 use anyhow::{Context, Result, anyhow};
 use bt_layout::SeatId;
@@ -17,7 +19,6 @@ use bt_render::{FrameSource, FrameTrigger};
 use bt_viewport::MathBlockAnchor;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use winit::dpi::PhysicalPosition;
 use winit::event::Ime;
 
 impl Runtime<'_> {
@@ -279,25 +280,8 @@ impl Runtime<'_> {
     /// the destination from somewhere older.
     /// **Check a path drop against the pointer answer already delivered** (release review 2026-09-17).
     ///
-    /// The asynchronous X11 query supplies this point. The original offer, target shell, and plan
-    /// still have to agree before any bytes are written.
-    pub(in crate::runtime) fn paste_offer_kept_at(
-        &self,
-        drag: &Drag,
-        plan: &seats::DropPlan,
-        released_at: PhysicalPosition<f64>,
-    ) -> Option<PasteTarget> {
-        let mut seam = drag.seam;
-        let at_release = self.survey_drop(&drag.source, drag.home, released_at, &mut seam);
-        paste_offer_is_kept(
-            self.glass_here(released_at),
-            drag.paste_offer,
-            self.paste_offer_at(at_release),
-            plan.fits(),
-            self.a_modal_holds_the_window(),
-        )
-    }
-
+    /// The native release path reads the cursor here; the asynchronous Linux X11 path supplies its
+    /// own release position. Both paths recheck the offer, target shell, and plan before writing.
     /// The synchronous native pointer road used where the platform returns from the release event.
     #[cfg(not(target_os = "linux"))]
     pub(in crate::runtime) fn paste_offer_kept(
