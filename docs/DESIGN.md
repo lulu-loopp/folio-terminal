@@ -14735,6 +14735,22 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 
 **Pinned by** `bt_term::adapter_boundary_tests::the_adapter_seam_imports_no_policy_crate`: red with the forbidden import in the alternate root, green on the real tree. The CI step `the adapter boundary gate can actually fail` owns the planted-copy mutation and refusal-message assertion.
 
+### 2026-10-10 — Shell exits and the run's last window state their causes
+
+**What is built.** When `Runtime::reap_exited_tabs` first observes a pane's remembered child status, it writes one resident diagnostics line with the seat, numeric exit code (or `none` for a signal), elapsed milliseconds from that PTY's birth, only the executable basename, the process-wide tab id, and whether the reaper retires the pane, keeps the tab, or retires the tab. The leaf remembers that the line was said, so a dirty preview that keeps a dead shell's tab open cannot repeat it.
+
+**The rule.** Every road that ends the run writes one `Folio: last window closed — …` line: an exit-driven final tab, a person's last-window close, Folio's quit, the launch/application wire's quit, an update restart, or the controlled failure and its one-line cause. These are `diagnostics::note` calls on existing window-thread roads and add no wait, worker, environment value, full program path, or command line.
+
+**Pinned by** `exit_diagnostics::tests::{a_shell_that_exits_says_its_code_basename_and_retirement, the_last_window_after_every_shell_exited_says_that_cause, a_plain_quit_says_quit, a_shell_line_contains_no_environment_value_or_full_program_path, every_run_end_cause_has_the_ruled_words_and_stays_on_one_line}`.
+
+### 2026-10-10 — Shell-exit diagnostics keep one line, one close cause, and no absolute failure path (T-SHELL-EXIT-DIAG-LINE round 2)
+
+**What is built.** The completed shell-exit payload takes the same one-line reduction as the run-end payload, including a basename that itself contains a newline. A close attempt spends an exit-driven cause before it asks the summoned terminal, so a refused attempt cannot lend that cause to a later hand-close. Controlled-failure text reduces every drive-rooted or POSIX-rooted absolute path to its final component and is capped at 240 characters.
+
+**The rule.** A resident lifecycle event is exactly one bounded physical line. A cause belongs to the close attempt that raised it, and neither a program path, an error path, nor a planted environment value reaches that line.
+
+**Pinned by** `exit_diagnostics::tests::{a_shell_line_contains_no_environment_value_or_full_program_path, a_shell_basename_with_a_newline_still_makes_one_diagnostic_line, a_summon_refused_close_spends_its_cause_before_a_later_person_close, a_controlled_failure_reduces_every_absolute_path_and_caps_its_error}`.
+
 ### 2026-10-10 — A trial's not-kept card survives the macOS holder removing its folder (T-MAC-TRIAL-CARD-NEVER-SHOWS)
 
 **What is built.** E4's `H/<txn>/unkept` mark remains the trial watch's intermediate fact, but every journal writer that advances the trial to `Committed` now copies the version it names into the existing body field `unkept`. `Retired{Committed}` carries the field, so macOS `Txn::retire` can remove the transaction folder and the committed build's next start still raises the existing *Changes made before Folio confirmed the update were not kept.* card once. Windows now uses the same journal-field road; startup has no mark-file fallback. E5's rollback retirement continues to read the mark into the same field.

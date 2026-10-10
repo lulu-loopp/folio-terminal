@@ -1729,6 +1729,8 @@ fn pump_pty_input(writer: &mut dyn Write, input: &InputRing) {
 pub struct PtySession {
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
+    /// When this pane's shell was born.
+    born_at: Instant,
     /// **How the child ended, once it has.**
     ///
     /// A process ending is a fact about this session, not a message handed to whoever asks first.
@@ -2302,6 +2304,7 @@ impl PtySession {
         Ok(Self {
             master: Some(pair.master),
             child: Some(child),
+            born_at: Instant::now(),
             exited: None,
             output,
             input,
@@ -2484,6 +2487,12 @@ impl PtySession {
             self.exited = status.clone();
         }
         Ok(status)
+    }
+
+    /// How long this pane's shell has existed at `now`.
+    #[must_use]
+    pub fn age_at(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.born_at)
     }
 
     pub fn shutdown(&mut self) -> Result<Option<ExitStatus>, PtyError> {
@@ -3811,6 +3820,7 @@ mod tests {
         let session = PtySession {
             master: None,
             child: None,
+            born_at: Instant::now(),
             exited: None,
             output: Arc::new(OutputRing::new(NonZeroUsize::new(32).unwrap())),
             input: Arc::new(InputRing::new(NonZeroUsize::new(32).unwrap())),

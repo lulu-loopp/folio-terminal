@@ -8,10 +8,11 @@ use crate::{
     RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
     TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_into_layout, absorb_tab_into_strip, attention, blank_page_return, create_tab_state,
-    expire_leaf_attention, float, new_tab_leaf_seed, notify, pane_can_become_a_tab, pane_into_tab,
-    pane_strip_landing, presentation_physical_size, profiles, recoverable_wheel_scroll_amount,
-    restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
-    strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
+    diagnostics, exit_diagnostics, expire_leaf_attention, float, new_tab_leaf_seed, notify,
+    pane_can_become_a_tab, pane_into_tab, pane_strip_landing, presentation_physical_size, profiles,
+    recoverable_wheel_scroll_amount, restore, row_strip_landing, scrollback_quota, seats, seed,
+    settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
+    tear_pane_into_tab, two_tabs_mut, webnav,
 };
 use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;
@@ -19,7 +20,7 @@ use anyhow::Result;
 use bt_layout::SeatId;
 use bt_math::{MathRaster, MathRenderError};
 use bt_render::{FrameSource, FrameTrigger, Travel};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
@@ -3431,34 +3432,18 @@ impl Runtime<'_> {
     /// the same rule §7.1.4 already gives closing — the last pane closing is the
     /// tab closing — read from the other direction.
     pub(in crate::runtime) fn reap_exited_tabs(&mut self) -> Result<()> {
-        // Which panes of the *active* tab died: those are the ones that can be
-        // closed as panes, because `close_pane` re-solves the tab the user is
-        // looking at.
         let active = self.window.active_tab;
-        let mut exited_panes = Vec::new();
-        for (seat, leaf) in self.window.tabs[active].leaves_mut() {
-            let Some(pty) = leaf.pty.as_mut() else {
-                continue;
-            };
-            if pty.try_wait()?.is_some() {
-                exited_panes.push(*seat);
-            }
-        }
-        // Never close the last one here: an empty tab is not a state, and
-        // `close_pane` routes that case to `close_tab` on its own.
-        if self.window.tabs[active].sessions.len() > exited_panes.len() {
-            for seat in exited_panes {
-                self.close_pane(seat)?;
-            }
-        }
-
+        let now = Instant::now();
+        let mut exits = Vec::new();
+        let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // A tab has ended when every shell it holds has ended. A tab in
             // probe mode holds no PTY at all and never ends this way.
             let mut any_live = false;
             let mut any_pty = false;
-            for (_, leaf) in tab.leaves_mut() {
+            let tab_id = tab.id;
+            for (seat, leaf) in tab.leaves_mut() {
                 // A shell still being born is a shell this tab is about to have: the tab has not
                 // ended while one of its panes is in birth.
                 if leaf.birth.is_some() {
@@ -3468,13 +3453,42 @@ impl Runtime<'_> {
                     continue;
                 };
                 any_pty = true;
-                if pty.try_wait()?.is_none() {
-                    any_live = true;
+                match pty.try_wait()? {
+                    None => any_live = true,
+                    Some(status) => {
+                        if index == active {
+                            active_exited_panes.push(*seat);
+                        }
+                        if !leaf.shell_exit_said {
+                            leaf.shell_exit_said = true;
+                            exits.push((
+                                index,
+                                exit_diagnostics::ShellExit {
+                                    seat: seat.0,
+                                    code: status.signal().is_none().then(|| status.exit_code()),
+                                    elapsed: pty.age_at(now),
+                                    program: leaf.program.clone(),
+                                    tab: tab_id.0,
+                                    disposition: exit_diagnostics::ShellExitDisposition::TabKept,
+                                },
+                            ));
+                        }
+                    }
                 }
             }
             if any_pty && !any_live {
                 exited.push(index);
             }
+        }
+        // Which panes of the active tab died: those are the ones that can be closed as panes,
+        // because `close_pane` re-solves the tab the user is looking at. Never close the last one
+        // here: an empty tab is not a state, and `close_pane` routes that case to `close_tab` on
+        // its own.
+        let active_retires_panes = self.window.tabs[active].sessions.len()
+            > active_exited_panes.len()
+            && !active_exited_panes.is_empty();
+        if active_retires_panes {
+            exited.retain(|index| *index != active);
         }
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
@@ -3485,9 +3499,29 @@ impl Runtime<'_> {
             self.window.active_tab,
             exited,
         );
+        let retired_tabs: BTreeSet<_> = exited.iter().copied().collect();
+        for (index, exit) in &mut exits {
+            exit.disposition = if retired_tabs.contains(index) {
+                exit_diagnostics::ShellExitDisposition::TabRetired
+            } else if *index == active && active_retires_panes {
+                exit_diagnostics::ShellExitDisposition::PaneRetired
+            } else {
+                exit_diagnostics::ShellExitDisposition::TabKept
+            };
+        }
+        exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {
+            diagnostics::note(line);
+        });
+        if active_retires_panes {
+            for seat in active_exited_panes {
+                self.close_pane(seat)?;
+            }
+        }
         for index in exited.into_iter().rev() {
+            let final_tab = self.window.tabs.len() == 1 && index == 0;
             self.close_tab(index)?;
-            if self.window.tabs.len() == 1 && index == 0 {
+            if final_tab {
+                self.window.shell_exit_close_requested = true;
                 break;
             }
         }
