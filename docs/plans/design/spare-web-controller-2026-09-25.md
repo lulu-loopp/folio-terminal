@@ -56,6 +56,18 @@ window of the spike, promoted from `webview.rs`'s test-only `HiddenWindow`, plus
 `Compositor`; it destroys the window on drop. `bt_platform::spare_parent()` answers `None` on macOS
 (WKWebView is made on the spot) and on the portable arm, so there the stage is `NothingToWarm`.
 
+**Visibility rule (2026-10-09, T-SPARE-WEBVIEW-STEALS-INPUT). A parked spare is invisible to the
+system: its controller is hidden and its parent is off-screen.** “Never shown” is not enough for
+the parent: WebView2 has its own layered top-level window, and a default-visible composition
+controller once left that window hit-testable over the primary screen's top-left 800 × 600 even
+though the parent drew nothing. The creation callback therefore calls `SetIsVisible(false)` before
+publishing the controller, every transition to parked issues the hide afresh and admits `Parked`
+only after `IsVisible` reads false, and the parent stands one full rectangle beyond the virtual
+screen. Parking and taking each write one diagnostics line with that readback. Adoption's existing
+`RehostStep::Presence` remains the only step that applies the target window's requested visibility.
+The macOS arm has no spare controller or spare parent (`spare_parent()` answers `None`), so this
+class of defect does not exist there.
+
 | phase | entered by | holds | leaves by |
 |---|---|---|---|
 | `None` | process start | nothing | the clock's spare stage → `Creating` |

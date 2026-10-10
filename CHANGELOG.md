@@ -12,6 +12,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- An invisible window Folio kept in reserve for web pages no longer swallows clicks at the top-left of your main screen. <!-- // zh: pending -->
 - A web page that answers with an error, such as 404 Not Found, shows the page the server sent instead of a card saying it could not be opened; the card is for an address that could not be reached at all. <!-- zh: 网页返回错误（如 404 Not Found）时，现在显示服务器发来的页面，不再显示无法打开的卡片；卡片只用于完全无法访问的地址。 -->
 - `folio --with-environment` opens a tab that keeps the environment of the terminal you started it from — an activated Python or conda environment, a developer prompt — also when Folio is already running. <!-- zh: `folio --with-environment` 打开的标签页沿用启动它的终端的环境——已激活的 Python 或 conda 环境、开发者命令行——Folio 已在运行时也一样。 -->
 - A link an agent printed with a stray full-width mark after it, such as `http://example.com：`, now opens the right address, and a link Folio will not open says why — the address is invalid, it is blocked, or no program opens it — instead of always saying it was blocked. <!-- zh: agent 打印的链接后面多了一个全角符号（如 `http://example.com：`）时，现在打开正确的地址；Folio 不打开的链接会说明原因——地址无效、已拦截或无程序可打开——不再一律显示已拦截。 -->

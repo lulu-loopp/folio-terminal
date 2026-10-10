@@ -8335,7 +8335,8 @@ pub use webview::{
     WebColorScheme, WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey,
     WebMouseEvent, WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule,
     forget_web_environment, install_rollback, rehost_compensation, spare_parent,
-    warm_web_environment, web_environment_epoch, web_mouse_buttons, webview2_runtime_version,
+    warm_web_environment, web_controller_visibility, web_environment_epoch, web_mouse_buttons,
+    webview2_runtime_version,
 };
 
 #[cfg(windows)]

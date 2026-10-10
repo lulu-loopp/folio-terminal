@@ -2437,26 +2437,57 @@ impl WebSeat {
         self.host.close();
     }
 
-    /// **Stand the spare's page on its parent's glass** (SW-5): the parent's scale, then a nonzero
-    /// rectangle, then shown inside a window nobody ever sees — spike 59's harness state, through
-    /// the one placement path every page takes.
+    /// **Stand the spare's page on its parent's tree** (SW-5): the parent's scale and a nonzero
+    /// rectangle, but hidden in the engine as well as in the compositor. A parent HWND that is
+    /// never shown does not hide WebView2's own top-level runtime window; controller visibility is
+    /// the fact that keeps the parked page out of system hit testing.
     pub(crate) fn stand_parked(
         &mut self,
         compositor: &bt_platform::Compositor,
         bounds: WebBounds,
     ) -> Result<(), String> {
-        self.place(compositor, WebPresence::Shown(bounds), Some(bounds), &[])?;
+        self.place(compositor, WebPresence::Hidden, Some(bounds), &[])?;
         // The commit is an owner-thread door; a refusal is this road's own `Err`.
         admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
             .unwrap_or_else(|refused| Err(refused.to_string()))
     }
 
+    /// **Enter the parked state, in the engine as well as in the model.**
+    ///
+    /// `presence = None` deliberately makes this a fresh `SetIsVisible(false)` even when the
+    /// cache already says hidden. Parking is a lifecycle boundary, and the controller's readback
+    /// — not that cache — is the fact the owner records and reports.
+    pub(crate) fn park(&mut self, compositor: &bt_platform::Compositor) -> Result<bool, String> {
+        self.presence = None;
+        self.place(compositor, WebPresence::Hidden, None, &[])?;
+        admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
+            .unwrap_or_else(|refused| Err(refused.to_string()))?;
+        self.parked_visibility()
+    }
+
     /// **Before a handoff: the spare's own rectangle is not the page's** (SW-3, SW-5). Hidden,
     /// and with no bounds wanted, so nothing but the target window's own placement can size the
     /// page — and so release its address.
-    pub(crate) fn park_for_handoff(&mut self) {
+    pub(crate) fn park_for_handoff(&mut self) -> Result<bool, String> {
         self.wanted = WebPresence::Hidden;
         self.wanted_bounds = None;
+        self.presence = None;
+        self.apply_presence()?;
+        self.parked_visibility()
+    }
+
+    /// Read the engine's answer after a parking hide. There is no spare on the non-Windows arms;
+    /// keeping their answer here avoids pretending WKWebView has WebView2's controller property.
+    fn parked_visibility(&self) -> Result<bool, String> {
+        let visible = bt_platform::web_controller_visibility(&self.host)?.ok_or_else(|| {
+            String::from("the spare web page has no controller whose visibility can be read")
+        })?;
+        if visible {
+            return Err(String::from(
+                "the spare web page's engine remained visible after it was parked",
+            ));
+        }
+        Ok(visible)
     }
 
     /// **A page has this seat now** (SW-1): its recovery is a page's from here on.
