@@ -1359,7 +1359,7 @@ impl<'a> Txn<'a> {
             self.road.limits.poll,
             &mut Instant::now,
             &mut || {
-                let running = install_flip::running_from(program)
+                let running = install_flip::running_from_on_worker(worker, program)
                     .map_err(|error| format!("the process list: {error}"))?;
                 let held: Vec<String> = running
                     .iter()
