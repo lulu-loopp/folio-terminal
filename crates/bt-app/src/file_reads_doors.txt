@@ -116,7 +116,7 @@ uninstall.rs: execute_with_claim: Marks::read
 # The install channel (U-1): the marker and scoop's receipt on Lane::Install, each
 # capped; the derivation's one call of the folder read.
 capped: .read_to_end
-derive_fact: read
+derive_fact_with_caskrooms: read
 # The updater's archive reader (U-14): the downloaded archive on Lane::Update,
 # opened once by `expand` (`file_reads::open`), its records read by `read_at`
 # and each member's data a bounded chunk at a time by `expand_member`.
