@@ -152,6 +152,7 @@ WindowRuntime.seat_pointer	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.settings	-	VIEW	main[settings]	the 2026-09-25 table
 WindowRuntime.settings_scroll	-	VIEW	main[settings]	the 2026-09-25 table
 WindowRuntime.settling	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.shell_exit_close_requested	-	LIFE	exit diagnostics	T-SHELL-EXIT-DIAG-LINE: the tab reaper raises the cause latch and FolioApp::close spends it when the native close returns
 WindowRuntime.tab_clicks	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.tab_menu	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.tab_scroll	-	VIEW	tabs	the 2026-09-25 table

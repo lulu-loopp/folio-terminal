@@ -57,6 +57,7 @@ mod context_menu;
 mod diagnostics;
 mod dir_news;
 mod elevated_host;
+mod exit_diagnostics;
 mod explorer_menu;
 mod favicon;
 mod file_peek;
@@ -11520,6 +11521,13 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// Whether this shell's one exit diagnostics line has been written.
+    ///
+    /// A dead shell can remain in a tab while a dirty preview keeps that tab open, and
+    /// `PtySession::try_wait` deliberately remembers its answer for every later reaper pass. This
+    /// bit is the pane-level complement: the answer stays true, while the resident diagnostic is
+    /// emitted once.
+    shell_exit_said: bool,
     /// **A shell still being born** (T-PROGRAMS-REFRESH, T-LAUNCH-PROBE's invariant): `Some`
     /// while the rule that decides which program this pane starts needs a row the program walk
     /// has not answered, `None` for every pane whose shell was decided at creation. Such a pane
@@ -15037,6 +15045,11 @@ struct WindowRuntime {
     /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
     /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
     window_close_requested: Option<WindowId>,
+    /// The final tab asked the native close because its last shell exited.
+    ///
+    /// Kept until the close event comes back through `FolioApp::close`; without it that event is
+    /// indistinguishable from the window's close button.
+    shell_exit_close_requested: bool,
     /// Which preview pane has its filename switcher up (P130-P137).
     ///
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
@@ -40230,6 +40243,7 @@ fn bare_leaf(
         incarnation: next_incarnation(),
         wake,
         pty: None,
+        shell_exit_said: false,
         foreground_program_cadence: foreground_program::Cadence::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
@@ -43239,6 +43253,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
         window_close_requested: None,
+        shell_exit_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
@@ -63295,6 +63310,11 @@ impl FolioApp {
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
+        let last_window_cause = if std::mem::take(&mut runtime.window.shell_exit_close_requested) {
+            exit_diagnostics::LastWindowCause::EveryPaneShellExited
+        } else {
+            exit_diagnostics::LastWindowCause::PersonClosedIt
+        };
         let closed = runtime.close_window(ending);
         // Set whatever the teardown answered: a child that refused to die is
         // said out loud by the caller and changes nothing about this window
@@ -63331,6 +63351,7 @@ impl FolioApp {
             if let Some(app) = self.app.as_mut() {
                 app.finish();
             }
+            exit_diagnostics::say_last_window_closed(last_window_cause, diagnostics::note);
         }
         closed
     }
@@ -64433,6 +64454,9 @@ impl FolioApp {
         }
         self.termination = Some(answer);
         if let Some(app) = self.app.as_mut() {
+            if app.quit.is_none() && !app.quit_requested {
+                app.quit_reason = quit::Reason::LaunchWireQuit;
+            }
             app.ask_to_quit();
         }
     }
@@ -65597,11 +65621,27 @@ impl FolioApp {
                     // The run's sentinel, dropped once — `App::finish`, spent
                     // here for the reason `FolioApp::close` spends it there: this
                     // is where "there are no windows left" becomes true.
+                    let cause = match self
+                        .app
+                        .as_ref()
+                        .and_then(|app| app.quit.as_ref())
+                        .map(quit::Quit::reason)
+                    {
+                        Some(quit::Reason::Asked) => exit_diagnostics::LastWindowCause::Quit,
+                        Some(quit::Reason::LaunchWireQuit) => {
+                            exit_diagnostics::LastWindowCause::LaunchWireQuit
+                        }
+                        Some(quit::Reason::UpdateRestart { .. }) => {
+                            exit_diagnostics::LastWindowCause::UpdateRestart
+                        }
+                        None => exit_diagnostics::LastWindowCause::UnknownRoad("settle_quit"),
+                    };
                     if let Some(app) = self.app.as_mut() {
                         app.quit = None;
                         app.finish();
                     }
                     self.windows.clear();
+                    exit_diagnostics::say_last_window_closed(cause, diagnostics::note);
                     // **And AppKit, if it was AppKit that asked** (M3-1).
                     // `NSTerminateNow`, said here rather than a line earlier:
                     // answering it lets `-[NSApplication terminate:]` go on to
@@ -65974,7 +66014,16 @@ impl FolioApp {
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
             announce_panic(path);
         });
-        if let Err(shutdown_error) = self.stop_every_window() {
+        let had_windows = !self.windows.is_empty();
+        let failure = format!("{error:#}");
+        let stopped = self.stop_every_window();
+        if had_windows {
+            exit_diagnostics::say_last_window_closed(
+                exit_diagnostics::LastWindowCause::ControlledFailure(&failure),
+                diagnostics::note,
+            );
+        }
+        if let Err(shutdown_error) = stopped {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
         // **The spare is abandoned, not waited for** (ticket 60, SW-2): its controller closed now,
@@ -67655,7 +67704,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // stopping, and every window still up at that moment is a window the
         // reader had open — its unsaved edits are kept, the file says so and the
         // next launch opens them.
-        if let Err(error) = self.stop_every_window() {
+        let stopped = self.stop_every_window();
+        exit_diagnostics::say_last_window_closed(
+            exit_diagnostics::LastWindowCause::ControlledFailure("event loop exited"),
+            diagnostics::note,
+        );
+        if let Err(error) = stopped {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.windows.clear();

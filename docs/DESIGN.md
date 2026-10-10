@@ -14726,3 +14726,11 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** `pointer_capture_overlaps` is a bounded compatibility representation, not a new multi-capture policy. It preserves the removed fields' overwrite and release behavior exactly until cut 4 replaces it.
 
 **Pinned by** `pointer_app_tests::a_new_latch_of_the_same_legacy_field_overwrites_the_old_one` and `legacy_overlaps_release_in_the_old_ladders_order`.
+
+### 2026-10-10 — Shell exits and the run's last window state their causes
+
+**What is built.** When `Runtime::reap_exited_tabs` first observes a pane's remembered child status, it writes one resident diagnostics line with the seat, numeric exit code (or `none` for a signal), elapsed milliseconds from that PTY's birth, only the executable basename, the process-wide tab id, and whether the reaper retires the pane, keeps the tab, or retires the tab. The leaf remembers that the line was said, so a dirty preview that keeps a dead shell's tab open cannot repeat it.
+
+**The rule.** Every road that ends the run writes one `Folio: last window closed — …` line: an exit-driven final tab, a person's last-window close, Folio's quit, the launch/application wire's quit, an update restart, or the controlled failure and its one-line cause. These are `diagnostics::note` calls on existing window-thread roads and add no wait, worker, environment value, full program path, or command line.
+
+**Pinned by** `exit_diagnostics::tests::{a_shell_that_exits_says_its_code_basename_and_retirement, the_last_window_after_every_shell_exited_says_that_cause, a_plain_quit_says_quit, a_shell_line_contains_no_environment_value_or_full_program_path, every_run_end_cause_has_the_ruled_words_and_stays_on_one_line}`.

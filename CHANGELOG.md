@@ -13,6 +13,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- The diagnostics log now says when a pane's shell exits and why Folio's last window closed. <!-- zh: pending T-SHELL-EXIT-DIAG-LINE -->
 - An invisible window Folio kept in reserve for web pages no longer swallows clicks at the top-left of your main screen. <!-- // zh: pending -->
 - A web page that answers with an error, such as 404 Not Found, shows the page the server sent instead of a card saying it could not be opened; the card is for an address that could not be reached at all. <!-- zh: 网页返回错误（如 404 Not Found）时，现在显示服务器发来的页面，不再显示无法打开的卡片；卡片只用于完全无法访问的地址。 -->
 - `folio --with-environment` opens a tab that keeps the environment of the terminal you started it from — an activated Python or conda environment, a developer prompt — also when Folio is already running. <!-- zh: `folio --with-environment` 打开的标签页沿用启动它的终端的环境——已激活的 Python 或 conda 环境、开发者命令行——Folio 已在运行时也一样。 -->
