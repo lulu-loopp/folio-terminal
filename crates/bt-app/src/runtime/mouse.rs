@@ -22,7 +22,9 @@ use crate::{
     wheel_points_sideways, wheel_route, wheel_zoom_notches, write_pty_input,
 };
 #[cfg(target_os = "linux")]
-use crate::{PasteTarget, PendingExternalDrop, PendingPastePath, i18n};
+use crate::{
+    PasteTarget, PendingExternalDrop, PendingPastePath, i18n, native_window, platform_pointer_of,
+};
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
 use anyhow::Result;
