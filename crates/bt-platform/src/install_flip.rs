@@ -950,7 +950,7 @@ mod tests {
         std::fs::write(a.join("which"), b"old").unwrap();
         std::fs::write(b.join("which"), b"new").unwrap();
         let answer = exchange(&a, &b);
-        if crate::host_platform() == crate::HostPlatform::MacOs {
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
             answer.unwrap();
             assert_eq!(std::fs::read(a.join("which")).unwrap(), b"new");
             assert_eq!(std::fs::read(b.join("which")).unwrap(), b"old");

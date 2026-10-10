@@ -10,17 +10,19 @@
 //!
 //! * **A durable write** of a small file ([`durable_write`]): a temporary name
 //!   in the same directory, the bytes, a flush of the file (`FlushFileBuffers`
-//!   / `F_FULLFSYNC`), an atomic rename over the target, then a flush of the
-//!   directory (Windows: `FlushFileBuffers` on a directory handle opened with
+//!   / `F_FULLFSYNC` / Linux `fsync`), an atomic rename over the target, then
+//!   a flush of the directory (Windows: `FlushFileBuffers` on a handle opened with
 //!   `FILE_FLAG_BACKUP_SEMANTICS`; macOS: `F_FULLFSYNC` on the directory's
-//!   descriptor). It returns only after the directory flush. A reader after a
-//!   power cut finds the old file or the new one, whole, and never a torn one.
+//!   descriptor; Linux: `fsync` on its descriptor). It returns only after that
+//!   flush. A reader after a power cut finds the old file or the new one,
+//!   whole, and never a torn one.
 //! * **A durable create** ([`durable_create`]): the same steps, with a rename
 //!   that never replaces — the trial's receipt (U-13), written once and never
 //!   over an existing one.
 //! * **A durable move** ([`durable_move`]): Windows `MoveFileExW(…,
-//!   MOVEFILE_WRITE_THROUGH)`, macOS `renamex_np(…, RENAME_EXCL)`; then the
-//!   same directory flush, on the destination's directory and on the source's
+//!   MOVEFILE_WRITE_THROUGH)`, macOS `renamex_np(…, RENAME_EXCL)`, Linux
+//!   `renameat2(…, RENAME_NOREPLACE)`; then the same directory flush, on the
+//!   destination's directory and on the source's
 //!   when it is another one. **A move never replaces a file** (see
 //!   [`durable_move`]).
 //! * **A durable remove** ([`durable_remove`]): a file or a whole directory
@@ -42,18 +44,20 @@
 //!   `RegFlushKey` on a key under `HKEY_CURRENT_USER`, for the entrance value a
 //!   later ticket writes (U-22).
 //! * **The two locks** ([`try_hold`], [`hold_within`]): a byte-range lock
-//!   (`LockFileEx`) on Windows, `flock` on macOS, held by a [`Held`] whose drop
-//!   releases it. The admission file `H\admission` is held [`Hold::Shared`] by
-//!   every running copy of the install (many holders; the file is opened for
+//!   (`LockFileEx`) on Windows, `flock` on macOS and Linux, held by a [`Held`]
+//!   whose drop releases it. The admission file `H\admission` is held
+//!   [`Hold::Shared`] by every running copy of the install (many holders; the
+//!   file is opened for
 //!   reading only, because F-6 lets any account that may run `folio.exe` there
 //!   take part, and such an account has read access through the inherited ACL)
 //!   and [`Hold::Exclusive`] by the applier while files move (refused while any
 //!   shared holder exists, and it refuses new shared holders while held). The
 //!   transaction lock `H\lock` is the same primitive held exclusive.
 //!
-//! **Three arms.** Windows and macOS are real. Every other platform has no arm:
-//! each call is refused with an error that names this door and the operation
-//! (`io::ErrorKind::Unsupported`), never answered as if it had happened.
+//! **Three arms.** Windows, macOS and Linux are real. Every other platform has
+//! no arm: each call is refused with an error that names this door and the
+//! operation (`io::ErrorKind::Unsupported`), never answered as if it had
+//! happened.
 //!
 //! **The OS calls come through a small trait, `Surface`,** so the one order
 //! that makes a write durable — write, flush, rename, directory flush — is
@@ -196,7 +200,8 @@ pub(crate) enum Replace {
     Never,
     /// **An exchange** (`crate::install_flip`, U-28): both names must exist,
     /// and each takes the other's entry in one call — macOS
-    /// `renamex_np(…, RENAME_SWAP)`. Windows has no such call and refuses it.
+    /// `renamex_np(…, RENAME_SWAP)` or Linux `renameat2(…, RENAME_EXCHANGE)`.
+    /// Windows has no such call and refuses it.
     Swap,
 }
 
@@ -212,12 +217,12 @@ pub(crate) trait Surface {
     fn create_new(&mut self, path: &Path) -> io::Result<Self::Handle>;
     fn write_all(&mut self, handle: &mut Self::Handle, bytes: &[u8]) -> io::Result<()>;
     /// Flush everything written through `handle` to the device:
-    /// `FlushFileBuffers` on Windows, `F_FULLFSYNC` on macOS — for a file and
-    /// for a directory handle alike.
+    /// `FlushFileBuffers` on Windows, `F_FULLFSYNC` on macOS and `fsync` on
+    /// Linux — for a file and for a directory handle alike.
     fn flush(&mut self, handle: &mut Self::Handle) -> io::Result<()>;
     fn close(&mut self, handle: Self::Handle);
     /// Open a directory so that it can be flushed (Windows: write access and
-    /// `FILE_FLAG_BACKUP_SEMANTICS`; macOS: a read-only descriptor).
+    /// `FILE_FLAG_BACKUP_SEMANTICS`; macOS and Linux: a read-only descriptor).
     fn open_directory(&mut self, path: &Path) -> io::Result<Self::Handle>;
     fn rename(&mut self, from: &Path, to: &Path, replace: Replace) -> io::Result<()>;
     /// Remove a temporary file this door made, on a failure. Best effort: the
@@ -345,7 +350,8 @@ pub fn durable_copy(source: &mut dyn io::Read, target: &Path) -> Result<u64, Fai
 
 /// **How many bytes the volume `folder` is on still has for this account**
 /// (`GetDiskFreeSpaceExW`'s "available to the caller", which counts a quota;
-/// `statvfs`'s `f_bavail` blocks on macOS) — the Windows Prepare's reservation
+/// `statvfs`'s `f_bavail` blocks on macOS and Linux) — the Windows Prepare's
+/// reservation
 /// (U-20; §C.2 step 3).
 ///
 /// # Errors
@@ -662,10 +668,10 @@ fn hold_until(path: &Path, hold: Hold, deadline: Option<Instant>) -> Result<Opti
     }
 }
 
-/// The Windows and macOS removal: a directory goes with everything in it,
+/// The supported native removal: a directory goes with everything in it,
 /// anything else (a file, a link) alone — a link to a directory is removed,
 /// never followed.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn remove_entry(path: &Path) -> io::Result<()> {
     if std::fs::symlink_metadata(path)?.is_dir() {
         std::fs::remove_dir_all(path)
@@ -1040,8 +1046,156 @@ mod arm {
     }
 }
 
+/// **The Linux arm.** The filesystem calls stay on the caller's worker, and
+/// Linux's `renameat2` supplies the no-replace and exchange operations as one
+/// atomic kernel operation.
+#[cfg(target_os = "linux")]
+mod arm {
+    use super::{Hold, Replace, Surface};
+    use std::ffi::CString;
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Write};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    use std::path::Path;
+
+    /// A Linux rename over an open file succeeds; no refusal is transient.
+    pub(super) fn refused_while_open(_error: &io::Error) -> bool {
+        false
+    }
+
+    fn c_path(path: &Path) -> io::Result<CString> {
+        CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in a path"))
+    }
+
+    fn rename_at(from: &Path, to: &Path, flags: libc::c_uint) -> io::Result<()> {
+        let from = c_path(from)?;
+        let to = c_path(to)?;
+        // SAFETY: both names are NUL-terminated and live across the syscall;
+        // AT_FDCWD makes each relative name resolve from the current directory.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                flags,
+            )
+        } == -1
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) struct Os;
+
+    impl Surface for Os {
+        type Handle = File;
+
+        fn create_new(&mut self, path: &Path) -> io::Result<File> {
+            OpenOptions::new().write(true).create_new(true).open(path)
+        }
+
+        fn write_all(&mut self, handle: &mut File, bytes: &[u8]) -> io::Result<()> {
+            handle.write_all(bytes)
+        }
+
+        fn flush(&mut self, handle: &mut File) -> io::Result<()> {
+            // SAFETY: the descriptor is live and owned by `handle`; fsync
+            // commits this file or directory through the Linux OS surface.
+            if unsafe { libc::fsync(handle.as_raw_fd()) } == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn close(&mut self, handle: File) {
+            drop(handle);
+        }
+
+        fn open_directory(&mut self, path: &Path) -> io::Result<File> {
+            OpenOptions::new().read(true).open(path)
+        }
+
+        fn rename(&mut self, from: &Path, to: &Path, replace: Replace) -> io::Result<()> {
+            let flags = match replace {
+                Replace::Existing => 0,
+                Replace::Never => libc::RENAME_NOREPLACE,
+                Replace::Swap => libc::RENAME_EXCHANGE,
+            };
+            rename_at(from, to, flags)
+        }
+
+        fn remove(&mut self, path: &Path) {
+            let _ = std::fs::remove_file(path);
+        }
+
+        fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
+            super::remove_entry(path)
+        }
+
+        fn create_directory(&mut self, path: &Path) -> io::Result<()> {
+            std::fs::create_dir(path)
+        }
+    }
+
+    pub(super) fn open_lock_file(path: &Path, hold: Hold) -> io::Result<File> {
+        match hold {
+            Hold::Shared => OpenOptions::new().read(true).open(path),
+            Hold::Exclusive => OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path),
+        }
+    }
+
+    pub(super) fn try_lock(file: &File, hold: Hold) -> io::Result<bool> {
+        let mode = match hold {
+            Hold::Shared => libc::LOCK_SH,
+            Hold::Exclusive => libc::LOCK_EX,
+        };
+        // SAFETY: the descriptor remains live in `file` for the call.
+        if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::WouldBlock {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
+    pub(super) fn unlock(file: &File) {
+        // SAFETY: the descriptor is live in `file`; dropping the held value
+        // immediately after this releases the file handle as well.
+        unsafe {
+            libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+
+    pub(super) fn available_bytes(folder: &Path) -> io::Result<u64> {
+        let name = c_path(folder)?;
+        // SAFETY: an all-zero `statvfs` is a valid value for the call to fill.
+        let mut volume: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: the name is NUL-terminated and `volume` is live for the call.
+        if unsafe { libc::statvfs(name.as_ptr(), &raw mut volume) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let bytes = u128::from(volume.f_bavail) * u128::from(volume.f_frsize);
+        Ok(u64::try_from(bytes).unwrap_or(u64::MAX))
+    }
+}
+
 /// **The arm of every other platform: each effect is refused by name.**
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod arm {
     use super::{Hold, Replace, Surface};
     use std::convert::Infallible;
@@ -1356,7 +1510,7 @@ mod tests {
         assert_eq!(failure.stage, Stage::CreateDirectory);
         assert_eq!(refusing.calls, vec![Call::CreateDirectory(folder)]);
 
-        if crate::host_platform() == crate::HostPlatform::OtherUnix {
+        if !cfg!(any(windows, target_os = "macos", target_os = "linux")) {
             return;
         }
         let root = bt_testpath::temp_path("bt-install-txn-mkdir");
@@ -1444,7 +1598,7 @@ mod tests {
         assert_eq!(failure.stage, Stage::Read);
         assert!(matches!(fake.calls.last(), Some(Call::Remove(_))));
 
-        if crate::host_platform() == crate::HostPlatform::OtherUnix {
+        if !cfg!(any(windows, target_os = "macos", target_os = "linux")) {
             return;
         }
         let root = bt_testpath::temp_path("bt-install-txn-copy");
@@ -1639,7 +1793,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     fn scratch(tag: &str) -> PathBuf {
         let directory = bt_testpath::temp_path(&format!("bt-install-txn-{tag}"));
         let _ = std::fs::remove_dir_all(&directory);
@@ -1647,7 +1801,7 @@ mod tests {
         directory
     }
 
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     fn names_in(directory: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(directory)
             .unwrap()
@@ -1669,7 +1823,7 @@ mod tests {
     ///
     /// MUTATION: open the directory in `Os::open_directory` without
     /// `FILE_FLAG_BACKUP_SEMANTICS` (Windows) — the open is refused.
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_durable_write_replaces_its_target_whole_and_leaves_no_temp() {
         let home = scratch("write");
@@ -1691,7 +1845,7 @@ mod tests {
     ///
     /// MUTATION: pass `Replace::Existing` from `durable_create` (the receipt is
     /// written over).
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_durable_create_writes_a_new_file_and_never_an_existing_one() {
         let home = scratch("create");
@@ -1720,7 +1874,7 @@ mod tests {
     ///
     /// MUTATION: make `remove_entry` call `std::fs::remove_dir` (the folder
     /// alone, which refuses a folder that is not empty).
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_durable_remove_takes_a_whole_tree_and_leaves_its_siblings() {
         let home = scratch("remove");
@@ -1747,7 +1901,7 @@ mod tests {
     /// source is gone and the destination holds its bytes.
     ///
     /// MUTATION: pass `Replace::Existing` in `durable_move_with`.
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_durable_move_never_replaces_an_existing_file() {
         let root = scratch("move");
@@ -1784,7 +1938,7 @@ mod tests {
     /// has nothing to do and returns. It takes shared admission, says so by
     /// creating the ready file, and holds it until the go file appears (or a
     /// minute passes, so an abandoned child still ends by itself).
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn admission_child_holds_shared_until_told() {
         let (Some(admission), Some(ready), Some(go)) = (
@@ -1805,11 +1959,11 @@ mod tests {
         drop(held);
     }
 
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     const CHILD_ADMISSION: &str = "BT_INSTALL_TXN_CHILD_ADMISSION";
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     const CHILD_READY: &str = "BT_INSTALL_TXN_CHILD_READY";
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     const CHILD_GO: &str = "BT_INSTALL_TXN_CHILD_GO";
 
     /// RED (U-11) — **a running copy's shared admission, held in another
@@ -1826,7 +1980,7 @@ mod tests {
     ///
     /// MUTATION: take the exclusive lock as shared (`Hold::Exclusive =>
     /// LOCK_FILE_FLAGS(0)` / `libc::LOCK_SH` in `try_lock`).
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn admission_shared_blocks_exclusive_across_processes() {
         let home = scratch("admission-processes");
@@ -1893,7 +2047,7 @@ mod tests {
     /// `LockFileEx` and `flock`.
     ///
     /// MUTATION: take the exclusive lock as shared (as above).
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn admission_exclusive_blocks_a_new_shared_holder() {
         let home = scratch("admission-exclusive");
@@ -1924,7 +2078,7 @@ mod tests {
     ///
     /// MUTATION: return `Ok(None)` after the first refusal in `hold_until`
     /// whatever the deadline.
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_durable_lock_wait_gives_up_at_its_deadline_and_not_before() {
         let home = scratch("admission-deadline");
@@ -1960,7 +2114,7 @@ mod tests {
     /// existed holds nothing (F-6), so the shared hold never creates the file.
     ///
     /// MUTATION: open the shared hold for writing in `open_lock_file`.
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn admission_shared_needs_only_read_access_and_creates_nothing() {
         let home = scratch("admission-read-only");
@@ -2016,7 +2170,7 @@ mod tests {
     /// was durable; one that said only "unsupported" would not say which door.
     ///
     /// MUTATION: answer `Ok(())` from the portable `rename`.
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     #[test]
     fn the_portable_arm_refuses_by_name() {
         let target = std::env::temp_dir()
