@@ -188,8 +188,8 @@ impl Runtime<'_> {
         // the OS's modal move/size loop, and a divider. §7.50 already reads the first of them for
         // the DPI settlement's sake; the child's notification is the other thing a gesture in
         // flight should not be interrupted to say.
-        let hand_on_the_geometry =
-            self.window.divider_drag.is_some() || self.window.custom_window_frame.in_size_move();
+        let hand_on_the_geometry = self.held_divider_drag().copied().is_some()
+            || self.window.custom_window_frame.in_size_move();
         // Every `ResizePseudoConsole` this window actually issues, one line each, so a report of
         // the shape "a resize sequence wedged the program in this pane" can be answered with the
         // sequence instead of with an argument about it. `BT_RESIZE_TRACE`, beside the surface

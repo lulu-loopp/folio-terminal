@@ -1,6 +1,7 @@
 //! `windows` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::touch::let_the_system_translate_touch;
 use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
@@ -9,14 +10,13 @@ use crate::{
     dpi_snapshot, dwm_dark_mode_owed, ensure_metrics_match_authoritative_scale,
     ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
     i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
-    let_the_system_translate_touch, marks, mouse_trace, native_window, new_window_runtime,
-    opening_window_attributes, persisted_preview_pages, persisted_window_bounds, plan_launch,
-    presentation_physical_size, preview, preview_source_of_recent, profiles, quit, rail_state_for,
-    recorded_window_placement, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
-    restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
-    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
-    startup_window_rect, tear_out_rect, toast, unsaved_line, window_minimum_changed,
-    window_surface_target,
+    marks, mouse_trace, native_window, new_window_runtime, opening_window_attributes,
+    persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
+    preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
+    render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
+    revive_plan, scrollback_quota, seats, seed, seeded_tab, session_sidebar_mode,
+    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
+    tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
@@ -2219,10 +2219,7 @@ impl Runtime<'_> {
     /// A refusal is said out loud and dropped: a page whose engine would not
     /// take the notice is a page whose context menu opens in the wrong place,
     /// which is not a reason to fail a window move.
-    pub(crate) fn window_moved(
-        &mut self,
-        position: winit::dpi::PhysicalPosition<i32>,
-    ) -> Result<()> {
+    pub(crate) fn window_moved(&mut self, position: crate::WindowOrigin) -> Result<()> {
         self.note_winit_position(position);
         self.remember_summoned_arrangement();
         // **The window may be on another panel now** (owner's report
@@ -2246,7 +2243,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    fn note_winit_position(&mut self, position: winit::dpi::PhysicalPosition<i32>) {
+    fn note_winit_position(&mut self, position: crate::WindowOrigin) {
         #[cfg(target_os = "linux")]
         {
             self.window.native_client_origin = None;

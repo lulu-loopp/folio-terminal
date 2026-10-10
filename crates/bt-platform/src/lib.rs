@@ -8359,8 +8359,8 @@ pub use webview::{
     WebColorScheme, WebDpiOwnership, WebEvent, WebFrame, WebGuards, WebHost, WebImeEvent,
     WebInstallReport, WebKey, WebKeyEvent, WebKeyModifiers, WebMouseEvent, WebNavigationVerdict,
     WebRequestVerdict, WebSetting, WebSettingRule, forget_web_environment, install_rollback,
-    rehost_compensation, spare_parent, warm_web_environment, web_environment_epoch,
-    web_mouse_buttons, webview2_runtime_version,
+    rehost_compensation, spare_parent, warm_web_environment, web_controller_visibility,
+    web_environment_epoch, web_mouse_buttons, webview2_runtime_version,
 };
 
 #[cfg(windows)]
@@ -18745,8 +18745,12 @@ mod platform_door_tests {
 /// constructor ungated, and this goes red naming the file and the declaration.
 #[cfg(test)]
 mod native_window_door_tests {
-    use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use bt_source::{
+        Index, ItemQuery, Pattern, Search, View, Workspace, needle, report, universes,
+    };
 
     /// The spellings that are a Windows handle however they are dressed.
     const WINDOWS_SHAPES: [&str; 4] = ["NonZeroIsize", "HWND", "HANDLE", "windows::"];
@@ -18755,31 +18759,68 @@ mod native_window_door_tests {
     /// this module's own note.
     const SPELLED_ON_PURPOSE: [&str; 2] = ["from_win32", "explorer_command_clsid"];
 
-    fn crate_sources() -> Vec<PathBuf> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut found = Vec::new();
-        walk(&root, &mut found);
-        found.sort();
-        assert!(
-            found.len() >= 10,
-            "the walk found {} files, which is not this crate's source tree",
-            found.len()
-        );
-        found
+    /// The workspace this crate is a member of, read from its manifests.
+    pub(super) fn workspace() -> Workspace {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        Workspace::read(&root).unwrap_or_else(|rejection| panic!("{rejection}"))
     }
 
-    fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, found);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                found.push(path);
-            }
-        }
+    /// **Every file the index was asked to cover is one a declaration reaches.**
+    ///
+    /// A universe is a disk scope and the targets whose roots it holds
+    /// (`bt_source::universes`); the index is what those targets' `mod`
+    /// declarations reach. A file under the scope that no declaration reaches
+    /// is not in the index, so a reading over the index would pass it by
+    /// without a word — which is how a walk loses a file. It is refused here
+    /// instead, naming the file: declare it, or move it out of the scope.
+    pub(super) fn every_file_is_declared(index: &Index) {
+        let unreached = &index.cross_check().only_on_disk;
+        assert!(
+            unreached.is_empty(),
+            "{} holds files no `mod` declaration reaches, so this reading cannot answer for \
+             them: {unreached:#?}",
+            index.universe().name()
+        );
+    }
+
+    /// `offset` as `crate-relative/path.rs:line`, for a message.
+    pub(super) fn located(index: &Index, workspace: &Workspace, offset: usize) -> String {
+        let location = index
+            .locate(offset)
+            .expect("an occurrence is in a file of the index");
+        format!(
+            "{}:{}",
+            location
+                .file
+                .strip_prefix(bt_source::normalized(workspace.root()))
+                .unwrap_or(location.file)
+                .display(),
+            location.line
+        )
+    }
+
+    /// The universe a stand-in is looked for in: every crate's `src/`, binary
+    /// targets included (`bt_source::universes::stand_in_windows`).
+    fn every_crate(workspace: &Workspace) -> Arc<Index> {
+        let universe = universes::stand_in_windows(workspace)
+            .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        let index =
+            Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        every_file_is_declared(&index);
+        index
+    }
+
+    /// This crate's own sources, as its targets declare them
+    /// (`bt_source::universes::crate_sources`, through `Index::of_package`).
+    fn crate_sources() -> &'static Index {
+        let index = Index::of_package("bt-platform");
+        every_file_is_declared(index);
+        assert!(
+            index.files().len() >= 10,
+            "the index holds {} files, which is not this crate's source tree",
+            index.files().len()
+        );
+        index
     }
 
     /// Every public declaration in one file: a `pub fn` header up to the brace
@@ -18855,16 +18896,16 @@ mod native_window_door_tests {
     /// RED — **no public item of this crate names a Windows handle.**
     ///
     /// A *name* and not a run of letters — see [`names`], which is the whole of
-    /// the difference and carries the case that made it necessary.
+    /// the difference and carries the case that made it necessary. The files
+    /// are the ones this crate's targets declare, read through `bt-source`, so a
+    /// module added under a new directory is read the day it is declared.
     #[test]
     fn the_native_window_door_has_no_windows_type_in_its_signature() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let index = crate_sources();
+        let root = bt_source::normalized(Path::new(env!("CARGO_MANIFEST_DIR")));
         let mut leaks = Vec::new();
-        for file in crate_sources() {
-            let Ok(text) = std::fs::read_to_string(&file) else {
-                continue;
-            };
-            for declaration in public_declarations(&text) {
+        for file in index.files() {
+            for declaration in public_declarations(index.text(file.span())) {
                 if SPELLED_ON_PURPOSE
                     .iter()
                     .any(|allowed| declaration.contains(allowed))
@@ -18875,7 +18916,10 @@ mod native_window_door_tests {
                     if names(&declaration, shape) {
                         leaks.push(format!(
                             "{}: {declaration}",
-                            file.strip_prefix(root).unwrap_or(&file).display()
+                            file.path()
+                                .strip_prefix(&root)
+                                .unwrap_or(file.path())
+                                .display()
                         ));
                     }
                 }
@@ -18898,88 +18942,52 @@ mod native_window_door_tests {
     /// product code writes one it becomes what this type was built to remove: a
     /// window-shaped value invented by the caller.
     ///
-    /// The walk is a brace count rather than a regex, because what is being
-    /// asked is *whether this occurrence is inside a `#[cfg(test)]` module* and
-    /// a line-based reading cannot answer that. The definition itself is the
-    /// one occurrence outside such a module, and it is named.
+    /// The question is asked of `bt-source` over every crate's `src/`, binary
+    /// targets included, and each part of it is one of that crate's rules
+    /// rather than a reading of this module's own:
     ///
-    /// **A gated module is not always text in the file that gates it**
-    /// (2026-09-18). It is `mod name { … }` or it is `mod name;` with the body
-    /// in a file beside it, and the two say exactly the same thing about what is
-    /// test-only. [`wholly_test_files`] is the half of the answer the brace
-    /// count cannot give.
+    /// * **a call, on a name's boundary** — `Pattern::call` in the identifier
+    ///   view, so `bt-app`'s `strip_stand_in` and `retire_the_stand_in`, about a
+    ///   placeholder tab, are different names that share an English word, and a
+    ///   comment about the door is not a use of it;
+    /// * **a definition is not a use** — the declarations of
+    ///   `NativeWindow::stand_in` and of its twin `hotkey::Foreground::stand_in`
+    ///   are exempted by their identities, and their bodies are not;
+    /// * **test code is whatever the declarations say is test code** —
+    ///   `Found::in_the_product`, which reads a `#[cfg(test)]` on an inline
+    ///   module, on an item, and on the `mod name;` that makes a whole file a
+    ///   test's.
     ///
     /// MUTATION: call `stand_in` from any shipped path and this fails naming
     /// the file and the line.
     #[test]
     fn a_stand_in_window_is_only_named_by_tests() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .canonicalize()
-            .expect("the crates directory, one above this crate");
-        let mut found = Vec::new();
-        walk(&root, &mut found);
-        found.sort();
-        found.retain(|path| {
-            path.components()
-                .any(|component| component.as_os_str() == "src")
-        });
+        let workspace = workspace();
+        let index = every_crate(&workspace);
         assert!(
-            found.len() > 20,
-            "the walk found {} files, which is not this workspace's crates",
-            found.len()
+            index.files().len() > 20,
+            "the index holds {} files, which is not this workspace's crates",
+            index.files().len()
         );
-
-        let (wholly_test, unfollowed) = wholly_test_files(&found);
-        assert!(
-            unfollowed.is_empty(),
-            "a `#[cfg(test)]` module is declared out of line and this walk cannot say which file \
-             holds it, so it cannot say what is test-only either — which is worse than saying so: \
-             {unfollowed:#?}"
+        let found = index
+            .search(
+                &Search::new(needle!(Pattern::call("stand_in")), View::Identifiers)
+                    .exempting_declarations_of(ItemQuery::method("NativeWindow", "stand_in"))
+                    .exempting_declarations_of(ItemQuery::method("Foreground", "stand_in")),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            found.excluded().len(),
+            2,
+            "the two definitions are the occurrences the search exempts: {}",
+            found.report(&index)
         );
-
-        let mut outside = Vec::new();
-        for file in found {
-            let Ok(text) = std::fs::read_to_string(&file) else {
-                continue;
-            };
-            // The whole file is somebody's `#[cfg(test)] mod …;`, so every line
-            // in it is inside that module.
-            if wholly_test.contains(&file) {
-                continue;
-            }
-            let spans = test_module_spans(&text);
-            for (at, _) in text.match_indices("stand_in(") {
-                // **On a word boundary**, for the quiet door's reason one file
-                // over: `bt-app`'s tab strip has a `strip_stand_in` and a
-                // `retire_the_stand_in` about a placeholder tab, which is a
-                // different subject that happens to share an English word.
-                if text[..at]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|before| before.is_alphanumeric() || before == '_')
-                {
-                    continue;
-                }
-                // The definition, which is where the spelling comes from.
-                if text[..at].ends_with("pub const fn ") {
-                    continue;
-                }
-                if spans.iter().any(|(from, to)| at > *from && at < *to) {
-                    continue;
-                }
-                // Prose about the door is not a use of it.
-                let line_start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
-                if text[line_start..at].trim_start().starts_with("//") {
-                    continue;
-                }
-                let line = text[..at].lines().count();
-                outside.push(format!(
-                    "{}:{line}",
-                    file.strip_prefix(&root).unwrap_or(&file).display()
-                ));
-            }
-        }
+        let outside: Vec<String> = found
+            .in_the_product(&index)
+            .occurrences()
+            .iter()
+            .map(|occurrence| located(&index, &workspace, occurrence.span.start()))
+            .collect();
         assert!(
             outside.is_empty(),
             "`NativeWindow::stand_in` names no window, so a shipped path that reaches for one is \
@@ -18987,459 +18995,29 @@ mod native_window_door_tests {
         );
     }
 
-    /// The byte ranges of every `#[cfg(test)]` or `#[cfg(all(test…` module in
-    /// `text`, from the brace that opens the module to the one that closes it.
+    /// RED — **the out-of-line test modules this workspace declares are read as
+    /// test code, and a file that declares one is not.**
     ///
-    /// Braces inside string and character literals and inside comments would
-    /// throw the count off, so both are skipped. It is a small parser and it is
-    /// the only honest way to ask the question this gate asks.
+    /// `a_stand_in_window_is_only_named_by_tests` takes "is this test code" from
+    /// the declarations, and `bt-app` keeps its largest test modules out of line
+    /// — so if that classification ever stops reaching a `mod name;` the gate
+    /// above goes red and names a test as a shipped path. This is the same
+    /// answer read the other way: three files whose whole body is a test
+    /// module's, by each of the spellings that make one.
     ///
-    /// **Raw strings are their own arm, and M1-10 is why.** A `r"\\?\"` — a
-    /// Windows verbatim prefix, of which this crate's tests are full — ends with
-    /// a backslash immediately before its closing quote. Read as an ordinary
-    /// string that backslash escapes the quote, the scan runs on into the next
-    /// literal, and from there the brace count is somebody else's. The effect
-    /// was silent and it was total: this walk never closed `handoff.rs`'s test
-    /// module at all, so the gate below covered none of it, and the first line
-    /// in that module to name `stand_in` was reported as a shipped path. A gate
-    /// that answers about a file it cannot parse is worse than one that says it
-    /// cannot, which is why this is a fix rather than an exception.
-    /// **A gate stands on exactly one item, and that item ends at the first `{`
-    /// or `;` after it** (2026-09-18). Reading further is how a gate on a
-    /// declaration came to claim the next item's braces.
-    fn test_module_spans(text: &str) -> Vec<(usize, usize)> {
-        let bytes = text.as_bytes();
-        let mut spans = Vec::new();
-        for at in gate_positions(text) {
-            let Some(GatedItem::Inline { open }) = gated_item(bytes, at) else {
-                continue;
-            };
-            let mut depth = 0_i32;
-            for index in code_indices(bytes, open) {
-                match bytes[index] {
-                    b'{' => depth += 1,
-                    b'}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            spans.push((open, index));
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        spans
-    }
-
-    /// Where each `#[cfg(test)]` or `#[cfg(all(test…` stands in `text`, in the
-    /// order they are written.
-    fn gate_positions(text: &str) -> Vec<usize> {
-        let mut gates: Vec<usize> = ["#[cfg(test)]", "#[cfg(all(test"]
-            .into_iter()
-            .flat_map(|gate| text.match_indices(gate).map(|(at, _)| at))
-            .collect();
-        gates.sort_unstable();
-        gates
-    }
-
-    /// Whether a gate's item carries its body here or names a file for it.
-    enum GatedItem {
-        /// `mod name { … }`, and `open` is that brace.
-        Inline { open: usize },
-        /// An item that ends in a semicolon — `mod name;`, and also a gated
-        /// `const` or `use`, which is not a module at all. Either way there is
-        /// no body here to take a span from; [`out_of_line_modules`] is what
-        /// reads the ones that name a file.
-        Declaration,
-    }
-
-    /// The item the gate at `at` stands on.
-    ///
-    /// **The first `{` or `;`, whichever comes first, and nothing after it.**
-    /// Until 2026-09-18 this looked only for a `{`, so a gate on `mod tests;`
-    /// — or on a gated `const`, of which `bt-app` has several — reached past its
-    /// own item and took the braces of whatever product item came next, and
-    /// every `stand_in` inside that item was exempted in silence. An
-    /// over-exemption is the failure this gate cannot see, so it is the one the
-    /// reading has to make impossible.
-    fn gated_item(bytes: &[u8], at: usize) -> Option<GatedItem> {
-        code_indices(bytes, at).find_map(|index| match bytes[index] {
-            b'{' => Some(GatedItem::Inline { open: index }),
-            b';' => Some(GatedItem::Declaration),
-            _ => None,
-        })
-    }
-
-    /// The indices of the bytes at and after `at` that are **code**: everything
-    /// inside a string, a raw string, a character literal or a line comment is
-    /// stepped over rather than yielded.
-    ///
-    /// One reader for every question this module asks of a source file — where
-    /// an item ends, how deep the braces are, what a declaration names — so that
-    /// a literal spelling `{`, `;` or `mod` cannot answer any of them. The
-    /// note on [`test_module_spans`] carries the case that made the skipping
-    /// necessary in the first place.
-    fn code_indices(bytes: &[u8], at: usize) -> impl Iterator<Item = usize> + '_ {
-        let mut index = at;
-        std::iter::from_fn(move || {
-            while index < bytes.len() {
-                let here = index;
-                match bytes[here] {
-                    b'r' if raw_string_opens_at(bytes, here) => {
-                        index = skip_raw_string(bytes, here) + 1;
-                    }
-                    b'"' => index = skip_string(bytes, here) + 1,
-                    b'\'' => {
-                        let past = skip_char(bytes, here);
-                        index = past + 1;
-                        // A quote that opens nothing is a lifetime, and a
-                        // lifetime is code.
-                        if past == here {
-                            return Some(here);
-                        }
-                    }
-                    b'/' if bytes.get(here + 1) == Some(&b'/') => {
-                        index = bytes[here..]
-                            .iter()
-                            .position(|byte| *byte == b'\n')
-                            .map_or(bytes.len(), |offset| here + offset);
-                    }
-                    _ => {
-                        index = here + 1;
-                        return Some(here);
-                    }
-                }
-            }
-            None
-        })
-    }
-
-    /// One module a file declares out of line — `mod name;`, with the body in a
-    /// file of its own.
-    struct Declaration {
-        name: String,
-        /// The file named by a `#[path = "…"]` written above it, if there is one.
-        path: Option<String>,
-        /// Whether a `#[cfg(test)]` stands on it. **This is the owner of the
-        /// fact "the file it names is test-only"** — never the file's name.
-        gated: bool,
-        /// The line it is written on, for the message when it cannot be followed.
-        line: usize,
-    }
-
-    /// Every module `text` declares out of line.
-    ///
-    /// The `mod` keyword is found in the code — a `#[path = "mod_a.rs"]` is a
-    /// string and is stepped over — and what stands above it is then read as
-    /// lines, which is sound for this one question because an attribute on a
-    /// module declaration is written above it and the read stops at the first
-    /// line that is neither an attribute, a comment, nor blank.
-    fn out_of_line_modules(text: &str) -> Vec<Declaration> {
-        let bytes = text.as_bytes();
-        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
-        let mut found = Vec::new();
-        for at in code_indices(bytes, 0) {
-            // The keyword, at both its edges: `submod` and `mode` are names.
-            if !bytes[at..].starts_with(b"mod")
-                || (at > 0 && is_word(bytes[at - 1]))
-                || bytes.get(at + 3).copied().is_some_and(is_word)
-            {
-                continue;
-            }
-            let mut name = String::new();
-            let mut after_name = false;
-            let mut ends_declaration = false;
-            for index in code_indices(bytes, at + 3) {
-                let byte = bytes[index];
-                if byte.is_ascii_whitespace() {
-                    after_name = !name.is_empty();
-                    continue;
-                }
-                if is_word(byte) && !after_name {
-                    name.push(char::from(byte));
-                    continue;
-                }
-                ends_declaration = byte == b';';
-                break;
-            }
-            if name.is_empty() || !ends_declaration {
-                continue;
-            }
-            let (gated, path) = attributes_above(text, at);
-            found.push(Declaration {
-                name,
-                path,
-                gated,
-                line: text[..at].lines().count(),
-            });
-        }
-        found
-    }
-
-    /// What is written above the item at `at`: whether a `cfg(test)` gate stands
-    /// on it, and the file any `#[path = "…"]` names.
-    fn attributes_above(text: &str, at: usize) -> (bool, Option<String>) {
-        let mut written: Vec<&str> = Vec::new();
-        let line_start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
-        written.push(text[line_start..at].trim());
-        for line in text[..line_start].lines().rev() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("//") {
-                continue;
-            }
-            if !trimmed.starts_with("#[") {
-                break;
-            }
-            written.push(trimmed);
-        }
-        let gated = written
-            .iter()
-            .any(|line| line.starts_with("#[cfg(test)]") || line.starts_with("#[cfg(all(test"));
-        let path = written.iter().find_map(|line| {
-            let rest = line.strip_prefix("#[path")?.split_once('"')?.1;
-            rest.split_once('"').map(|(named, _)| named.to_owned())
-        });
-        (gated, path)
-    }
-
-    /// The file a module `declaring` declares out of line lives in.
-    ///
-    /// Rust's own rule, and no other: a `#[path]` on a module declared at the
-    /// top of a file is relative to the directory that file is in; otherwise a
-    /// crate root and a `mod.rs` own the directory they are in, and every other
-    /// file owns a directory named after it.
-    fn module_file(declaring: &Path, module: &Declaration) -> Option<PathBuf> {
-        let directory = declaring.parent()?;
-        if let Some(named) = &module.path {
-            let file = directory.join(named);
-            return file.is_file().then_some(file);
-        }
-        let stem = declaring.file_stem()?.to_str()?;
-        let directory = match stem {
-            "lib" | "main" | "mod" => directory.to_path_buf(),
-            owner => directory.join(owner),
-        };
-        let beside = directory.join(format!("{}.rs", module.name));
-        if beside.is_file() {
-            return Some(beside);
-        }
-        let nested = directory.join(&module.name).join("mod.rs");
-        nested.is_file().then_some(nested)
-    }
-
-    /// **Every file of `files` that exists only under `cfg(test)`**, and every
-    /// gated declaration this walk could not follow to a file.
-    ///
-    /// The fact is owned by the declaration: a file is here because a
-    /// `#[cfg(test)] mod …;` names it, never because of what it is called.
-    /// Transitively, too — a file that is only compiled under `cfg(test)`
-    /// compiles its own children under it as well, whether or not they carry a
-    /// gate of their own, because there is no build in which their parent is
-    /// there and they are not.
-    fn wholly_test_files(files: &[PathBuf]) -> (BTreeSet<PathBuf>, Vec<String>) {
-        let read = |file: &Path| std::fs::read_to_string(file).ok();
-        let mut wholly = BTreeSet::new();
-        let mut unfollowed = Vec::new();
-        let mut frontier = Vec::new();
-        for file in files {
-            let Some(text) = read(file) else { continue };
-            for module in out_of_line_modules(&text).iter().filter(|it| it.gated) {
-                match module_file(file, module) {
-                    Some(named) => {
-                        if wholly.insert(named.clone()) {
-                            frontier.push(named);
-                        }
-                    }
-                    None => unfollowed.push(format!(
-                        "{}:{}: mod {};",
-                        file.display(),
-                        module.line,
-                        module.name
-                    )),
-                }
-            }
-        }
-        while let Some(file) = frontier.pop() {
-            let Some(text) = read(&file) else { continue };
-            for module in out_of_line_modules(&text) {
-                let Some(named) = module_file(&file, &module) else {
-                    unfollowed.push(format!(
-                        "{}:{}: mod {};",
-                        file.display(),
-                        module.line,
-                        module.name
-                    ));
-                    continue;
-                };
-                if wholly.insert(named.clone()) {
-                    frontier.push(named);
-                }
-            }
-        }
-        (wholly, unfollowed)
-    }
-
-    /// Whether the `r` at `at` opens a raw string rather than sitting inside a
-    /// word.
-    ///
-    /// Two readings and both are cheap: the byte before it may not be part of an
-    /// identifier — `for` must not open one — except that it may be the `b` of
-    /// `br"…"`, which is the byte-string spelling of the same literal. What
-    /// follows has to be `#`* `"`, and [`skip_raw_string`] answers that by
-    /// declining to move, so this predicate is allowed to be the loose half.
-    fn raw_string_opens_at(bytes: &[u8], at: usize) -> bool {
-        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
-        let before = match at.checked_sub(1).map(|before| bytes[before]) {
-            Some(b'b') => at.checked_sub(2).map(|before| bytes[before]),
-            other => other,
-        };
-        if before.is_some_and(is_word) {
-            return false;
-        }
-        let mut index = at + 1;
-        while bytes.get(index) == Some(&b'#') {
-            index += 1;
-        }
-        bytes.get(index) == Some(&b'"')
-    }
-
-    /// Past the raw string that starts at the `r` at `at` — the closing quote
-    /// and its hashes — or `at` itself when that is not what is there.
-    ///
-    /// A raw string has no escapes at all: it ends at the first `"` followed by
-    /// as many `#` as opened it, and a backslash before that quote is one more
-    /// character of the path.
-    fn skip_raw_string(bytes: &[u8], at: usize) -> usize {
-        let mut hashes = 0_usize;
-        let mut index = at + 1;
-        while bytes.get(index) == Some(&b'#') {
-            hashes += 1;
-            index += 1;
-        }
-        if bytes.get(index) != Some(&b'"') {
-            return at;
-        }
-        index += 1;
-        while index < bytes.len() {
-            if bytes[index] == b'"'
-                && (1..=hashes).all(|offset| bytes.get(index + offset) == Some(&b'#'))
-            {
-                return index + hashes;
-            }
-            index += 1;
-        }
-        bytes.len()
-    }
-
-    /// Past the string literal that starts at `at`.
-    fn skip_string(bytes: &[u8], at: usize) -> usize {
-        let mut index = at + 1;
-        while index < bytes.len() {
-            match bytes[index] {
-                b'\\' => index += 1,
-                b'"' => return index,
-                _ => {}
-            }
-            index += 1;
-        }
-        bytes.len()
-    }
-
-    /// Past the character literal that starts at `at`, or `at` itself when the
-    /// quote is a lifetime rather than a literal.
-    fn skip_char(bytes: &[u8], at: usize) -> usize {
-        match (bytes.get(at + 1), bytes.get(at + 2)) {
-            (Some(b'\\'), _) => bytes[at + 2..]
-                .iter()
-                .position(|byte| *byte == b'\'')
-                .map_or(bytes.len(), |offset| at + 2 + offset),
-            (Some(_), Some(b'\'')) => at + 2,
-            _ => at,
-        }
-    }
-
-    /// RED — **a gate on a declaration covers the file it names, and never the
-    /// item that happens to follow it** (2026-09-18).
-    ///
-    /// The reading this gate makes is the whole of what it can say, so the
-    /// reading is tested against text rather than only against the tree — the
-    /// tree has the cases it has today, and the ones that matter are the ones
-    /// somebody writes tomorrow.
-    ///
-    /// The first assertion is the one that was red before this day's change:
-    /// the old scan took the *next* `{` after a gate, whatever item it belonged
-    /// to, so `struct Shipped` below was inside a "test module" and every
-    /// `stand_in` in it was exempted without a word.
-    #[test]
-    fn a_gate_reads_its_own_item_and_the_file_it_names() {
-        let declared = "#[cfg(test)]\nmod tests;\n\nstruct Shipped {\n    door: usize,\n}\n";
-        assert!(
-            test_module_spans(declared).is_empty(),
-            "the braces of the item after a gated declaration are not a test module's body"
-        );
-        let modules = out_of_line_modules(declared);
-        assert_eq!(modules.len(), 1, "one declaration, and `struct` is not one");
-        assert!(
-            modules[0].gated && modules[0].name == "tests" && modules[0].path.is_none(),
-            "the gate stands on `mod tests;`, which is what makes that file test-only"
-        );
-
-        // An inline gated module still gives up its own body, and only that.
-        let inline = "#[cfg(test)]\nmod tests {\n    fn one() {}\n}\nstruct Shipped;\n";
-        let spans = test_module_spans(inline);
-        assert_eq!(spans.len(), 1, "the inline module is still read");
-        assert!(
-            inline[spans[0].0..=spans[0].1].contains("fn one")
-                && !inline[spans[0].0..=spans[0].1].contains("Shipped"),
-            "the span is the module's braces and stops at them"
-        );
-
-        // A declaration with no gate says nothing about the file it names, and a
-        // gate that is spelled inside a string is not a gate.
-        let plain =
-            out_of_line_modules("mod files;\nconst NEEDLE: &str = \"#[cfg(test)]\\nmod x;\";\n");
-        assert_eq!(
-            plain.len(),
-            1,
-            "the one in the literal is text, not a module"
-        );
-        assert!(
-            !plain[0].gated,
-            "an ungated `mod files;` names a file this crate ships"
-        );
-
-        // `#[path]` is honoured, and it is read from above the declaration.
-        let pathed =
-            out_of_line_modules("#[cfg(test)]\n#[path = \"journeys_tests.rs\"]\nmod journeys;\n");
-        assert_eq!(pathed.len(), 1);
-        assert!(
-            pathed[0].gated && pathed[0].path.as_deref() == Some("journeys_tests.rs"),
-            "the file a gated module is told to read is the file that is test-only"
-        );
-    }
-
-    /// RED — **and on this tree, the declaration is followed to the file.**
-    ///
-    /// The half above is about the reading; this is about the answer. `bt-app`
-    /// declares its largest test module out of line since 2026-09-18, and two
-    /// `stand_in` calls live in the file it names — so if this classification
-    /// ever stops working, `a_stand_in_window_is_only_named_by_tests` goes red
-    /// and names a test as a shipped path.
+    /// MUTATION: take the `#[cfg(test)]` off `mod tests;` in `bt-app`'s
+    /// `main.rs` and the first file is not wholly test any more.
     #[test]
     fn the_out_of_line_test_modules_of_this_workspace_are_followed() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .canonicalize()
-            .expect("the crates directory, one above this crate");
-        let mut found = Vec::new();
-        walk(&root, &mut found);
-        found.retain(|path| {
-            path.components()
-                .any(|component| component.as_os_str() == "src")
-        });
-        let (wholly, unfollowed) = wholly_test_files(&found);
-        assert!(unfollowed.is_empty(), "{unfollowed:#?}");
+        let workspace = workspace();
+        let index = every_crate(&workspace);
+        let crates = workspace.root().join("crates");
+        let file = |named: &str| {
+            let path = crates.join(named.replace('/', std::path::MAIN_SEPARATOR_STR));
+            index
+                .file(&path)
+                .unwrap_or_else(|| panic!("{named} is not a file of this workspace's crates"))
+        };
         for named in [
             // Declared `#[cfg(test)] mod tests;` in `main.rs`, beside it.
             "bt-app/src/tests.rs",
@@ -19450,16 +19028,13 @@ mod native_window_door_tests {
             // ledger moved whole.
             "bt-workbench/src/attention/tests.rs",
         ] {
-            let file = root.join(named.replace('/', std::path::MAIN_SEPARATOR_STR));
             assert!(
-                wholly.contains(&file),
+                file(named).is_wholly_test(),
                 "{named} is a `#[cfg(test)]` module's whole body and is not classified as one"
             );
         }
         assert!(
-            !wholly.contains(
-                &root.join("bt-app/src/main.rs".replace('/', std::path::MAIN_SEPARATOR_STR))
-            ),
+            !file("bt-app/src/main.rs").is_wholly_test(),
             "a file that declares a test module is not itself one"
         );
     }
@@ -24772,24 +24347,15 @@ mod custom_frame_tests {
 /// is the test that nothing else is a door.
 #[cfg(test)]
 mod quiet_door_tests {
-    use std::path::{Path, PathBuf};
+    use bt_source::{Index, ItemQuery, Pattern, Search, View, needle, report, universes};
 
-    /// The workspace root, from where this crate is rather than from where the
-    /// test happened to be started.
-    fn repository_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .canonicalize()
-            .expect("the workspace root, two directories above this crate")
-    }
+    use super::native_window_door_tests::{every_file_is_declared, located, workspace};
 
-    /// Every `.rs` file that can end up in `folio.exe`, as
-    /// `bt_app::diagnostics`'s own walk defines that — **the walk is the point**:
-    /// a list of files here would be a list somebody has to remember to add to,
-    /// which is the same failure this whole section exists to remove.
+    /// RED — **the workspace builds a child process in exactly one place.**
     ///
-    /// Three exclusions, each for a reason of its own:
+    /// Red gate for §7.40 ①. The universe is `bt_source::universes::quiet_doors`
+    /// — every crate's `src/`, as its targets declare it, with three exclusions,
+    /// each for a reason of its own:
     ///
     /// * `vendor/` is upstream code held to upstream's choices, exactly as the
     ///   workspace lint table says. This product's rules are not theirs;
@@ -24797,111 +24363,70 @@ mod quiet_door_tests {
     ///   cargo**, which owns a console already. There is no window to suppress
     ///   there, and a build script cannot depend on the crate holding the door
     ///   without building that crate for the host first;
-    /// * `bin/` and `tests/` are the shipped walk's own exclusions: a development
-    ///   binary is a console program on purpose, and an integration test runs
-    ///   under the harness's console.
+    /// * `bin/` and `tests/` directories: a development binary is a console
+    ///   program on purpose, and an integration test runs under the harness's
+    ///   console.
     ///
     /// Everything else, **test modules inside `src/` included**. A `#[cfg(test)]`
-    /// block is exempted from nothing here, and deliberately: the stripping such
-    /// an exemption would need is a brace-counting parser, a suite whose own
+    /// block is exempted from nothing here, and deliberately: a suite whose own
     /// children flash consoles across a developer's screen is a suite nobody
     /// wants, and the door costs a test exactly as little as it costs the
     /// product.
-    fn shipped_sources(root: &Path) -> Vec<PathBuf> {
-        let mut found = Vec::new();
-        walk(&root.join("crates"), &mut found);
-        found.retain(|path| {
-            path.components()
-                .any(|component| component.as_os_str() == "src")
-        });
-        found.sort();
-        assert!(
-            found.len() > 50,
-            "the walk found {} files, which is not a source tree",
-            found.len()
-        );
-        found
-    }
-
-    fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            let name = entry.file_name();
-            if path.is_dir() {
-                if name != "bin" && name != "tests" && name != "target" {
-                    walk(&path, found);
-                }
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                found.push(path);
-            }
-        }
-    }
-
-    /// How many times `text` builds a `std::process` child by hand.
     ///
-    /// **On a word boundary**, which is the whole of the difference between this
-    /// rule and a ban on starting processes: `bt_pty::PtyCommand` carries this
-    /// spelling as a substring and is a different type entirely — a shell in a
-    /// pane is *given* a pseudoconsole by ConPTY rather than allocated a real
-    /// one, so it has no window to suppress and nothing to route through the
-    /// door.
+    /// **A path on a name's boundary**, which is the whole of the difference
+    /// between this rule and a ban on starting processes: `bt_pty::PtyCommand`
+    /// carries the spelling as a substring and is a different type entirely — a
+    /// shell in a pane is *given* a pseudoconsole by ConPTY rather than
+    /// allocated a real one, so it has no window to suppress and nothing to
+    /// route through the door. And the one place a child is built is asked for
+    /// by its identity, `quiet_command`, not by the file it is written in.
     ///
-    /// The needle is assembled at compile time rather than written as one
-    /// literal, for `bt_app::attention_hooks`'s reason: a test that spelled it
-    /// whole would be an occurrence of the very thing it counts, and this file is
-    /// the one file whose count has to be exact.
-    fn doors_built_in(text: &str) -> usize {
-        const NEEDLE: &str = concat!("Command", "::new(");
-        text.match_indices(NEEDLE)
-            .filter(|(at, _)| {
-                text[..*at]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|before| !before.is_alphanumeric() && before != '_')
-            })
-            .count()
-    }
-
-    /// RED — **the workspace builds a child process in exactly one place.**
+    /// RED GATE: build a child by hand anywhere under a crate's `src/` and this
+    /// fails naming the file and the line; the `wsl::probe` this section was
+    /// opened by would have failed it on the two lines that opened a Windows
+    /// Terminal window at every launch.
     ///
-    /// Red gate for §7.40 ①. RED GATE: build a child by hand anywhere under a
-    /// crate's `src/` and this fails naming the file and the count; the
-    /// `wsl::probe` this section was opened by would have failed it on the two
-    /// lines that opened a Windows Terminal window at every launch.
-    ///
-    /// MUTATION: match without the word boundary and every `PtyCommand` in
-    /// `bt-pty` reads as a violation, so the gate has to be weakened to pass and
-    /// stops being one.
+    /// MUTATION: match without the name boundary (`Pattern::text`) and every
+    /// `PtyCommand` in `bt-pty` reads as a violation, so the gate has to be
+    /// weakened to pass and stops being one.
     #[test]
     fn no_command_is_built_outside_the_quiet_door() {
-        let root = repository_root();
-        let door = root
-            .join("crates")
-            .join("bt-platform")
-            .join("src")
-            .join("lib.rs");
-        let mut outside = Vec::new();
-        let mut inside = 0;
-        for file in shipped_sources(&root) {
-            let Ok(text) = std::fs::read_to_string(&file) else {
-                continue;
-            };
-            let built = doors_built_in(&text);
-            if built == 0 {
-                continue;
-            }
-            if file == door {
-                inside = built;
-            } else {
-                outside.push(format!(
-                    "{} builds {built} of its own",
-                    file.strip_prefix(&root).unwrap_or(&file).display()
-                ));
-            }
-        }
+        let workspace = workspace();
+        let universe = universes::quiet_doors(&workspace)
+            .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        let index =
+            Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        every_file_is_declared(&index);
+        assert!(
+            index.files().len() > 50,
+            "the index holds {} files, which is not a source tree",
+            index.files().len()
+        );
+        let built = index
+            .search(&Search::new(
+                needle!(Pattern::path("Command::new")),
+                View::Identifiers,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let door = index
+            .one(&ItemQuery::function("quiet_command"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let body = door.body().expect("the door is a function with a body");
+        // **The call, as this gate reads it**: the path with a parenthesis
+        // after it. A path handed on as a value — `bt-pty`'s test-shell tests
+        // pass `std::process::Command::new` to `Hygiene::command` — is not a
+        // call written at that site and is not counted.
+        let calls = built.occurrences().iter().filter(|occurrence| {
+            index.union()[occurrence.span.end()..]
+                .trim_start()
+                .starts_with('(')
+        });
+        let (inside, outside): (Vec<&bt_source::Occurrence>, Vec<&bt_source::Occurrence>) =
+            calls.partition(|occurrence| occurrence.span.within(body));
+        let outside: Vec<String> = outside
+            .iter()
+            .map(|occurrence| located(&index, &workspace, occurrence.span.start()))
+            .collect();
         assert!(
             outside.is_empty(),
             "every child process this product starts goes through \
@@ -24909,14 +24434,9 @@ mod quiet_door_tests {
              otherwise hand it is refused; these do not: {outside:#?}"
         );
         assert_eq!(
-            inside, 1,
+            inside.len(),
+            1,
             "and the door itself builds exactly one, in `quiet_command`"
-        );
-        assert!(
-            std::fs::read_to_string(&door)
-                .expect("this crate's own source")
-                .contains("pub fn quiet_command("),
-            "the door is still called `quiet_command`"
         );
     }
 }
@@ -25629,6 +25149,7 @@ mod macos_player_signature_tests {
             "set_muted",
             "set_volume",
             "wait_for_metadata",
+            "state_reaching",
             "shutdown",
         ] {
             let windows = verb(WINDOWS_ARM, door);

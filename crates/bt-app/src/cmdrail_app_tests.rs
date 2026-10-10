@@ -3,50 +3,23 @@
 //! module's own, with their shared fixtures from [`crate::test_support`].
 
 use super::*;
-use crate::test_support::{
-    RAIL_FAILED_THEN_PROMPT, item_body, leaf_saying, rail_test_body, squeezed, squeezed_body,
-};
-use bt_source::ItemQuery;
+use crate::test_support::{RAIL_FAILED_THEN_PROMPT, leaf_saying, rail_test_body, squeezed_body};
 
 /// RED (confirmation review of `6049179a`, P2) — **the in-pane surfaces yield
-/// to every band painted above them, and that list is the paint order.**
+/// to every band painted above them.**
 ///
 /// The wheel's in-pane station stood above the palette, so a notch on the
 /// palette's list where it overlapped a pill was swallowed by the pill. The
 /// rule is not a station moved by hand: the router's in-pane step yields to
 /// `OVER_IN_PANE_TOP_FIRST`, and every reader that asks the router — the
-/// wheel, the press door, the tip — inherits it. This test reads
-/// `OverlayStack::flattened` and requires that list to be exactly the bands it
-/// paints above `in_pane`, top first, less the ones that take no pointer — so a
-/// band added to the paint above the in-pane surfaces fails here until it is
-/// classified, and a reorder of the paint fails here until the list follows.
+/// wheel, the press door, the tip — inherits it. That the list is the paint
+/// order above the in-pane surfaces is
+/// `every_band_is_a_pointer_layer_or_takes_no_pointer`'s to hold.
 ///
-/// Red gate: swap two entries of the list, or drop the yield from the router,
-/// and the assertion naming it fails.
+/// Red gate: drop the yield from the router, or read the claim anywhere but
+/// the router, and the assertion naming it fails.
 #[test]
 fn the_in_pane_surfaces_yield_to_every_band_painted_above_them() {
-    let paint = squeezed(item_body(&ItemQuery::method("OverlayStack", "flattened")));
-    let array = &paint[paint.find("[preview_bars,").expect("the paint array")..];
-    let array = &array[1..array.find(']').expect("its end")];
-    let bands: Vec<&str> = array.split(',').filter(|band| !band.is_empty()).collect();
-    let in_pane = bands
-        .iter()
-        .position(|band| *band == "in_pane")
-        .expect("the in-pane surfaces are painted as one band");
-    let above: Vec<&str> = bands[in_pane + 1..]
-        .iter()
-        .rev()
-        .copied()
-        .filter(|band| !BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER.contains(band))
-        .collect();
-    let listed: Vec<&str> = OVER_IN_PANE_TOP_FIRST
-        .iter()
-        .map(|family| family.band())
-        .collect();
-    assert_eq!(
-        listed, above,
-        "OVER_IN_PANE_TOP_FIRST is the paint order above the in-pane surfaces, top first"
-    );
     let router = squeezed_body("Runtime", "pointer_target_at");
     let step = router
         .find("forsurfaceinIN_PANE_SURFACES_TOP_FIRST")

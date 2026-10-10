@@ -29,16 +29,16 @@
 //! `include_str!("../../../docs/BT-ENVIRONMENT.md")`, whose subject really is a
 //! published document. It is **not** here. The tripwire looks for `.rs`, so an
 //! entry for it would enforce nothing — and it would be keyed to
-//! `crates/bt-app/src/diagnostics.rs`, which also holds a `shipped_sources`
-//! directory walk that is genuine debt (P13). Allowlisting that file would blind
-//! the tripwire to the debt beside the document. The document is safe because
-//! nothing moves it, not because a list says so.
+//! `crates/bt-app/src/diagnostics.rs`, a file whose other readers are source
+//! readers; allowlisting it would blind the tripwire to them. The source half
+//! of that test reads [`crate::universes::shipped_program`], and the document
+//! is safe because nothing moves it, not because a list says so.
 //!
-//! `scripts/check-adapter-boundary.ps1` names `adapter.rs` and `cell_capture.rs`
-//! as the vendor compatibility seam, and it reads as if the concern were those
-//! two files. It is not: the concern is the adapter *module*, and the day either
-//! file gains a submodule the gate stops covering it without a word. It is on
-//! the debt list, at P17.
+//! The vendor compatibility seam in `bt-term` reads as if its concern were the
+//! two files `adapter.rs` and `cell_capture.rs`. It is not: the concern is the
+//! two *modules*, and `bt_term::adapter_boundary_tests` names them by their
+//! paths, each with its whole tree, so a submodule either one gains is covered
+//! the day it is declared.
 
 /// A reader whose concern really is a file.
 ///
