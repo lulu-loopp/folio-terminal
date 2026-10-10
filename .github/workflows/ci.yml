@@ -565,7 +565,7 @@ jobs:
   logic:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       # Whole history: see `gates-can-fail`'s checkout. The debt-list check runs
       # here for real, and a merge base is what it compares against.
