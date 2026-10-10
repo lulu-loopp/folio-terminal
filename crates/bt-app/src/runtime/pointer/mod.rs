@@ -30,10 +30,21 @@ pub(crate) use router::{
     FloatFacts, Plane, PointerFacts, PointerHit, PointerScene, walk_pointer_layers,
 };
 
-use crate::{PreviewSurface, Runtime, float, git_panel, hang_watch, risen_frame, seats};
+use crate::{
+    Drag, PasteTarget, PreviewSurface, Runtime, float, git_panel, hang_watch, paste_offer_is_kept,
+    risen_frame, seats,
+};
+#[cfg(not(target_os = "linux"))]
+use crate::{native_window, platform_pointer_of};
 use anyhow::Result;
+#[cfg(not(target_os = "linux"))]
+use bt_platform::NativeWindow;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
+#[cfg(target_os = "linux")]
+use winit::dpi::PhysicalSize;
+#[cfg(target_os = "linux")]
+use winit::event::MouseButton;
 use winit::event::WindowEvent;
 
 /// **Whether a window event is a pointer event** — the dispatcher's one
@@ -54,6 +65,36 @@ pub(crate) fn is_pointer_event(event: &WindowEvent) -> bool {
 /// past the held burst unspent ([`crate::WheelBurst`]).
 pub(crate) fn is_wheel_event(event: &WindowEvent) -> bool {
     matches!(event, WindowEvent::MouseWheel { .. })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_resize_direction(
+    position: PhysicalPosition<f64>,
+    size: PhysicalSize<u32>,
+    scale: f64,
+) -> Option<winit::window::ResizeDirection> {
+    use winit::window::ResizeDirection;
+    let width = f64::from(size.width);
+    let height = f64::from(size.height);
+    if position.x < 0.0 || position.y < 0.0 || position.x >= width || position.y >= height {
+        return None;
+    }
+    let edge = 4.0 * scale;
+    let west = position.x < edge;
+    let east = position.x >= width - edge;
+    let north = position.y < edge;
+    let south = position.y >= height - edge;
+    match (west, east, north, south) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
+    }
 }
 
 /// **The hang watch's name for a pointer event**, and `None` for every other
@@ -105,7 +146,93 @@ pub(crate) struct PointerMemo {
     answer: Option<(PhysicalPosition<f64>, Option<PointerHit>)>,
 }
 
+impl crate::quake::SummonScreen {
+    /// **The display the reader is working on**, which is the display the pointer is on.
+    ///
+    /// The pointer and not the window, because the pointer is the only thing on the desk that says
+    /// which screen the person is at. When Windows will not say where the pointer is, the window's
+    /// own display answers, and when it will not say that either the virtual screen does — in that
+    /// order, because each fallback is one step further from the question actually asked.
+    ///
+    /// This is the machine-reading half of the one summon door; the deciding half is
+    /// [`crate::quake::Quake::placement`], which is pure and is where the rules live.
+    #[cfg(not(target_os = "linux"))]
+    #[must_use]
+    pub(crate) fn under_the_pointer(window: NativeWindow, cached_dpi: u32) -> Self {
+        let pointer = bt_platform::pointer_position();
+        let work = pointer
+            .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
+            .or_else(|| bt_platform::get_work_area(window).ok())
+            .unwrap_or_else(bt_platform::virtual_screen_rect);
+        Self {
+            work,
+            monitor_id: pointer.and_then(|(x, y)| bt_platform::monitor_id_at(x, y)),
+            dpi: pointer.map_or(cached_dpi, |(x, y)| bt_platform::dpi_at(x, y)),
+        }
+    }
+}
+
 impl Runtime<'_> {
+    /// **Where the cursor is, this instant, in this window's own pixels**
+    /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
+    /// under the cursor).
+    ///
+    /// **Two readers, and they are the two gestures that put a path on a command
+    /// line.** [`Self::collect_dropped_file`] asks it as an external drop
+    /// arrives, and [`Self::keep_the_paste_offer`] asks it as an internal drag is
+    /// let go of (review 2026-09-17). Both for one reason: there is only one
+    /// instant at which "where is the cursor" and "where was this let go of" are
+    /// the same question, and it is the one this process is standing in while
+    /// the platform delivers the release. Nothing else in this window reads it,
+    /// and the name is the platform's rather than either gesture's so that
+    /// neither road can grow a second door.
+    ///
+    /// **The units are `CursorMoved`'s and no conversion happens here**, which
+    /// was checked rather than assumed. On Windows a pointer event is
+    /// `WM_MOUSEMOVE`'s `lParam` — physical pixels from the client area's
+    /// top-left — which is precisely what `GetCursorPos` put through
+    /// `ScreenToClient` answers. On macOS winit takes its view's point and
+    /// multiplies by the window's backing scale, which is precisely what the
+    /// AppKit arm does with `NSEvent.mouseLocation` after the same two
+    /// conversions. So the platform's answer is already in the window's physical
+    /// pixels and is used as it stands; scaling it again here would square the
+    /// factor on every Retina and every 150% display.
+    ///
+    /// Neither `pointer_position` nor [`WindowRuntime::pointer_last_seen`] is
+    /// read: both say where the hand was *before* the drag, which is not where
+    /// this drop landed, and a routing built on either would be a guess wearing
+    /// a measurement's clothes.
+    #[cfg(not(target_os = "linux"))]
+    pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
+        platform_pointer_of(
+            native_window(&self.window.window)
+                .ok()
+                .and_then(bt_platform::pointer_position_in_window),
+        )
+    }
+
+    /// Recheck a path offer at the actual release point.
+    ///
+    /// Linux supplies the asynchronous X11 query's answer; the native release path supplies its
+    /// cursor query. The original offer, target shell, and plan still have to agree before bytes
+    /// are written.
+    pub(in crate::runtime) fn paste_offer_kept_at(
+        &self,
+        drag: &Drag,
+        plan: &seats::DropPlan,
+        released_at: PhysicalPosition<f64>,
+    ) -> Option<PasteTarget> {
+        let mut seam = drag.seam;
+        let at_release = self.survey_drop(&drag.source, drag.home, released_at, &mut seam);
+        paste_offer_is_kept(
+            self.glass_here(released_at),
+            drag.paste_offer,
+            self.paste_offer_at(at_release),
+            plan.fits(),
+            self.a_modal_holds_the_window(),
+        )
+    }
+
     /// **The one door every pointer event of a window comes through**
     /// (T-POINTER-CAPTURE cut 1). The dispatcher hands over each event
     /// [`is_pointer_event`] names; a pointer entering the window asks nothing,
@@ -118,6 +245,28 @@ impl Runtime<'_> {
             WindowEvent::MouseWheel { delta, .. } => self.queue_wheel(delta),
             _ => Ok(()),
         }
+    }
+
+    /// Start Linux's native client-edge resize from this button event.
+    #[cfg(target_os = "linux")]
+    pub(in crate::runtime) fn try_begin_linux_border_resize(
+        &mut self,
+        button: MouseButton,
+    ) -> bool {
+        if button == MouseButton::Left
+            && self.window_maximized_state() == Some(false)
+            && self.window.window.fullscreen().is_none()
+            && let Some(position) = self.window.pointer_position
+            && let Some(direction) = linux_resize_direction(
+                position,
+                self.client_size(),
+                self.window.window.scale_factor(),
+            )
+            && self.window.window.drag_resize_window(direction).is_ok()
+        {
+            return true;
+        }
+        false
     }
 
     /// **Open one pointer event**: forget the last event's answer and walk the

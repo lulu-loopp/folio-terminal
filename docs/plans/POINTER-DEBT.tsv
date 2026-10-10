@@ -123,8 +123,6 @@ crate::protocol_mouse_button	N-B
 crate::protocol_mouse_button	N-B
 crate::protocol_mouse_button	N-B
 crate::protocol_mouse_button	N-B
-crate::quake::SummonScreen::under_the_pointer	N-P
-crate::quake::SummonScreen::under_the_pointer	N-S
 crate::rail_zone_wants_open	N-E
 crate::route_forwarded_mouse_button	N-B
 crate::route_forwarded_mouse_button	N-B
@@ -355,8 +353,6 @@ crate::runtime::mouse::Runtime::note_terminal_column_hover	N-E
 crate::runtime::mouse::Runtime::over_in_pane_claims	N-E
 crate::runtime::mouse::Runtime::owned_tooltip_anchor_at	N-E
 crate::runtime::mouse::Runtime::painted_over_in_pane_at	N-E
-crate::runtime::mouse::Runtime::platform_pointer_now	N-E
-crate::runtime::mouse::Runtime::platform_pointer_now	N-S
 crate::runtime::mouse::Runtime::pointer_is_on_our_own_glass	N-E
 crate::runtime::mouse::Runtime::pointer_left	N-E
 crate::runtime::mouse::Runtime::pointer_left	N-P

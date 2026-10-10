@@ -714,8 +714,8 @@ pub(crate) fn user_data_folder_in(local_appdata: &Path) -> PathBuf {
 ///   `WKContentRuleListStore` — the compiled form of the third door — which is
 ///   a directory the host must be given and which nothing else in this product
 ///   has a place for.
-/// - **Other Unix:** no engine, so no folder; the seat's refusal names the
-///   platform rather than a missing variable.
+/// - **Other Unix:** the data store's `Chromium` profile directory. The cache
+///   and temporary roots are prepared by the Linux engine worker.
 pub(crate) fn web_engine_folder(
     platform: bt_platform::HostPlatform,
     env: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -735,7 +735,9 @@ pub(crate) fn web_engine_folder(
                 .join("Folio")
                 .join("WebKit")
         }),
-        bt_platform::HostPlatform::OtherUnix => None,
+        bt_platform::HostPlatform::OtherUnix => {
+            Some(crate::persist::storage_directory_in(platform, |name| env(name)).join("Chromium"))
+        }
     }
 }
 
@@ -2331,6 +2333,16 @@ pub(crate) struct WebSeat {
     /// and [`Self::take_address`] writes, so a line written after a tear-out or an adoption names
     /// the pane the page is in, not the one it was made in (ticket 60).
     label: Rc<std::cell::Cell<bt_platform::PageVisual>>,
+    #[cfg(target_os = "linux")]
+    frame: Option<bt_platform::WebFrame>,
+    #[cfg(target_os = "linux")]
+    frame_above: Option<usize>,
+    #[cfg(target_os = "linux")]
+    ime_cursor_rect_px: Option<[f64; 4]>,
+    #[cfg(target_os = "linux")]
+    pressed_keys: std::collections::BTreeMap<String, bt_platform::WebKeyEvent>,
+    #[cfg(target_os = "linux")]
+    composing: bool,
 }
 
 impl WebSeat {
@@ -2466,6 +2478,16 @@ impl WebSeat {
             made_under: None,
             owed: Vec::new(),
             label,
+            #[cfg(target_os = "linux")]
+            frame: None,
+            #[cfg(target_os = "linux")]
+            frame_above: None,
+            #[cfg(target_os = "linux")]
+            ime_cursor_rect_px: None,
+            #[cfg(target_os = "linux")]
+            pressed_keys: std::collections::BTreeMap::new(),
+            #[cfg(target_os = "linux")]
+            composing: false,
         };
         // **The third door in its other spelling, said before the engine is
         // even asked for** (M4-2, `docs/DESIGN.md` §13.29).
@@ -2767,7 +2789,99 @@ impl WebSeat {
                 Recovered::Retire(why) => self.retire_parked(why, compositor, &mut outcomes),
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            if self.machine.state() != WebState::Ready {
+                self.frame = None;
+            } else if let Some(frame) = self.host.take_frame() {
+                let accepted =
+                    frame.page == self.label.get() && frame.generation == self.machine.generation();
+                crate::web_trace::line(|| {
+                    format!(
+                        "linux_frame received page={:?} generation={} sequence={} expected_page={:?} expected_generation={} accepted={} bounds={:?} pixels={}x{}",
+                        frame.page,
+                        frame.generation,
+                        frame.sequence,
+                        self.label.get(),
+                        self.machine.generation(),
+                        accepted,
+                        frame.bounds_px,
+                        frame.width_px,
+                        frame.height_px,
+                    )
+                });
+                if accepted {
+                    self.frame = Some(frame);
+                }
+            }
+        }
         outcomes
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn frame_layer(&self) -> Option<(&bt_platform::WebFrame, WebBounds, Option<usize>)> {
+        let WebPresence::Shown(bounds) = self.wanted else {
+            return None;
+        };
+        Some((self.frame.as_ref()?, bounds, self.frame_above))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_frame_above(&mut self, above: Option<usize>) {
+        self.frame_above = above;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn ime_cursor_rect(&self) -> Option<[f32; 4]> {
+        let WebPresence::Shown(bounds) = self.wanted else {
+            return None;
+        };
+        let rect = self.ime_cursor_rect_px?;
+        Some([
+            (f64::from(bounds.x) + rect[0]) as f32,
+            (f64::from(bounds.y) + rect[1]) as f32,
+            (f64::from(bounds.x) + rect[2]) as f32,
+            (f64::from(bounds.y) + rect[3]) as f32,
+        ])
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn send_key(&mut self, event: bt_platform::WebKeyEvent) -> Result<(), String> {
+        if event.down {
+            self.host.send_key(event.clone())?;
+            self.pressed_keys.insert(event.code.clone(), event);
+            Ok(())
+        } else if self.pressed_keys.remove(&event.code).is_some() {
+            self.host.send_key(event)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn send_ime(&mut self, event: bt_platform::WebImeEvent) -> Result<(), String> {
+        if matches!(event, bt_platform::WebImeEvent::Cancel) && !self.composing {
+            return Ok(());
+        }
+        let composing =
+            matches!(&event, bt_platform::WebImeEvent::Preedit { text, .. } if !text.is_empty());
+        self.host.send_ime(event)?;
+        self.composing = composing;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clear_web_input(&mut self) {
+        self.ime_cursor_rect_px = None;
+        for (_, event) in std::mem::take(&mut self.pressed_keys) {
+            let mut event: bt_platform::WebKeyEvent = event;
+            event.down = false;
+            event.repeat = false;
+            event.text = None;
+            event.modifiers = bt_platform::WebKeyModifiers::default();
+            let _ = self.host.send_key(event);
+        }
+        let _ = self.send_ime(bt_platform::WebImeEvent::Cancel);
     }
 
     /// **A parked spare retires itself**: the machine's own close — the wait for the browser to
@@ -2790,6 +2904,33 @@ impl WebSeat {
     /// hear about directly.
     fn digest(&mut self, event: &WebEvent, outcomes: &mut Vec<WebOutcome>) -> WebEffect {
         match event {
+            WebEvent::ImeCursorChanged {
+                page,
+                generation,
+                rect,
+                rasterization_scale,
+            } => {
+                #[cfg(target_os = "linux")]
+                {
+                    let accepted = *page == self.label.get()
+                        && *generation == self.machine.generation()
+                        && rasterization_scale.to_bits() == self.scale.to_bits();
+                    crate::web_trace::line(|| {
+                        format!(
+                            "linux_ime_cursor page={page:?} generation={generation} scale={rasterization_scale} expected_page={:?} expected_generation={} expected_scale={} accepted={accepted} rect={rect:?}",
+                            self.label.get(),
+                            self.machine.generation(),
+                            self.scale,
+                        )
+                    });
+                    if accepted {
+                        self.ime_cursor_rect_px = *rect;
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = (page, generation, rect, rasterization_scale);
+                WebEffect::Ignore
+            }
             WebEvent::Environment { generation, error } => {
                 // **A callback from a generation nobody is waiting for touches
                 // nothing on this seat.** The machine has always compared the
@@ -3615,20 +3756,29 @@ impl WebSeat {
     /// the two mistakes.
     fn the_engine_did_not_start(&mut self, detail: String, outcomes: &mut Vec<WebOutcome>) {
         self.engine_owes_an_answer = None;
+        // Linux runs setup on one shared actor. Retire this host at the existing
+        // failure door so a silent CDP response cannot keep that actor occupied
+        // after the card has already replaced the pending setup.
+        #[cfg(target_os = "linux")]
+        if self.machine.state() != WebState::Closing {
+            self.host.close();
+        }
         // **And the machine hears it too** (R2-13). The card this raises has
         // one verb and the verb is `WebMachine::restart`, which does nothing
         // from any state but `Failed` — so a card raised without this line was
         // a button that could be pressed and could not fire.
         self.machine.the_engine_did_not_start();
-        self.fault = Some(if bt_platform::webview2_runtime_version().is_err() {
-            WebFault::RuntimeMissing {
-                detail: detail.clone(),
-            }
-        } else {
-            WebFault::EngineDidNotStart {
-                detail: detail.clone(),
-            }
-        });
+        self.fault = Some(
+            if !cfg!(target_os = "linux") && bt_platform::webview2_runtime_version().is_err() {
+                WebFault::RuntimeMissing {
+                    detail: detail.clone(),
+                }
+            } else {
+                WebFault::EngineDidNotStart {
+                    detail: detail.clone(),
+                }
+            },
+        );
         outcomes.push(WebOutcome::Fault(detail));
     }
 
@@ -3830,6 +3980,10 @@ impl WebSeat {
     /// that waited for a frame would be a page rastered for the display it left
     /// for as long as nothing asked this window to draw.
     pub(crate) fn set_device_scale(&mut self, scale: f64) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        if self.scale.to_bits() != scale.to_bits() {
+            self.ime_cursor_rect_px = None;
+        }
         self.scale = scale;
         self.apply_rasterization()
     }
@@ -3911,6 +4065,12 @@ impl WebSeat {
             && self.bounded != self.wanted_bounds
         {
             let was = self.bounded;
+            #[cfg(target_os = "linux")]
+            if was
+                .is_none_or(|before| before.width != bounds.width || before.height != bounds.height)
+            {
+                self.ime_cursor_rect_px = None;
+            }
             self.host
                 .set_bounds(bounds.x, bounds.y, bounds.width, bounds.height)?;
             self.bounded = Some(bounds);
@@ -4129,9 +4289,43 @@ impl WebSeat {
     /// would be a floor in a window it has left and its raster would be sized
     /// for a display it may not be on.
     fn take_address(&mut self, address: SeatAddress) {
+        #[cfg(target_os = "linux")]
+        let carried_frame = self.frame.take().filter(|frame| {
+            let expected_bytes = usize::try_from(frame.width_px)
+                .ok()
+                .and_then(|width| {
+                    usize::try_from(frame.height_px)
+                        .ok()
+                        .and_then(|height| width.checked_mul(height))
+                })
+                .and_then(|pixels| pixels.checked_mul(4));
+            self.address.window == address.window
+                && frame.page == self.address.page
+                && frame.generation == self.machine.generation()
+                && self.machine.state() == WebState::Ready
+                && frame.sequence > 0
+                && frame.visible
+                && frame.bounds_px.2 > 0
+                && frame.bounds_px.3 > 0
+                && self.bounded.is_some_and(|bounds| {
+                    frame.bounds_px == (bounds.x, bounds.y, bounds.width, bounds.height)
+                })
+                && expected_bytes.is_some_and(|bytes| frame.bgra.len() == bytes)
+        });
+        #[cfg(target_os = "linux")]
+        {
+            self.clear_web_input();
+        }
         self.address = address;
         self.label.set(address.page);
         self.the_controller_has_been_told_nothing();
+        #[cfg(target_os = "linux")]
+        {
+            self.frame = carried_frame.map(|mut frame| {
+                frame.page = address.page;
+                frame
+            });
+        }
         // And the floor, which answers for a visual rather than for a
         // controller: this seat's pair is in another window's tree now.
         self.placed = None;
@@ -4156,6 +4350,11 @@ impl WebSeat {
     /// pair changes clears it — see `InstallEvents` — and so does the one place
     /// the window changes.
     fn the_controller_has_been_told_nothing(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.clear_web_input();
+            self.frame = None;
+        }
         self.presence = None;
         self.bounded = None;
         self.rastered = None;
@@ -4224,6 +4423,24 @@ impl WebSeat {
         now: Instant,
     ) -> Result<(), String> {
         let Some(bounds) = self.shown_at() else {
+            if matches!(
+                event,
+                bt_platform::WebMouseEvent::LeftDown
+                    | bt_platform::WebMouseEvent::LeftUp
+                    | bt_platform::WebMouseEvent::LeftDoubleClick
+                    | bt_platform::WebMouseEvent::RightDown
+                    | bt_platform::WebMouseEvent::RightUp
+                    | bt_platform::WebMouseEvent::MiddleDown
+                    | bt_platform::WebMouseEvent::MiddleUp
+            ) {
+                crate::web_trace::line(|| {
+                    format!(
+                        "mouse page={} event={event:?} dropped=not-shown presence={:?}",
+                        crate::web_trace::seat(self.address.page),
+                        self.presence
+                    )
+                });
+            }
             return Ok(());
         };
         let point = (window_point.0 - bounds.x, window_point.1 - bounds.y);
@@ -4238,7 +4455,35 @@ impl WebSeat {
                 self.buttons &= !bit;
             }
         }
-        self.host.send_mouse(event, point, self.buttons)
+        let result = self.host.send_mouse(event, point, self.buttons);
+        if matches!(
+            event,
+            bt_platform::WebMouseEvent::LeftDown
+                | bt_platform::WebMouseEvent::LeftUp
+                | bt_platform::WebMouseEvent::LeftDoubleClick
+                | bt_platform::WebMouseEvent::RightDown
+                | bt_platform::WebMouseEvent::RightUp
+                | bt_platform::WebMouseEvent::MiddleDown
+                | bt_platform::WebMouseEvent::MiddleUp
+        ) {
+            crate::web_trace::line(|| {
+                format!(
+                    "mouse page={} event={event:?} window=({},{}) bounds=({},{},{},{}) viewport=({},{}) buttons={} queued={}",
+                    crate::web_trace::seat(self.address.page),
+                    window_point.0,
+                    window_point.1,
+                    bounds.x,
+                    bounds.y,
+                    bounds.width,
+                    bounds.height,
+                    point.0,
+                    point.1,
+                    self.buttons,
+                    result.is_ok()
+                )
+            });
+        }
+        result
     }
 
     /// A second left press in the same place, soon enough, is a double click.
@@ -4628,6 +4873,11 @@ impl WebSeat {
 
     /// The seat is going away: close the controller and start the wait.
     pub(crate) fn close(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+        #[cfg(target_os = "linux")]
+        {
+            self.clear_web_input();
+            self.frame = None;
+        }
         if self.machine.state() == WebState::Closing {
             return Vec::new();
         }
@@ -5065,14 +5315,19 @@ mod folder_tests {
                 "/Users/x/Library/Application Support/Folio/WebKit"
             ))
         );
-        // No engine, so no folder — and the seat's refusal then names the
-        // platform rather than a variable somebody could go and set.
         assert_eq!(
             web_engine_folder(
                 HostPlatform::OtherUnix,
                 env(vec![("HOME", "/home/x".to_owned())])
             ),
-            None
+            Some(PathBuf::from("/home/x/.local/share/Folio/Chromium"))
+        );
+        assert_eq!(
+            web_engine_folder(
+                HostPlatform::OtherUnix,
+                env(vec![("XDG_DATA_HOME", "/data".to_owned())])
+            ),
+            Some(PathBuf::from("/data/Folio/Chromium"))
         );
         // An unset or empty variable is the same answer on both machines that
         // have an engine: there is nowhere to put it.
@@ -5150,6 +5405,16 @@ mod rehost_address_tests {
             made_under: None,
             owed: Vec::new(),
             label: Rc::new(std::cell::Cell::new(address.page)),
+            #[cfg(target_os = "linux")]
+            frame: None,
+            #[cfg(target_os = "linux")]
+            frame_above: None,
+            #[cfg(target_os = "linux")]
+            ime_cursor_rect_px: None,
+            #[cfg(target_os = "linux")]
+            pressed_keys: std::collections::BTreeMap::new(),
+            #[cfg(target_os = "linux")]
+            composing: false,
         }
     }
 
@@ -5160,41 +5425,60 @@ mod rehost_address_tests {
     /// through the state machine on their way: the environment callback and the
     /// controller callback arriving with an error each set `Failed`. The third
     /// — the start deadline passing with no callback at all — only drew the
-    /// card. The card's one verb is `WebMachine::restart`, which answers
-    /// `Ignore` from anywhere but `Failed`, so the seat came up with a card, a
-    /// button, and nothing behind the button for the rest of the session. Gate
-    /// 5 photographed exactly this shape on a machine with no runtime.
+    /// card. Linux restarts its browser actor; it does not use the WebView2
+    /// loader. Elsewhere, when the loader says a runtime is present, its verb is
+    /// `WebMachine::restart`, which answers `Ignore` from anywhere but `Failed`;
+    /// when the loader says this build has no runtime, the card links to the
+    /// runtime download instead. Both still leave the machine in `Failed`.
     ///
     /// RED GATE: take `self.machine.the_engine_did_not_start()` out of
-    /// [`WebSeat::the_engine_did_not_start`] and the second assertion fails —
-    /// which on the machine is a `Retry` that does nothing when it is pressed.
+    /// [`WebSeat::the_engine_did_not_start`] and the state assertion fails; on
+    /// a machine with a runtime, the restart verb would then do nothing too.
     #[test]
     fn a_card_for_an_engine_that_said_nothing_has_a_button_that_can_fire() {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
             window: window(1),
         });
+        #[cfg(target_os = "linux")]
+        let expects_restart_card = true;
+        #[cfg(not(target_os = "linux"))]
+        let expects_restart_card = bt_platform::webview2_runtime_version().is_ok();
         // The seat has asked for an engine and is waiting on the answer, which
         // is the state the deadline exists for.
         let _ = seat.machine.request("https://example.com/");
         seat.engine_owes_an_answer = Some(Instant::now() - Duration::from_millis(1));
         let outcomes = seat.engine_that_said_nothing(Instant::now());
 
-        assert!(
-            matches!(seat.fault, Some(WebFault::EngineDidNotStart { .. })),
-            "the card is raised: {:?}",
-            seat.fault
-        );
+        let fault = seat.fault.as_ref().expect("the silence raises a card");
         assert_eq!(
             seat.machine.state(),
             WebState::Failed,
             "and the machine is where the card's verb can act"
         );
-        assert_eq!(
-            seat.machine.restart(),
-            WebEffect::RebuildFromScratch,
-            "so the button on it actually asks for an engine again"
-        );
+        match (expects_restart_card, fault) {
+            (true, WebFault::EngineDidNotStart { .. }) => {
+                assert_eq!(
+                    fault.verb_text(),
+                    Some(crate::i18n::Text::WebFailEngineVerb)
+                );
+                assert_eq!(fault.verb(), Some(WebFaultVerb::RestartTheEngine));
+                assert_eq!(
+                    seat.machine.restart(),
+                    WebEffect::RebuildFromScratch,
+                    "the restart button asks for an engine again"
+                );
+            }
+            (false, WebFault::RuntimeMissing { .. }) => {
+                assert_eq!(
+                    fault.verb_text(),
+                    Some(crate::i18n::Text::WebFailRuntimeVerb)
+                );
+                assert_eq!(fault.verb(), Some(WebFaultVerb::DownloadTheRuntime));
+            }
+            (true, _) => panic!("an available runtime gets the engine-start card: {fault:?}"),
+            (false, _) => panic!("a missing runtime gets the runtime card: {fault:?}"),
+        }
         assert!(
             !outcomes.is_empty(),
             "and the reason is on its way to the log either way"
@@ -5426,6 +5710,98 @@ mod rehost_address_tests {
             "the rebuild is asked for on the window the seat moved to"
         );
         assert_eq!(seat.machine.recoverable_url(), Some("https://example.com/"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docking_a_page_retags_its_current_raster_to_the_new_seat() {
+        let source = SeatAddress {
+            page: page(1, 2),
+            window: window(0x1111),
+        };
+        let target = SeatAddress {
+            page: page(1, 3),
+            window: window(0x1111),
+        };
+        let mut seat = detached(source);
+        seat.machine.request("https://example.com/");
+        let generation = seat.machine.generation();
+        seat.machine.on_environment(generation, true);
+        seat.machine.on_controller(generation, true);
+        seat.machine.on_events_installed(generation);
+        seat.machine
+            .on_navigation_completed(generation, "https://example.com/", true);
+        seat.bounded = Some(WebBounds {
+            x: 523,
+            y: 134,
+            width: 428,
+            height: 269,
+        });
+        seat.frame = Some(bt_platform::WebFrame {
+            page: source.page,
+            generation,
+            sequence: 6,
+            bounds_px: (523, 134, 428, 269),
+            visible: true,
+            width_px: 4,
+            height_px: 3,
+            bgra: std::sync::Arc::from(vec![7; 48]),
+        });
+
+        seat.take_address(target);
+
+        let frame = seat
+            .frame
+            .as_ref()
+            .expect("the last complete frame remains until its replacement arrives");
+        assert_eq!(frame.page, target.page);
+        assert_eq!(frame.generation, generation);
+        assert_eq!(frame.sequence, 6);
+        assert_eq!(frame.bgra.as_ref(), &[7; 48]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docking_a_page_discards_a_raster_from_another_generation() {
+        let source = SeatAddress {
+            page: page(1, 2),
+            window: window(0x1111),
+        };
+        let target = SeatAddress {
+            page: page(1, 3),
+            window: window(0x1111),
+        };
+        let mut seat = detached(source);
+        seat.machine.request("https://example.com/");
+        let generation = seat.machine.generation();
+        seat.machine.on_environment(generation, true);
+        seat.machine.on_controller(generation, true);
+        seat.machine.on_events_installed(generation);
+        seat.machine
+            .on_navigation_completed(generation, "https://example.com/", true);
+        seat.bounded = Some(WebBounds {
+            x: 523,
+            y: 134,
+            width: 428,
+            height: 269,
+        });
+        seat.frame = Some(bt_platform::WebFrame {
+            page: source.page,
+            generation: generation.saturating_sub(1),
+            sequence: 6,
+            bounds_px: (523, 134, 428, 269),
+            visible: true,
+            width_px: 4,
+            height_px: 3,
+            bgra: std::sync::Arc::from(vec![7; 48]),
+        });
+
+        seat.take_address(target);
+
+        assert!(
+            seat.frame.is_none(),
+            "a frame from a replaced controller cannot be relabeled as the new page"
+        );
     }
 
     /// RED — and a compensation that could not run leaves the seat rebuilding

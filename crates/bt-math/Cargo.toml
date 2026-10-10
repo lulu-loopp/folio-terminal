@@ -22,6 +22,9 @@ typst-svg.workspace = true
 typst-syntax = "=0.15.1"
 web-time.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+fontconfig-parser.workspace = true
+
 [dev-dependencies]
 # Every test's scratch name comes from one place (`bt_testpath`, T-TEST-HYGIENE-048).
 bt-testpath = { path = "../bt-testpath" }
