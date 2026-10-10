@@ -531,15 +531,7 @@ fn sync_file_on_worker(_worker: &WorkerCtx, file: &mut std::fs::File) -> io::Res
 
 #[cfg(all(target_os = "linux", any(test, feature = "trust-harness")))]
 fn scoped_test_flush(file: &mut std::fs::File) -> io::Result<()> {
-    let mut owned = file.try_clone()?;
-    let flush = crate::spawn_at_priority(
-        "bt-install-txn-test-flush",
-        crate::ThreadPriority::BelowNormal,
-        move |worker| sync_file_on_worker(worker, &mut owned),
-    )?;
-    flush
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    bt_testpath::sync_scratch_file(file)
 }
 
 /// **How many bytes the volume `folder` is on still has for this account**
