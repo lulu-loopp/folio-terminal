@@ -56,7 +56,10 @@ mod settings;
 mod update;
 mod write_tracker;
 
-pub use atomic::{atomic_replace_keeping_metadata, atomic_replace_preserving, atomic_write};
+pub use atomic::{
+    atomic_replace_keeping_metadata, atomic_replace_preserving, atomic_write,
+    atomic_write_carrying_from,
+};
 pub use debounce::Debouncer;
 pub use error::WriteError;
 pub use export::{

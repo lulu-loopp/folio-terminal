@@ -30,6 +30,11 @@ use bt_persist::{
 /// over.
 pub const SESSION_FILE_NAME: &str = "session.json";
 
+/// The single restore-ready generation kept beside [`SESSION_FILE_NAME`].
+/// Folio writes this file and never reads it: it is the layout Folio had when
+/// the current run started, for a person to put back deliberately if needed.
+const PREVIOUS_SESSION_FILE_NAME: &str = "session.prev.json";
+
 /// And the preferences document's, on the same terms.
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
@@ -474,10 +479,21 @@ struct SessionWriteReceipt {
     result: Result<(), String>,
 }
 
+/// The session document this run read, on its way to the one-generation
+/// backup. `source` lends its permissions; `path` is always its sibling.
+struct SessionBackupRequest {
+    source: PathBuf,
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
 /// **One job for the storage worker**: a session document, an update
 /// trial's receipt (U-13), or an update's hand-over to its applier (U-21).
 enum StorageJob {
     Session(SessionWriteRequest),
+    /// Queued before this run's first `Session` job, on the same one writer.
+    /// It has no receipt because failure is non-fatal and reported once here.
+    SessionBackup(SessionBackupRequest),
     /// Written create-new through the `install_txn` door, and answered on its
     /// own channel: a receipt is not a session document and has no generation.
     Receipt {
@@ -624,6 +640,18 @@ impl SessionWriter {
                 while let Ok(job) = ends.incoming.recv() {
                     let request = match job {
                         StorageJob::Session(request) => request,
+                        StorageJob::SessionBackup(request) => {
+                            if let Err(error) = bt_persist::atomic_write_carrying_from(
+                                &request.path,
+                                &request.bytes,
+                                &request.source,
+                            ) {
+                                crate::diagnostics::note(&format!(
+                                    "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
+                                ));
+                            }
+                            continue;
+                        }
                         StorageJob::Receipt { job, answer } => {
                             let _ = answer.send(write_receipt(&job));
                             continue;
@@ -679,6 +707,17 @@ impl SessionWriter {
             .ok()?;
         self.sent = generation;
         Some(generation)
+    }
+
+    /// Queue this run's one launch backup ahead of every session write. The
+    /// request is consumed even when no worker can take it: one launch gets one
+    /// attempt, and a refusal is a diagnostic rather than a second write road.
+    fn send_backup(&mut self, request: SessionBackupRequest) -> bool {
+        self.start()
+            && self
+                .requests
+                .send(StorageJob::SessionBackup(request))
+                .is_ok()
     }
 
     /// Hand an update trial's receipt to the writer thread (F-14). `None` when
@@ -859,6 +898,9 @@ pub struct SessionStore {
     debouncer: Debouncer,
     writes: DocumentWrites,
     writer: SessionWriter,
+    /// Held only while an update trial holds all durable writes. A commit queues
+    /// it immediately before the first session write; an ended trial drops it.
+    launch_backup: Option<SessionBackupRequest>,
     /// True once the sentinel for *this* run exists, so a clean exit knows
     /// there is something to remove.
     armed: bool,
@@ -875,6 +917,35 @@ pub struct SessionStore {
     /// The sentence a startup owes about this file, if it owes one — a document
     /// that would not read, or one larger than this build will open.
     fault: Option<String>,
+}
+
+/// Make the one snapshot a launch may owe. Missing, refused and tabless
+/// documents leave an older backup untouched; only a successfully loaded
+/// layout with at least one tab replaces it.
+fn launch_backup_request(
+    session_path: &Path,
+    session: &SessionV1,
+    report: &ReadReport,
+) -> Option<SessionBackupRequest> {
+    if !matches!(report, ReadReport::Loaded)
+        || !session.windows.iter().any(|window| !window.tabs.is_empty())
+    {
+        return None;
+    }
+    let bytes = match bt_persist::serialize_session(session) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            crate::diagnostics::note(&format!(
+                "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {error}"
+            ));
+            return None;
+        }
+    };
+    Some(SessionBackupRequest {
+        source: session_path.to_path_buf(),
+        path: session_path.with_file_name(PREVIOUS_SESSION_FILE_NAME),
+        bytes,
+    })
 }
 
 impl SessionStore {
@@ -938,22 +1009,34 @@ impl SessionStore {
         }
         // An update's trial arms no sentinel until it is committed
         // (`update_trial`, F-7): `session.lock` is a file in O's folder.
+        let writes_deferred =
+            writer_of_record && crate::update_trial::defer(crate::update_trial::Writer::Session);
         let armed = writable
             && writer_of_record
-            && !crate::update_trial::defer(crate::update_trial::Writer::Session)
+            && !writes_deferred
             && create_sentinel(&sentinel_path).is_ok();
-        Self {
+        let launch_backup = if writer_of_record {
+            launch_backup_request(&session_path, &session, &report)
+        } else {
+            None
+        };
+        let mut store = Self {
             session_path,
             sentinel_path,
             session,
             debouncer: Debouncer::new(),
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
+            launch_backup,
             armed,
             sentinel_dropped_for_the_systems_end: false,
             writer_of_record,
             fault,
+        };
+        if !writes_deferred {
+            store.queue_launch_backup();
         }
+        store
     }
 
     /// Take the sentence this store owes the reader, so a card about it is
@@ -990,11 +1073,41 @@ impl SessionStore {
             debouncer: Debouncer::new(),
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
+            launch_backup: None,
             armed: false,
             sentinel_dropped_for_the_systems_end: false,
             writer_of_record,
             fault: None,
         }
+    }
+
+    /// [`Self::open`] over caller-owned paths: it reads the named session and
+    /// queues the launch backup, without touching the machine's data folder or
+    /// sentinel. Only tests need to observe a launch at this seam.
+    #[cfg(test)]
+    fn launched_at(session_path: PathBuf, sentinel_path: PathBuf) -> Self {
+        let writer_of_record = is_writer_of_document(&session_path);
+        let (session, report, _degradation) = read_session(&session_path);
+        let launch_backup = if writer_of_record {
+            launch_backup_request(&session_path, &session, &report)
+        } else {
+            None
+        };
+        let mut store = Self {
+            session_path,
+            sentinel_path,
+            session,
+            debouncer: Debouncer::new(),
+            writes: DocumentWrites::new(),
+            writer: SessionWriter::open(),
+            launch_backup,
+            armed: false,
+            sentinel_dropped_for_the_systems_end: false,
+            writer_of_record,
+            fault: None,
+        };
+        store.queue_launch_backup();
+        store
     }
 
     /// [`Self::at`], with this run's sentinel created and armed as [`Self::open`] arms it — for
@@ -1079,7 +1192,22 @@ impl SessionStore {
         if !self.armed {
             self.armed = create_sentinel(&self.sentinel_path).is_ok();
         }
+        self.queue_launch_backup();
         self.hand_over(Instant::now());
+    }
+
+    /// Put the launch backup on the session writer exactly once. FIFO ordering
+    /// makes it land before this run's first session write without a wait on the
+    /// window thread.
+    fn queue_launch_backup(&mut self) {
+        let Some(request) = self.launch_backup.take() else {
+            return;
+        };
+        if !self.writer.send_backup(request) {
+            crate::diagnostics::note(&format!(
+                "BT_PERSIST {PREVIOUS_SESSION_FILE_NAME} backup failed: {NO_WRITER_THREAD}"
+            ));
+        }
     }
 
     /// Hand the current document to the writer, without waiting for it to land.
@@ -2313,6 +2441,118 @@ pub(crate) mod tests {
     fn retire(writer: &mut SessionWriter) {
         admitted::<doors::SessionWriterRetire, _>(|token| writer.close(token))
             .expect("admitted on the way out");
+    }
+
+    fn session_with_tabs(count: usize) -> SessionV1 {
+        SessionV1 {
+            windows: vec![bt_persist::SessionWindowV1 {
+                tabs: (0..count)
+                    .map(|index| {
+                        crate::test_support::saved_tab(
+                            "default",
+                            "/launch-backup",
+                            Some(&format!("tab-{index}")),
+                            false,
+                        )
+                    })
+                    .collect(),
+                ..bt_persist::SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        }
+    }
+
+    /// RED (T-STORE-PWSH-AND-SESSION-BACKUP item 2) — **the backup is the
+    /// layout read at launch, not the first layout this run later saves.**
+    ///
+    /// MUTATION: enqueue `SessionBackup` after `Session`, or serialize
+    /// `self.session` from `hand_over`; the backup contains one tab instead of
+    /// three. Drop the launch request and it is absent. Use the plain atomic
+    /// writer and its mode differs from the source on Unix.
+    #[test]
+    fn launch_keeps_the_session_it_read_before_this_runs_first_write() {
+        crate::test_support::on_the_window_thread_exiting();
+        let root = bt_testpath::temp_path("bt-app-session-launch-backup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private session directory");
+        let path = root.join(SESSION_FILE_NAME);
+        let previous = session_with_tabs(3);
+        bt_persist::write_session_atomic(&path, &previous).expect("the previous run's session");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+                .expect("a distinctive source mode");
+        }
+
+        let mut store = SessionStore::launched_at(path.clone(), root.join(SENTINEL_FILE_NAME));
+        let current = session_with_tabs(1);
+        store.record(current.clone(), Instant::now());
+        assert_eq!(store.flush_judged(), Ok(()));
+
+        let backup_path = root.join(PREVIOUS_SESSION_FILE_NAME);
+        assert_eq!(read_session(&backup_path).0, previous);
+        assert_eq!(read_session(&path).0, current);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&backup_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640,
+                "the backup carries the session document's permissions"
+            );
+        }
+
+        retire(&mut store.writer);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-STORE-PWSH-AND-SESSION-BACKUP item 2) — **an empty launch does
+    /// not erase the last useful generation.**
+    ///
+    /// MUTATION: remove the tab-presence guard in `launch_backup_request`; the
+    /// prior backup becomes the empty session.
+    #[test]
+    fn an_empty_session_leaves_the_prior_backup_untouched() {
+        crate::test_support::on_the_window_thread_exiting();
+        let root = bt_testpath::temp_path("bt-app-empty-session-launch-backup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private session directory");
+        let path = root.join(SESSION_FILE_NAME);
+        let backup_path = root.join(PREVIOUS_SESSION_FILE_NAME);
+        let useful = session_with_tabs(3);
+        bt_persist::write_session_atomic(&backup_path, &useful).unwrap();
+        bt_persist::write_session_atomic(&path, &SessionV1::default()).unwrap();
+
+        let mut store = SessionStore::launched_at(path, root.join(SENTINEL_FILE_NAME));
+        retire(&mut store.writer);
+
+        assert_eq!(read_session(&backup_path).0, useful);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-STORE-PWSH-AND-SESSION-BACKUP item 2) — **first run creates no
+    /// invented backup.**
+    ///
+    /// MUTATION: treat `ReadReport::NotFound` as loaded; `session.prev.json`
+    /// appears even though no session document was read.
+    #[test]
+    fn an_absent_session_creates_no_backup() {
+        crate::test_support::on_the_window_thread_exiting();
+        let root = bt_testpath::temp_path("bt-app-absent-session-launch-backup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private session directory");
+
+        let mut store =
+            SessionStore::launched_at(root.join(SESSION_FILE_NAME), root.join(SENTINEL_FILE_NAME));
+        retire(&mut store.writer);
+
+        assert!(!root.join(PREVIOUS_SESSION_FILE_NAME).exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (multiwindow slice E2 phase ③, acceptance gate 1) — **a write that

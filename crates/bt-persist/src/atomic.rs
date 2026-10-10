@@ -37,6 +37,31 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), WriteError> {
     commit_rename(&tmp_path, path)
 }
 
+/// Write a new sibling document atomically, carrying the permissions and other
+/// metadata the source document can lend to a rename.
+///
+/// Unlike [`atomic_replace_keeping_metadata`], `path` need not exist: the
+/// metadata belongs to `source`, while the name made visible by the final
+/// rename belongs to `path`. This is the shape a one-generation backup needs —
+/// its bytes and access are the session document that was read, but it has a
+/// different name and must never be visible half-written.
+pub fn atomic_write_carrying_from(
+    path: &Path,
+    contents: &[u8],
+    source: &Path,
+) -> Result<(), WriteError> {
+    let tmp_path = temp_sibling_path(path).map_err(|source| WriteError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    write_temp(&tmp_path, contents, TempBirth::OwnerOnly).map_err(|source| WriteError::Io {
+        path: tmp_path.clone(),
+        source,
+    })?;
+    bt_platform::carry_metadata(&tmp_path, source);
+    commit_rename(&tmp_path, path)
+}
+
 /// Replace an existing user-owned file without discarding its metadata.
 /// Windows merges DACLs, streams and creation time through ReplaceFileW;
 /// Unix carries ownership, mode and extended attributes before rename.
