@@ -1276,7 +1276,7 @@ jobs:
   core-linux:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     # **The static C runtime is a Windows shipping rule and this job ships
     # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
     # every build so that `folio.exe` carries its own CRT rather than asking a
