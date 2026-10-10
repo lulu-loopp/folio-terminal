@@ -9,9 +9,12 @@ All notable changes to Folio are recorded here. The format follows
 ### Added
 
 - A Folio installed with Homebrew now updates itself in place from About, like a copy you dragged to Applications; Homebrew keeps managing and uninstalling it. <!-- zh: 用 Homebrew 安装的 Folio 现在也能在关于页中就地更新，和拖进应用程序文件夹的副本一样；Homebrew 仍负责管理和卸载。 -->
+- After a graphics failure, Folio tells you at its next start where it kept your unsaved edit, with a button that opens the folder. <!-- zh: pending T-RECOVERED-FOLDER -->
 
 ### Fixed
 
+- The diagnostics log now says when a pane's shell exits and why Folio's last window closed. <!-- zh: pending T-SHELL-EXIT-DIAG-LINE -->
+- An invisible window Folio kept in reserve for web pages no longer swallows clicks at the top-left of your main screen. <!-- // zh: pending -->
 - A web page that answers with an error, such as 404 Not Found, shows the page the server sent instead of a card saying it could not be opened; the card is for an address that could not be reached at all. <!-- zh: 网页返回错误（如 404 Not Found）时，现在显示服务器发来的页面，不再显示无法打开的卡片；卡片只用于完全无法访问的地址。 -->
 - `folio --with-environment` opens a tab that keeps the environment of the terminal you started it from — an activated Python or conda environment, a developer prompt — also when Folio is already running. <!-- zh: `folio --with-environment` 打开的标签页沿用启动它的终端的环境——已激活的 Python 或 conda 环境、开发者命令行——Folio 已在运行时也一样。 -->
 - A link an agent printed with a stray full-width mark after it, such as `http://example.com：`, now opens the right address, and a link Folio will not open says why — the address is invalid, it is blocked, or no program opens it — instead of always saying it was blocked. <!-- zh: agent 打印的链接后面多了一个全角符号（如 `http://example.com：`）时，现在打开正确的地址；Folio 不打开的链接会说明原因——地址无效、已拦截或无程序可打开——不再一律显示已拦截。 -->
@@ -23,6 +26,7 @@ All notable changes to Folio are recorded here. The format follows
 - An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: 杀毒或备份程序短暂占用某个更新文件时，更新不再回滚：Folio 最多等待十秒；文件仍被占用时，卡片会说明，并附上 Windows 给出的错误。 -->
 - The card after an unfinished update says what happened — that the update stopped before the new version started, or that it did not finish while the new version is already running — instead of always saying the new version did not start. <!-- zh: 未完成的更新之后，卡片说明实际发生了什么——更新在新版本启动前停止，或新版本已在运行而更新未完成——不再一律显示新版本未能启动。 -->
 - If you change a setting in the first window of a new version and the update is only finished later, the next start says those changes were not kept, instead of losing them without a word. <!-- zh: 在新版本的第一个窗口中改了设置、更新却稍后才完成时，下次启动会说明这些更改没有保留，不再无声丢失。 -->
+- If an update is undone after you already used the new version, Folio says that your changes from it were not kept, instead of only saying the previous version was restored. <!-- zh: pending E5 -->
 - Restart shell, Split and Duplicate in a folder on a network share that stopped answering no longer freeze the window: the pane waits for the share by itself and, when the folder does not answer, starts in its usual folder and says so in the diagnostics log. <!-- zh: 在不再响应的网络共享文件夹中重启 shell、拆分和复制窗格，不再卡住窗口：窗格自行等待共享；文件夹没有响应时，从平常的文件夹启动，并在诊断日志中注明。 -->
 - A PowerShell check that a security program held suspended no longer waits for ever: it is stopped after five seconds without progress and the diagnostics log says another program suspended it; a check that is still working, such as a first start on a new account, is given the time it needs. <!-- zh: 被安全软件挂起的 PowerShell 检测不再无限等待：五秒没有进展即停止，诊断日志写明它被其他程序挂起；仍在进行的检测（如新账户首次启动）则给足时间。 -->
 - Folio started through a link — the one winget installs — finds its own files, so its panes run on the console host that comes with it. <!-- zh: 通过链接（winget 安装的那个）启动的 Folio 能找到自己的文件，窗格因此运行在随附的控制台主机上。 -->
@@ -34,6 +38,9 @@ All notable changes to Folio are recorded here. The format follows
 - Opening Folio in a folder while an update is being installed (Open in Folio, `folio-here.cmd`, starting Folio again) now opens that folder in the Folio that comes back, instead of being forgotten. <!-- zh: 更新安装期间在某个文件夹打开 Folio（在 Folio 中打开、`folio-here.cmd`、再次启动 Folio），现在会在重新打开的 Folio 中打开该文件夹，不再被忽略。 -->
 - A downloaded update is no longer thrown away because the computer lost power or Folio crashed; only choosing Later twice does that. If you pressed Restart to update and the restart did not happen, Folio says so the next time it opens and offers Restart again. <!-- zh: 已下载的更新不再因断电或 Folio 崩溃而被丢弃，只有两次选择以后才会。按下重启以更新却没有重启时，Folio 下次打开会说明，并再次提供重启。 -->
 - Starting Folio a second time while an interrupted update's new version is still finishing no longer waits 30 seconds and shows nothing: the folder opens in the running Folio, or, if it does not answer, in a window of its own that says the update is not finished. <!-- zh: 中断的更新的新版本仍在收尾时再次启动 Folio，不再等待 30 秒却什么都不显示：文件夹在运行中的 Folio 里打开；它没有响应时，在一个单独的窗口中打开，并说明更新未完成。 -->
+- On a Mac, a pane whose shell would not start and fell back to another one says so in its first line instead of closing. <!-- zh: pending M-SWEEP-048 -->
+- Typing a file path into a page's address bar — `/Users/you/notes.md`, `~/notes.md` or `./notes.md` — opens the file on a Mac as it does on Windows, instead of searching the web for it; a document opens as a document, and a path to nothing says No such file in the address bar. <!-- zh: pending M-SWEEP-048 -->
+- On a Mac, a document's link to a network share answers Ctrl+click the same way the same link in the terminal does. <!-- zh: pending M-SWEEP-048 -->
 - A second window's Git page now follows changes on disk as the first window's does.
 - Before a pane's shell reports its folder, everything that offers "where this pane is" uses the folder the pane was opened in: the pane's files card and a files column opened from it (which showed your home folder), the files column's folder menu, the place hints in the command palette, and the folder picker of New terminal in folder… in the pane menu and the new-tab menu — for example a PowerShell 7 profile with a fixed starting folder, before its first prompt (issue #28).
 - Every pasted picture's `[Image #N]` on an agent's input line can be opened, not only the last one.
@@ -44,6 +51,7 @@ All notable changes to Folio are recorded here. The format follows
 - Programs installed while Folio is running appear in the new-tab menu, Split with, the default profile and the Agents page without a restart, and a Git installed while Folio is running is found by the Git page. Folio looks again when one of those menus or pages opens and when Windows says the environment changed; a menu that is open when the answer arrives updates in place.
 - A page that cannot open in a web pane says why in one line under "Cannot open" and the address — the name that did not resolve, or the kind of address a preview does not open — and the card no longer carries a button: reload, the address and copy are in the row right above it. <!-- zh: 网页窗格无法打开页面时，在「无法打开」和地址下用一行说明原因——无法解析的域名，或预览不打开的地址类型——卡片不再带按钮：重新加载、地址和复制都在它正上方的一行。 -->
 - While a page loads, the address bar shows the address you asked for, and after a page fails to load it still shows it, so you can correct it instead of retyping it. <!-- zh: 页面加载时，地址栏显示你请求的地址；页面加载失败后仍保留，可以直接修改，不必重新输入。 -->
+- Letting go of a divider, tab or scroll thumb while a card or menu is over it now ends the drag. <!-- zh: pending -->
 
 ### Changed
 

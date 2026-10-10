@@ -1937,15 +1937,29 @@ impl<'a> Txn<'a> {
     }
 
     /// W11 after `RolledBack` is durable: the entrance removed and flushed,
-    /// then `Retired{RolledBack}`. `H\<txn>` — `backup\`'s leftovers,
-    /// `rolledout\` and the rescue folder this process runs from — is the next
-    /// ordinary start's. Every failure here is debt.
+    /// then `Retired{RolledBack}` — noting the version the transaction's mark
+    /// names, whose changes the rollback did not keep (0.4.8 E5,
+    /// `update_apply::unkept_version`). `H\<txn>` — `backup\`'s leftovers,
+    /// `rolledout\`, the mark and the rescue folder this process runs from —
+    /// is the next ordinary start's. Every failure here is debt.
     fn finish_rollback(&mut self, actor: Actor, world: &mut impl World) -> Ended {
         let steps = self
             .j
             .may(actor, Effect::RemoveEntrance)
             .and_then(|()| world.disarm(self.txn()))
             .and_then(|()| {
+                let unkept =
+                    crate::update_apply::unkept_version(&self.road.home, self.txn(), &mut |line| {
+                        world.say(line)
+                    });
+                if let Some(version) = &unkept {
+                    world.say(&crate::update_apply::unkept_said(
+                        self.txn(),
+                        version,
+                        self.j.phase(),
+                    ));
+                }
+                self.j.journal = self.j.journal.clone().noting_unkept(unkept);
                 self.j
                     .record(actor, &Event::Retired, &mut |line| world.say(line))
             });

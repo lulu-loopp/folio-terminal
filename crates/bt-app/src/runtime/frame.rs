@@ -1436,6 +1436,10 @@ impl Runtime<'_> {
                     self.window.unpainted_pane_output = false;
                     if self.window.window_shown && !self.window.first_visible_present_dpi_checked {
                         self.window.first_visible_present_dpi_checked = true;
+                        // **The recovered folder is asked about after the first frame and
+                        // never before it** (T-RECOVERED-FOLDER): on its own worker, once per
+                        // process (`recovered::begin`).
+                        crate::recovered::begin(&crate::persist::storage_dir());
                         self.reconcile_authoritative_dpi("first-present")?;
                     }
                     let latency = receipt.map(|receipt| receipt.latency());
@@ -2227,10 +2231,7 @@ impl Runtime<'_> {
             // The press's own 180ms, and only while it still owes one — a press
             // that has been paid or has slipped reports nothing, so a held
             // button costs no wake-ups at all.
-            self.window
-                .tab_press
-                .as_ref()
-                .and_then(TabPress::wake_deadline),
+            self.held_tab_press().and_then(TabPress::wake_deadline),
             // The rename caret blinks only while there is a rename.
             self.window
                 .rename

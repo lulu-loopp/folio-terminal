@@ -1704,8 +1704,26 @@ impl<'a> Txn<'a> {
     /// this process may run from included (a Unix process may remove its own
     /// image). The journal is kept: after a commit for the trial's watch,
     /// after a rollback for the relaunched build's card; the next ordinary
-    /// start retires it.
+    /// start retires it. **A rollback's `Retired` notes the version the
+    /// transaction's mark names** (0.4.8 E5, `update_apply::unkept_version`):
+    /// the mark goes with the folder here, so the journal is what carries to
+    /// the restored build that the changes made in that version were not kept.
     fn retire(&mut self, actor: Actor, debt: &mut Vec<String>) {
+        if matches!(self.journal.body.phase, Phase::RolledBack { .. }) {
+            let mut say = |line: &str| {
+                bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            };
+            let unkept =
+                crate::update_apply::unkept_version(&self.road.home, self.road.txn, &mut say);
+            if let Some(version) = &unkept {
+                say(&crate::update_apply::unkept_said(
+                    self.road.txn,
+                    version,
+                    self.phase(),
+                ));
+            }
+            self.journal = self.journal.clone().noting_unkept(unkept);
+        }
         if let Err(why) = self.record(actor, &Event::Retired) {
             debt.push(why);
             return;

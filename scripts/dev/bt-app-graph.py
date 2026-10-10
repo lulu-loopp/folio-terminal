@@ -6,7 +6,8 @@
 # `target/review_graph.py`; moved here unchanged except for this header and the
 # dependency lookup below.
 #
-# Read-only. It parses; it never builds, checks or tests.
+# Read-only. It parses, and asks `cargo metadata --no-deps --offline` where the
+# binary target's root is; it never builds, checks or tests.
 #
 #   python scripts/dev/bt-app-graph.py > target/bt-app-graph-output.txt
 #
@@ -27,7 +28,7 @@
 # so a module that names a root-owned type is correctly shown as un-extractable.
 # `*_all` include test-only edges; `*_prod` exclude them.
 
-import sys, re, json, gc
+import sys, re, json, gc, subprocess
 gc.disable()
 from pathlib import Path
 sys.path.insert(0, str(Path('target/review-python').resolve()))  # optional vendored copy
@@ -35,10 +36,25 @@ from tree_sitter import Language, Parser
 import tree_sitter_rust
 import networkx as nx
 
-BASE=Path('crates/bt-app/src')
+# **The crate is what its declarations make it** (split prep section 6.6, P0).
+# `cargo metadata` names the binary target's root file, and every other file is
+# one a `mod` declaration reaches from that root (the walk below). No directory
+# is listed: a file nothing declares is not part of the crate, and a declaration
+# that names no file, or two, stops the run naming it.
+def binary_root():
+    meta=json.loads(subprocess.check_output(['cargo','metadata','--no-deps','--format-version','1','--locked','--offline']))
+    package=next(p for p in meta['packages'] if p['name']=='bt-app')
+    roots=[Path(t['src_path']) for t in package['targets'] if 'bin' in t['kind']]
+    if len(roots)!=1: sys.exit(f'bt-app declares {len(roots)} binary targets; the graph is rooted at exactly one')
+    return roots[0]
+ROOT_FILE=binary_root()
+BASE=ROOT_FILE.parent
+ROOT=ROOT_FILE.name
 parser=Parser(Language(tree_sitter_rust.language()))
-files={p.relative_to(BASE).as_posix():p.read_bytes() for p in BASE.rglob('*.rs')}
-trees={p:parser.parse(b) for p,b in files.items()}
+files={}; trees={}
+def load(p):
+    files[p]=(BASE/p).read_bytes(); trees[p]=parser.parse(files[p])
+load(ROOT)
 def txt(n): return n.text.decode('utf8')
 def walk(n):
     yield n
@@ -83,27 +99,41 @@ def declarations(p):
 # `#[path]` on a module outside an inline block is relative to the directory of
 # the declaring file; a plain `mod x;` looks in that file's own module directory
 # (`` for the crate root, `foo/` for `foo.rs`, `a/` for `a/mod.rs`).
-contexts={'main.rs':()}; whole_test=set(); queue=[('main.rs',False)]
+contexts={ROOT:()}; whole_test=set(); queue=[(ROOT,False)]
 while queue:
     p,test=queue.pop()
     here=p.rsplit('/',1)[0]+'/' if '/' in p else ''
-    moddir='' if p=='main.rs' else here if p.endswith('/mod.rs') else p[:-3]+'/'
+    moddir='' if p==ROOT else here if p.endswith('/mod.rs') else p[:-3]+'/'
     for ctx,rel,ct in declarations(p):
-        child=next((q for q in (here+rel,) if rel and q in files),None) if rel else \
-              next((q for q in (moddir+ctx[-1]+'.rs',moddir+ctx[-1]+'/mod.rs') if q in files),None)
-        if child is None or child in contexts: continue
+        candidates=(here+rel,) if rel else (moddir+ctx[-1]+'.rs',moddir+ctx[-1]+'/mod.rs')
+        found=[q for q in candidates if (BASE/q).is_file()]
+        if len(found)!=1:
+            sys.exit(f"{p}: `mod {ctx[-1]};` resolves to {found or 'no file'} - a declaration the graph cannot follow")
+        child=found[0]
+        if child in contexts: continue
+        load(child)
         contexts[child]=contexts[p]+ctx
         if test or ct: whole_test.add(child)
         queue.append((child,test or ct))
+# The files in one order whatever order the walk reached them in: a directory's
+# own files by name, then its subdirectories by name, names compared without
+# case. Every list below is built by iterating `files`.
+def listed_order(p):
+    *dirs,name=p.split('/')
+    return [(1,d.upper()) for d in dirs]+[(0,name.upper())]
+files={p:files[p] for p in sorted(files,key=listed_order)}
+# Empty by construction - every file was reached by a declaration - and kept in
+# the output so that the output's shape is the one the plan's tables were read
+# from.
 unreached=sorted(set(files)-set(contexts))
 for p in unreached: contexts[p]=tuple(p[:-3].split('/'))
-nodes={p.split('/')[0].removesuffix('.rs') for p in files if p!='main.rs'}
+nodes={p.split('/')[0].removesuffix('.rs') for p in files if p!=ROOT}
 def physical(p): return p.split('/')[0].removesuffix('.rs')
 def owner(path): return path[0] if path and path[0] in nodes else '@root'
 def node_of(p): return owner(contexts[p])
 # A file whose physical node is not its semantic owner is a phantom node in the
 # module graph; a node all of whose files are wholly test is not production.
-phantom={p for p in files if p!='main.rs' and physical(p)!=node_of(p)}
+phantom={p for p in files if p!=ROOT and physical(p)!=node_of(p)}
 test_only={n for n in nodes if all(p in whole_test for p in files if physical(p)==n)}
 
 records=[]; stats={}; stripped={}; prod={}; items={}; imports=[]
@@ -137,9 +167,9 @@ for p,b in files.items():
 # Resolve root imports (including external-crate aliases) and root definitions.
 aliases={}
 for p,n,ctx,test,uu in imports:
-    if p=='main.rs' and n.parent.type=='source_file':
+    if p==ROOT and n.parent.type=='source_file':
         for path,alias in uu: aliases[alias]=path
-rootdefs={txt(n.child_by_field_name('name')) for n,ctx,t in items['main.rs'] if not ctx and n.type in {'struct_item','enum_item','function_item','const_item','static_item','type_item','trait_item'} and n.child_by_field_name('name')}
+rootdefs={txt(n.child_by_field_name('name')) for n,ctx,t in items[ROOT] if not ctx and n.type in {'struct_item','enum_item','function_item','const_item','static_item','type_item','trait_item'} and n.child_by_field_name('name')}
 def resolve(path,ctx):
     path=list(path)
     if not path: return None
@@ -166,7 +196,7 @@ def edge(kind,a,z,p,line,source):
     if not kind.startswith('root') and z=='@root': return
     graphs[kind].add_edge(a,z); evidence[kind].append([a,z,p,line,source])
 for p,b in prod.items():
-    if p=='main.rs': continue
+    if p==ROOT: continue
     # Exact inventory-style match, without inherited cfg on external files.
     bb=stripped[p] if p in whole_test else b
     for m in re.finditer(rb'crate::(\w+)::',bb):
@@ -176,7 +206,7 @@ for p,b in prod.items():
         z=m[1].decode()
         if z in nodes: edge('regex_full',physical(p),z,p,bb[:m.start()].count(b'\n')+1,m[0].decode())
 for p,n,ctx,test in records:
-    a='@root' if p=='main.rs' else owner(contexts[p])
+    a='@root' if p==ROOT else owner(contexts[p])
     paths=[]
     if n.type=='use_declaration': paths=[path for path,alias in uses(n)]
     elif n.type in {'scoped_identifier','scoped_type_identifier'}:
@@ -185,7 +215,7 @@ for p,n,ctx,test in records:
     elif n.type=='token_tree' and n.parent.type!='token_tree':
         code=stripped[p][n.start_byte:n.end_byte].decode()
         paths=[tuple(re.sub(r'\s+','',m[0]).split('::')) for m in re.finditer(r'\b(?:crate|super)\s*::\s*\w+(?:\s*::\s*\w+)*',code)]
-    elif n.type=='mod_item' and p=='main.rs' and n.child_by_field_name('body') is None:
+    elif n.type=='mod_item' and p==ROOT and n.child_by_field_name('body') is None:
         z=txt(n.child_by_field_name('name'))
         for k in ['root_all']+([] if test else ['root_prod']): edge(k,a,z,p,n.start_point.row+1,txt(n))
     for path in paths:
@@ -206,7 +236,7 @@ for kind,g in graphs.items():
             if n in g: g.remove_node(n)
 def report(g,kind):
     mass=weights.copy()
-    mass['@root']=stats['main.rs']['lines']+1
+    mass['@root']=stats[ROOT]['lines']+1
     if not kind.startswith('regex'):
         for p in sorted(phantom): mass[node_of(p)]+=mass[physical(p)]
     scc=sorted(nx.strongly_connected_components(g),key=lambda s:(len(s),sum(mass.get(n,0) for n in s)),reverse=True)
@@ -228,11 +258,11 @@ for k,g in graphs.items():
         for n in sinks: gg.remove_edges_from(list(gg.out_edges(n)))
         gg.remove_edges_from(ee); cuts[k][label]=report(gg,k)
 methods=[]
-for n,ctx,test in items['main.rs']:
+for n,ctx,test in items[ROOT]:
     if n.type=='impl_item' and n.child_by_field_name('trait') is None and n.child_by_field_name('type') and txt(n.child_by_field_name('type')).startswith('Runtime'):
         for m in n.child_by_field_name('body').named_children:
             if m.type=='function_item':
-                code=prod['main.rs'][m.start_byte:m.end_byte].decode()
+                code=prod[ROOT][m.start_byte:m.end_byte].decode()
                 methods.append({'name':txt(m.child_by_field_name('name')),'line':m.start_point.row+1,'lines':m.end_point.row-m.start_point.row+1,'window':sorted(set(re.findall(r'self\s*\.\s*window\s*\.\s*(\w+)',code))),'app':sorted(set(re.findall(r'self\s*\.\s*app\s*\.\s*(\w+)',code)))})
 out={'stats':stats,'cuts':cuts,'edges':evidence,'methods':methods,'root_aliases':aliases,'whole_test':sorted(whole_test),'phantom_nodes':sorted({physical(p) for p in phantom}),'test_only_nodes':sorted(test_only),'contexts':{p:list(c) for p,c in sorted(contexts.items())},'unreached':unreached}
 Path('target/bt-app-graph.json').write_text(json.dumps(out,indent=2),encoding='utf8')
@@ -243,7 +273,7 @@ print('parse errors',[p for p,s in stats.items() if s['parse_errors']])
 print('wholly test',len(whole_test),sorted(whole_test))
 print('phantom nodes',sorted({physical(p) for p in phantom}),'test-only nodes',sorted(test_only),'unreached',unreached)
 print('source',len(files),sum(s['lines'] for s in stats.values()),'test lines',sum(s['test'] for s in stats.values()),'code',sum(s['code'] for s in stats.values()))
-print('main',stats['main.rs'],'methods',len(methods),'lines',sum(m['lines'] for m in methods),'tabs',sum('tabs' in m['window'] for m in methods))
+print('main',stats[ROOT],'methods',len(methods),'lines',sum(m['lines'] for m in methods),'tabs',sum('tabs' in m['window'] for m in methods))
 for kind in ['regex','syntax_prod','root_prod']:
     print(kind,'i18n',sorted(graphs[kind].successors('i18n')))
     for n in ['seats','settings','preview','profiles','shortcuts','marks','icons']:

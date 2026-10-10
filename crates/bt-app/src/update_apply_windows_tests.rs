@@ -464,6 +464,7 @@ impl Install {
             body: Body {
                 adapter: crate::update_txn::Adapter::Ours,
                 marker: None,
+                unkept: None,
                 phase,
                 layout: Layout::Members(self.inventories.clone()),
             },
@@ -2081,6 +2082,132 @@ fn rolled_back_is_retired_at_the_next_start() {
     );
     assert!(!folder.exists(), "H\\<txn> is deleted by the start");
     assert!(!journal.exists(), "and the journal after it");
+}
+
+/// A start's world in which the operating system refuses every program it
+/// asks for (the rescue copy quarantined, held or gone).
+struct RefusedStart {
+    said: Vec<String>,
+}
+
+impl crate::update_startup::World for RefusedStart {
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn spawn_detached(&mut self, _program: &Path, _args: &[OsString]) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    }
+
+    fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {
+        panic!("a held start retires nothing: {txn}")
+    }
+
+    fn mounts_under(&mut self, _folder: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted on Windows")
+    }
+}
+
+/// RED (0.4.8 E5, census #16) — **an update interrupted with the new set
+/// live, whose rescue copy cannot be started: the new build runs held and
+/// marks the transaction; the recovery a later logon runs rolls it back and
+/// notes, as it retires, the version whose changes were not kept; and the
+/// restored build's first start says *The update was undone.* /
+/// *Changes made in Folio {version} were not kept.*** — the Windows
+/// applier's own recovery between the two starts, over real moves.
+///
+/// MUTATION: in `Txn::finish_rollback`, retire without reading the mark
+/// (`noting_unkept(None)`): the journal notes nothing and the restored build
+/// says only that the update was interrupted.
+#[test]
+fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
+    let Some(install) = Install::new("undone") else {
+        return;
+    };
+    flipped_at(&install, Phase::Moving);
+    let aside = install.rescue.with_extension("aside");
+    std::fs::rename(&install.rescue, &aside).unwrap();
+    let start = crate::update_startup::Start {
+        own_exe: &install.installed,
+        home: &install.home,
+        argv: &[],
+        trial: None,
+        failed: None,
+        journal_held: None,
+    };
+    let mut held_start = RefusedStart { said: Vec::new() };
+    let crate::update_startup::Verdict::Continue { held, .. } =
+        crate::update_startup::run(&start, &mut held_start)
+    else {
+        panic!("the start continues: {:?}", held_start.said);
+    };
+    assert_eq!(held, Some(install.txn), "{:?}", held_start.said);
+    std::fs::rename(&aside, &install.rescue).unwrap();
+
+    let (code, world) = recovered_at_logon(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    let version = crate::version::VERSION;
+    let journal = install.on_disk();
+    assert_eq!(
+        journal.body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack,
+            untried: true,
+        }
+    );
+    assert_eq!(
+        journal.body.unkept.as_deref(),
+        Some(version),
+        "{:?}",
+        world.said
+    );
+    assert!(
+        world
+            .said
+            .iter()
+            .any(|line| line.contains(version) && line.contains("Retired")),
+        "the holder's line: {:?}",
+        world.said
+    );
+    assert!(install.holds(Place::Install, &install.old));
+
+    let path = install.home.journal();
+    let argv = failed_then(&install, &[]);
+    let mut starting = StartWorld {
+        said: Vec::new(),
+        registry: install.registry.clone(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed,
+            home: &install.home,
+            argv: &argv,
+            trial: None,
+            failed: Some(&path),
+            journal_held: None,
+        },
+        &mut starting,
+    );
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", starting.said);
+    };
+    assert_eq!(
+        failed,
+        Some(Failure::Undone {
+            version: version.to_owned()
+        }),
+        "{:?}",
+        starting.said
+    );
+    assert!(!path.exists(), "the start retired the journal");
 }
 
 /// RED (U-24) — **the trial is asked to quit before it is ended, and only the

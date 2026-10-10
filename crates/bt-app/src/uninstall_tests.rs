@@ -2,21 +2,21 @@
 use super::*;
 use std::fs;
 
-// ── `bt-source`, for the one reader in this file that used to ask `main.rs`
-//    for its text (`docs/plans/bt-app-split-prep.md` §6.3, ticket P17)
+// ── `bt-source`, for the readers in this file that ask the program about its
+//    own items (`docs/plans/bt-app-split-prep.md` §6.5, ticket P17)
 //
 // **The pattern is `main.rs::pty_drain_budget_tests`' and is not re-derived**;
-// only the three helpers that reader needs are copied. Its six points hold
+// only the three helpers these readers need are copied. Its six points hold
 // here word for word — one index per process, a body pin that names an
 // identity rather than a file, and a `QueryFailure` that panics instead of
 // narrowing the question.
 //
 // **This file is reached by `#[path]`** from `uninstall.rs`, so its own text is
-// inside the universe `Index::of_package("bt-app")` declares (§2.6): a reader
-// here that searched the crate would have to exclude its own needle. The pin
-// below is a *body* reading of one named method, so the literal it looks for
-// never meets the copy of itself written on this page — which is the other half
-// of why a body pin is the right shape for a call-site fact.
+// inside the universe `Index::of_package("bt-app")` declares (§2.6). A body pin
+// reads one named item, so the literal it looks for never meets the copy of
+// itself written on this page; a search over a module takes its needle through
+// `needle!`, which excludes the needle's own construction, and keeps to the
+// product, which this file is not.
 
 /// **This crate, indexed once per process** — the workspace read, this
 /// package's own `src/` declared as the universe and lowered, on the first ask
@@ -595,8 +595,9 @@ fn uninstall_purge_refuses_the_application_folder() {
 /// `the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log` drives the call itself).
 #[test]
 fn uninstall_door_precedes_every_startup_effect() {
-    let source = include_str!("main.rs");
-    let main = source.split_once("\nfn main() -> Result<()> {").unwrap().1;
+    // `fn main`, by its identity, rather than the text after a line of the file it
+    // is written in today.
+    let main = item_body(&bt_source::ItemQuery::function("main").in_module("crate"));
     let door = main.find("cli::uninstall_cleanup(").unwrap();
     let uninheritable = main
         .find("bt_platform::make_standard_streams_uninheritable();")
@@ -612,10 +613,8 @@ fn uninstall_door_precedes_every_startup_effect() {
     ] {
         assert!(door < main.find(later).unwrap(), "{later}");
     }
-    let orchestration = include_str!("uninstall.rs")
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap();
+    // The door's own module, product code only — the suite beside it names every
+    // one of these to say they are absent.
     for forbidden in [
         "persist::storage_dir()",
         "attention claude-code:",
@@ -623,8 +622,20 @@ fn uninstall_door_precedes_every_startup_effect() {
         "CreateProcess",
         "taskkill",
     ] {
+        let found = source()
+            .search(
+                &bt_source::Search::new(
+                    bt_source::needle!(bt_source::Pattern::text(forbidden)),
+                    bt_source::View::Raw,
+                )
+                .in_scope(bt_source::Scope::Modules(vec![
+                    bt_source::ModuleSpec::tree("crate::uninstall"),
+                ])),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(source());
         assert!(
-            !orchestration.contains(forbidden),
+            found.is_empty(),
             "the door acquired another owner: {forbidden}"
         );
     }
@@ -632,108 +643,114 @@ fn uninstall_door_precedes_every_startup_effect() {
 
 #[test]
 fn uninstall_source_guard_pins_known_writers_and_inventory() {
-    use syn::visit::{self, Visit};
-    #[derive(Default)]
-    struct Functions {
-        found: Vec<String>,
-        owner: String,
-    }
-    impl<'ast> Visit<'ast> for Functions {
-        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-            self.found.push(item.sig.ident.to_string());
-            visit::visit_item_fn(self, item);
-        }
-        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-            let name = match item.self_ty.as_ref() {
-                syn::Type::Path(path) => path.path.segments.last().unwrap().ident.to_string(),
-                _ => String::new(),
-            };
-            let previous = std::mem::replace(&mut self.owner, name);
-            visit::visit_item_impl(self, item);
-            self.owner = previous;
-        }
-        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-            self.found
-                .push(format!("{}::{}", self.owner, item.sig.ident));
-            visit::visit_impl_item_fn(self, item);
-        }
-    }
-    // Like the content-read guard, parse Rust rather than matching comment decoys.
-    // Syntax cannot establish whether a generic Path came from data, an export picker,
-    // or an OS framework. We pin the audited writer owners, not a false universal promise.
-    for (remover, source, writer) in [
+    use bt_source::{Index, ItemQuery};
+    // Each audited writer by its identity — a free function in a named module, or a
+    // method of a named type — asked of the package that declares it, so a writer
+    // that moves between files is still found and one that is renamed or deleted is
+    // not. Syntax cannot establish whether a generic Path came from data, an export
+    // picker, or an OS framework. We pin the audited writer owners, not a false
+    // universal promise.
+    let app = source();
+    let platform = Index::of_package("bt-platform");
+    let function = |module: &str, name: &str| {
+        ItemQuery::function(name)
+            .in_module(module)
+            .one_per_variant()
+    };
+    for (remover, index, query, writer) in [
         (
             Remover::Profiles,
-            include_str!("shell_integration.rs"),
+            app,
+            function("crate::shell_integration", "add_to_profile"),
             "add_to_profile",
         ),
         (
             Remover::PsReadLine,
-            include_str!("psreadline.rs"),
+            app,
+            function("crate::psreadline", "install_recorded"),
             "install_recorded",
         ),
         (
             Remover::Agent(0),
-            include_str!("attention_hooks.rs"),
+            app,
+            function("crate::attention_hooks", "apply_at"),
             "apply_at",
         ),
         (
             Remover::Agent(1),
-            include_str!("attention_codex.rs"),
+            app,
+            function("crate::attention_codex", "apply_at"),
             "apply_at",
         ),
         (
             Remover::Agent(2),
-            include_str!("attention_copilot.rs"),
+            app,
+            function("crate::attention_copilot", "apply_at"),
             "apply_at",
         ),
-        (Remover::Explorer, include_str!("context_menu.rs"), "apply"),
         (
             Remover::Explorer,
-            include_str!("explorer_menu.rs"),
+            app,
+            function("crate::context_menu", "apply"),
+            "apply",
+        ),
+        (
+            Remover::Explorer,
+            app,
+            function("crate::explorer_menu", "request"),
             "request",
         ),
         (
             Remover::Toast,
-            include_str!("../../bt-platform/src/lib.rs"),
+            platform,
+            ItemQuery::method("Notifier", "new").one_per_variant(),
             "Notifier::new",
         ),
         (
             Remover::RecoverySnapshots,
-            include_str!("shell_integration.rs"),
+            app,
+            function("crate::shell_integration", "replace_profile"),
             "replace_profile",
         ),
         (
             Remover::RecoverySnapshots,
-            include_str!("attention_hooks.rs"),
-            // A method on the one resolution an operation makes, since the T-B follow-ups: the
-            // walker above names an impl item `Owner::method`, and the dated copy beside somebody
-            // else's configuration is written by that one and by nothing else.
+            app,
+            // A method on the one resolution an operation makes, since the T-B follow-ups:
+            // the dated copy beside somebody else's configuration is written by that one
+            // and by nothing else.
+            ItemQuery::method("Config", "land")
+                .in_module("crate::attention_hooks")
+                .one_per_variant(),
             "Config::land",
         ),
         (
             Remover::RuntimeClaims,
-            include_str!("../../bt-platform/src/instance.rs"),
+            platform,
+            function("crate::instance", "try_claim_data_directory"),
             "try_claim_data_directory",
         ),
         (
             Remover::TrialFolder,
-            include_str!("shell_integration.rs"),
+            app,
+            function("crate::shell_integration", "trial_script_directory"),
             "trial_script_directory",
         ),
         (
             Remover::Data(HostPlatform::Windows, Base::Roaming, "Folio"),
-            include_str!("persist.rs"),
+            app,
+            function("crate::persist", "storage_location"),
             "storage_location",
         ),
         (
             Remover::Data(HostPlatform::Windows, Base::Roaming, "BetterTerminal"),
-            include_str!("persist.rs"),
+            app,
+            function("crate::persist", "storage_location"),
             "storage_location",
         ),
         (
             Remover::Data(HostPlatform::Windows, Base::Local, "Folio"),
-            include_str!("webhost.rs"),
+            app,
+            function("crate::webhost", "user_data_folder_in"),
             "user_data_folder_in",
         ),
         (
@@ -742,36 +759,39 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
                 Base::Library("Application Support"),
                 "Folio",
             ),
-            include_str!("webhost.rs"),
+            app,
+            function("crate::webhost", "web_engine_folder"),
             "web_engine_folder",
         ),
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Xdg, "Folio"),
-            include_str!("persist.rs"),
+            app,
+            function("crate::persist", "storage_location"),
             "storage_location",
         ),
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio/clipboard"),
-            include_str!("clipboard_picture.rs"),
+            app,
+            function("crate::clipboard_picture", "save"),
             "save",
         ),
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio-panic.log"),
-            include_str!("main.rs"),
+            app,
+            function("crate", "install_panic_log_hook"),
             "install_panic_log_hook",
         ),
         (
             Remover::Staging,
-            include_str!("../../bt-platform/src/deferred_removal.rs"),
+            platform,
+            function("crate::deferred_removal", "schedule"),
             "schedule",
         ),
     ] {
-        let mut functions = Functions::default();
-        functions.visit_file(&syn::parse_file(source).unwrap());
-        assert!(
-            functions.found.iter().any(|f| f == writer),
-            "writer moved: {writer}"
-        );
+        let found = index
+            .find(&query)
+            .unwrap_or_else(|failure| panic!("writer moved: {writer}: {failure}"));
+        assert!(!found.is_empty(), "writer moved: {writer}");
         assert!(
             INVENTORY
                 .iter()
@@ -797,16 +817,16 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
     // occupancy check (audit 3, E-1); what is pinned is that the module root
     // still reaches `integration-marks.json` before the first byte is written.
     assert!(
-        include_str!("psreadline.rs")
-            .contains("marks.psreadline_module_roots.push(root.to_owned())")
+        item_body(
+            &bt_source::ItemQuery::function("install_recorded").in_module("crate::psreadline")
+        )
+        .contains("marks.psreadline_module_roots.push(root.to_owned())")
     );
     // And that the one caller of the recording writer is the row's own press.
-    // This used to be `include_str!("main.rs").contains(…)` — a positive over a
-    // whole file, which says *somewhere in that file* and goes silent the day
-    // the method it means moves out of it. The subject is
-    // `Runtime::apply_psreadline`, whose Step 2a destination is
-    // `runtime/first_run.rs`, so the identity is what is asked for and the file
-    // is not mentioned.
+    // A positive over a whole file says *somewhere in that file* and goes silent
+    // the day the method it means moves out of it, so the subject,
+    // `Runtime::apply_psreadline`, is asked for by its identity and no file is
+    // mentioned.
     assert!(
         method_body("Runtime", "apply_psreadline").contains("psreadline::apply_recorded("),
         "`Runtime::apply_psreadline` no longer reaches `psreadline::apply_recorded`, \
@@ -841,9 +861,23 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
                 && mark.writer.ends_with("logon_hook.rs:arm_in")),
         "the update entrance has no undo"
     );
+    // The macOS engine's data store is the default one, which is the folder the
+    // `web_engine_folder` row removes; asked of `bt-platform`'s macOS web module.
     assert!(
-        include_str!("../../bt-platform/src/macos_webview.rs")
-            .contains("WKWebsiteDataStore::defaultDataStore(mtm)")
+        !bt_source::Index::of_package("bt-platform")
+            .search(
+                &bt_source::Search::new(
+                    bt_source::needle!(bt_source::Pattern::text(
+                        "WKWebsiteDataStore::defaultDataStore(mtm)"
+                    )),
+                    bt_source::View::CodeKeepingLiterals,
+                )
+                .in_scope(bt_source::Scope::Modules(vec![
+                    bt_source::ModuleSpec::tree("crate::webview::macos"),
+                ])),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .is_empty()
     );
     assert!(
         include_str!("../../../packaging/macos/Info.plist.in")
@@ -966,13 +1000,11 @@ fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
 fn uninstall_archive_has_ten_files_and_a_one_press_wrapper() {
     // The archive's members are one list, `scripts/release/archive-members.txt`
     // (0.4.6 ticket U-9): `package.ps1` packs from it and `build.rs` builds the
-    // release manifest from it. It is read here with the grammar both use, and
-    // `package.ps1` is held to reading it rather than to a list of its own.
-    let package = include_str!("../../../scripts/release/package.ps1");
-    assert!(
-        package.contains("$listed = Get-ArchiveMemberList"),
-        "package.ps1 packs from archive-members.txt"
-    );
+    // release manifest from it. It is read here with the grammar both use. That
+    // `package.ps1` packs from it is held where the packing runs:
+    // `scripts/release/package-tests.ps1`'s
+    // `the_manifest_lists_every_member_but_the_two_signed_ones` packs a real
+    // archive and refuses a member the list does not name.
     let listed = bt_winres::release_manifest::parse_member_list(include_str!(
         "../../../scripts/release/archive-members.txt"
     ))
@@ -1208,11 +1240,25 @@ fn uninstall_sandbox_door_is_not_read_by_a_shipped_build() {
     );
     assert_eq!(sandbox_root(true, None), None);
     const { assert!(SANDBOX_DOOR, "a test build keeps the door") };
-    let source = include_str!("uninstall.rs");
-    assert!(source.contains("const SANDBOX_DOOR: bool = cfg!(any(debug_assertions, test));"));
-    assert!(
-        source.contains(r#"sandbox_root(SANDBOX_DOOR, std::env::var_os("BT_UNINSTALL_ROOT"))"#)
-    );
+    // The door's own module, product code only, by its module path.
+    for spelled in [
+        "const SANDBOX_DOOR: bool = cfg!(any(debug_assertions, test));",
+        r#"sandbox_root(SANDBOX_DOOR, std::env::var_os("BT_UNINSTALL_ROOT"))"#,
+    ] {
+        let found = source()
+            .search(
+                &bt_source::Search::new(
+                    bt_source::needle!(bt_source::Pattern::text(spelled)),
+                    bt_source::View::CodeKeepingLiterals,
+                )
+                .in_scope(bt_source::Scope::Modules(vec![
+                    bt_source::ModuleSpec::tree("crate::uninstall"),
+                ])),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(source());
+        assert_eq!(found.len(), 1, "{spelled}");
+    }
     for script in [
         include_str!("../../../packaging/uninstall.cmd"),
         include_str!("../../../scripts/release/ci-build-tests.ps1"),
@@ -1430,7 +1476,10 @@ fn uninstall_purge_says_on_macos_that_held_data_cannot_be_told() {
     assert!(report.stdout().starts_with(&format!("{notice}\n")));
     assert!(report.stderr().is_empty());
     assert!(
-        include_str!("../../bt-platform/src/cleanup.rs").contains("let _ = path;"),
+        bt_source::Index::of_package("bt-platform")
+            .body_of(&bt_source::ItemQuery::function("probe_file").in_module("crate::cleanup"))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .contains("let _ = path;"),
         "probe_file is no longer the no-op this notice exists for"
     );
 }
@@ -3226,6 +3275,7 @@ fn uninstall_removes_the_folder_of_the_trial_its_journal_names() {
             }),
             adapter: Adapter::Ours,
             marker: None,
+            unkept: None,
         },
     }
     .encode();

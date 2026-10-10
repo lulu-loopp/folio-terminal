@@ -46,10 +46,11 @@
 #     formulas, every run the typesetter set on this machine -- face, glyph ids,
 #     advances -- to be diffed against another machine when a glyph goes missing
 #     there (T-MATH-MAC-MINUS); the pins beside it run in the normal suite.
-#   * one in `bt-platform` opens a real page in a real WebView2 and reads back
-#     what the page says loaded. It needs a runtime, a window and a message
-#     pump, which is the same "what does this machine do" question the ConPTY
-#     probes ask. Run it with
+#   * two in `bt-platform` open real pages in real WebView2 controllers: one
+#     reads back what a local page says loaded, and one verifies that the parked
+#     spare stays hidden and warms off-screen. They need a runtime, a window and
+#     a message pump, which is the same "what does this machine do" question the
+#     ConPTY probes ask. Run them with
 #     `cargo test -p bt-platform -- --ignored --nocapture`.
 #
 # One is neither a probe nor a regression: it is a **writer**, like
@@ -113,6 +114,7 @@ tests::system_conpty_resize_cursor_outcome_matches_the_sidecar_contract
 tests::typed_input_gate_blank_window_probe
 tests::typed_input_resize_deferral_probe
 webview::webview2_runtime_probe::a_local_page_reaches_only_its_own_folder
+webview::webview2_runtime_probe::a_parked_spare_is_hidden_and_warms_off_every_monitor
 
 # T-PASTE-1: defined MSVC wmain argv consumer must be compiled separately; native acceptance
 # runs it directly with CREATE_NO_WINDOW, no clipboard, shell, keys or Folio. Pure literals run normally.
