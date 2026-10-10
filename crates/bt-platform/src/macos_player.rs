@@ -169,7 +169,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use objc2::rc::{Allocated, Retained, autoreleasepool};
@@ -405,6 +405,36 @@ impl Engine {
         let _ = self.commands.send(Command::Volume(volume));
     }
 
+    /// **Wait until the engine thread publishes a state `until` accepts**, woken
+    /// by each publication rather than by a clock, and answer the state the wait
+    /// ended on — the accepted one, or what stood when `patience` ran out, which
+    /// the caller then reads as its red.
+    ///
+    /// Tests only: this crate's, and those of a crate that names the
+    /// `trust-harness` feature. A caller drives the engine with its own verbs —
+    /// a seek lands without a clock on every machine, where playback on a Mac
+    /// needs a main run loop a test thread does not have — and waits here for the
+    /// engine to say so.
+    #[cfg(any(test, feature = "trust-harness"))]
+    #[doc(hidden)]
+    pub fn state_reaching(
+        &self,
+        until: impl Fn(&EngineState) -> bool,
+        patience: Duration,
+    ) -> EngineState {
+        let held = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let (state, _) = self
+            .shared
+            .published
+            .wait_timeout_while(held, patience, |state| !until(state))
+            .unwrap_or_else(|held| held.into_inner());
+        *state
+    }
+
     /// **Wait until the metadata has arrived, or until `budget` runs out.**
     ///
     /// # Where it may be called from
@@ -477,6 +507,10 @@ impl Drop for Engine {
 #[derive(Default)]
 struct Shared {
     state: Mutex<EngineState>,
+    /// Told every time `state` is written, so a test can wait for the engine
+    /// thread to publish a state rather than for a clock to run out
+    /// ([`Engine::state_reaching`]).
+    published: Condvar,
     frame: Mutex<Option<Frame>>,
     cost: Mutex<FrameCost>,
     /// Read before the `frame` lock is taken, so the overwhelmingly common
@@ -550,6 +584,8 @@ fn publish_failure(shared: &Arc<Shared>, error: EngineError) {
     if state.error.is_none() {
         state.error = Some(error);
     }
+    drop(state);
+    shared.published.notify_all();
 }
 
 /// Everything the engine thread owns. It never leaves that thread — the type is
@@ -858,6 +894,7 @@ impl Machinery {
             }
         };
         *shared.state.lock().unwrap_or_else(|held| held.into_inner()) = state;
+        shared.published.notify_all();
         state
     }
 

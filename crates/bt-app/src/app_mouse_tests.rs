@@ -4,10 +4,11 @@
 //! from [`crate::test_support`].
 
 use super::*;
+use crate::runtime::pointer::touch::pan_on_the_wheel_road;
 use crate::test_support::{
     CARDS_AT_200, PtyPresentationHarness, TARGET, a_local_file, a_local_folder, a_shell, at,
     calls_of, cards_column, centre, every_wheel_situation, flush_test_wheel, found, hand_leaves,
-    host_file_uri, hyperlink_hit, in_product, method_body, no_directories, on_this_host, peek_open,
+    host_file_uri, hyperlink_hit, method_body, no_directories, on_this_host, peek_open,
     reader_names, source, squeezed_body, wheel_pane_at_top,
 };
 use bt_source::{Needle, Pattern, View};
@@ -3525,9 +3526,9 @@ fn the_press_and_the_hover_ask_one_router() {
              that part with a name, read off the router like everything else"
     );
     assert_eq!(
-        in_product(&calls_of("Runtime", "docked_chrome_target_at")),
-        1,
-        "and the docked ladder is reached through the router and nowhere else"
+        reader_names(&calls_of("Runtime", "docked_chrome_target_at")),
+        ["plane_at", "pointer_target_at"],
+        "and the docked ladder is reached through the routers and nowhere else: today's, and the docked plane of the pointer module's walk (T-POINTER-CAPTURE cut 1)"
     );
     assert!(
         method_body("Runtime", "pointer_target_at")
@@ -3730,7 +3731,7 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
         "nor a pane whose tab is no longer on top"
     );
 
-    let release = squeezed_body("Runtime", "release_owned_gesture");
+    let release = squeezed_body("Runtime", "release_cell_route");
     let motion = squeezed_body("Runtime", "forward_owned_drag_motion");
     for (door, body) in [("release", &release), ("motion", &motion)] {
         assert!(
@@ -3742,9 +3743,7 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
             "{door}: the seat is the route's"
         );
         assert!(
-            body.contains(
-                "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;"
-            ),
+            body.contains("ifself.live_paste_target(owner).is_none(){self.drop_mouse_route();"),
             "{door}: a gone owner drops the route with nothing sent"
         );
     }
@@ -3755,7 +3754,7 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
     // A selection drag is addressed the same way.
     assert!(
         squeezed_body("Runtime", "extend_local_selection").contains(
-            "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;returnOk(());}letseat=owner.seat;"
+            "ifself.live_paste_target(owner).is_none(){self.drop_mouse_route();returnOk(());}letseat=owner.seat;"
         ),
         "selection: its moves go to its own shell, and a gone shell lets it go"
     );
@@ -3838,7 +3837,7 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
     );
     assert!(route.is_none());
 
-    let release = squeezed_body("Runtime", "release_owned_gesture");
+    let release = squeezed_body("Runtime", "release_cell_route");
     assert!(
         release.contains("ifprotocol_mouse_button(button)!=Some(latched){returnOk(false);}"),
         "the owned release hands another button's release on as an event of its own"
@@ -3850,7 +3849,7 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
     let road = squeezed_body("Runtime", "mouse_input");
     assert!(
         road.contains(
-            "ifmatches!(self.window.mouse_route,Some(MouseRoute::Forward{..})){returnOk(());}match state"
+            "ifmatches!(self.held_mouse_route(),Some(MouseRoute::Forward{..})){returnOk(());}match state"
                 .replace(' ', "")
                 .as_str()
         ),

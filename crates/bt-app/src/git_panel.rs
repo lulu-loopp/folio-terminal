@@ -2743,30 +2743,45 @@ pub fn act_boxes(
     scale: f32,
     revealed: bool,
 ) -> Vec<(GitAct, [f32; 4])> {
+    placed_row_acts(row, rect, scale, revealed).collect()
+}
+
+/// [`act_boxes`] as an iterator: the row's own box when the row is its verb,
+/// else its verbs placed by [`placed_acts`].
+fn placed_row_acts(
+    row: &GitRow,
+    rect: [f32; 4],
+    scale: f32,
+    revealed: bool,
+) -> impl Iterator<Item = (GitAct, [f32; 4])> {
     // Asked before the reveal, because the reveal is about a *corner* of a row
     // and a row that is its own button has none: its sentence is drawn whether or
     // not a hand is near it, so the button it is cannot be hidden either.
-    if let Some(act) = row_is_its_act(row) {
-        return vec![(act, rect)];
-    }
-    let acts: Vec<GitAct> = match row {
+    let whole = row_is_its_act(row);
+    let acts: [Option<GitAct>; 2] = match row {
+        _ if whole.is_some() => [None, None],
         // Right to left, so the *destructive* verb is furthest from the trailing
         // edge a pointer travels along: `+` sits at the end, `×` inside it. A
         // discard under the thumb's resting place is a discard that gets pressed.
-        GitRow::Change(change) if change.pending => Vec::new(),
+        GitRow::Change(change) if change.pending => [None, None],
         GitRow::Change(change) => match change.group {
-            GitGroup::Staged => vec![GitAct::Unstage],
-            GitGroup::Changes | GitGroup::Untracked => vec![GitAct::Stage, GitAct::Discard],
+            GitGroup::Staged => [Some(GitAct::Unstage), None],
+            GitGroup::Changes | GitGroup::Untracked => [Some(GitAct::Stage), Some(GitAct::Discard)],
         },
-        GitRow::Heading { act, .. } => act.iter().copied().collect(),
-        GitRow::Masthead(_) => MASTHEAD_ACTS.to_vec(),
-        _ => Vec::new(),
+        GitRow::Heading { act, .. } => [*act, None],
+        GitRow::Masthead(_) => MASTHEAD_ACTS.map(Some),
+        _ => [None, None],
     };
-    let acts: Vec<GitAct> = acts
+    let acts = acts
         .into_iter()
-        .filter(|act| revealed || act.rests_visible())
-        .collect();
-    place_acts(&acts, rect, scale, act_trailing_padding(row))
+        .flatten()
+        .filter(move |act| revealed || act.rests_visible());
+    whole.map(|act| (act, rect)).into_iter().chain(placed_acts(
+        acts,
+        rect,
+        scale,
+        act_trailing_padding(row),
+    ))
 }
 
 /// **The masthead's two buttons, trailing edge first** (G24 + T5).
@@ -2796,26 +2811,24 @@ const MASTHEAD_ACTS: [GitAct; 2] = [GitAct::Refresh, GitAct::OpenGraph];
 /// buttons *will* be without re-deriving the arithmetic. It had a copy of it —
 /// one button's width and one gap — and the copy was correct for exactly as long
 /// as the masthead had one button.
-fn place_acts(
-    acts: &[GitAct],
+fn placed_acts(
+    acts: impl IntoIterator<Item = GitAct>,
     rect: [f32; 4],
     scale: f32,
     trailing_padding_logical_px: f32,
-) -> Vec<(GitAct, [f32; 4])> {
+) -> impl Iterator<Item = (GitAct, [f32; 4])> {
     let box_ = (GIT_ACT_LOGICAL_PX * scale).round().max(1.0);
     let gap = (GIT_ACT_GAP_LOGICAL_PX * scale).round();
     let middle = ((rect[1] + rect[3] - box_) / 2.0).round();
-    let mut placed = Vec::with_capacity(acts.len());
     let mut edge = rect[2] - (trailing_padding_logical_px * scale).round();
-    for &act in acts {
+    acts.into_iter().map_while(move |act| {
         let left = edge - box_;
         if left < rect[0] {
-            break;
+            return None;
         }
-        placed.push((act, [left, middle, left + box_, middle + box_]));
         edge = left - gap;
-    }
-    placed
+        Some((act, [left, middle, left + box_, middle + box_]))
+    })
 }
 
 /// The horizontal padding a row kind keeps between its trailing edge and its
@@ -2835,6 +2848,10 @@ fn act_trailing_padding(row: &GitRow) -> f32 {
 /// has already established that the pointer is inside this row — which *is* the
 /// reveal — while the tooltip list is walking every row on the page and knows
 /// only which one the pointer is on.
+///
+/// It reads [`act_boxes`]' derivation without building the list, so a hit
+/// test that must not allocate (the pointer router's walk, T-POINTER-CAPTURE
+/// R-4) asks the one derivation the painter draws from.
 #[must_use]
 pub fn act_at(
     row: &GitRow,
@@ -2844,8 +2861,7 @@ pub fn act_at(
     x: f32,
     y: f32,
 ) -> Option<GitAct> {
-    act_boxes(row, rect, scale, revealed)
-        .into_iter()
+    placed_row_acts(row, rect, scale, revealed)
         .find(|(_, box_)| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3])
         .map(|(act, _)| act)
 }
@@ -2949,7 +2965,7 @@ pub fn masthead_rects(
     let pad = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
     // The masthead's buttons hold the trailing edge (G24's `margin-left:auto`),
     // so the segment's room ends where the leftmost of them begins. Laid out by
-    // [`place_acts`] rather than re-measured here, on this function's own rule:
+    // [`placed_acts`] rather than re-measured here, on this function's own rule:
     // two derivations of one edge is a pill drawn under a button — which is
     // exactly what the arithmetic this replaced would have produced the moment a
     // second button joined the first.
@@ -3019,8 +3035,7 @@ pub fn pill_boxes(head: &GitHead, rect: [f32; 4], scale: f32) -> Vec<[f32; 4]> {
 /// One number, read by the pill layout above and by the painter of the name, so
 /// that a name too long for its strip is cut at the button rather than under it.
 fn masthead_acts_left(rect: [f32; 4], scale: f32, gap: f32) -> f32 {
-    let left = place_acts(&MASTHEAD_ACTS, rect, scale, GIT_HEAD_PADDING_X_LOGICAL_PX)
-        .iter()
+    let left = placed_acts(MASTHEAD_ACTS, rect, scale, GIT_HEAD_PADDING_X_LOGICAL_PX)
         .map(|(_, box_)| box_[0])
         .fold(rect[2], f32::min);
     (left - gap).max(rect[0])

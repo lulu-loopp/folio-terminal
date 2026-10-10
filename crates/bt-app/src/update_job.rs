@@ -550,6 +550,14 @@ pub(crate) enum Failure {
     /// were held until a commit it never saw, and the trial left its mark in
     /// the transaction's folder (`update_trial`). `version` is this build's.
     ChangesNotKept { version: String },
+    /// **The update was rolled back after a Folio ran over it, and what was
+    /// changed in that Folio was not kept** (0.4.8 E5): the start that retires
+    /// the rollback — the restored build's first — found the journal noting
+    /// `version` (`update_txn::Body::unkept`): a start that ran over the
+    /// unfinished transaction with no recovery to hand it to, or a trial that
+    /// held a person's change. The previous version is back, as after
+    /// [`Failure::RolledBack`].
+    Undone { version: String },
     /// **This start stood in for U-35's reserved trial and found that trial
     /// already running** (0.4.8 E3, `update_startup::stand_down`): the trial
     /// did not take its launch within the claim's wait, so this session opens

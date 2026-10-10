@@ -1100,7 +1100,7 @@ mod failure_road {
         Row { item, count, why }
     }
 
-    /// The twelve sites of a controlled failure.
+    /// The thirteen sites of a controlled failure.
     pub(super) const FAIL_SITES: &[Row] = &[
         row(
             "crate::FolioApp::about_to_wait_inner",
@@ -1119,8 +1119,8 @@ mod failure_road {
         ),
         row(
             "crate::FolioApp::window_event",
-            3,
-            "the wheel's flush, the drop's flush, the handler's result",
+            4,
+            "the capture pre-dispatch, the wheel's flush, the drop's flush, the handler's result",
         ),
     ];
 
@@ -1252,7 +1252,7 @@ mod failure_road {
         failures
     }
 
-    /// RED (D-4, 0.4.8 G7) — **the twelve `fail` sites all enter through the one road, and no
+    /// RED (D-4, 0.4.8 G7) — **the thirteen `fail` sites all enter through the one road, and no
     /// other site closes a window past it.**
     ///
     /// MUTATION (planted below, and on the product): add a function to `impl FolioApp` that
@@ -1269,12 +1269,12 @@ mod failure_road {
         );
         assert_eq!(
             FAIL_SITES.iter().map(|row| row.count).sum::<usize>(),
-            12,
-            "the twelve sites"
+            13,
+            "the thirteen sites"
         );
     }
 
-    /// A crate with a road, its sites, and a thirteenth site that closes past it.
+    /// A crate with a road, its sites, and another site that closes past it.
     const PLANTED: &str = r#"
 pub struct Runtime;
 impl Runtime {

@@ -106,6 +106,14 @@ const REPORT_UNTRIED_KEY: &str = "failed_untried";
 /// earlier build ignores it.
 const REPORT_HELD_KEY: &str = "failed_journal_held";
 
+/// The key the version whose changes a rollback did not keep crosses as, beside [`REPORT_KEY`]
+/// and only with the rolled-back word ([`Report::Undone`], 0.4.8 E5); an earlier build ignores it
+/// and says the previous version was restored, as it always did.
+const REPORT_UNDONE_KEY: &str = "failed_undone";
+
+/// **The most bytes the version a rollback did not keep may cross as** — a release's version.
+const MAX_VERSION_BYTES: usize = 64;
+
 /// The key `--with-environment`'s environment crosses as: an array of `[name, value]` pairs,
 /// absent when the launch carried none (F-SWEEP-2-048). A key, never a new value of a known one
 /// ([`WIRE_VERSION`]'s rule): an earlier build ignores it and opens the tab without it.
@@ -119,7 +127,7 @@ const MAX_REFUSAL_BYTES: usize = 512;
 /// **What a start a rollback sent was told to report**, in the words it crosses the pipe in
 /// (0.4.7 U-36).
 ///
-/// The three of `crate::update_job::Failure`'s kinds that a start can carry to another Folio, and
+/// The ones of `crate::update_job::Failure`'s kinds that a start can carry to another Folio, and
 /// no other. `TrialIncomplete` is deliberately not one of them: its card tells the reader that
 /// *this* session is the update's trial, which is false of every process but the trial itself — and
 /// a trial never hands itself over (`crate::update_trial::take_the_claim`). The kinds a driver
@@ -144,6 +152,10 @@ pub(crate) enum Report {
     /// (`Failure::JournalHeld`, 0.4.8 E4): `error`, the system's refusal, over the report the
     /// journal itself makes ([`REPORT_HELD_KEY`]).
     JournalHeld { error: String, then: Box<Report> },
+    /// **The previous version was put back, and what was changed in `version`, which ran over the
+    /// transaction, was not kept** (`Failure::Undone`, 0.4.8 E5): the rolled-back word, with the
+    /// version beside it ([`REPORT_UNDONE_KEY`]).
+    Undone { version: String },
 }
 
 impl Report {
@@ -153,6 +165,9 @@ impl Report {
         match failure {
             Failure::RolledBack => Some(Self::RolledBack),
             Failure::Interrupted => Some(Self::Interrupted),
+            Failure::Undone { version } => Some(Self::Undone {
+                version: version.clone(),
+            }),
             Failure::JournalHeld { error, then } => Some(Self::JournalHeld {
                 error: error.clone(),
                 then: Box::new(Self::of(then)?),
@@ -192,6 +207,9 @@ impl Report {
         match self {
             Self::RolledBack => Failure::RolledBack,
             Self::Interrupted => Failure::Interrupted,
+            Self::Undone { version } => Failure::Undone {
+                version: version.clone(),
+            },
             Self::Incomplete { folder, untried } => Failure::Incomplete {
                 folder: folder.clone(),
                 held: false,
@@ -231,25 +249,28 @@ impl Report {
     /// The token this report crosses as — short and from a closed set, [`origin_token`]'s rule.
     fn token(&self) -> &'static str {
         match self.beneath() {
-            Self::RolledBack => "rolled-back",
+            Self::RolledBack | Self::Undone { .. } => "rolled-back",
             Self::Interrupted => "interrupted",
             Self::Incomplete { .. } | Self::JournalHeld { .. } => "incomplete",
         }
     }
 
-    /// A token, its folder, whether no trial began and the hold's refusal, read back: the folder
-    /// and `untried` come with `incomplete` and with nothing else, a hold with any word, and
+    /// A token, its folder, whether no trial began, the version a rollback did not keep and the
+    /// hold's refusal, read back: the folder and `untried` come with `incomplete` and with nothing
+    /// else, the version with `rolled-back` and with nothing else, a hold with any word, and
     /// anything else is not a report this build knows.
     fn from_token(
         token: &str,
         folder: Option<String>,
         untried: bool,
+        undone: Option<String>,
         held: Option<String>,
     ) -> Option<Self> {
-        let report = match (token, folder, untried) {
-            ("rolled-back", None, false) => Self::RolledBack,
-            ("interrupted", None, false) => Self::Interrupted,
-            ("incomplete", Some(folder), untried) => Self::Incomplete {
+        let report = match (token, folder, untried, undone) {
+            ("rolled-back", None, false, None) => Self::RolledBack,
+            ("rolled-back", None, false, Some(version)) => Self::Undone { version },
+            ("interrupted", None, false, None) => Self::Interrupted,
+            ("incomplete", Some(folder), untried, None) => Self::Incomplete {
                 folder: Some(PathBuf::from(folder)),
                 untried,
             },
@@ -510,6 +531,9 @@ impl LaunchRequest {
                     value.insert(REPORT_UNTRIED_KEY.to_owned(), true.into());
                 }
             }
+            if let Report::Undone { version } = report.beneath() {
+                value.insert(REPORT_UNDONE_KEY.to_owned(), version.clone().into());
+            }
             if let Some(error) = report.held() {
                 value.insert(REPORT_HELD_KEY.to_owned(), error.into());
             }
@@ -578,17 +602,19 @@ impl LaunchRequest {
                 object.get(REPORT_KEY),
                 bounded(REPORT_FOLDER_KEY, MAX_FOLDER_BYTES)?,
                 object.get(REPORT_UNTRIED_KEY),
+                bounded(REPORT_UNDONE_KEY, MAX_VERSION_BYTES)?,
                 bounded(REPORT_HELD_KEY, MAX_REFUSAL_BYTES)?,
             ) {
-                (None, None, None, None) => None,
+                (None, None, None, None, None) => None,
                 (None, ..) => return None,
-                (Some(token), folder, untried, held) => Some(Report::from_token(
+                (Some(token), folder, untried, undone, held) => Some(Report::from_token(
                     token.as_str()?,
                     folder,
                     match untried {
                         None => false,
                         Some(untried) => untried.as_bool()?,
                     },
+                    undone,
                     held,
                 )?),
             },
@@ -1880,10 +1906,14 @@ mod tests {
     }
 
     /// The reports a start can carry, an unfinished rollback's naming `folder`.
-    fn reports(folder: PathBuf) -> [Failure; 5] {
+    fn reports(folder: PathBuf) -> [Failure; 6] {
         [
             Failure::RolledBack,
             Failure::Interrupted,
+            // 0.4.8 E5: a rollback that did not keep what a Folio ran over it changed.
+            Failure::Undone {
+                version: "0.4.9".to_owned(),
+            },
             Failure::Incomplete {
                 folder: Some(folder.clone()),
                 held: false,
@@ -2434,6 +2464,64 @@ mod tests {
             format!(r#"{{{base},"failed_journal_held":"拒绝访问。"}}"#),
             format!(r#"{{{base},"failed":"interrupted","failed_journal_held":""}}"#),
             format!(r#"{{{base},"failed":"interrupted","failed_journal_held":"a\nb"}}"#),
+        ] {
+            assert_eq!(
+                LaunchRequest::decode(&line),
+                None,
+                "{line} is not a request this build understands"
+            );
+        }
+    }
+
+    /// **RED (0.4.8 E5) — a rollback that did not keep what a Folio ran over it changed crosses as
+    /// the rolled-back word with the version in a key of its own**, so the receiver's card says
+    /// *The update was undone.* where the start's would have, and an earlier receiver, which
+    /// ignores the key, says *Previous version restored.* as it always did (the frozen 0.4.6
+    /// reader is held to the frame through `reports`). The key comes with `rolled-back` alone,
+    /// bounded and free of control bytes.
+    ///
+    /// MUTATION: leave `REPORT_UNDONE_KEY` out of `encode` — the report arrives as a plain
+    /// rollback.
+    #[test]
+    fn a_rollback_that_did_not_keep_a_folios_changes_crosses_with_its_version() {
+        let undone = Failure::Undone {
+            version: "0.4.9".to_owned(),
+        };
+        for failure in [
+            undone.clone(),
+            Failure::JournalHeld {
+                error: "拒绝访问。 (os error 5)".to_owned(),
+                then: Box::new(undone.clone()),
+            },
+        ] {
+            let request =
+                LaunchRequest::of_start(&sent_by_a_rollback(), Some(&failure), all_folders, None)
+                    .expect("it crosses");
+            let frame = request.encode();
+            let words: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(
+                words[REPORT_KEY], "rolled-back",
+                "never a new word: {frame}"
+            );
+            assert_eq!(words[REPORT_UNDONE_KEY], "0.4.9", "{frame}");
+            let arrived = LaunchRequest::decode(&frame).expect("this build reads it");
+            assert_eq!(
+                arrived.report.map(|report| report.failure()),
+                Some(failure.clone()),
+                "{frame}"
+            );
+        }
+        let base = r#""v":2,"new":false,"tab":false,"from":"plain""#;
+        let long = "9".repeat(MAX_VERSION_BYTES + 1);
+        for line in [
+            format!(r#"{{{base},"failed":"interrupted","failed_undone":"0.4.9"}}"#),
+            format!(
+                r#"{{{base},"failed":"incomplete","failed_folder":"C:\\x","failed_undone":"0.4.9"}}"#
+            ),
+            format!(r#"{{{base},"failed_undone":"0.4.9"}}"#),
+            format!(r#"{{{base},"failed":"rolled-back","failed_undone":""}}"#),
+            format!(r#"{{{base},"failed":"rolled-back","failed_undone":"0.4.9\n"}}"#),
+            format!(r#"{{{base},"failed":"rolled-back","failed_undone":"{long}"}}"#),
         ] {
             assert_eq!(
                 LaunchRequest::decode(&line),

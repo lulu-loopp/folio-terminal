@@ -69,7 +69,12 @@
 //! left as it is, and the start continues with the card that says its record
 //! cannot be read. A lock somebody else holds, and a file that cannot be
 //! measured, leave everything as it is and continue. **Nothing durable is
-//! written by an ordinary start except a retirement.**
+//! written by an ordinary start except a retirement, and the mark of a start
+//! that continues over an unfinished transaction no recovery could be handed**
+//! (`H\<txn>\unkept`, its version: what it changes is not kept, which a later
+//! rollback's card says — 0.4.8 E5). The start that retires a rollback whose
+//! journal notes such a version raises *The update was undone.* over the
+//! rollback's own card.
 //!
 //! # Where it runs, and its doors
 //!
@@ -550,9 +555,16 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             // retirement removes its folder: once, never by a start that
             // leaves it to a lock holder.
             let failed = match action {
-                StartAction::Retire => {
-                    failed.or_else(|| changes_not_kept(&seen, start.home, world))
-                }
+                StartAction::Retire => match undone(&seen, world) {
+                    Some(undone) => Some(match failed {
+                        Some(Failure::JournalHeld { error, .. }) => Failure::JournalHeld {
+                            error,
+                            then: Box::new(undone),
+                        },
+                        _ => undone,
+                    }),
+                    None => failed.or_else(|| changes_not_kept(&seen, start.home, world)),
+                },
                 _ => failed,
             };
             retire(action, &header, start.home, lock, world);
@@ -637,6 +649,33 @@ fn changes_not_kept(seen: &Sight, home: &Home, world: &mut impl World) -> Option
             None
         }
     }
+}
+
+/// **The card of a rollback that did not keep what a Folio ran over it
+/// changed** (0.4.8 E5): the journal is retired `rolled_back` and its body
+/// notes the version (`update_txn::Body::unkept`, recorded by the lock holder
+/// from the transaction's mark) — *The update was undone.* / *Changes made in
+/// Folio {version} were not kept.*, raised by the start that retires the
+/// transaction, which is the restored build's first, and over the rollback's
+/// own card when a lock holder sent it. Once: the retirement removes the
+/// journal it is read from. `None` for every other journal.
+fn undone(seen: &Sight, world: &mut impl World) -> Option<Failure> {
+    let Sight::Known(journal) = seen else {
+        return None;
+    };
+    let Phase::Retired {
+        outcome: Outcome::RolledBack,
+        ..
+    } = journal.body.phase
+    else {
+        return None;
+    };
+    let version = journal.body.unkept.clone()?;
+    world.say(&format!(
+        "BT_UPDATE_START transaction {} was rolled back after Folio {version} ran over it; the journal, Retired, notes that its changes were not kept",
+        journal.txn
+    ));
+    Some(Failure::Undone { version })
 }
 
 /// Step 1: `H\admission`, shared, one attempt. `None` when there is no
@@ -817,7 +856,15 @@ fn delete(removal: Removal, txn: TxnId, home: &Home) -> Result<(), install_txn::
 /// and nothing recorded in the journal. The card says the update is not
 /// finished and that this session's changes are not kept. The rollback the
 /// next logon or start makes may put back what the new build wrote; with
-/// nothing written here, nothing of this session is lost to it unannounced.
+/// nothing written here, nothing of this session is lost to it unannounced,
+/// and the transaction's mark names this build (0.4.8 E5, [`mark_unkept`]),
+/// so that the restored build's first start says that the changes made in it
+/// were not kept ([`undone`]).
+///
+/// **The macOS start that can start nothing writes as always** (U-29b ruling
+/// 2); when it is the transaction's new bundle, a later rollback puts the old
+/// bundle back over what it wrote — accepted, said: it marks the transaction
+/// the same way (the owner's ruling E5 of 2026-10-08).
 fn hand_to_rescue(
     start: &Start<'_>,
     header: &Header,
@@ -878,8 +925,9 @@ fn hand_to_rescue(
     }
     if named.is_none() {
         world.say(&format!(
-            "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts with its writes held, and nothing this session changes is kept",
+            "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts with its writes held, and nothing this session changes is kept{}",
             header.txn,
+            mark_unkept(start.home, header.txn),
         ));
         return Verdict::Continue {
             admission,
@@ -891,8 +939,16 @@ fn hand_to_rescue(
             stands_in: false,
         };
     }
+    // This build writes as always. When it is the transaction's new bundle, a
+    // rollback later puts the old one back over what it wrote, and the mark
+    // lets the restored build say so (0.4.8 E5).
+    let marked = if is_the_new_bundle(seen) {
+        mark_unkept(start.home, header.txn)
+    } else {
+        String::new()
+    };
     world.say(&format!(
-        "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts without it",
+        "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts without it{marked}",
         header.txn,
     ));
     Verdict::Continue {
@@ -904,6 +960,35 @@ fn hand_to_rescue(
         held: None,
         stands_in: false,
     }
+}
+
+/// **The mark that what this start changes is not kept** (0.4.8 E5): this
+/// build's version, written durably to the transaction's mark
+/// (`Home::unkept`), which the lock holder that later retires a rollback
+/// records in the journal, so that the restored build's first start says that
+/// the changes made in this version were not kept. The words that end this
+/// start's one line: where the mark is, or why it could not be written.
+fn mark_unkept(home: &Home, txn: TxnId) -> String {
+    let mark = home.unkept(txn);
+    match install_txn::durable_write(&mark, crate::version::VERSION.as_bytes()) {
+        Ok(()) => format!("; {} says so", mark.display()),
+        Err(failure) => format!("; {failure}, so a rollback will not say so"),
+    }
+}
+
+/// **Whether this build is the new bundle of the transaction `seen`**
+/// (0.4.8 E5): a journal this build reads whole whose bundle layout names
+/// this build's version as the one it installs. Elsewhere — the old bundle,
+/// a member set, a journal not read whole — it is not known to be.
+fn is_the_new_bundle(seen: &Sight) -> bool {
+    let Sight::Known(journal) = seen else {
+        return false;
+    };
+    let crate::update_txn::Layout::Bundle { new, .. } = &journal.body.layout else {
+        return false;
+    };
+    let this = crate::update::Version::parse(crate::version::VERSION);
+    this.is_some() && crate::update::Version::parse(&new.version) == this
 }
 
 /// This process's own world.
@@ -1145,6 +1230,7 @@ mod tests {
                     }),
                     adapter: Adapter::Ours,
                     marker: None,
+                    unkept: None,
                 },
             };
             assert_eq!(
@@ -1354,7 +1440,7 @@ mod tests {
         /// RED (U-12, coordinator ruling 2026-09-27) — **a start that must hand
         /// itself to a rescue build that is not there continues, with one line
         /// naming the missing program and the transaction, and touches
-        /// nothing.**
+        /// nothing but the transaction's mark (0.4.8 E5).**
         ///
         /// Exiting would leave a Folio that never opens again for as long as
         /// the journal says `destructive`. The journal and the transaction's
@@ -1385,7 +1471,17 @@ mod tests {
                 "the line names the missing rescue build and the transaction: {line}"
             );
             assert_eq!(std::fs::read(scene.home.journal()).unwrap(), journal);
-            assert_eq!(scene.listing(), before, "nothing is written or removed");
+            // Nothing but the transaction's mark naming this build (0.4.8 E5).
+            let mut listed = scene.listing();
+            let mark = scene
+                .home
+                .unkept(txn())
+                .strip_prefix(&scene.install)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            listed.retain(|path| *path != mark);
+            assert_eq!(listed, before, "nothing else is written or removed");
             assert!(world.entrances.is_empty());
         }
 
@@ -1767,6 +1863,7 @@ mod tests {
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
                     marker: None,
+                    unkept: None,
                     phase,
                     layout: Layout::Members(Inventories {
                         old_shipped: vec!["folio.exe".to_owned()],
@@ -1880,6 +1977,7 @@ mod tests {
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
                     marker: None,
+                    unkept: None,
                     phase: Phase::TrialStarting {
                         nonce: nonce(),
                         began_ms: 42,
@@ -2061,6 +2159,7 @@ mod tests {
                 body: Body {
                     adapter: crate::update_txn::Adapter::Ours,
                     marker: None,
+                    unkept: None,
                     phase: Phase::Stuck {
                         trial: None,
                         trial_started: false,
@@ -2447,6 +2546,15 @@ mod tests {
 
         /// The journal of this scene's transaction in `phase`, written whole.
         fn write_phase(scene: &Scene, phase: crate::update_txn::Phase) -> Vec<u8> {
+            write_noted(scene, phase, None)
+        }
+
+        /// [`write_phase`], its body noting `unkept` (0.4.8 E5).
+        fn write_noted(
+            scene: &Scene,
+            phase: crate::update_txn::Phase,
+            unkept: Option<&str>,
+        ) -> Vec<u8> {
             use crate::update_txn::{Adapter, Body, Inventories, Layout};
             let bytes = Journal {
                 txn: txn(),
@@ -2460,6 +2568,7 @@ mod tests {
                     }),
                     adapter: Adapter::Ours,
                     marker: None,
+                    unkept: unkept.map(str::to_owned),
                 },
             }
             .encode();
@@ -2594,7 +2703,8 @@ mod tests {
         /// rescue build cannot be started continues with its writes held,
         /// over every `destructive` phase, with the card that says the update
         /// is not finished and this session's changes are not kept**; nothing
-        /// is recorded or removed. Over a journal this build cannot read whole
+        /// is recorded or removed, and the one file written is the
+        /// transaction's mark naming this build (0.4.8 E5). Over a journal this build cannot read whole
         /// the card is the newer Folio's, held the same way; over one of
         /// which nothing reads there is no transaction to hold for, and the
         /// start continues with its card. U-35's `TrialStarting` keeps its
@@ -2650,9 +2760,21 @@ mod tests {
                     "{kind:?} is a destructive phase this test does not start over"
                 );
             }
+            // The one thing written: the transaction's mark, naming this
+            // build (0.4.8 E5).
+            let mark = scene.home.unkept(txn());
+            let marked = mark
+                .strip_prefix(&scene.install)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
             for phase in destructive {
                 let bytes = write_phase(&scene, phase.clone());
-                let before = scene.listing();
+                let mut before = scene.listing();
+                if !before.contains(&marked) {
+                    before.push(marked.clone());
+                    before.sort();
+                }
                 let mut world = Recorded::default();
                 let (failed, held, trial) = continued_with(scene.run(&["--tab"], None, &mut world));
                 assert_eq!(held, Some(txn()), "{phase:?}");
@@ -2669,7 +2791,16 @@ mod tests {
                 assert_eq!(world.spawned.len(), 1, "{phase:?}: the rescue was asked");
                 assert_eq!(world.said.len(), 1, "{phase:?}: {:?}", world.said);
                 assert_eq!(std::fs::read(scene.home.journal()).unwrap(), bytes);
-                assert_eq!(scene.listing(), before, "{phase:?}: nothing is written");
+                assert_eq!(
+                    scene.listing(),
+                    before,
+                    "{phase:?}: nothing is written but the mark"
+                );
+                assert_eq!(
+                    std::fs::read(&mark).unwrap(),
+                    crate::version::VERSION.as_bytes(),
+                    "{phase:?}"
+                );
             }
 
             let known = write_phase(&scene, Phase::Moving);
@@ -2999,6 +3130,251 @@ mod tests {
             let mut world = Recorded::default();
             let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
             assert_eq!(failed, None);
+        }
+
+        /// RED (0.4.8 E5, census #16) — **a Folio that ran over an unfinished
+        /// update whose rescue could not be started, and the rollback that
+        /// later undid the update: the restored build's first start says *The
+        /// update was undone.* / *Changes made in Folio {version} were not
+        /// kept.*, once** — whether a lock holder sent it (over the rollback's
+        /// own card, under a held journal's) or it is a plain start after a
+        /// rollback made at logon; the next start says nothing.
+        ///
+        /// The road, each step the product's own: the held start
+        /// (`hand_to_rescue`) marks the transaction with its version; the
+        /// rollback's lock holder reads the mark
+        /// (`update_apply::unkept_version`, the holders' wiring pinned in the
+        /// appliers' own tests) and notes it in the retired journal; the start
+        /// that retires the journal raises the card ([`undone`]) and removes
+        /// the journal it read it from.
+        ///
+        /// MUTATIONS: `undone` answers `None` (the rollback's own card, or
+        /// none: the silent overwrite); `mark_unkept` writes nothing (the
+        /// holder finds no mark); the Retire arm keeps the journal when it
+        /// raises the card (the card at every start).
+        #[test]
+        fn a_rollback_over_a_session_it_did_not_keep_says_so_once_on_the_restored_build() {
+            use crate::update_card;
+            use crate::update_job::{Job, State};
+            use crate::update_txn::{Outcome, Phase};
+            let Some(scene) = Scene::new("undone") else {
+                return;
+            };
+            let version = crate::version::VERSION;
+            let undone = Some(Failure::Undone {
+                version: version.to_owned(),
+            });
+            // The new build runs over the unfinished update, its rescue
+            // refused: its writes held, the transaction marked.
+            let rescue_aside = scene.rescue.with_extension("aside");
+            std::fs::rename(&scene.rescue, &rescue_aside).unwrap();
+            write_phase(&scene, Phase::Moving);
+            let mut world = Recorded::default();
+            let (_, held, _) = continued_with(scene.run(&["--tab"], None, &mut world));
+            assert_eq!(held, Some(txn()), "{:?}", world.said);
+            assert!(
+                world.said[0].contains(&scene.home.unkept(txn()).display().to_string()),
+                "the line names the mark: {:?}",
+                world.said
+            );
+            // The rollback's holder reads it and notes it as it retires.
+            std::fs::rename(&rescue_aside, &scene.rescue).unwrap();
+            let noted = crate::update_apply::unkept_version(&scene.home, txn(), &mut |line| {
+                panic!("the mark reads: {line}")
+            });
+            assert_eq!(noted.as_deref(), Some(version), "the mark names this build");
+            let retired = Phase::Retired {
+                outcome: Outcome::RolledBack,
+                untried: true,
+            };
+
+            // Sent by the holder: over the rollback's own card.
+            write_noted(&scene, retired.clone(), noted.as_deref());
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run_sent(&scene.home.journal(), &mut world));
+            assert_eq!(failed, undone, "{:?}", world.said);
+            assert!(
+                world
+                    .said
+                    .iter()
+                    .any(|line| line.contains(version) && line.contains("Retired")),
+                "the line names the version and the journal: {:?}",
+                world.said
+            );
+            assert!(!scene.home.journal().exists(), "retired: read once");
+            assert!(!scene.home.transaction(txn()).exists(), "the mark with it");
+            let job: Job<u32> = Job::with_offers(true).after_rollback(failed);
+            assert!(matches!(job.state(), State::Failed(None, _)));
+            let card = update_card::paint(job.state()).expect("a card");
+            assert_eq!(card.heading.as_deref(), Some("The update was undone."));
+            assert_eq!(
+                card.detail.as_deref(),
+                Some(format!("Changes made in Folio {version} were not kept.").as_str())
+            );
+            // Once: the next start finds nothing to say.
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(failed, None, "{:?}", world.said);
+
+            // A plain start after a rollback made at logon.
+            write_noted(&scene, retired.clone(), noted.as_deref());
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut Recorded::default()));
+            assert_eq!(failed, undone);
+
+            // Under a held journal's card, the hold is still named.
+            write_noted(&scene, retired.clone(), noted.as_deref());
+            let (failed, ..) = continued_with(run_reporting(
+                &scene,
+                None,
+                Some("拒绝访问。 (os error 5)"),
+                &mut Recorded::default(),
+            ));
+            assert_eq!(
+                failed,
+                Some(Failure::JournalHeld {
+                    error: "拒绝访问。 (os error 5)".to_owned(),
+                    then: Box::new(Failure::Undone {
+                        version: version.to_owned()
+                    }),
+                })
+            );
+        }
+
+        /// RED (0.4.8 E5; the regression row) — **a rollback whose journal
+        /// notes nothing keeps its own card**: the update interrupted before
+        /// the new version started, or the new version did not start, as
+        /// before — even with a mark left in the folder, which the start does
+        /// not read for a rollback (the lock holder that retired it did, and
+        /// noted nothing); and a plain start says nothing.
+        ///
+        /// MUTATION: `undone` reads the folder's mark for a rollback the
+        /// journal notes nothing for.
+        #[test]
+        fn a_rollback_the_journal_notes_nothing_for_keeps_its_own_card() {
+            use crate::update_txn::{Outcome, Phase};
+            let Some(scene) = Scene::new("undone-not") else {
+                return;
+            };
+            for (untried, card) in [(true, Failure::Interrupted), (false, Failure::RolledBack)] {
+                let retired = Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried,
+                };
+                for marked in [false, true] {
+                    write_phase(&scene, retired.clone());
+                    if marked {
+                        std::fs::create_dir_all(scene.home.transaction(txn())).unwrap();
+                        std::fs::write(
+                            scene.home.unkept(txn()),
+                            crate::version::VERSION.as_bytes(),
+                        )
+                        .unwrap();
+                    }
+                    let (failed, ..) = continued_with(
+                        scene.run_sent(&scene.home.journal(), &mut Recorded::default()),
+                    );
+                    assert_eq!(
+                        failed,
+                        Some(card.clone()),
+                        "untried {untried}, marked {marked}"
+                    );
+                    write_phase(&scene, retired.clone());
+                    let (failed, ..) =
+                        continued_with(scene.run(&[], None, &mut Recorded::default()));
+                    assert_eq!(failed, None, "untried {untried}, marked {marked}");
+                }
+            }
+        }
+
+        /// RED (0.4.8 E5, the macOS road) — **a macOS start that can start
+        /// neither the rescue clone nor its own program writes as always, and
+        /// marks the transaction only when it is the transaction's new
+        /// bundle**: a later rollback puts the old bundle back over what it
+        /// wrote, and the restored build says so. The old bundle, or a journal
+        /// that names no bundle, marks nothing.
+        ///
+        /// MUTATION: `is_the_new_bundle` answers `false` (the macOS overwrite
+        /// unsaid), or `true` (the old build's own writes said lost).
+        #[test]
+        fn a_macos_start_that_can_start_nothing_marks_the_transaction_only_as_its_new_bundle() {
+            use crate::update_txn::{
+                Adapter, Body, BundleIdentity, Cdhash, HeaderOutcome, Layout, Phase,
+            };
+            let Some(scene) = Scene::new("macos-undone") else {
+                return;
+            };
+            let bundle = scene.root.join("Applications").join("Folio.app");
+            let exe = bundle.join(crate::update_txn::MACOS_EXECUTABLE_INSIDE);
+            let home = Home::of(bt_platform::HostPlatform::MacOs, &exe).unwrap();
+            let rescue = home.rescue_bundle(txn()).unwrap();
+            std::fs::create_dir_all(home.transaction(txn())).unwrap();
+            let identity = |version: &str| BundleIdentity {
+                cdhash: Cdhash::new([0x3c; 20]),
+                version: version.to_owned(),
+            };
+            let this = crate::version::VERSION;
+            for (what, layout, marks) in [
+                (
+                    "the new bundle",
+                    Layout::Bundle {
+                        old: identity("0.4.6"),
+                        new: identity(this),
+                    },
+                    true,
+                ),
+                (
+                    "the old bundle",
+                    Layout::Bundle {
+                        old: identity(this),
+                        new: identity("99.0.0"),
+                    },
+                    false,
+                ),
+                (
+                    "no bundle named",
+                    Layout::Members(crate::update_txn::Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                    false,
+                ),
+            ] {
+                let _ = std::fs::remove_file(home.unkept(txn()));
+                let journal = Journal {
+                    txn: txn(),
+                    rescue: rescue.to_string_lossy().into_owned(),
+                    body: Body {
+                        phase: Phase::Moving,
+                        layout,
+                        adapter: Adapter::Ours,
+                        marker: None,
+                        unkept: None,
+                    },
+                };
+                assert_eq!(journal.header().outcome, HeaderOutcome::None);
+                std::fs::write(home.journal(), journal.encode()).unwrap();
+                let argv = [OsString::from("--tab")];
+                let start = Start {
+                    own_exe: &exe,
+                    home: &home,
+                    argv: &argv,
+                    trial: None,
+                    failed: None,
+                    journal_held: None,
+                };
+                let mut world = Recorded::default();
+                let (_, held, trial) = continued_with(run(&start, &mut world));
+                assert_eq!((held, trial), (None, None), "{what}: it writes as always");
+                assert_eq!(world.spawned.len(), 2, "{what}: both were asked");
+                assert_eq!(
+                    std::fs::read(home.unkept(txn())).ok().as_deref(),
+                    marks.then_some(this.as_bytes()),
+                    "{what}: {:?}",
+                    world.said
+                );
+                assert_eq!(world.said.len(), 1, "{what}: {:?}", world.said);
+            }
         }
     }
 }
