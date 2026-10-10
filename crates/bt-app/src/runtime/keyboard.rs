@@ -18,8 +18,6 @@ use bt_render::{FrameSource, FrameTrigger, ImeCursorArea, Preedit};
 use bt_viewport::ViewportFrame;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-#[cfg(target_os = "linux")]
-use winit::event::ElementState;
 use winit::event::{Ime, KeyEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey, NativeKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -1056,7 +1054,7 @@ impl Runtime<'_> {
             // Each seat releases only keys whose press it received, including
             // when focus moved before the release. Synthetic reports stay out.
             #[cfg(target_os = "linux")]
-            if event.state == ElementState::Released && !is_synthetic {
+            if !event.state.is_pressed() && !is_synthetic {
                 let modifiers = self.window.modifiers;
                 for web in self.window.web.values_mut() {
                     let key = input::web_key_event(
