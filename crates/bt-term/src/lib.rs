@@ -82,11 +82,42 @@ pub use session::{
 /// `adapter.rs` and this goes red naming the line.
 #[cfg(test)]
 mod adapter_boundary_tests {
-    use bt_source::{Index, ModuleSpec, Pattern, Scope, Search, View, needle};
+    use std::path::PathBuf;
+
+    use bt_source::{
+        DiskScope, Index, ModuleSpec, Pattern, Scope, Search, TargetId, TargetKind, TargetRoot,
+        Universe, Vendor, View, needle, report,
+    };
+
+    const ALTERNATE_SOURCE_ROOT: &str = "BT_ADAPTER_BOUNDARY_SOURCE_ROOT";
+
+    fn alternate_index() -> Option<Index> {
+        let root = std::env::var_os(ALTERNATE_SOURCE_ROOT)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)?;
+        let universe = Universe::declare(
+            format!("bt-term's adapter seam at {}", root.display()),
+            vec![TargetRoot {
+                id: TargetId {
+                    package: "bt-term".to_owned(),
+                    kind: TargetKind::Library,
+                    name: "bt-term".to_owned(),
+                },
+                file: root.join("lib.rs"),
+            }],
+            vec![DiskScope::under(root)],
+            Vendor::Excluded,
+        )
+        .unwrap_or_else(|rejection| panic!("the alternate bt-term source root: {rejection}"));
+        Some(Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections))))
+    }
 
     #[test]
     fn the_adapter_seam_imports_no_policy_crate() {
-        let index = Index::of_package("bt-term");
+        let alternate = alternate_index();
+        let index = alternate
+            .as_ref()
+            .unwrap_or_else(|| Index::of_package("bt-term"));
         let mut found = Vec::new();
         for policy in ["bt_doc", "bt_detect", "bt_viewport"] {
             let named = index

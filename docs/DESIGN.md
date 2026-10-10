@@ -14727,6 +14727,14 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 
 **Pinned by** `pointer_app_tests::a_new_latch_of_the_same_legacy_field_overwrites_the_old_one` and `legacy_overlaps_release_in_the_old_ladders_order`.
 
+### 2026-10-10 — The adapter-boundary canary reads a planted source copy without rebuilding bt-term (T-CI-CANARY-COST)
+
+**What is built.** `bt_term::adapter_boundary_tests` keeps its name and its default reading of the real `bt-term` package. When the test-only `BT_ADAPTER_BOUNDARY_SOURCE_ROOT` names a copied `bt-term/src`, it declares the same library-rooted `bt-source` universe over that copy. The CI canary copies the sources under the runner's temporary directory, plants the forbidden `bt_doc` import there and runs the already-built test binary; no tracked source is changed or restored.
+
+**The rule.** A canary proves the adapter guard can refuse without invalidating the crate whose test binary holds the guard. The copied tree is still followed through its `mod` declarations and read with the same raw identifier query, so the refusal remains `the adapter seam names a policy crate` and an unset or empty switch preserves the real-tree test.
+
+**Pinned by** `bt_term::adapter_boundary_tests::the_adapter_seam_imports_no_policy_crate`: red with the forbidden import in the alternate root, green on the real tree. The CI step `the adapter boundary gate can actually fail` owns the planted-copy mutation and refusal-message assertion.
+
 ### 2026-10-10 — Shell exits and the run's last window state their causes
 
 **What is built.** When `Runtime::reap_exited_tabs` first observes a pane's remembered child status, it writes one resident diagnostics line with the seat, numeric exit code (or `none` for a signal), elapsed milliseconds from that PTY's birth, only the executable basename, the process-wide tab id, and whether the reaper retires the pane, keeps the tab, or retires the tab. The leaf remembers that the line was said, so a dirty preview that keeps a dead shell's tab open cannot repeat it.
