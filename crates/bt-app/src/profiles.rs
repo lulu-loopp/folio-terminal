@@ -18719,16 +18719,21 @@ mod tests {
     /// answered "is row 3 startable" with whatever row happened to be third when
     /// the probe ran. That is the disagreement the spawn used to panic on.
     ///
-    /// Red gate: key the probe by position again and the loop below fails on the
-    /// first row whose neighbour answers differently, which on a bare Windows box
-    /// is every row but one.
+    /// Red gate: key the probe by position again and the available `sh` answer
+    /// stays at its old index after the fixture rotates the rows.
     #[test]
     fn a_probe_answers_about_a_row_and_not_about_a_position() {
-        let machine = bare_machine();
-        let mut rows = table().profiles().to_vec();
-        assert!(rows.len() > 2, "the fixture needs a table worth moving");
+        let fixture = ProfileTable {
+            profiles: shipped_for(SeedPlatform::MacOs, &FakeMachine::default()),
+        };
+        assert_eq!(fixture.profiles.len(), 3);
+        let machine = FakeMachine::default().with_file("/bin/sh");
+        let mut rows = fixture.profiles.clone();
 
-        let before = ProfilePrograms::probe_rows(&rows, &machine);
+        let before = ProfilePrograms::probe_rows(&fixture.profiles, &machine);
+        assert!(before.is_available(BOURNE_SHELL_ID));
+        assert!(!before.is_available("zsh"));
+        assert!(!before.is_available("bash"));
         assert!(
             rows.iter().any(|row| before.is_available(&row.id))
                 && rows.iter().any(|row| !before.is_available(&row.id)),
@@ -26221,46 +26226,67 @@ mod tests {
     #[test]
     fn restoring_a_builtin_leaves_its_place_and_its_hiding_alone() {
         let registry = Registry::shipped();
-        registry.rename(0, "Seven");
-        registry.edit(0, |profile| {
+        let seed = shipped();
+        let other = host_id("cmd", "bash");
+        let other_index = registry
+            .table()
+            .position_of_id(other)
+            .expect("the distinct built-in row is in this seed");
+        let floor = fallback_profile_in(&registry.table());
+        assert_ne!(
+            other_index, floor,
+            "the hidden row is not the fallback floor"
+        );
+        let platform = SeedPlatform::of_this_build();
+        // Other Unix always ships bash and sh, and may prepend a distinct `$SHELL`.
+        // In its minimal two-row seed, bash is `other` and sh is both the floor
+        // and the row this test moves; with an extra shell, and on Windows or Mac,
+        // the first row stays the one moved. The hidden row is distinct from both.
+        let first_index = seed
+            .iter()
+            .position(|row| row.id != other)
+            .expect("the seed has a built-in row distinct from the other row");
+        assert_ne!(first_index, other_index);
+        match platform {
+            SeedPlatform::Windows | SeedPlatform::MacOs => assert_eq!(first_index, 0),
+            SeedPlatform::OtherUnix if seed.len() == 2 => assert_eq!(first_index, floor),
+            SeedPlatform::OtherUnix => assert_ne!(first_index, floor),
+        }
+        let first = seed[first_index].id.clone();
+        let first_seed = seed[first_index].clone();
+
+        registry.rename(first_index, "Seven");
+        registry.edit(first_index, |profile| {
             profile.args = vec!["-NoProfile".to_owned()];
             profile.env = vec![("A".to_owned(), "1".to_owned())];
             profile.start_at = StartAt::Home;
             true
         });
-        // The first row and one more built-in of this process's own seed:
-        // PowerShell 7 and Command Prompt on Windows, the first shell and bash
-        // elsewhere. The floor is the default here, as it is on a fresh machine.
-        let seed = shipped();
-        let first = seed[0].id.clone();
-        let other = host_id("cmd", "bash");
-        let floor = fallback_profile();
-        let cmd = registry.table().position_of_id(other).unwrap();
-        registry.set_hidden(cmd, true, &[floor]);
-        registry.rename(cmd, "Console");
-        registry.move_profile(0, true);
+        registry.set_hidden(other_index, true, &[floor]);
+        registry.rename(other_index, "Console");
+        let move_down = first_index + 1 < seed.len();
+        let moved_to = if move_down {
+            first_index + 1
+        } else {
+            first_index - 1
+        };
+        assert!(registry.move_profile(first_index, move_down));
         let moved = registry.table().position_of_id(&first).unwrap();
-        assert_eq!(moved, 1);
-        // Found again by its id: off Windows it is the row the move swapped with.
-        let cmd = registry.table().position_of_id(other).unwrap();
+        assert_eq!(moved, moved_to);
+        let other_index = registry.table().position_of_id(other).unwrap();
 
         assert!(registry.restore_defaults(moved));
         let row = registry.table().get(moved).unwrap().clone();
-        assert_eq!(
-            row,
-            Profile {
-                ..shipped().remove(0)
-            }
-        );
+        assert_eq!(row, Profile { ..first_seed });
         assert_eq!(
             registry.table().position_of_id(&first),
-            Some(1),
+            Some(moved_to),
             "the row stays where the reader put it"
         );
 
-        assert!(registry.restore_defaults(cmd));
+        assert!(registry.restore_defaults(other_index));
         assert_eq!(
-            registry.table().get(cmd).unwrap().display_title,
+            registry.table().get(other_index).unwrap().display_title,
             seed.iter()
                 .find(|row| row.id == other)
                 .expect("a shipped row")
@@ -26272,7 +26298,7 @@ mod tests {
             "the name a restore brings back on Windows"
         );
         assert!(
-            registry.table().get(cmd).unwrap().hidden,
+            registry.table().get(other_index).unwrap().hidden,
             "a hidden row's editor is reached by opening the row that is dimmed; \
              putting it back in the picker is a question nobody asked"
         );
@@ -27591,27 +27617,50 @@ mod tests {
     /// unchanged — Enter runs the newly inserted profile instead of the one the reader saw lit.
     #[test]
     fn a_highlight_follows_its_profile_and_enter_runs_the_profile_it_showed() {
-        let builtins: Vec<usize> = (0..count())
-            .filter(|index| {
-                table()
-                    .get(*index)
-                    .is_some_and(|row| row.origin == Origin::Builtin && !row.hidden)
-            })
-            .take(3)
-            .collect();
-        let [a, b, c] = builtins[..] else {
-            panic!("this build ships at least three visible built-in rows");
+        let fixture = ProfileTable {
+            profiles: shipped_for(SeedPlatform::MacOs, &FakeMachine::default()),
         };
-        let before = ProfilePrograms::with_only(&[a, c]);
-        let after = ProfilePrograms::with_only(&[a, b, c]);
-        let shown_layout = pane_menu_on(true, &before);
-        let shown = shown_layout.submenu_items().to_vec();
+        assert_eq!(fixture.profiles.len(), 3);
+        let [a, b, c] = [
+            fixture.position_of_id("zsh").unwrap(),
+            fixture.position_of_id("bash").unwrap(),
+            fixture.position_of_id(BOURNE_SHELL_ID).unwrap(),
+        ];
+        let probe = |paths: &[&str]| {
+            let machine = paths.iter().fold(FakeMachine::default(), |machine, path| {
+                machine.with_file(path)
+            });
+            ProfilePrograms::probe_rows(&fixture.profiles, &machine)
+        };
+        let before = probe(&["/bin/zsh", "/bin/sh"]);
+        let after = probe(&["/bin/zsh", "/bin/bash", "/bin/sh"]);
+        let parent = pane_menu_on(false, &ProfilePrograms::unknown());
+        let split_with = |programs: &ProfilePrograms| {
+            let offered = fixture.offered_to_start(programs);
+            pane_submenu_layout(
+                parent.frame,
+                parent.item(PaneMenuRow::SplitWith),
+                PaneMenuRow::SplitWith,
+                &[],
+                &offered,
+                (960.0, 600.0),
+                parent.scale,
+                (FLOAT_WINDOW_BORDER_LOGICAL_PX * parent.scale).max(1.0),
+                MENU_PADDING_LOGICAL_PX * parent.scale,
+                (ITEM_HEIGHT_LOGICAL_PX * parent.scale).round(),
+                &mut fake_measure,
+            )
+        };
+        let shown_layout = split_with(&before);
+        let shown = shown_layout.rows.clone();
+        assert_eq!(shown, vec![a, c]);
         let lit = shown
             .iter()
             .position(|row| *row == c)
             .expect("the child lists c");
-        let now_layout = pane_menu_on(true, &after);
-        let now = now_layout.submenu_items();
+        let now_layout = split_with(&after);
+        let now = now_layout.rows.as_slice();
+        assert_eq!(now, &[a, b, c]);
         assert_ne!(
             now.iter().position(|row| *row == c),
             Some(lit),
@@ -27620,7 +27669,7 @@ mod tests {
 
         let keyboard = relit(Some(lit), LitBy::Keyboard, &shown, now, None);
         assert_eq!(
-            keyboard.and_then(|at| now_layout.submenu_row(at)),
+            keyboard.and_then(|at| now_layout.rows.get(at).copied()),
             Some(c),
             "Enter runs the profile the reader saw lit"
         );
@@ -27633,19 +27682,14 @@ mod tests {
             "the lit row is the row under the pointer"
         );
         assert_eq!(
-            pointer.and_then(|at| now_layout.submenu_row(at)),
-            now_layout.submenu_row(lit),
+            pointer.and_then(|at| now_layout.rows.get(at).copied()),
+            now_layout.rows.get(lit).copied(),
             "and a press there runs the row it lands on, which is the lit one"
         );
 
         // A profile the walk took away leaves no keyboard highlight behind.
-        let gone = relit(
-            Some(lit),
-            LitBy::Keyboard,
-            &shown,
-            pane_menu_on(true, &ProfilePrograms::with_only(&[a])).submenu_items(),
-            None,
-        );
+        let gone_rows = split_with(&probe(&["/bin/zsh"])).rows;
+        let gone = relit(Some(lit), LitBy::Keyboard, &shown, &gone_rows, None);
         assert_eq!(gone, None);
     }
 }
