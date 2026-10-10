@@ -58,6 +58,9 @@
 //! no arm: each call is refused with an error that names this door and the
 //! operation (`io::ErrorKind::Unsupported`), never answered as if it had
 //! happened.
+//! Linux's transaction writes take a [`WorkerCtx`]; preview recovery copies
+//! take one batch's [`WaitToken`]. Context-free durable mutations refuse in
+//! Linux product builds.
 //!
 //! **The OS calls come through a small trait, `Surface`,** so the one order
 //! that makes a write durable — write, flush, rename, directory flush — is
@@ -65,9 +68,10 @@
 //!
 //! **Worker only.** Every call here blocks on the disk (a flush waits for the
 //! device), and [`hold_within`] sleeps until its deadline. None of it may run
-//! on a window thread. Today that is this sentence; the thread door's
-//! `WorkerCtx` (A1b) and its prohibitions (A1e) are what will make it a type.
-//! **The one exception is the start** (U-12, `bt-app::update_startup`): in
+//! on a window thread except the one admitted Linux preview-recovery batch
+//! ([`durable_recovery_copies`]). The thread door's `WorkerCtx` (A1b) and its
+//! prohibitions (A1e) are what make worker effects a type. **The other
+//! exception is the start** (U-12, `bt-app::update_startup`): in
 //! `fn main`, before the event loop exists, the window thread takes the
 //! admission and asks for the transaction lock with [`try_hold`] (never
 //! [`hold_within`]) and retires a finished transaction with
@@ -79,7 +83,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Each arm's real surface, for the doors built on this one's durable write.
+use crate::admission::WorkerCtx;
+#[cfg(target_os = "linux")]
+use crate::admission::{WaitToken, doors};
+
+/// The legacy surface name: real on Windows and macOS, refusing without
+/// context on Linux, and explicitly unsupported on other platforms.
 pub(crate) use arm::Os;
 
 /// **The step of an effect that failed.** Every failure of this door names
@@ -248,8 +257,39 @@ pub(crate) trait Surface {
 /// # Errors
 /// A [`Failure`] naming the stage that failed; on a platform with no arm, one
 /// at [`Stage::CreateTemp`] whose error is `Unsupported` and names this door.
+/// A Linux product caller without a worker gets the same refusal; use
+/// [`durable_write_on_worker`] there.
 pub fn durable_write(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    durable_write_with(&mut arm::Os, target, bytes, Replace::Existing)
+    #[cfg(target_os = "linux")]
+    {
+        linux_without_worker(target, Stage::CreateTemp, "durable write", |surface| {
+            durable_write_with(surface, target, bytes, Replace::Existing)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        durable_write_with(&mut arm::Os, target, bytes, Replace::Existing)
+    }
+}
+
+/// The same atomic write with the Linux filesystem effects on `worker`. Other
+/// native arms keep their existing synchronous implementation.
+pub fn durable_write_on_worker(
+    worker: &WorkerCtx,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<(), Failure> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut surface =
+            arm::LinuxOs::new(|file: &mut std::fs::File| sync_file_on_worker(worker, file));
+        durable_write_with(&mut surface, target, bytes, Replace::Existing)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = worker;
+        durable_write(target, bytes)
+    }
 }
 
 /// **Write `bytes` to `target` durably, and only if nothing is there yet** —
@@ -265,8 +305,19 @@ pub fn durable_write(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
 /// # Errors
 /// A [`Failure`] naming the stage that failed; on a platform with no arm, one
 /// at [`Stage::CreateTemp`] whose error is `Unsupported` and names this door.
+/// Linux product callers get the same refusal. Recovery copies use the
+/// admitted [`durable_recovery_copies`] batch.
 pub fn durable_create(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    durable_write_with(&mut arm::Os, target, bytes, Replace::Never)
+    #[cfg(target_os = "linux")]
+    {
+        linux_without_worker(target, Stage::CreateTemp, "durable create", |surface| {
+            durable_write_with(surface, target, bytes, Replace::Never)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        durable_write_with(&mut arm::Os, target, bytes, Replace::Never)
+    }
 }
 
 /// **Move `from` to `to`, durably, and never over an existing file.**
@@ -284,9 +335,19 @@ pub fn durable_create(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
 ///
 /// # Errors
 /// A [`Failure`] naming the stage that failed; on a platform with no arm, one
-/// at [`Stage::Rename`] whose error is `Unsupported` and names this door.
+/// at [`Stage::Rename`] whose error is `Unsupported` and names this door. A
+/// Linux product caller without a worker is refused at that stage.
 pub fn durable_move(from: &Path, to: &Path) -> Result<(), Failure> {
-    durable_move_with(&mut arm::Os, from, to)
+    #[cfg(target_os = "linux")]
+    {
+        linux_without_worker(to, Stage::Rename, "durable move", |surface| {
+            durable_move_with(surface, from, to)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        durable_move_with(&mut arm::Os, from, to)
+    }
 }
 
 /// **Remove `path` — a file or a directory tree — and flush the directory it
@@ -304,9 +365,19 @@ pub fn durable_move(from: &Path, to: &Path) -> Result<(), Failure> {
 /// # Errors
 /// A [`Failure`] at [`Stage::Remove`], [`Stage::OpenDirectory`] or
 /// [`Stage::FlushDirectory`]; on a platform with no arm, one at
-/// [`Stage::Remove`] whose error is `Unsupported` and names this door.
+/// [`Stage::Remove`] whose error is `Unsupported` and names this door. A Linux
+/// product caller without a worker is refused at that stage.
 pub fn durable_remove(path: &Path) -> Result<(), Failure> {
-    durable_remove_with(&mut arm::Os, path)
+    #[cfg(target_os = "linux")]
+    {
+        linux_without_worker(path, Stage::Remove, "durable remove", |surface| {
+            durable_remove_with(surface, path)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        durable_remove_with(&mut arm::Os, path)
+    }
 }
 
 /// **Create the directory `path`, which must not exist yet, and flush the
@@ -323,8 +394,75 @@ pub fn durable_remove(path: &Path) -> Result<(), Failure> {
 /// A [`Failure`] at [`Stage::CreateDirectory`], [`Stage::OpenDirectory`] or
 /// [`Stage::FlushDirectory`]; on a platform with no arm, one at
 /// [`Stage::CreateDirectory`] whose error is `Unsupported` and names this door.
+/// A Linux product caller without a worker is refused at that stage.
 pub fn durable_create_dir(path: &Path) -> Result<(), Failure> {
-    durable_create_dir_with(&mut arm::Os, path)
+    #[cfg(target_os = "linux")]
+    {
+        linux_without_worker(
+            path,
+            Stage::CreateDirectory,
+            "durable directory create",
+            |surface| durable_create_dir_with(surface, path),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        durable_create_dir_with(&mut arm::Os, path)
+    }
+}
+
+/// One preview recovery copy. The timestamp and source basename stay separate
+/// so numbered collision names keep the existing `instant (n) name` form.
+#[cfg(target_os = "linux")]
+pub struct RecoveryCopyRequest {
+    /// The recovery directory to create or use.
+    pub folder: PathBuf,
+    /// The timestamp for the first filename candidate.
+    pub instant: String,
+    /// The source basename for the first filename candidate.
+    pub name: String,
+    /// The encoded document bytes to preserve.
+    pub bytes: Vec<u8>,
+}
+
+/// Keep the caller's save-then-copy loop inside one admitted batch. `work`
+/// creates one encoded request at a time; the copy callback answers with that
+/// request's path or failure so the caller can continue after a refusal.
+#[cfg(target_os = "linux")]
+pub fn durable_recovery_copies<R>(
+    _token: WaitToken<'_, doors::PreviewRecoveryCopies>,
+    work: impl FnOnce(&mut dyn FnMut(&RecoveryCopyRequest) -> Result<PathBuf, Failure>) -> R,
+) -> R {
+    let mut surface = arm::LinuxOs::new(|file: &mut std::fs::File| file.sync_all());
+    let mut copy =
+        |request: &RecoveryCopyRequest| durable_recovery_copy_with(&mut surface, request);
+    work(&mut copy)
+}
+
+#[cfg(target_os = "linux")]
+fn durable_recovery_copy_with<S: Surface>(
+    surface: &mut S,
+    request: &RecoveryCopyRequest,
+) -> Result<PathBuf, Failure> {
+    match durable_create_dir_with(surface, &request.folder) {
+        Ok(()) => {}
+        Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(failure) => return Err(failure),
+    }
+    for collision in 0_u32.. {
+        let name = if collision == 0 {
+            format!("{} {}", request.instant, request.name)
+        } else {
+            format!("{} ({collision}) {}", request.instant, request.name)
+        };
+        let copy = request.folder.join(name);
+        match durable_write_with(surface, &copy, &request.bytes, Replace::Never) {
+            Ok(()) => return Ok(copy),
+            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(failure) => return Err(failure),
+        }
+    }
+    unreachable!("a folder holds fewer than u32::MAX copies of one recovery name")
 }
 
 /// **Copy what `source` reads into `target`, durably, and only if nothing is
@@ -343,9 +481,65 @@ pub fn durable_create_dir(path: &Path) -> Result<(), Failure> {
 /// # Errors
 /// A [`Failure`] naming the stage that failed — [`Stage::Read`] when `source`
 /// refuses; on a platform with no arm, one at [`Stage::CreateTemp`] whose error
-/// is `Unsupported` and names this door.
+/// is `Unsupported` and names this door. A Linux product caller without a
+/// worker is refused at that stage.
 pub fn durable_copy(source: &mut dyn io::Read, target: &Path) -> Result<u64, Failure> {
-    durable_copy_with(&mut arm::Os, source, target)
+    #[cfg(target_os = "linux")]
+    {
+        linux_without_worker(target, Stage::CreateTemp, "durable copy", |surface| {
+            durable_copy_with(surface, source, target)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        durable_copy_with(&mut arm::Os, source, target)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_without_worker<T>(
+    path: &Path,
+    stage: Stage,
+    operation: &str,
+    run: impl FnOnce(&mut arm::LinuxOs<fn(&mut std::fs::File) -> io::Result<()>>) -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    #[cfg(any(test, feature = "trust-harness"))]
+    {
+        let _ = (path, stage, operation);
+        let mut surface =
+            arm::LinuxOs::new(scoped_test_flush as fn(&mut std::fs::File) -> io::Result<()>);
+        run(&mut surface)
+    }
+    #[cfg(not(any(test, feature = "trust-harness")))]
+    {
+        let _ = run;
+        Err(Failure::at(
+            stage,
+            path,
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("install_txn has no {operation} on this platform"),
+            ),
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sync_file_on_worker(_worker: &WorkerCtx, file: &mut std::fs::File) -> io::Result<()> {
+    file.sync_all()
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "trust-harness")))]
+fn scoped_test_flush(file: &mut std::fs::File) -> io::Result<()> {
+    let mut owned = file.try_clone()?;
+    let flush = crate::spawn_at_priority(
+        "bt-install-txn-test-flush",
+        crate::ThreadPriority::BelowNormal,
+        move |worker| sync_file_on_worker(worker, &mut owned),
+    )?;
+    flush
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 /// **How many bytes the volume `folder` is on still has for this account**
@@ -1046,12 +1240,13 @@ mod arm {
     }
 }
 
-/// **The Linux arm.** The filesystem calls stay on the caller's worker, and
-/// Linux's `renameat2` supplies the no-replace and exchange operations as one
-/// atomic kernel operation.
+/// **The Linux arm.** Flushes use the caller's worker or admitted recovery
+/// batch. Linux's `renameat2` supplies the no-replace and exchange operations
+/// as one atomic kernel operation.
 #[cfg(target_os = "linux")]
 mod arm {
     use super::{Hold, Replace, Surface};
+    use std::convert::Infallible;
     use std::ffi::CString;
     use std::fs::{File, OpenOptions};
     use std::io::{self, Write};
@@ -1091,9 +1286,71 @@ mod arm {
         }
     }
 
+    /// The no-context surface retained for legacy call sites. Linux durable
+    /// operations require a worker or preview-recovery admission.
     pub(crate) struct Os;
 
     impl Surface for Os {
+        type Handle = Infallible;
+
+        fn create_new(&mut self, _path: &Path) -> io::Result<Infallible> {
+            Err(refused("durable write"))
+        }
+
+        fn write_all(&mut self, handle: &mut Infallible, _bytes: &[u8]) -> io::Result<()> {
+            match *handle {}
+        }
+
+        fn flush(&mut self, handle: &mut Infallible) -> io::Result<()> {
+            match *handle {}
+        }
+
+        fn close(&mut self, handle: Infallible) {
+            match handle {}
+        }
+
+        fn open_directory(&mut self, _path: &Path) -> io::Result<Infallible> {
+            Err(refused("directory flush"))
+        }
+
+        fn rename(&mut self, _from: &Path, _to: &Path, _replace: Replace) -> io::Result<()> {
+            Err(refused("durable exchange"))
+        }
+
+        fn remove(&mut self, _path: &Path) {}
+
+        fn remove_entry(&mut self, _path: &Path) -> io::Result<()> {
+            Err(refused("durable remove"))
+        }
+
+        fn create_directory(&mut self, _path: &Path) -> io::Result<()> {
+            Err(refused("durable directory create"))
+        }
+    }
+
+    fn refused(operation: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("install_txn has no {operation} on this platform"),
+        )
+    }
+
+    /// Linux's real filesystem surface takes its flush authority from the
+    /// caller; product call sites cannot construct it without that authority.
+    pub(super) struct LinuxOs<F> {
+        flush: F,
+    }
+
+    impl<F> LinuxOs<F> {
+        pub(super) fn new(flush: F) -> Self {
+            Self { flush }
+        }
+    }
+
+    impl<F> Surface for LinuxOs<F>
+    where
+        F: FnMut(&mut File) -> io::Result<()>,
+    {
         type Handle = File;
 
         fn create_new(&mut self, path: &Path) -> io::Result<File> {
@@ -1105,13 +1362,7 @@ mod arm {
         }
 
         fn flush(&mut self, handle: &mut File) -> io::Result<()> {
-            // SAFETY: the descriptor is live and owned by `handle`; fsync
-            // commits this file or directory through the Linux OS surface.
-            if unsafe { libc::fsync(handle.as_raw_fd()) } == -1 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
+            (self.flush)(handle)
         }
 
         fn close(&mut self, handle: File) {
@@ -1135,12 +1386,12 @@ mod arm {
             let _ = std::fs::remove_file(path);
         }
 
-        fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
-            super::remove_entry(path)
-        }
-
         fn create_directory(&mut self, path: &Path) -> io::Result<()> {
             std::fs::create_dir(path)
+        }
+
+        fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
+            super::remove_entry(path)
         }
     }
 

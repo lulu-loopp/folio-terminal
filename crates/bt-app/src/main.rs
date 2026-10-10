@@ -18560,6 +18560,7 @@ fn raise_dirty_gate_over(
 /// gate's own reasoning: a dirty buffer on a tab nobody is looking at is still a
 /// dirty buffer. Each pool keeps its own through
 /// [`preview::PreviewPool::keep_dirty`].
+#[cfg(any(test, not(target_os = "linux")))]
 fn keep_unsaved_edits_over(
     tabs: &mut [TabState],
     recovery: &Path,
@@ -67419,6 +67420,16 @@ impl FolioApp {
     /// theirs.
     fn stop_every_window(&mut self) -> Result<()> {
         let recovery = persist::storage_dir().join(preview::RECOVERED_FOLDER);
+        #[cfg(target_os = "linux")]
+        bt_platform::admission::admitted::<bt_platform::admission::doors::PreviewRecoveryCopies, _>(|token| {
+                bt_platform::durable_recovery_copies(token, |copy| {
+                self.for_each_window(|runtime| {
+                    runtime.keep_unsaved_edits_on_stop(&recovery, copy);
+                    Ok(())
+                })
+            })
+        }).map_err(|refusal| anyhow::anyhow!(refusal.to_string()))??;
+        #[cfg(not(target_os = "linux"))]
         self.for_each_window(|runtime| {
             runtime.keep_unsaved_edits(&recovery);
             Ok(())
@@ -77334,7 +77345,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 49] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 50] = [
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -77386,6 +77397,9 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Linux's generation-checked native hotkey answers read the current claim here.
         "quake.rs",
+        // Linux recovery-copy tests enter the window owner door; other platforms retain
+        // their existing synchronous recovery-copy fixture.
+        "restore_app_tests.rs",
         // Linux clipboard and path-drop replies apply only to their captured destination.
         "runtime/clipboard.rs",
         // Linux snapshots use event geometry and an asynchronous native rectangle answer.

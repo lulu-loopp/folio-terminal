@@ -1004,6 +1004,28 @@ fn an_unwritable_target_keeps_the_edit_in_a_recovery_copy_and_says_where() {
     std::fs::write(&moved, "another writer — 别人\n").expect("the other writer");
     crate::test_support::move_the_disk_forward(&moved);
 
+    #[cfg(target_os = "linux")]
+    let kept = {
+        assert!(bt_platform::admission::enter_window_thread());
+        assert!(bt_platform::admission::loop_running());
+        bt_platform::admission::admitted::<bt_platform::admission::doors::PreviewRecoveryCopies, _>(
+            |token| {
+                bt_platform::install_txn::durable_recovery_copies(token, |copy| {
+                    tabs.iter_mut()
+                        .flat_map(|tab| {
+                            tab.preview_pool.keep_dirty_on_stop(
+                                &recovery,
+                                SystemTime::UNIX_EPOCH,
+                                copy,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            },
+        )
+        .expect("the controlled stop owns its recovery-copy admission")
+    };
+    #[cfg(not(target_os = "linux"))]
     let kept = keep_unsaved_edits_over(&mut tabs, &recovery, SystemTime::UNIX_EPOCH);
     refuse(false);
 

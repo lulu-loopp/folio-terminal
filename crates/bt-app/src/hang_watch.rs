@@ -326,7 +326,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 224;
+const STATION_COUNT: usize = 225;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1061,6 +1061,9 @@ pub enum Station {
     UpdateLeave = 222,
     /// Linux desktop helper and hotkey workers joined after the event loop.
     DesktopRetire = 223,
+    /// Synchronous dirty-preview recovery copies before a controlled stop closes windows
+    /// (§5.3 row 31; door `PreviewRecoveryCopies`).
+    PreviewRecoveryCopies = 224,
 }
 
 impl Station {
@@ -1292,6 +1295,7 @@ impl Station {
             Self::UpdateJobProgress => "update_job::Job::drain_progress",
             Self::UpdateLeave => "update_handoff::leave_armed",
             Self::DesktopRetire => "retire_linux_desktop",
+            Self::PreviewRecoveryCopies => "preview recovery copies",
         }
     }
 
@@ -1537,6 +1541,7 @@ impl Station {
             221 => Self::UpdateJobProgress,
             222 => Self::UpdateLeave,
             223 => Self::DesktopRetire,
+            224 => Self::PreviewRecoveryCopies,
             _ => Self::Starting,
         }
     }
