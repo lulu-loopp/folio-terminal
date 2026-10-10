@@ -4,8 +4,14 @@ cask "folio" do
 
   url "https://github.com/lulu-loopp/folio-terminal/releases/download/v#{version}-preview/Folio-#{version}-macos-arm64.dmg"
   name "Folio"
-  desc "Terminal that typesets formulas where a command prints them, with files previewed beside the prompt"
+  desc "Typesets formulas in terminal output and previews files beside the prompt"
   homepage "https://github.com/lulu-loopp/folio-terminal"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+    regex(/^v?(\d+(?:\.\d+)+)-preview$/i)
+  end
 
   # Folio updates itself in place from its own card (the bundle at the app
   # target this cask recorded, replaced as a whole). With this, a plain
