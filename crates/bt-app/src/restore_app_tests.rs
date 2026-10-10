@@ -1100,12 +1100,12 @@ mod failure_road {
         Row { item, count, why }
     }
 
-    /// The fourteen sites of a controlled failure.
+    /// The fifteen sites of a controlled failure.
     pub(super) const FAIL_SITES: &[Row] = &[
         row(
             "crate::FolioApp::about_to_wait_inner",
-            6,
-            "the retirement's turn (2), the settle chain, the drag broker, the reap, a window's turn",
+            7,
+            "the retirement's turn (2), the settle chain, the clipboard-lane drain, the drag broker, the reap, a window's turn",
         ),
         row(
             "crate::FolioApp::resumed",
@@ -1269,8 +1269,8 @@ mod failure_road {
         );
         assert_eq!(
             FAIL_SITES.iter().map(|row| row.count).sum::<usize>(),
-            14,
-            "the fourteen sites"
+            15,
+            "the fifteen sites"
         );
     }
 
