@@ -9,6 +9,7 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use bt_platform::admission::WorkerCtx;
 use bt_platform::hang::Answer;
 
 type Wake = dyn Fn(u64) -> bool + Send + Sync + 'static;
@@ -60,7 +61,7 @@ impl Instance {
         }
     }
 
-    fn ask(&self, timeout: Duration) -> Answer {
+    fn ask(&self, _worker: &WorkerCtx, timeout: Duration) -> Answer {
         let started = Instant::now();
         let (id, wake, reply_rx) = {
             let mut guard: MutexGuard<'_, State> = self
@@ -174,10 +175,10 @@ pub fn install(wake: impl Fn(u64) -> bool + Send + Sync + 'static) -> Registrati
 }
 
 /// Asks the registered Linux event loop to process a user event within `timeout`.
-pub fn ask(timeout: Duration) -> Answer {
+pub fn ask(_worker: &WorkerCtx, timeout: Duration) -> Answer {
     let started = Instant::now();
     registered_instance().map_or(Answer::NoWindow, |instance| {
-        instance.ask(timeout.saturating_sub(started.elapsed()))
+        instance.ask(_worker, timeout.saturating_sub(started.elapsed()))
     })
 }
 
@@ -205,6 +206,24 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn start_on_a_worker<T: Send + 'static>(
+        body: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+    ) -> thread::JoinHandle<T> {
+        bt_platform::spawn_at_priority(
+            "bt-linux-hang-probe-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            body,
+        )
+        .expect("the thread door starts a worker")
+    }
+
+    fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+        match start_on_a_worker(body).join() {
+            Ok(answer) => answer,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     fn channel_instance() -> (Arc<Instance>, Receiver<u64>) {
         let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel(1);
         let instance = Arc::new(Instance::new(move |id| wake_tx.try_send(id).is_ok()));
@@ -215,7 +234,7 @@ mod tests {
     fn a_matching_user_event_answers_an_active_question() {
         let (instance, wake_rx) = channel_instance();
         let asking = Arc::clone(&instance);
-        let waiter = thread::spawn(move || asking.ask(ANSWER_PATIENCE));
+        let waiter = start_on_a_worker(move |worker| asking.ask(worker, ANSWER_PATIENCE));
 
         let id = wake_rx.recv().expect("question was not sent");
         instance.answer(id);
@@ -227,13 +246,25 @@ mod tests {
     fn zero_timeout_keeps_one_tombstone_until_its_event_arrives() {
         let (instance, wake_rx) = channel_instance();
 
-        assert_eq!(instance.ask(Duration::ZERO), Answer::Silent);
+        let first_ask = Arc::clone(&instance);
+        assert_eq!(
+            on_a_worker(move |worker| first_ask.ask(worker, Duration::ZERO)),
+            Answer::Silent
+        );
         let first_id = wake_rx.recv().expect("zero-timeout question was not sent");
-        assert_eq!(instance.ask(Duration::ZERO), Answer::Silent);
+        let second_ask = Arc::clone(&instance);
+        assert_eq!(
+            on_a_worker(move |worker| second_ask.ask(worker, Duration::ZERO)),
+            Answer::Silent
+        );
         assert!(matches!(wake_rx.try_recv(), Err(TryRecvError::Empty)));
 
         instance.answer(first_id);
-        assert_eq!(instance.ask(Duration::ZERO), Answer::Silent);
+        let third_ask = Arc::clone(&instance);
+        assert_eq!(
+            on_a_worker(move |worker| third_ask.ask(worker, Duration::ZERO)),
+            Answer::Silent
+        );
         let second_id = wake_rx.recv().expect("next question was not sent");
         assert!(second_id > first_id);
         instance.answer(second_id);
@@ -243,7 +274,7 @@ mod tests {
     fn an_ack_for_an_older_question_does_not_answer_the_current_one() {
         let (instance, wake_rx) = channel_instance();
         let asking = Arc::clone(&instance);
-        let first_waiter = thread::spawn(move || asking.ask(ANSWER_PATIENCE));
+        let first_waiter = start_on_a_worker(move |worker| asking.ask(worker, ANSWER_PATIENCE));
         let first_id = wake_rx.recv().expect("first question was not sent");
         instance.answer(first_id);
         assert_eq!(
@@ -252,7 +283,7 @@ mod tests {
         );
 
         let asking = Arc::clone(&instance);
-        let second_waiter = thread::spawn(move || asking.ask(ANSWER_PATIENCE));
+        let second_waiter = start_on_a_worker(move |worker| asking.ask(worker, ANSWER_PATIENCE));
         let second_id = wake_rx.recv().expect("second question was not sent");
         assert!(second_id > first_id);
         instance.answer(first_id);
@@ -276,12 +307,16 @@ mod tests {
     fn a_failed_send_returns_no_window_and_is_not_retried() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counted_attempts = Arc::clone(&attempts);
-        let instance = Instance::new(move |_| {
+        let instance = Arc::new(Instance::new(move |_| {
             counted_attempts.fetch_add(1, Ordering::Relaxed);
             false
-        });
+        }));
 
-        assert_eq!(instance.ask(ANSWER_PATIENCE), Answer::NoWindow);
+        let asking = Arc::clone(&instance);
+        assert_eq!(
+            on_a_worker(move |worker| asking.ask(worker, ANSWER_PATIENCE)),
+            Answer::NoWindow
+        );
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
         assert!(
             instance
@@ -298,13 +333,16 @@ mod tests {
         let _lock = global_test_lock();
         let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel(1);
         let registration = install(move |id| wake_tx.try_send(id).is_ok());
-        let waiter = thread::spawn(|| ask(ANSWER_PATIENCE));
+        let waiter = start_on_a_worker(|worker| ask(worker, ANSWER_PATIENCE));
 
         let _id = wake_rx.recv().expect("registered question was not sent");
         drop(registration);
 
         assert_eq!(waiter.join().expect("asker panicked"), Answer::NoWindow);
-        assert_eq!(ask(Duration::ZERO), Answer::NoWindow);
+        assert_eq!(
+            on_a_worker(|worker| ask(worker, Duration::ZERO)),
+            Answer::NoWindow
+        );
     }
 
     #[test]
@@ -316,7 +354,10 @@ mod tests {
         let new_registration = install(move |id| new_wake_tx.try_send(id).is_ok());
 
         drop(old_registration);
-        assert_eq!(ask(Duration::ZERO), Answer::Silent);
+        assert_eq!(
+            on_a_worker(|worker| ask(worker, Duration::ZERO)),
+            Answer::Silent
+        );
         let id = new_wake_rx.recv().expect("new registration was not used");
         assert!(old_wake_rx.try_recv().is_err());
         answer(id);
