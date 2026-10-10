@@ -450,7 +450,9 @@ text surface so a patch never gets a text area) and by declaring which chrome
 paints it. **A document's links are answered by the terminal's table**
 (2026-09-23): `preview::link_action` says what a target names and
 `reference_activation` — the table row 6 reads — says what a press spends; plain
-click stays in the window, `Ctrl`/`⌘`+click hands it over.
+click stays in the window, `Ctrl`/`⌘`+click hands it over. A `file:` link this
+machine names no path from (a share's `file://server/…` off Windows) is the terminal's
+own row for that URI, never the anchor's nothing (M-SWEEP-048).
 **From.** §7.1.3 *the file tree, the preview minimum contract, and the tab-level
 shared buffer pool*; §7.10 *a local file can also be a web page*; §7.32 *when a
 name cannot answer, ask the file itself: text is decided by content, and a page's
@@ -1262,7 +1264,16 @@ trial, no receipt, no watch and no release, so nothing it changes is written
 and nothing is recorded in the journal; its card says the update is not
 finished and that the changes made in this session are not kept. The rollback a
 later logon or start makes may put back what the new build wrote; nothing of
-the held session is lost to it unannounced. **A journal a build cannot read
+the held session is lost to it unannounced. **A rollback over a Folio whose
+changes it did not keep says so on the restored build** (E5, the owner's ruling
+of 2026-10-08: the overwrite is accepted, with a card): such a start, a trial
+that held a person's change, and a macOS start that could start neither the
+rescue clone nor its own program while it is the transaction's new bundle (it
+writes as always) mark the transaction's folder with their version; the lock
+holder that retires the rollback notes that version in the journal before the
+folder can go, and the restored build's first start says *The update was
+undone.* / *Changes made in Folio {version} were not kept.*, once — a rollback
+whose journal notes nothing keeps its own card. **A journal a build cannot read
 whole** (E1) — a journal file that cannot be read at all included; only one
 that is not there is no journal — is preserved byte for byte, and only the
 rescue build its envelope names settles it: every build reads the header's `txn`, `rescue` and
@@ -1682,7 +1693,13 @@ the quit's judged write (`PreviewBuffer::save`, its conflict check included), an
 where the file refuses or has changed on disk, copied into the data directory's
 `recovered` folder under the instant and the file's name, never over the file — each
 said in `diagnostics.log` with where its edit is; no card, no question, and the
-writes are done before the road goes on. It then closes **every** window with the
+writes are done before the road goes on. **The next start says it** (T-RECOVERED-FOLDER,
+owner ruling 2026-10-09): after the first frame, the `bt-recovered` worker lists the
+`recovered` folder, and copies no start has said yet raise one toast — "An unsaved edit
+was kept at <folder>", "N unsaved edits were kept at …" — an error card, six seconds and held while the pointer is on it, whose one verb
+opens the folder in the system's file manager. The names said are recorded in the data directory's
+`recovered-announced.json` before the toast is raised, so no copy is said twice, a crash
+loop included; nothing in the folder is ever pruned, and there is no switch. It then closes **every** window with the
 ending flag through `Runtime::close_window` so that no shell outlives its window, **abandons the
 spare web controller without waiting (its controller closed, its parent left to process
 exit; `exiting` does the same)**, finishes the application and exits the loop. `install_panic_log_hook` / `install_panic_log_hook_at`
@@ -1725,7 +1742,7 @@ may ask what platform it is on, and only in the files its own list names.
 `scripts/check-portable-core.ps1` is the local guard over the fifteen named
 portable crates; CI's macOS and Linux compiles are its authoritative CI proof.
 `bt_app::platform_gate_tests` alone holds `bt-app`'s file list.
-`scripts/check-adapter-boundary.ps1` holds the separate two vendor-seam files,
+`bt_term::adapter_boundary_tests` holds the separate two vendor-seam modules,
 which may not import a policy crate.
 **From.** §13.1 *the rule is one sentence, and it is not new*; §13.2 *the portable
 core, named one crate at a time*; §13.3 *two guards, and they are two different
@@ -1767,6 +1784,12 @@ again on every theme or setting change; nothing else about a page is changed.
 (0.4.5 ticket 60; owner's ruling 2026-09-25, option A): only for a profile whose receipt
 says a page has committed there, one spare per process, never replenished, handed over by
 `WebSeat::rehost`; the controller stays on the window thread (§5.2, ruling 2026-09-24).
+2026-10-09 *a path typed into a page's address field is a file's address on every
+platform* (M-SWEEP-048): a string that parses as a local path on this machine —
+absolute, `~`-rooted, or `./`/`../`-relative to the folder of the local page the seat
+shows — is never a search phrase; a page opens in the seat as before, any other file
+opens as a document on the same pane through the document door, and a path that names
+no file is refused in the field with the words *No such file*. A share is refused.
 2026-10-09 *a page that answers with an error shows that page* (T-WEB-404-SAYS-UNKNOWN,
 coordinator's ruling 2026-10-09): a navigation a server answered — an HTTP status is present
 (`WebEvent::NavigationCompleted::http_status`: WebView2's `HttpStatusCode`, the main-frame

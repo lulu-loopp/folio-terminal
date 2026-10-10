@@ -1141,59 +1141,55 @@ mod tests {
 #[cfg(test)]
 mod bt_environment_doc_tests {
     use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// The document, read at compile time so a missing file is a build failure
-    /// rather than a skipped test.
+    /// rather than a skipped test. Its subject really is this document: it is
+    /// the published list, and the source is what it is compared against.
     const DOCUMENT: &str = include_str!("../../../docs/BT-ENVIRONMENT.md");
 
-    /// The repository root, from where this crate is rather than from where the
-    /// test happened to be started.
-    fn repository_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .canonicalize()
-            .expect("the repository root, two directories above this crate")
-    }
-
-    /// Every `.rs` file that can end up in `folio.exe`.
+    /// **The text of every `.rs` file that can end up in `folio.exe`** —
+    /// `bt_source::universes::shipped_program`: `crates/` and `vendor/`, with
+    /// `bin/` and `tests/` directories left out (development binaries that no
+    /// release archive carries, and integration tests, which are not the
+    /// shipped program).
     ///
-    /// `src/bin/` is left out because those are development binaries that no
-    /// release archive carries, and `tests/` because an integration test is not
-    /// the shipped program. Everything else under `crates/` and `vendor/` is
-    /// walked — **the walk is the point**: a list of files here would be a list
+    /// **The universe is the point**: a list of files here would be a list
     /// somebody has to remember to add to, which is the same failure as a list
-    /// of variables.
-    fn shipped_sources(root: &Path) -> Vec<PathBuf> {
-        let mut found = Vec::new();
-        for top in ["crates", "vendor"] {
-            walk(&root.join(top), &mut found);
+    /// of variables. Two halves of it are read. The files the workspace's `mod`
+    /// declarations reach come out of the index; the files under the scope that
+    /// no declaration of a workspace member reaches come out of the universe's
+    /// own disk walk (`FileSetDiff::only_on_disk`) and are read as well, because
+    /// a vendored crate the workspace patches in by path — `portable-pty` — is
+    /// compiled into the program without being a member whose targets the
+    /// index knows.
+    fn shipped_texts() -> Vec<String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let workspace =
+            bt_source::Workspace::read(&root).unwrap_or_else(|rejection| panic!("{rejection}"));
+        let universe = bt_source::universes::shipped_program(&workspace)
+            .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections)));
+        let index = bt_source::Index::shared(&universe)
+            .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections)));
+        let mut texts: Vec<String> = index
+            .files()
+            .iter()
+            .map(|file| index.text(file.span()).to_owned())
+            .collect();
+        for undeclared in &index.cross_check().only_on_disk {
+            texts.push(std::fs::read_to_string(undeclared).unwrap_or_else(|error| {
+                panic!(
+                    "{} is in the universe and could not be read: {error}",
+                    undeclared.display()
+                )
+            }));
         }
-        found.sort();
         assert!(
-            found.len() > 50,
-            "the walk found {} files, which is not a source tree",
-            found.len()
+            texts.len() > 50,
+            "the universe holds {} files, which is not a source tree",
+            texts.len()
         );
-        found
-    }
-
-    fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            let name = entry.file_name();
-            if path.is_dir() {
-                if name != "bin" && name != "tests" && name != "target" {
-                    walk(&path, found);
-                }
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                found.push(path);
-            }
-        }
+        texts
     }
 
     /// Every `BT_…` name that appears in `text` as a **whole** string literal —
@@ -1246,12 +1242,8 @@ mod bt_environment_doc_tests {
     /// document and it fails the other way.
     #[test]
     fn every_bt_name_in_the_source_is_in_the_document_and_the_reverse() {
-        let root = repository_root();
         let mut in_source = BTreeSet::new();
-        for file in shipped_sources(&root) {
-            let Ok(text) = std::fs::read_to_string(&file) else {
-                continue;
-            };
+        for text in shipped_texts() {
             in_source.extend(names_in_source(&text));
         }
         let in_document = names_in_document(DOCUMENT);

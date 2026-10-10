@@ -123,8 +123,10 @@ pub(crate) const ANSWER_LOOK: Duration = Duration::from_millis(15);
 /// photograph, the write — and the reason says only what else rides on it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reason {
-    /// A person asked: the chord, the menu bar's Quit row, the system's quit.
+    /// A person asked through Folio: the chord or the menu bar's Quit row.
     Asked,
+    /// The operating system's launch/application wire asked the running copy to quit.
+    LaunchWireQuit,
     /// **Restart**, on the update's verified card: the ordinary quit run to
     /// completion, and then the applier of transaction `txn`.
     UpdateRestart { txn: TxnId },
@@ -302,6 +304,7 @@ impl WriteVerdict {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Quit {
     phase: Phase,
+    reason: Reason,
     /// The update this quit is running for, if it is one (U-21).
     update: Option<Update>,
     /// What the card names, collected once when the question was put.
@@ -364,7 +367,7 @@ impl Quit {
             Phase::Asking
         };
         let update = match reason {
-            Reason::Asked => None,
+            Reason::Asked | Reason::LaunchWireQuit => None,
             Reason::UpdateRestart { txn } => Some(Update {
                 txn,
                 leg: Leg::Live,
@@ -373,6 +376,7 @@ impl Quit {
         };
         Self {
             phase,
+            reason,
             update,
             names,
             hover: None,
@@ -382,10 +386,7 @@ impl Quit {
     /// Why this quit began.
     #[must_use]
     pub(crate) fn reason(&self) -> Reason {
-        self.update
-            .map_or(Reason::Asked, |update| Reason::UpdateRestart {
-                txn: update.txn,
-            })
+        self.reason
     }
 
     /// **The report the update job is owed**, taken once (U-21): the quit gave

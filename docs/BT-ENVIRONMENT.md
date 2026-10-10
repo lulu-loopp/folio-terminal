@@ -137,6 +137,10 @@ let go. Only that test's child half reads them; no product code does.
 `tests::alone_in_a_process` runs again in a process of its own — the three
 standalone-entry cases of `attention_wire` and `explorer_menu`, whose claim holds
 once per process — and only that test, in that child, reads it. And
+`BT_ADAPTER_BOUNDARY_SOURCE_ROOT` names an absolute copied `bt-term/src` directory
+that `bt_term::adapter_boundary_tests` indexes instead of the workspace source.
+Only that test reads it; unset or empty, the test indexes the real package, and
+the switch writes nothing.
 `BT_UPDATE_TRIAL_TEST_CHILD` and `BT_UPDATE_TRIAL_TEST_ROOT` — the test name and
 the private folder `bt-app`'s `update_trial` tests set on the copy of their own
 test binary that runs a start's writers in a process of its own (the trial is a

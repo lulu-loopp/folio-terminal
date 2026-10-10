@@ -177,6 +177,40 @@ impl Runtime<'_> {
         Ok(id)
     }
 
+    /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): one card on the window, its
+    /// sentence naming the folder, and its one verb — the reveal's own words — opening that
+    /// folder ([`Self::take_recovered_folder`]). An error card: a file did not take an edit, and
+    /// the error kind's life is the longest a card has.
+    pub(crate) fn announce_recovered_edits(
+        &mut self,
+        announcement: &crate::recovered::Announcement,
+    ) -> Result<()> {
+        let card = self.toast_with_verb(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            announcement.sentence(),
+            i18n::Text::MenuRevealInExplorer.text(),
+        )?;
+        self.window.recovered_card = Some(crate::recovered::Raised::of(card, announcement));
+        Ok(())
+    }
+
+    /// **The verb on the card that says where kept edits are**: the folder, handed to the
+    /// system's file manager through the window's one reveal. A verb pressed on another card
+    /// leaves the offer standing.
+    fn take_recovered_folder(&mut self, card: toast::ToastId) {
+        let Some(raised) = self.window.recovered_card.take() else {
+            return;
+        };
+        match raised.press(toast::ToastHit::Action(card)) {
+            Some(folder) => {
+                let folder = folder.to_path_buf();
+                self.reveal_in_explorer(&folder);
+            }
+            None => self.window.recovered_card = Some(raised),
+        }
+    }
+
     /// Which card, which `×` and which verb the pointer is on, for the reveal
     /// ladder.
     fn toast_pointer(&self, layouts: &[toast::ToastLayout]) -> toast::ToastPointer {
@@ -293,6 +327,7 @@ impl Runtime<'_> {
             self.take_profile_undo(id)?;
             self.take_powershell_profile_undo(id);
             self.take_checkout_undo(id)?;
+            self.take_recovered_folder(id);
             if self
                 .window
                 .toasts

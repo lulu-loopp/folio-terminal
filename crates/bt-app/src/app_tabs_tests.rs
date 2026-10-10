@@ -952,6 +952,52 @@ fn the_window_start_is_read_from_advances_not_remeasured() {
 /// RED GATE: have `create_files_row` answer a bare `bool` again and there is
 /// nothing to record; clear `refused` on open and never write it and the box
 /// goes on showing a valid-looking field over a name Enter will not take.
+/// RED (M-SWEEP-048) — **a page's address field keeps what the commit said
+/// against the draft it was said about**, as the files box does (D8(a)), and
+/// one door's refusal is never read as the other's.
+///
+/// MUTATION: have `address_refusal` answer whatever stands, of either kind, and
+/// the cross-reading assertion goes red.
+#[test]
+fn an_address_the_disk_refused_is_shown_against_its_draft() {
+    let mut editor = TabRename::open_address(LEAF_ONE, "https://例子.test/");
+    editor.insert("./不在的.md");
+    assert_eq!(
+        editor.address_refusal(),
+        None,
+        "nothing has been put through yet"
+    );
+
+    editor.refuse_address(webhost::AddressRefusal::NoSuchFile);
+    assert_eq!(
+        editor.address_refusal(),
+        Some(webhost::AddressRefusal::NoSuchFile),
+        "the commit's refusal stands against this draft"
+    );
+    assert_eq!(
+        editor.refusal(),
+        None,
+        "and it is not a name the files box refused"
+    );
+    editor.insert("x");
+    assert_eq!(
+        editor.address_refusal(),
+        None,
+        "and stops standing the moment the draft is different"
+    );
+    press(&mut editor, &Key::Named(NamedKey::Backspace), NO_MODIFIERS);
+    assert_eq!(
+        editor.address_refusal(),
+        Some(webhost::AddressRefusal::NoSuchFile),
+        "typing the refused path back in shows it again"
+    );
+
+    let mut files = TabRename::open_files_new(LEAF_ONE, "", false, true);
+    files.insert("notes.md");
+    files.refuse(files::NewNameRefusal::Taken);
+    assert_eq!(files.address_refusal(), None, "a name is not an address");
+}
+
 #[test]
 fn a_refusal_the_commit_raised_is_shown_in_the_box() {
     let body = |name: &str| method_body("Runtime", name);

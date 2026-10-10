@@ -924,6 +924,13 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 
 [dev-dependencies]
 bt-testpath = { path = "../bt-testpath" }
+# **The crate this package's workspace-wide guards ask** — the mechanism of
+# `docs/plans/bt-app-split-prep.md`. The stand-in, quiet-door and window-handle
+# gates read the files the workspace's `mod` declarations reach, through the
+# universes `bt_source::universes` declares, rather than walking directories.
+# Tests only, and `bt-source`'s own manifest says that nothing in `folio.exe`
+# may ever depend on it.
+bt-source = { path = "../bt-source" }
 # **A real shell for a test** (T-PROBE-CHILD): the Unix probe tests stand a
 # `/bin/sh -c` child and grandchild in for a probed tool, and the Windows
 # running-image test makes its directory junction with `cmd /C mklink /J`

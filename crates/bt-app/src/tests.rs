@@ -629,25 +629,29 @@ fn a_card_torn_off_carries_its_engine_with_it() {
     seats
         .open(PreviewSurface::Peek, &fixture, now)
         .expect("the card opens the fixture");
-    // Let the clock get off zero, so that "the playhead did not go back" is
-    // a claim with something in it. The wait ends the moment the playhead
-    // moves; the ceiling only has to outlast a cold decoder on a loaded
-    // shared runner, where the first frame has taken longer than five
-    // seconds.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < deadline {
-        if seats
-            .get(PreviewSurface::Peek)
-            .is_some_and(|seat| seat.state().position_secs > 0.0)
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let card = seats.get(PreviewSurface::Peek).expect("a seat on the card");
+    // Put the playhead off zero, so that "the playhead did not go back" is a
+    // claim with something in it — by the engine's own seek and not by waiting
+    // for playback to move it (M-SWEEP-048). A seek lands on every machine; a
+    // Mac's `AVPlayer` only advances while the main run loop drains the main
+    // queue, which no libtest thread can do, its own run loop pumped or not.
+    // Both waits are on the engine thread's publications, within the lane
+    // suite's patience.
+    let card = seats
+        .get_mut(PreviewSurface::Peek)
+        .expect("a seat on the card");
+    let loaded =
+        card.state_reaching(|state| state.duration_secs.is_some() || state.error.is_some());
+    assert_eq!(loaded.error, None, "the fixture loads");
+    card.seek_to(0.2, now);
+    let target = 0.2 * loaded.duration_secs.expect("a length");
+    let was = card
+        .state_reaching(|state| state.position_secs >= target - 0.05)
+        .position_secs;
+    assert!(
+        was >= target - 0.05,
+        "the playhead reached the seek before the tear-off: {was} for {target}"
+    );
     let key = card.key().to_owned();
-    let was = card.state().position_secs;
-    assert!(was > 0.0, "the fixture is playing before the tear-off");
     let started = engines_started();
     let stopped = engines_shut_down();
 

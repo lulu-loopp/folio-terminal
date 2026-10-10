@@ -12,7 +12,7 @@
 # and both under-report by construction: a reader assembled at run time, or one
 # split across two functions, is in neither. The tripwire
 # (`crates/bt-source/tests/tripwire.rs`) reads fewer rows still — it scans `.rs`
-# and `.ps1` only, so the three Python generators below are on this list and out
+# and `.ps1` only, so a Python generator below is on this list and out
 # of its reach. A reader with no row here and no allowlist variant is a gap, and
 # finding one is a finding, not a reason to widen either list.
 #
@@ -102,9 +102,6 @@ crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_o
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_relative_operand_names_nobody_and_is_removable	fixture / manifest read	remove	P14	no
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_untrusted_executable_and_bad_record_refuse_without_config_changes	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/clipboard_picture.rs	clipboard_picture::tests::every_encoding_is_judged_by_the_one_ceiling	include_str!	png_from;png_from_dib	P14	no
-crates/bt-app/src/context_menu.rs	context_menu::tests::the_classic_registration_is_announced_to_the_shell_as_well	runtime fs read	(the file it reads)	P17	no
-crates/bt-app/src/diagnostics.rs	diagnostics::bt_environment_doc_tests::every_bt_name_in_the_source_is_in_the_document_and_the_reverse	include_str!	../../../docs/BT-ENVIRONMENT.md	P13	no
-crates/bt-app/src/diagnostics.rs	diagnostics::bt_environment_doc_tests::the_document_names_both_directories_the_product_writes_under	include_str!	../../../docs/BT-ENVIRONMENT.md	P13	no
 crates/bt-app/src/diagnostics.rs	diagnostics::tests::a_run_heads_its_log_before_anything_else_can_write_into_it	include_str!	choose_resident_channel;open_run_log	P14	no
 crates/bt-app/src/diagnostics.rs	diagnostics::tests::nothing_branches_on_the_two_console_no_ops	include_str!	choose_resident_channel;main	P14	no
 crates/bt-app/src/file_reads_doors.txt	animation.rs: file_source_in_lane: FileAnimationSource::open	ledger key naming a file	file_source_in_lane (1 site(s), FileAnimationSource::open)	P16	no
@@ -175,7 +172,6 @@ crates/bt-app/src/icons.rs	icons::tests::no_drawing_carries_a_bare_alpha	include
 crates/bt-app/src/icons.rs	icons::tests::no_font_character_stands_in_for_a_mark	include_str!	file_peek.rs;float.rs;git_graph.rs;git_panel.rs;notice.rs;peek_strip.rs;profiles.rs;restore.rs;search.rs;seats.rs;settings.rs;toast.rs	P14	no
 crates/bt-app/src/icons.rs	icons::tests::no_surface_reaches_past_the_registry_for_a_disclosure	include_str!	float.rs;git_graph.rs;git_panel.rs;profiles.rs;search.rs;seats.rs;settings.rs	P14	no
 crates/bt-app/src/icons.rs	icons::tests::the_punctuation_that_stayed_a_character_is_set_as_type	include_str!	seats.rs;settings.rs	P14	no
-crates/bt-app/src/main.rs	platform_gate_tests::only_the_named_files_decide_what_platform_this_is	directory walk	(the file it reads)	P10	no
 crates/bt-app/src/persist.rs	persist::tests::the_only_thread_that_fsyncs_session_json_is_the_writer	include_str!	flush_if_due;hand_over	P14	no
 crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value	include_str!	window_is_hidden	P14	no
 crates/bt-app/src/preview.rs	preview::tests::a_save_is_written_by_the_writer_that_keeps_what_the_file_carried	include_str!	save	P14	no
@@ -237,11 +233,6 @@ crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_term_variab
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::writing_the_profile_leaves_no_half_written_file_in_the_folder	include_str!	replace_profile	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag	include_str!	../../../scripts/shell-integration/folio.zsh	P14	no
 crates/bt-app/src/shortcuts.rs	shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	fixture / manifest read	target	P14	no
-crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_archive_has_ten_files_and_cleanup_only_wrapper	include_str!	../../../scripts/release/package.ps1	P17	no
-crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_door_precedes_every_startup_effect	include_str!	main	P17	no
-crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_purge_says_on_macos_that_held_data_cannot_be_told	include_str!	../../bt-platform/src/cleanup.rs	P17	no
-crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_sandbox_door_is_not_read_by_a_shipped_build	include_str!	../../../scripts/release/ci-build-tests.ps1;../../../scripts/release/cleanvm/in-guest.ps1;uninstall.rs	P17	no
-crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory	include_str!	add_to_profile;install_panic_log_hook	P17	yes
 crates/bt-app/src/update.rs	update::tests::the_check_asks_one_stack_on_every_platform	include_str!	update.rs	P14	no
 crates/bt-app/src/update.rs	update::tests::the_question_carries_nothing_about_the_machine	include_str!	../../../README.md;../../../README.zh-CN.md;../../../docs/PRIVACY.md	P14	no
 crates/bt-app/src/version.rs	version::tests::the_plist_carries_the_workspace_version_twice_and_no_literal	fixture / manifest read	(the file it reads)	P14	no
@@ -250,7 +241,6 @@ crates/bt-app/src/webhost.rs	webhost::engine_absence_tests::open_answers_a_refus
 crates/bt-app/src/webhost.rs	webhost::fault_tests::a_zoom_notch_reports_the_factor_the_engine_ended_up_at	include_str!	webhost.rs	P14	no
 crates/bt-app/src/webhost.rs	webhost::machine_tests::the_host_asks_its_own_gate_before_it_issues_its_own_navigation	include_str!	webhost.rs	P14	no
 crates/bt-app/src/webhost.rs	webhost::refusal_card_tests::the_engine_is_only_ever_told_what_the_door_answered	include_str!	webhost.rs	P14	no
-crates/bt-app/src/webnav.rs	webnav::file_url_tests::no_file_url_is_compared_as_text	directory walk	(the file it reads)	P13	yes
 crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
 crates/bt-platform/src/app_delegate.rs	tests::PROVIDER	include_str!	macos_services.rs	P14	no
 crates/bt-platform/src/hang.rs	tests::SOURCE	include_str!	hang.rs	P14	no
@@ -287,14 +277,9 @@ crates/bt-platform/src/lib.rs	macos_video_signature_tests::WINDOWS_ARM	include_s
 crates/bt-platform/src/lib.rs	macos_window_backend_tests::MACOS	include_str!	macos_impl.rs	P14	no
 crates/bt-platform/src/lib.rs	macos_window_backend_tests::PORTABLE	include_str!	portable_impl.rs	P14	no
 crates/bt-platform/src/lib.rs	macos_window_backend_tests::a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows	include_str!	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	native_window_door_tests::a_stand_in_window_is_only_named_by_tests	dir walk	NativeWindow::stand_in, over the whole crates/ tree retained to src	P12	no
-crates/bt-platform/src/lib.rs	native_window_door_tests::crate_sources	dir walk	bt-platform/src, recursive (plan 3.1)	P12	no
 crates/bt-platform/src/lib.rs	native_window_door_tests::each_native_window_constructor_is_gated_to_its_own_platform	include_str!	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	native_window_door_tests::the_native_window_door_has_no_windows_type_in_its_signature	dir walk	every public declaration of bt-platform	P12	no
 crates/bt-platform/src/lib.rs	platform_door_tests::SOURCE	include_str!	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	dir walk	Command::new outside bt_platform::quiet	P12	no
 crates/bt-platform/src/lib.rs	quiet_door_tests::no_command_is_built_outside_the_quiet_door	runtime fs read	lib.rs	P14	no
-crates/bt-platform/src/lib.rs	quiet_door_tests::shipped_sources	dir walk	crates/ retained to src, excluding bin/tests/target	P12	no
 crates/bt-platform/src/lib.rs	update_check_transport_tests::MACOS	include_str!	macos_http.rs	P14	no
 crates/bt-platform/src/lib.rs	update_check_transport_tests::PORTABLE	include_str!	http_portable.rs	P14	no
 crates/bt-platform/src/lib.rs	update_check_transport_tests::WHOLE_FILE	include_str!	lib.rs	P14	no
@@ -316,14 +301,7 @@ crates/bt-platform/src/macos_app.rs	tests::SOURCE	include_str!	macos_app.rs	P14	
 crates/bt-platform/src/macos_menu.rs	tests::a_declined_clipboard_row_comes_back_on_the_bars_own_sender	include_str!	macos_menu.rs	P14	no
 crates/bt-platform/src/macos_menu.rs	tests::the_dock_menu_is_handed_over_autoreleased	include_str!	macos_menu.rs	P14	no
 crates/bt-platform/src/macos_menu.rs	tests::the_menu_bar_does_not_end_the_process_where_it_stands	include_str!	macos_menu.rs	P14	no
-crates/bt-platform/src/msix.rs	tests::every_deployment_this_module_makes_announces_itself_to_the_shell	runtime fs read	msix.rs	P17	no
 crates/bt-platform/src/webview.rs	third_door_shape_tests::DOOR	include_str!	macos_webview.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::SOURCE	include_str!	lib.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::input_dump_off_write_path_has_only_the_option_gate	include_str!	lib.rs	P14	no
-scripts/check-adapter-boundary.ps1	the file list at the head of the script	script: named file list	crates/bt-term/src/adapter.rs;crates/bt-term/src/cell_capture.rs	P17	no
-scripts/check-doc-words.ps1	the $files list	script: named file list	the nine reader-facing documents; the rule's Rust twin is i18n.rs	P17	no
-scripts/check-screenshots.ps1	the manifest and page reads	script: named file read	docs/screenshots/README.md and the pages that embed a shot	P17	no
-scripts/check-shortcuts-table.ps1	the docs/shortcuts.md half	script: named file read	docs/shortcuts.md against BINDINGS in shortcuts.rs	P17	no
-scripts/dev/bt-app-graph.py	whole_test / contexts / the module walk	script: dir walk and named files	bt-app's module graph, rooted at main.rs	P0	no
 scripts/dev/bt-app-split-freshness.py	manifest() and reference_maps()	script: named files out of git blobs	the two impl Runtime blocks in main.rs	P0	no
-scripts/dev/bt-app-split-table.py	the row manifest	script: named modules	the plan's 7.2 row table	P0	no
