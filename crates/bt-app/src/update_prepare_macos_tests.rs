@@ -1947,8 +1947,18 @@ fn homebrews_record_is_read_as_homebrew_reads_it() {
     // The default prefixes are injected, never the host's own Caskrooms: on a Mac where Folio is
     // installed with Homebrew the real defaults would record an app and the answer would depend on
     // the machine the test runs on.
-    let absent_arm = scratch.root.join("opt").join("homebrew").join("Caskroom").join("folio");
-    let absent_intel = scratch.root.join("usr").join("local").join("Caskroom").join("folio");
+    let absent_arm = scratch
+        .root
+        .join("opt")
+        .join("homebrew")
+        .join("Caskroom")
+        .join("folio");
+    let absent_intel = scratch
+        .root
+        .join("usr")
+        .join("local")
+        .join("Caskroom")
+        .join("folio");
     assert_eq!(
         crate::install_channel::homebrew_record_in(&app, [&absent_arm, &absent_intel]).map(drop),
         Err("the default Caskrooms record no app"),
