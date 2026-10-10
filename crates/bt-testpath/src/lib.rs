@@ -54,6 +54,13 @@ pub fn temp_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(unique_name(tag))
 }
 
+/// Flush a test fixture's file or directory before checking its durable state.
+/// This crate is absent from the shipped program; its caller is the Linux
+/// transaction fixture enabled only by `trust-harness` or crate tests.
+pub fn sync_scratch_file(file: &std::fs::File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
 /// **The system's temporary directory with every link above it resolved, in its ordinary
 /// spelling.**
 ///

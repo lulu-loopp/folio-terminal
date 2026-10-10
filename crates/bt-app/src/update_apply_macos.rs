@@ -1359,7 +1359,7 @@ impl<'a> Txn<'a> {
             self.road.limits.poll,
             &mut Instant::now,
             &mut || {
-                let running = install_flip::running_from(program)
+                let running = install_flip::running_from_on_worker(worker, program)
                     .map_err(|error| format!("the process list: {error}"))?;
                 let held: Vec<String> = running
                     .iter()
@@ -1437,6 +1437,7 @@ impl<'a> Txn<'a> {
             // A trial of it that runs and has answered is recorded, never a
             // second one started beside it (U-37).
             match self.before_deciding(
+                worker,
                 places,
                 Actor::Recovery,
                 (Some(places.new), Some(places.old)),
@@ -1644,7 +1645,8 @@ impl<'a> Txn<'a> {
         // Never a retrial beside a candidate, over a held or unaskable claim,
         // or when what runs cannot be read (H.3); a running trial its receipt
         // names is recorded instead and commits.
-        match self.before_deciding(places, actor, (Some(places.new), None), None, hands) {
+        let worker = self.worker;
+        match self.before_deciding(worker, places, actor, (Some(places.new), None), None, hands) {
             Ok(Pre::Decide) => {}
             Ok(Pre::Again) => {
                 return match self.settle(worker, places, None, hands, handed) {
@@ -1795,6 +1797,7 @@ impl<'a> Txn<'a> {
                 .and_then(|nonce| read_receipt(&self.road.home.receipt_path(self.road.txn, &nonce)))
                 .and_then(Result::ok);
             match self.before_deciding(
+                worker,
                 places,
                 actor,
                 (live.as_ref(), stage.as_ref()),
@@ -1953,6 +1956,7 @@ impl<'a> Txn<'a> {
     /// The adoption's record failed; the adopted trial runs on as the window.
     fn before_deciding(
         &mut self,
+        worker: &WorkerCtx,
         places: &Places<'_>,
         actor: Actor,
         (live, stage): (Option<&BundleIdentity>, Option<&BundleIdentity>),
@@ -1978,7 +1982,6 @@ impl<'a> Txn<'a> {
             .into_iter()
             .chain(road.starter)
             .collect();
-        let worker = self.worker;
         let may_end = self.may(actor, Effect::EndTrial);
         let program = places.program;
         let mut end = |process: TrialProcess| {
@@ -2004,7 +2007,7 @@ impl<'a> Txn<'a> {
             handed_back: road.handed_back,
             data: &road.data,
         };
-        match crate::update_apply::before_deciding(&what, &mut end) {
+        match crate::update_apply::before_deciding(worker, &what, &mut end) {
             BeforeDeciding::Decide => Ok(Pre::Decide),
             BeforeDeciding::Defer(deferral) => {
                 hands.say(&format!("BT_UPDATE_RECOVER deferred: {}", deferral.said()));

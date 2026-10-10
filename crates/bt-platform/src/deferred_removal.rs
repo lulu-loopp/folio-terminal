@@ -732,7 +732,7 @@ fn perform_with(
             .filter(|waited| crate::install_flip::still_running(waited.process))
             .map(|waited| waited.name.clone())
             .collect();
-        let images = match crate::install_flip::running_from(&removal.program) {
+        let images = match crate::install_flip::running_from_on_worker(worker, &removal.program) {
             Ok(images) => images,
             Err(error) if error.kind() == io::ErrorKind::Unsupported => Vec::new(),
             Err(error) => {

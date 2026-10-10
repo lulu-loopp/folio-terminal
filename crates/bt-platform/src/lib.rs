@@ -8293,6 +8293,8 @@ pub mod trust_harness;
 /// E-15). Three arms: Windows, macOS, and a refusal by name everywhere else.
 /// Worker only: every call blocks on the disk.
 pub mod install_txn;
+#[cfg(target_os = "linux")]
+pub use install_txn::durable_recovery_copies;
 
 /// **The update's entrance at logon** — one value, `FolioUpdate-<txn8>`, under
 /// `HKCU\…\CurrentVersion\Run`: written, flushed and read back before the
