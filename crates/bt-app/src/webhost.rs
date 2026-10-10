@@ -5425,7 +5425,8 @@ mod rehost_address_tests {
     /// through the state machine on their way: the environment callback and the
     /// controller callback arriving with an error each set `Failed`. The third
     /// — the start deadline passing with no callback at all — only drew the
-    /// card. When the loader says a runtime is present, its verb is
+    /// card. Linux restarts its browser actor; it does not use the WebView2
+    /// loader. Elsewhere, when the loader says a runtime is present, its verb is
     /// `WebMachine::restart`, which answers `Ignore` from anywhere but `Failed`;
     /// when the loader says this build has no runtime, the card links to the
     /// runtime download instead. Both still leave the machine in `Failed`.
@@ -5439,7 +5440,10 @@ mod rehost_address_tests {
             page: page(1, 1),
             window: window(1),
         });
-        let runtime_is_available = bt_platform::webview2_runtime_version().is_ok();
+        #[cfg(target_os = "linux")]
+        let expects_restart_card = true;
+        #[cfg(not(target_os = "linux"))]
+        let expects_restart_card = bt_platform::webview2_runtime_version().is_ok();
         // The seat has asked for an engine and is waiting on the answer, which
         // is the state the deadline exists for.
         let _ = seat.machine.request("https://example.com/");
@@ -5452,7 +5456,7 @@ mod rehost_address_tests {
             WebState::Failed,
             "and the machine is where the card's verb can act"
         );
-        match (runtime_is_available, fault) {
+        match (expects_restart_card, fault) {
             (true, WebFault::EngineDidNotStart { .. }) => {
                 assert_eq!(
                     fault.verb_text(),
