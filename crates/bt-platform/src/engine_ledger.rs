@@ -1,7 +1,8 @@
 //! **The process's media-engine ledger**: how many playback engines this
 //! process has made and how many it has given back, on every platform, with
-//! one owner for both arms (`video::engine` on Windows, the AVFoundation player
-//! on a Mac, and the arm with neither, where both counts stay zero).
+//! one owner for both arms (`video::engine` on Windows, the GStreamer player
+//! on Linux, the AVFoundation player on a Mac, and the arm with neither, where
+//! both counts stay zero).
 //!
 //! **The ledger is a signal as well as a number.** Every movement is made
 //! under the ledger's lock and announced on its condition variable, so a test
@@ -10,7 +11,15 @@
 //! after the open that asked for it has returned, and a machine under load
 //! only moves that moment later. See [`outstanding_reaching`].
 
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    test,
+    feature = "trust-harness"
+))]
+use std::sync::Condvar;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 #[cfg(any(test, feature = "trust-harness"))]
 use std::time::Duration;
 
@@ -31,6 +40,13 @@ impl Counts {
 /// announced on.
 struct Ledger {
     counts: Mutex<Counts>,
+    #[cfg(any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        test,
+        feature = "trust-harness"
+    ))]
     moved: Condvar,
 }
 
@@ -39,6 +55,13 @@ static LEDGER: Ledger = Ledger {
         started: 0,
         shut_down: 0,
     }),
+    #[cfg(any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        test,
+        feature = "trust-harness"
+    ))]
     moved: Condvar::new(),
 };
 
@@ -49,7 +72,7 @@ fn counts() -> MutexGuard<'static, Counts> {
 }
 
 /// Move the counts and tell every waiter.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn move_counts(change: impl FnOnce(&mut Counts)) {
     change(&mut counts());
     LEDGER.moved.notify_all();
@@ -73,7 +96,7 @@ pub(crate) fn outstanding() -> u64 {
 /// One engine has been given back — called by the engine's own thread, after
 /// the platform's `Shutdown`, by whatever owned the [`LedgerEntry`] it was
 /// handed.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) fn note_engine_shut_down() {
     move_counts(|counts| counts.shut_down += 1);
 }
@@ -110,12 +133,12 @@ pub(crate) fn outstanding_reaching(target: u64, patience: Duration) -> u64 {
 /// from there the machinery's stop closes it, through
 /// [`note_engine_shut_down`] — and dropping it any other way closes it here,
 /// including on an unwind.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) struct LedgerEntry {
     kept: bool,
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 impl LedgerEntry {
     /// An engine exists. Counted from here.
     pub(crate) fn opened() -> Self {
@@ -129,7 +152,7 @@ impl LedgerEntry {
     }
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 impl Drop for LedgerEntry {
     fn drop(&mut self) {
         if !self.kept {

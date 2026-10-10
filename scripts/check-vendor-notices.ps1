@@ -52,6 +52,20 @@ $crates = @(
         dir    = "vendor\vte"
         sha256 = "A5924018406CE0063CD67F8E008104968B74B563EE1B85DDE3ED1F7CB87D3DBD"
         added  = @("CHANGES-FOLIO.md")
+    },
+    @{
+        name   = "wl-clipboard-rs"
+        version = "0.9.4"
+        dir    = "vendor\wl-clipboard-rs"
+        sha256 = "4D7888CCD4896447B2D14D3A9350A85DF2AEB6F181E2E7A31349D104AC46CAC1"
+        added  = @("CHANGES-FOLIO.md")
+    },
+    @{
+        name   = "arboard"
+        version = "3.6.1"
+        dir    = "vendor\arboard"
+        sha256 = "0348A1C054491F4BFE6AB86A7B6AB1E44E45D899005DE92F58B3DF180B36DDAF"
+        added  = @("CHANGES-FOLIO.md")
     }
 )
 

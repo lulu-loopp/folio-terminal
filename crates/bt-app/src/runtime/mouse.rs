@@ -13,14 +13,17 @@ use crate::{
     a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
     drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
     formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
-    live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
-    platform_pointer_of, pointer_cursor, press_after_blur, press_files_node, press_pins_a_peek,
-    press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity, profiles,
-    protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
-    right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
-    route_forwarded_mouse_motion, seats, settings, settling, toast, tooltip, update, upright_wheel,
-    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
-    write_pty_input,
+    live_viewport_mouse_hit, marks, mouse_trace, over_home_ground, palette, pointer_cursor,
+    press_after_blur, press_files_node, press_pins_a_peek, press_reaches_no_grid,
+    press_spends_itself_closing, pressed_row_identity, profiles, protocol_mouse_button,
+    recoverable_wheel_scroll_amount, release_verdict, restore, right_press_raises_terminal_menu,
+    risen_frame, route_forwarded_mouse_button, route_forwarded_mouse_motion, seats, settings,
+    settling, toast, tooltip, update, upright_wheel, web_page_cursor, websheet, wheel_axis,
+    wheel_points_sideways, wheel_route, wheel_zoom_notches, write_pty_input,
+};
+#[cfg(target_os = "linux")]
+use crate::{
+    PasteTarget, PendingExternalDrop, PendingPastePath, i18n, native_window, platform_pointer_of,
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
@@ -1559,6 +1562,8 @@ impl Runtime<'_> {
     }
 
     pub(crate) fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.refuse_pending_linux_pointer_actions()?;
         self.window.pointer_position = Some(position);
         self.window.pointer_last_seen = Some(position);
         // **One resolution of the reference under the pointer, for the three surfaces that ask
@@ -3474,8 +3479,10 @@ impl Runtime<'_> {
                 position.x,
                 position.y,
             ) {
-                if let Err(reason) = crate::press_owned_title_bar(&self.window.custom_window_frame)
-                {
+                if let Err(reason) = crate::press_owned_title_bar(
+                    &self.window.window,
+                    &self.window.custom_window_frame,
+                ) {
                     eprintln!("{reason}");
                 }
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar state={state:?} button={button:?} target={traced_target:?}"));
@@ -4028,9 +4035,7 @@ impl Runtime<'_> {
                 crate::minimize_owned_window(&self.window.window)?;
             }
             seats::ChromeTarget::Maximize => {
-                self.window
-                    .window
-                    .set_maximized(!self.window.window.is_maximized());
+                self.toggle_window_maximized();
             }
             seats::ChromeTarget::CloseWindow => {
                 self.request_window_close()
@@ -4135,7 +4140,7 @@ impl Runtime<'_> {
         // where it is drawn.
         self.mouse_trace(|| {
             let presentation = self.window.renderer.presentation_geometry();
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             let pointer = self
                 .window
                 .pointer_position
@@ -4202,6 +4207,10 @@ impl Runtime<'_> {
             // L135 sends the peek the same way and for the same reason: it is a
             // glance, and pressing is you saying you are done glancing.
             self.hide_layout_peek()?;
+            #[cfg(target_os = "linux")]
+            if self.try_begin_linux_border_resize(button) {
+                return Ok(());
+            }
             // **A press outside the capsule hands the keyboard back — and leaves
             // the capsule up** (§7.1.5d). Those are two separate facts and both
             // are ruled: the field losing focus is what every text box on this
@@ -5407,88 +5416,357 @@ impl Runtime<'_> {
         spent
     }
 
-    /// **One file of a drop, written down the moment the platform hands it
-    /// over** (release review 0.4.2 X-10).
+    /// **One file of a drop, written down as the platform hands it over**
+    /// (release review 0.4.2 X-10).
     ///
-    /// The dispatcher's `DroppedFile` arm, given a name because of the one thing
-    /// it does besides pushing a path: **on the file that opens the batch, and
-    /// only then, it asks the platform where the cursor is.** This call runs
-    /// inside the delivery of the release itself — `IDropTarget::Drop` on
-    /// Windows, `performDragOperation:` on macOS — so the hand is still where it
-    /// let go of the file, which is the one instant at which the question has a
-    /// true answer.
+    /// Winit's `DroppedFile` event carries a path but no Xdnd position. Windows
+    /// and macOS read the pointer during their release callback. Linux queues one
+    /// pointer query on the display worker for the first file and keeps every path
+    /// with that request. A later observed pointer or window-context change
+    /// refuses the action and asks for a re-drop; the worker's later point is
+    /// never allowed to retarget a changed gesture.
     ///
-    /// **Two guards, one each.** The `is_none` here decides whether the *system*
-    /// is called at all, so a drop of forty files crosses into Win32 or AppKit
-    /// once rather than forty times; [`DropBatch::collect`]'s own match decides
-    /// whose answer the batch keeps, so a point offered later could not win even
-    /// if one were taken.
-    ///
-    /// **`pointer_position` is not consulted, deliberately.** The window's cached
-    /// pointer is not the drop point and is not even stale in the ordinary sense:
-    /// no pointer event is delivered while another application's drag is over
-    /// this window, so what is in it is from before the drag began — a different
-    /// gesture entirely, quite possibly over a different pane.
-    pub(crate) fn collect_dropped_file(&mut self, path: PathBuf) {
-        let opening = self.window.dropped_files.is_none();
-        let point = opening.then(|| self.platform_pointer_now()).flatten();
-        // **And the shell, named here for the same reason the point is** (X-1):
-        // the pane under that point, and the tab and the running program it
-        // belongs to, are what the hand was aimed at — facts about this instant
-        // and not about the turn that spends them. Only on the opening file, so
-        // that a drop of forty does not re-aim thirty-nine times.
-        // **And a drop is refused outright while the window is asking something**
-        // (review 2026-09-17 P1-b). Asked here, on the file that opens the
-        // batch, because this runs inside the platform's delivery of the release
-        // — the card the file was let go of over is the card that was on screen
-        // when it was let go of. Asked *again* at the flush, because a gate can
-        // open between the two. See [`Self::a_modal_holds_the_window`].
-        let target = opening
-            .then(|| {
-                (!self.a_modal_holds_the_window())
-                    .then(|| self.dropped_files_seat(point))
-                    .flatten()
-                    .and_then(|seat| self.paste_target(seat))
-            })
-            .flatten();
-        DropBatch::collect(&mut self.window.dropped_files, path, point, target);
+    /// **`pointer_position` is not consulted.** No pointer event is delivered
+    /// while another application's drag is over this window, so its cache is
+    /// from before the drag began — quite possibly over a different pane.
+    pub(crate) fn collect_dropped_file(&mut self, path: PathBuf) -> Result<()> {
+        if self.window.dropped_files.is_some() {
+            DropBatch::collect(&mut self.window.dropped_files, path, None, None);
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(pending) = self.window.pending_external_drop.as_mut()
+                && pending.batch_open
+            {
+                pending.paths.push(path);
+                return Ok(());
+            }
+            if self.window.pending_external_drop.is_some()
+                || self.window.pending_paste_path.is_some()
+            {
+                self.refuse_pending_linux_pointer_actions()?;
+            }
+            let Some(tab) = self.window.tabs.get(self.window.active_tab) else {
+                DropBatch::collect(&mut self.window.dropped_files, path, None, None);
+                return Ok(());
+            };
+            let tab_id = tab.id;
+            let layout = tab.seat_layout.clone();
+            let viewport = self.window.seat_viewport;
+            let targets = tab
+                .sessions
+                .iter()
+                .map(|(seat, leaf)| PasteTarget {
+                    tab: tab_id,
+                    seat: *seat,
+                    incarnation: leaf.incarnation,
+                })
+                .collect();
+            let focused_target = tab.focused().map(|leaf| PasteTarget {
+                tab: tab_id,
+                seat: tab.focused_leaf,
+                incarnation: leaf.incarnation,
+            });
+            let request = native_window(&self.window.window).ok().and_then(|native| {
+                let generation = self.app.next_display_generation();
+                bt_platform::linux_display::request_display(
+                    u64::from(self.window.window.id()),
+                    generation,
+                    bt_platform::linux_display::LinuxDisplayQuery::PointerInWindow {
+                        window: native,
+                    },
+                )
+                .ok()
+            });
+            self.window.pending_external_drop = Some(PendingExternalDrop {
+                request,
+                paths: vec![path],
+                batch_open: true,
+                refused: false,
+                tab: tab_id,
+                layout,
+                viewport,
+                focused_target,
+                targets,
+            });
+            if self
+                .window
+                .pending_external_drop
+                .as_ref()
+                .is_some_and(|pending| pending.request.is_none())
+            {
+                self.refuse_pending_linux_pointer_actions()?;
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let point = self.platform_pointer_now();
+            let target = (!self.a_modal_holds_the_window())
+                .then(|| self.dropped_files_seat(point))
+                .flatten()
+                .and_then(|seat| self.paste_target(seat));
+            DropBatch::collect(&mut self.window.dropped_files, path, point, target);
+            Ok(())
+        }
     }
 
-    /// **Where the cursor is, this instant, in this window's own pixels**
-    /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
-    /// under the cursor).
-    ///
-    /// **Two readers, and they are the two gestures that put a path on a command
-    /// line.** [`Self::collect_dropped_file`] asks it as an external drop
-    /// arrives, and [`Self::keep_the_paste_offer`] asks it as an internal drag is
-    /// let go of (review 2026-09-17). Both for one reason: there is only one
-    /// instant at which "where is the cursor" and "where was this let go of" are
-    /// the same question, and it is the one this process is standing in while
-    /// the platform delivers the release. Nothing else in this window reads it,
-    /// and the name is the platform's rather than either gesture's so that
-    /// neither road can grow a second door.
-    ///
-    /// **The units are `CursorMoved`'s and no conversion happens here**, which
-    /// was checked rather than assumed. On Windows a pointer event is
-    /// `WM_MOUSEMOVE`'s `lParam` — physical pixels from the client area's
-    /// top-left — which is precisely what `GetCursorPos` put through
-    /// `ScreenToClient` answers. On macOS winit takes its view's point and
-    /// multiplies by the window's backing scale, which is precisely what the
-    /// AppKit arm does with `NSEvent.mouseLocation` after the same two
-    /// conversions. So the platform's answer is already in the window's physical
-    /// pixels and is used as it stands; scaling it again here would square the
-    /// factor on every Retina and every 150% display.
-    ///
-    /// Neither `pointer_position` nor [`WindowRuntime::pointer_last_seen`] is
-    /// read: both say where the hand was *before* the drag, which is not where
-    /// this drop landed, and a routing built on either would be a guess wearing
-    /// a measurement's clothes.
-    pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
-        platform_pointer_of(
-            native_window(&self.window.window)
-                .ok()
-                .and_then(bt_platform::pointer_position_in_window),
-        )
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refuse_pending_linux_pointer_actions(&mut self) -> Result<()> {
+        let dropped = self.window.pending_external_drop.take();
+        let pasted = self.window.pending_paste_path.take();
+        if dropped.is_none() && pasted.is_none() {
+            return Ok(());
+        }
+        if dropped.as_ref().is_some_and(|pending| pending.refused) && pasted.is_none() {
+            self.window.pending_external_drop = dropped;
+            return Ok(());
+        }
+        if let Err(error) = self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            i18n::Text::DropLocationUnconfirmed.text(),
+        ) {
+            self.window.pending_external_drop = dropped;
+            self.window.pending_paste_path = pasted;
+            return Err(error);
+        }
+        if let Some(mut dropped) = dropped {
+            dropped.refused = true;
+            if dropped.batch_open {
+                self.window.pending_external_drop = Some(dropped);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(in crate::runtime) fn queue_linux_paste_path(
+        &mut self,
+        drag: &Drag,
+        plan: &seats::DropPlan,
+        path: PathBuf,
+    ) -> Result<bool> {
+        if self.window.pending_paste_path.is_some() || self.window.pending_external_drop.is_some() {
+            self.refuse_pending_linux_pointer_actions()?;
+        }
+        let Some(tab) = self.window.tabs.get(self.window.active_tab) else {
+            return Ok(false);
+        };
+        let tab_id = tab.id;
+        let layout = tab.seat_layout.clone();
+        let viewport = self.window.seat_viewport;
+        let focused_target = tab.focused().map(|leaf| PasteTarget {
+            tab: tab_id,
+            seat: tab.focused_leaf,
+            incarnation: leaf.incarnation,
+        });
+        let request = native_window(&self.window.window).ok().and_then(|native| {
+            let generation = self.app.next_display_generation();
+            bt_platform::linux_display::request_display(
+                u64::from(self.window.window.id()),
+                generation,
+                bt_platform::linux_display::LinuxDisplayQuery::PointerInWindow { window: native },
+            )
+            .ok()
+        });
+        let refused = request.is_none();
+        self.window.pending_paste_path = Some(PendingPastePath {
+            request,
+            drag: drag.clone(),
+            plan: plan.clone(),
+            path,
+            tab: tab_id,
+            layout,
+            viewport,
+            focused_target,
+        });
+        if refused {
+            self.refuse_pending_linux_pointer_actions()?;
+        }
+        Ok(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_linux_pointer_display_ready(
+        &mut self,
+        ready: bt_platform::linux_display::LinuxDisplayReady,
+    ) -> Result<bool> {
+        let drop_matches = self
+            .window
+            .pending_external_drop
+            .as_ref()
+            .is_some_and(|pending| {
+                !pending.refused
+                    && pending
+                        .request
+                        .as_ref()
+                        .is_some_and(|request| request.ready() == ready)
+            });
+        if drop_matches {
+            let pointer = self
+                .window
+                .pending_external_drop
+                .as_ref()
+                .and_then(|pending| pending.request.as_ref())
+                .and_then(|request| match request.try_take() {
+                    Ok(bt_platform::linux_display::LinuxDisplayAnswer::PointerInWindow(Some(
+                        pointer,
+                    ))) => Some(pointer),
+                    _ => None,
+                });
+            let Some(pointer) = pointer else {
+                self.refuse_pending_linux_pointer_actions()?;
+                return Ok(true);
+            };
+            let Some((pending_tab, pending_layout, pending_viewport, pending_focus, targets)) =
+                self.window.pending_external_drop.as_ref().map(|pending| {
+                    (
+                        pending.tab,
+                        pending.layout.clone(),
+                        pending.viewport,
+                        pending.focused_target,
+                        pending.targets.clone(),
+                    )
+                })
+            else {
+                return Ok(false);
+            };
+            let active = self.window.tabs.get(self.window.active_tab);
+            let current_focus = active.and_then(|tab| {
+                tab.focused().map(|leaf| PasteTarget {
+                    tab: tab.id,
+                    seat: tab.focused_leaf,
+                    incarnation: leaf.incarnation,
+                })
+            });
+            let same_context = active.is_some_and(|tab| {
+                tab.id == pending_tab
+                    && tab.seat_layout == pending_layout
+                    && self.window.seat_viewport == pending_viewport
+            }) && current_focus == pending_focus;
+            if !same_context {
+                self.refuse_pending_linux_pointer_actions()?;
+                return Ok(true);
+            }
+            let point = platform_pointer_of(Some(pointer));
+            let seat = if self.a_modal_holds_the_window() {
+                None
+            } else {
+                self.dropped_files_seat(point)
+            };
+            let target = seat.and_then(|seat| self.paste_target(seat));
+            let target_at_that_seat = seat.and_then(|seat| {
+                targets
+                    .iter()
+                    .find(|target| target.tab == pending_tab && target.seat == seat)
+                    .copied()
+            });
+            if target != target_at_that_seat
+                || target.is_some_and(|target| !targets.contains(&target))
+            {
+                self.refuse_pending_linux_pointer_actions()?;
+                return Ok(true);
+            }
+            let Some(pending) = self.window.pending_external_drop.take() else {
+                return Ok(false);
+            };
+            for path in pending.paths {
+                DropBatch::collect(&mut self.window.dropped_files, path, point, target);
+            }
+            return Ok(true);
+        }
+
+        let paste_matches = self
+            .window
+            .pending_paste_path
+            .as_ref()
+            .is_some_and(|pending| {
+                pending
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.ready() == ready)
+            });
+        if !paste_matches {
+            return Ok(false);
+        }
+        let answer = self.window.pending_paste_path.as_ref().and_then(|pending| {
+            pending
+                .request
+                .as_ref()
+                .and_then(|request| match request.try_take() {
+                    Ok(bt_platform::linux_display::LinuxDisplayAnswer::PointerInWindow(Some(
+                        pointer,
+                    ))) => Some((
+                        pointer,
+                        pending.tab,
+                        pending.layout.clone(),
+                        pending.viewport,
+                        pending.focused_target,
+                        pending.drag.clone(),
+                        pending.plan.clone(),
+                        pending.path.clone(),
+                    )),
+                    _ => None,
+                })
+        });
+        let Some((
+            pointer,
+            pending_tab,
+            pending_layout,
+            pending_viewport,
+            pending_focus,
+            drag,
+            plan,
+            path,
+        )) = answer
+        else {
+            self.refuse_pending_linux_pointer_actions()?;
+            return Ok(true);
+        };
+        let active = self.window.tabs.get(self.window.active_tab);
+        let current_focus = active.and_then(|tab| {
+            tab.focused().map(|leaf| PasteTarget {
+                tab: tab.id,
+                seat: tab.focused_leaf,
+                incarnation: leaf.incarnation,
+            })
+        });
+        let same_context = active.is_some_and(|tab| {
+            tab.id == pending_tab
+                && tab.seat_layout == pending_layout
+                && self.window.seat_viewport == pending_viewport
+        }) && current_focus == pending_focus;
+        if !same_context {
+            self.refuse_pending_linux_pointer_actions()?;
+            return Ok(true);
+        }
+        let Some(released_at) = platform_pointer_of(Some(pointer)) else {
+            self.refuse_pending_linux_pointer_actions()?;
+            return Ok(true);
+        };
+        let Some(target) = self.paste_offer_kept_at(&drag, &plan, released_at) else {
+            self.refuse_pending_linux_pointer_actions()?;
+            return Ok(true);
+        };
+        let Some(mut pending) = self.window.pending_paste_path.take() else {
+            return Ok(false);
+        };
+        pending.request = None;
+        match self.paste_paths_into(target, vec![path], "write dragged path to PTY") {
+            Ok(true) => self.focus_the_pane_a_path_landed_in(target.seat)?,
+            Ok(false) => {
+                self.window.pending_paste_path = Some(pending);
+                self.refuse_pending_linux_pointer_actions()?;
+            }
+            Err(error) => {
+                self.window.pending_paste_path = Some(pending);
+                return Err(error);
+            }
+        }
+        Ok(true)
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
@@ -5506,7 +5784,7 @@ impl Runtime<'_> {
         // nothing else does.
         self.mouse_trace(|| {
             let presentation = self.window.renderer.presentation_geometry();
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             mouse_trace::WheelEntry {
                 pointer: self.window.pointer_position.map(|at| (at.x, at.y)),
                 pointer_last_seen: self.window.pointer_last_seen.map(|at| (at.x, at.y)),

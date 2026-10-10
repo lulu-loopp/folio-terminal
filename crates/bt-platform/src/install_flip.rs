@@ -13,11 +13,16 @@
 //!   construction (C.1). Windows has no such call and refuses it; so does
 //!   every platform without an arm. (The Windows flip is one
 //!   `install_txn::durable_move` per file.)
-//! * **[`running_from`]**: the processes whose image is a given executable,
-//!   matched by the file itself, never by spelling — read only. macOS:
+//! * **[`running_from`]** (macOS and Windows) and
+//!   **[`running_from_on_worker`]** (Linux): the processes whose image is a
+//!   given executable, matched by the file itself, never by spelling — read
+//!   only. macOS:
 //!   `proc_listallpids`, then `proc_pidpath` of each, compared by device and
-//!   inode. Windows: `K32EnumProcesses`, then `QueryFullProcessImageNameW` of
-//!   each, compared by volume serial number and file index. The macOS
+//!   inode. Linux: `/proc`, with each live image compared by device and inode
+//!   while its pid and start instant stay the same, through the worker-only
+//!   API. Windows:
+//!   `K32EnumProcesses`, then `QueryFullProcessImageNameW` of each, compared
+//!   by volume serial number and file index. The macOS
 //!   applier's process check before the exchange (M4), the trial's pid after
 //!   its launch through LaunchServices (`open` reports no pid), and the
 //!   Windows recovery's look for an applier still alive (W3) are this list.
@@ -39,6 +44,8 @@
 //!   not merely until its exit code can be read, which comes first (0.4.7
 //!   uninstall fix: the door that waits for its asker took the said exit code
 //!   for the end and met the asker's data-directory claim still held).
+//!   Linux reads field 22 of `/proc/PID/stat` in clock ticks since boot.
+//!   Process signaling remains unavailable there.
 //! * **[`ask`]** (U-29; Windows U-24): a recorded process asked to quit, or
 //!   ended — only after the process list shows that very process (pid *and*
 //!   start instant) running from one of the given executables. The rollback
@@ -62,20 +69,21 @@
 //!   Nothing is written, and the handle is closed at once, so the check never
 //!   stands in a move's way. Refused by name elsewhere.
 //!
-//! Worker only: the exchange flushes to the device. Refused by name (or an
-//! empty answer, for the reads) where there is no arm.
+//! Worker only: the exchange flushes to the device. Unsupported operations
+//! return a named refusal or their documented empty answer.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 
+use crate::admission::WorkerCtx;
 use crate::install_txn::{self, Failure};
 
 /// **A process, by its pid and the instant it started** (macOS: microseconds
-/// since the epoch, as `proc_pidinfo`'s `PROC_PIDTBSDINFO` reports it;
-/// Windows: the creation time `GetProcessTimes` reports, in 100 ns since
-/// 1601): together they name one process for its whole life, where a pid alone
-/// may be reused.
+/// since the epoch as `proc_pidinfo` reports it; Windows: `GetProcessTimes`
+/// creation time in 100 ns since 1601; Linux: `/proc/PID/stat` field 22, clock
+/// ticks since boot): together they name one process for its whole life, where
+/// a pid alone may be reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Running {
     pub pid: u32,
@@ -95,13 +103,35 @@ pub fn exchange(live: &Path, staged: &Path) -> Result<(), Failure> {
 }
 
 /// **Every process whose image is the file at `executable`** — see the module
-/// header. A process that ends while it is being asked about is left out.
+/// header. On Linux, use [`running_from_on_worker`], because the process list
+/// is worker-only. A process that ends while it is being asked about is left
+/// out.
 ///
 /// # Errors
 /// The process list could not be read, or `executable` cannot be looked at;
-/// `Unsupported` where there is no arm (neither macOS nor Windows).
+/// `Unsupported` on Linux and where there is no other arm.
 pub fn running_from(executable: &Path) -> io::Result<Vec<Running>> {
     imp::running_from(executable)
+}
+
+/// **Every process whose image is the file at `executable`**, read on a worker
+/// — see the module header. Linux requires this worker-only entry point. On
+/// other platforms it delegates to [`running_from`]. A process that ends while
+/// it is being asked about is left out.
+///
+/// # Errors
+/// The process list could not be read, or `executable` cannot be looked at;
+/// `Unsupported` where there is no process-list arm.
+pub fn running_from_on_worker(worker: &WorkerCtx, executable: &Path) -> io::Result<Vec<Running>> {
+    #[cfg(target_os = "linux")]
+    {
+        imp::running_from_on_worker(worker, executable)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = worker;
+        running_from(executable)
+    }
 }
 
 /// **Whether `process` still runs**: its pid names a live process that started
@@ -777,6 +807,8 @@ mod imp {
 
 #[cfg(not(any(target_os = "macos", windows)))]
 mod imp {
+    #[cfg(target_os = "linux")]
+    use super::WorkerCtx;
     use super::{Ask, Running};
     use std::io;
     use std::path::Path;
@@ -788,8 +820,116 @@ mod imp {
         ))
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn running_from_on_worker(
+        _worker: &WorkerCtx,
+        executable: &Path,
+    ) -> io::Result<Vec<Running>> {
+        use std::os::unix::fs::MetadataExt;
+
+        let wanted = std::fs::metadata(executable)?;
+        let mut pids = Vec::new();
+        for entry in std::fs::read_dir("/proc")? {
+            let entry = entry?;
+            if let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+                .filter(|pid| *pid != 0)
+            {
+                pids.push(pid);
+            }
+        }
+        pids.sort_unstable();
+
+        let mut found = Vec::new();
+        for pid in pids {
+            let Some(started) = started_of(pid) else {
+                continue;
+            };
+            let image = match std::fs::metadata(format!("/proc/{pid}/exe")) {
+                Ok(image) => image,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if (image.dev(), image.ino()) != (wanted.dev(), wanted.ino()) {
+                continue;
+            }
+            if started_of(pid) == Some(started) {
+                found.push(Running { pid, started });
+            }
+        }
+        Ok(found)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     pub(super) fn started_of(_pid: u32) -> Option<u64> {
         None
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn started_of(pid: u32) -> Option<u64> {
+        let stat = crate::file_reads::read(
+            crate::file_reads::Lane::Install,
+            format!("/proc/{pid}/stat"),
+        )
+        .ok()?;
+        start_ticks(&stat)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_ticks(stat: &[u8]) -> Option<u64> {
+        let close = stat.iter().rposition(|byte| *byte == b')')?;
+        if stat.get(close + 1) != Some(&b' ') {
+            return None;
+        }
+        let mut fields = stat
+            .get(close + 2..)?
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let state = fields.next()?;
+        if state.len() != 1 || state == b"Z" || state == b"X" || state == b"x" {
+            return None;
+        }
+        let start_ticks = fields.nth(18)?;
+        std::str::from_utf8(start_ticks).ok()?.parse().ok()
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod linux_tests {
+        use super::start_ticks;
+
+        #[test]
+        fn start_ticks_reads_field_22_after_the_last_comm_parenthesis() {
+            let mut stat = b"42 (cmd ) S 1 2 (nested) \xff) R ".to_vec();
+            stat.extend_from_slice(b"1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 731 20\n");
+            assert_eq!(start_ticks(&stat), Some(731));
+        }
+
+        #[test]
+        fn start_ticks_rejects_dead_and_malformed_records() {
+            let fields = b"1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 731 20";
+            for state in [b'Z', b'X', b'x'] {
+                let mut stat = b"42 (worker) ".to_vec();
+                stat.push(state);
+                stat.push(b' ');
+                stat.extend_from_slice(fields);
+                assert_eq!(start_ticks(&stat), None);
+            }
+            assert_eq!(start_ticks(b"malformed"), None);
+            assert_eq!(start_ticks(b"42 (short) S 1 2"), None);
+            assert_eq!(
+                start_ticks(b"42 (bad) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 nope"),
+                None
+            );
+        }
     }
 
     pub(super) fn image_name(_pid: u32) -> Option<std::ffi::OsString> {
@@ -828,6 +968,34 @@ mod tests {
     use crate::install_txn::Replace;
     use crate::install_txn::recording::{Call, Recorder};
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    fn on_worker<T: Send + 'static>(
+        work: impl FnOnce(&crate::admission::WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        match crate::spawn_at_priority(
+            "bt-install-flip-test",
+            crate::ThreadPriority::BelowNormal,
+            work,
+        )
+        .expect("start a controlled worker")
+        .join()
+        {
+            Ok(answer) => answer,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    fn process_list(executable: PathBuf) -> io::Result<Vec<Running>> {
+        #[cfg(target_os = "linux")]
+        {
+            on_worker(move |worker| running_from_on_worker(worker, &executable))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            running_from(&executable)
+        }
+    }
 
     /// RED (U-28) — **an exchange is one call that swaps the two names, then
     /// a flush of each directory, the first directory first** — and a refused
@@ -888,7 +1056,7 @@ mod tests {
         std::fs::write(a.join("which"), b"old").unwrap();
         std::fs::write(b.join("which"), b"new").unwrap();
         let answer = exchange(&a, &b);
-        if crate::host_platform() == crate::HostPlatform::MacOs {
+        if cfg!(target_os = "macos") {
             answer.unwrap();
             assert_eq!(std::fs::read(a.join("which")).unwrap(), b"new");
             assert_eq!(std::fs::read(b.join("which")).unwrap(), b"old");
@@ -909,10 +1077,11 @@ mod tests {
         if crate::host_platform() == crate::HostPlatform::OtherUnix {
             assert!(running_from(Path::new("anything")).is_err());
             assert!(!still_running(Running { pid: 1, started: 0 }));
+            #[cfg(not(target_os = "linux"))]
             return;
         }
         let me = std::env::current_exe().unwrap();
-        let found = running_from(&me).unwrap();
+        let found = process_list(me.clone()).unwrap();
         let pid = std::process::id();
         let mine = found
             .iter()
@@ -926,8 +1095,36 @@ mod tests {
         }));
         let elsewhere = bt_testpath::temp_path("bt-flip-none");
         std::fs::write(&elsewhere, b"").unwrap();
-        assert!(running_from(&elsewhere).unwrap().is_empty());
+        assert!(process_list(elsewhere.clone()).unwrap().is_empty());
         let _ = std::fs::remove_file(&elsewhere);
+    }
+
+    /// RED (U-28; Linux) — **the image is the file object, not its spelling**:
+    /// a copied executable with the same basename names no running process,
+    /// while a hard link to this process's executable does.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_process_image_uses_file_identity_across_copies_and_hard_links() {
+        let executable = std::env::current_exe().unwrap();
+        let pid = std::process::id();
+        let mine = Running {
+            pid,
+            started: started_of(pid).expect("this test process has a start instant"),
+        };
+
+        let copy_root = bt_testpath::temp_path("bt-flip-image-copy");
+        std::fs::create_dir_all(&copy_root).unwrap();
+        let copied = copy_root.join(executable.file_name().unwrap());
+        std::fs::copy(&executable, &copied).unwrap();
+        assert_eq!(copied.file_name(), executable.file_name());
+        assert!(process_list(copied).unwrap().is_empty());
+
+        let linked = executable.with_file_name(bt_testpath::unique_name("bt-flip-image-link"));
+        std::fs::hard_link(&executable, &linked).unwrap();
+        assert!(process_list(linked.clone()).unwrap().contains(&mine));
+
+        std::fs::remove_file(&linked).unwrap();
+        std::fs::remove_dir_all(&copy_root).unwrap();
     }
 
     /// RED (U-29) — **a signal reaches a recorded process only while the
@@ -947,7 +1144,25 @@ mod tests {
         signals_reach_only_the_recorded_process();
         #[cfg(windows)]
         a_windows_process_is_asked_only_by_its_identity();
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "linux")]
+        {
+            let fake = Running {
+                pid: u32::MAX,
+                started: 0,
+            };
+            let executable = std::env::current_exe().unwrap();
+            let listed = process_list(executable.clone()).unwrap();
+            assert!(!listed.contains(&fake));
+            assert_eq!(
+                ask(fake, &[&executable], Ask::Quit).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+            assert_eq!(
+                imp::signal(fake, Ask::Quit).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
             // Refused by name where there is no process list.
             let nobody = Running { pid: 1, started: 0 };

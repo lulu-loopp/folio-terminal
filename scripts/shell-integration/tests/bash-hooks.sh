@@ -97,8 +97,9 @@ expect() {
     fi
 }
 
-# The trace one command typed at one prompt is owed: the prompt that offered it,
-# the region the command opened, and the prompt that closed it.
+# This helper pipes input into an interactive bash, so EOF can expand PS1 again
+# in a way a terminal does not. `markers` removes only that exact orphan A/B
+# redraw, leaving the prompt that returned after the command in the trace.
 one_command_trace='7
 133;A
 133;B

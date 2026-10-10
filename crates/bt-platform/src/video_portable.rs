@@ -1,25 +1,15 @@
-//! **Video off Windows: a real first frame on a Mac, and nothing anywhere that
-//! can play one yet** (M4-4 landed here; M4-5 is still ahead).
+//! **Video off Windows** — AVFoundation posters and playback on macOS,
+//! GStreamer playback on Linux, and an explicit refusal elsewhere.
 //!
-//! `bt-app` names eleven things from `video` and `video::engine`, and every one
-//! of them is here. Three of them now do something: [`first_frame`],
-//! [`decode_first_frame`] and [`decode_first_frame_measured`] reach
-//! `AVAssetImageGenerator` on macOS through `src/macos_video.rs`, and answer
-//! `None` on a third platform exactly as they did before. The rest is still
-//! nothing: `Engine::open` answers `EngineError::Unsupported`, which the video
-//! pane reads as *this machine cannot play this*, prints under a black
-//! rectangle, and goes on.
+//! `bt-app` uses the shared frame and playback shapes in this module. macOS
+//! uses AVFoundation for stills and playback. Linux uses GStreamer for playback
+//! and keeps the existing `None` answer for still-frame requests.
 //!
-//! # Two platforms, one file, and where the cut is
+//! # Shared off-Windows contracts
 //!
-//! What is in *this* file is everything that is not a decoder — the frame's
-//! shape, the two timing constants, the cost breakdown, the fit, the giving-up,
-//! and the engine's refusal — because none of that is AVFoundation and all of it
-//! is the same sentence on a Mac and on a machine with neither backend. What is
-//! in `macos_video.rs` is the AVFoundation conversation and nothing else. The
-//! split follows `handoff.rs`, where `macos_handoff` sits beside
-//! `portable_handoff` and `lib.rs` picks one: a body per platform, one set of
-//! names, and a `cfg` on the arms rather than on the call sites.
+//! This file defines the off-Windows types and selects the platform arms.
+//! AVFoundation calls stay in `macos_video.rs` and `macos_player.rs`; GStreamer
+//! calls stay in `linux_player.rs`. The public shapes remain shared by both.
 //!
 //! # The one duplication in this ticket, and why it is here
 //!
@@ -32,22 +22,14 @@
 //! It is not the answer here because those two files are Media Foundation from
 //! their first line to their last — an `IMFMediaEngine` on a worker thread, a
 //! D3D11 texture, a staging read-back — and the types are interleaved with it
-//! rather than gathered. **M4-4 and M4-5 replace both files with AVFoundation**
+//! rather than gathered. At that stage M4-4 and M4-5 replaced both files with AVFoundation
 //! (`AVAssetImageGenerator`, then `AVPlayer` with audio, seeking and colour
 //! conversion), and the right moment to have one definition of a frame is when
 //! there are two real implementations to share it, not when there is one
 //! implementation and a refusal.
 //!
-//! **M4-4 is half of that moment and does not take it**, deliberately. There
-//! are now two real implementations of the *first frame* and still only one of
-//! the engine, so gathering [`VideoFrame`] into a shared file today would move
-//! it out from beside `Frame`, `EngineError` and `EngineState`, which would
-//! still be written twice — one definition shared and three copied is a worse
-//! shape to read than four copied. What holds the two [`VideoFrame`]s to each
-//! other in the meantime is not a convention: `tests/video_first_frame.rs` runs
-//! the same assertions against whichever arm the machine compiled, and
-//! `lib.rs`'s `macos_video_signature_tests` compares the two arms' text on the
-//! Windows machine, where only one of them can be built.
+//! The shared off-Windows types now serve both native player implementations.
+//! Source gates in `lib.rs` compare their public signatures with the Windows arm.
 
 use std::time::Duration;
 
@@ -143,17 +125,21 @@ mod macos_video;
 #[path = "macos_player.rs"]
 mod macos_player;
 
+/// **The GStreamer arm of [`engine`]** — the Linux player owns its pipeline on
+/// one worker and publishes only the newest decoded frame to the renderer.
+#[cfg(target_os = "linux")]
+#[path = "linux_player.rs"]
+mod linux_player;
+
 /// **The three first-frame doors, on a Mac.**
 #[cfg(target_os = "macos")]
 pub use macos_video::{decode_first_frame, decode_first_frame_measured, first_frame};
 
-/// **The three first-frame doors, on a platform with neither Media Foundation
-/// nor AVFoundation** — still the one silence.
+/// **The three first-frame doors, where no poster backend is wired.**
 #[cfg(not(target_os = "macos"))]
 pub use no_decoder::{decode_first_frame, decode_first_frame_measured, first_frame};
 
-/// **A third platform, where there is no decoder to ask** — Linux today, and
-/// the 0.5 remote server's host tomorrow.
+/// **A target with no still-frame decoder**, including Linux.
 ///
 /// `None` is the refusal, and it is the same `None` the Windows arm answers for
 /// a container it has no decoder for: the card shows the file's name and no
@@ -256,16 +242,11 @@ pub fn prewarm() {}
 /// The other half of [`prewarm`], and a no-op for the same reason.
 pub fn shutdown_media_session() {}
 
-/// **Playback: `AVPlayer` on a Mac, and a refusal on a platform with no
-/// decoder at all** (M4-5; `docs/DESIGN.md` §13.35).
+/// **Playback: AVPlayer on macOS, GStreamer on Linux, and refusal elsewhere.**
 ///
-/// The shape of [`super`] one level down. What is in *this* module is everything
-/// that is not a player — the four timing constants, the error, the state, the
-/// frame, the cost breakdown and the process ledger — because none of that is
-/// AVFoundation and all of it is the same sentence on a Mac and on a machine
-/// with neither backend. What is in `macos_player.rs` is the AVFoundation
-/// conversation and nothing else, and [`no_player`] is the third platform's
-/// silence.
+/// This module owns the shared timing, state, frame-cost and engine-ledger
+/// shapes. AVFoundation and GStreamer keep native pipeline work in their own
+/// platform modules.
 pub mod engine {
     use std::sync::Arc;
     use std::time::Duration;
@@ -333,25 +314,20 @@ pub mod engine {
         pub generation: u64,
     }
 
-    /// **Where one frame's microseconds went**, segment by segment — the twin of
-    /// the Windows arm's `FrameCost`, with the same four fields for the same
-    /// four reasons.
+    /// **Where one frame's microseconds went**, segment by segment — the Windows
+    /// arm's `FrameCost` shape, with backend-specific spans mapped to its fields.
     ///
-    /// The names are Media Foundation's shape because that is the arm that
-    /// measured the problem first and because a caller that matched on one name
-    /// here and another there would be two callers. What each one *means* on
-    /// AVFoundation is written on it. Nothing in this module reads these back or
-    /// decides anything by them.
+    /// Names follow Media Foundation's shape so callers need one set of fields.
+    /// Each backend maps its sample transfer, readback and copy spans to them.
+    /// Nothing in this module reads these values back or decides anything by them.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     pub struct FrameCost {
-        /// `copyPixelBufferForItemTime:` — the player handing over the picture
-        /// that is due, which is where its own decode is waited for.
+        /// Time spent obtaining the decoded sample from the player.
         pub transfer: Duration,
-        /// `CVPixelBufferLockBaseAddress` — the wait for a buffer the GPU may
-        /// still be writing, which is where a read-back's stall actually is.
+        /// Time spent making a GPU-backed sample readable on the CPU. Zero for
+        /// backends that publish CPU memory directly.
         pub readback: Duration,
-        /// The row-wise `memcpy` out of the locked rows into a `Vec`, with the
-        /// buffer's padding left where it is.
+        /// Time spent copying the sample into the packed BGRA frame.
         pub copy: Duration,
         /// How many frames the three spans above are the *last* of.
         pub frames: u64,
@@ -370,17 +346,21 @@ pub mod engine {
     #[cfg(target_os = "macos")]
     pub use super::macos_player::Engine;
 
-    /// **The arm for a platform with no player to ask** — still the one refusal.
-    #[cfg(not(target_os = "macos"))]
+    /// **The GStreamer arm**, which keeps the pipeline on its own worker.
+    #[cfg(target_os = "linux")]
+    pub use super::linux_player::Engine;
+
+    /// **The arm for a target with no player to ask** — still the one refusal.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub use no_player::Engine;
 
     /// **A video being played, on a platform that has nothing to play it with.**
     ///
-    /// Linux today, and the 0.5 remote server's host tomorrow. It refuses at
-    /// `open`, which is where the video pane already has somewhere to put a
+    /// A target without a player. It refuses at `open`, which is where the
+    /// video pane already has somewhere to put a
     /// reason: a line under a black rectangle naming the error, which is a
     /// different product from a pane that shows nothing.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     mod no_player {
         use std::path::Path;
         use std::time::Duration;
@@ -527,6 +507,6 @@ pub mod engine {
 
     /// One engine has been given back, and its place on the ledger — the
     /// player's own thread and constructor move the ledger through these.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(super) use crate::engine_ledger::{LedgerEntry, note_engine_shut_down};
 }

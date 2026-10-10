@@ -6,10 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-# **The first dependencies this crate has ever had off Windows** (M1-9), and
-# they are target-scoped so that a Linux build still links a `bt-platform` with
-# no dependencies at all — `docs/plans/port/macos-plan-2026-09-12.md` §4.6, the
-# rule the 0.5 remote server inherits.
+# Desktop dependencies are target-scoped: Cocoa on macOS, X11 and Wayland on Linux.
+# Other portable targets do not select these desktop backends. Linux does not build
+# AppKit bindings; macOS does not build the POSIX or Fontconfig paths below. Linux
+# server builds also include `fontdb` through this shared crate for font discovery.
 #
 # `objc2-app-kit` 0.3 gates every class behind a feature of its own name, so
 # `NSPasteboard` is asked for by name and nothing else in AppKit is generated;
@@ -1184,6 +1184,26 @@ windows = { version = "0.62.2", features = [
 # would need a `ManuallyDrop` around every argument to mean the same thing.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"] }
+wl-clipboard-rs = { version = "=0.9.4", default-features = false }
+x11rb = { version = "=0.13.2", default-features = false, features = ["xkb", "randr", "resource_manager", "xfixes"] }
+xkeysym = { version = "=0.2.1", default-features = false }
+# `fontdb` already comes through `glyphon`; this direct edge reads the configured
+# Linux font directories without adding a package or notice.
+fontdb.workspace = true
+# Linux loads the installed GStreamer 1.x runtime at playback time. `libloading`
+# is already in the lock file and THIRD-PARTY-NOTICES.md; no dev headers are added.
+libloading.workspace = true
+# The desktop appearance is the XDG Settings portal's one process-wide fact.
+# zbus is pure Rust and stays Linux-scoped. Its Tokio integration runs on the
+# named worker's current-thread runtime, so the subscription adds no executor
+# thread outside the one the application can retire. The three are declared in
+# the workspace table under exact pins, like the rest of this workspace's pins.
+futures-util.workspace = true
+tokio.workspace = true
+zbus.workspace = true
 
 # This crate is the deliberately narrow unsafe boundary for native Win32 APIs. All other
 # first-party crates continue inheriting the workspace-wide `unsafe_code = "deny"` policy.

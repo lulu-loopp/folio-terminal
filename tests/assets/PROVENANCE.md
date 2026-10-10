@@ -1,6 +1,6 @@
 # Where the files in `tests/assets/` came from
 
-29 tracked files: 11 here and 18 under `preview-samples/`. Each is one of three
+30 tracked files: 12 here and 18 under `preview-samples/`. Each is one of three
 things — **own** (written here), **upstream** (someone else's, under someone
 else's licence), or **generated** (produced from something else in this
 directory).
@@ -13,7 +13,7 @@ Several are compiled into the test binaries with `include_bytes!` /
 `include_str!` (`crates/bt-app/src/pdf.rs`, `preview.rs`, `main.rs`), so they are
 not merely files in a folder: they are part of what the test suite asserts on.
 
-## The eleven at the top
+## The twelve at the top
 
 | File | | |
 |---|---|---|
@@ -84,6 +84,22 @@ ffmpeg -f lavfi -i color=c=black:s=160x120:r=5:d=0.2 \
 | `avi` | `-c:v mpeg4 -vtag XVID -q:v 8 -pix_fmt yuv420p` |
 | `wmv` | `-c:v wmv2 -b:v 60k -pix_fmt yuv420p` |
 
+### The longer-audio stream
+
+`folio-video-unequal-streams.ts` is generated from FFmpeg's `lavfi` color and
+sine sources. It carries one second of H.264 video and three seconds of AAC
+audio in MPEG-TS, which declares no duration to GStreamer on the tested Linux
+stack. The playback test checks that the video appsink ending does not end the
+media before the longer audio track and that the engine ends on pipeline EOS.
+
+```
+ffmpeg -hide_banner -loglevel error \
+       -f lavfi -i 'color=c=orange:s=160x120:r=10:d=1' \
+       -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=3' \
+       -map 0:v:0 -map 1:a:0 -c:v libopenh264 -b:v 250k -c:a aac \
+       -f mpegts -y folio-video-unequal-streams.ts
+```
+
 ### The animation
 
 | File | | |
@@ -127,6 +143,6 @@ written for its case; none is a real-world file.
 
 ## Nothing here is undetermined
 
-Every one of the 28 files was read. If a file is added to this directory, it
+Every one of the 30 files was read. If a file is added to this directory, it
 belongs in this table before it belongs in a commit — and if it ever comes from
 somewhere else, it belongs in `THIRD-PARTY-NOTICES.md` too.
