@@ -831,6 +831,10 @@ impl Runtime<'_> {
                             caret_lit: edit.caret_lit,
                             refused: frame.refused,
                         }),
+                        refusal: frame
+                            .refusal
+                            .as_ref()
+                            .map(|(sentence, width)| (sentence.as_str(), *width)),
                     },
                 )
             })

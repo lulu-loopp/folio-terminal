@@ -2247,6 +2247,10 @@ text_entries! {
     /// The refused address's fact line when the scheme is not why it was refused, or there is
     /// no scheme to name. The spelling that *does* name one is `web_fail_blocked_scheme` below.
     WebFailBlockedSay,
+    /// What a page's address field says when the path typed into it names no
+    /// file on this machine (M-SWEEP-048) — said in the field, at its end, in
+    /// the field's refused ink.
+    WebAddressNoSuchFile,
     /// The blocked card's fact when the text is not an address at all (F-SWEEP-2-048).
     WebFailAddressInvalidSay,
     /// The `Download refused` card's two sentences. The second is the fact, not
@@ -5361,6 +5365,11 @@ impl Text {
                 "This address does not open in a preview.",
                 "这个地址不在预览中打开。",
             ),
+            Self::WebAddressNoSuchFile => pick(
+                lang,
+                "No such file",
+                "No such file", // zh: pending M-SWEEP-048
+            ),
             Self::WebFailAddressInvalidSay => {
                 pick(lang, "This address is not valid.", "这个地址无效。")
             }
@@ -6183,6 +6192,9 @@ impl Text {
         (Self::UpdateFailedUndone, HostPlatform::MacOs),
         (Self::UpdateCardUndone, HostPlatform::Windows),
         (Self::UpdateCardUndone, HostPlatform::MacOs),
+        // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
+        (Self::WebAddressNoSuchFile, HostPlatform::Windows),
+        (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
     ];
 }
 

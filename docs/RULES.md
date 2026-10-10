@@ -450,7 +450,9 @@ text surface so a patch never gets a text area) and by declaring which chrome
 paints it. **A document's links are answered by the terminal's table**
 (2026-09-23): `preview::link_action` says what a target names and
 `reference_activation` — the table row 6 reads — says what a press spends; plain
-click stays in the window, `Ctrl`/`⌘`+click hands it over.
+click stays in the window, `Ctrl`/`⌘`+click hands it over. A `file:` link this
+machine names no path from (a share's `file://server/…` off Windows) is the terminal's
+own row for that URI, never the anchor's nothing (M-SWEEP-048).
 **From.** §7.1.3 *the file tree, the preview minimum contract, and the tab-level
 shared buffer pool*; §7.10 *a local file can also be a web page*; §7.32 *when a
 name cannot answer, ask the file itself: text is decided by content, and a page's
@@ -1782,6 +1784,12 @@ again on every theme or setting change; nothing else about a page is changed.
 (0.4.5 ticket 60; owner's ruling 2026-09-25, option A): only for a profile whose receipt
 says a page has committed there, one spare per process, never replenished, handed over by
 `WebSeat::rehost`; the controller stays on the window thread (§5.2, ruling 2026-09-24).
+2026-10-09 *a path typed into a page's address field is a file's address on every
+platform* (M-SWEEP-048): a string that parses as a local path on this machine —
+absolute, `~`-rooted, or `./`/`../`-relative to the folder of the local page the seat
+shows — is never a search phrase; a page opens in the seat as before, any other file
+opens as a document on the same pane through the document door, and a path that names
+no file is refused in the field with the words *No such file*. A share is refused.
 2026-10-09 *a page that answers with an error shows that page* (T-WEB-404-SAYS-UNKNOWN,
 coordinator's ruling 2026-10-09): a navigation a server answered — an HTTP status is present
 (`WebEvent::NavigationCompleted::http_status`: WebView2's `HttpStatusCode`, the main-frame

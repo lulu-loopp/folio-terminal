@@ -3665,9 +3665,9 @@ fn resolve_document_pictures(
             preview::LinkAction::Web(url) => MarkdownPicture::Remote(url),
             // A picture addressed by a scheme this window has no reader for is nothing to draw:
             // a source is fetched, never handed over.
-            preview::LinkAction::Nowhere | preview::LinkAction::Scheme(_) => {
-                MarkdownPicture::Nowhere
-            }
+            preview::LinkAction::Nowhere
+            | preview::LinkAction::Scheme(_)
+            | preview::LinkAction::Unnamed(_) => MarkdownPicture::Nowhere,
             // **A source this window will not go looking at** (route E of the untrusted-path
             // audit, 2026-09-08). `![](\\attacker\share\x.png)` inside a document rendered on a
             // hover used to reach `ask` — which is `request_peek_pixels` — and the picture was
@@ -19738,6 +19738,10 @@ struct PreviewRailFrame {
     /// written in `--err` where it is being typed. It moved down here with the
     /// field on 2026-08-24.
     refused: bool,
+    /// **What the commit said about the draft standing in the field** — the
+    /// sentence and its measured width — when only the commit could know it
+    /// (M-SWEEP-048: a path that names no file). Drawn at the field's end.
+    refusal: Option<(String, f32)>,
     flip_to_source: bool,
     web: seats::WebHeadState,
 }
@@ -22986,7 +22990,17 @@ struct TabRename {
     /// itself, and typing the refused name back in shows the refusal again —
     /// which is right, because it is still refused. One field, and no hook in
     /// any verb.
-    refused: Option<(String, files::NewNameRefusal)>,
+    refused: Option<(String, EditorRefusal)>,
+}
+
+/// The two kinds of refusal a submission of [`TabRename`]'s draft can raise —
+/// one per door that refuses at the commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorRefusal {
+    /// A new entry's name the folder would not take (D8(a)).
+    NewName(files::NewNameRefusal),
+    /// A page's address the disk said no to (M-SWEEP-048).
+    Address(webhost::AddressRefusal),
 }
 
 impl TabRename {
@@ -23333,12 +23347,40 @@ impl TabRename {
     /// The draft is kept with it; see [`Self::refused`] for why that is the
     /// whole of the invalidation.
     fn refuse(&mut self, refusal: files::NewNameRefusal) {
-        self.refused = Some((self.field.text().to_owned(), refusal));
+        self.refused = Some((
+            self.field.text().to_owned(),
+            EditorRefusal::NewName(refusal),
+        ));
+    }
+
+    /// [`Self::refuse`] for a page's address: what the disk said at the commit,
+    /// kept against the draft it was said about.
+    fn refuse_address(&mut self, refusal: webhost::AddressRefusal) {
+        self.refused = Some((
+            self.field.text().to_owned(),
+            EditorRefusal::Address(refusal),
+        ));
     }
 
     /// The refusal standing against the draft **as it is now** — `None` the
     /// moment a character changes it.
     fn refusal(&self) -> Option<files::NewNameRefusal> {
+        match self.standing_refusal()? {
+            EditorRefusal::NewName(refusal) => Some(refusal),
+            EditorRefusal::Address(_) => None,
+        }
+    }
+
+    /// [`Self::refusal`] for a page's address field.
+    fn address_refusal(&self) -> Option<webhost::AddressRefusal> {
+        match self.standing_refusal()? {
+            EditorRefusal::Address(refusal) => Some(refusal),
+            EditorRefusal::NewName(_) => None,
+        }
+    }
+
+    /// Whichever refusal stands against the draft as it is now.
+    fn standing_refusal(&self) -> Option<EditorRefusal> {
         self.refused
             .as_ref()
             .filter(|(draft, _)| draft == self.field.text())
@@ -26477,6 +26519,7 @@ fn preview_reference_row(target: &str, document: &Path) -> ReferenceRow {
         preview::LinkAction::Web(url) => ReferenceRow::Web(url),
         preview::LinkAction::Refused(path) => ReferenceRow::Unasked(path, None),
         preview::LinkAction::Scheme(uri) => ReferenceRow::Scheme(uri),
+        preview::LinkAction::Unnamed(_) => ReferenceRow::Unnamed,
         preview::LinkAction::Nowhere => ReferenceRow::Nothing,
     }
 }
@@ -69084,6 +69127,16 @@ fn profile_banner_name(id: &str) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
+/// An executable as [`fallback_banner`] names it: by file name, never by path
+/// (`pwsh.exe`, `powershell.exe`, `sh`).
+fn executable_banner_name(program: &std::ffi::OsStr) -> String {
+    Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// The first line of a pane whose profile's shell would not start —
 /// `M2-restart-shell-contract.md` §3's "首行可见降级横幅", and §5#3's ruling that
 /// the swap is *never* silent.
@@ -69127,21 +69180,18 @@ fn profile_banner_name(id: &str) -> String {
 /// on their prompt line, and a person who wants to know *what they are typing
 /// into now* learns it from exactly this.
 fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: &str) -> String {
-    // The record's `started` is `powershell.exe`, and `fallback_profile()` is the
-    // profile that resolves to it — one shell, and the name the user knows it
-    // by is the profile's.
-    debug_assert!(
-        fallback
-            .started
-            .eq_ignore_ascii_case(bt_pty::WINDOWS_POWERSHELL)
-    );
+    // The record's `started` is this platform's last-resort shell
+    // (`powershell.exe` on Windows, `/bin/sh` elsewhere), and
+    // `fallback_profile()` is the profile that resolves to it — one shell, and
+    // the name the user knows it by is the profile's.
+    debug_assert_eq!(fallback.started, bt_pty::LAST_RESORT_SHELL);
     let (requested, started) = if requested == profiles::fallback_profile_id() {
         // **The one case the profiles cannot name**, and it is reachable rather
-        // than theoretical: `BT_SHELL` points the PowerShell profile at a shell
-        // that is not there, or a `pwsh` install is removed between sessions, and
-        // the swap happens *inside* one profile. Both names would be "PowerShell",
-        // and "PowerShell failed to start; using PowerShell instead" is a sentence
-        // that answers nothing.
+        // than theoretical: `BT_SHELL` points the floor profile at a shell that
+        // is not there, or a `pwsh` install is removed between sessions, and the
+        // swap happens *inside* one profile. Both names would be the floor's,
+        // and "PowerShell failed to start; using PowerShell instead" is a
+        // sentence that answers nothing.
         //
         // So the two executables are named, which is the only thing that differs
         // here, and by file name rather than path: `pwsh.exe` → `powershell.exe`
@@ -69149,12 +69199,8 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: &str) -> String 
         // the launcher's bookkeeping — the same reason the rest of this line does
         // not carry one.
         (
-            Path::new(&fallback.requested)
-                .file_name()
-                .unwrap_or(fallback.requested.as_os_str())
-                .to_string_lossy()
-                .into_owned(),
-            fallback.started.to_owned(),
+            executable_banner_name(&fallback.requested),
+            executable_banner_name(std::ffi::OsStr::new(fallback.started)),
         )
     } else {
         (

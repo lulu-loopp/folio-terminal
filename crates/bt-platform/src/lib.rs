@@ -24985,6 +24985,7 @@ mod macos_player_signature_tests {
             "set_muted",
             "set_volume",
             "wait_for_metadata",
+            "state_reaching",
             "shutdown",
         ] {
             let windows = verb(WINDOWS_ARM, door);

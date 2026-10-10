@@ -7562,6 +7562,14 @@ pub enum LinkAction {
     /// [`crate::preview_link_activation`]. It carries the target as written, trimmed, because
     /// that is what is handed over.
     Scheme(String),
+    /// **A `file:` link that names no path on this machine** — a share's `file://server/…` off
+    /// Windows, where [`bt_platform::file_uri_to_path`] reads no path out of a remote authority.
+    ///
+    /// The terminal's own row for the same URI (owner ruling 2026-09-23: a document link answers
+    /// the same row as a terminal reference): a request was made, so `Ctrl` is told it names
+    /// nothing here, where [`Self::Nowhere`] is an anchor or an empty target that asked for
+    /// nothing. Carries the target as written, trimmed.
+    Unnamed(String),
     /// Nothing this window will act on.
     Nowhere,
 }
@@ -7603,7 +7611,8 @@ pub enum LinkAction {
 /// * `file:` is unwrapped to the path it carries by the one `file:` reader this
 ///   product has, [`bt_platform::file_uri_to_path`] — so `file:///Users/alice/a.md`
 ///   is `/Users/alice/a.md` on a Mac and `file:///C:/a.md` is `C:\a.md` on Windows,
-///   each platform's own grammar (B-AUDIT-046 PRV-2);
+///   each platform's own grammar (B-AUDIT-046 PRV-2); a `file:` URI that reader
+///   names no path from is [`LinkAction::Unnamed`], the terminal's row for it;
 /// * anything else carrying a `scheme:` is [`LinkAction::Scheme`], *except*
 ///   that a bare Windows drive letter (`C:\x`) is a path and not a scheme — one
 ///   letter before the colon is a drive ([`handover_scheme`]);
@@ -7624,7 +7633,7 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
     let lower = target.to_ascii_lowercase();
     let path = if lower.starts_with("file:") {
         let Some(path) = bt_platform::file_uri_to_path(target) else {
-            return LinkAction::Nowhere;
+            return LinkAction::Unnamed(target.to_owned());
         };
         path
     } else if handover_scheme(target).is_some() {
@@ -7698,7 +7707,7 @@ fn resolved_link(path: PathBuf) -> LinkAction {
 /// wrong tool twice over: it asks the disk, so it fails for a link to a file
 /// that does not exist yet, and it returns a `\\?\` extended path that no
 /// caption should ever show.
-fn normalized(path: &Path) -> PathBuf {
+pub(crate) fn normalized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -10606,6 +10615,32 @@ mod tests {
         );
         assert_eq!(link_action("#section", document), LinkAction::Nowhere);
         assert_eq!(link_action("   ", document), LinkAction::Nowhere);
+    }
+
+    /// RED (M-SWEEP-048) — **a `file:` link to another machine is a request, on
+    /// every platform.**
+    ///
+    /// On Windows the platform's reader names the share's own path, which this
+    /// window refuses to read unasked; off Windows it names no path at all, and
+    /// the link is the terminal's row for a `file:` URI with no path here. It
+    /// was [`LinkAction::Nowhere`] there — the answer an anchor gets — so a
+    /// document's share link answered nothing under `Ctrl` where the terminal's
+    /// same reference answered `Blocked`.
+    ///
+    /// MUTATION: return `LinkAction::Nowhere` from `link_action`'s `file:` arm
+    /// when the reader names no path, and the Mac row goes red.
+    #[test]
+    fn a_file_link_to_another_machine_is_a_request_on_every_platform() {
+        let document = bt_testpath::temp_path("m-sweep-share-links").join("说明.md");
+        let target = "file://server/share/report.md";
+        assert_eq!(
+            link_action(target, &document),
+            crate::test_support::on_this_host(
+                LinkAction::Refused(PathBuf::from(r"\\server\share\report.md")),
+                LinkAction::Unnamed(target.to_owned()),
+            ),
+            "{target} in a document"
+        );
     }
 
     /// RED (B-AUDIT-046 PRV-2) — **a `file:` link names the path its platform
