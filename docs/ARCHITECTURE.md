@@ -523,7 +523,9 @@ those manifests actually practise, restated here from what they say:
 - **`bt_term::adapter_boundary_tests`** — `bt-term`'s `adapter` and
   `cell_capture` module trees may not name `bt_doc`, `bt_detect` or
   `bt_viewport`. The vendor seam answers "what did the terminal do", never
-  "what shall we do about it".
+  "what shall we do about it". Its CI canary points the already-built test at
+  a temporary copy of `bt-term`'s sources and plants the forbidden import there,
+  so proving the guard can fail does not rebuild the crate it guards.
 - **Adding an edge edits this file.** The direction is enforced by
   **`scripts/ci/check-crate-edges.ps1`** over
   `cargo metadata --no-deps --locked --offline`: every normal and build

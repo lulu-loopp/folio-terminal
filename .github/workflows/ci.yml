@@ -671,24 +671,22 @@ jobs:
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
       # report terminal facts; importing document, detection, or viewport policy there recreates
       # the layering bug Task 00b removed. `bt_term::adapter_boundary_tests` holds the rule; the
-      # canary plants the import and requires that test to fail.
+      # canary plants the import in a temporary copy and requires the already-built test to fail.
       - name: the adapter boundary gate can actually fail
         shell: pwsh
         run: |
-          $file = "crates/bt-term/src/adapter.rs"
-          $original = [IO.File]::ReadAllBytes($file)
-          try {
-            [IO.File]::AppendAllText($file, "`nuse bt_doc::HistoryDocument as _AdapterBoundaryProbe;`n")
-            $said = (cargo test -p bt-term --lib --locked -- adapter_boundary_tests 2>&1 | Out-String)
-            $code = $LASTEXITCODE
-            if ($code -eq 0) {
-              throw "the adapter boundary test accepted a planted bt_doc import"
-            }
-            if ($said -notmatch 'the adapter seam names a policy crate') {
-              throw "the probe failed without the adapter boundary test refusing it: $said"
-            }
-          } finally {
-            [IO.File]::WriteAllBytes($file, $original)
+          $copy = Join-Path $env:RUNNER_TEMP "folio-adapter-boundary-$([Guid]::NewGuid().ToString('N'))"
+          Copy-Item -LiteralPath "crates/bt-term/src" -Destination $copy -Recurse
+          $file = Join-Path $copy "adapter.rs"
+          [IO.File]::AppendAllText($file, "`nuse bt_doc::HistoryDocument as _AdapterBoundaryProbe;`n")
+          $env:BT_ADAPTER_BOUNDARY_SOURCE_ROOT = $copy
+          $said = (cargo test -p bt-term --lib --locked -- adapter_boundary_tests 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          if ($code -eq 0) {
+            throw "the adapter boundary test accepted a planted bt_doc import"
+          }
+          if ($said -notmatch 'the adapter seam names a policy crate') {
+            throw "the probe failed without the adapter boundary test refusing it: $said"
           }
           exit 0
 
