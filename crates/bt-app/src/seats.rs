@@ -19627,7 +19627,7 @@ pub struct PreviewRailContent<'a> {
     /// **The sentence the commit refused the open draft with, and its measured
     /// width** (M-SWEEP-048) — drawn at the field's right end in the refused
     /// ink, and the draft is laid out in what is left of the field
-    /// ([`preview_address_draft_box`]).
+    /// ([`preview_address_runs`]).
     pub refusal: Option<(&'a str, f32)>,
 }
 

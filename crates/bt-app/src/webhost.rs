@@ -6605,14 +6605,16 @@ mod search_tests {
             judge_address("./notes.md", engine, LocalFrame::default()),
             AddressVerdict::Refuse
         );
-        // A network path never becomes a local page: it is refused at the mint,
-        // which is where this product has always refused one.
+        // A network path never becomes a local page: where `\` is a separator
+        // (Windows) the spelling is a share, and `local_path_of` names no local
+        // path for it, so `judge_address` refuses it; elsewhere it is no path at
+        // all and goes to the address door.
         assert!(
             !matches!(
                 judged(r"\\server\share\report.html"),
                 AddressVerdict::LocalPage(_)
             ),
-            "a network path is refused at the mint"
+            "a network path is never a local page"
         );
     }
 }
