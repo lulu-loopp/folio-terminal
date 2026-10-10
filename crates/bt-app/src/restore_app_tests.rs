@@ -935,7 +935,7 @@ fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
     let (second, other) = a_file_being_edited("g7-saved-第二");
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
     let (other_tab, _) = tab_with_a_preview(2, vec![other]);
-    let mut tabs = vec![tab, other_tab];
+    let mut tabs = [tab, other_tab];
     let recovery = disk_scratch("g7-recovered-unused").join(preview::RECOVERED_FOLDER);
 
     let kept = keep_unsaved_edits_over(&mut tabs, &recovery, SystemTime::now());
