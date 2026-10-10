@@ -2966,7 +2966,11 @@ mod tests {
         std::fs::write(&path, journal.encode()).unwrap();
         watch(
             &gate,
-            (&path, &path.with_file_name(crate::update_txn::UNKEPT_FILE)),
+            (
+                &path,
+                &path.with_file_name(crate::update_txn::UNKEPT_FILE),
+                &path.with_file_name("health-test"),
+            ),
             txn,
             Duration::from_millis(5),
             &|| {},

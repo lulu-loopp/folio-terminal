@@ -612,9 +612,10 @@ fn unfinished(seen: &Sight, home: &Home, held: bool) -> Failure {
 /// **The card of a transaction committed after its trial held a person's
 /// change** (0.4.8 E4, R3): the journal is retired `committed` and its body
 /// notes the version from the trial's intermediate mark (`Home::unkept`,
-/// `update_trial`), copied by the writer that recorded `Committed` before a
-/// macOS retirement can remove the folder. `None` for every other journal or
-/// one that notes no version.
+/// `update_trial`), copied by a settled commit writer or re-read by the holder
+/// after a live trial's watch made its final take-back decision, before a macOS
+/// retirement can remove the folder. `None` for every other journal or one
+/// that notes no version.
 fn changes_not_kept(seen: &Sight, world: &mut impl World) -> Option<Failure> {
     let Sight::Known(journal) = seen else {
         return None;
@@ -2241,6 +2242,7 @@ mod tests {
                 (
                     &journal,
                     &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    &journal.with_file_name("health-test"),
                 ),
                 txn(),
                 std::time::Duration::from_millis(5),

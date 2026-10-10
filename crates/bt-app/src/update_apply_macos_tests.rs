@@ -1021,20 +1021,118 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     assert_eq!(journal.header().outcome, HeaderOutcome::Committed);
 }
 
-/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS) — **a trial that held a person's
-/// change leaves its version mark; the macOS holder commits it into the
-/// journal before retirement removes `H/<txn>`; and the committed build's
-/// next start shows E4's card once.**
+/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS round 2) — **a live trial that held a
+/// person's change reads `Committed`, releases the change and takes its mark
+/// back; the macOS holder re-reads the mark after that decision, before it
+/// deletes `H/<txn>`, so the next start shows no false card.**
 ///
-/// MUTATIONS: make `Txn::record_saying` record `Committed` without
-/// `noting_unkept` (the folder removes the only fact, so no card); make
-/// `changes_not_kept` ignore the field (the field is present, but no card).
+/// MUTATION: restore the round-1 capture in `Txn::record_saying` by reading the
+/// mark and calling `next.noting_unkept(unkept)` when `phase == Committed`:
+/// the retired field is `Some` and startup returns a false `ChangesNotKept`
+/// card.
+#[test]
+fn a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("commit-kept-设置");
+    let children = Children::default();
+    let watcher = Arc::new(Mutex::new(None));
+    let (home, txn) = (install.home.clone(), install.txn);
+    let trial_children = children.clone();
+    let launched_watcher = Arc::clone(&watcher);
+    let world = launching(Box::new(move |bundle, args| {
+        let nonce = trial_nonce(args);
+        let pid = trial_children.start_trial(bundle, args);
+        let started = install_flip::started_of(pid);
+        let gate: &'static crate::update_trial::Gate =
+            Box::leak(Box::new(crate::update_trial::Gate::new()));
+        assert!(gate.defer(true, crate::update_trial::Writer::Settings));
+        let journal = home.journal();
+        let mark = home.unkept(txn);
+        let receipt_path = home.receipt_path(txn, &nonce);
+        let handle = std::thread::spawn(move || {
+            crate::update_trial::watch(
+                gate,
+                (&journal, &mark, &receipt_path),
+                txn,
+                Duration::from_millis(5),
+                &|| {},
+                None,
+                &mut crate::update_trial::watchdog_asleep(),
+            );
+        });
+        *launched_watcher.lock().unwrap() = Some(handle);
+        while !home.unkept(txn).exists() {
+            std::thread::yield_now();
+        }
+        let receipt = Receipt {
+            txn,
+            nonce,
+            pid,
+            version: "2.0".to_owned(),
+            started,
+        };
+        install_txn::durable_create(&home.receipt_path(txn, &nonce), &receipt.encode()).unwrap();
+        Ok(())
+    }));
+    let (ended, hands) = applied(install.road(limits(5_000, 5_000)), world);
+    watcher
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the trial watch started")
+        .join()
+        .unwrap();
+    assert_eq!(ended, Ended::Committed, "{:?}", hands.said);
+    assert!(
+        !install.home.transaction(install.txn).exists(),
+        "macOS retirement removed the intermediate mark"
+    );
+    assert_eq!(
+        install.on_disk().unwrap().body.unkept.as_deref(),
+        None,
+        "the watch took the provisional mark back before retirement"
+    );
+
+    let journal = install.home.journal();
+    let mut starting = StartWorld {
+        agents: install.agents.clone(),
+        said: Vec::new(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed.join(EXE),
+            home: &install.home,
+            argv: &[],
+            trial: None,
+            failed: None,
+            journal_held: None,
+        },
+        &mut starting,
+    );
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", starting.said);
+    };
+    assert_eq!(failed, None, "kept changes produce no card");
+    assert!(!journal.exists(), "the committed journal is retired");
+
+    drop(children);
+}
+
+/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS) — **a trial that ended after leaving its
+/// mark cannot take it back; the settled macOS commit records the mark before
+/// retirement deletes `H/<txn>`, and the next start shows E4's card once.**
+///
+/// MUTATIONS: make `note_settled_unkept` record `None` (the folder removes the
+/// only fact, so no card); make `changes_not_kept` ignore the field (the field
+/// is present, but no card).
 #[test]
 fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
     if !on_macos() {
         return;
     }
-    let install = Install::new("commit-unkept");
+    let install = Install::new("commit-unkept-设置");
     let (home, txn) = (install.home.clone(), install.txn);
     let version = crate::version::VERSION;
     let world = launching(Box::new(move |_, args| {
@@ -1059,7 +1157,7 @@ fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
     assert_eq!(
         install.on_disk().unwrap().body.unkept.as_deref(),
         Some(version),
-        "the committed outcome carries the fact past the folder"
+        "the settled committed outcome carries the fact past the folder"
     );
 
     let journal = install.home.journal();

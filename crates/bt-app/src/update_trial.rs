@@ -33,11 +33,14 @@
 //! retires it removes the transaction's folder). So once a document a person
 //! edits is held ([`Writer::is_a_persons_change`]), the watch marks the
 //! transaction's folder (`H\<txn>\unkept`, `update_txn::Home::unkept`). The
-//! journal writer that commits reads the mark into `Body::unkept` before a
-//! macOS retirement can remove the folder; the start that retires the
-//! committed journal says that the changes made before the commit were not
-//! kept (`update_startup`). The watch still takes the intermediate mark back
-//! when it reads the commit.
+//! A writer that commits with no live trial reads the final mark into
+//! `Body::unkept`. A live trial's watch first takes the intermediate mark back
+//! when it reads the commit and releases the changes, then removes its receipt
+//! as the decision acknowledgement; the holder re-reads the mark before
+//! retirement. Thus the journal records only the mark left by the final
+//! decision, before a macOS retirement can remove the folder. The next start
+//! says that the changes made before the commit were not kept
+//! (`update_startup`).
 //!
 //! **The watch** is a worker of its own (`folio-trial-watch`, below normal):
 //! one read of `H\journal.json` every [`WATCH_INTERVAL`] through `file_reads`
@@ -595,7 +598,7 @@ pub(crate) fn begin_watch(wake: impl Fn() + Send + 'static) {
                 if last { Some(&mut commit) } else { None };
             watch(
                 &GATE,
-                (&journal, &home.unkept(txn)),
+                (&journal, &home.unkept(txn), &home.receipt_path(txn, &nonce)),
                 txn,
                 WATCH_INTERVAL,
                 &wake,
@@ -698,10 +701,11 @@ enum Read {
 /// the mark** (0.4.8 E4): after step 1, while a person's change is held and
 /// the transaction undecided, `unkept` is written once, naming this build's
 /// version (0.4.8 E5: what a rollback's card names), asked again each turn
-/// while the write fails; a commit read takes it back.
+/// while the write fails; a commit read takes it back, then removes the
+/// receipt as the holder's acknowledgement that this decision is final.
 pub(crate) fn watch(
     gate: &Gate,
-    (journal, unkept): (&Path, &Path),
+    (journal, unkept, receipt): (&Path, &Path, &Path),
     txn: TxnId,
     interval: Duration,
     wake: &dyn Fn(),
@@ -716,12 +720,21 @@ pub(crate) fn watch(
     let mut said_commit_refusal = false;
     let mut said_mark_refusal = false;
     let mut taking_back: Option<Instant> = None;
+    let mut acknowledging: Option<Instant> = None;
     loop {
         // A commit was read and the mark is still to be taken back: only
         // that, each turn, until it goes or the window passes (0.4.8 E4).
         'turn: {
             if let Some(until) = taking_back {
                 if mark_taken_back(unkept, txn, until) {
+                    taking_back = None;
+                    acknowledging = Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
+                } else {
+                    break 'turn;
+                }
+            }
+            if let Some(until) = acknowledging {
+                if decision_acknowledged(receipt, txn, until) {
                     return;
                 }
                 break 'turn;
@@ -791,7 +804,9 @@ pub(crate) fn watch(
                             wake();
                         }
                         if !gate.has_marked_unkept() {
-                            return;
+                            acknowledging =
+                                Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
+                            break 'turn;
                         }
                         taking_back =
                             Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
@@ -840,7 +855,9 @@ pub(crate) fn watch(
                         wake();
                     }
                     if !gate.has_marked_unkept() {
-                        return;
+                        acknowledging =
+                            Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
+                        break 'turn;
                     }
                     taking_back = Some(Instant::now() + crate::update_apply::JOURNAL_HELD_WITHIN);
                     break 'turn;
@@ -900,6 +917,25 @@ fn mark_taken_back(unkept: &Path, txn: TxnId, until: Instant) -> bool {
         Err(failure) => {
             eprintln!(
                 "BT_UPDATE_TRIAL transaction {txn} is committed, and its mark could not be taken back: {failure}"
+            );
+            true
+        }
+    }
+}
+
+/// The live trial has made the commit decision and dealt with its mark. Its
+/// receipt is no longer evidence another holder needs once `Committed` is
+/// durable, so removing it acknowledges that the holder may re-read the mark
+/// and retire the transaction. A refused removal is retried for the same
+/// window as the mark; if it remains, the holder preserves the transaction
+/// rather than guessing.
+fn decision_acknowledged(receipt: &Path, txn: TxnId, until: Instant) -> bool {
+    match bt_platform::install_txn::durable_remove(receipt) {
+        Ok(()) => true,
+        Err(_) if Instant::now() < until => false,
+        Err(failure) => {
+            eprintln!(
+                "BT_UPDATE_TRIAL transaction {txn} made its commit decision, but could not acknowledge it: {failure}"
             );
             true
         }
@@ -1468,6 +1504,7 @@ mod tests {
                 (
                     &watched,
                     &watched.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    &watched.with_file_name("health-test"),
                 ),
                 TXN,
                 Duration::from_millis(5),
@@ -1556,7 +1593,7 @@ mod tests {
             assert!(gate.owes_unkept_mark());
             watch(
                 &gate,
-                (&journal, &mark),
+                (&journal, &mark, &journal.with_file_name("health-test")),
                 TXN,
                 Duration::from_millis(5),
                 &|| {},
@@ -1636,6 +1673,7 @@ mod tests {
             (
                 &journal,
                 &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                &journal.with_file_name("health-test"),
             ),
             TXN,
             Duration::ZERO,
@@ -1689,6 +1727,7 @@ mod tests {
                 (
                     &journal,
                     &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    &journal.with_file_name("health-test"),
                 ),
                 TXN,
                 Duration::from_millis(5),
@@ -1739,6 +1778,7 @@ mod tests {
                 (
                     &watched,
                     &watched.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    &watched.with_file_name("health-test"),
                 ),
                 TXN,
                 Duration::from_millis(5),
@@ -1927,7 +1967,11 @@ mod tests {
                     };
                     watch(
                         gate,
-                        (&home.journal(), &home.unkept(TXN)),
+                        (
+                            &home.journal(),
+                            &home.unkept(TXN),
+                            &home.receipt_path(TXN, &nonce()),
+                        ),
                         TXN,
                         Duration::from_millis(10),
                         &|| {},
@@ -2053,12 +2097,14 @@ mod tests {
         gate.keep_receipt(job.clone());
         gate.await_receipt(store.write_receipt(job.clone()).expect("a writer"));
         let watched = journal.clone();
+        let acknowledged = job.path.clone();
         let watcher = std::thread::spawn(move || {
             watch(
                 gate,
                 (
                     &watched,
                     &watched.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    &acknowledged,
                 ),
                 TXN,
                 Duration::from_millis(5),
@@ -2078,6 +2124,7 @@ mod tests {
         assert_eq!(std::fs::read(&job.path).unwrap(), job.bytes);
         std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
         watcher.join().unwrap();
+        assert!(!job.path.exists(), "the final decision retires the receipt");
         store.close();
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2354,6 +2401,7 @@ mod tests {
             (
                 &journal,
                 &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                &journal.with_file_name("health-test"),
             ),
             TXN,
             Duration::ZERO,

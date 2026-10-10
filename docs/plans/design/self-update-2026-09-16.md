@@ -3239,3 +3239,28 @@ any start can read it. The same additive body field E5 introduced is the carrier
 - **Compatibility.** `unkept` keeps its grammar row: body, additive since 0.4.8, now written by a
   rescue lock holder or the reserved trial. The frozen 0.4.6 and 0.4.7 readers ignore it and settle
   the same committed journal forward, losing only the card.
+
+## Revision 2026-10-10 (l) — the committed card records the trial watch's final decision
+
+Revision (k)'s capture at the `Committed` write was too early when the trial was still live: the
+mark then meant only that a person's write was held. The live watch would read that commit,
+release the write and take the mark back, while the premature field survived and produced a false
+not-kept card. The finalized road is:
+
+- **A settled trial.** When the exact trial is already gone, the commit writer reads the mark and
+  records its version in `Committed`; nobody remains who can take it back.
+- **A live trial.** `Committed` is first durable without sampling the provisional mark. The watch
+  reads it, releases the held writes, takes the mark back when the changes are kept, and then
+  removes its now-spent receipt as the decision acknowledgement. A holder that saw a mark waits
+  for that exact live receipt to cease naming the trial, re-reads the mark, and carries the final
+  answer into `Retired{Committed}`. The holder waits for that acknowledgement even when there was
+  no mark, so macOS cannot delete the receipt before the watch has released its writes. Failure to observe the acknowledgement is debt: the committed
+  journal and `H/<txn>` stay for a later holder; elapsed time never becomes a not-kept claim.
+- **macOS order.** The re-read and the `Retired{Committed}` journal write happen before
+  `Txn::retire` removes `H/<txn>`. Windows uses the same decision road. A hand-back recovery that
+  commits while the trial watch is alive therefore waits for the watch's take-back and records no
+  false field.
+
+No journal grammar or parse site changes. The receipt is no longer evidence after `Committed`; its
+removal is solely the live watch's acknowledgement to the holder already settling that committed
+transaction.

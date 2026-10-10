@@ -387,6 +387,16 @@ pub(crate) trait Recording {
         event: &Event,
         say: &mut dyn FnMut(&str),
     ) -> Result<(), String>;
+
+    /// [`Self::record`], atomically carrying `version` as the outcome's
+    /// finalized not-kept fact in the same durable write.
+    fn record_noting_unkept(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        version: Option<String>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String>;
 }
 
 /// **The journal of one transaction under its lock**: as it stands durably,
@@ -394,8 +404,6 @@ pub(crate) trait Recording {
 /// the holder runs on, whose wait door a refused write sleeps through
 /// ([`write_journal`]).
 pub(crate) struct Journaled<'w> {
-    /// The transaction's home, including the trial's `unkept` mark.
-    home: Home,
     /// `H\journal.json`.
     path: PathBuf,
     worker: &'w WorkerCtx,
@@ -420,7 +428,6 @@ impl<'w> Journaled<'w> {
         held_within: Duration,
     ) -> Self {
         Self {
-            home: home.clone(),
             path: home.journal(),
             worker,
             held_within,
@@ -448,6 +455,18 @@ impl<'w> Journaled<'w> {
         event: &Event,
         say: &mut dyn FnMut(&str),
     ) -> Result<(), String> {
+        self.record_as(actor, event, None, say)
+    }
+
+    /// [`Self::record`], replacing the carried `unkept` value in the same
+    /// write when `unkept` is `Some` (whose inner value may clear it).
+    fn record_as(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        unkept: Option<Option<String>>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
         if !event.kind().authors().contains(&actor) {
             return Err(format!("{actor:?} may not record {:?}", event.kind()));
         }
@@ -459,11 +478,7 @@ impl<'w> Journaled<'w> {
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
         }
-        if phase == PhaseKind::Committed {
-            let unkept = unkept_version(&self.home, next.txn, say);
-            if let Some(version) = &unkept {
-                say(&unkept_committed_said(next.txn, version));
-            }
+        if let Some(unkept) = unkept {
             next = next.noting_unkept(unkept);
         }
         if let Err(unwritten) = write_journal(
@@ -512,17 +527,28 @@ impl Recording for Journaled<'_> {
     ) -> Result<(), String> {
         Journaled::record(self, actor, event, say)
     }
+
+    fn record_noting_unkept(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        version: Option<String>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        self.record_as(actor, event, Some(version), say)
+    }
 }
 
 /// **What an update outcome did not keep** (0.4.8 E4, E5): the version the
 /// transaction's mark names (`H\<txn>\unkept`, `Home::unkept` — a start that
 /// ran over the transaction with no recovery to hand it to, or a trial that
-/// held a person's change), read by the journal writer before it records
-/// `Committed`, or by the lock holder before it retires a rollback, so that
-/// the journal carries it (`update_txn::Body::unkept`,
-/// `Journal::noting_unkept`) past the folder — a macOS holder removes the
-/// folder at once. `None` without a mark; a mark that cannot be read, or names
-/// no version, is said through `say` and is `None`, so no not-kept card follows.
+/// held a person's change), read by the journal writer when no live trial
+/// remains to decide it, by the holder after a live trial's watch decides, or
+/// by the lock holder before it retires a rollback. The journal carries it
+/// (`update_txn::Body::unkept`, `Journal::noting_unkept`) past the folder — a
+/// macOS holder removes the folder at once. `None` without a mark; a mark that
+/// cannot be read, or names no version, is said through `say` and is `None`, so
+/// no not-kept card follows.
 pub(crate) fn unkept_version(home: &Home, txn: TxnId, say: &mut dyn FnMut(&str)) -> Option<String> {
     let mark = home.unkept(txn);
     match file_reads::read(Lane::UpdateJournal, &mark) {
@@ -557,6 +583,20 @@ pub(crate) fn unkept_committed_said(txn: TxnId, version: &str) -> String {
     format!(
         "BT_UPDATE_COMMIT transaction {txn}: Folio {version}'s trial held changes that were not kept; Committed notes it"
     )
+}
+
+/// Record the mark now that no live trial remains to decide whether to take it
+/// back. Called before the settled trial's `Committed` write.
+pub(crate) fn note_settled_unkept(
+    home: &Home,
+    txn: TxnId,
+    say: &mut dyn FnMut(&str),
+) -> Option<String> {
+    let unkept = unkept_version(home, txn, say);
+    if let Some(version) = &unkept {
+        say(&unkept_committed_said(txn, version));
+    }
+    unkept
 }
 
 /// **The line a lock holder says as it records a rollback's retirement that
@@ -1012,7 +1052,17 @@ pub(crate) fn watch_trial(
                         let event = Event::ReceiptAccepted(receipt);
                         match txn.journal().advance(&event) {
                             Ok(_) => {
-                                txn.record(actor, &event, say)?;
+                                // The mark is final before `Committed` only
+                                // when the trial is already gone. A live trial
+                                // releases its writes and takes the mark back
+                                // only after it reads this commit.
+                                if !alive(process) {
+                                    let txn_id = txn.journal().txn;
+                                    let unkept = note_settled_unkept(watch.home, txn_id, say);
+                                    txn.record_noting_unkept(actor, &event, unkept, say)?;
+                                } else {
+                                    txn.record(actor, &event, say)?;
+                                }
                                 return Ok(Watched::Committed);
                             }
                             Err(refusal) if !said_refusal => {
@@ -1129,7 +1179,18 @@ pub(crate) enum Survey {
     /// Processes of the new build run, and no receipt names one of them
     /// exactly: each is a trial nobody records, or a start about to become
     /// one — whether or not it has taken the data directory yet (H.3 step 3).
-    Candidates(Vec<Running>),
+    Candidates {
+        running: Vec<Running>,
+        /// Whether the transaction folder still holds any receipt. A
+        /// committed trial removes its accepted receipt only after its watch's
+        /// final mark decision.
+        receipts_present: bool,
+        /// Whether at least one receipt is readable, belongs to this
+        /// transaction, and is at the path its nonce names. When none of
+        /// those receipts' exact processes run, such a receipt proves that
+        /// the accepted trial has ended without acknowledging the decision.
+        valid_receipts_present: bool,
+    },
     /// No process of the new build runs, besides those excluded.
     Nothing,
     /// The process list, or `H\<txn>`, could not be read: whether a candidate
@@ -1169,7 +1230,7 @@ pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Runnin
             return Survey::Unlistable(format!("{}: {fault:?}", folder.display()));
         }
     };
-    let adoptable = listing
+    let receipts: Vec<_> = listing
         .entries
         .iter()
         .filter(|entry| {
@@ -1178,29 +1239,103 @@ pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Runnin
                     .name
                     .starts_with(crate::update_txn::RECEIPT_FILE_PREFIX)
         })
-        .find_map(|entry| {
-            let path = folder.join(&entry.name);
-            let receipt = read_receipt(&path)?.ok()?;
-            // This transaction's, at its own nonce's name, naming its own
-            // start instant (H.1 R3).
-            if receipt.txn != txn || path != home.receipt_path(txn, &receipt.nonce) {
-                return None;
-            }
-            let exactly = Running {
-                pid: receipt.pid,
-                started: receipt.started?,
-            };
-            running.contains(&exactly).then_some((
-                TrialProcess {
-                    pid: exactly.pid,
-                    started: exactly.started,
-                },
-                receipt,
-            ))
-        });
+        .collect();
+    let mut valid_receipts_present = false;
+    let adoptable = receipts.iter().find_map(|entry| {
+        let path = folder.join(&entry.name);
+        let receipt = read_receipt(&path)?.ok()?;
+        // This transaction's, at its own nonce's name, naming its own
+        // start instant (H.1 R3).
+        if receipt.txn != txn || path != home.receipt_path(txn, &receipt.nonce) {
+            return None;
+        }
+        valid_receipts_present = true;
+        let exactly = Running {
+            pid: receipt.pid,
+            started: receipt.started?,
+        };
+        running.contains(&exactly).then_some((
+            TrialProcess {
+                pid: exactly.pid,
+                started: exactly.started,
+            },
+            receipt,
+        ))
+    });
     match adoptable {
         Some((process, receipt)) => Survey::Adoptable { process, receipt },
-        None => Survey::Candidates(running),
+        None => Survey::Candidates {
+            running,
+            receipts_present: !receipts.is_empty(),
+            valid_receipts_present,
+        },
+    }
+}
+
+/// Finalize a committed outcome's `unkept` note before its transaction folder
+/// can be removed. A present mark beside a live receipt is still provisional:
+/// the trial's watch has not yet read `Committed`, released the held writes and
+/// either taken the mark back or deliberately left it. The watch removes that
+/// receipt after making the decision. Until then the holder waits through its
+/// worker door; after the acknowledgement (or after the exact trial has ended)
+/// it re-reads the mark and carries that final answer into `Retired`.
+///
+/// A decision not observed within the journal-held window is an error. The
+/// caller must preserve `H/<txn>` and the committed journal for a later holder;
+/// it must not turn elapsed time into a not-kept assertion.
+pub(crate) fn note_unkept_after_trial_decision(
+    worker: &WorkerCtx,
+    journal: &Journal,
+    home: &Home,
+    txn: TxnId,
+    program: &Path,
+    poll: Duration,
+    within: Duration,
+    say: &mut dyn FnMut(&str),
+) -> Result<Option<String>, String> {
+    if let Some(version) = &journal.body.unkept {
+        return Ok(Some(version.clone()));
+    }
+    let until = Instant::now() + within;
+    loop {
+        match survey(home, txn, program, &[]) {
+            Survey::Adoptable { .. }
+            | Survey::Candidates {
+                receipts_present: true,
+                valid_receipts_present: false,
+                ..
+            } => {}
+            Survey::Candidates {
+                receipts_present: false,
+                ..
+            }
+            | Survey::Candidates {
+                valid_receipts_present: true,
+                ..
+            }
+            | Survey::Nothing => {
+                let unkept = unkept_version(home, txn, say);
+                if let Some(version) = &unkept {
+                    say(&unkept_committed_said(txn, version));
+                }
+                return Ok(unkept);
+            }
+            Survey::Unlistable(why) => {
+                if Instant::now() >= until {
+                    return Err(format!(
+                        "the trial's final decision could not be observed: {why}"
+                    ));
+                }
+            }
+        }
+
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(
+                "the live trial did not acknowledge its final not-kept decision".to_owned(),
+            );
+        }
+        bt_platform::wait::sleep_within(worker, poll.min(left));
     }
 }
 
@@ -1327,7 +1462,13 @@ pub(crate) fn before_deciding(
         .filter(|process| handed_back.is_none_or(|handed| handed.process != *process))
         .collect();
     let mut found = survey(home, txn, program, &excluded);
-    if let (Some(handed), Survey::Candidates(running)) = (handed_back, &found)
+    if let (
+        Some(handed),
+        Survey::Candidates {
+            running,
+            receipts_present: _,
+        },
+    ) = (handed_back, &found)
         && !handed.ready
         && running.contains(&handed.process)
     {
@@ -1354,7 +1495,7 @@ pub(crate) fn before_deciding(
                 },
             };
         }
-        Survey::Candidates(running) => {
+        Survey::Candidates { running, .. } => {
             return BeforeDeciding::Defer(Deferral::Candidate(running[0]));
         }
         Survey::Unlistable(why) => Some(why),

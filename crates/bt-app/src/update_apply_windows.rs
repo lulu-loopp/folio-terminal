@@ -177,7 +177,7 @@ use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
     Ahead, BeforeDeciding, Carried, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave,
-    Limits, Opener, Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
+    Limits, Opener, Opens, Recording, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
     read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
 };
 
@@ -1435,7 +1435,7 @@ impl<'a> Txn<'a> {
             return self.declare_rollback(worker, Actor::Applier, world);
         }
         if self.watch(worker, Actor::Applier, world)? {
-            Ok(self.retire_committed(Actor::Applier, world))
+            Ok(self.retire_committed(worker, Actor::Applier, world))
         } else {
             self.declare_rollback(worker, Actor::Applier, world)
         }
@@ -1566,7 +1566,7 @@ impl<'a> Txn<'a> {
                 Action::Revert { .. } => return self.revert(actor, world),
                 Action::AwaitReceipt { .. } => {
                     if self.watch(worker, actor, world)? {
-                        return Ok(self.retire_committed(actor, world));
+                        return Ok(self.retire_committed(worker, actor, world));
                     }
                     if self.j.phase() == PhaseKind::Stuck {
                         // The trial started over `Stuck` gave none: it is left
@@ -1580,11 +1580,26 @@ impl<'a> Txn<'a> {
                     let Some(receipt) = receipt else {
                         return Err("a commit without its receipt".to_owned());
                     };
-                    self.j
-                        .record(actor, &Event::ReceiptAccepted(receipt), &mut |line| {
-                            world.say(line)
-                        })?;
-                    return Ok(self.retire_committed(actor, world));
+                    if !trial_alive {
+                        let home = self.road.home.clone();
+                        let txn = self.txn();
+                        let unkept =
+                            crate::update_apply::note_settled_unkept(&home, txn, &mut |line| {
+                                world.say(line)
+                            });
+                        self.j.record_noting_unkept(
+                            actor,
+                            &Event::ReceiptAccepted(receipt),
+                            unkept,
+                            &mut |line| world.say(line),
+                        )?;
+                    } else {
+                        self.j
+                            .record(actor, &Event::ReceiptAccepted(receipt), &mut |line| {
+                                world.say(line)
+                            })?;
+                    }
+                    return Ok(self.retire_committed(worker, actor, world));
                 }
                 Action::DeclareRollback => {
                     if let Some(process) = trial {
@@ -1605,7 +1620,9 @@ impl<'a> Txn<'a> {
                     self.j
                         .record(actor, &Event::RollbackDeclared, &mut |line| world.say(line))?;
                 }
-                Action::FinishCommit { .. } => return Ok(self.retire_committed(actor, world)),
+                Action::FinishCommit { .. } => {
+                    return Ok(self.retire_committed(worker, actor, world));
+                }
                 Action::StopTrial(process) => {
                     self.j.may(actor, Effect::EndTrial)?;
                     let limits = &self.road.limits;
@@ -1903,7 +1920,7 @@ impl<'a> Txn<'a> {
             &mut |line| world.say(line),
         )?;
         Ok(if self.watch(worker, actor, world)? {
-            self.retire_committed(actor, world)
+            self.retire_committed(worker, actor, world)
         } else {
             self.still_stuck()
         })
@@ -1983,12 +2000,18 @@ impl<'a> Txn<'a> {
     /// is durable; the entrance removed and flushed; then exactly the recorded
     /// old files `backup\` holds, by their digests (`update_txn::decide`'s
     /// `FinishCommit`) — never a file the journal does not record; then
-    /// `Retired{Committed}`, carrying the `unkept` note written with
-    /// `Committed`. Every failure is debt, never a rollback; `H\<txn>`
+    /// `Retired{Committed}`, carrying the settled trial's `unkept` note from
+    /// `Committed`, or the mark re-read after a live trial's final decision.
+    /// Every failure is debt, never a rollback; `H\<txn>`
     /// — the emptied `backup\`, and the rescue folder this process runs from —
     /// is the next ordinary start's.
-    fn retire_committed(&mut self, actor: Actor, world: &mut impl World) -> Ended {
-        match self.retire_committed_steps(actor, world) {
+    fn retire_committed(
+        &mut self,
+        worker: &WorkerCtx,
+        actor: Actor,
+        world: &mut impl World,
+    ) -> Ended {
+        match self.retire_committed_steps(worker, actor, world) {
             Ok(()) => Ended::Committed,
             Err(debt) => Ended::CommittedWithDebt(debt),
         }
@@ -1996,9 +2019,24 @@ impl<'a> Txn<'a> {
 
     fn retire_committed_steps(
         &mut self,
+        worker: &WorkerCtx,
         actor: Actor,
         world: &mut impl World,
     ) -> Result<(), String> {
+        let home = self.road.home.clone();
+        let txn = self.txn();
+        let installed = self.road.installed.clone();
+        let limits = self.road.limits;
+        let unkept = crate::update_apply::note_unkept_after_trial_decision(
+            worker,
+            &self.j.journal,
+            &home,
+            txn,
+            &installed,
+            limits.poll,
+            limits.journal_held_within,
+            &mut |line| world.say(line),
+        )?;
         let located = self.layout.locate(&self.site())?;
         let entrance = world.is_armed(self.txn()).unwrap_or(true);
         let disk = Disk {
@@ -2032,7 +2070,7 @@ impl<'a> Txn<'a> {
                 .map_err(|failure| failure.to_string())?;
         }
         self.j
-            .record(actor, &Event::Retired, &mut |line| world.say(line))
+            .record_noting_unkept(actor, &Event::Retired, unkept, &mut |line| world.say(line))
     }
 }
 

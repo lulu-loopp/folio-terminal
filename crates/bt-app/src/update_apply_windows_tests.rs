@@ -142,6 +142,11 @@ impl Drop for Children {
 enum Trial {
     /// Writes its receipt, as `update_trial` does at first pane text.
     Answers,
+    /// Holds a person's change, writes its receipt, and runs the product watch
+    /// which releases the change and takes the mark back after `Committed`.
+    AnswersAndKeeps,
+    /// Writes its receipt and ends before it can read `Committed`.
+    AnswersThenDies,
     /// Writes a receipt at its own name that carries another nonce.
     AnswersWithAnotherNonce,
     /// Writes nothing.
@@ -218,6 +223,8 @@ struct Fake {
     /// What the window's Folio answers a carried start: taken, unless a test
     /// says otherwise.
     carry_answer: crate::update_apply::Carried,
+    /// Trial-watch threads this stand-in started; the owning test joins them.
+    watchers: Vec<JoinHandle<()>>,
 }
 
 impl World for Fake {
@@ -296,9 +303,32 @@ impl World for Fake {
                 });
                 return Ok(pid);
             }
-            Trial::Answers => nonce,
+            Trial::Answers | Trial::AnswersAndKeeps | Trial::AnswersThenDies => nonce,
             Trial::AnswersWithAnotherNonce => Nonce::new([0x99; 32]),
         };
+        if self.trial == Trial::AnswersAndKeeps {
+            let gate: &'static crate::update_trial::Gate =
+                Box::leak(Box::new(crate::update_trial::Gate::new()));
+            assert!(gate.defer(true, crate::update_trial::Writer::Settings));
+            let home = self.home.clone();
+            let journal = home.journal();
+            let mark = home.unkept(txn);
+            let receipt = home.receipt_path(txn, &nonce);
+            self.watchers.push(std::thread::spawn(move || {
+                crate::update_trial::watch(
+                    gate,
+                    (&journal, &mark, &receipt),
+                    txn,
+                    Duration::from_millis(5),
+                    &|| {},
+                    None,
+                    &mut crate::update_trial::watchdog_asleep(),
+                );
+            }));
+            while !self.home.unkept(txn).exists() {
+                std::thread::yield_now();
+            }
+        }
         let receipt = Receipt {
             txn,
             nonce: carried,
@@ -309,6 +339,9 @@ impl World for Fake {
         };
         install_txn::durable_create(&self.home.receipt_path(txn, &nonce), &receipt.encode())
             .unwrap();
+        if self.trial == Trial::AnswersThenDies {
+            self.children.end(pid);
+        }
         Ok(pid)
     }
 
@@ -526,6 +559,7 @@ impl Install {
             beside_launch: None,
             carried: Vec::new(),
             carry_answer: crate::update_apply::Carried::Taken,
+            watchers: Vec::new(),
         }
     }
 
@@ -1197,19 +1231,65 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     );
 }
 
-/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS, Windows regression) — **the holder
-/// that commits a trial whose mark names a version carries that fact in the
-/// journal, and the next start shows E4's card once from the field even when
-/// the intermediate mark is gone.** Windows uses the same field road as
-/// macOS; the mark is only the writer's input.
+/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS round 2) — **a live trial that held a
+/// person's change reads `Committed`, releases the change and takes its mark
+/// back; the holder re-reads the mark only after that decision, so the journal
+/// carries no `unkept` field and the next start shows no false card.**
 ///
-/// MUTATIONS: make `Journaled::record` record `Committed` without
-/// `noting_unkept` (no field, no card); make `changes_not_kept` ignore the
-/// field (no card). Removing the mark before the start must not change the
-/// answer.
+/// MUTATION: restore the round-1 capture in `Journaled::record` by reading the
+/// mark and calling `next.noting_unkept(unkept)` when `phase == Committed`:
+/// the field is `Some` and startup returns a false `ChangesNotKept` card.
+#[test]
+fn a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card() {
+    let Some(install) = Install::new("commit-kept-设置") else {
+        return;
+    };
+    let (ended, mut world) = applied(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::AnswersAndKeeps),
+    );
+    for watcher in world.watchers.drain(..) {
+        watcher.join().unwrap();
+    }
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(
+        install.on_disk().body.unkept.as_deref(),
+        None,
+        "the watch took the provisional mark back"
+    );
+
+    let mut starting = StartWorld {
+        said: Vec::new(),
+        registry: install.registry.clone(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed,
+            home: &install.home,
+            argv: &[],
+            trial: None,
+            failed: None,
+            journal_held: None,
+        },
+        &mut starting,
+    );
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", starting.said);
+    };
+    assert_eq!(failed, None, "kept changes produce no card");
+}
+
+/// RED (T-MAC-TRIAL-CARD-NEVER-SHOWS) — **a trial that ended after leaving its
+/// mark cannot take it back; the settled commit records the mark in the
+/// journal and the next start shows E4's card once.**
+///
+/// MUTATIONS: make `note_settled_unkept` record `None` (no field, no card);
+/// make `changes_not_kept` ignore the field (no card). Removing the mark before
+/// startup must not change the answer.
 #[test]
 fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
-    let Some(install) = Install::new("commit-unkept") else {
+    let Some(install) = Install::new("commit-unkept-设置") else {
         return;
     };
     let version = crate::version::VERSION;
@@ -1217,13 +1297,13 @@ fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
     let (ended, world) = applied(
         &install,
         limits(20_000, 20_000),
-        install.world(Trial::Answers),
+        install.world(Trial::AnswersThenDies),
     );
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(
         install.on_disk().body.unkept.as_deref(),
         Some(version),
-        "the committed outcome carries the trial's fact"
+        "the settled commit carries the trial's final fact"
     );
 
     std::fs::remove_file(install.home.unkept(install.txn)).unwrap();
@@ -5692,6 +5772,7 @@ fn bare_world(home: Home) -> Fake {
         beside_launch: None,
         carried: Vec::new(),
         carry_answer: crate::update_apply::Carried::Taken,
+        watchers: Vec::new(),
     }
 }
 
@@ -5711,6 +5792,10 @@ fn trial_part(root: &Path) {
         gate.ready_for_a_test();
     }
     if plan.mode == "ready" {
+        assert!(
+            gate.defer(true, crate::update_trial::Writer::Settings),
+            "the hand-back trial holds a person's change"
+        );
         let nonce = Nonce::new([0x7a; 32]);
         let receipt = Receipt {
             txn: plan.txn,
@@ -5775,6 +5860,7 @@ fn trial_part(root: &Path) {
                 (
                     &journal,
                     &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    &home.receipt_path(plan.txn, &Nonce::new([0x7a; 32])),
                 ),
                 plan.txn,
                 Duration::from_millis(20),
@@ -5905,7 +5991,9 @@ fn rescues(root: &Path) -> Vec<Vec<String>> {
 /// that records its argv would be.
 ///
 /// MUTATIONS: in `update_trial::watch`, hand back beside a recovery still
-/// running (the "refused" part starts one more); in
+/// running (the "refused" part starts one more); restore the round-1
+/// `Journaled::record` capture at the `Committed` write (the ready part records
+/// `unkept` although its live watch took the mark back); in
 /// `update_apply::before_deciding`, skip the end of an unready handed-back
 /// trial (the "unready" part never ends the trial).
 #[test]
@@ -6012,6 +6100,15 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
                         outcome: Outcome::Committed,
                         untried: false,
                     }
+                );
+                assert_eq!(
+                    install.on_disk().body.unkept,
+                    None,
+                    "the live hand-back trial took its mark back"
+                );
+                assert!(
+                    !install.home.unkept(install.txn).exists(),
+                    "the watch finalized the kept decision"
                 );
                 assert!(matches!(trial.0.try_wait(), Ok(None)), "the trial stays");
                 let done = rescues(&root);

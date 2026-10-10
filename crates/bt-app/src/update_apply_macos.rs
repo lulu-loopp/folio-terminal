@@ -56,10 +56,12 @@
 //!    whole deadline with no window).
 //! 6. **Commit** (M7 → M8): a receipt the journal accepts — this transaction's,
 //!    this trial's nonce, while the journal says `Trial` — →
-//!    `Committed{outcome: committed}`, durable, carrying the version named by
-//!    the trial's `unkept` mark when there is one; **then** the old bundle in
-//!    `stage/` (checked to be the old identity) is removed, the plist removed,
-//!    `Retired{Committed}` recorded, and `H/<txn>` removed with the rescue
+//!    `Committed{outcome: committed}`, durable. A settled trial's final
+//!    `unkept` mark is carried then; for a live trial, its watch first releases
+//!    the writes and takes the mark back, and the holder re-reads the final
+//!    answer; **then** the old bundle in `stage/` (checked to be the old
+//!    identity) is removed, the plist removed, `Retired{Committed}` recorded,
+//!    and `H/<txn>` removed with the rescue
 //!    clone this process runs from (a Unix process may remove its own image).
 //!    The journal itself is kept at `Retired{Committed}`: the trial's watch
 //!    releases its held-back writes when it reads `committed` there, and would
@@ -1218,6 +1220,18 @@ impl<'a> Txn<'a> {
         event: &Event,
         say: &mut dyn FnMut(&str),
     ) -> Result<(), String> {
+        self.record_saying_as(actor, event, None, say)
+    }
+
+    /// [`Self::record_saying`], replacing the carried `unkept` value in the
+    /// same write when `unkept` is `Some` (whose inner value may clear it).
+    fn record_saying_as(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        unkept: Option<Option<String>>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
         let mut next = self
             .journal
             .advance(event)
@@ -1226,14 +1240,7 @@ impl<'a> Txn<'a> {
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
         }
-        if phase == PhaseKind::Committed {
-            let unkept = crate::update_apply::unkept_version(&self.road.home, self.road.txn, say);
-            if let Some(version) = &unkept {
-                say(&crate::update_apply::unkept_committed_said(
-                    self.road.txn,
-                    version,
-                ));
-            }
+        if let Some(unkept) = unkept {
             next = next.noting_unkept(unkept);
         }
         crate::update_apply::write_journal(
@@ -1690,6 +1697,25 @@ impl<'a> Txn<'a> {
     /// `Retired{Committed}` and `H/<txn>`. Every failure here is debt.
     fn commit(&mut self, worker: &WorkerCtx, places: &Places<'_>, actor: Actor) -> Ended {
         let mut debt = Vec::new();
+        let home = self.road.home.clone();
+        let txn = self.road.txn;
+        let limits = self.road.limits;
+        let committed_unkept = match crate::update_apply::note_unkept_after_trial_decision(
+            worker,
+            &self.journal,
+            &home,
+            txn,
+            places.program,
+            limits.poll,
+            limits.journal_held_within,
+            &mut |line| bt_platform::write_std_error(format!("{line}\n").as_bytes()),
+        ) {
+            Ok(unkept) => unkept,
+            Err(why) => {
+                debt.push(why);
+                return Ended::CommittedWithDebt(debt.join("; "));
+            }
+        };
         let (_, stage) = self.layout.locate(worker, places);
         if stage.as_ref() == Some(places.old) {
             match self.may(actor, Effect::DeleteRollbackMaterial) {
@@ -1704,7 +1730,7 @@ impl<'a> Txn<'a> {
         if let Err(why) = self.disarm(actor) {
             debt.push(why);
         }
-        self.retire(actor, &mut debt);
+        self.retire(actor, &mut debt, Some(committed_unkept));
         if debt.is_empty() {
             Ended::Committed
         } else {
@@ -1716,29 +1742,37 @@ impl<'a> Txn<'a> {
     /// this process may run from included (a Unix process may remove its own
     /// image). The journal is kept: after a commit for the trial's watch,
     /// after a rollback for the relaunched build's card; the next ordinary
-    /// start retires it. A committed journal already carries the trial's
-    /// `unkept` note from the write of `Committed`. **A rollback's `Retired`
-    /// notes the version the
+    /// start retires it. A committed retirement carries the settled trial's
+    /// note from `Committed`, or the live trial's final mark re-read before
+    /// this call. **A rollback's `Retired` notes the version the
     /// transaction's mark names** (0.4.8 E5, `update_apply::unkept_version`):
     /// the mark goes with the folder here, so the journal is what carries to
     /// the restored build that the changes made in that version were not kept.
-    fn retire(&mut self, actor: Actor, debt: &mut Vec<String>) {
+    fn retire(&mut self, actor: Actor, debt: &mut Vec<String>, mut unkept: Option<Option<String>>) {
         if matches!(self.journal.body.phase, Phase::RolledBack { .. }) {
             let mut say = |line: &str| {
                 bt_platform::write_std_error(format!("{line}\n").as_bytes());
             };
-            let unkept =
+            let rollback_unkept =
                 crate::update_apply::unkept_version(&self.road.home, self.road.txn, &mut say);
-            if let Some(version) = &unkept {
+            if let Some(version) = &rollback_unkept {
                 say(&crate::update_apply::unkept_said(
                     self.road.txn,
                     version,
                     self.phase(),
                 ));
             }
-            self.journal = self.journal.clone().noting_unkept(unkept);
+            unkept = Some(rollback_unkept);
         }
-        if let Err(why) = self.record(actor, &Event::Retired) {
+        let written = match unkept {
+            Some(unkept) => {
+                self.record_saying_as(actor, &Event::Retired, Some(unkept), &mut |line| {
+                    bt_platform::write_std_error(format!("{line}\n").as_bytes())
+                })
+            }
+            None => self.record(actor, &Event::Retired),
+        };
+        if let Err(why) = written {
             debt.push(why);
             return;
         }
@@ -1856,7 +1890,22 @@ impl<'a> Txn<'a> {
                     let Some(receipt) = receipt else {
                         return Err("a commit without its receipt".to_owned());
                     };
-                    self.record(actor, &Event::ReceiptAccepted(receipt))?;
+                    if !trial_alive {
+                        let home = self.road.home.clone();
+                        let txn = self.road.txn;
+                        let unkept =
+                            crate::update_apply::note_settled_unkept(&home, txn, &mut |line| {
+                                hands.say(line)
+                            });
+                        self.record_saying_as(
+                            actor,
+                            &Event::ReceiptAccepted(receipt),
+                            Some(unkept),
+                            &mut |line| hands.say(line),
+                        )?;
+                    } else {
+                        self.record(actor, &Event::ReceiptAccepted(receipt))?;
+                    }
                     return Ok(self.commit(worker, places, actor));
                 }
                 Action::DeclareRollback => {
@@ -2046,7 +2095,7 @@ impl<'a> Txn<'a> {
         if let Err(why) = self.disarm(actor) {
             debt.push(why);
         }
-        self.retire(actor, &mut debt);
+        self.retire(actor, &mut debt, None);
         if debt.is_empty() {
             Ended::RolledBack
         } else {
@@ -2116,6 +2165,16 @@ impl Recording for Txn<'_> {
         say: &mut dyn FnMut(&str),
     ) -> Result<(), String> {
         Txn::record_saying(self, actor, event, say)
+    }
+
+    fn record_noting_unkept(
+        &mut self,
+        actor: Actor,
+        event: &Event,
+        version: Option<String>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        self.record_saying_as(actor, event, Some(version), say)
     }
 }
 

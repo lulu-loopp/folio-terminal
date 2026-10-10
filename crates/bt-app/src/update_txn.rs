@@ -1038,9 +1038,10 @@ pub(crate) struct Carried {
 /// reader included). **`marker`** (0.4.8 D1) follows the same rule: absent
 /// when nothing is carried — every journal of Folio's own road — and written
 /// by the press of a managed copy's road ([`Carried`]); every later phase
-/// carries it. **`unkept`** (0.4.8 E5) follows it too: absent unless a
-/// journal writer recorded the transaction's mark with `Committed`, or a
-/// rollback's lock holder recorded it with `Retired`
+/// carries it. **`unkept`** (0.4.8 E5) follows it too: absent unless a settled
+/// commit writer recorded the transaction's final mark with `Committed`, a
+/// holder re-read it after a live trial's final decision and recorded it with
+/// `Retired`, or a rollback's lock holder recorded it with `Retired`
 /// ([`Journal::noting_unkept`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Body {
@@ -1051,10 +1052,11 @@ pub(crate) struct Body {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) marker: Option<Carried>,
     /// **The version whose changes this update outcome did not keep** (0.4.8
-    /// E4, E5): a journal writer that commits a trial, or a lock holder that
-    /// retires a rollback, reads the transaction's mark
-    /// (`H\<txn>\unkept`, [`Home::unkept`]) and records the version it names
-    /// here before the folder can go — a macOS holder removes it at once. The
+    /// E4, E5): a writer committing a settled trial, a holder retiring a live
+    /// trial after its watch's final decision, or a lock holder retiring a
+    /// rollback reads the transaction's mark (`H\<txn>\unkept`,
+    /// [`Home::unkept`]) and records the version it names here before the
+    /// folder can go — a macOS holder removes it at once. The
     /// next start says it on the committed or restored build's card. Losing
     /// it to a reader that does not know it costs that card alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1119,8 +1121,9 @@ impl Journal {
     }
 
     /// **The journal noting `version`'s changes as not kept** — what a lock
-    /// writer records with `Committed`, or with `Retired` over a rollback,
-    /// when the transaction's folder holds the mark (0.4.8 E4, E5,
+    /// writer records with `Committed` for a settled trial, or with `Retired`
+    /// after a live trial's decision or over a rollback, when the transaction's
+    /// folder holds the mark (0.4.8 E4, E5,
     /// [`Body::unkept`]); the next [`Self::advance`] carries it.
     #[must_use]
     pub(crate) fn noting_unkept(mut self, version: Option<String>) -> Self {
@@ -3219,8 +3222,9 @@ impl Home {
     /// continued over `txn` unfinished, because no recovery could be started,
     /// with its writes held (Windows) or as the transaction's new build
     /// writing plainly (macOS) (0.4.8 E5, `update_startup::hand_to_rescue`).
-    /// Its bytes are the version of the build that wrote it. Read by the
-    /// journal writer that records `Committed`, and by the lock holder that
+    /// Its bytes are the version of the build that wrote it. Read by a commit
+    /// writer only when no live trial remains, by the holder after a live
+    /// trial's watch makes its take-back decision, and by the lock holder that
     /// retires a rollback; each records the version in the journal
     /// ([`Body::unkept`]) before the mark goes with the transaction's folder.
     pub(crate) fn unkept(&self, txn: TxnId) -> PathBuf {

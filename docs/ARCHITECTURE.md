@@ -764,6 +764,8 @@ does not have to find it later.
 
 ---
 
+Committed-trial decision acknowledgement is part of the existing self-update transaction ownership above. The trial watch owns taking back or leaving the trial mark and then durably removing its accepted health receipt; the platform holder owns waiting for that acknowledgement, re-reading the mark, and atomically recording the final `unkept` fact before retiring the transaction (and, on macOS, before deleting `H/<txn>`).
+
 ## 5. Execution lanes
 
 ### 5.1 The seven lanes

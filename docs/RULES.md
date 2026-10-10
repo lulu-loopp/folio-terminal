@@ -1254,9 +1254,12 @@ person's change a trial held — the settings, the shortcuts, the profiles, the
 pins — is marked in the transaction's folder until the trial reads its
 commit; a commit made after the trial ended (its applier dead, a recovery
 committing from its receipt) cannot carry what the trial held, so the journal
-writer copies the mark's version into `Committed` before retirement can remove
-the folder, and the start that retires it says that the changes made before
-Folio confirmed the update were not kept. **On Windows, a start whose rescue build cannot
+writer copies the mark's version into `Committed`. A live trial's watch first
+reads `Committed`, releases the held writes and takes the mark back, then
+retires its receipt as the acknowledgement of that final decision; the holder
+re-reads the mark and records only what remains before retirement can remove
+the folder. The start that retires a journal noting the version says that the
+changes made before Folio confirmed the update were not kept. **On Windows, a start whose rescue build cannot
 be started — its folder gone, its file held, the operating system refusing it —
 continues with its writes held** (E1, the owner's ruling E5 of 2026-10-08),
 over every destructive phase but `TrialStarting`, which keeps U-35's road
