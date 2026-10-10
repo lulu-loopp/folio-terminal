@@ -1811,7 +1811,7 @@ fn remove_the_program(
     let row = format!("{label}: {}", plan.root.display());
     let mut waited = after.to_vec();
     let program: &Path = &plan.program;
-    match bt_platform::install_flip::running_from(program) {
+    match bt_platform::install_flip::running_from_on_worker(worker, program) {
         Ok(running) => {
             for process in running {
                 if !waited.contains(&process) {
