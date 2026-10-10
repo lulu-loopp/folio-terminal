@@ -39,6 +39,10 @@ impl Runtime<'_> {
         crate::take_owned_keyboard_focus(&self.window.window)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn restore_minimized_window(&self) -> Result<()> {
+        crate::restore_minimized_window(&self.window.window)
+    }
     pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
         crate::request_owned_window_close(&self.window.window)
     }

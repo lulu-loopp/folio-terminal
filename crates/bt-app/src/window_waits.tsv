@@ -191,6 +191,19 @@ bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_dialogs::finish_helper	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_files::command_output	std::process::Child::wait 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_files::openable_target	std::fs::canonicalize 1, std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_files::reveal_in_explorer	std::fs::canonicalize 1, std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_notifications::shutdown_notifications	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_process::kill_reap_and_join	std::process::Child::wait 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_process::shutdown_helpers	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_system_settings::shutdown_system_settings	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::install_descendants	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::retirement_loop	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::stop_and_join	libc::write 1, std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "linux"]	crate::linux_watch::shutdown_watches	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners

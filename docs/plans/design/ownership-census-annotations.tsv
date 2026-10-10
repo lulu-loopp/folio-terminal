@@ -35,6 +35,7 @@ App.git_watch	-	OBS	the application (git_watch)	T-WINDOWS-ALL (2026-10-08): the 
 App.handoff_lane	-	RES	handoff	the 2026-09-25 table
 App.keybindings_store	-	DUR	keyboard	proposed by census-1
 App.layout_tables	-	OBS	keyboard	round 5: the application-owned per-HKL observation map is written only when a key requests a miss or a worker answer lands
+App.notifications	-	RES	the application (FolioApp)	Linux census: App holds one NotificationDesk; Runtime::raise_attention submits, FolioApp drains failure; refusal stays latched until exit, desk drop cancels helper sends and DesktopRetire reaps them
 App.pending_application_change	-	PROJ	diagnostics	the 2026-09-25 table
 App.pending_handover	-	LIFE	windows	the 2026-09-25 table
 App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table

@@ -17,6 +17,8 @@ use typst_library::{
     text::{FontBook, FontInfo, FontStyle},
 };
 
+#[cfg(target_os = "linux")]
+mod linux_svg_fonts;
 mod macro_budget;
 
 /// **Test-only: make one stage of a render panic on purpose.**
@@ -1026,6 +1028,9 @@ fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
         // milliseconds, and it is paid on the lane that exists to keep tens of
         // milliseconds of typesetting off the window's thread.
         bt_effects::file_reads::opaque(bt_effects::file_reads::Lane::Fonts, || {
+            #[cfg(target_os = "linux")]
+            linux_svg_fonts::load_svg_fonts(options.fontdb_mut());
+            #[cfg(not(target_os = "linux"))]
             options.fontdb_mut().load_system_fonts()
         });
         options

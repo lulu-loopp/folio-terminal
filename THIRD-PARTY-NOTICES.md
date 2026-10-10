@@ -3661,7 +3661,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 476 |
+| MIT License | 505 |
 | Apache License 2.0 | 38 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -5686,6 +5686,37 @@ Used by 1 package(s):
 
 ### MIT License
 
+Used by 1 package(s):
+
+- **uds_windows 1.1.0** — <https://github.com/haraldh/rust_uds_windows>
+
+````````text
+    MIT License
+
+    Copyright (c) Microsoft Corporation. All rights reserved.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE
+
+````````
+
+### MIT License
+
 Used by 2 package(s):
 
 - **cfg_aliases 0.1.1** — <https://github.com/katharostech/cfg_aliases>
@@ -5723,9 +5754,10 @@ The `cfg_aliases!` macro uses a lot of the code from [`tectonic_cfg_support::tar
 
 ### MIT License
 
-Used by 1 package(s):
+Used by 2 package(s):
 
 - **atomic-waker 1.1.2** — <https://github.com/smol-rs/atomic-waker>
+- **futures-lite 2.6.1** — <https://github.com/smol-rs/futures-lite>
 
 ````````text
 ===============================================================================
@@ -5857,6 +5889,36 @@ DEALINGS IN THE SOFTWARE.
 
 Used by 1 package(s):
 
+- **hex 0.4.3** — <https://github.com/KokaKiwi/rust-hex>
+
+````````text
+Copyright (c) 2013-2014 The Rust Project Developers.
+Copyright (c) 2015-2020 The rust-hex Developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
 - **form_urlencoded 1.2.2** — <https://github.com/servo/rust-url>
 
 ````````text
@@ -5928,13 +5990,14 @@ DEALINGS IN THE SOFTWARE.
 
 ### MIT License
 
-Used by 13 package(s):
+Used by 14 package(s):
 
 - **cc 1.2.67** — <https://github.com/rust-lang/cc-rs>
 - **cfg-if 1.0.4** — <https://github.com/rust-lang/cfg-if>
 - **find-msvc-tools 0.1.9** — <https://github.com/rust-lang/cc-rs>
 - **jobserver 0.1.35** — <https://github.com/rust-lang/jobserver-rs>
 - **js-sys 0.3.103** — <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys>
+- **socket2 0.6.5** — <https://github.com/rust-lang/socket2>
 - **stacker 0.1.24** — <https://github.com/rust-lang/stacker>
 - **wait-timeout 0.2.1** — <https://github.com/alexcrichton/wait-timeout>
 - **wasm-bindgen-futures 0.4.76** — <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures>
@@ -6012,6 +6075,35 @@ DEALINGS IN THE SOFTWARE.
 
 Used by 1 package(s):
 
+- **mio 1.2.4** — <https://github.com/tokio-rs/mio>
+
+````````text
+Copyright (c) 2014 Carl Lerche and other MIO contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
 - **errno 0.3.14** — <https://github.com/lambda-fairy/rust-errno>
 
 ````````text
@@ -6060,6 +6152,42 @@ Used by 10 package(s):
 
 ````````text
 Copyright (c) 2014 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
+- **uuid 1.24.0** — <https://github.com/uuid-rs/uuid>
+
+````````text
+Copyright (c) 2014 The Rust Project Developers
+Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -6601,10 +6729,11 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 4 package(s):
+Used by 5 package(s):
 
 - **futures-core 0.3.32** — <https://github.com/rust-lang/futures-rs>
 - **futures-io 0.3.32** — <https://github.com/rust-lang/futures-rs>
+- **futures-macro 0.3.32** — <https://github.com/rust-lang/futures-rs>
 - **futures-task 0.3.32** — <https://github.com/rust-lang/futures-rs>
 - **futures-util 0.3.32** — <https://github.com/rust-lang/futures-rs>
 
@@ -6993,6 +7122,41 @@ SOFTWARE.
 
 Used by 1 package(s):
 
+- **enumflags2_derive 0.7.12** — <https://github.com/meithecatte/enumflags2>
+
+````````text
+Copyright (c) 2017 Maik Klein
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
 - **by_address 1.2.1** — <https://github.com/mbrubeck/by_address>
 
 ````````text
@@ -7201,6 +7365,41 @@ Used by 2 package(s):
 
 ````````text
 Copyright (c) 2017 tokio-jsonrpc developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
+- **enumflags2 0.7.12** — <https://github.com/meithecatte/enumflags2>
+
+````````text
+Copyright (c) 2017-2023 Maik Klein, Maja Kądziołka
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -7820,8 +8019,9 @@ DEALINGS IN THE SOFTWARE.
 
 ### MIT License
 
-Used by 2 package(s):
+Used by 3 package(s):
 
+- **tracing-attributes 0.1.31** — <https://github.com/tokio-rs/tracing>
 - **tracing-core 0.1.36** — <https://github.com/tokio-rs/tracing>
 - **tracing 0.1.44** — <https://github.com/tokio-rs/tracing>
 
@@ -8487,12 +8687,86 @@ SOFTWARE.
 
 ### MIT License
 
+Used by 5 package(s):
+
+- **zbus 5.19.0** — <https://github.com/z-galaxy/zbus/>
+- **zbus_macros 5.19.0** — <https://github.com/z-galaxy/zbus/>
+- **zbus_names 4.3.4** — <https://github.com/z-galaxy/zbus/>
+- **zvariant 5.15.0** — <https://github.com/z-galaxy/zbus/>
+- **zvariant_derive 5.15.0** — <https://github.com/z-galaxy/zbus/>
+
+````````text
+Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+````````
+
+### MIT License
+
 Used by 1 package(s):
 
 - **bit-set 0.10.0** — <https://github.com/contain-rs/bit-set>
 
 ````````text
 Copyright (c) 2026 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
+- **zcheapstr 1.1.0** — <https://github.com/z-galaxy/zcheapstr/>
+
+````````text
+Copyright (c) 2026 Zeeshan Ali Khan & zcheapstr contributors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -9948,6 +10222,37 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by 1 package(s):
 
+- **tokio 1.53.2** — <https://github.com/tokio-rs/tokio>
+
+````````text
+MIT License
+
+Copyright (c) Tokio Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
 - **simd-adler32 0.3.10** — <https://github.com/mcountryman/simd-adler32>
 
 ````````text
@@ -10310,8 +10615,9 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 2 package(s):
+Used by 3 package(s):
 
+- **async-recursion 1.1.1** — <https://github.com/dcchut/async-recursion>
 - **rkyv_derive 0.7.46** — <https://github.com/rkyv/rkyv>
 - **rustc-hash 2.1.3** — <https://github.com/rust-lang/rustc-hash>
 
@@ -10343,17 +10649,22 @@ DEALINGS IN THE SOFTWARE.
 
 ### MIT License
 
-Used by 63 package(s):
+Used by 73 package(s):
 
 - **adler2 2.0.1** — <https://github.com/oyvindln/adler2>
 - **anyhow 1.0.103** — <https://github.com/dtolnay/anyhow>
+- **async-trait 0.1.89** — <https://github.com/dtolnay/async-trait>
 - **atomic-waker 1.1.2** — <https://github.com/smol-rs/atomic-waker>
 - **biblatex 0.12.0** — <https://github.com/typst/biblatex>
 - **citationberg 0.7.0** — <https://github.com/typst/citationberg>
 - **concurrent-queue 2.5.0** — <https://github.com/smol-rs/concurrent-queue>
 - **countme 3.0.1** — <https://github.com/matklad/countme>
 - **displaydoc 0.2.6** — <https://github.com/yaahc/displaydoc>
+- **endi 1.1.1** — <https://github.com/zeenix/endi>
+- **event-listener-strategy 0.5.4** — <https://github.com/smol-rs/event-listener-strategy>
+- **event-listener 5.4.2** — <https://github.com/smol-rs/event-listener>
 - **fastrand 2.4.1** — <https://github.com/smol-rs/fastrand>
+- **futures-lite 2.6.1** — <https://github.com/smol-rs/futures-lite>
 - **glyphon 0.12.0** — <https://github.com/grovesNL/glyphon>
 - **hayagriva 0.10.1** — <https://github.com/typst/hayagriva>
 - **hermit-abi 0.5.2** — <https://github.com/hermit-os/hermit-rs>
@@ -10364,6 +10675,8 @@ Used by 63 package(s):
 - **num_enum 0.7.6** — <https://github.com/illicitonion/num_enum>
 - **num_enum_derive 0.7.6** — <https://github.com/illicitonion/num_enum>
 - **once_cell 1.21.4** — <https://github.com/matklad/once_cell>
+- **ordered-stream 0.2.0** — <https://github.com/danieldg/ordered-stream>
+- **parking 2.2.1** — <https://github.com/smol-rs/parking>
 - **paste 1.0.15** — <https://github.com/dtolnay/paste>
 - **pin-project-internal 1.1.13** — <https://github.com/taiki-e/pin-project>
 - **pin-project-lite 0.2.17** — <https://github.com/taiki-e/pin-project-lite>
@@ -10386,12 +10699,14 @@ Used by 63 package(s):
 - **serde_derive 1.0.228** — <https://github.com/serde-rs/serde>
 - **serde_json 1.0.149** — <https://github.com/serde-rs/json>
 - **serde_path_to_error 0.1.20** — <https://github.com/dtolnay/path-to-error>
+- **serde_repr 0.1.20** — <https://github.com/dtolnay/serde-repr>
 - **serde_yaml 0.9.34+deprecated** — <https://github.com/dtolnay/serde-yaml>
 - **simd_cesu8 1.2.0** — <https://github.com/seancroach/simd_cesu8>
 - **smol_str 0.2.2** — <https://github.com/rust-analyzer/smol_str>
 - **smol_str 0.3.2** — <https://github.com/rust-analyzer/smol_str>
 - **syn 1.0.109** — <https://github.com/dtolnay/syn>
 - **syn 2.0.119** — <https://github.com/dtolnay/syn>
+- **syn 3.0.6** — <https://github.com/dtolnay/syn>
 - **thin-vec 0.2.18** — <https://github.com/mozilla/thin-vec>
 - **thiserror-impl 1.0.69** — <https://github.com/dtolnay/thiserror>
 - **thiserror-impl 2.0.18** — <https://github.com/dtolnay/thiserror>
@@ -10408,6 +10723,7 @@ Used by 63 package(s):
 - **wit-bindgen 0.51.0** — <https://github.com/bytecodealliance/wit-bindgen>
 - **wit-bindgen 0.57.1** — <https://github.com/bytecodealliance/wit-bindgen>
 - **zmij 1.0.21** — <https://github.com/dtolnay/zmij>
+- **zvariant_utils 4.2.0** — <https://github.com/z-galaxy/zbus/>
 
 ````````text
 Permission is hereby granted, free of charge, to any
@@ -11370,6 +11686,37 @@ SOFTWARE.
 
 Used by 1 package(s):
 
+- **async-broadcast 0.7.2** — <https://github.com/smol-rs/async-broadcast>
+
+````````text
+The MIT License (MIT)
+
+Copyright (c) 2020 Yoshua Wuyts
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
 - **cosmic-text 0.19.0** — <https://github.com/pop-os/cosmic-text>
 
 ````````text
@@ -12219,9 +12566,9 @@ the following restrictions:
 
 ## In the lock file, not in any resolved build
 
-`Cargo.lock` pins 574 packages from crates.io. 537 of them are in the
+`Cargo.lock` pins 601 packages from crates.io. 565 of them are in the
 dependency graph this workspace resolves, and are attributed above with their
-licence texts. The 37 below are optional or platform-specific entries
+licence texts. The 36 below are optional or platform-specific entries
 that no feature resolution here reaches: nothing links them, so nothing
 distributes them. They are listed with the terms they declare, so that the two
 counts a reader might compare are reconciled here rather than left as a gap.
@@ -12254,7 +12601,6 @@ counts a reader might compare are reconciled here rather than left as a gap.
 | `radium 0.7.0` | MIT |
 | `tap 1.0.1` | MIT |
 | `unicode-xid 0.2.6` | MIT OR Apache-2.0 |
-| `uuid 1.24.0` | Apache-2.0 OR MIT |
 | `vello_common 0.0.9` | Apache-2.0 OR MIT |
 | `wasm-encoder 0.244.0` | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasm-metadata 0.244.0` | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
