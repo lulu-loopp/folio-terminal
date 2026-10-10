@@ -1729,7 +1729,7 @@ impl<'a> Txn<'a> {
             handed_back: road.handed_back,
             data: &road.data,
         };
-        match crate::update_apply::before_deciding(&what, &mut end) {
+        match crate::update_apply::before_deciding(worker, &what, &mut end) {
             BeforeDeciding::Decide => Ok(Pre::Decide),
             BeforeDeciding::Defer(deferral) => {
                 world.say(&format!("BT_UPDATE_RECOVER deferred: {}", deferral.said()));

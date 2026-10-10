@@ -14183,6 +14183,12 @@ Removals locate `$PROFILE` from that record, ask an unrecorded edition only for 
 
 Pinned by `the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_load_it`, `after_enable_and_undo_an_ordinary_restricted_session_prints_nothing` (a real Windows PowerShell 5.1 under `Restricted`), `what_folios_profile_writes_created_goes_with_its_line_and_nothing_else_does`, `every_removal_road_retires_what_the_write_created`, `a_power_loss_between_the_record_and_the_write_is_retired`, `a_profile_no_shell_located_is_said_and_refuses_nothing`, `the_remover_stands_only_for_a_line_it_can_prove_is_folios`, `a_failed_parse_question_is_undetermined_and_a_visit_asks_it_again`, `shell_integration_profile_path_askers_share_an_answer_and_ask_again_after_a_failure`, `a_refusal_before_the_purge_keeps_the_data_and_the_purge_comes_last`, `a_managed_copy_is_left_to_its_manager` and `the_default_badge_and_the_rows_button_never_overlap`.
 
+### 2026-10-06 — Patched clipboard crates have a Linux CI gate
+
+The port keeps `arboard` and `wl-clipboard-rs` as patched path dependencies outside the cross-platform workspace. The Wayland test server uses Linux epoll and cannot join the Windows or macOS workspace test commands. Instead, `core-linux` runs both complete suites through `scripts/ci/linux-vendor-clipboard-tests.py`, using each crate's retained lockfile. Arboard runs on private Xvfb with a real clipboard manager so its ownership-after-drop assertion is tested. The Wayland suite creates protocol servers under a private runtime directory. The harness owns its HOME, XDG directories, display and D-Bus session; it retires its recorded process groups on success or failure. This is the port's choice for review in PR #21; upstreaming the patches remains possible without removing this test gate.
+
+The local run passed Arboard's four unit tests and three documentation tests, and wl-clipboard-rs's 49 unit tests and 18 documentation tests. Windows and macOS keep their existing workspace membership and test commands.
+
 ### 2026-10-06 — Current path for the policy-command clipboard pin
 
 The pin named in the 2026-10-04 policy note moved with its implementation. Its current path is `runtime::clipboard::tests::copy_puts_exactly_the_policy_command_on_the_clipboard`; the earlier entry is retained as written.
@@ -14283,6 +14289,98 @@ Pinned by `no_clock_of_the_standard_library_is_named_where_a_browser_build_reads
 
 The gate fails on a first-party crate with no layer row, a layer row naming no first-party crate, an exemption whose edge no longer exists or now goes down, and an exemption key (from, to, kind) not at the merge base with `origin/main`. When the base has no list, that comparison is skipped and says so. With no merge base the gate exits 2, and with zero crates read it refuses. `gates-can-fail` copies the real metadata and plants `bt-unicode → bt-app`, which must be refused as not going to a lower layer. It drops `bt-term`'s dependency on `bt-math`, which must leave D-15's row reported as no longer existing. It deletes `bt-workbench`'s layer row, which must be reported as missing. `scripts/ci/check-crate-edges-tests.ps1` runs the gate on scratch repositories through the no-base-list, unchanged, added-row, shrunk and no-merge-base cases. The no-base-list case also runs the gate the way a GitHub Actions `shell: pwsh` step does, which exits with `$LASTEXITCODE`; the gate ends its pass with `exit 0`, so the status `git show` leaves for a list the base lacks is not read as the gate's. Each canary was seen red with its check in the gate disabled, and the suite was seen red with the merge-base comparison disabled.
 
+### 2026-10-06 — Linux summons restore the minimized window before showing it
+
+On Linux, `FolioApp::summon_quake` reads the previous foreground, restores a minimized window through `Runtime::restore_minimized_window`, then shows it and runs the foreground retry. The other platforms keep the existing summon sequence. Pinned by `floated_page_tests::the_foreground_is_read_before_the_summon_and_handed_back_after_it`.
+
+### 2026-10-06 — Linux hand-offs retain the lane worker
+
+Linux dispatches file and address requests through `ShellThread::hand_over_on_worker`, carrying the handoff lane's `WorkerCtx` into the Linux file and process doors.
+
+### 2026-10-06 — Addressed Linux display requests use a worker (PR20)
+
+PR20 moves quake summon/arrangement, tear-out placement, work-area and session-geometry snapshots, and pointer-drop reads onto `bt-linux-display`. Each request carries owner, request and generation identity; the worker parks its actual answer before posting `NativeDisplayReady`. Those callers never wait for X11 setup or replies, and there is no timeout or stale-cache success path. The hotkey worker carries the X11 KeyPress root point into summon placement, so the press is not re-aimed by a later pointer read. The shared Linux display helpers remain synchronous for two window-side callers: `DragGuard::sample` reads `virtual_screen_rect`, and `restore_monitors` reads `work_area_at` for each Winit monitor. §5.3 row 29a stays open for those follow-up moves.
+
+Geometry from a saved position or a tear-out answer seeds the window cache; winit `Moved`/`Resized` events refresh it. If no position is known, the cache stays empty rather than turning a missing rectangle into `(0, 0)`. Linux `dpi_snapshot` reads this cache and does not call winit's synchronous X11 outer-position or outer-size accessors. Session geometry and work-area refreshes use addressed worker requests; a refused native read leaves the last known geometry or work-area hint in place.
+
+Winit supplies an external file drop's path without its Xdnd position. The worker query therefore resolves the point off-thread, and the result applies only while the window has not observed a cursor, tab, layout, viewport, focused-shell or shell-incarnation change. A changed context produces the localized re-drop notice. The path list stays pending until that notice is accepted, and a refused multi-file drop remains closed through the batch's turn boundary. An internal path drag carries its original drag plan and uses the same addressed answer; a refusal never redirects to a later query result.
+
+The deterministic fake X11 server sends a real Setup reply, receives the worker's first `InternAtom`, and withholds its reply while the child window-side request returns. `linux_display::stalled_server_tests::a_window_thread_query_returns_while_the_x11_server_withholds_its_reply` is the red/green regression seam. `stop_display_service` stops admission and drops unanswered work after an active X11 call returns; `display_service_stopped` reports exit without joining on the window thread. PR22 connects those gates to the existing desktop-retirement budget.
+
+### 2026-10-06 — The last Linux display helper callers use the same worker
+
+`DragGuard` now samples `VirtualScreenRect` through `bt-linux-display`. Each reply must match the active broker generation and request; an unknown, changed, or refused rectangle cancels the drag through its existing source-home path. A release with no valid screen observation cannot spend a stale cross-window aim, and the reply never changes the broker's event-delivered pointer.
+
+Restored-window monitor inputs remain the Winit bounds, scale and primary-first order. The first window still falls back to full monitor bounds because its restore runs before Linux backend installation. Later saved secondary windows submit one batch of center-point work-area requests through the existing display lane. The answer carries X11 monitor bounds and primary bounds with the work areas. A matching topology uses the actual worker answers; an individual work-area refusal keeps that monitor's full-bounds fallback. If the topology or observed scale-input generation changed, placement keeps the saved size and forfeits its position. The answer handler does not re-query Winit. Windows and macOS retain their previous synchronous monitor restoration and drag-guard code.
+
+Pinned by `cross_window_drag_tests::one_guard_answers_every_way_a_cross_window_gesture_is_taken_away`, `cross_window_drag_tests::delayed_drag_guard_answers_need_the_same_broker_and_observed_screen`, `cross_window_drag_tests::linux_drag_guard_and_restore_reads_resume_from_display_answers`, and `cross_window_drag_tests::async_restore_work_areas_require_the_captured_topology_and_primary`. §5.3 row 29a stays open for the adjacent Winit intrinsic getter migration and root review.
+
+### 2026-10-06 — Consuming a drag sample preserves its confirmed aim
+
+The broker records the event-delivered pointer used by its last confirmed aim.
+Consuming the screen sample authorizes one broker turn; it does not revoke the
+release. Release uses that recorded pointer, the captured release point, the
+known screen baseline and the absence of a same-generation pending query. A
+changed pointer or pending query returns the payload home. Late answers cannot
+rewrite the aim or pointer. The production-state regression exercises answer,
+sample consumption, aim and release, and keeps the original nonlocal target.
+
+### 2026-10-06 — Requested window allocation is not a native observation
+
+Linux layout, rendering and input use delivered resize dimensions or the
+configured surface allocation. Initial surface configuration uses the explicit
+opening request. Native geometry and resize observations start as `None`;
+only winit events or an addressed native answer fill them. A saved or tear-out
+request no longer initializes the observed geometry cache. Windows and macOS
+keep their original size getters. Pinned by
+`clipboard_path_tests::linux_runtime_sizes_do_not_read_x11_on_the_window_thread`.
+
+
+### Linux client-origin observation — 2026-10-06
+
+Cross-window drag coordinates use the display worker's actual X11 client-to-root translation, separately from the outer frame rectangle. Move and resize events invalidate that origin until a matching current geometry answer arrives. An unavailable translation is not replaced by an outer-frame guess. Windows and macOS retain their Winit inner-position read; Wayland retains the absence of global window coordinates. This uses the existing display request and does not start another worker.
+
+
+### Linux background monitor read — 2026-10-06
+
+The background-image worker reads X11 monitor dimensions before decoding, using its existing WorkerCtx and the independent display connection. The window thread captures only the current client-size fallback. Missing monitors retain that fallback; a native query error records a diagnostic. Wayland and the other platforms keep their Winit monitor path. This avoids the X11 monitor-cache miss reaching RandR from the background-image admission call and adds no worker.
+
+
+### Linux drag origin loss — 2026-10-06
+
+A Linux cross-window drag starts only with an observed client origin. If move or resize invalidates that origin during the gesture, the source withdraws the cross-window broker and keeps its local drag. It does not convert local coordinates into a guessed screen point or retain the previous foreign aim.
+
+
+### Linux origin refresh is independent of persistence — 2026-10-06
+
+Showing an X11 window and each native move or resize event request current window facts. Requests coalesce through the existing pending request and owed-refresh flag. Origin recovery does not wait for a session mutation or save. Wayland skips unsupported native rectangle queries, and closing windows stop admission.
+
+
+### Correction to the background monitor read — 2026-10-06
+
+The preceding background-monitor decision is withdrawn. Winit 0.30.13 caches its X11 monitor list, populates it during window creation, and refreshes it inside the RandR handler before delivering application callbacks. `DISABLE_MONITOR_LIST_CACHING` is a constant false. The application background-image path therefore keeps the existing monitor cache; it does not add fresh native queries to its decode worker. The client-origin migration remains necessary because Winit inner_position performs a live translation on every call.
+
+
+### Linux window posture and summon retirement — 2026-10-06
+
+X11 caption toggles belong to one per-window maximize intent. Observed EWMH state remains separate from the desired request, and stale or unknown facts do not confirm a requested state. Notification restore and resize guards consume that window-owned observation; Wayland retains cached Winit state, and Windows/macOS retain their native paths.
+
+A Linux summon captures the previous foreground before its display request. Its addressed completion restores, shows and finishes the foreground handoff in that order. A second hotkey press while it is pending cancels the request. Closing the run withdraws the pending summon before closing its window; the completion also rejects a leaving, inactive or retiring target before consuming the answer or restoring the window.
+
+
+### Linux application display-read debt is repaid — 2026-10-06
+
+Window-wait row 29a now records the completed application migration. Native X11 display, client-origin and posture facts are read on the display worker; geometry events invalidate and refresh observations, and closing windows reject late results. Layout uses event or configured sizes. Winit's own window construction and event processing remain its responsibility, and its populated monitor cache is retained. The previous open-row notes describe earlier checkpoints.
+
+
+### 2026-10-06 — Linux application display reads close row 29a
+
+Row 29a is done: application X11 display, client-origin and posture observations run on the display worker. The window thread uses addressed answers, event geometry and Winit's populated monitor cache. This records the completed migration described above; it does not replace Winit window construction or event processing.
+
+
+### 2026-10-06 — Linux desktop retirement uses the shared cutoff
+
+Row 30 retains this port's recorded design choice: desktop cleanup runs on its worker after the application drops, and the exiting thread uses the existing three-second SESSION_SAVE_BUDGET. It joins only a finished worker and continues shutdown with a diagnostic at the cutoff. This reuses the Windows session-writer close policy and is not a separate maintainer ruling.
 ### 2026-10-08 — Every window has a seat in the git watch, so a second window's Git page follows the disk as the first window's does (T-WINDOWS-ALL)
 
 The class: a fact that must follow the machine was followed only for the first window, because the subscription or the re-read lived on the window that turns the application's clocks. The survey of every subscription and re-read that reacts to the machine (the ticket's report) found one member in today's code: the git kernel watch. `App::git_watch` was turned only by the first window's turn (`if application_clocks`), with the wanted set and the re-read both read off that window's active tab, so a second window's Git page was never subscribed, the first window's turn dropped every root only another window showed, and news re-read only the first window's surfaces. The document re-reads named beside it are already one owner per window (`WindowRuntime::preview_watch`, turned on every window's turn and answered per owner), as are the file trees, the theme, the scale and the system-settings ear; the profiles and pins re-read's window half (an open Profiles editor in another window keeps its row index) is B6's, because the editor names its row by index, which no fan-out after the table moves can re-point.

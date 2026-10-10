@@ -403,6 +403,10 @@ text_entries! {
     CleanupMarkPreferences,
     CleanupMarkSavedState,
     CleanupMarkUnixData,
+    #[cfg(any(target_os = "linux", test))]
+    CleanupMarkUnixConfig,
+    #[cfg(any(target_os = "linux", test))]
+    CleanupMarkUnixCache,
     CleanupMarkRecovery,
     CleanupMarkUpdateEntrances,
     CleanupMarkUpdateHome,
@@ -435,6 +439,9 @@ text_entries! {
     UninstallCardCancel,
 
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
+    /// A pending drop lost the pointer or target state it was requested for.
+    #[cfg(any(target_os = "linux", test))]
+    DropLocationUnconfirmed,
     PastePathEncoding,
     PastePathControl,
     PastePathPowerShellQuote,
@@ -3158,6 +3165,12 @@ impl Text {
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
             ),
+            #[cfg(any(target_os = "linux", test))]
+            Self::DropLocationUnconfirmed => pick(
+                lang,
+                "Folio could not confirm where the drop landed. Drop the files again.",
+                "Folio 无法确认放置位置。请重新拖放文件。",
+            ),
             Self::PasteClipboardPicture => pick(
                 lang,
                 "The clipboard picture could not be saved. Copy again and retry.",
@@ -5061,6 +5074,10 @@ impl Text {
                 pick(lang, "Saved Application State", "Saved Application State")
             }
             Self::CleanupMarkUnixData => pick(lang, "Unix data", "Unix 数据"),
+            #[cfg(any(target_os = "linux", test))]
+            Self::CleanupMarkUnixConfig => pick(lang, "Unix configuration", "Unix 配置"),
+            #[cfg(any(target_os = "linux", test))]
+            Self::CleanupMarkUnixCache => pick(lang, "Unix Chromium cache", "Unix Chromium 缓存"),
             Self::CleanupMarkRecovery => {
                 pick(lang, "User configuration recovery copies", "用户配置备份")
             }

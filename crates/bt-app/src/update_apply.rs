@@ -1132,8 +1132,14 @@ pub(crate) enum Survey {
 /// The receipts are found by listing `H\<txn>` (`files::read_directory`, the
 /// product's one listing): the trial's nonce is its own, and its receipt is the
 /// one place it says it.
-pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Running]) -> Survey {
-    let running: Vec<Running> = match install_flip::running_from(program) {
+pub(crate) fn survey(
+    worker: &WorkerCtx,
+    home: &Home,
+    txn: TxnId,
+    program: &Path,
+    excluded: &[Running],
+) -> Survey {
+    let running: Vec<Running> = match install_flip::running_from_on_worker(worker, program) {
         Ok(list) => list
             .into_iter()
             .filter(|process| !excluded.contains(process))
@@ -1287,6 +1293,7 @@ pub(crate) struct Before<'a> {
 /// this recovery's own starter); `data` is the data directory whose claim is
 /// asked.
 pub(crate) fn before_deciding(
+    worker: &WorkerCtx,
     what: &Before<'_>,
     end: &mut dyn FnMut(TrialProcess) -> Result<(), String>,
 ) -> BeforeDeciding {
@@ -1307,7 +1314,7 @@ pub(crate) fn before_deciding(
         .copied()
         .filter(|process| handed_back.is_none_or(|handed| handed.process != *process))
         .collect();
-    let mut found = survey(home, txn, program, &excluded);
+    let mut found = survey(worker, home, txn, program, &excluded);
     if let (Some(handed), Survey::Candidates(running)) = (handed_back, &found)
         && !handed.ready
         && running.contains(&handed.process)
@@ -1323,7 +1330,7 @@ pub(crate) fn before_deciding(
             )));
         }
         excluded.push(handed.process);
-        found = survey(home, txn, program, &excluded);
+        found = survey(worker, home, txn, program, &excluded);
     }
     let unlistable = match found {
         Survey::Adoptable { process, receipt } => {

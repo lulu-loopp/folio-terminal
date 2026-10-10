@@ -64,13 +64,14 @@ use crate::NativeWindow;
 ///
 /// **The currency is the platform's and the field is one field** (M4-8). On
 /// Windows [`summon_key_code`] answers with a Win32 virtual key, the number
-/// `RegisterHotKey` takes; on macOS it answers with a `kVK_*` virtual key code,
-/// the number `RegisterEventHotKey` takes. They are two different numbers for
-/// the same press — `` ` `` is `0xc0` on one machine and `0x32` on the other —
-/// and a struct with one field per platform would be a struct whose other half
-/// is always a lie. What makes one field safe is that nothing above this module
-/// ever *reads* it: `bt-app` fills it from [`summon_key_code`] and hands the
-/// whole value straight back to [`register`].
+/// `RegisterHotKey` takes; on macOS it answers with a `kVK_*` code, the number
+/// `RegisterEventHotKey` takes; on Linux it answers with an XKB keysym that the
+/// X11 worker resolves through the live keyboard map. They are different
+/// numbers for the same press — `` ` `` is `0xc0` on one machine and `0x32` on
+/// another — and a struct with one field per platform would be a struct whose
+/// other half is always a lie. Nothing above this module ever *reads* the
+/// field: `bt-app` fills it from [`summon_key_code`] and hands it straight back
+/// to [`register`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hotkey {
     pub ctrl: bool,
@@ -91,10 +92,10 @@ pub struct Hotkey {
 ///
 /// The table upstairs stores a chord as a person wrote it — a character they
 /// typed, or a key that has a name rather than a character — and that is the
-/// only description of a key that means the same thing on two platforms. The
-/// numbers do not: a Win32 virtual key is one machine's answer and a `kVK_*`
-/// code is the other's, and [`summon_key_code`] is the single door between
-/// them. `bt-app` says which key; this crate says which number.
+/// only description of a key that means the same thing across platforms. The
+/// numbers do not: a Win32 virtual key, `kVK_*` code, and XKB keysym are each a
+/// machine's answer, and [`summon_key_code`] is the single door between them.
+/// `bt-app` says which key; this crate says which number.
 ///
 /// It is this crate's own enum rather than `winit::keyboard::Key` because
 /// `winit` is not a dependency of this crate outside its tests, and because the
@@ -165,13 +166,13 @@ pub fn summon_key_code(key: SummonKey) -> Option<u16> {
     this_platforms_key_code(key)
 }
 
-/// [`summon_key_code`]'s three arms, as three definitions.
+/// [`summon_key_code`]'s platform arms, each as a definition.
 ///
 /// Three functions rather than three `cfg` blocks inside one, which is this
 /// crate's shape everywhere else: a `cfg` that chooses between *definitions* is
 /// read by the compiler before anything about types is decided, and a reader
 /// looking for what this platform does finds one body rather than a body with
-/// two thirds of it crossed out.
+/// other platforms' code crossed out.
 #[cfg(windows)]
 fn this_platforms_key_code(key: SummonKey) -> Option<u16> {
     win32_key_code(key)
@@ -182,10 +183,16 @@ fn this_platforms_key_code(key: SummonKey) -> Option<u16> {
     carbon_key_code(key)
 }
 
+/// The Linux door names a key in XKB keysym currency.
+#[cfg(target_os = "linux")]
+fn this_platforms_key_code(key: SummonKey) -> Option<u16> {
+    crate::linux_hotkey::keysym_for(key)
+}
+
 /// A platform with no door to claim a chord at has no number to name a key by
 /// either, and answering one would be answering for a machine nobody asked.
-/// `register`'s own third arm says the same thing in a sentence.
-#[cfg(not(any(windows, target_os = "macos")))]
+/// `register`'s refusal arm says the same thing in a sentence.
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 fn this_platforms_key_code(key: SummonKey) -> Option<u16> {
     let _ = key;
     None
@@ -1943,14 +1950,14 @@ mod macos_hotkey {
 /// server has no desktop to take a key out of. The refusal is a sentence rather
 /// than a variant of [`HotkeyFault`] for the reason the fault list itself gives:
 /// its variants are things a reader can do something about.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 #[derive(Debug)]
 pub struct GlobalHotkey {
     /// Never constructed: [`register`] refuses.
     _never: std::convert::Infallible,
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 impl GlobalHotkey {
     /// The id this claim was made under. Unreachable: there is no claim.
     #[must_use]
@@ -1960,7 +1967,7 @@ impl GlobalHotkey {
 }
 
 /// Claim the chord. Refused: there is no desktop here.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
     let _ = id;
     // **The product's own refusal first, exactly as the two real arms order
@@ -1974,6 +1981,34 @@ pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
     Err(HotkeyFault::Refused(
         "the global summon key is not on this platform".to_owned(),
     ))
+}
+
+#[cfg(target_os = "linux")]
+pub type GlobalHotkey = crate::linux_hotkey::LinuxGlobalHotkey;
+
+#[cfg(target_os = "linux")]
+static LINUX_BACKEND: std::sync::OnceLock<crate::linux_window::Backend> =
+    std::sync::OnceLock::new();
+
+/// The event loop's backend selected from its first live window handle.
+#[cfg(target_os = "linux")]
+pub fn set_linux_backend(backend: crate::linux_window::Backend) {
+    let _ = LINUX_BACKEND.set(backend);
+}
+
+/// Queue an X11 claim; its status is pending until the server answers.
+#[cfg(target_os = "linux")]
+pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
+    if !holds_a_summon_modifier(hotkey) {
+        return Err(HotkeyFault::NoModifier);
+    }
+    if hotkey.virtual_key == 0 {
+        return Err(HotkeyFault::NoSuchKey);
+    }
+    let backend = LINUX_BACKEND.get().copied().ok_or_else(|| {
+        HotkeyFault::Refused("the Linux window backend is not configured".to_owned())
+    })?;
+    crate::linux_hotkey::register_global_hotkey(backend, id, hotkey)
 }
 
 /// Nobody has the keyboard on a host with no desktop.

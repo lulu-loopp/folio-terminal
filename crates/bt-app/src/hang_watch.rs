@@ -215,7 +215,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize,
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bt_platform::admission::{Cookie, DoorKey, Meter};
+use bt_platform::admission::{Cookie, DoorKey, Meter, WorkerCtx};
 use bt_platform::mem::Footprint;
 
 pub use bt_platform::hang::Answer;
@@ -326,7 +326,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 223;
+const STATION_COUNT: usize = 225;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1059,6 +1059,11 @@ pub enum Station {
     /// **An update's exit guard at the process's end** — `update_handoff::leave_armed`, after
     /// the loop (§5.3 row 29; door `UpdateLeave`, 0.4.6 U-34).
     UpdateLeave = 222,
+    /// Linux desktop helper and hotkey workers joined after the event loop.
+    DesktopRetire = 223,
+    /// Synchronous dirty-preview recovery copies before a controlled stop closes windows
+    /// (§5.3 row 31; door `PreviewRecoveryCopies`).
+    PreviewRecoveryCopies = 224,
 }
 
 impl Station {
@@ -1289,6 +1294,8 @@ impl Station {
             Self::UpdateJobOffer => "FolioApp::consider_update_offer",
             Self::UpdateJobProgress => "update_job::Job::drain_progress",
             Self::UpdateLeave => "update_handoff::leave_armed",
+            Self::DesktopRetire => "retire_linux_desktop",
+            Self::PreviewRecoveryCopies => "preview recovery copies",
         }
     }
 
@@ -1533,6 +1540,8 @@ impl Station {
             220 => Self::UpdateJobOffer,
             221 => Self::UpdateJobProgress,
             222 => Self::UpdateLeave,
+            223 => Self::DesktopRetire,
+            224 => Self::PreviewRecoveryCopies,
             _ => Self::Starting,
         }
     }
@@ -3445,7 +3454,7 @@ pub fn start(reports: PathBuf, trace_perf: bool) {
     if let Err(error) = bt_platform::spawn_at_priority(
         "bt-hang-watch",
         bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| watch_forever(reports, ui_thread_id, threshold, trace_perf),
+        move |worker| watch_forever(worker, reports, ui_thread_id, threshold, trace_perf),
     ) {
         crate::diagnostics::note(&format!("Folio could not start its hang watchdog: {error}"));
     }
@@ -3507,19 +3516,34 @@ pub fn can_come_round(now_ms: u64, pulse: Pulse, allowance_ms: u64) -> bool {
 /// `threshold` is [`start`]'s answer and not this thread's: see
 /// [`TRACED_HANG_THRESHOLD`] for which run gets which, and for why the reading
 /// is not taken here.
-fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace_perf: bool) {
+fn watch_forever(
+    _worker: &WorkerCtx,
+    reports: PathBuf,
+    ui_thread_id: u32,
+    threshold: Duration,
+    trace_perf: bool,
+) {
     let mut watch = HangWatch::new(threshold, STARTUP_THRESHOLD);
     let mut reads = crate::file_reads::Clock::default();
     // The file the stall in progress was reported to, so its healing line lands
     // in the same file rather than in a second one nobody would connect to it.
     let mut open_report: Option<PathBuf> = None;
-    // The question, bound to the thread it is about. Not called unless the
-    // arithmetic has already run out of innocent explanations.
+    // Ordinary polls ask only after the silence is unexplained; Linux trace
+    // runs also ask once at startup to record the event delivery path.
+    #[cfg(target_os = "linux")]
+    let mut ask = || crate::linux_hang_probe::ask(_worker, ANSWER_WITHIN);
+    #[cfg(not(target_os = "linux"))]
     let mut ask = move || bt_platform::hang::ask_thread_to_answer(ui_thread_id, ANSWER_WITHIN);
     // The budget lines lost as of the last one printed; the next line printed says how many more.
     let mut lost_printed = 0;
+    #[cfg(target_os = "linux")]
+    let mut trace_probe_asked = !trace_perf;
     loop {
         std::thread::sleep(WATCH_INTERVAL);
+        #[cfg(target_os = "linux")]
+        if !trace_probe_asked {
+            trace_probe_asked = !matches!(ask(), Answer::NoWindow);
+        }
         let heart = heartbeat();
         // **The other instrument, drained first and said last** (X-7): a hold
         // that ran long and then healed is exactly what the poll below is about

@@ -12,7 +12,7 @@
 //! **Which copies have been said** is the file [`ANNOUNCED_RECORD`] in the data directory, beside
 //! the folder and never in it (the folder the verb opens holds the person's edits and nothing
 //! of Folio's): a JSON array of the names of the copies the folder held when it was last said.
-//! It is written whole ([`bt_platform::install_txn::durable_write`]) **before** the toast is
+//! It is written whole ([`bt_platform::install_txn::durable_write_on_worker`]) **before** the toast is
 //! raised, so a start that dies before or after its toast has already recorded the copies, and a
 //! run of starts that each fail never says the same copy twice. A record that cannot be written
 //! raises no toast (a copy would otherwise be said at every start). A record that cannot be
@@ -111,12 +111,14 @@ fn look(worker: &WorkerCtx, folder: &Path, record: &Path) -> Result<Option<Annou
         return Ok(None);
     }
     let bytes = serde_json::to_vec(&present).expect("a set of strings is JSON");
-    bt_platform::install_txn::durable_write(record, &bytes).map_err(|failure| {
-        format!(
-            "{} could not be written ({failure}); nothing is said, so nothing is said twice",
-            record.display()
-        )
-    })?;
+    bt_platform::install_txn::durable_write_on_worker(worker, record, &bytes).map_err(
+        |failure| {
+            format!(
+                "{} could not be written ({failure}); nothing is said, so nothing is said twice",
+                record.display()
+            )
+        },
+    )?;
     Ok(Some(Announcement {
         folder: folder.to_path_buf(),
         count,

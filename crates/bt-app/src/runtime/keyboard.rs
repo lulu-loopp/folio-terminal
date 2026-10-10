@@ -777,6 +777,12 @@ impl Runtime<'_> {
         if !self.window.ime_active {
             return;
         }
+        #[cfg(target_os = "linux")]
+        if bt_platform::linux_display_backend() == Some(bt_platform::linux_window::Backend::X11)
+            && !self.window.window_focused
+        {
+            return;
+        }
         let owner = ime_owner(self.keyboard_owner());
         let area = match ime_caret_source(owner) {
             ImeCaretSource::Nowhere => return,
