@@ -1358,6 +1358,13 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
         .unwrap_or_else(|| {
             panic!("the clipboard door does not ask who holds the keyboard:\n{door}")
         });
+    let request = door
+        .find("self.request_clipboard_read(token,ReadKind::Payload)")
+        .expect("the door queues the payload read");
+    assert!(
+        asked < request,
+        "the question is asked after the payload read was queued"
+    );
     let read = door
         .find("bt_platform::clipboard_payload()")
         .expect("the door reads the clipboard");

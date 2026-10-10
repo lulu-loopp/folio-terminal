@@ -646,7 +646,7 @@ fn esc_under_the_restore_card_closes_it_unanswered_and_reaches_nothing_beneath()
     // The unanswered tabs go back to the file: the snapshot carries the window's pending list,
     // and only an answer (the loop's `settle_restore_answer`) clears the application's question.
     assert!(
-        squeezed_body("Runtime", "window_snapshot")
+        squeezed_body("Runtime", "window_snapshot_with_rect")
             .contains(".extend(self.window.pending_restore.iter().map(|tab|TabV1{pinned:false,"),
         "an unanswered question no longer folds back into the session"
     );
@@ -735,7 +735,7 @@ fn the_last_ordinary_window_closing_asks_the_summoned_terminal_about_its_unsaved
     let summon = squeezed(method_body("FolioApp", "the_summon_lets_the_run_end"));
     assert!(
         summon.contains(
-            "runtime.raise_dirty_gate(restore::GateRequest::ShutWithTheRun(closing))?;ifraised.proceeds(){returnOk(true);}self.summon_quake()?;Ok(false)"
+            "runtime.raise_dirty_gate(restore::GateRequest::ShutWithTheRun(closing))?;ifraised.proceeds(){returnOk(true);}self.summon_quake(None)?;Ok(false)"
         ),
         "the summoned terminal's own gate decides, and a held close brings it up:\n{summon}"
     );
@@ -1071,12 +1071,12 @@ fn an_unwritable_target_keeps_the_edit_in_a_recovery_copy_and_says_where() {
 /// Three tables, each the whole of what the product does:
 ///
 /// * [`FAIL_SITES`] — every call of `FolioApp::fail`, by the item it stands in and how many: the
-///   twelve sites, each a controlled failure;
+///   fourteen sites, each a controlled failure;
 /// * [`ROAD`] — every call of `FolioApp::stop_every_window`, the road that keeps every window's
 ///   unsaved edits and then closes every window with `ending`: `fail`, and `exiting` (a loop
 ///   stopped by something that is not a window closing);
 /// * [`CLOSES`] — every call of `Runtime::close_window` outside the road, with why it does not
-///   need the road. A thirteenth site that closed windows for a stop of its own, past the
+///   need the road. A site that closed windows for a stop of its own, past the
 ///   preservation, is a call this table does not have.
 ///
 /// A call standing in no function (a `const`, a `static`) is refused: it has no row.
@@ -1100,12 +1100,12 @@ mod failure_road {
         Row { item, count, why }
     }
 
-    /// The thirteen sites of a controlled failure.
+    /// The fifteen sites of a controlled failure.
     pub(super) const FAIL_SITES: &[Row] = &[
         row(
             "crate::FolioApp::about_to_wait_inner",
-            6,
-            "the retirement's turn (2), the settle chain, the drag broker, the reap, a window's turn",
+            7,
+            "the retirement's turn (2), the settle chain, the clipboard-lane drain, the drag broker, the reap, a window's turn",
         ),
         row(
             "crate::FolioApp::resumed",
@@ -1119,8 +1119,8 @@ mod failure_road {
         ),
         row(
             "crate::FolioApp::window_event",
-            4,
-            "the capture pre-dispatch, the wheel's flush, the drop's flush, the handler's result",
+            5,
+            "the capture pre-dispatch, the wheel's flush, Linux's pending-pointer refusal, the drop's flush, the handler's result",
         ),
     ];
 
@@ -1252,7 +1252,7 @@ mod failure_road {
         failures
     }
 
-    /// RED (D-4, 0.4.8 G7) — **the thirteen `fail` sites all enter through the one road, and no
+    /// RED (D-4, 0.4.8 G7) — **the fourteen `fail` sites all enter through the one road, and no
     /// other site closes a window past it.**
     ///
     /// MUTATION (planted below, and on the product): add a function to `impl FolioApp` that
@@ -1269,8 +1269,8 @@ mod failure_road {
         );
         assert_eq!(
             FAIL_SITES.iter().map(|row| row.count).sum::<usize>(),
-            13,
-            "the thirteen sites"
+            15,
+            "the fifteen sites"
         );
     }
 

@@ -2938,6 +2938,7 @@ mod tests {
 
     const MAC: HostPlatform = HostPlatform::MacOs;
     const WINDOWS: HostPlatform = HostPlatform::Windows;
+    const OTHER_UNIX: HostPlatform = HostPlatform::OtherUnix;
     const CMD: ModifiersState = ModifiersState::SUPER;
 
     /// **This host's command modifier** — Control, or Command on a Mac — read off
@@ -3042,13 +3043,34 @@ mod tests {
         );
 
         // And off macOS the answer never moves: Alt is Alt on a keyboard with an
-        // Alt key printed on it, whichever way the row is set.
-        for setting in [false, true] {
-            assert_eq!(
-                effective_modifiers(ModifiersState::ALT, setting, WINDOWS),
-                ModifiersState::ALT,
-            );
+        // Alt key printed on it, whichever way the row is set. This is also the
+        // Linux path from winit's XKB modifier state to the bytes the PTY hears.
+        for platform in [WINDOWS, OTHER_UNIX] {
+            for setting in [false, true] {
+                assert_eq!(
+                    effective_modifiers(ModifiersState::ALT, setting, platform),
+                    ModifiersState::ALT,
+                    "{platform:?}, Option-as-Alt={setting}"
+                );
+            }
         }
+        let linux_modifiers = effective_modifiers(ModifiersState::ALT, false, OTHER_UNIX);
+        assert_eq!(
+            keyboard_bytes(
+                &character("å"),
+                &character("å"),
+                KeyLocation::Standard,
+                linux_modifiers,
+                false,
+                UNASKED,
+                KeyOrigin {
+                    platform: OTHER_UNIX,
+                    ..NOWHERE
+                },
+            ),
+            Some(b"\x1b\xc3\xa5".to_vec()),
+            "the XKB-produced text and Alt modifier reach a Unix child together"
+        );
     }
 
     /// RED (T-MAC-LIVE, §13.33 ①) — **what this door answers is a question
@@ -4352,45 +4374,23 @@ mod tests {
     /// combinations of Shift, Alt, Ctrl and Super, with DECCKM off and on.
     ///
     /// `key_encoding_legacy_windows.tsv` and `key_encoding_legacy_macos.tsv` were captured, each on
-    /// its platform, from the encoder as it stood on main before T-KEYBOARD-PROTOCOL. This is the promise the design note makes of PowerShell, cmd and
-    /// Codex on Windows: byte-identical.
+    /// its platform, from the encoder as it stood on main before T-KEYBOARD-PROTOCOL. Other Unix
+    /// uses the Windows capture for the shared Ctrl and Shift+Insert paste rules, with Alt+F4
+    /// taken from the Mac capture: the existing platform test holds Alt+F4 as an ordinary VT key
+    /// there. No Linux capture is claimed, and the historical files stay unchanged.
     ///
     /// MUTATION: let the kitty rules run when no protocol is in force (Esc sends `CSI 27u`).
     #[test]
     fn a_program_that_never_asked_gets_exactly_the_bytes_it_got_before() {
-        let baseline = match bt_platform::host_platform() {
-            HostPlatform::Windows => KEY_ENCODING_LEGACY_WINDOWS,
-            HostPlatform::MacOs => KEY_ENCODING_LEGACY_MACOS,
-            other => panic!("no pre-ticket capture was made on {other:?}"),
-        };
         let mut compared = 0;
-        for line in baseline
-            .lines()
-            .filter(|line| !line.starts_with('#') && !line.is_empty())
-        {
-            let cells = line.split('\t').collect::<Vec<_>>();
-            let [key, bits, decckm, hex] = cells[..] else {
-                panic!("four columns: {line:?}");
-            };
-            let bits = bits.parse::<u8>().expect("modifier bits");
-            let mut modifiers = ModifiersState::empty();
-            for (bit, modifier) in [
-                (1, ModifiersState::SHIFT),
-                (2, ModifiersState::ALT),
-                (4, ModifiersState::CONTROL),
-                (8, ModifiersState::SUPER),
-            ] {
-                if bits & bit != 0 {
-                    modifiers |= modifier;
-                }
-            }
+        for (key, modifiers, decckm, expected) in legacy_sweep() {
             let (logical, base) = windows_us(key, modifiers.shift_key());
             let sent = keyboard_bytes(
                 &logical,
                 &base,
                 KeyLocation::Standard,
                 modifiers,
-                decckm == "1",
+                decckm,
                 UNASKED,
                 NOWHERE,
             );
@@ -4398,19 +4398,16 @@ mod tests {
                 || "-".to_owned(),
                 |bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
             );
-            assert_eq!(sent, hex, "{key} mods {bits} DECCKM {decckm}");
+            assert_eq!(sent, expected, "{key} mods {modifiers:?} DECCKM {decckm}");
             compared += 1;
         }
         assert_eq!(compared, 2368, "the whole captured sweep");
     }
 
-    /// The captured sweep of this host, as `(key, modifiers, DECCKM, hex or "-")`.
-    fn legacy_sweep() -> Vec<(&'static str, ModifiersState, bool, &'static str)> {
-        let baseline = match bt_platform::host_platform() {
-            HostPlatform::Windows => KEY_ENCODING_LEGACY_WINDOWS,
-            HostPlatform::MacOs => KEY_ENCODING_LEGACY_MACOS,
-            other => panic!("no pre-ticket capture was made on {other:?}"),
-        };
+    /// One historical sweep, parsed as `(key, modifiers, DECCKM, hex or "-")`.
+    fn parse_legacy_sweep(
+        baseline: &'static str,
+    ) -> Vec<(&'static str, ModifiersState, bool, &'static str)> {
         baseline
             .lines()
             .filter(|line| !line.starts_with('#') && !line.is_empty())
@@ -4434,6 +4431,34 @@ mod tests {
                 (key, modifiers, decckm == "1", hex)
             })
             .collect()
+    }
+
+    /// The historical sweep for this host. Other Unix shared Windows' command and paste
+    /// modifiers, but it did not reserve Alt+F4 for closing the window. That third-platform
+    /// expectation is therefore the Windows capture with those rows taken from the Mac capture,
+    /// where Alt+F4 was an ordinary VT key too. It does not use today's encoder to generate its
+    /// own expected output.
+    fn legacy_sweep() -> Vec<(&'static str, ModifiersState, bool, &'static str)> {
+        match bt_platform::host_platform() {
+            HostPlatform::Windows => parse_legacy_sweep(KEY_ENCODING_LEGACY_WINDOWS),
+            HostPlatform::MacOs => parse_legacy_sweep(KEY_ENCODING_LEGACY_MACOS),
+            HostPlatform::OtherUnix => {
+                let mut other_unix = parse_legacy_sweep(KEY_ENCODING_LEGACY_WINDOWS);
+                let macos = parse_legacy_sweep(KEY_ENCODING_LEGACY_MACOS);
+                for row in &mut other_unix {
+                    if row.0 == "F4" && row.1.alt_key() && !row.1.super_key() {
+                        row.3 = macos
+                            .iter()
+                            .find(|candidate| {
+                                candidate.0 == row.0 && candidate.1 == row.1 && candidate.2 == row.2
+                            })
+                            .expect("the Mac capture holds this Alt+F4 chord")
+                            .3;
+                    }
+                }
+                other_unix
+            }
+        }
     }
 
     fn hex_of(bytes: Option<Vec<u8>>) -> String {

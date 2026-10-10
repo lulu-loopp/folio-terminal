@@ -113,14 +113,14 @@ pub use windows_impl::native_present_facts;
 /// is hold it, copy it, compare two of them, and hand it back — which is
 /// exactly what `bt-app` does with the fifty it takes.
 ///
-/// **Where the handle is spelled.** Twice, and both spellings are gated:
+/// **Where the handle is spelled.** The platform constructors are gated:
 /// [`NativeWindow::from_win32`] on Windows and [`NativeWindow::from_appkit`] on
-/// macOS. That is §4.4 ① of the plan applied to a type rather than to a
+/// macOS, and X11/Wayland constructors on Linux. That is §4.4 ① of the plan applied to a type rather than to a
 /// module — an SDK type stays inside a backend definition — and it is the same
 /// arrangement `instance::DataDirectoryClaim` already has. The rule is pinned
 /// by `the_native_window_door_has_no_windows_type_in_its_signature`.
 ///
-/// **The bits inside.** An `HWND` on Windows and an `NSView*` on macOS, both
+/// **The bits inside.** An `HWND`, `NSView*`, X11 window ID or Wayland surface,
 /// held as a `NonZeroIsize` rather than as a pointer, so the value is `Send`
 /// and `Sync` for the same reason the `NonZeroIsize` it replaces was: it is a
 /// number that names something, not a reference to it. Whether the thread
@@ -172,6 +172,30 @@ impl NativeWindow {
         let handle = NonZeroIsize::new(ns_view.as_ptr() as isize)
             .expect("a NonNull pointer is not the null address");
         Self { handle }
+    }
+
+    /// An X11 window ID supplied by the window owner.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn from_x11(window: std::num::NonZeroU32) -> Self {
+        Self {
+            handle: NonZeroIsize::new(window.get() as isize).expect("an X11 window ID is nonzero"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn as_x11_window(self) -> u32 {
+        self.handle.get() as u32
+    }
+
+    /// A Wayland surface supplied by the window owner.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn from_wayland(surface: std::ptr::NonNull<std::ffi::c_void>) -> Self {
+        Self {
+            handle: NonZeroIsize::new(surface.as_ptr() as isize)
+                .expect("a NonNull surface is not the null address"),
+        }
     }
 
     /// **A window token that names no window**, for a test that needs two
@@ -17384,6 +17408,69 @@ pub use windows_impl::{
 #[cfg(not(windows))]
 mod portable_impl;
 
+#[cfg(target_os = "linux")]
+mod linux_clipboard;
+#[cfg(target_os = "linux")]
+mod linux_clipboard_x11;
+#[cfg(target_os = "linux")]
+mod linux_clipboard_x11_transport;
+#[cfg(target_os = "linux")]
+mod linux_files;
+#[cfg(target_os = "linux")]
+pub use linux_clipboard::{
+    LINUX_CLIPBOARD_OPERATION_BUDGET, LinuxClipboardBackend, clipboard_payload_on_worker,
+    clipboard_text_on_worker, set_clipboard_text_on_worker,
+};
+#[cfg(target_os = "linux")]
+pub use linux_clipboard::{
+    install_backend as install_linux_clipboard_backend, shutdown as release_clipboard,
+    shutdown_on_worker as release_clipboard_on_worker,
+};
+#[cfg(target_os = "linux")]
+pub use linux_clipboard_x11::{
+    ClaimOutcome as LinuxX11ClaimOutcome, ReconcileOutcome as LinuxX11ReconcileOutcome,
+    StartError as LinuxX11StartError, X11OwnerCandidate as LinuxX11OwnerCandidate,
+};
+#[cfg(target_os = "linux")]
+pub use linux_files::recycle_on_worker;
+
+#[cfg(target_os = "linux")]
+pub mod linux_display;
+#[cfg(target_os = "linux")]
+mod linux_fonts;
+#[cfg(target_os = "linux")]
+mod linux_watch;
+#[cfg(target_os = "linux")]
+pub use linux_display::active_backend as linux_display_backend;
+#[cfg(target_os = "linux")]
+pub use linux_display::install_backend as install_linux_display_backend;
+#[cfg(target_os = "linux")]
+pub use linux_watch::shutdown_watches;
+
+#[cfg(target_os = "linux")]
+mod linux_dialogs;
+#[cfg(target_os = "linux")]
+mod linux_process;
+#[cfg(target_os = "linux")]
+pub use linux_process::{register_helper_worker as register_linux_helper_worker, shutdown_helpers};
+#[cfg(target_os = "linux")]
+pub mod linux_hotkey;
+#[cfg(target_os = "linux")]
+mod linux_notifications;
+#[cfg(target_os = "linux")]
+pub mod linux_window;
+#[cfg(target_os = "linux")]
+pub use linux_dialogs::install_dialog_wake;
+#[cfg(target_os = "linux")]
+pub use linux_notifications::shutdown_notifications;
+
+#[cfg(target_os = "linux")]
+mod linux_system_settings;
+#[cfg(target_os = "linux")]
+pub use linux_system_settings::{
+    SystemSettingsWatch, shutdown_system_settings, system_uses_light_apps,
+};
+
 #[cfg(not(windows))]
 pub use portable_impl::{
     CustomWindowFrame, FilePickKind, ImeSystemCaret, ShellPickKind, active_keyboard_layout,
@@ -17431,13 +17518,12 @@ pub use portable_impl::{
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_impl::{DirChange, DirWatch};
 
-/// **The trash and the font list, on a platform that has neither door written**
-/// (M2-2, M2-4).
+/// **The trash and the font list, on platforms without their own backend**
+/// (M2-2, M2-4). Linux's font functions delegate to [`linux_fonts`].
 ///
-/// The same split as the watch group above and for the same reason: both names
-/// were this module's for every non-Windows target, and `macos_files` and
-/// `macos_fonts` now answer them for a Mac. A third platform still meets the
-/// refusal and the one-row list.
+/// The same split as the watch group above and for the same reason: these names
+/// remain in the portable API, while Linux uses [`linux_fonts`] for font data
+/// and macOS uses `macos_fonts`.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_impl::{
     cjk_font_families, monospace_family_named, monospace_font_families, recycle,
@@ -17450,17 +17536,21 @@ pub use portable_impl::{
 /// The split is the whole of what M1-3 changed about the portable module: every
 /// door in it whose subject is a window or a display now carries
 /// `#[cfg(not(any(windows, target_os = "macos")))]`, and the same names arrive
-/// from the macOS backend instead. `a_window_or_screen_door_has_one_arm_per_platform`
-/// walks both files and holds the two lists to each other.
+/// from the macOS backend instead. Linux's system-appearance read and watch
+/// have their own portal backend below; the remaining portable window doors
+/// still use this arm. `a_window_or_screen_door_has_one_arm_per_platform`
+/// walks the platform arms and holds the door lists to each other.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_impl::{
-    SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
-    get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
-    monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
-    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
+    client_area_animation_enabled, dpi_at, get_dpi_for_window, get_window_rect, get_work_area,
+    install_window_class_background, is_window_minimized, monitor_id_at, os_ui_language,
+    pointer_position, pointer_position_in_window, request_window_close, set_window_dark_mode,
+    set_window_outer_rect, set_window_topmost, stand_window_at, take_keyboard_focus,
+    top_level_window_at, virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
+
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
+pub use portable_impl::{SystemSettingsWatch, system_uses_light_apps};
 
 /// **The window and the screen, over AppKit** (M1-3).
 ///
@@ -18489,6 +18579,7 @@ mod portable_clipboard {
 
     /// Put one string on the clipboard. Refused, and said so — the caller's own
     /// failure path already turns this into a line a reader sees.
+    #[cfg(not(target_os = "linux"))]
     pub fn set_clipboard_text(text: &str) -> Result<(), String> {
         let _ = text;
         Err("this platform has no clipboard backend".to_owned())
@@ -18496,7 +18587,9 @@ mod portable_clipboard {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub use portable_clipboard::{clipboard_text, set_clipboard_text};
+pub use portable_clipboard::clipboard_text;
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub use portable_clipboard::set_clipboard_text;
 
 /// **A door in this crate has one signature, and no window in it**
 /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②, ticket M1-9).
@@ -19099,26 +19192,27 @@ mod deferred_service_tests {
 /// **The window and screen backend has exactly one arm per platform** (ticket
 /// M1-3).
 ///
-/// Source pins, for `deferred_service_tests`' reason turned round: the module
-/// they are about is the one this workstation does **not** compile, and the
-/// claim is about which doors live in which file — which is a fact about the
-/// text rather than about a call. The behavioural twin runs on the Mac
-/// (`macos_impl::tests`).
+/// Source pins, for `deferred_service_tests`' reason turned round: the claim is
+/// about which doors live in which file, including the Linux portal arm, and is
+/// therefore a fact about the text as well as the platform build. The
+/// behavioural macOS twin runs in `macos_impl::tests`.
 ///
 /// What they are guarding is the failure this split can have and no compiler
 /// would catch on Windows: a door that gains an AppKit arm and keeps its
 /// portable one is a duplicate definition on macOS (caught there, late), and a
-/// door that loses its portable arm without gaining an AppKit one is a **Linux**
-/// build that stops compiling — which nothing in this workspace builds today and
-/// §4.6 of the plan says must stay possible.
+/// door that loses a portable arm without gaining its platform-specific arm is
+/// a build that stops compiling on that platform.
 #[cfg(test)]
 mod macos_window_backend_tests {
     /// The two arms' own text.
     const PORTABLE: &str = include_str!("portable_impl.rs");
     const MACOS: &str = include_str!("macos_impl.rs");
+    const LINUX: &str = include_str!("linux_system_settings.rs");
 
     /// The gate every door in the portable arm now stands behind.
     const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
+    const OTHER_UNIX: &str =
+        "#[cfg(not(any(windows, target_os = \"macos\", target_os = \"linux\")))]";
 
     /// **The window and screen group**, named once for both pins — the doors
     /// M1-3 moved, in the order the re-export lists spell them.
@@ -19192,24 +19286,49 @@ mod macos_window_backend_tests {
     fn a_window_or_screen_door_has_one_arm_per_platform() {
         for door in DOORS {
             let attributes = attributes_above(PORTABLE, door);
+            let portable_gate = if door == "system_uses_light_apps" {
+                OTHER_UNIX
+            } else {
+                NEITHER
+            };
             assert!(
-                attributes.contains(NEITHER),
+                attributes.contains(portable_gate),
                 "`{door}` is still the portable arm's on macOS, where `macos_impl` also defines \
-                 it:\n{attributes}"
+                 it, or on Linux where `linux_system_settings` owns it:\n{attributes}"
             );
             assert!(
                 MACOS.contains(&format!("\npub fn {door}(")),
-                "`{door}` left the portable arm without arriving in the macOS one, which is a \
-                 platform with no such door at all"
+                "`{door}` left the portable arm without arriving in the macOS one, which is \
+                 a platform with no such door at all"
             );
         }
         assert!(
-            PORTABLE.contains(&format!("{NEITHER}\npub struct SystemSettingsWatch")),
-            "the settings watch is the group's one type and it moves with the doors"
+            PORTABLE.contains(&format!("{OTHER_UNIX}\npub struct SystemSettingsWatch")),
+            "the inert settings-watch type is kept only on other Unix hosts"
         );
         assert!(
             MACOS.contains("pub struct SystemSettingsWatch {"),
             "and the macOS arm is the one that really subscribes"
+        );
+        assert!(
+            LINUX.contains("pub struct SystemSettingsWatch {"),
+            "Linux subscribes to the process-wide portal source"
+        );
+        assert!(
+            LINUX.contains("pub fn system_uses_light_apps() -> Option<bool> {"),
+            "the cached Linux appearance getter lives beside its source"
+        );
+        assert!(
+            LINUX.contains(
+                "pub fn shutdown_system_settings(_worker: &WorkerCtx) -> Result<(), String> {"
+            ),
+            "the exit worker has the one join door for the portal subscription"
+        );
+        assert!(
+            include_str!("lib.rs").contains(
+                "pub use linux_system_settings::{\n    SystemSettingsWatch, shutdown_system_settings, system_uses_light_apps,"
+            ),
+            "the Linux platform crate exports its worker-only shutdown entrance"
         );
     }
 
@@ -19776,8 +19895,13 @@ mod macos_dialog_backend_tests {
             "\npub fn message_box(",
         ] {
             let attributes = attributes_above(PORTABLE, definition);
+            let expected = if definition.contains("Picker") {
+                "#[cfg(not(any(windows, target_os = \"macos\", target_os = \"linux\")))]"
+            } else {
+                NEITHER
+            };
             assert!(
-                attributes.contains(NEITHER),
+                attributes.contains(expected),
                 "`{definition}` is still the portable arm's on macOS, where `macos_dialogs` also \
                  defines it:\n{attributes}"
             );
@@ -19786,6 +19910,9 @@ mod macos_dialog_backend_tests {
                 "`{definition}` left the portable arm without arriving in the macOS one, which is \
                  a platform with no such door at all"
             );
+            if definition.contains("Picker") {
+                assert!(include_str!("linux_dialogs.rs").contains(definition));
+            }
         }
         assert!(
             PORTABLE.contains("pub enum ShellPickKind {")
@@ -20123,8 +20250,13 @@ mod macos_notification_backend_tests {
             );
         }
         for type_name in ["Notifier", "Taskbar"] {
+            let expected = if type_name == "Notifier" {
+                "#[cfg(not(any(windows, target_os = \"macos\", target_os = \"linux\")))]"
+            } else {
+                NEITHER
+            };
             assert!(
-                PORTABLE.contains(&format!("{NEITHER}\npub struct {type_name}")),
+                PORTABLE.contains(&format!("{expected}\npub struct {type_name}")),
                 "`{type_name}` is the group's type and it moves with the doors"
             );
             assert!(
@@ -20779,8 +20911,13 @@ mod macos_process_door_tests {
                 .expect("the macOS arm is a module");
             let portable_arm = &HANDOFF[portable..macos];
             let attributes = attributes_above(portable_arm, &format!("pub fn {door}("));
+            let expected = if door == "open_system_fonts_page" {
+                NOT_MACOS
+            } else {
+                "#[cfg(not(any(target_os = \"macos\", target_os = \"linux\")))]"
+            };
             assert!(
-                attributes.contains(NOT_MACOS),
+                attributes.contains(expected),
                 "`{door}` is still the portable arm's on macOS, where `macos_handoff` also \
                  defines it:\n{attributes}"
             );
@@ -20788,6 +20925,9 @@ mod macos_process_door_tests {
                 HANDOFF[macos..].contains(&format!("pub fn {door}(")),
                 "`{door}` left the portable arm without arriving in the macOS one"
             );
+            if door != "open_system_fonts_page" {
+                assert!(include_str!("linux_files.rs").contains(&format!("fn {door}(")));
+            }
         }
         // And the one door macOS takes *from* the portable arm keeps its single
         // re-export, because both platforms answer it the same way.

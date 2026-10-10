@@ -447,12 +447,20 @@ fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_plac
 fn real_powershell_input_reaches_a_viewport_owned_frame() {
     let columns = std::num::NonZeroU16::new(48).unwrap();
     let rows = std::num::NonZeroU16::new(10).unwrap();
-    // The default shell, resolved as a pane resolves it, but started through `TestShell`:
-    // without the user's `$PROFILE`, and with history refused (and read back) before the line
-    // below is typed. Started the ordinary way, this test appended that line to the user's own
-    // PSReadLine history on every run (T-TEST-SHELL-HYGIENE).
+    // PowerShell's readiness handshake is Windows-specific. Unix `/bin/sh` uses a controlled
+    // `PS1` prompt as its readiness marker, then receives a POSIX `printf` line. Both shells go
+    // through `TestShell`, which keeps profiles, history and home in a per-test scratch directory.
+    #[cfg(windows)]
     let mut pty =
         bt_pty::test_shell::TestShell::spawn_default(PtySize::cells(columns, rows)).unwrap();
+    #[cfg(unix)]
+    let mut pty = bt_pty::test_shell::TestShell::spawn(
+        bt_pty::PtyCommand::new("/bin/sh")
+            .arg("-i")
+            .env("PS1", "BT_APP_READY> "),
+        PtySize::cells(columns, rows),
+    )
+    .unwrap();
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
         nonzero_u32(columns.get()),
         nonzero_u32(rows.get()),
@@ -460,28 +468,31 @@ fn real_powershell_input_reaches_a_viewport_owned_frame() {
         DEFAULT_FROZEN_LINE_QUOTA,
         std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
     );
-    // The child here is a real PowerShell starting for real, so *how long* it needs to
-    // reach a prompt and echo a command back is a fact about the machine, not about this
-    // terminal. A total wall-clock budget therefore made this test a load meter: at rest it
-    // finished in six seconds, but with twenty-four spinners on this twenty-four-thread host
-    // the 2026-08-20 experiment failed it **16 times out of 16**, always on the same ten-second
-    // ceiling, always with the child working normally on the other side of it.
+    // The child is a real shell, so startup and input echo take machine time, not terminal
+    // time. The old Windows PowerShell version made a total wall-clock budget a load meter: at
+    // rest it finished in six seconds, but with twenty-four spinners on this twenty-four-thread
+    // host the 2026-08-20 experiment failed it **16 times out of 16**, always on the same
+    // ten-second ceiling, always with the child working normally on the other side of it.
     //
     // What the test wants to know is whether the child has *stopped*, and that question
     // survives a busy host: a starved machine delivers the same bytes, only further apart. So
     // the budget restarts on every byte read, and a separate ceiling catches the one shape
     // silence cannot — a child that talks forever without ever saying this.
     //
-    // Enlarging the old ten-second *total* was the option not taken, and the distinction is
-    // the point: a total grows with the work the child has left, so no value of it is right on
-    // a machine of unknown speed, while a silence budget is one judgement about how long a
-    // live process may be denied the CPU before we call it dead. Thirty seconds is that
-    // judgement, and it is `bt-pty`'s `PROBE_SILENCE_BUDGET` to the second — same question,
-    // same host, and the two probes should not answer it differently. See there for the
-    // measurements it was chosen from.
+    // Enlarging the old ten-second *total* was the option not taken: a total grows with the
+    // work the child has left, while a silence budget asks how long a live process may be denied
+    // the CPU before we call it dead. Thirty seconds is that judgement, and it is `bt-pty`'s
+    // `PROBE_SILENCE_BUDGET` to the second — same question, same host, and the two probes should
+    // not answer it differently. See there for the measurements it was chosen from.
     const SILENCE_BUDGET: Duration = Duration::from_secs(30);
     const CEILING: Duration = Duration::from_secs(180);
     const MARKER: &str = "BT_APP_INPUT_OK";
+    #[cfg(windows)]
+    const COMMAND: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')\r";
+    #[cfg(unix)]
+    const COMMAND: &str = "printf '%s%s\\n' 'BT_APP_' 'INPUT_OK'\r";
+    #[cfg(unix)]
+    const READY_MARKER: &str = "BT_APP_READY>";
 
     let started = Instant::now();
     let mut last_output = Instant::now();
@@ -498,9 +509,16 @@ fn real_powershell_input_reaches_a_viewport_owned_frame() {
             for reply in &replies {
                 pty.reply(reply).unwrap();
             }
-            if !command_sent && !replies.is_empty() {
-                pty.write(&ime_commit_bytes("Write-Output ('BT_APP_' + 'INPUT_OK')\r"))
-                    .unwrap();
+            #[cfg(windows)]
+            let ready = !replies.is_empty();
+            #[cfg(unix)]
+            let ready = session
+                .terminal()
+                .visible_text()
+                .iter()
+                .any(|line| line.contains(READY_MARKER));
+            if !command_sent && ready {
+                pty.write(&ime_commit_bytes(COMMAND)).unwrap();
                 command_sent = true;
             }
             output_seen = session
@@ -514,14 +532,14 @@ fn real_powershell_input_reaches_a_viewport_owned_frame() {
         if silent_for >= SILENCE_BUDGET || started.elapsed() >= CEILING {
             panic!(
                 "{MARKER} never reached Term: gave up after {:?}, the last {:?} of it with the \
-                     child silent, having read {bytes_read} bytes; the handshake {}; {}. Screen \
+                     child silent, having read {bytes_read} bytes; input {}; {}. Screen \
                      {:?}",
                 started.elapsed(),
                 silent_for,
                 if command_sent {
-                    "completed and the command was sent"
+                    "the command was sent"
                 } else {
-                    "never completed, so the command was never sent"
+                    "the shell readiness signal never arrived, so the command was not sent"
                 },
                 pty.account(),
                 session.terminal().visible_text()
@@ -757,4 +775,54 @@ fn an_update_doors_panic_unwinds_through_its_exit_guard_under_mains_hook() {
         "the child got past the panic: {said}"
     );
     assert!(said.contains("1 passed"), "{said}");
+}
+
+#[test]
+fn maximize_intent_keeps_desired_state_ahead_of_stale_answers() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+}
+
+#[test]
+fn maximize_intent_preserves_rapid_absolute_toggle_order() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+    assert_eq!(intent.posture_state(), Some(false));
+}
+
+#[test]
+fn maximize_intent_waits_for_unknown_state_and_cancels_even_toggles() {
+    let mut intent = WindowMaximizeIntent::default();
+    assert_eq!(intent.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(intent.observe(Some(false)), None);
+    assert_eq!(intent.posture_state(), Some(false));
+
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(true));
+    let mut unknown = WindowMaximizeIntent::default();
+    assert_eq!(unknown.toggle(), WindowMaximizeAction::WaitForObservation);
+    assert_eq!(
+        unknown.observe(Some(true)),
+        Some(WindowMaximizeAction::Request(false))
+    );
+    assert_eq!(unknown.posture_state(), None);
+    assert_eq!(unknown.observe(Some(false)), None);
+    assert_eq!(unknown.posture_state(), Some(false));
+}
+
+#[test]
+fn an_initial_maximize_request_stays_desired_until_observed() {
+    let mut intent = WindowMaximizeIntent::default();
+    intent.request_initial(true);
+    assert_eq!(intent.toggle(), WindowMaximizeAction::Request(false));
+    assert_eq!(intent.posture_state(), None);
+    assert_eq!(intent.observe(Some(true)), None);
+    assert_eq!(intent.posture_state(), None);
 }

@@ -1,0 +1,12 @@
+[package]
+name = "wayland-ime-driver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wayland-client = "=0.31.15"
+wayland-protocols-misc = { version = "=0.3.12", features = ["client"] }
+tempfile = "=3.27.0"
+
+[workspace]

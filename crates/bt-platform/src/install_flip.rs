@@ -39,6 +39,8 @@
 //!   not merely until its exit code can be read, which comes first (0.4.7
 //!   uninstall fix: the door that waits for its asker took the said exit code
 //!   for the end and met the asker's data-directory claim still held).
+//!   Linux reads field 22 of `/proc/PID/stat` in clock ticks since boot.
+//!   Process listing and signaling remain unavailable on Linux.
 //! * **[`ask`]** (U-29; Windows U-24): a recorded process asked to quit, or
 //!   ended — only after the process list shows that very process (pid *and*
 //!   start instant) running from one of the given executables. The rollback
@@ -62,8 +64,9 @@
 //!   Nothing is written, and the handle is closed at once, so the check never
 //!   stands in a move's way. Refused by name elsewhere.
 //!
-//! Worker only: the exchange flushes to the device. Refused by name (or an
-//! empty answer, for the reads) where there is no arm.
+//! Worker only: the exchange flushes to the device. Linux supplies only the
+//! process-start read; unsupported operations return a named refusal or their
+//! documented empty answer.
 
 use std::ffi::OsString;
 use std::io;
@@ -72,10 +75,10 @@ use std::path::Path;
 use crate::install_txn::{self, Failure};
 
 /// **A process, by its pid and the instant it started** (macOS: microseconds
-/// since the epoch, as `proc_pidinfo`'s `PROC_PIDTBSDINFO` reports it;
-/// Windows: the creation time `GetProcessTimes` reports, in 100 ns since
-/// 1601): together they name one process for its whole life, where a pid alone
-/// may be reused.
+/// since the epoch as `proc_pidinfo` reports it; Windows: `GetProcessTimes`
+/// creation time in 100 ns since 1601; Linux: `/proc/PID/stat` field 22, clock
+/// ticks since boot): together they name one process for its whole life, where
+/// a pid alone may be reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Running {
     pub pid: u32,
@@ -788,8 +791,67 @@ mod imp {
         ))
     }
 
+    #[cfg(not(target_os = "linux"))]
     pub(super) fn started_of(_pid: u32) -> Option<u64> {
         None
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn started_of(pid: u32) -> Option<u64> {
+        let stat = crate::file_reads::read(
+            crate::file_reads::Lane::Install,
+            format!("/proc/{pid}/stat"),
+        )
+        .ok()?;
+        start_ticks(&stat)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_ticks(stat: &[u8]) -> Option<u64> {
+        let close = stat.iter().rposition(|byte| *byte == b')')?;
+        if stat.get(close + 1) != Some(&b' ') {
+            return None;
+        }
+        let mut fields = stat
+            .get(close + 2..)?
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let state = fields.next()?;
+        if state.len() != 1 || state == b"Z" || state == b"X" || state == b"x" {
+            return None;
+        }
+        let start_ticks = fields.nth(18)?;
+        std::str::from_utf8(start_ticks).ok()?.parse().ok()
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod linux_tests {
+        use super::start_ticks;
+
+        #[test]
+        fn start_ticks_reads_field_22_after_the_last_comm_parenthesis() {
+            let mut stat = b"42 (cmd ) S 1 2 (nested) \xff) R ".to_vec();
+            stat.extend_from_slice(b"1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 731 20\n");
+            assert_eq!(start_ticks(&stat), Some(731));
+        }
+
+        #[test]
+        fn start_ticks_rejects_dead_and_malformed_records() {
+            let fields = b"1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 731 20";
+            for state in [b'Z', b'X', b'x'] {
+                let mut stat = b"42 (worker) ".to_vec();
+                stat.push(state);
+                stat.push(b' ');
+                stat.extend_from_slice(fields);
+                assert_eq!(start_ticks(&stat), None);
+            }
+            assert_eq!(start_ticks(b"malformed"), None);
+            assert_eq!(start_ticks(b"42 (short) S 1 2"), None);
+            assert_eq!(
+                start_ticks(b"42 (bad) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 nope"),
+                None
+            );
+        }
     }
 
     pub(super) fn image_name(_pid: u32) -> Option<std::ffi::OsString> {

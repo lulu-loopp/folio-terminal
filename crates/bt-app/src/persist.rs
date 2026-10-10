@@ -394,7 +394,7 @@ const SESSION_DEBOUNCE: Duration = Duration::from_millis(1_500);
 pub(crate) const SESSION_SAVE_BUDGET: Duration = Duration::from_secs(3);
 
 /// How often a bounded join asks whether the writer thread has finished.
-const SESSION_JOIN_POLL: Duration = Duration::from_millis(2);
+pub(crate) const SESSION_JOIN_POLL: Duration = Duration::from_millis(2);
 
 /// What a store with nowhere to send a document says (release review X-9).
 ///
