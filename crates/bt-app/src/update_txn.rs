@@ -101,8 +101,8 @@ pub(crate) const STUCK_ATTEMPT_LIMIT: u8 = 3;
 /// (`H\<txn>\health-<nonce>`, (b).2's objects table).
 pub(crate) const RECEIPT_FILE_PREFIX: &str = "health-";
 
-/// The trial's mark that a person's change it held was never committed
-/// (`H\<txn>\unkept`, [`Home::unkept`]; 0.4.8 E4).
+/// The mark that what a Folio running over the transaction changed is not
+/// kept (`H\<txn>\unkept`, [`Home::unkept`]; 0.4.8 E4, E5).
 pub(crate) const UNKEPT_FILE: &str = "unkept";
 
 // ───────────────────────────── fixed-length values ─────────────────────────────
@@ -1038,7 +1038,8 @@ pub(crate) struct Carried {
 /// reader included). **`marker`** (0.4.8 D1) follows the same rule: absent
 /// when nothing is carried — every journal of Folio's own road — and written
 /// by the press of a managed copy's road ([`Carried`]); every later phase
-/// carries it.
+/// carries it. **`unkept`** (0.4.8 E5) follows it too: absent unless a
+/// rollback's lock holder recorded it ([`Journal::noting_unkept`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Body {
     pub(crate) phase: Phase,
@@ -1047,6 +1048,16 @@ pub(crate) struct Body {
     pub(crate) adapter: Adapter,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) marker: Option<Carried>,
+    /// **The version of a Folio that ran over this transaction and whose
+    /// changes the rollback did not keep** (0.4.8 E5): the lock holder that
+    /// retires a rollback reads the transaction's mark (`H\<txn>\unkept`,
+    /// [`Home::unkept`]: a held start's, or a trial's that held a person's
+    /// change) and records the version it names here, with `Retired`, before
+    /// the folder can go — a macOS holder removes it at once. The start that
+    /// retires the transaction says it on the restored build's card. Losing it
+    /// to a reader that does not know it costs that card alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) unkept: Option<String>,
 }
 
 /// **`H\journal.json`**: the frozen header's `txn` and `rescue`, and the body.
@@ -1084,6 +1095,7 @@ impl Journal {
                 layout,
                 adapter: Adapter::Ours,
                 marker: None,
+                unkept: None,
             },
         }
     }
@@ -1102,6 +1114,16 @@ impl Journal {
     #[must_use]
     pub(crate) fn carrying(mut self, marker: Option<Carried>) -> Self {
         self.body.marker = marker;
+        self
+    }
+
+    /// **The journal noting `version`'s changes as not kept** — what a lock
+    /// holder records with `Retired` over a rollback whose transaction's
+    /// folder holds the mark (0.4.8 E5, [`Body::unkept`]); the next
+    /// [`Self::advance`] carries it.
+    #[must_use]
+    pub(crate) fn noting_unkept(mut self, version: Option<String>) -> Self {
+        self.body.unkept = version;
         self
     }
 
@@ -1170,6 +1192,7 @@ impl Journal {
                 layout: self.body.layout.clone(),
                 adapter: self.body.adapter,
                 marker: self.body.marker.clone(),
+                unkept: self.body.unkept.clone(),
             },
             ..self.clone()
         })
@@ -3188,12 +3211,18 @@ impl Home {
         self.transaction(txn).join(Receipt::file_name(nonce))
     }
 
-    /// **`H\<txn>\unkept`: a trial of `txn` held a person's change it never
-    /// saw committed** (0.4.8 E4, R3) — written by the trial's watch
-    /// (`update_trial`), taken back when the watch reads the commit, and read
-    /// by the start that retires a committed transaction
-    /// (`update_startup::changes_not_kept`); it goes with the transaction's
-    /// folder. Empty: its being there is the fact.
+    /// **`H\<txn>\unkept`: a Folio ran over `txn` and what it changed is not
+    /// kept** — a trial of `txn` held a person's change it never saw
+    /// committed (0.4.8 E4, R3), written by the trial's watch (`update_trial`)
+    /// and taken back when the watch reads the commit; or a start that
+    /// continued over `txn` unfinished, because no recovery could be started,
+    /// with its writes held (Windows) or as the transaction's new build
+    /// writing plainly (macOS) (0.4.8 E5, `update_startup::hand_to_rescue`).
+    /// Its bytes are the version of the build that wrote it. Read by the start
+    /// that retires a committed transaction (`update_startup::changes_not_kept`)
+    /// and by the lock holder that retires a rollback, which records the
+    /// version in the journal ([`Body::unkept`]); it goes with the
+    /// transaction's folder.
     pub(crate) fn unkept(&self, txn: TxnId) -> PathBuf {
         self.transaction(txn).join(UNKEPT_FILE)
     }
@@ -3728,6 +3757,7 @@ mod tests {
                 layout,
                 adapter: Adapter::Ours,
                 marker: None,
+                unkept: None,
             },
         }
     }
@@ -4015,6 +4045,62 @@ mod tests {
         }
         let ordinary = journal(Phase::Moving, members_layout());
         assert_eq!(Journal::parse(&ordinary.encode()), Ok(ordinary));
+    }
+
+    /// RED (0.4.8 E5) — **a rollback's note of the version whose changes it
+    /// did not keep is carried by `Retired` and read back, absent when there
+    /// is none, and an earlier reader settles the journal as it always did**:
+    /// 0.4.6's and 0.4.7's body readers read the phase and the layout as they
+    /// are, and their header reader reads the header as it reads one without
+    /// the note — a terminal, rolled-back transaction they retire, losing the
+    /// restored build's card alone (the grammar's row: additive, written by
+    /// the rescue copy).
+    ///
+    /// MUTATION: `advance` writes `unkept: None` — `Retired` has lost the
+    /// note the holder made.
+    #[test]
+    fn a_rollbacks_note_is_carried_by_retired_and_an_earlier_reader_settles_it_as_ever() {
+        let rolled_back = journal(Phase::RolledBack { untried: true }, members_layout());
+        let plain = rolled_back.advance(&Event::Retired).unwrap();
+        let noted = rolled_back
+            .clone()
+            .noting_unkept(Some("0.4.9".to_owned()))
+            .advance(&Event::Retired)
+            .unwrap();
+        let retired = Phase::Retired {
+            outcome: Outcome::RolledBack,
+            untried: true,
+        };
+        assert_eq!(noted.body.phase, retired);
+        assert_eq!(
+            noted.body.unkept.as_deref(),
+            Some("0.4.9"),
+            "Retired carries it"
+        );
+        let bytes = noted.encode();
+        assert_eq!(Journal::parse(&bytes), Ok(noted.clone()));
+        assert!(
+            !String::from_utf8(plain.encode())
+                .unwrap()
+                .contains("unkept"),
+            "absent when there is none"
+        );
+        let BodyOnly046 { body } = serde_json::from_slice(&bytes).expect("0.4.6 and 0.4.7 read it");
+        assert_eq!(
+            body,
+            Body046 {
+                phase: retired,
+                layout: members_layout(),
+            }
+        );
+        let earlier = header_as_0_4_6_and_0_4_7_read_it(&bytes).expect("the header reads");
+        assert_eq!(
+            header_as_0_4_6_and_0_4_7_read_it(&plain.encode()),
+            Some(earlier),
+            "the header 0.4.6 and 0.4.7 read is the one without the note"
+        );
+        assert_eq!(noted.header().class, Class::Terminal);
+        assert_eq!(noted.header().outcome, HeaderOutcome::RolledBack);
     }
 
     /// The four folders a Windows member lives in, as the file system keeps
@@ -7132,6 +7218,9 @@ mod tests {
         Adapter,
         /// The body's carried marker and its keys (0.4.8 D1).
         Carried,
+        /// The body's note of a version whose changes a rollback did not
+        /// keep (0.4.8 E5).
+        Unkept,
         ReceiptVersion,
     }
 
@@ -7146,7 +7235,8 @@ mod tests {
                 | Vocabulary::RetiredOutcome
                 | Vocabulary::Layout
                 | Vocabulary::Adapter
-                | Vocabulary::Carried => Document::Body,
+                | Vocabulary::Carried
+                | Vocabulary::Unkept => Document::Body,
                 Vocabulary::ReceiptVersion => Document::Receipt,
             }
         }
@@ -7268,6 +7358,7 @@ mod tests {
         Layout(LayoutWord),
         Adapter(Adapter),
         Carried(CarriedWord),
+        Unkept,
         ReceiptVersion,
     }
 
@@ -7283,6 +7374,7 @@ mod tests {
                 Of::Layout(_) => Vocabulary::Layout,
                 Of::Adapter(_) => Vocabulary::Adapter,
                 Of::Carried(_) => Vocabulary::Carried,
+                Of::Unkept => Vocabulary::Unkept,
                 Of::ReceiptVersion => Vocabulary::ReceiptVersion,
             }
         }
@@ -7388,6 +7480,11 @@ mod tests {
             Of::Carried(CarriedWord::Marker) => additive(of, "marker", "0.4.8", EVERY),
             Of::Carried(CarriedWord::Install) => additive(of, "install", "0.4.8", EVERY),
             Of::Carried(CarriedWord::Caskroom) => additive(of, "caskroom", "0.4.8", EVERY),
+            // Absent unless a rollback's lock holder notes it with `Retired`
+            // (0.4.8 E5): the version a mark in the transaction's folder
+            // names. A reader that does not know the key ignores it (0.4.6's
+            // and 0.4.7's included) and loses the restored build's card alone.
+            Of::Unkept => additive(of, "unkept", "0.4.8", Writers::RESCUE),
             Of::ReceiptVersion => additive(of, "1", "0.4.6", Writers::N),
         }
     }
@@ -7435,6 +7532,7 @@ mod tests {
         words.extend(LAYOUTS.map(|layout| row(Of::Layout(layout))));
         words.extend(ADAPTERS.map(|adapter| row(Of::Adapter(adapter))));
         words.extend(CARRIED.map(|word| row(Of::Carried(word))));
+        words.push(row(Of::Unkept));
         words.push(row(Of::ReceiptVersion));
         words
     }
@@ -7453,7 +7551,8 @@ mod tests {
     /// 4 classes, 3 outcomes (design §3(c): a fifth class or a fourth outcome
     /// is read by every 0.4.6 and 0.4.7 start as a journal it cannot read, for
     /// ever), 13 phases, 2 retirements, 3 layouts, 4 adapters: design §1.1's
-    /// 29 words; and the carried marker's 3 keys (0.4.8 D1). Each row's word
+    /// 29 words; the carried marker's 3 keys (0.4.8 D1); and the rollback's
+    /// note, `unkept` (0.4.8 E5). Each row's word
     /// is the word this build's own serialiser and parser use. The writers of
     /// a phase are [`JOURNAL_WRITERS`]'s, and a class's or an outcome's are
     /// those of the phases that project to it.
@@ -7481,6 +7580,7 @@ mod tests {
             (Vocabulary::Layout, 3),
             (Vocabulary::Adapter, 4),
             (Vocabulary::Carried, 3),
+            (Vocabulary::Unkept, 1),
             (Vocabulary::ReceiptVersion, 1),
         ] {
             assert_eq!(words(vocabulary).len(), count, "{vocabulary:?}");
@@ -7602,6 +7702,25 @@ mod tests {
             .collect();
         rows.sort_unstable();
         assert_eq!(on_the_wire, rows);
+        // The rollback's note: the body's one key beyond those above.
+        let noted = serde_json::to_value(
+            &journal(
+                Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried: false,
+                },
+                members_layout(),
+            )
+            .noting_unkept(Some("0.4.9".to_owned()))
+            .body,
+        )
+        .unwrap();
+        assert_eq!(noted[row(Of::Unkept).word], "0.4.9");
+        assert_eq!(
+            noted.as_object().unwrap().len(),
+            3,
+            "phase, layout and the note: {noted}"
+        );
         assert_eq!(HEADER_VERSION.to_string(), row(Of::HeaderVersion).word);
         assert_eq!(RECEIPT_VERSION.to_string(), row(Of::ReceiptVersion).word);
         let header: serde_json::Value =

@@ -236,6 +236,10 @@ pub(crate) enum Outcome {
     /// `Previous version restored.` — the flip was rolled back
     /// (`Failure::RolledBack`, U-29).
     Restored,
+    /// `Changes made in Folio {version} were not kept.` — the flip was rolled
+    /// back after `version` ran over the transaction, and what was changed in
+    /// it was not kept (`Failure::Undone`, 0.4.8 E5).
+    Undone { version: String },
     /// `Update incomplete.` and the journal's folder — the rollback did not
     /// finish (`Failure::Incomplete`, U-29). No folder when a report handed
     /// over named none this side accepts (U-36 round 2). `held`: and this
@@ -372,6 +376,9 @@ pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
             None,
             CardVerb::Releases,
         ),
+        Outcome::Undone { version } => {
+            (i18n::update_card_undone(version), None, CardVerb::Releases)
+        }
         Outcome::Incomplete { folder, held } => (
             not_kept(Text::UpdateCardIncomplete.text().to_owned(), *held),
             folder.clone(),
@@ -453,6 +460,7 @@ fn reason(failure: &Failure) -> String {
             Text::UpdateFailedTrialRunning
         }
         Failure::Interrupted => Text::UpdateFailedInterrupted,
+        Failure::Undone { .. } => Text::UpdateFailedUndone,
         Failure::Newer {
             version: Some(_), ..
         } => Text::UpdateFailedNewer,
@@ -484,6 +492,9 @@ fn outcome(failure: &Failure) -> Outcome {
         },
         Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
         Failure::RolledBack | Failure::Interrupted => Outcome::Restored,
+        Failure::Undone { version } => Outcome::Undone {
+            version: version.clone(),
+        },
         Failure::Incomplete { folder, held, .. } => Outcome::Incomplete {
             folder: folder.clone(),
             held: *held,
@@ -942,7 +953,7 @@ fn version_failure<W: Copy + Eq>(job: &Job<W>) -> Option<(&Option<Offer>, Outcom
 pub(crate) fn version_failed_in(lang: Lang, outcome: &Outcome, version: &str) -> String {
     match outcome {
         Outcome::NothingChanged => Text::VersionFailed,
-        Outcome::Restored => Text::VersionFailedRestored,
+        Outcome::Restored | Outcome::Undone { .. } => Text::VersionFailedRestored,
         Outcome::Incomplete { .. } | Outcome::Newer { .. } | Outcome::Trial { .. } => {
             Text::VersionFailedIncomplete
         }
