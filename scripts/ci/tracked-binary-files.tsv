@@ -44,6 +44,19 @@ docs/design/wordmark-r2/detail-b.png	binary format contains NUL bytes
 docs/design/wordmark-r2/detail-c.png	binary format contains NUL bytes
 docs/design/wordmark-r2/detail-d.png	binary format contains NUL bytes
 docs/design/wordmark-r2/options.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/dirty-cancelled.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/dirty-close-choices.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/dirty-save-choices.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/file-peek-dismissed.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/file-peek-open.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/file-peek-pinned.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/float-after-tab-transfer.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/float-before-tab-transfer.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/preview-closed.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/preview-docked.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/preview-popped-out.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/preview-tab-in-destination.png	binary format contains NUL bytes
+docs/plans/port/linux-window-session-evidence/restore-confirm-question.png	binary format contains NUL bytes
 docs/plans/web-preview/favicon-evidence/a-site-with-no-icon-is-the-globe.png	binary format contains NUL bytes
 docs/plans/web-preview/favicon-evidence/favicon-on-head-and-foot.png	binary format contains NUL bytes
 docs/plans/web-preview/favicon-evidence/fixture-favicon.png	binary format contains NUL bytes
@@ -163,6 +176,7 @@ tests/assets/folio-video-test.mkv	binary format contains NUL bytes
 tests/assets/folio-video-test.mov	binary format contains NUL bytes
 tests/assets/folio-video-test.mp4	binary format contains NUL bytes
 tests/assets/folio-video-test.wmv	binary format contains NUL bytes
+tests/assets/folio-video-unequal-streams.ts	binary format contains NUL bytes
 tests/assets/preview-samples/binary.bin	binary format contains NUL bytes
 tests/assets/preview-samples/sample.dat	binary format contains NUL bytes
 tests/corpus/cargo-build-flood.btcr	binary format contains NUL bytes

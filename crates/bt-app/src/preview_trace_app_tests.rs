@@ -8,14 +8,13 @@ use crate::test_support::cell_ink;
 /// **One rebuild of a whole document, in three clocks** — the harness both
 /// budget tests measure with, so that the two are measuring one thing.
 ///
-/// **What is in the clock and what is not.** The parse is real — and since
-/// ticket T7 that is the *mapped* parse, because
-/// [`preview::parse_markdown_ranged`] is [`preview::parse_markdown_mapped`]
-/// with its maps dropped and the window builds the maps on every parse. The
-/// fence highlighting is real (syntect, the half the research expected to
-/// dominate), and the layout arithmetic is real; the *shaper* is the stub
-/// below, for this legacy arithmetic-only probe. So this is the cost of
-/// everything a rebuild re-derives except the proportional shaping.
+/// **What is in the clock and what is not.** The parse is real: this uses the
+/// mapped entry point the window calls, and keeps its per-block source maps
+/// alive through layout, as a rebuilt document does. The fence highlighting is
+/// real (syntect, the half the research expected to dominate), and the layout
+/// arithmetic is real; the *shaper* is the stub below, for this legacy
+/// arithmetic-only probe. So this is the cost of everything a rebuild
+/// re-derives except proportional shaping.
 ///
 /// The three constructions above the clocks are outside all of them, which is
 /// where they belong: a palette and an empty picture map are a test's setup
@@ -56,7 +55,7 @@ fn rebuild_cost(
     };
 
     let clock = Instant::now();
-    let (blocks, ranges) = preview::parse_markdown_ranged(content);
+    let (blocks, ranges, origins) = preview::parse_markdown_mapped(content);
     let parse = clock.elapsed();
     let clock = Instant::now();
     let intrinsic = measure_markdown_intrinsics(
@@ -90,6 +89,9 @@ fn rebuild_cost(
         &mut shaper,
     );
     let laid = clock.elapsed();
+    // The live document retains these maps; do not time their destruction as
+    // part of parsing.
+    std::hint::black_box(origins);
     assert_eq!(layout.len(), blocks.len());
     (blocks.len(), parse, intrinsics, laid)
 }

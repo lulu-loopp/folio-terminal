@@ -1351,13 +1351,20 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
         rung < paste,
         "`Ctrl+V` reaches the clipboard rung before the card's"
     );
-    // The door every clipboard road shares asks the list before it reads the clipboard.
+    // The door every clipboard road shares asks the list before it queues a read.
     let door = squeezed_body("Runtime", "paste_from_clipboard_into");
     let asked = door
         .find("ifself.a_surface_above_the_clipboard_rung_holds_the_keyboard(){returnOk(());}")
         .unwrap_or_else(|| {
             panic!("the clipboard door does not ask who holds the keyboard:\n{door}")
         });
+    let request = door
+        .find("self.request_clipboard_read(token,ReadKind::Payload)")
+        .expect("the door queues the payload read");
+    assert!(
+        asked < request,
+        "the question is asked after the payload read was queued"
+    );
     let read = door
         .find("bt_platform::clipboard_payload()")
         .expect("the door reads the clipboard");

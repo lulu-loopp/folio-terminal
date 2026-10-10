@@ -269,7 +269,11 @@ fn the_files_menus_second_batch_makes_a_row_and_recycles_one() {
     let delete = body("delete_files_row");
     assert!(
         delete.contains("bt_platform::recycle(&path)"),
-        "the row goes to the Recycle Bin"
+        "non-Linux platforms keep their native recycle call"
+    );
+    assert!(
+        delete.contains("self.app.submit_trash(path, target)"),
+        "Linux admits the captured row path to the asynchronous trash lane"
     );
     for permanent in [
         "std::fs::remove_file",

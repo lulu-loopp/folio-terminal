@@ -160,8 +160,10 @@ mod tests {
     /// whose absence is the ordinary case.
     ///
     /// So the error here is **not constructed** — `io::Error::from(NotFound)`
-    /// would have passed on every one of those seven weeks. The error comes
-    /// from the real `DirWatch::start` call.
+    /// would have passed on every one of those seven weeks. Synchronous
+    /// platforms return it from `DirWatch::start`; Linux delivers it through
+    /// the pending subscription after its startup wake, which this test waits
+    /// for without sleeping.
     ///
     /// MUTATION: put the raw `HRESULT` back in `win32_io_error` and this goes
     /// red, which is the stderr line coming back with it.
@@ -169,6 +171,21 @@ mod tests {
     fn a_schemes_folder_that_is_not_there_is_not_a_line_on_stderr() {
         let missing = bt_testpath::temp_path("folio-schemes-that-were-never-customised");
         let _ = std::fs::remove_dir_all(&missing);
+        #[cfg(target_os = "linux")]
+        let error = {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let mut watch = bt_platform::DirWatch::start(&missing, move || {
+                let _ = sender.send(());
+            })
+            .expect("queue a watch before the Linux worker checks the folder");
+            receiver.recv().expect("the failed arm wakes its owner");
+            let error = watch
+                .take_failure()
+                .expect("the subscription carries its asynchronous start failure");
+            assert!(!watch.is_armed());
+            error
+        };
+        #[cfg(not(target_os = "linux"))]
         let error = bt_platform::DirWatch::start(&missing, || {})
             .err()
             .expect("a folder that is not there cannot be watched");

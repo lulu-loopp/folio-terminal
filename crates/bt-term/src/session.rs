@@ -18033,11 +18033,6 @@ mod tests {
             }
         }
 
-        let mut adapter = TerminalAdapter::new(nz(COLUMNS), nz(ROWS));
-        adapter.feed(b"\x1b[?1049h");
-        adapter.feed(&repaint);
-        adapter.take_damage();
-
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(COLUMNS), nz(ROWS));
         session.feed_at(b"\x1b[?1049h", start).unwrap();
@@ -18060,42 +18055,78 @@ mod tests {
             state.content_fingerprint = fingerprint;
         }
 
+        // Keep the production behavior check separate from the timing arms. A same-content feed
+        // must preserve the live artifact and leave every row's revision alone.
+        let row_state = session
+            .live_rows
+            .iter()
+            .map(|state| (state.revision, state.content_fingerprint))
+            .collect::<Vec<_>>();
+        let content_revision = session.live_content_revision;
+
+        // The baseline parses and collects damage; the measured arm uses that same parser and
+        // damage, then runs the production owner that fingerprints and observes the damaged rows.
+        // Calling the owner directly avoids timing unrelated event, staging, and feed-turn work.
+        let mut adapter = TerminalAdapter::new(nz(COLUMNS), nz(ROWS));
+        adapter.feed(b"\x1b[?1049h");
+        adapter.feed(&repaint);
+        let _ = adapter.take_damage();
+
         // Warm both parsers and damage trackers before measuring the same byte stream.
         adapter.feed(&repaint);
-        adapter.take_damage();
+        std::hint::black_box(adapter.take_damage());
         session.feed(&repaint).unwrap();
-        assert_eq!(session.live_decorations.len(), 1);
+        let observation_at = start + LIVE_MATH_STABLE_INTERVAL;
+        let owner_sample = |session: &mut DualPlaneSession| {
+            let started = Instant::now();
+            session.terminal.feed(&repaint);
+            let damage = session.terminal.take_damage();
+            session.observe_live_damage(damage, observation_at);
+            started.elapsed()
+        };
 
-        // The two sides are interleaved and each cycle is its own sample, rather than one block of
-        // 16 timed against another block of 16 seconds later. A quotient of two blocks is only a
-        // ratio of the code if the machine treated both blocks alike, and inside `cargo test` it
-        // does not: this assertion was red in 2 of 20 suite runs on an idle machine while it was
-        // green every time it ran alone (2026-08-19). Paired, a burst of scheduler or allocator
-        // contention lands on both halves of the same sample and cancels out of the quotient; the
-        // median of the 16 then discards the cycles that were preempted outright. Same reasoning,
-        // and the measured distributions, as `docs/M1.8-resize-visual-stability.md`.
+        // Each cycle is a paired sample. Reverse the order on alternating pairs so parser warmup
+        // and frequency changes do not systematically favor one arm; the median then discards
+        // isolated preemptions as described in `docs/M1.8-resize-visual-stability.md`.
         let mut ratios = Vec::with_capacity(CYCLES);
         let mut baseline = Duration::ZERO;
-        let mut measured = Duration::ZERO;
-        for _ in 0..CYCLES {
-            let baseline_started = Instant::now();
-            adapter.feed(&repaint);
-            adapter.take_damage();
-            let baseline_cycle = baseline_started.elapsed();
-
-            let measured_started = Instant::now();
-            session.feed(&repaint).unwrap();
-            let measured_cycle = measured_started.elapsed();
-
+        let mut fingerprint = Duration::ZERO;
+        let baseline_sample = |terminal: &mut TerminalAdapter| {
+            let started = Instant::now();
+            terminal.feed(&repaint);
+            std::hint::black_box(terminal.take_damage());
+            started.elapsed()
+        };
+        for cycle in 0..CYCLES {
+            let (baseline_cycle, fingerprint_cycle) = if cycle % 2 == 0 {
+                (baseline_sample(&mut adapter), owner_sample(&mut session))
+            } else {
+                let fingerprint_cycle = owner_sample(&mut session);
+                let baseline_cycle = baseline_sample(&mut adapter);
+                (baseline_cycle, fingerprint_cycle)
+            };
             baseline += baseline_cycle;
-            measured += measured_cycle;
-            ratios.push(measured_cycle.as_secs_f64() / baseline_cycle.as_secs_f64());
+            fingerprint += fingerprint_cycle;
+            ratios.push(fingerprint_cycle.as_secs_f64() / baseline_cycle.as_secs_f64());
         }
         ratios.sort_by(f64::total_cmp);
         let ratio = ratios[ratios.len() / 2];
         eprintln!(
-            "G1_WIDE_DAMAGE columns={COLUMNS} rows={ROWS} cycles={CYCLES} baseline={baseline:?} fingerprint={measured:?} ratio={ratio:.2} worst={:.2}",
+            "G1_WIDE_DAMAGE columns={COLUMNS} rows={ROWS} cycles={CYCLES} baseline={baseline:?} fingerprint={fingerprint:?} ratio={ratio:.2} worst={:.2}",
             ratios[ratios.len() - 1]
+        );
+        assert_eq!(
+            session.live_content_revision, content_revision,
+            "same-content repaint must not revise the live screen"
+        );
+        assert_eq!(
+            session
+                .live_rows
+                .iter()
+                .map(|state| (state.revision, state.content_fingerprint))
+                .collect::<Vec<_>>(),
+            row_state,
+            "same-content repaint must preserve each row's fingerprint and revision"
         );
         assert_eq!(
             session.live_decorations.len(),
@@ -18105,11 +18136,10 @@ mod tests {
         // Both sides parse and write 1.28M terminal cells. The fixed side additionally streams each
         // cell once into an allocation-free fingerprint. A 2.25x ceiling allows 12.5% host/timer
         // variance over the equal-cost parse+hash model, yet still rejects the measured 6.2x clone
-        // regression. The ceiling is unchanged from when this was two blocks; what changed is that
-        // the number under it is now a property of the code rather than of the machine.
+        // regression.
         assert!(
             ratio <= 2.25,
-            "wide full-screen content invalidation took {ratio:.2}x parser/damage baseline ({measured:?} vs {baseline:?})"
+            "wide full-screen content invalidation took {ratio:.2}x parser/damage baseline ({fingerprint:?} vs {baseline:?})"
         );
     }
 

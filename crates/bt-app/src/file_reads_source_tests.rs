@@ -493,6 +493,7 @@ fn file_reads_every_product_content_door_has_a_lane() {
         "payload_on_stdin",
         "drain",
         "read_profile_for_edit",
+        "copy_config_bytes_if_missing",
         "<FileAnimationSource as Read>::read",
     ] {
         let owner = Owner::parse(key);

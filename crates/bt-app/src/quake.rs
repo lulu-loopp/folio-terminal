@@ -26,8 +26,6 @@
 //! restore prompt's election — a question about a window nobody can see is a
 //! question nobody can answer.
 
-use bt_platform::NativeWindow;
-
 use bt_platform::WindowRect;
 use bt_platform::hotkey::{Foreground, GlobalHotkey, Hotkey, HotkeyFault};
 use winit::keyboard::{ModifiersState, NamedKey};
@@ -223,31 +221,6 @@ pub(crate) struct SummonScreen {
     pub(crate) dpi: u32,
 }
 
-impl SummonScreen {
-    /// **The display the reader is working on**, which is the display the pointer is on.
-    ///
-    /// The pointer and not the window, because the pointer is the only thing on the desk that says
-    /// which screen the person is at. When Windows will not say where the pointer is, the window's
-    /// own display answers, and when it will not say that either the virtual screen does — in that
-    /// order, because each fallback is one step further from the question actually asked.
-    ///
-    /// This is the machine-reading half of the one summon door; the deciding half is
-    /// [`Quake::placement`], which is pure and is where the rules live.
-    #[must_use]
-    pub(crate) fn under_the_pointer(window: NativeWindow, cached_dpi: u32) -> Self {
-        let pointer = bt_platform::pointer_position();
-        let work = pointer
-            .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
-            .or_else(|| bt_platform::get_work_area(window).ok())
-            .unwrap_or_else(bt_platform::virtual_screen_rect);
-        Self {
-            work,
-            monitor_id: pointer.and_then(|(x, y)| bt_platform::monitor_id_at(x, y)),
-            dpi: pointer.map_or(cached_dpi, |(x, y)| bt_platform::dpi_at(x, y)),
-        }
-    }
-}
-
 /// **A chord as this machine's hotkey door will be asked for it**, or `None`
 /// when this keyboard has no key for it.
 ///
@@ -352,6 +325,8 @@ pub(crate) enum SummonMove {
     Raise,
     /// It is up and the reader is in it, so the press means "away".
     Dismiss,
+    /// A second key press cancels a summon that has not reached the screen.
+    CancelPending,
 }
 
 /// The rule, with no window and no Win32 in it.
@@ -360,8 +335,10 @@ pub(crate) enum SummonMove {
 /// the keyboard": a second Folio window in front of the summoned one is exactly
 /// as much *not this window* as somebody's editor is.
 #[must_use]
-pub(crate) const fn summon_move(showing: bool, focused: bool) -> SummonMove {
-    if showing && focused {
+pub(crate) const fn summon_move(showing: bool, focused: bool, pending: bool) -> SummonMove {
+    if pending && !showing {
+        SummonMove::CancelPending
+    } else if showing && focused {
         SummonMove::Dismiss
     } else {
         SummonMove::Raise
@@ -392,6 +369,7 @@ pub(crate) struct Quake {
     /// the claim stands. Read by the settings page — see
     /// `settings::SettingsValues::quake_hotkey_taken`.
     fault: Option<HotkeyFault>,
+    capability_refusal_reported: bool,
     /// The window, once there is one. `None` before the first summon on a launch
     /// with nothing saved.
     window: Option<WindowId>,
@@ -420,6 +398,8 @@ pub(crate) struct Quake {
     /// The message hook does nothing but wake the loop (see the hook's own note
     /// in `main`), so what a `WM_HOTKEY` leaves behind is this bit and a turn.
     summoned: bool,
+    #[cfg(target_os = "linux")]
+    summoned_pointer: Option<(i32, i32)>,
     /// **The window lost the keyboard and the reader wants it gone.**
     ///
     /// Set by the blur and spent on the *next* turn rather than in the arm,
@@ -453,6 +433,35 @@ pub(crate) struct Quake {
 }
 
 impl Quake {
+    /// The current platform claim, for generation-checked asynchronous answers.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn claim(&self) -> Option<&GlobalHotkey> {
+        self.claim.as_ref()
+    }
+
+    /// Record a registration failure whose answer arrived after the request.
+    pub(crate) fn registration_failed(&mut self, fault: HotkeyFault) {
+        self.claim = None;
+        self.fault = Some(fault);
+        self.capability_refusal_reported = false;
+    }
+
+    /// The last registration refusal, for a platform or settings status line.
+    pub(crate) fn registration_fault(&self) -> Option<&HotkeyFault> {
+        self.fault.as_ref()
+    }
+
+    /// Take a platform capability refusal for one diagnostic line, without
+    /// treating it as a competing hotkey registration.
+    pub(crate) fn take_unreported_capability_refusal(&mut self) -> Option<HotkeyFault> {
+        let fault = self.registration_fault()?.clone();
+        if self.capability_refusal_reported || !matches!(fault, HotkeyFault::Refused(_)) {
+            return None;
+        }
+        self.capability_refusal_reported = true;
+        Some(fault)
+    }
+
     /// The window, if this process has one.
     pub(crate) const fn window(&self) -> Option<WindowId> {
         self.window
@@ -505,8 +514,24 @@ impl Quake {
     /// A press has arrived.
     pub(crate) fn press(&mut self) {
         self.summoned = true;
+        #[cfg(target_os = "linux")]
+        {
+            self.summoned_pointer = None;
+        }
     }
 
+    /// Record the root point carried by this X11 key press.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn press_at(&mut self, pointer: (i32, i32)) {
+        self.summoned = true;
+        self.summoned_pointer = Some(pointer);
+    }
+
+    /// Take the location associated with the pending press.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_press_pointer(&mut self) -> Option<(i32, i32)> {
+        self.summoned_pointer.take()
+    }
     /// Take the press, if there is one waiting.
     pub(crate) fn take_press(&mut self) -> bool {
         std::mem::take(&mut self.summoned)
@@ -704,6 +729,7 @@ impl Quake {
         self.claimed_for = wanted.cloned();
         self.claimed_key = None;
         self.fault = None;
+        self.capability_refusal_reported = false;
         let Some(chord) = wanted else {
             return;
         };
@@ -720,7 +746,7 @@ impl Quake {
                 // the window is described by; a card raised over somebody's editor
                 // because a second copy of this program started would be a
                 // notification about a thing that is working as designed.
-                self.fault = Some(fault);
+                self.registration_failed(fault);
             }
         }
     }
@@ -927,8 +953,8 @@ mod tests {
     /// every keyboard has one, so the assertion is about the crossing rather than
     /// about a layout.
     ///
-    /// **The number a digit answers with is not the same number on the two
-    /// platforms** (M4-8), and writing both down is the point rather than a
+    /// **The number a digit answers with is not the same number on the three
+    /// platforms** (M4-8), and writing all three down is the point rather than a
     /// nuisance: `1` is `VK_1` on Windows, which is the digit's own ASCII, and
     /// `kVK_ANSI_1` on a Mac, which is a position on the keyboard and is `0x12`.
     /// A test that asserted one of them would be a test that goes red the first
@@ -950,15 +976,9 @@ mod tests {
         let expected = match bt_platform::host_platform() {
             bt_platform::HostPlatform::Windows => 0x31,
             bt_platform::HostPlatform::MacOs => 0x12,
-            // **A host with no door to claim a chord at has no key code
-            // either** — `bt_platform::hotkey::summon_key_code`'s own third arm.
-            // There is no crossing here to assert, and the absence is asserted
-            // instead: a summon that quietly registered nothing would be worse
-            // than one that says so.
-            bt_platform::HostPlatform::OtherUnix => {
-                assert!(hotkey_for(&chord(ModifiersState::CONTROL)).is_none());
-                return;
-            }
+            // Linux answers with the XKB keysym the digit's character maps
+            // to, which for `1` is the character's own code point.
+            bt_platform::HostPlatform::OtherUnix => 0x31,
         };
         let of = |modifiers: ModifiersState| {
             hotkey_for(&chord(modifiers)).expect("a digit is a key every keyboard this runs on has")
@@ -1040,23 +1060,24 @@ mod tests {
     #[test]
     fn the_chord_raises_a_visible_unfocused_summon_and_hides_a_focused_one() {
         assert_eq!(
-            summon_move(false, false),
+            summon_move(false, false, false),
             SummonMove::Raise,
             "nothing on the screen: the ordinary first press"
         );
         assert_eq!(
-            summon_move(true, false),
+            summon_move(true, false, false),
             SummonMove::Raise,
             "standing there while the reader works elsewhere: the press asks for it"
         );
         assert_eq!(
-            summon_move(true, true),
+            summon_move(true, true, false),
             SummonMove::Dismiss,
             "up, and the reader is in it: the press means away"
         );
         // A window that is hidden cannot hold the keyboard, so this pair says
         // nothing new — it is asserted so that the rule has no unexamined corner.
-        assert_eq!(summon_move(false, true), SummonMove::Raise);
+        assert_eq!(summon_move(false, true, false), SummonMove::Raise);
+        assert_eq!(summon_move(false, false, true), SummonMove::CancelPending);
     }
 
     /// RED (§7.54) — **the settings page speaks only for the refusal a reader can
@@ -1204,6 +1225,41 @@ mod tests {
             quake.fault.is_none() && quake.claimed_for.is_none(),
             "and a chord taken away releases the claim and the fault with it"
         );
+    }
+
+    #[test]
+    fn an_asynchronous_backend_refusal_is_retained_without_becoming_a_conflict() {
+        use crate::shortcuts::{Chord, ChordKey};
+        use std::borrow::Cow;
+        use winit::keyboard::ModifiersState;
+
+        let chord = Chord {
+            modifiers: ModifiersState::CONTROL,
+            key: ChordKey::Character(Cow::Borrowed("`")),
+        };
+        let fault = HotkeyFault::Refused(
+            "native Wayland summon needs unsupported restore and focus operations".to_owned(),
+        );
+        let mut quake = Quake {
+            claimed_for: Some(chord.clone()),
+            ..Quake::default()
+        };
+
+        quake.registration_failed(fault.clone());
+        assert_eq!(quake.fault, Some(fault.clone()));
+        assert!(!quake.hotkey_taken());
+        assert_eq!(
+            quake.take_unreported_capability_refusal(),
+            Some(fault.clone()),
+            "a capability refusal is surfaced without claiming a registration conflict"
+        );
+        assert_eq!(
+            quake.take_unreported_capability_refusal(),
+            None,
+            "the stored refusal is reported once"
+        );
+        quake.reconcile(Some(&chord));
+        assert_eq!(quake.fault, Some(fault));
     }
 
     /// RED (T-FRESH-FACTS) — **a layout that moved the chord's key re-claims it; one
