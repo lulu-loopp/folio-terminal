@@ -140,7 +140,8 @@ impl Drop for Children {
 /// What the synthetic trial does once it is started.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Trial {
-    /// Writes its receipt, as `update_trial` does at first pane text.
+    /// Writes its receipt and runs the product watch, as `update_trial` does
+    /// at first pane text.
     Answers,
     /// Holds a person's change, writes its receipt, and runs the product watch
     /// which releases the change and takes the mark back after `Committed`.
@@ -339,6 +340,9 @@ impl World for Fake {
         };
         install_txn::durable_create(&self.home.receipt_path(txn, &nonce), &receipt.encode())
             .unwrap();
+        if self.trial == Trial::Answers {
+            watch_receipt_decision(self.home.clone(), txn, nonce);
+        }
         if self.trial == Trial::AnswersThenDies {
             self.children.end(pid);
         }
@@ -377,6 +381,28 @@ impl World for Fake {
         self.carried.push((ahead.clone(), request.clone()));
         self.carry_answer
     }
+}
+
+/// Run the product watch beside a synthetic live trial. Once it reads
+/// `Committed`, it removes the receipt to acknowledge that its final mark
+/// decision is complete, just as the real trial does.
+fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
+    let journal = home.journal();
+    let mark = home.unkept(txn);
+    let receipt = home.receipt_path(txn, &nonce);
+    std::thread::spawn(move || {
+        let gate: &'static crate::update_trial::Gate =
+            Box::leak(Box::new(crate::update_trial::Gate::new()));
+        crate::update_trial::watch(
+            gate,
+            (&journal, &mark, &receipt),
+            txn,
+            Duration::from_millis(5),
+            &|| {},
+            None,
+            &mut crate::update_trial::watchdog_asleep(),
+        );
+    });
 }
 
 // ── the installation ────────────────────────────────────────────────────────
@@ -2581,6 +2607,7 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
                 }
                 if tag == "trial-answered" {
                     install.receipt(nonce, nonce, trial.pid);
+                    watch_receipt_decision(install.home.clone(), install.txn, nonce);
                 }
                 install.write(Phase::Trial {
                     nonce,
@@ -3119,6 +3146,7 @@ fn failed_with_the_journal_held(tag: &str) -> Option<(Install, TrialProcess, Fak
     let nonce = Nonce::parse(&words[2].to_string_lossy()).unwrap();
     let second = install.start_trial();
     install.receipt(nonce, nonce, second.pid);
+    watch_receipt_decision(install.home.clone(), install.txn, nonce);
     world.held = None;
     Some((install, second, world))
 }
@@ -3253,6 +3281,7 @@ fn a_persons_start_beside_the_launch_is_never_the_recorded_trial() {
     children.end(person);
     assert_ne!(process.pid, person, "the person's start is never the trial");
     install.receipt(nonce, nonce, process.pid);
+    watch_receipt_decision(install.home.clone(), install.txn, nonce);
     let (ended, world) = applier.join().unwrap();
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert!(
@@ -4975,6 +5004,7 @@ fn adoption_needs_a_receipt_naming_the_exact_process() {
             started: Some(running.started),
         },
     );
+    watch_receipt_decision(install.home.clone(), install.txn, exact);
     let (code, world) =
         recovered_at_logon(&install, limits(5_000, 5_000), install.world(Trial::Silent));
     assert_eq!(code, 0, "{:?}", world.said);
@@ -5621,6 +5651,7 @@ fn the_direct_hop_from_0_4_6_ends_as_0_4_6_ends_it() {
         began_ms: now_ms(),
     });
     exact(&install, nonce, trial);
+    watch_receipt_decision(install.home.clone(), install.txn, nonce);
     let (code, world) = run(as_046(&install), install.world(Trial::Silent));
     assert_eq!(code, 0, "{:?}", world.said);
     assert!(
@@ -5677,7 +5708,9 @@ fn the_direct_hop_from_0_4_6_ends_as_0_4_6_ends_it() {
 
     // The same unrecorded trial beside a rescue build of 0.4.7: adopted.
     let trial = install.start_trial();
-    exact(&install, Nonce::new([0x73; 32]), trial);
+    let nonce = Nonce::new([0x73; 32]);
+    exact(&install, nonce, trial);
+    watch_receipt_decision(install.home.clone(), install.txn, nonce);
     let (code, world) = run(
         install.road(limits(5_000, 5_000)),
         install.world(Trial::Silent),
