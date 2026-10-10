@@ -390,7 +390,7 @@ impl Homebrew {
     fn carries(places: &Places<'_>, bundle: &Path) -> Result<(), String> {
         let found = crate::install_channel::homebrew_marks(bundle).map(|marks| Carried {
             install: marks.marker,
-            caskroom: Some(marks.caskroom),
+            caskroom: marks.caskroom,
         });
         match (found, places.carried) {
             (Ok(found), Some(recorded)) if found == *recorded => Ok(()),

@@ -1658,7 +1658,7 @@ fn homebrew() -> Channel {
 /// The marks a Homebrew copy whose Caskroom is `caskroom` carries.
 fn marks(caskroom: &Path) -> crate::update_txn::Carried {
     crate::update_txn::Carried {
-        install: HOMEBREW_MARKER.as_bytes().to_vec(),
+        install: Some(HOMEBREW_MARKER.as_bytes().to_vec()),
         caskroom: Some(caskroom.to_str().unwrap().as_bytes().to_vec()),
     }
 }
@@ -1705,10 +1705,10 @@ fn a_homebrew_copys_press_records_its_marks_and_carries_them_onto_the_staged_bun
     let stage = home.stage_bundle(TxnId::new([0x41; 16])).unwrap();
     let carried = crate::install_channel::homebrew_marks(&stage).expect("the staged marks");
     assert_eq!(
-        (carried.marker.as_slice(), carried.caskroom.as_slice()),
+        (carried.marker.as_deref(), carried.caskroom.as_deref()),
         (
-            HOMEBREW_MARKER.as_bytes(),
-            caskroom.to_str().unwrap().as_bytes()
+            Some(HOMEBREW_MARKER.as_bytes()),
+            Some(caskroom.to_str().unwrap().as_bytes())
         ),
         "M1: carried byte for byte"
     );
@@ -1725,6 +1725,44 @@ fn a_homebrew_copys_press_records_its_marks_and_carries_them_onto_the_staged_bun
         assert_eq!(identity(worker, &staged).unwrap(), recorded);
     });
     assert!(!calls.exists(), "Homebrew is never run");
+}
+
+/// RED (D2, managed-update revision (d)) — **the carry writes only the
+/// attributes that the old bundle actually had.** A marker-only copy stays
+/// marker-only and a Caskroom-only copy stays Caskroom-only; Folio does not
+/// compose the missing mark.
+///
+/// MUTATION: in `carry`, skip the install-marker arm — the marker-only staged
+/// bundle is missing the one mark it was meant to carry.
+#[test]
+fn a_homebrew_carry_writes_each_existing_attribute_and_no_missing_one() {
+    if !on_macos() {
+        return;
+    }
+    let scratch = Scratch::new("hb-one-mark");
+    for (tag, carried) in [
+        (
+            "marker",
+            crate::update_txn::Carried {
+                install: Some(HOMEBREW_MARKER.as_bytes().to_vec()),
+                caskroom: None,
+            },
+        ),
+        (
+            "caskroom",
+            crate::update_txn::Carried {
+                install: None,
+                caskroom: Some(b"/opt/homebrew/Caskroom/folio".to_vec()),
+            },
+        ),
+    ] {
+        let bundle = scratch.root.join(tag).join("Folio.app");
+        std::fs::create_dir_all(&bundle).unwrap();
+        carry(&bundle, &carried).unwrap();
+        let marks = crate::install_channel::homebrew_marks(&bundle).unwrap();
+        assert_eq!(marks.marker, carried.install, "{tag}: marker");
+        assert_eq!(marks.caskroom, carried.caskroom, "{tag}: Caskroom");
+    }
 }
 
 /// RED (D1, managed-update M2, §3.2 F12) — **a marker that changed on the
@@ -1853,7 +1891,19 @@ fn homebrews_record_is_read_as_homebrew_reads_it() {
     let other = bundle(&scratch.root, "Folio.app", "0.4.5", "another app");
     let prefix = scratch.root.join("prefix");
     let caskroom = homebrew_install(&prefix, "0.4.6", &app);
-    assert!(crate::install_channel::homebrew_record(&app).is_ok());
+    let record = crate::install_channel::homebrew_record(&app).unwrap();
+    assert_eq!(
+        record.evidence,
+        crate::install_channel::HomebrewRecordEvidence::Attribute
+    );
+    assert_eq!(
+        record.marks.marker.as_deref(),
+        Some(HOMEBREW_MARKER.as_bytes())
+    );
+    assert_eq!(
+        record.marks.caskroom.as_deref(),
+        Some(caskroom.to_str().unwrap().as_bytes())
+    );
 
     // An older version whose timestamp is earlier does not count, and one
     // whose timestamp is later does.
@@ -1896,6 +1946,7 @@ fn homebrews_record_is_read_as_homebrew_reads_it() {
     );
     assert_eq!(
         crate::install_channel::homebrew_record(&app).map(drop),
-        Err("an attribute the cask writes is missing")
+        Err("the default Caskrooms record no app"),
+        "a custom prefix without its attribute is not discovered"
     );
 }

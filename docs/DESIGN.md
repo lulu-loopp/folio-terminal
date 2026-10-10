@@ -14766,3 +14766,25 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** `unkept` means the version whose changes the final update outcome did not keep. A provisional held-writes mark is not that fact. The journal grammar, startup reader, mutual exclusion with the rollback card, once semantics and 0.4.7-to-0.4.8 compatibility remain unchanged.
 
 **Pinned by** `update_apply_macos::tests::{a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card, a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so}`, their Windows twins, and the ready arm of `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`, which commits from the hand-back while the real live watch takes its mark back.
+
+### 2026-10-10 — Homebrew's own record recognizes an official-cask copy without install-time attributes (D2)
+
+**What is built.** A macOS bundle is Homebrew-managed when the installed
+version's `Folio.app` link in Homebrew's Caskroom names that exact bundle, even
+when no install marker or Caskroom attribute exists. With no Caskroom
+attribute, `install_channel` checks the two fixed documented locations,
+`/opt/homebrew/Caskroom/folio` and `/usr/local/Caskroom/folio`; a custom prefix
+still requires the attribute. `Fact::line` says `Homebrew record (attribute)`
+or `Homebrew record (default prefix)`. `HomebrewMarks` and
+`update_txn::Carried` hold each attribute optionally, and Prepare carries only
+the bytes that existed.
+
+**The rule.** Homebrew's own link is sufficient evidence that this path is its
+live artifact. Folio reads no `HOMEBREW_PREFIX` and starts no `brew` process.
+The marker remains composed by the package manager; Folio may carry its exact
+bytes but never invents a missing marker or Caskroom attribute.
+
+**Pinned by**
+`install_channel::tests::{a_default_prefix_record_without_attributes_is_homebrew, another_apps_record_and_no_default_record_leave_the_copy_row}`,
+`update_prepare_macos::tests::{homebrews_record_is_read_as_homebrew_reads_it, a_homebrew_carry_writes_each_existing_attribute_and_no_missing_one}`,
+and the existing Homebrew Prepare/Activate M rows.

@@ -66,13 +66,14 @@
 //! # Homebrew's record of the copy (managed-update §2.2 R-H2; 0.4.8 D1)
 //!
 //! A Homebrew copy is updated by Folio's own road only at the app target
-//! Homebrew recorded: the marker says who installed a bundle, and it travels
-//! with a copy made by hand; the record says that *this path* is Homebrew's
-//! live artifact. The cask writes, beside the marker, the attribute
-//! [`CASKROOM_ATTRIBUTE`] holding its Caskroom folder (`{{caskroom_path}}`,
-//! `<prefix>/Caskroom/folio`) — the one place Folio could not otherwise find
-//! without running `brew`. [`homebrew_record`] reads both attributes and asks
-//! the Caskroom what Homebrew itself asks there (Homebrew 7.0.6–7.0.8,
+//! Homebrew recorded. That record is sufficient provenance: it says that
+//! *this path* is Homebrew's live artifact, whether or not the cask also wrote
+//! a marker. The cask may write [`CASKROOM_ATTRIBUTE`] holding its Caskroom
+//! folder (`{{caskroom_path}}`, `<prefix>/Caskroom/folio`). Without that
+//! attribute, Folio checks Homebrew's two documented Caskrooms,
+//! `/opt/homebrew/Caskroom/folio` and `/usr/local/Caskroom/folio`; it reads no
+//! environment variable and runs no `brew`. [`homebrew_record`] asks that
+//! Caskroom what Homebrew itself asks there (Homebrew 7.0.6–7.0.8,
 //! `Caskroom.cask_installed_caskfile` and `Artifact::Moved`): the installed
 //! version is the parent of the greatest `.metadata/*/*` that holds
 //! `Casks/folio.json` (or `.rb`), and `<version>/Folio.app` is the link
@@ -99,6 +100,11 @@ pub const MARKER_ATTRIBUTE: &str = "io.github.lulu-loopp.folio.install";
 /// cask writes on the bundle directory beside the marker, holding the cask's
 /// Caskroom folder (`packaging/homebrew/folio.rb`, `{{caskroom_path}}`).
 pub const CASKROOM_ATTRIBUTE: &str = "io.github.lulu-loopp.folio.caskroom";
+/// Homebrew's documented Caskroom for this cask under its Apple silicon and
+/// Intel default prefixes. A custom prefix is learned only from the cask's
+/// attribute; a Finder launch has no `HOMEBREW_PREFIX` to consult.
+const DEFAULT_HOMEBREW_CASKROOMS: [&str; 2] =
+    ["/opt/homebrew/Caskroom/folio", "/usr/local/Caskroom/folio"];
 /// The app the cask installs (`app "Folio.app"`, no `target:`), and so the
 /// link's name in the Caskroom's version folder.
 pub(crate) const CASK_APP: &str = "Folio.app";
@@ -567,7 +573,7 @@ pub struct Fact {
     pub channel: Channel,
     /// **Whether Homebrew's record names this bundle** ([`homebrew_record`]):
     /// asked of a macOS copy managed by Homebrew, `None` for every other.
-    pub homebrew: Option<Result<(), &'static str>>,
+    pub homebrew: Option<Result<HomebrewRecordEvidence, &'static str>>,
 }
 
 /// The derivation the product runs: the executable's install folder, and
@@ -578,6 +584,24 @@ fn derive_fact(
     me: io::Result<Account>,
     records: impl FnOnce() -> io::Result<Vec<UninstallRecord>>,
 ) -> Fact {
+    derive_fact_with_caskrooms(
+        exe,
+        platform,
+        me,
+        records,
+        DEFAULT_HOMEBREW_CASKROOMS.map(Path::new),
+    )
+}
+
+/// The derivation with the two default Caskrooms named by the caller, so the
+/// product's fixed paths can be exercised over a temporary Homebrew tree.
+fn derive_fact_with_caskrooms(
+    exe: io::Result<PathBuf>,
+    platform: HostPlatform,
+    me: io::Result<Account>,
+    records: impl FnOnce() -> io::Result<Vec<UninstallRecord>>,
+    default_caskrooms: [&Path; 2],
+) -> Fact {
     let root = exe.map_err(|error| error.kind()).and_then(|exe| {
         let root = install_root(&exe, platform).ok_or(io::ErrorKind::NotFound)?;
         Ok((exe, root))
@@ -586,16 +610,43 @@ fn derive_fact(
         let winget = winget(exe, platform, records);
         read(root, platform, me.as_ref().map_err(io::Error::kind), winget)
     });
-    let channel = evidence.as_ref().map_or(Channel::Unknown, classify);
-    let homebrew = match (channel, platform, &root) {
-        (
-            Channel::Managed {
-                manager: Manager::Homebrew,
-                ..
-            },
-            HostPlatform::MacOs,
-            Ok((_, bundle)),
-        ) => Some(homebrew_record(bundle).map(drop)),
+    let mut channel = evidence.as_ref().map_or(Channel::Unknown, classify);
+    let marker_can_be_homebrew = evidence.as_ref().is_ok_and(|evidence| {
+        matches!(
+            evidence.marker,
+            MarkerEvidence::Absent
+                | MarkerEvidence::Present(Marker {
+                    manager: Manager::Homebrew,
+                    ..
+                })
+        )
+    });
+    let homebrew = match (marker_can_be_homebrew, platform, &root) {
+        (true, HostPlatform::MacOs, Ok((_, bundle))) => {
+            let record = homebrew_record_in(bundle, default_caskrooms);
+            if record.is_ok()
+                && matches!(
+                    evidence.as_ref().map(|e| e.marker),
+                    Ok(MarkerEvidence::Absent)
+                )
+            {
+                channel = Channel::Managed {
+                    manager: Manager::Homebrew,
+                    uninstall_hook: false,
+                };
+            }
+            if matches!(
+                channel,
+                Channel::Managed {
+                    manager: Manager::Homebrew,
+                    ..
+                }
+            ) {
+                Some(record.map(|record| record.evidence))
+            } else {
+                None
+            }
+        }
         _ => None,
     };
     Fact {
@@ -610,18 +661,18 @@ fn derive_fact(
 /// them on the bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HomebrewMarks {
-    pub(crate) marker: Vec<u8>,
-    pub(crate) caskroom: Vec<u8>,
+    pub(crate) marker: Option<Vec<u8>>,
+    pub(crate) caskroom: Option<Vec<u8>>,
 }
 
-/// **The two attributes on the bundle at `bundle`**, both required.
+/// **The two attributes on the bundle at `bundle`**, when they exist.
 ///
 /// # Errors
-/// Why not, in words with no path: an attribute missing or unreadable.
+/// Why not, in words with no path: an attribute is unreadable. Absence is a
+/// value: an official cask need not carry either install-time attribute.
 pub(crate) fn homebrew_marks(bundle: &Path) -> Result<HomebrewMarks, &'static str> {
     let attribute_of = |name| match install_evidence::attribute(bundle, name) {
-        Ok(Some(bytes)) => Ok(bytes),
-        Ok(None) => Err("an attribute the cask writes is missing"),
+        Ok(bytes) => Ok(bytes),
         Err(_) => Err("an attribute the cask writes cannot be read"),
     };
     Ok(HomebrewMarks {
@@ -630,25 +681,63 @@ pub(crate) fn homebrew_marks(bundle: &Path) -> Result<HomebrewMarks, &'static st
     })
 }
 
+/// Which path supplied Homebrew's record of the bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HomebrewRecordEvidence {
+    Attribute,
+    DefaultPrefix,
+}
+
+/// Homebrew's record of the bundle and the attributes that exist on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HomebrewRecord {
+    pub(crate) marks: HomebrewMarks,
+    pub(crate) evidence: HomebrewRecordEvidence,
+}
+
 /// **Homebrew's record of the bundle at `bundle`, and what it carries** (R-H2,
-/// the module header): the marker names Homebrew, and the Caskroom the cask
-/// named records this very path as its app. The bundle's marks, for the
-/// journal, when it does.
+/// the module header): a Caskroom records this very path as its app. The
+/// attribute names a custom or default Caskroom when present; otherwise the
+/// two documented default-prefix Caskrooms are checked. The marker is not
+/// required. The bundle's existing marks are returned for the journal.
 ///
 /// # Errors
 /// Why not, in words with no path: the road keeps the row with the manager's
 /// command.
-pub(crate) fn homebrew_record(bundle: &Path) -> Result<HomebrewMarks, &'static str> {
+pub(crate) fn homebrew_record(bundle: &Path) -> Result<HomebrewRecord, &'static str> {
+    homebrew_record_in(bundle, DEFAULT_HOMEBREW_CASKROOMS.map(Path::new))
+}
+
+fn homebrew_record_in(
+    bundle: &Path,
+    default_caskrooms: [&Path; 2],
+) -> Result<HomebrewRecord, &'static str> {
     let marks = homebrew_marks(bundle)?;
-    match Marker::parse(&marks.marker) {
-        Ok(Marker {
-            manager: Manager::Homebrew,
-            ..
-        }) => {}
-        _ => return Err("the marker is not Homebrew's"),
+    if let Some(caskroom) = &marks.caskroom {
+        recorded_target(bundle, caskroom)?;
+        return Ok(HomebrewRecord {
+            marks,
+            evidence: HomebrewRecordEvidence::Attribute,
+        });
     }
-    recorded_target(bundle, &marks.caskroom)?;
-    Ok(marks)
+    let mut another_app = false;
+    for caskroom in default_caskrooms {
+        match recorded_target(bundle, caskroom.as_os_str().as_encoded_bytes()) {
+            Ok(()) => {
+                return Ok(HomebrewRecord {
+                    marks,
+                    evidence: HomebrewRecordEvidence::DefaultPrefix,
+                });
+            }
+            Err("the Caskroom records another app") => another_app = true,
+            Err(_) => {}
+        }
+    }
+    if another_app {
+        Err("the default Caskroom records another app")
+    } else {
+        Err("the default Caskrooms record no app")
+    }
 }
 
 /// **Whether the Caskroom named by `caskroom` records `bundle` as its app**:
@@ -767,8 +856,13 @@ impl Fact {
         };
         let homebrew = match self.homebrew {
             None => String::new(),
-            Some(Ok(())) => " · homebrew record: this app".to_owned(),
-            Some(Err(why)) => format!(" · homebrew record: {why}"),
+            Some(Ok(HomebrewRecordEvidence::Attribute)) => {
+                " · Homebrew record (attribute): this app".to_owned()
+            }
+            Some(Ok(HomebrewRecordEvidence::DefaultPrefix)) => {
+                " · Homebrew record (default prefix): this app".to_owned()
+            }
+            Some(Err(why)) => format!(" · Homebrew record: {why}"),
         };
         format!("Folio: install channel {channel} — {evidence}{homebrew}")
     }
@@ -795,7 +889,7 @@ pub fn channel() -> Option<Channel> {
 #[must_use]
 pub fn at_recorded_target() -> bool {
     FACT.get()
-        .is_some_and(|fact| matches!(fact.homebrew, Some(Ok(()))))
+        .is_some_and(|fact| matches!(fact.homebrew, Some(Ok(_))))
 }
 
 /// **How the copy whose executable is `exe` was installed**, derived now on
@@ -898,6 +992,129 @@ mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn no_records() -> io::Result<Vec<UninstallRecord>> {
         Ok(Vec::new())
+    }
+
+    /// A bundle-shaped install path for the Homebrew record tests. The record
+    /// reads paths and attributes only; it does not inspect the executable.
+    fn homebrew_bundle(tag: &str) -> (PathBuf, PathBuf) {
+        let root = bt_testpath::temp_path(&format!("folio-install-channel-homebrew-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let bundle = root.join("Apps").join("Folio.app");
+        let exe = bundle.join("Contents/MacOS/folio");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"").unwrap();
+        (root, exe)
+    }
+
+    fn remove_attribute(bundle: &Path, name: &str) {
+        crate::update_prepare_macos::tests::fixture::run(
+            "/usr/bin/xattr",
+            &[
+                std::ffi::OsStr::new("-d"),
+                std::ffi::OsStr::new(name),
+                bundle.as_os_str(),
+            ],
+        );
+    }
+
+    /// RED (D2, managed-update revision (d)) — **Homebrew's own link is
+    /// sufficient install-channel evidence without either cask attribute.**
+    ///
+    /// The two defaults are test paths standing in for the fixed Apple
+    /// silicon and Intel Caskrooms. The first records this bundle; the second
+    /// does not exist. The channel, eligibility and diagnostic all come from
+    /// that record, and the journal input has no marks to carry.
+    ///
+    /// MUTATION: in `derive_fact_with_caskrooms`, do not replace the bare
+    /// bundle's channel when the default-prefix record succeeds — it is Ours.
+    #[test]
+    fn a_default_prefix_record_without_attributes_is_homebrew() {
+        if bt_platform::host_platform() != HostPlatform::MacOs {
+            return;
+        }
+        let (root, exe) = homebrew_bundle("default");
+        let bundle = install_root(&exe, HostPlatform::MacOs).unwrap();
+        let prefix = root.join("prefix");
+        let caskroom = crate::update_prepare_macos::tests::fixture::homebrew_install(
+            &prefix, "0.4.7", &bundle,
+        );
+        remove_attribute(&bundle, MARKER_ATTRIBUTE);
+        remove_attribute(&bundle, CASKROOM_ATTRIBUTE);
+        let missing = root.join("missing/Caskroom/folio");
+
+        let fact = derive_fact_with_caskrooms(
+            Ok(exe),
+            HostPlatform::MacOs,
+            Ok(me()),
+            no_records,
+            [&caskroom, &missing],
+        );
+        assert_eq!(
+            fact.channel,
+            Channel::Managed {
+                manager: Manager::Homebrew,
+                uninstall_hook: false,
+            }
+        );
+        assert_eq!(
+            fact.homebrew,
+            Some(Ok(HomebrewRecordEvidence::DefaultPrefix))
+        );
+        assert!(
+            fact.line()
+                .contains("Homebrew record (default prefix): this app"),
+            "{}",
+            fact.line()
+        );
+        let record = homebrew_record_in(&bundle, [&caskroom, &missing]).unwrap();
+        assert_eq!(
+            record.marks,
+            HomebrewMarks {
+                marker: None,
+                caskroom: None,
+            }
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (D2, managed-update revision (d)) — **a default Caskroom whose
+    /// link names another bundle is not evidence for this copy, and missing
+    /// default Caskrooms are not evidence either.** Both remain on the bare
+    /// Copy row.
+    ///
+    /// MUTATION: in `recorded_target`, accept a link without comparing its
+    /// canonical target — the first fact becomes Homebrew-managed.
+    #[test]
+    fn another_apps_record_and_no_default_record_leave_the_copy_row() {
+        if bt_platform::host_platform() != HostPlatform::MacOs {
+            return;
+        }
+        let (root, exe) = homebrew_bundle("not-recorded");
+        let other = root.join("Other/Folio.app");
+        std::fs::create_dir_all(&other).unwrap();
+        let prefix = root.join("prefix");
+        let caskroom =
+            crate::update_prepare_macos::tests::fixture::homebrew_install(&prefix, "0.4.7", &other);
+        remove_attribute(&other, MARKER_ATTRIBUTE);
+        remove_attribute(&other, CASKROOM_ATTRIBUTE);
+        let missing = root.join("missing/Caskroom/folio");
+        let also_missing = root.join("also-missing/Caskroom/folio");
+
+        for defaults in [
+            [caskroom.as_path(), missing.as_path()],
+            [missing.as_path(), also_missing.as_path()],
+        ] {
+            let fact = derive_fact_with_caskrooms(
+                Ok(exe.clone()),
+                HostPlatform::MacOs,
+                Ok(me()),
+                no_records,
+                defaults,
+            );
+            assert_eq!(fact.channel, Channel::Ours, "{defaults:?}");
+            assert_eq!(fact.homebrew, None, "{defaults:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// **A winget package folder as E2 found one**: `<location>` holding the

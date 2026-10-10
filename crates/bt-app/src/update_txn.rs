@@ -1017,8 +1017,10 @@ impl Adapter {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Carried {
     /// The install marker, exactly as the manager wrote it
-    /// (`install_channel::MARKER_ATTRIBUTE` on a macOS bundle).
-    pub(crate) install: Vec<u8>,
+    /// (`install_channel::MARKER_ATTRIBUTE` on a macOS bundle). Absent when
+    /// the manager's own record exists without an install marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) install: Option<Vec<u8>>,
     /// **Where Homebrew keeps its record of the copy**: the bytes of the
     /// attribute the cask writes beside the marker
     /// (`install_channel::CASKROOM_ATTRIBUTE`), which the next update reads
@@ -3743,7 +3745,7 @@ mod tests {
     /// Caskroom under a folder named in two scripts.
     fn carried() -> Carried {
         Carried {
-            install: br#"{"v":1,"manager":"homebrew","uninstall_hook":false}"#.to_vec(),
+            install: Some(br#"{"v":1,"manager":"homebrew","uninstall_hook":false}"#.to_vec()),
             caskroom: Some(
                 "/Users/测试 tester/homebrew/Caskroom/folio"
                     .as_bytes()
@@ -7348,11 +7350,11 @@ mod tests {
     impl CarriedWord {
         /// The words a body carrying `carried` writes.
         fn of(carried: &Carried) -> Vec<Self> {
-            let Carried {
-                install: _,
-                caskroom,
-            } = carried;
-            let mut words = vec![CarriedWord::Marker, CarriedWord::Install];
+            let Carried { install, caskroom } = carried;
+            let mut words = vec![CarriedWord::Marker];
+            if install.is_some() {
+                words.push(CarriedWord::Install);
+            }
             if caskroom.is_some() {
                 words.push(CarriedWord::Caskroom);
             }

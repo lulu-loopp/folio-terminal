@@ -929,3 +929,39 @@ The Windows `ApplyPoints` takes the member inventories (`Site::inventories`), an
 **U-41a2.** L1–L3 are scoop's alone and wait for U-41c, with this manifest: L1 — the `%LOCALAPPDATA%\Folio\update\<key>\` home keyed by the `current` link's canonical, case-folded path, found only behind a directory link and counted only when its journal's `Link` body names the link; L2 — its retirement once no process holds admission, and `--uninstall-cleanup`'s per-copy row; L3 — the installed program read from the body for `Link`. L4 holds on macOS as built: `install_flip::running_from` matches by device and inode, so the process check, H.3's witness and the trial's stop already compare the files themselves; its Windows half (`GetFinalPathNameByHandleW`) is U-41c's. The Homebrew home stays ours' beside the bundle (HB5). Identity across copies: two marked bundles at two paths have two homes, and only the one the Caskroom's link names takes the road.
 
 **Rehearsal rows** (a real `brew`, on a rehearsal account, never on an owner's Homebrew): HB-R1 `check-cask-hooks.sh` with both attributes after install, upgrade and reinstall; HB-R2 a cask install updated by Folio's card (both attributes live, `brew list --versions` stale, the uninstall row unchanged); HB-R3 plain `brew upgrade`/`brew outdated --cask` (nothing) and `--greedy` (listed); HB-R4 a named `brew upgrade --cask folio` over Folio's bundle; HB-R5 the tap a version ahead (upgraded); HB-R6 `brew uninstall --cask --zap` after the swap; HB-R7 a notarized, stapled bundle with the carried attributes through `codesign`, `spctl` and an offline first start; HB-R8 a custom `--appdir` and a hand copy; HB-R9 a copy installed by the previous cask (the row until one `brew upgrade`); HB-R10 the M rows with both attributes asserted live. Each is listed with its expectation in the D1 report.
+
+## Revision (f), 2026-10-10: the official cask's record is sufficient without install-time attributes
+
+This is the official-cask revision described as revision (d) in D2's brief;
+the note had already acquired implementation revisions (d) and (e), so it is
+appended as (f) rather than reusing a revision name. It supersedes revision
+(e)'s requirement that both cask attributes exist.
+
+**Homebrew's own record is sufficient provenance.** The link
+`<Caskroom>/folio/<installed version>/Folio.app` naming this very bundle is
+Homebrew's statement that this path is its live artifact, whether the bundle
+has both cask attributes, one, or neither. When
+`io.github.lulu-loopp.folio.caskroom` exists, it remains the authority for a
+custom prefix. When it is absent, Folio checks the two Caskrooms under
+Homebrew's documented default prefixes:
+`/opt/homebrew/Caskroom/folio` (Apple silicon) and
+`/usr/local/Caskroom/folio` (Intel). A Finder-launched application has no
+`HOMEBREW_PREFIX` in its environment, so no environment variable is read and
+no `brew` process is started. A custom-prefix installation without the
+attribute has no discoverable record and remains on the Copy row, as does a
+bundle the record's link does not name.
+
+**The marker remains the manager's to compose.** `RULES.md` row 41 remains:
+"The marker is composed by the package manager; Folio may carry those exact
+bytes across an update it performs." A record with no marker produces
+`Managed { manager: Homebrew, uninstall_hook: false }`. `HomebrewMarks` and
+the journal's `Carried` fields are optional; the press records both, one, or
+neither, and Prepare writes only the attributes it read. Folio never composes
+a missing marker or Caskroom attribute. The start's one diagnostics line says
+whether eligibility came from `Homebrew record (attribute)` or `Homebrew
+record (default prefix)`.
+
+**Privacy.** With no Caskroom attribute, the install-channel worker makes
+read-only directory reads at the two fixed Caskroom paths above and lists the
+selected Caskroom's `.metadata` record. It sends nothing, changes nothing,
+reads no Homebrew environment variable and executes no Homebrew process.
