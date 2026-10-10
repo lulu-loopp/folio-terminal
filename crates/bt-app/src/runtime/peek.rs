@@ -57,7 +57,7 @@ impl Runtime<'_> {
             self.rail_posture().draws_focus_rail(),
             // A drag owns the pointer outright — the rule the tip, the hyperlink
             // underline and the terminal's own selection already live by.
-            self.window.drag.is_some(),
+            self.held_drag().is_some(),
             // The editor IS the answer, exactly as it is for the tip: a
             // schematic laid over the box you are typing a name into covers the
             // box you are typing it into.
@@ -452,7 +452,7 @@ impl Runtime<'_> {
             // free to arm its own card, and if nothing is, the grace starts.
             Some(file_peek::Life::Released) | None => {}
         }
-        let Some((host, index)) = host.filter(|_| self.window.drag.is_none()) else {
+        let Some((host, index)) = host.filter(|_| self.held_drag().is_none()) else {
             return self.release_file_peek(now);
         };
         let Some((key, _, _)) = self.peek_row(host, index) else {
@@ -520,7 +520,6 @@ impl Runtime<'_> {
             foot_lit: false,
             column: None,
             closing_at: None,
-            thumb_grab: None,
             dwell: None,
         })
     }
@@ -642,7 +641,7 @@ impl Runtime<'_> {
         // ruling's: the grace starts, and the card comes down when it runs out
         // (real-machine capture, 2026-08-14).
         let over = host
-            .filter(|_| self.window.drag.is_none())
+            .filter(|_| self.held_drag().is_none())
             .and_then(|(host, index)| {
                 let (key, _, _) = self.peek_row(host, index)?;
                 let showing = self
@@ -760,7 +759,7 @@ impl Runtime<'_> {
             peek.rect,
             frame,
             at,
-            self.window.drag.is_some(),
+            self.held_drag().is_some(),
         ))
     }
 
@@ -937,9 +936,8 @@ impl Runtime<'_> {
         // And the hand that was on its head. A press whose card has gone has
         // nothing left to promote, and a promotion that fired afterwards would
         // open a window over a file nobody is pointing at any more.
-        self.window.file_peek_press = None;
-        self.capture_mirror_end(CaptureOwner::GlanceThumb);
-        self.capture_mirror_end(CaptureOwner::GlanceHeadPress);
+        self.drop_file_peek_press();
+        self.drop_glance_thumb();
         self.window.peek_buffer = None;
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
@@ -961,11 +959,11 @@ impl Runtime<'_> {
         // because its life is this field's — so this is where that life ends for
         // the gestures too.
         if self
-            .preview_block_drag
+            .held_preview_block_drag()
+            .copied()
             .is_some_and(|drag| drag.surface == PreviewSurface::Peek)
         {
-            self.preview_block_drag = None;
-            self.capture_mirror_end(CaptureOwner::BlockThumb(self.id));
+            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
@@ -1879,10 +1877,7 @@ impl Runtime<'_> {
                 return vec![layer];
             };
             let state = ScrollThumbState::of(
-                self.window
-                    .file_peek
-                    .as_ref()
-                    .is_some_and(|peek| peek.thumb_grab.is_some()),
+                self.held_glance_thumb().is_some(),
                 self.window
                     .pointer_position
                     .is_some_and(|at| file_peek::contains(bar.grab, [at.x as f32, at.y as f32])),
@@ -1922,10 +1917,7 @@ impl Runtime<'_> {
             return vec![layer];
         };
         let state = ScrollThumbState::of(
-            self.window
-                .file_peek
-                .as_ref()
-                .is_some_and(|peek| peek.thumb_grab.is_some()),
+            self.held_glance_thumb().is_some(),
             self.window
                 .pointer_position
                 .is_some_and(|at| file_peek::contains(bar.grab, [at.x as f32, at.y as f32])),
@@ -1990,10 +1982,9 @@ impl Runtime<'_> {
             // choice: an answer given on the way down cannot be taken back on
             // the way up.
             file_peek::Press::Head if self.file_peek_promotes() => {
-                self.window.file_peek_press = Some(FilePeekPress {
+                self.latch_file_peek_press(FilePeekPress {
                     latch: DragLatch::new(position),
                 });
-                self.capture_mirror_begin_pressed(CaptureOwner::GlanceHeadPress, button);
                 Ok(true)
             }
             // **A card with no window to become keeps the head it always had**
@@ -2003,10 +1994,7 @@ impl Runtime<'_> {
             // yesterday.
             file_peek::Press::Head => self.press_file_peek_door(),
             file_peek::Press::Thumb(grab) => {
-                if let Some(peek) = self.window.file_peek.as_mut() {
-                    peek.thumb_grab = Some(grab);
-                }
-                self.capture_mirror_begin_pressed(CaptureOwner::GlanceThumb, button);
+                self.latch_capture(CaptureOwner::GlanceThumb(grab), button);
                 // The thumb's ink changes the moment it is taken, so this owes a
                 // frame even though nothing has moved yet.
                 if self.refresh_overlay() {
@@ -2200,12 +2188,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(grab) = self
-            .window
-            .file_peek
-            .as_ref()
-            .and_then(|peek| peek.thumb_grab)
-        else {
+        let Some(grab) = self.held_glance_thumb().copied() else {
             return Ok(false);
         };
         let Some(bar) = self.file_peek_bar() else {
@@ -2245,7 +2228,7 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
         let scale = self.window.renderer.scale_factor();
-        let Some(press) = self.window.file_peek_press.as_mut() else {
+        let Some(press) = self.held_file_peek_press_mut() else {
             return Ok(false);
         };
         if !press.latch.travelled(position, scale) {
@@ -2255,8 +2238,7 @@ impl Runtime<'_> {
             // hover underneath re-arm a card that is about to be consumed.
             return Ok(true);
         }
-        self.window.file_peek_press = None;
-        self.capture_mirror_end(CaptureOwner::GlanceHeadPress);
+        self.drop_file_peek_press();
         self.promote_file_peek(position)?;
         Ok(true)
     }
@@ -2357,11 +2339,10 @@ impl Runtime<'_> {
                 .rehome(PreviewSurface::Peek, PreviewSurface::Float(id));
         }
         self.open_preview_onto(PreviewSurface::Float(id), path)?;
-        self.window.float_drag = Some(FloatDrag {
+        self.latch_float_drag(FloatDrag {
             win: id,
             kind: FloatDragKind::Move { grab },
         });
-        self.capture_mirror_begin(CaptureOwner::FloatDrag);
         self.forget_dead_float_gestures();
         self.apply_pointer_cursor();
         self.refresh_chrome();
@@ -2380,10 +2361,9 @@ impl Runtime<'_> {
     /// Answers whether the release was the head's, so the caller knows whether
     /// anything else may still have it.
     pub(in crate::runtime) fn release_file_peek_press(&mut self) -> Result<bool> {
-        if self.window.file_peek_press.take().is_none() {
+        if self.take_file_peek_press().is_none() {
             return Ok(false);
         }
-        self.capture_mirror_end(CaptureOwner::GlanceHeadPress);
         // The same door, and literally the same one: a head that decided it was
         // a press and a face that never had a choice must arrive at one
         // document, or the card would lead two places depending on where in it
@@ -2404,14 +2384,7 @@ impl Runtime<'_> {
     /// thumb's: the same button coming up still has to reach whatever else was
     /// waiting for it.
     pub(in crate::runtime) fn release_file_peek_thumb(&mut self) -> Result<()> {
-        let released = self
-            .window
-            .file_peek
-            .as_mut()
-            .is_some_and(|peek| peek.thumb_grab.take().is_some());
-        if released {
-            self.capture_mirror_end(CaptureOwner::GlanceThumb);
-        }
+        let released = self.take_glance_thumb().is_some();
         if released && self.refresh_overlay() {
             self.present_chrome_change()?;
         }

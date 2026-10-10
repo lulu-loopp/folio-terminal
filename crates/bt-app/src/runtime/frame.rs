@@ -2222,10 +2222,7 @@ impl Runtime<'_> {
             // The press's own 180ms, and only while it still owes one — a press
             // that has been paid or has slipped reports nothing, so a held
             // button costs no wake-ups at all.
-            self.window
-                .tab_press
-                .as_ref()
-                .and_then(TabPress::wake_deadline),
+            self.held_tab_press().and_then(TabPress::wake_deadline),
             // The rename caret blinks only while there is a rename.
             self.window
                 .rename

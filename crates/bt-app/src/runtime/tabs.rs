@@ -1,7 +1,6 @@
 //! `tabs` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::pointer::CaptureOwner;
 use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
     FolderPick, FormulaSwitches, HandoverInto, LeafId, MathHoverExit, MenuPaint, NewWindowPlan,
@@ -193,10 +192,8 @@ impl Runtime<'_> {
         let _ = self.window.pending_frames.take();
         self.window.last_presented_frame = None;
         self.window.preedit = None;
-        self.window.mouse_route = None;
-        self.window.divider_drag = None;
-        self.capture_mirror_end_route();
-        self.capture_mirror_end(CaptureOwner::Divider);
+        self.drop_mouse_route();
+        self.drop_divider_drag();
         self.window.seat_pointer = seats::ChromePointer::default();
         self.window.hyperlink_hover.clear();
         self.window.peek_hover.clear();
@@ -289,23 +286,21 @@ impl Runtime<'_> {
         }) {
             self.finish_rename(RenameExit::Blur)?;
         }
-        if self.window.tab_press.is_some_and(|press| {
+        if self.held_tab_press().copied().is_some_and(|press| {
             self.window
                 .tabs
                 .get(index)
                 .is_some_and(|tab| tab.id == press.tab)
         }) {
-            self.window.tab_press = None;
-            self.capture_mirror_end(CaptureOwner::TabPress);
+            self.drop_tab_press();
         }
-        if self.window.drag.as_ref().is_some_and(|drag| {
+        if self.held_drag().is_some_and(|drag| {
             self.window
                 .tabs
                 .get(index)
                 .is_some_and(|tab| drag.tab() == Some(tab.id))
         }) {
-            self.window.drag = None;
-            self.capture_mirror_end(CaptureOwner::Drag);
+            self.drop_drag();
             // F2: the payload stopped existing, so the application's pointer has
             // nothing left to broker either.
             self.app.drag_broker = None;
@@ -541,7 +536,7 @@ impl Runtime<'_> {
                 },
             ));
         }
-        let drag = self.window.drag.as_ref()?;
+        let drag = self.held_drag()?;
         let DropLanding::StripExtract { slot } = drag.landing? else {
             return None;
         };
@@ -1815,16 +1810,13 @@ impl Runtime<'_> {
         // the very first one into a double.
         // One button, one press: whichever source the router chose, the others
         // are not being held.
-        self.window.pane_press = None;
-        self.window.row_press = None;
-        self.window.tab_press = Some(if index == self.window.active_tab {
+        self.drop_pane_press();
+        self.drop_row_press();
+        self.latch_tab_press(if index == self.window.active_tab {
             TabPress::settled(tab, position, now)
         } else {
             TabPress::armed(tab, position, now)
         });
-        self.capture_mirror_end(CaptureOwner::PanePress);
-        self.capture_mirror_end(CaptureOwner::RowPress);
-        self.capture_mirror_begin(CaptureOwner::TabPress);
         Ok(())
     }
 
@@ -3314,16 +3306,14 @@ impl Runtime<'_> {
     /// Route an event-loop tick to the press promise and the rename caret.
     pub(in crate::runtime) fn advance_tab_press_if_due(&mut self, now: Instant) -> Result<()> {
         let matured = self
-            .window
-            .tab_press
-            .as_mut()
+            .held_tab_press_mut()
             .is_some_and(|press| press.matured(now));
         if !matured {
             return Ok(());
         }
         let tab = self
-            .window
-            .tab_press
+            .held_tab_press()
+            .copied()
             .expect("a press that matured is a press")
             .tab;
         self.activate_tab(self.tab_index(tab), false)

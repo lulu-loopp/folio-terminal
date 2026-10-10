@@ -1,7 +1,6 @@
 //! `terminal` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::pointer::CaptureOwner;
 use crate::PtyTarget;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
@@ -435,7 +434,8 @@ impl Runtime<'_> {
                     scrolled: leaf.projection.is_scrolled(),
                     near: self.terminal_thumb_hover == Some(*seat),
                     held: self
-                        .terminal_thumb_drag
+                        .held_terminal_thumb_drag()
+                        .copied()
                         .is_some_and(|drag| drag.seat == *seat),
                     since_rest: now.saturating_duration_since(leaf.thumb_awake),
                 };
@@ -565,7 +565,7 @@ impl Runtime<'_> {
     /// outright. Asked of `self` rather than handed in because both are facts
     /// about this instant, and this is the only reader of them here.
     pub(crate) fn terminal_reference_cell(&mut self) -> Option<(RowHost, usize)> {
-        if self.window.mouse_route.is_some() || self.math_hit().is_some() {
+        if self.held_mouse_route().is_some() || self.math_hit().is_some() {
             return None;
         }
         let (seat, hit) = self.pane_frame_hit()?;
@@ -1407,7 +1407,7 @@ impl Runtime<'_> {
             // and the release acts on whichever of the two came back.
             self.re_ask_the_worker_about_a_link_target(seat, &uri);
         }
-        self.window.mouse_route = Some(MouseRoute::Local(Box::new(SelectionDrag {
+        self.latch_selection_route(MouseRoute::Local(Box::new(SelectionDrag {
             mode,
             owner,
             origin_row: hit.row,
@@ -1417,12 +1417,11 @@ impl Runtime<'_> {
             hyperlink_control,
             local_image_activation,
         })));
-        self.capture_mirror_begin(CaptureOwner::TerminalSelection);
         // The route the press armed, and what it promised (`BT_MOUSE_TRACE`).
         // Read back out of the route rather than off the locals, so what the
         // trace reports is what the release will actually find.
         self.mouse_trace(|| {
-            let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref() else {
+            let Some(MouseRoute::Local(drag)) = self.held_mouse_route() else {
                 return "begin_local_selection route=missing".to_owned();
             };
             format!(
@@ -1447,7 +1446,7 @@ impl Runtime<'_> {
     /// spoken in, and [`Self::drag_hit_in_pane`] is the one place that translation
     /// is written.
     pub(in crate::runtime) fn extend_local_selection(&mut self) -> Result<()> {
-        let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref() else {
+        let Some(MouseRoute::Local(drag)) = self.held_mouse_route() else {
             return Ok(());
         };
         // Copied out field by field rather than by cloning the drag whole: this
@@ -1459,8 +1458,7 @@ impl Runtime<'_> {
         // A selection whose shell is gone is let go, not carried on in
         // whatever pane wears its seat now.
         if self.live_paste_target(owner).is_none() {
-            self.window.mouse_route = None;
-            self.capture_mirror_end(CaptureOwner::TerminalSelection);
+            self.drop_mouse_route();
             return Ok(());
         }
         let seat = owner.seat;
@@ -1645,12 +1643,11 @@ impl Runtime<'_> {
             )
         });
         let copy_on_select = should_copy_on_select_release(
-            self.window.mouse_route.as_ref(),
+            self.held_mouse_route(),
             single_click,
             self.app.settings_store.loaded().copy_on_select,
         );
-        self.window.mouse_route = None;
-        self.capture_mirror_end(CaptureOwner::TerminalSelection);
+        self.drop_mouse_route();
         if single_click {
             self.clear_pane_selection(seat);
             self.publish_interaction_frame()?;

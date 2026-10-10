@@ -14660,3 +14660,11 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 **The rule.** The mirror records every overlap the fields can be in today — a latch whose release was eaten beside the next gesture's, a settings drag beside another latch, a formula press over a forwarded one — rather than resolving it; cut 3's one slot brings the count to zero.
 
 **Pinned by** `pointer_app_tests::the_mirror_names_every_live_legacy_latch` (every writer the ownership census proves names its latch's record; the three overlaps scripted and counted).
+
+### 2026-10-09 — One capture slot owns every latched gesture, and its release reaches it over any layer (T-POINTER-CAPTURE cut 3)
+
+**What is built.** The twenty legacy latch fields are replaced by `App::pointer_capture`, one `Option<PointerCapture>` for the application; each gesture's payload is its `CaptureOwner` variant, a tab's gesture naming its tab, and every road reaches it through per-gesture doors that answer only for the window's own capture (`docs/plans/design/pointer-capture-2026-10-09.md` §4.1 cut 3, revision (g)). `Runtime::release_capture` replaces the five release roads — the cell route's, the chrome router's ladder, the floating window's carry, the glance card's and the settings sheet's — and is asked before every arm of `mouse_input`; `press_against_the_slot` makes a press of the held capture's own button cancel the stale capture before the press is routed, in whichever window it arrives.
+
+**The rule.** While a gesture is held, the release that ends it goes to its owner wherever the pointer is; a card, a menu, the palette, the glance card, a floating window or a hosted page under the pointer can no longer leave a divider, a tab, a thumb or a selection stuck to the hand (cells A·a). Which button's release ends a gesture is unchanged until cut 4.
+
+**Pinned by** `pointer_app_tests::a_release_reaches_its_owner_over_every_layer_that_eats_releases`, `a_press_of_the_held_button_cancels_the_stale_capture_first` (cell B20, both windows) and `a_divider_released_anywhere_commits_through_the_whole_dispatch` (cell C1·0); `app_mouse_tests::a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to` stays green.

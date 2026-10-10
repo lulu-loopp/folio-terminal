@@ -44,9 +44,7 @@ crate::Runtime::settings_mouse_input	N-B
 crate::Runtime::settings_mouse_input	N-B
 crate::Runtime::settings_mouse_input	N-B
 crate::Runtime::settings_mouse_input	N-B
-crate::Runtime::settings_mouse_input	N-B
 crate::Runtime::settings_mouse_input	N-E
-crate::Runtime::settings_mouse_input	N-P
 crate::Runtime::settings_mouse_input	N-P
 crate::Runtime::settings_mouse_input	N-P
 crate::Runtime::toggle_settings_panel	N-P
@@ -332,7 +330,6 @@ crate::runtime::mouse::Runtime::mouse_input	N-P
 crate::runtime::mouse::Runtime::mouse_input	N-P
 crate::runtime::mouse::Runtime::mouse_input	N-P
 crate::runtime::mouse::Runtime::mouse_input	N-P
-crate::runtime::mouse::Runtime::mouse_input	N-P
 crate::runtime::mouse::Runtime::mouse_wheel	N-B
 crate::runtime::mouse::Runtime::mouse_wheel	N-B
 crate::runtime::mouse::Runtime::mouse_wheel	N-B
@@ -377,10 +374,6 @@ crate::runtime::mouse::Runtime::press_preview_body_ladder	N-E
 crate::runtime::mouse::Runtime::promote_float_head_press	N-E
 crate::runtime::mouse::Runtime::queue_wheel	N-B
 crate::runtime::mouse::Runtime::rearm_hover_intents	N-P
-crate::runtime::mouse::Runtime::release_owned_gesture	N-B
-crate::runtime::mouse::Runtime::release_owned_gesture	N-B
-crate::runtime::mouse::Runtime::release_owned_gesture	N-B
-crate::runtime::mouse::Runtime::release_owned_gesture	N-B
 crate::runtime::mouse::Runtime::survey_drop	N-E
 crate::runtime::mouse::Runtime::take_forward_wheel_lines	N-B
 crate::runtime::mouse::Runtime::take_forward_wheel_lines	N-B

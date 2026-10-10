@@ -2553,8 +2553,7 @@ impl Runtime<'_> {
             return;
         };
         let anchor = self.window.pending_math_context_anchor.take();
-        self.window.mouse_route = None;
-        self.capture_mirror_end_route();
+        self.drop_mouse_route();
         match (result, anchor) {
             (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor),
             (Ok(true), None) => {

@@ -2807,7 +2807,7 @@ fn the_capsule_is_above_the_strip_for_the_paint_the_hover_and_the_press() {
     );
     assert!(
         moved[strip..]
-            .starts_with("self.drive_notice_hover((self.window.mouse_route.is_none()&&!on_search)"),
+            .starts_with("self.drive_notice_hover((self.held_mouse_route().is_none()&&!on_search)"),
         "and a hand the capsule has claimed lights nothing on the strip under it"
     );
     for (gesture, door) in [

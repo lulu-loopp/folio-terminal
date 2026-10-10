@@ -1,7 +1,6 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::pointer::CaptureOwner;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
@@ -2307,19 +2306,17 @@ impl Runtime<'_> {
             self.preview_edit_focus = None;
         }
         if self
-            .preview_selecting
+            .held_preview_selecting()
+            .copied()
             .is_some_and(|surface| !alive.contains(&surface))
         {
-            self.preview_selecting = None;
-            self.capture_mirror_end(CaptureOwner::EditSelection(self.id));
+            self.drop_preview_selecting();
         }
         if self
-            .preview_text_drag
-            .as_ref()
+            .held_preview_text_drag()
             .is_some_and(|drag| !alive.contains(&drag.surface))
         {
-            self.preview_text_drag = None;
-            self.capture_mirror_end(CaptureOwner::RenderedSelection(self.id));
+            self.drop_preview_text_drag();
         }
         // **The card is not in `alive` and must not be swept out by its
         // absence.** [`PreviewSurface::Peek`] is not in the tree and not in the
@@ -2328,11 +2325,10 @@ impl Runtime<'_> {
         // [`Self::hide_file_peek`] is where a gesture on the card is let go.
         // Without the guard, any seat-set change would drop a hand that is in
         // the middle of dragging a table sideways inside a glance.
-        if self.preview_block_drag.is_some_and(|drag| {
+        if self.held_preview_block_drag().copied().is_some_and(|drag| {
             drag.surface != PreviewSurface::Peek && !alive.contains(&drag.surface)
         }) {
-            self.preview_block_drag = None;
-            self.capture_mirror_end(CaptureOwner::BlockThumb(self.id));
+            self.drop_preview_block_drag();
         }
         if self.preview_block_hover.is_some_and(|(surface, _)| {
             surface != PreviewSurface::Peek && !alive.contains(&surface)
@@ -2340,11 +2336,11 @@ impl Runtime<'_> {
             self.preview_block_hover = None;
         }
         if self
-            .preview_body_drag
+            .held_preview_body_drag()
+            .copied()
             .is_some_and(|drag| !alive.contains(&drag.surface))
         {
-            self.preview_body_drag = None;
-            self.capture_mirror_end(CaptureOwner::PreviewBodyThumb(self.id));
+            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -3114,28 +3110,25 @@ impl Runtime<'_> {
         if self.preview_edit_focus == Some(surface) {
             self.preview_edit_focus = None;
         }
-        if self.preview_selecting == Some(surface) {
-            self.preview_selecting = None;
-            self.capture_mirror_end(CaptureOwner::EditSelection(self.id));
+        if self.held_preview_selecting().copied() == Some(surface) {
+            self.drop_preview_selecting();
         }
         // A selection being drawn across a page that has just been swapped out
         // is a selection of a document nobody is looking at any more.
         if self
-            .preview_text_drag
-            .as_ref()
+            .held_preview_text_drag()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_text_drag = None;
-            self.capture_mirror_end(CaptureOwner::RenderedSelection(self.id));
+            self.drop_preview_text_drag();
         }
         // A thumb held over the swap would be dragging a block that is not there
         // any more.
         if self
-            .preview_block_drag
+            .held_preview_block_drag()
+            .copied()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_block_drag = None;
-            self.capture_mirror_end(CaptureOwner::BlockThumb(self.id));
+            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
@@ -3147,11 +3140,11 @@ impl Runtime<'_> {
         // length, so a thumb held across the swap would be dragging a track that
         // means something else.
         if self
-            .preview_body_drag
+            .held_preview_body_drag()
+            .copied()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_body_drag = None;
-            self.capture_mirror_end(CaptureOwner::PreviewBodyThumb(self.id));
+            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -4706,7 +4699,8 @@ impl Runtime<'_> {
     /// in have to be told "none of yours" rather than be handed the other's
     /// index.
     fn preview_block_lit(&self, surface: PreviewSurface) -> Option<(usize, bool)> {
-        self.preview_block_drag
+        self.held_preview_block_drag()
+            .copied()
             .filter(|drag| drag.surface == surface)
             .map(|drag| (drag.index, true))
             .or(self
@@ -4795,7 +4789,8 @@ impl Runtime<'_> {
             .flatten()
             .map(|bar| {
                 let state = ScrollThumbState::of(
-                    self.preview_body_drag
+                    self.held_preview_body_drag()
+                        .copied()
                         .is_some_and(|drag| drag.surface == surface && drag.axis == bar.axis),
                     self.preview_body_hover == Some((surface, bar.axis)),
                 );
@@ -5024,8 +5019,7 @@ impl Runtime<'_> {
                 Some(video_seat::BarSlot::Rate) => seat.cycle_rate(now),
                 Some(slot @ (video_seat::BarSlot::Seek | video_seat::BarSlot::Volume)) => {
                     seat.grab(slot, &layout, at, now);
-                    self.window.video_bar_drag = Some(surface);
-                    self.capture_mirror_begin(CaptureOwner::VideoBar);
+                    self.latch_video_bar_drag(surface);
                 }
                 // The bar's own ground. Taken and not passed through: a press
                 // that fell past a panel would land on the picture behind it,
@@ -5115,7 +5109,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(surface) = self.window.video_bar_drag else {
+        let Some(surface) = self.held_video_bar_drag().copied() else {
             return Ok(false);
         };
         let at = [position.x as f32, position.y as f32];
@@ -5328,12 +5322,11 @@ impl Runtime<'_> {
             preview::ScrollAxis::Horizontal => (bar.thumb[0], bar.thumb[2]),
             preview::ScrollAxis::Vertical => (bar.thumb[1], bar.thumb[3]),
         };
-        self.preview_body_drag = Some(PreviewBodyDrag {
+        self.latch_preview_body_drag(PreviewBodyDrag {
             surface,
             axis: bar.axis,
             grab: (bar.along([position.x as f32, position.y as f32]) - near).clamp(0.0, far - near),
         });
-        self.capture_mirror_begin(CaptureOwner::PreviewBodyThumb(self.id));
         self.preview_body_hover = Some((surface, bar.axis));
         self.repaint_preview()?;
         Ok(true)
@@ -5348,7 +5341,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_body_drag else {
+        let Some(drag) = self.held_preview_body_drag().copied() else {
             return Ok(false);
         };
         let scale = self.window.renderer.scale_factor() as f32;
@@ -5893,7 +5886,7 @@ impl Runtime<'_> {
             // is not this page's, and the ladder goes on underneath it.
             return Ok(false);
         }
-        self.preview_text_drag = Some(PreviewTextDrag {
+        self.latch_preview_text_drag(PreviewTextDrag {
             surface,
             // A shift-click has already extended the selection and must not have
             // to travel to keep it; the latch is what decides whether the *link*
@@ -5907,7 +5900,6 @@ impl Runtime<'_> {
             seated,
             reached: None,
         });
-        self.capture_mirror_begin(CaptureOwner::RenderedSelection(self.id));
         self.repaint_preview()?;
         Ok(true)
     }
@@ -5982,8 +5974,7 @@ impl Runtime<'_> {
     /// caret moved after, so the page is laid out again from where the caret and
     /// the rendered selection stand now.
     pub(crate) fn cancel_preview_text_drag(&mut self) -> Result<()> {
-        if self.preview_text_drag.take().is_some() {
-            self.capture_mirror_end(CaptureOwner::RenderedSelection(self.id));
+        if self.take_preview_text_drag().is_some() {
             self.repaint_preview()?;
         }
         Ok(())
@@ -6186,7 +6177,7 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
         let scale = self.window.renderer.scale_factor();
-        let Some(drag) = self.preview_text_drag.as_mut() else {
+        let Some(drag) = self.held_preview_text_drag_mut() else {
             return Ok(false);
         };
         let surface = drag.surface;
@@ -6218,7 +6209,7 @@ impl Runtime<'_> {
         // spends, so what this changes is what is drawn and nothing else.
         let mut reach_moved = false;
         if let Some(offset) = self.preview_md_file_offset_at(surface, position) {
-            if let Some(drag) = self.preview_text_drag.as_mut() {
+            if let Some(drag) = self.held_preview_text_drag_mut() {
                 reach_moved = drag.reached != Some(offset);
                 drag.reached = Some(offset);
             }
@@ -6275,10 +6266,9 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_text_drag.take() else {
+        let Some(drag) = self.take_preview_text_drag() else {
             return Ok(false);
         };
-        self.capture_mirror_end(CaptureOwner::RenderedSelection(self.id));
         let click = preview_press_opens_its_link(&drag.latch);
         if let Some(pressed) = drag.pressed {
             // Where the hand let go, or — for a button that came up off the page
@@ -6497,12 +6487,11 @@ impl Runtime<'_> {
         let Some((surface, index, bar)) = self.preview_block_bar_under(position) else {
             return Ok(false);
         };
-        self.preview_block_drag = Some(PreviewBlockDrag {
+        self.latch_preview_block_drag(PreviewBlockDrag {
             surface,
             index,
             grab: (position.x as f32 - bar.thumb[0]).clamp(0.0, bar.thumb[2] - bar.thumb[0]),
         });
-        self.capture_mirror_begin(CaptureOwner::BlockThumb(self.id));
         self.preview_block_hover = Some((surface, index));
         self.repaint_preview()?;
         Ok(true)
@@ -6518,7 +6507,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_block_drag else {
+        let Some(drag) = self.held_preview_block_drag().copied() else {
             return Ok(false);
         };
         let scale = self.window.renderer.scale_factor() as f32;
@@ -7901,8 +7890,7 @@ impl Runtime<'_> {
         caret.place(&content, offset, self.window.modifiers.shift_key());
         self.preview_pane_mut(surface).caret = caret;
         self.preview_edit_focus = Some(surface);
-        self.preview_selecting = Some(surface);
-        self.capture_mirror_begin(CaptureOwner::EditSelection(self.id));
+        self.latch_preview_selecting(surface);
         self.repaint_preview()?;
         Ok(true)
     }
@@ -7937,11 +7925,10 @@ impl Runtime<'_> {
             let toggled = image_zoom_toggled(self.preview_image_zoom(surface));
             self.set_preview_image_zoom(surface, toggled)?;
         } else {
-            self.preview_image_drag = Some(ImageDrag {
+            self.latch_preview_image_drag(ImageDrag {
                 surface,
                 last: point,
             });
-            self.capture_mirror_begin(CaptureOwner::PicturePan(self.id));
         }
         self.apply_pointer_cursor();
         Ok(true)
@@ -7956,7 +7943,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_image_drag else {
+        let Some(drag) = self.held_preview_image_drag().copied() else {
             return Ok(false);
         };
         let Some((body, image_px)) = self.preview_image_geometry(drag.surface) else {
@@ -7971,11 +7958,10 @@ impl Runtime<'_> {
             ],
             ..zoom
         };
-        self.preview_image_drag = Some(ImageDrag {
+        self.latch_preview_image_drag(ImageDrag {
             last: point,
             ..drag
         });
-        self.capture_mirror_begin(CaptureOwner::PicturePan(self.id));
         let clamped = ImageZoom {
             pan: image_clamped_pan(body, image_px, carried),
             ..carried
@@ -7991,7 +7977,7 @@ impl Runtime<'_> {
     ) -> Result<bool> {
         // The gesture's own surface, not the one under the pointer: a selection
         // belongs to the body it began in however far the hand has since gone.
-        let Some(surface) = self.preview_selecting else {
+        let Some(surface) = self.held_preview_selecting().copied() else {
             return Ok(false);
         };
         let scale = self.window.renderer.scale_factor() as f32;
@@ -8205,8 +8191,7 @@ impl Runtime<'_> {
         // which moves the caret, changes it once.
         let live_caret = self.preview_live_caret(surface);
         let in_flight = self
-            .preview_text_drag
-            .as_ref()
+            .held_preview_text_drag()
             .is_some_and(|drag| drag.surface == surface);
         let standing_source = live_caret.and_then(|caret| {
             preview_press::held_span(
@@ -8701,11 +8686,11 @@ impl Runtime<'_> {
         }
         // Drag and hover identities are positional too; a new parse retires them.
         if self
-            .preview_block_drag
+            .held_preview_block_drag()
+            .copied()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_block_drag = None;
-            self.capture_mirror_end(CaptureOwner::BlockThumb(self.id));
+            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
@@ -9634,8 +9619,7 @@ impl Runtime<'_> {
             band: preview_live::source_band(
                 caret.range(),
                 pane.md_select.as_ref(),
-                self.preview_text_drag
-                    .as_ref()
+                self.held_preview_text_drag()
                     .filter(|drag| drag.surface == surface)
                     .and_then(|drag| drag.reached),
                 blocks,
@@ -13645,7 +13629,7 @@ impl Runtime<'_> {
     /// closed hand, because the shape changing mid-drag would say something
     /// happened when nothing did (K113, and the mock-up's own line 1710).
     pub(in crate::runtime) fn image_grasp(&self) -> Option<ImageGrasp> {
-        if self.preview_image_drag.is_some() {
+        if self.held_preview_image_drag().copied().is_some() {
             return Some(ImageGrasp::Closed);
         }
         let position = self.window.pointer_position?;

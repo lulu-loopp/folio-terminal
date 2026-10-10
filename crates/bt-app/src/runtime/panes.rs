@@ -1,7 +1,6 @@
 //! `panes` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::pointer::CaptureOwner;
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
     conpty_source_of, decided_birth, deliver_held_input, diagnostics, i18n, land_shell_birth,
@@ -1137,7 +1136,7 @@ impl Runtime<'_> {
         if self.window.foreign.is_some() {
             return None;
         }
-        let drag = self.window.drag.as_ref()?;
+        let drag = self.held_drag()?;
         let DropLanding::StripExtract { .. } = drag.landing? else {
             return None;
         };
@@ -1370,8 +1369,7 @@ impl Runtime<'_> {
     /// is precisely what the pool's dirty gates read.
     pub(crate) fn settle_seat_set_change(&mut self) -> Result<()> {
         self.window.seat_pointer = seats::ChromePointer::default();
-        self.window.divider_drag = None;
-        self.capture_mirror_end(CaptureOwner::Divider);
+        self.drop_divider_drag();
         self.sweep_preview_panes();
         self.apply_window_min_inner_size()?;
         self.commit_seat_geometry()
@@ -1902,7 +1900,7 @@ impl Runtime<'_> {
             source: FrameSource::Resize,
         })?;
         let published_at = trace_started.map(|_| Instant::now());
-        let synchronous_present = self.window.divider_drag.is_none();
+        let synchronous_present = self.held_divider_drag().copied().is_none();
         // Pointer motion must stay ahead of the swapchain. `publish_frame` already requested a
         // redraw and `LatestFrameSlot` keeps the newest geometry, so presenting synchronously here
         // would make every divider event wait on GPU acquire/vsync before Windows can deliver the
@@ -3817,7 +3815,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.window.divider_drag else {
+        let Some(drag) = self.held_divider_drag().copied() else {
             return Ok(false);
         };
         let Some(slot) = self
@@ -3826,8 +3824,7 @@ impl Runtime<'_> {
             .into_iter()
             .find(|slot| slot.id == drag.split)
         else {
-            self.window.divider_drag = None;
-            self.capture_mirror_end(CaptureOwner::Divider);
+            self.drop_divider_drag();
             return Ok(false);
         };
         let along = match drag.dir {
@@ -3926,7 +3923,7 @@ impl Runtime<'_> {
     /// The whole of the test is [`divider_drag_still_holds_its_pointer`]; what is here is the one
     /// sample it is asked about, taken only while a drag is actually in the air.
     pub(in crate::runtime) fn end_a_divider_drag_that_lost_its_pointer(&mut self) -> Result<bool> {
-        let Some(drag) = self.window.divider_drag else {
+        let Some(drag) = self.held_divider_drag().copied() else {
             return Ok(false);
         };
         if divider_drag_still_holds_its_pointer(drag.capture, bt_platform::thread_mouse_capture()) {
@@ -3936,10 +3933,9 @@ impl Runtime<'_> {
     }
 
     pub(crate) fn cancel_divider_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.window.divider_drag.take() else {
+        let Some(drag) = self.take_divider_drag() else {
             return Ok(false);
         };
-        self.capture_mirror_end(CaptureOwner::Divider);
         self.window.seat_pointer.dragging = None;
         let usable = self
             .seats

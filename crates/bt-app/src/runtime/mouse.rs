@@ -1,7 +1,6 @@
 //! `mouse` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::pointer::CaptureOwner;
 use crate::PtyTarget;
 use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
@@ -67,12 +66,7 @@ impl Runtime<'_> {
         let (pointer, mark, mark_logical, mark_color, text) = match visiting {
             Some(visiting) => visiting,
             None => {
-                let Some(drag) = self
-                    .window
-                    .drag
-                    .as_ref()
-                    .filter(|drag| drag.ghost_is_shown())
-                else {
+                let Some(drag) = self.held_drag().filter(|drag| drag.ghost_is_shown()) else {
                     self.forget_the_ghost();
                     return marks::Band::default();
                 };
@@ -420,7 +414,7 @@ impl Runtime<'_> {
     /// in its lane is a standing reason for it to be up; a pointer on the last
     /// row is not, and bumping the clock here would keep an already-fading mark
     /// alive under a hand that had come for the prompt.
-    fn note_terminal_column_hover(
+    pub(in crate::runtime) fn note_terminal_column_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<()> {
@@ -446,10 +440,8 @@ impl Runtime<'_> {
     /// is not a node arms nothing, so a press on "Loading …" cannot become a
     /// drag of a sentence.
     fn arm_row_press(&mut self, host: RowHost, index: usize, position: PhysicalPosition<f64>) {
-        self.window.tab_press = None;
-        self.window.pane_press = None;
-        self.capture_mirror_end(CaptureOwner::TabPress);
-        self.capture_mirror_end(CaptureOwner::PanePress);
+        self.drop_tab_press();
+        self.drop_pane_press();
         let Some((_, rows)) = self.host_rows(host) else {
             return;
         };
@@ -460,13 +452,12 @@ impl Runtime<'_> {
         let Some(rect) = self.row_geometry(host).map(|tree| tree.row_rect(index)) else {
             return;
         };
-        self.window.row_press = Some(RowPress {
+        self.latch_row_press(RowPress {
             host,
             key,
             rect,
             latch: DragLatch::new(position),
         });
-        self.capture_mirror_begin(CaptureOwner::RowPress);
     }
 
     /// The press on a row has travelled six pixels, so the row is in the air
@@ -634,7 +625,7 @@ impl Runtime<'_> {
     /// one. What the switch buys is sight of where you are about to put the
     /// thing; the putting is the release.
     pub(in crate::runtime) fn advance_drag_spring(&mut self, now: Instant) -> Result<()> {
-        let Some(drag) = self.window.drag.as_mut() else {
+        let Some(drag) = self.held_drag_mut() else {
             return Ok(());
         };
         let Some(tab) = drag.spring.due(now) else {
@@ -652,7 +643,7 @@ impl Runtime<'_> {
 
     /// The spring's next wake-up, for the loop's set.
     pub(in crate::runtime) fn drag_spring_deadline(&self) -> Option<Instant> {
-        self.window.drag.as_ref()?.spring.deadline()
+        self.held_drag()?.spring.deadline()
     }
 
     /// **缺陷 #188 — the list runs under a hand that has reached its edge.**
@@ -714,23 +705,18 @@ impl Runtime<'_> {
         let travelling =
             seats::autoscroll_speed(&run, scroll, (pointer.x, pointer.y), scale, motion) != 0.0;
         if !travelling {
-            if let Some(drag) = self.window.drag.as_mut() {
+            if let Some(drag) = self.held_drag_mut() {
                 drag.autoscroll_ticked_at = None;
             }
             return Ok(());
         }
         // Nothing stands between the reading above and the integration below:
         // see this method's own note on why a service is never paced.
-        let Some(last) = self
-            .window
-            .drag
-            .as_ref()
-            .and_then(|drag| drag.autoscroll_ticked_at)
-        else {
+        let Some(last) = self.held_drag().and_then(|drag| drag.autoscroll_ticked_at) else {
             // The frame the hand arrived on winds the clock and moves nothing: a
             // step is struck between two instants, and there is only one yet. The
             // wake set has already asked for the second, one frame away.
-            if let Some(drag) = self.window.drag.as_mut() {
+            if let Some(drag) = self.held_drag_mut() {
                 drag.autoscroll_ticked_at = Some(now);
             }
             return Ok(());
@@ -750,7 +736,7 @@ impl Runtime<'_> {
         // `drive_drag` rebuilds the drag from a clone taken at its own door: an
         // instant written afterwards would be written onto the struct this line
         // is about to replace.
-        if let Some(drag) = self.window.drag.as_mut() {
+        if let Some(drag) = self.held_drag_mut() {
             drag.autoscroll_ticked_at = Some(now);
         }
         // The list moved under a stationary pointer, so what it is over changed
@@ -783,9 +769,7 @@ impl Runtime<'_> {
             return None;
         }
         let tick = self
-            .window
-            .drag
-            .as_ref()
+            .held_drag()
             .and_then(|drag| drag.autoscroll_ticked_at)?
             + self.window.frame_clock.interval();
         Some(self.clamp_animation_deadline(tick))
@@ -854,7 +838,10 @@ impl Runtime<'_> {
     /// A pinned window is deliberately not on this path at all: it is closed by
     /// `×`, Esc, Dock or its own trigger, and "the pointer went somewhere else"
     /// is not on that list.
-    fn drive_float_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+    pub(in crate::runtime) fn drive_float_hover(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<()> {
         let hit = self.float_hit_at(position);
         if self.window.float_hover != hit {
             self.window.float_hover = hit;
@@ -1001,11 +988,10 @@ impl Runtime<'_> {
                 if self.window.float.is_pinned(id) {
                     // A window that is already yours is picked up on the press:
                     // there is nothing left to decide.
-                    self.window.float_drag = Some(FloatDrag {
+                    self.latch_float_drag(FloatDrag {
                         win: id,
                         kind: FloatDragKind::Move { grab },
                     });
-                    self.capture_mirror_begin(CaptureOwner::FloatDrag);
                 } else {
                     // A peek is a moment, and a moment cannot be picked up — yet.
                     // **User ruling 2026-08-12**: dragging its header is how you
@@ -1018,17 +1004,15 @@ impl Runtime<'_> {
                     // The offset is taken here, at the press, so the promotion
                     // does not move the window under the hand — see
                     // [`FloatHeadPress`].
-                    self.window.float_head_press = Some(FloatHeadPress::armed(id, position, frame));
-                    self.capture_mirror_begin(CaptureOwner::FloatHeadPress);
+                    self.latch_float_head_press(FloatHeadPress::armed(id, position, frame));
                 }
             }
             float::FloatPart::Grip => {
                 if self.window.float.is_pinned(id) {
-                    self.window.float_drag = Some(FloatDrag {
+                    self.latch_float_drag(FloatDrag {
                         win: id,
                         kind: FloatDragKind::Resize,
                     });
-                    self.capture_mirror_begin(CaptureOwner::FloatDrag);
                 }
             }
             // A buffer's body is an edit surface: the press puts the caret where
@@ -1223,15 +1207,14 @@ impl Runtime<'_> {
     /// drag step that follows, before any tick can run it.
     fn promote_float_head_press(&mut self, position: PhysicalPosition<f64>) {
         let scale = self.window.renderer.scale_factor();
-        let Some(press) = self.window.float_head_press.as_mut() else {
+        let Some(press) = self.held_float_head_press_mut() else {
             return;
         };
         let Some(carry) = press.promoted(position, scale) else {
             return;
         };
         let pressed = press.win;
-        self.window.float_head_press = None;
-        self.capture_mirror_end(CaptureOwner::FloatHeadPress);
+        self.drop_float_head_press();
         // A peek that stopped being live while the button was down — dismissed by
         // Esc, wiped by a viewport change, *or replaced by another trigger's* —
         // has nothing this gesture may promote, and the press dies with it rather
@@ -1244,8 +1227,7 @@ impl Runtime<'_> {
         };
         // The window keeps its identity across the promotion, so the carry that
         // follows is aimed at the very window the press began on.
-        self.window.float_drag = Some(FloatDrag { win, kind: carry });
-        self.capture_mirror_begin(CaptureOwner::FloatDrag);
+        self.latch_float_drag(FloatDrag { win, kind: carry });
         // The hand closes on it the instant it becomes carryable, rather than at
         // the next move: this *is* the move, and a frame of open palm over a
         // window already travelling would be the cursor disagreeing with the
@@ -1256,15 +1238,14 @@ impl Runtime<'_> {
     /// Move or resize the float under a dragged pointer. Returns whether it owned
     /// the event.
     fn drive_float_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(drag) = self.window.float_drag else {
+        let Some(drag) = self.held_float_drag().copied() else {
             return Ok(false);
         };
         let scale = self.window.renderer.scale_factor() as f32;
         let viewport = self.float_viewport();
         let pointer = [position.x as f32, position.y as f32];
         let Some(win) = self.window.float.live_mut(drag.win) else {
-            self.window.float_drag = None;
-            self.capture_mirror_end(CaptureOwner::FloatDrag);
+            self.drop_float_drag();
             return Ok(false);
         };
         // The grip's floors are the tenant's — a tree is useless below 200×150, a
@@ -1556,7 +1537,7 @@ impl Runtime<'_> {
     /// — because a mouse gesture never has one. Every mouse member of
     /// [`UserInputKind`] answers `returns_view_to_live` with false, so the branch
     /// would be dead code standing where a policy looks like it lives.
-    fn send_mouse_input_to(
+    pub(in crate::runtime) fn send_mouse_input_to(
         &mut self,
         seat: SeatId,
         bytes: &[u8],
@@ -2040,41 +2021,34 @@ impl Runtime<'_> {
         // time", and the ordering is what says so.
         let scale = self.window.renderer.scale_factor();
         if self
-            .window
-            .tab_press
-            .as_mut()
+            .held_tab_press_mut()
             .is_some_and(|press| press.travelled(position, scale))
         {
             let press = self
-                .window
-                .tab_press
+                .held_tab_press()
+                .copied()
                 .expect("a press that travelled is a press");
             self.begin_tab_drag(press, position)?;
         } else if self
-            .window
-            .pane_press
-            .as_mut()
+            .held_pane_press_mut()
             .is_some_and(|press| press.latch.travelled(position, scale))
         {
             let seat = self
-                .window
-                .pane_press
+                .held_pane_press()
+                .copied()
                 .expect("a press that travelled is a press")
                 .seat;
             self.begin_pane_drag(seat, position)?;
         } else if self
-            .window
-            .row_press
-            .as_mut()
+            .held_row_press_mut()
             .is_some_and(|press| press.latch.travelled(position, scale))
         {
             // P81/J113 — the third source crosses the same six pixels, through
             // the same latch, in the same `else if` chain: one press is in the
             // hand at a time, and which one it is was decided at the press.
             let press = self
-                .window
-                .row_press
-                .clone()
+                .held_row_press()
+                .cloned()
                 .expect("a press that travelled is a press");
             self.begin_row_drag(press, position)?;
         }
@@ -2173,12 +2147,12 @@ impl Runtime<'_> {
         // `IN_PANE_SURFACES_TOP_FIRST`), so this order only says which is asked
         // first; the router already says which one owns the point.
         let on_search =
-            self.drive_search_hover(self.window.mouse_route.is_none().then_some(position))?;
+            self.drive_search_hover(self.held_mouse_route().is_none().then_some(position))?;
         let on_notice = self.drive_notice_hover(
-            (self.window.mouse_route.is_none() && !on_search).then_some(position),
+            (self.held_mouse_route().is_none() && !on_search).then_some(position),
         )?;
         let on_command_rail = self.drive_command_rail_hover(
-            (self.window.mouse_route.is_none() && !on_search && !on_notice).then_some(position),
+            (self.held_mouse_route().is_none() && !on_search && !on_notice).then_some(position),
         )?;
         // The glance card wins over anything the pane underneath it would say,
         // for the reason the rail takes the pointer at all: it is the surface on
@@ -2212,7 +2186,7 @@ impl Runtime<'_> {
         let hit = self.frame_hit().filter(|_| !on_command_rail && !on_search);
         let hyperlink = hit
             .filter(|_| {
-                math_hit.is_none() && !matches!(self.window.mouse_route, Some(MouseRoute::Local(_)))
+                math_hit.is_none() && !matches!(self.held_mouse_route(), Some(MouseRoute::Local(_)))
             })
             .and_then(|hit| self.hyperlink_hit(hit));
         // **And the pane is asked what the disk says about it** (audit 3 C-2). An `OSC 8` target
@@ -2241,13 +2215,13 @@ impl Runtime<'_> {
         self.refresh_image_reference_underline()?;
         let peek_path = hit
             .filter(|_| {
-                math_hit.is_none() && !matches!(self.window.mouse_route, Some(MouseRoute::Local(_)))
+                math_hit.is_none() && !matches!(self.held_mouse_route(), Some(MouseRoute::Local(_)))
             })
             .and_then(|hit| self.peek_target(hit));
         if self.window.peek_hover.observe(peek_path, position, now) {
             self.present_peek_overlay(None)?;
         }
-        if math_hit.is_some() || matches!(self.window.mouse_route, Some(MouseRoute::MathBlock)) {
+        if math_hit.is_some() || matches!(self.held_mouse_route(), Some(MouseRoute::MathBlock)) {
             return Ok(());
         }
         // Above the "is the pointer over a cell" guard, deliberately: a selection
@@ -2255,7 +2229,7 @@ impl Runtime<'_> {
         // not the pointer is over a cell of the pane it is currently crossing.
         // Under the old guard a drag that left its pane simply stopped following
         // the hand until it came back.
-        if matches!(self.window.mouse_route, Some(MouseRoute::Local(_))) {
+        if matches!(self.held_mouse_route(), Some(MouseRoute::Local(_))) {
             return self.extend_local_selection();
         }
         // **And a drag already handed to a program goes on being that
@@ -2265,7 +2239,7 @@ impl Runtime<'_> {
         // hand is — over the capsule, the strip, a pane head or the pane next
         // door. What the pointer is over decides where a gesture *starts*; it
         // does not take one away from its owner halfway.
-        if matches!(self.window.mouse_route, Some(MouseRoute::Forward { .. })) {
+        if matches!(self.held_mouse_route(), Some(MouseRoute::Forward { .. })) {
             return self.forward_owned_drag_motion();
         }
         if hit.is_none() {
@@ -2288,11 +2262,9 @@ impl Runtime<'_> {
             return Ok(());
         };
         let modes = self.leaf_terminal_modes(seat);
-        let Some((sgr, button)) = route_forwarded_mouse_motion(
-            self.window.mouse_route.as_ref(),
-            modes,
-            self.window.modifiers,
-        ) else {
+        let Some((sgr, button)) =
+            route_forwarded_mouse_motion(self.held_mouse_route(), modes, self.window.modifiers)
+        else {
             return Ok(());
         };
         let bytes = input::mouse_bytes(
@@ -2631,7 +2603,7 @@ impl Runtime<'_> {
     /// grip it began on.
     pub(crate) fn apply_pointer_cursor(&mut self) {
         let grasp = float_grasp(
-            self.window.float_drag.map(|drag| drag.kind),
+            self.held_float_drag().copied().map(|drag| drag.kind),
             self.window.float_hover.map(|(_, part)| part),
             // The window **under the pointer**, not "is any window pinned": a
             // peek standing over a pinned one would otherwise borrow its grab
@@ -2651,12 +2623,8 @@ impl Runtime<'_> {
         // flight — the float's answer is the one that must win, and asking it
         // first is what makes that true by construction.
         .or_else(|| self.file_peek_head_grasp());
-        let divider_axis = self
-            .window
-            .divider_drag
-            .as_ref()
-            .map(|drag| drag.dir)
-            .or_else(|| match self.window.seat_pointer.hover {
+        let divider_axis = self.held_divider_drag().map(|drag| drag.dir).or_else(|| {
+            match self.window.seat_pointer.hover {
                 Some(seats::ChromeTarget::Divider(split)) => self
                     .seats
                     .split_slots(&self.seat_layout)
@@ -2664,7 +2632,8 @@ impl Runtime<'_> {
                     .find(|slot| slot.id == split)
                     .map(|slot| slot.dir),
                 _ => None,
-            });
+            }
+        });
         // **Inside the page, the page decides.** A hosted document says what
         // its own rectangle means — a link, a text field, a resize grip — and
         // this window has no way to know any of it. Outside that rectangle the
@@ -2685,7 +2654,7 @@ impl Runtime<'_> {
             return;
         }
         let cursor = pointer_cursor(
-            self.window.drag.is_some(),
+            self.held_drag().is_some(),
             grasp,
             divider_axis,
             // The glance card's folder address is a link too (user ruling
@@ -2726,7 +2695,7 @@ impl Runtime<'_> {
         &self,
         now: Instant,
     ) -> Option<(seats::TabRun, f32, PhysicalPosition<f64>)> {
-        let drag = self.window.drag.as_ref()?;
+        let drag = self.held_drag()?;
         let run = self.tab_run(now)?;
         Some((run, self.tab_run_scroll(), drag.pointer))
     }
@@ -2778,7 +2747,7 @@ impl Runtime<'_> {
         // needs are facts about the *press* and there is no second chance to read
         // them.
         self.open_broker(&source, position);
-        self.window.drag = Some(Drag {
+        self.latch_drag(Drag {
             source,
             carry,
             pointer: position,
@@ -2789,7 +2758,6 @@ impl Runtime<'_> {
             autoscroll_ticked_at: None,
             seam: None,
         });
-        self.capture_mirror_begin(CaptureOwner::Drag);
         // Hover goes quiet for the whole gesture: while something is in your hand
         // the chrome has nothing to offer the pointer, and a `×` lighting up
         // under a tab that is sliding past is an affordance that cannot be taken.
@@ -2924,7 +2892,7 @@ impl Runtime<'_> {
     }
 
     fn drive_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(mut drag) = self.window.drag.clone() else {
+        let Some(mut drag) = self.held_drag().cloned() else {
             return Ok(false);
         };
         // What is in the hand can go away underneath the gesture — a background
@@ -2932,8 +2900,7 @@ impl Runtime<'_> {
         // by a verb this window ran for some other reason. There is then nothing
         // left to drag, and the state must not survive the thing it points at.
         if !self.drag_source_lives(&drag.source) {
-            self.window.drag = None;
-            self.capture_mirror_end(CaptureOwner::Drag);
+            self.drop_drag();
             // F2: and the application's pointer with it — see [`Self::finish_drag`].
             self.app.drag_broker = None;
             self.apply_pointer_cursor();
@@ -2990,8 +2957,7 @@ impl Runtime<'_> {
         {
             drag.carry = DragCarry::Tab(self.settle_strip_reorder(tab, carry, slot, position));
         }
-        self.window.drag = Some(drag);
-        self.capture_mirror_begin(CaptureOwner::Drag);
+        self.latch_drag(drag);
         // The ghost lives in the overlay rather than in the chrome, and it does
         // not need its own repaint call: `refresh_chrome` rebuilds the overlay
         // from the same choke point and answers `true` if *either* changed. On a
@@ -3052,20 +3018,16 @@ impl Runtime<'_> {
     /// nowhere to be. The difference shows up in what each leaves behind: both
     /// keep the press's activation (J108), and neither writes the session,
     /// because a drag that landed nowhere chose nothing to record.
-    fn release_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.window.drag.take() else {
+    pub(in crate::runtime) fn release_drag(&mut self) -> Result<bool> {
+        let Some(drag) = self.take_drag() else {
             return Ok(false);
         };
         let now = Instant::now();
         let motion = self.app.motion;
         // A gesture is not a click, and it is not half of one either.
-        self.window.tab_press = None;
-        self.window.pane_press = None;
-        self.window.row_press = None;
-        self.capture_mirror_end(CaptureOwner::Drag);
-        self.capture_mirror_end(CaptureOwner::TabPress);
-        self.capture_mirror_end(CaptureOwner::PanePress);
-        self.capture_mirror_end(CaptureOwner::RowPress);
+        self.drop_tab_press();
+        self.drop_pane_press();
+        self.drop_row_press();
         self.window.tab_clicks.interrupt();
         // **F2 — the hand may have opened over another window, or over none.**
         //
@@ -3142,16 +3104,12 @@ impl Runtime<'_> {
     /// tab, and a cancelled drag does not unchoose it. Nothing here has to say so
     /// — the promise was paid the moment the drag began.
     pub(crate) fn cancel_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.window.drag.take() else {
+        let Some(drag) = self.take_drag() else {
             return Ok(false);
         };
-        self.window.tab_press = None;
-        self.window.pane_press = None;
-        self.window.row_press = None;
-        self.capture_mirror_end(CaptureOwner::Drag);
-        self.capture_mirror_end(CaptureOwner::TabPress);
-        self.capture_mirror_end(CaptureOwner::PanePress);
-        self.capture_mirror_end(CaptureOwner::RowPress);
+        self.drop_tab_press();
+        self.drop_pane_press();
+        self.drop_row_press();
         self.window.tab_clicks.interrupt();
         self.settle_home(&drag);
         self.finish_drag()
@@ -3246,158 +3204,10 @@ impl Runtime<'_> {
             return Ok(false);
         }
         if state == ElementState::Released {
-            // **A held scrubber or volume, first of everything** (route B slice
-            // ②; §7.44 ②): the fraction it wrote on the way is already the
-            // answer, so letting go only puts the dot away and restarts the
-            // dwell that will take the bar off the glass.
-            if let Some(surface) = self.window.video_bar_drag.take() {
-                self.capture_mirror_end(CaptureOwner::VideoBar);
-                if let Some(seat) = self.window.video.get_mut(surface) {
-                    seat.release(Instant::now());
-                }
-                self.refresh_chrome();
-                self.present_chrome_change()?;
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-video-bar-track state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // A thumb is let go wherever the hand lets go of it — the offset it
-            // wrote on the way is already the answer, so this only puts the
-            // accent out. The body's bar first, the order everything else about
-            // these two is in.
-            if self.preview_body_drag.take().is_some() {
-                self.capture_mirror_end(CaptureOwner::PreviewBodyThumb(self.id));
-                self.note_preview_body_hover(Some(position))?;
-                self.repaint_preview()?;
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-body-thumb state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // The terminal's own thumb, on the same terms: the offset it wrote
-            // on the way is the answer, so letting go only settles which ink it
-            // wears and restarts the clock that will take it off the glass.
-            if let Some(drag) = self.terminal_thumb_drag.take() {
-                self.capture_mirror_end(CaptureOwner::TerminalThumb(self.id));
-                self.wake_terminal_thumb(drag.seat);
-                self.note_terminal_thumb_hover(Some(position))?;
-                self.repaint_pane_change(drag.seat)?;
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-terminal-thumb state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // And the foot's, on those same terms.
-            if let Some(drag) = self.terminal_column_drag.take() {
-                self.capture_mirror_end(CaptureOwner::TerminalFootMark(self.id));
-                self.wake_terminal_column(drag.seat);
-                self.note_terminal_column_hover(Some(position))?;
-                self.repaint_pane_change(drag.seat)?;
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-terminal-column-thumb state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            if self.preview_block_drag.take().is_some() {
-                self.capture_mirror_end(CaptureOwner::BlockThumb(self.id));
-                self.note_preview_block_hover(Some(position))?;
-                self.repaint_preview()?;
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-block-thumb state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // A carried picture is let go wherever the hand lets go of it, and
-            // the pan it wrote on the way is already the answer — this only puts
-            // the closed hand away.
-            if self.preview_image_drag.take().is_some() {
-                self.capture_mirror_end(CaptureOwner::PicturePan(self.id));
-                self.apply_pointer_cursor();
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-image-drag state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // A selection drawn across the edit surface ends wherever the button
-            // comes up. The release is consumed because the press was: a gesture
-            // belongs to the surface it began on, whatever it is let go over.
-            if self.preview_selecting.take().is_some() {
-                self.capture_mirror_end(CaptureOwner::EditSelection(self.id));
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-selecting state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // **And one drawn across a rendered page**, on the same terms and
-            // with one more decision to make: a press that never travelled was a
-            // click, and a click is the link's or nobody's.
-            if self.release_preview_text(position)? {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-text state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // Ahead of the press: a gesture that has become a drag answers with
-            // its drop, and the press that started it is no longer a click.
-            if self.release_drag()? {
-                // A press that travelled is not half of a double click, and a
-                // pane drag starts on the very head the zoom gesture lives on
-                // (J99's rule, at this window's other double-click surface).
-                self.window.pane_head_clicks.interrupt();
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-drag-drop state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            if self.window.divider_drag.take().is_some() {
-                self.capture_mirror_end(CaptureOwner::Divider);
-                self.window.seat_pointer.dragging = None;
-                self.apply_pointer_cursor();
-                if self.refresh_chrome() {
-                    self.present_chrome_change()?;
-                }
-                // The end of a drag is a meaningful change (§5.1): the ratio that
-                // was being explored is now the ratio the user chose.
-                self.mark_session_dirty(Instant::now());
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-divider-drag state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
             let target = self.chrome_target_at(position);
-            // A pane press that never travelled has nothing to settle: D40 moved
-            // the focus on the way down and that is all a press on a head has
-            // ever meant. Dropping it is the whole of letting go.
-            let pane_press = self.window.pane_press.take();
-            let held_pane = pane_press.is_some() | self.window.row_press.take().is_some();
-            self.capture_mirror_end(CaptureOwner::PanePress);
-            self.capture_mirror_end(CaptureOwner::RowPress);
-            // **A double-click on a pane head zooms it, and lets it go again**
-            // (§7.1.6l, 2026-08-24). This is the seat §7.1.6b′ kept warm.
-            //
-            // The gesture carried focus mode for one day and was withdrawn on
-            // 2026-08-19, on an argument that named its rightful owner in the
-            // same breath: a double-click on a title bar means "make this thing
-            // bigger" everywhere in this operating system, focus mode made the
-            // pane *smaller*, and single-pane zoom is the verb whose shape this
-            // is. So the gesture was left empty rather than repurposed, and the
-            // layout primitives it needed (`bt-layout`'s `LayoutMode::Focus` /
-            // `solve_focused`) were kept unused for exactly this.
-            //
-            // **Both clicks must land on the same pane's head**, and the pairing
-            // is keyed by the seat rather than by a pixel neighbourhood, which is
-            // this window's rule at its three other double-click surfaces: the
-            // head a re-solve moved between the two clicks is still the same
-            // head. A release on anything else breaks the chain (J99), which is
-            // the `else` below and not a list of interrupts sprinkled through
-            // the press arms — one place decides, so one place can be wrong.
-            let doubled = match (pane_press, target) {
-                (Some(press), Some(seats::ChromeTarget::PaneHeader(seat)))
-                    if seat == press.seat =>
-                {
-                    self.window.pane_head_clicks.register(seat, Instant::now()) == TabClick::Double
-                }
-                _ => {
-                    self.window.pane_head_clicks.interrupt();
-                    false
-                }
-            };
-            if doubled && let Some(press) = pane_press {
-                self.toggle_pane_zoom(press.seat)?;
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-pane-head-zoom state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            if let Some(press) = self.window.tab_press.take() {
-                self.capture_mirror_end(CaptureOwner::TabPress);
-                self.release_tab_press(press, target)?;
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-tab-press state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            if held_pane {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-held-pane state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
+            // A release no capture owned ends no gesture, and it is not the
+            // second half of a double click on a pane head (J99).
+            self.window.pane_head_clicks.interrupt();
             let taken = target.is_some();
             self.mouse_trace(|| format!("chrome_mouse_input taken={} at=release-target-is-some state={state:?} button={button:?} target={target:?}", u8::from(taken)));
             return Ok(taken);
@@ -3434,8 +3244,7 @@ impl Runtime<'_> {
         }
         // A press that lands on something other than a row leaves no row press
         // behind. The arms below that *are* rows arm their own, after this.
-        self.window.row_press = None;
-        self.capture_mirror_end(CaptureOwner::RowPress);
+        self.drop_row_press();
         // D40, above the router and consuming nothing: every press inside a pane
         // moves the layout focus there, whatever else the press goes on to mean.
         // Above the rename guard too — clicking into another pane is a blur, and
@@ -3760,13 +3569,12 @@ impl Runtime<'_> {
                         DividerGrip::Ratio(origin)
                     }
                 };
-                self.window.divider_drag = Some(DividerDrag {
+                self.latch_divider_drag(DividerDrag {
                     split,
                     dir: slot.dir,
                     grip,
                     capture: bt_platform::thread_mouse_capture(),
                 });
-                self.capture_mirror_begin(CaptureOwner::Divider);
                 self.window.seat_pointer.dragging = Some(split);
                 self.apply_pointer_cursor();
                 if self.refresh_chrome() {
@@ -3815,13 +3623,11 @@ impl Runtime<'_> {
             // is exactly the mock-up's shape (`pointerdown` → `startDrag`, with
             // the ordinary click handler left to run, 5835-5840).
             seats::ChromeTarget::PaneHeader(seat) => {
-                self.window.tab_press = None;
-                self.window.pane_press = Some(PanePress {
+                self.drop_tab_press();
+                self.latch_pane_press(PanePress {
                     seat,
                     latch: DragLatch::new(position),
                 });
-                self.capture_mirror_end(CaptureOwner::TabPress);
-                self.capture_mirror_begin(CaptureOwner::PanePress);
             }
             // I102/I105: one verb for every kind of leaf. A files pane has no
             // session to clear, which is the whole of what `closeFilesPane =
@@ -4097,11 +3903,10 @@ impl Runtime<'_> {
                     self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-name-double state={state:?} button={button:?} target={traced_target:?}"));
                     return Ok(true);
                 }
-                self.window.pane_press = Some(PanePress {
+                self.latch_pane_press(PanePress {
                     seat,
                     latch: DragLatch::new(position),
                 });
-                self.capture_mirror_begin(CaptureOwner::PanePress);
                 // **A single press opens the switcher only when there is one to
                 // open.** The name answers the pointer on every head now (it is
                 // how the editor is reached), and a pane holding one buffer has
@@ -4125,11 +3930,10 @@ impl Runtime<'_> {
                 // click that never travels means "change this folder". Arming
                 // costs the click nothing, and not arming would make the one
                 // pane in the window whose head cannot be grabbed by its name.
-                self.window.pane_press = Some(PanePress {
+                self.latch_pane_press(PanePress {
                     seat,
                     latch: DragLatch::new(position),
                 });
-                self.capture_mirror_begin(CaptureOwner::PanePress);
                 self.toggle_root_menu(seat)?;
             }
             seats::ChromeTarget::Tab(index) => self.press_tab(index, position)?,
@@ -4263,115 +4067,11 @@ impl Runtime<'_> {
     /// "was a route armed at all, and is it still there when the button comes
     /// up".
     fn mouse_route_name(&self) -> &'static str {
-        match self.window.mouse_route {
+        match self.held_mouse_route() {
             None => "none",
             Some(MouseRoute::Local(_)) => "local",
             Some(MouseRoute::Forward { .. }) => "forward",
             Some(MouseRoute::MathBlock) => "math",
-        }
-    }
-
-    /// **End the gesture a press on a cell latched, wherever the button comes
-    /// up** — and answer whether there was one (T-STRIP-HOVER-THROUGH,
-    /// confirmation review 2026-10-04).
-    ///
-    /// Every [`MouseRoute`] is a press that a pane took, and its release is
-    /// owed to that pane whatever is under the pointer now:
-    ///
-    /// * a formula mark's press ink comes off with the button (owner's ruling
-    ///   2026-09-14 ②);
-    /// * a selection drag is finished in the pane it began in — over the pane
-    ///   next door, over the chrome, past the window's edge — because a release
-    ///   left unanswered left the route latched and the next move went on
-    ///   selecting;
-    /// * a press handed to the program gets its release, at the cell the
-    ///   pointer stands over clamped into that pane's body
-    ///   ([`Self::forwarded_gesture_hit`]), in the encoding the press was sent
-    ///   in, and the route comes off. A child given a press and never its
-    ///   release holds a button down for ever.
-    ///
-    /// A button the mouse protocol has no name for ends nothing here, as it
-    /// forwarded nothing.
-    fn release_owned_gesture(&mut self, button: MouseButton) -> Result<bool> {
-        match self.window.mouse_route.as_ref().cloned() {
-            None => Ok(false),
-            Some(MouseRoute::MathBlock) => {
-                self.window.mouse_route = None;
-                self.capture_mirror_end(CaptureOwner::FormulaBlock);
-                if self.window.math_tool_pressed.take().is_some() {
-                    self.repaint_hovered_pane()?;
-                }
-                Ok(true)
-            }
-            // A selection is only ever begun by the left button, so only the
-            // left button's release ends it; any other button's release goes on
-            // down the ordinary road as an event of its own.
-            Some(MouseRoute::Local(drag)) => {
-                if button != MouseButton::Left {
-                    return Ok(false);
-                }
-                // Its shell gone, the selection is let go with nothing done.
-                if self.live_paste_target(drag.owner).is_none() {
-                    self.window.mouse_route = None;
-                    self.capture_mirror_end(CaptureOwner::TerminalSelection);
-                    return Ok(true);
-                }
-                self.finish_local_selection(*drag)?;
-                Ok(true)
-            }
-            Some(MouseRoute::Forward {
-                button: latched,
-                owner,
-                ..
-            }) => {
-                // **Only the button that started the gesture ends it.** Any
-                // other button's release is not this gesture's: it is not
-                // forwarded under this route, it does not clear it, and it
-                // goes on down the ordinary road as an event of its own.
-                if protocol_mouse_button(button) != Some(latched) {
-                    return Ok(false);
-                }
-                // **To the shell the press was handed to, and to no other.** A
-                // shell that is gone (or whose tab is no longer on top) is owed
-                // nothing: the route comes off with no byte sent anywhere.
-                if self.live_paste_target(owner).is_none() {
-                    self.window.mouse_route = None;
-                    self.capture_mirror_end(CaptureOwner::ForwardedPress);
-                    return Ok(true);
-                }
-                let seat = owner.seat;
-                let Some(hit) = self.forwarded_gesture_hit(seat) else {
-                    // A pane with no frame to name a cell in has no child to
-                    // tell; the latch still has to come off.
-                    self.window.mouse_route = None;
-                    self.capture_mirror_end(CaptureOwner::ForwardedPress);
-                    return Ok(true);
-                };
-                let modes = self.leaf_terminal_modes(seat);
-                if let Some(bytes) = route_forwarded_mouse_button(
-                    &mut self.window.mouse_route,
-                    ElementState::Released,
-                    latched,
-                    hit,
-                    modes,
-                    self.window.modifiers,
-                    PressedCellTarget::Ordinary,
-                    owner,
-                ) {
-                    self.capture_mirror_end(CaptureOwner::ForwardedPress);
-                    self.mouse_trace(|| {
-                        format!(
-                            "pane_release forwarded=1 bytes={} cell={},{}",
-                            bytes.len(),
-                            hit.row,
-                            hit.column
-                        )
-                    });
-                    self.answer_attention(seat, UserInputKind::MouseButton);
-                    self.send_mouse_input_to(seat, &bytes, "forward mouse button event to PTY")?;
-                }
-                Ok(true)
-            }
         }
     }
 
@@ -4383,7 +4083,10 @@ impl Runtime<'_> {
     /// The pane is the route's recorded owner ([`MouseRoute::Forward`]'s
     /// `owner`), never the focused one: a focus moved while the button is held
     /// does not redirect the gesture.
-    fn forwarded_gesture_hit(&self, seat: SeatId) -> Option<bt_render::GridHit> {
+    pub(in crate::runtime) fn forwarded_gesture_hit(
+        &self,
+        seat: SeatId,
+    ) -> Option<bt_render::GridHit> {
         let hit = self.drag_hit_in_pane(seat)?;
         let frame = self.pane_frame(seat)?;
         Some(live_viewport_mouse_hit(frame, hit))
@@ -4392,14 +4095,13 @@ impl Runtime<'_> {
     /// One move of a drag already handed to a program, reported to the pane
     /// that took the press ([`Self::forwarded_gesture_hit`]).
     fn forward_owned_drag_motion(&mut self) -> Result<()> {
-        let Some(MouseRoute::Forward { owner, .. }) = self.window.mouse_route else {
+        let Some(MouseRoute::Forward { owner, .. }) = self.held_mouse_route().cloned() else {
             return Ok(());
         };
         // A gesture whose shell is gone is owed nothing, and is let go here
         // rather than reported to whatever stands in its place.
         if self.live_paste_target(owner).is_none() {
-            self.window.mouse_route = None;
-            self.capture_mirror_end(CaptureOwner::ForwardedPress);
+            self.drop_mouse_route();
             return Ok(());
         }
         let seat = owner.seat;
@@ -4407,11 +4109,9 @@ impl Runtime<'_> {
             return Ok(());
         };
         let modes = self.leaf_terminal_modes(seat);
-        let Some((sgr, button)) = route_forwarded_mouse_motion(
-            self.window.mouse_route.as_ref(),
-            modes,
-            self.window.modifiers,
-        ) else {
+        let Some((sgr, button)) =
+            route_forwarded_mouse_motion(self.held_mouse_route(), modes, self.window.modifiers)
+        else {
             return Ok(());
         };
         let bytes = input::mouse_bytes(
@@ -4477,11 +4177,12 @@ impl Runtime<'_> {
         }
         // **The router walks once for this button** (T-POINTER-CAPTURE R-4), at the
         // point the chrome router answers it from.
-        if let Some(position) = button_router_position(
+        let router_at = button_router_position(
             state,
             self.window.pointer_position,
             self.window.pointer_last_seen,
-        ) {
+        );
+        if let Some(position) = router_at {
             self.open_pointer_event(position);
         }
         // M142, and ahead of everything: any press at all takes the tip down.
@@ -4533,8 +4234,14 @@ impl Runtime<'_> {
         // *starts*, and a release over the search capsule, a notice strip or any
         // other surface is not a new gesture there but the end of the one the
         // pane already owns.
-        if state == ElementState::Released && self.release_owned_gesture(button)? {
+        if state == ElementState::Released && self.release_capture(button, router_at)? {
             return Ok(());
+        }
+        // **And a press of the held capture's own button proves its release was
+        // lost** (T-POINTER-CAPTURE R-5): the stale capture is cancelled first,
+        // then this press is routed.
+        if state == ElementState::Pressed {
+            self.press_against_the_capture(button)?;
         }
         // The quit card first, in the order it is drawn: every press is
         // swallowed, its own scrim included, and the answer is the application's
@@ -4958,15 +4665,8 @@ impl Runtime<'_> {
         // A release is handed on rather than claimed: letting go of a thumb ends
         // the drag, and the same release still has to reach whatever else was
         // waiting for one.
-        if state == ElementState::Released {
-            self.release_file_peek_thumb()?;
-            // The head's other meaning, and it *is* claimed: the press was
-            // consumed on the way down so that the hand could still choose, and
-            // the release is where the choice is spent.
-            if self.release_file_peek_press()? {
-                return Ok(());
-            }
-        } else if self.press_file_peek(button)? {
+        // Its releases are its capture's (`Self::release_capture`).
+        if state == ElementState::Pressed && self.press_file_peek(button)? {
             return Ok(());
         }
         // **The right press that raises a tab's own menu** (丙2, the gesture
@@ -5059,27 +4759,7 @@ impl Runtime<'_> {
         //
         // Ahead of the arming below rather than after it, so the press that arms
         // one is not the event that throws it away.
-        self.window.float_head_press = None;
-        self.capture_mirror_end(CaptureOwner::FloatHeadPress);
-        // A release ends whatever the float was doing, wherever it lands: a
-        // gesture that began on the header can finish anywhere, and a window that
-        // kept following the pointer after the button came up would be a window
-        // stuck to the hand.
-        if state == ElementState::Released && self.window.float_drag.take().is_some() {
-            self.capture_mirror_end(CaptureOwner::FloatDrag);
-            // The hand opens onto whatever the release actually left it over,
-            // which has to be *asked* rather than assumed: a drag owns the
-            // pointer, so the hover underneath is as old as the gesture, and a
-            // grip pulled past the 200×150 floor leaves its corner behind — the
-            // part the pull began on is exactly the part no longer under the
-            // hand. Without this the resize arrow would outlive the resize,
-            // until some later move happened to correct it.
-            if let Some(position) = self.window.pointer_position {
-                self.drive_float_hover(position)?;
-            }
-            self.apply_pointer_cursor();
-            return Ok(());
-        }
+        self.drop_float_head_press();
         // **A float carrying a page has no body of its own to press** (§7.14a).
         // Its head, its grip and its `DOCK` still answer for themselves — those
         // are the window — but the rectangle between them *is* the page, exactly
@@ -5389,8 +5069,7 @@ impl Runtime<'_> {
             // Formula pixels are one indivisible presentation object in this slice. Swallowing the
             // complete press/release pair intentionally prevents half-source selections and keeps
             // both local selection and application mouse reporting from seeing synthetic cells.
-            self.window.mouse_route = Some(MouseRoute::MathBlock);
-            self.capture_mirror_begin_pressed(CaptureOwner::FormulaBlock, button);
+            self.latch_mouse_route(MouseRoute::MathBlock, button);
             // **A mark that is being held says so** (owner's ruling 2026-09-14
             // ②), and it says so before the verb runs: toggling the source
             // republishes this pane's frame from inside the arm below, and a
@@ -5536,8 +5215,10 @@ impl Runtime<'_> {
         let Some(owner) = self.paste_target(self.focused_leaf) else {
             return Ok(());
         };
-        if let Some(bytes) = route_forwarded_mouse_button(
-            &mut self.window.mouse_route,
+        // The route this press may latch, or the release may end, in the slot.
+        let mut route = self.held_mouse_route().cloned();
+        let answered = route_forwarded_mouse_button(
+            &mut route,
             state,
             protocol_button,
             forwarded_hit,
@@ -5545,8 +5226,14 @@ impl Runtime<'_> {
             self.window.modifiers,
             target,
             owner,
-        ) {
-            self.capture_mirror_forwarded(state, button);
+        );
+        if answered.is_some() {
+            match route {
+                Some(route) => self.latch_mouse_route(route, button),
+                None => self.drop_mouse_route(),
+            }
+        }
+        if let Some(bytes) = answered {
             self.mouse_trace(|| {
                 format!(
                     "pane_press forwarded=1 bytes={} route={}",
@@ -5567,7 +5254,7 @@ impl Runtime<'_> {
         // **A gesture already handed to the program keeps the pane**: another
         // button pressed over a cell while it is held is not forwarded and does
         // not begin a selection that would take the route from it.
-        if matches!(self.window.mouse_route, Some(MouseRoute::Forward { .. })) {
+        if matches!(self.held_mouse_route(), Some(MouseRoute::Forward { .. })) {
             return Ok(());
         }
         match state {
@@ -6570,43 +6257,11 @@ impl Runtime<'_> {
     /// the pointer is *over* it — but a pointer with a press still open on it
     /// belongs to whatever that press began on, wherever it has since travelled.
     ///
-    /// **Every carry, and not only the drop.** The reported defect was a pane
-    /// carried over a page, but the ladder in [`Self::mouse_input`] answers the
-    /// divider, the video scrubber, the preview thumbs, the picture pan and the
-    /// terminal's own selection *below* its page arm too, so all of them ended
-    /// the same way — a release the page ate and a gesture that never finished.
-    /// One predicate rather than one clause per gesture is what stops the next
-    /// one being written without this line.
-    ///
-    /// **`MouseRoute::Forward` is deliberately not here.** That press was handed
-    /// to the program in the pane, spoken in that pane's cells, and its release
-    /// is routed by a cell lookup — a pane holding a page has no cells, so that
-    /// gesture cannot end on one however this answers. Its latch is also the one
-    /// state here that a release does not always clear (a release with no cell
-    /// under it leaves it standing, which it already did before this line
-    /// existed), and a predicate that could stick is a predicate that could
-    /// switch every page in the window off for good.
+    /// **Every gesture in the slot** (T-POINTER-CAPTURE cut 3): a capture of this
+    /// window, of any owner, holds the pointer until its release reaches it, and
+    /// its release always does (`Self::release_capture` is asked before every
+    /// layer), so the predicate is the slot and cannot stick.
     pub(in crate::runtime) fn a_gesture_holds_the_pointer(&self) -> bool {
-        self.window.drag.is_some()
-            || self.window.divider_drag.is_some()
-            || self.window.float_drag.is_some()
-            || self.window.video_bar_drag.is_some()
-            || self.window.settings_slider_drag.is_some()
-            || self.window.settings_menu_bar_drag.is_some()
-            || self.preview_block_drag.is_some()
-            || self.preview_body_drag.is_some()
-            || self.preview_text_drag.is_some()
-            || self.preview_image_drag.is_some()
-            || self.terminal_thumb_drag.is_some()
-            || self.terminal_column_drag.is_some()
-            || self
-                .window
-                .file_peek
-                .as_ref()
-                .is_some_and(|peek| peek.thumb_grab.is_some())
-            || matches!(
-                self.window.mouse_route,
-                Some(MouseRoute::Local(_) | MouseRoute::MathBlock)
-            )
+        self.a_capture_holds_the_pointer()
     }
 }

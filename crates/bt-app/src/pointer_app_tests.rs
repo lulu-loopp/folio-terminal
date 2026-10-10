@@ -4,8 +4,9 @@
 
 use super::*;
 use crate::runtime::pointer::{
-    BANDS_THAT_TAKE_NO_POINTER, CaptureMirror, CaptureOwner, FloatFacts, POINTER_LAYERS_TOP_FIRST,
-    Plane, PointerCapture, PointerFacts, PointerHit, PointerScene, Visits, walk_pointer_layers,
+    BANDS_THAT_TAKE_NO_POINTER, CaptureOwner, FloatFacts, POINTER_LAYERS_TOP_FIRST, Plane,
+    PointerCapture, PointerFacts, PointerHit, PointerScene, PressVerdict, Visits,
+    press_against_the_slot, release_ends_the_capture, walk_pointer_layers,
 };
 use crate::test_support::{calls_of, source};
 use bt_source::{Pattern, Search, View, needle};
@@ -747,186 +748,181 @@ fn every_pointer_read_is_the_routers_or_a_captures() {
     );
 }
 
-// ── the capture mirror (cut 2) ─────────────────────────────────────────────────
+// ── the capture slot (cut 3) ───────────────────────────────────────────────────
 
-/// **Every legacy latch field** (§1.2), as the census names a fact: the
-/// window's, the tab's, and the glance card's thumb.
-const LEGACY_LATCHES: [(&str, &[&str]); 20] = [
-    ("WindowRuntime.divider_drag", &["Divider"]),
-    ("WindowRuntime.tab_press", &["TabPress"]),
-    ("WindowRuntime.pane_press", &["PanePress"]),
-    ("WindowRuntime.row_press", &["RowPress"]),
-    ("WindowRuntime.drag", &["Drag"]),
-    ("WindowRuntime.float_head_press", &["FloatHeadPress"]),
-    ("WindowRuntime.float_drag", &["FloatDrag"]),
-    ("WindowRuntime.file_peek_press", &["GlanceHeadPress"]),
-    ("FilePeek.thumb_grab", &["GlanceThumb"]),
-    ("WindowRuntime.video_bar_drag", &["VideoBar"]),
-    ("TabState.preview_body_drag", &["PreviewBodyThumb"]),
-    ("TabState.preview_block_drag", &["BlockThumb"]),
-    ("TabState.preview_image_drag", &["PicturePan"]),
-    ("TabState.preview_selecting", &["EditSelection"]),
-    ("TabState.preview_text_drag", &["RenderedSelection"]),
-    ("TabState.terminal_thumb_drag", &["TerminalThumb"]),
-    ("TabState.terminal_column_drag", &["TerminalFootMark"]),
-    (
-        "WindowRuntime.mouse_route",
-        &["TerminalSelection", "ForwardedPress", "FormulaBlock"],
-    ),
-    ("WindowRuntime.settings_slider_drag", &["SettingsSlider"]),
-    ("WindowRuntime.settings_menu_bar_drag", &["SettingsMenuBar"]),
-];
-
-/// One latch taken in a window.
-fn a_capture(window: winit::window::WindowId, owner: CaptureOwner) -> PointerCapture {
+/// A capture of `owner` latched in `window` by `button`.
+fn a_capture(
+    window: winit::window::WindowId,
+    owner: CaptureOwner,
+    button: MouseButton,
+) -> PointerCapture {
     PointerCapture {
         window,
         owner,
-        button: MouseButton::Left,
+        button,
         started: None,
     }
 }
 
-/// RED (T-POINTER-CAPTURE cut 2) — **the mirror names every live legacy
-/// latch**, and records today's overlaps rather than resolving them.
-///
-/// Two halves. Every function that sets or clears a latch field — an
-/// assignment or a `take`, as the ownership census proves a write — writes the
-/// mirror beside it (`capture_mirror_begin`, `capture_mirror_end`, or the
-/// route's `capture_mirror_end_route`), so the mirror holds what the fields
-/// hold. And the mirror keeps every latch it is told of, so the three overlaps
-/// the fields can be in today are each one more record: a latch whose release
-/// was eaten beside the next gesture's, a settings drag beside another latch,
-/// a formula press over a forwarded one. Cut 3's one slot cannot hold two; it
-/// brings the count to zero.
-///
-/// MUTATION: drop the mirror call from one set site (`press_tab`'s, say) and
-/// the first half names the function.
-#[test]
-fn the_mirror_names_every_live_legacy_latch() {
-    let app = source();
-    let census =
-        bt_source::FieldCensus::take(app, &["WindowRuntime", "TabState", "FilePeek"], &[app])
-            .unwrap_or_else(|failure| panic!("{failure}"));
-    // A function that reaches the latch through `as_mut` changes the gesture in
-    // place (its latch travelling, its anchor moving): that is not a latch set
-    // or cleared, and the census says which functions those are.
-    let in_place: Vec<(&str, &str, &str)> = census
-        .rows()
-        .iter()
-        .filter(|row| {
-            row.column == bt_source::Column::Access
-                && row.kinds.iter().any(|kind| kind == "call:as_mut")
-        })
-        .map(|row| {
-            (
-                row.fact.as_str(),
-                row.module.as_str(),
-                row.function.as_str(),
-            )
-        })
-        .collect();
-    let mut writers = 0;
-    for row in census.rows() {
-        if in_place.contains(&(
-            row.fact.as_str(),
-            row.module.as_str(),
-            row.function.as_str(),
-        )) {
-            continue;
-        }
-        let Some((_, owners)) = LEGACY_LATCHES
-            .iter()
-            .find(|(fact, _)| *fact == row.fact.as_str())
-        else {
-            continue;
-        };
-        if row.column != bt_source::Column::Write
-            || !row
-                .kinds
-                .iter()
-                .any(|kind| kind == "assign" || kind == "call:take")
-        {
-            continue;
-        }
-        let (owner, name) = row
-            .function
-            .split_once("::")
-            .unwrap_or(("", row.function.as_str()));
-        let query = bt_source::ItemQuery::method(owner, name).in_module(&row.module);
-        let in_the_item = |pattern: Pattern| {
-            app.search(
-                &Search::new(needle!(pattern), View::Identifiers)
-                    .in_scope(bt_source::Scope::Item(query.clone())),
-            )
-            .unwrap_or_else(|failure| panic!("{failure}"))
-            .len()
-        };
-        // The record named by its owner, or — for the route, one field holding
-        // three gestures — the two doors that write the route's records.
-        let mirrored = owners
-            .iter()
-            .map(|owner| in_the_item(Pattern::path(&format!("CaptureOwner::{owner}"))))
-            .sum::<usize>()
-            + if row.fact == "WindowRuntime.mouse_route" {
-                in_the_item(Pattern::call("capture_mirror_end_route"))
-                    + in_the_item(Pattern::call("capture_mirror_forwarded"))
-            } else {
-                0
-            };
-        writers += 1;
-        assert!(
-            mirrored > 0,
-            "`{}::{}` sets or clears `{}` and writes no record of {owners:?} to the mirror beside it",
-            row.module,
-            row.function,
-            row.fact
-        );
-    }
-    assert!(
-        writers > 40,
-        "the census found the latches' writers ({writers})"
-    );
+/// The layers that took a release before it reached the gesture that owned it
+/// (§3.1 column a), each by the door its press arm calls in `mouse_input`.
+const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 7] = [
+    ("a full-window card", "self.quit_card_layout()"),
+    ("the toasts", "self.press_toast("),
+    ("the settings sheet", "self.settings_mouse_input("),
+    ("the glance card's head", "self.press_file_peek(button)"),
+    ("a floating window", "self.press_float(position)"),
+    (
+        "a hosted page",
+        "self.press_web_page(state,button,position)",
+    ),
+    ("the chrome's own router", "self.chrome_mouse_input("),
+];
 
+/// RED (T-POINTER-CAPTURE cut 3, R-6) — **a release reaches its owner over
+/// every layer that eats releases.**
+///
+/// The release of the capture's button is decided by the capture alone — its
+/// owner and its button, never the window and never what is under the pointer
+/// — and it is asked before every layer of the press road: a card, the toasts,
+/// the settings sheet, a menu, the glance card, a floating window, a hosted page
+/// and the chrome's router all stand below `release_capture` in `mouse_input`.
+/// The gestures that always ended on any button's release still do until cut 4
+/// rules on the other button; every other one ends on its own.
+///
+/// MUTATION: put the page arm back above the release (move
+/// `self.press_web_page(state, button, position)` ahead of
+/// `self.release_capture(`) — the order assertion names the page.
+#[test]
+fn a_release_reaches_its_owner_over_every_layer_that_eats_releases() {
     let (a, b) = (
         winit::window::WindowId::from(1_u64),
         winit::window::WindowId::from(2_u64),
     );
-    let tab = TabId(7);
-    let mut overlaps = 0;
-    // 1. A thumb whose release a menu ate, and the next gesture beside it.
-    let mut mirror = CaptureMirror::default();
-    mirror.begin(a_capture(a, CaptureOwner::PreviewBodyThumb(tab)));
-    mirror.begin(a_capture(a, CaptureOwner::TerminalThumb(tab)));
-    assert_eq!(
-        mirror.held().len(),
-        2,
-        "the stale thumb and the new one are both named"
+    let tab = TabId(3);
+    let surface = PreviewSurface::Peek;
+    for (owner, any) in [
+        (CaptureOwner::EditSelection(tab, surface), false),
+        (CaptureOwner::VideoBar(surface), false),
+        (CaptureOwner::Route(MouseRoute::MathBlock), true),
+        (CaptureOwner::GlanceThumb(4.0), true),
+        (CaptureOwner::SettingsMenuBar(12.0), true),
+    ] {
+        for window in [a, b] {
+            let capture = a_capture(window, owner.clone(), MouseButton::Left);
+            assert!(
+                release_ends_the_capture(&capture, MouseButton::Left),
+                "the capture's own button ends it, in any window"
+            );
+            assert_eq!(
+                release_ends_the_capture(&capture, MouseButton::Right),
+                any,
+                "another button's release ends it exactly where it always did"
+            );
+        }
+    }
+    let road = crate::test_support::squeezed_body("Runtime", "mouse_input");
+    let release = road
+        .find("self.release_capture(")
+        .expect("the release asks the capture first");
+    for (layer, door) in LAYERS_THAT_ATE_RELEASES {
+        let at = road
+            .find(door)
+            .unwrap_or_else(|| panic!("`{door}` ({layer}) is on the press road"));
+        assert!(
+            release < at,
+            "{layer} is asked after the capture's release, so it cannot eat it"
+        );
+    }
+}
+
+/// RED (T-POINTER-CAPTURE cut 3, R-5, cell B20) — **a press of the held
+/// button cancels the stale capture first**, in the capturing window and in
+/// another window of the same application.
+///
+/// A button cannot go down twice without coming up, so a press of the held
+/// capture's button proves its release was lost. The verdict compares buttons
+/// and never windows; a press of another button keeps today's routing until cut
+/// 4. The door asks it before any arm of the press road, and a stale capture of
+/// another window is handed to that window, which runs its owner's cancel.
+///
+/// MUTATION: answer `Route` for the held button (route without cancelling) —
+/// the verdicts fail; drop `cancel_stale_capture` from the door — the last
+/// assertion fails.
+#[test]
+fn a_press_of_the_held_button_cancels_the_stale_capture_first() {
+    let (a, b) = (
+        winit::window::WindowId::from(1_u64),
+        winit::window::WindowId::from(2_u64),
     );
-    overlaps += mirror.overlaps();
-    // 2. A settings drag beside a latch in another window.
-    let mut mirror = CaptureMirror::default();
-    mirror.begin(a_capture(b, CaptureOwner::TabPress));
-    mirror.begin(a_capture(a, CaptureOwner::SettingsSlider));
-    assert_eq!(mirror.held().len(), 2);
-    overlaps += mirror.overlaps();
-    // 3. A formula press over a forwarded one: the field holds the formula's
-    //    route now, and the forwarded press is still down in the program.
-    let mut mirror = CaptureMirror::default();
-    mirror.begin(a_capture(a, CaptureOwner::ForwardedPress));
-    mirror.begin(a_capture(a, CaptureOwner::FormulaBlock));
-    assert_eq!(mirror.held().len(), 2);
-    overlaps += mirror.overlaps();
-    // Writing a latch again is the same latch, and clearing it ends only its
-    // own window's record.
-    mirror.begin(a_capture(a, CaptureOwner::FormulaBlock));
-    mirror.end(b, CaptureOwner::FormulaBlock);
-    assert_eq!(mirror.held().len(), 2);
-    mirror.end(a, CaptureOwner::FormulaBlock);
-    mirror.end(a, CaptureOwner::ForwardedPress);
-    assert!(mirror.held().is_empty());
+    let held = a_capture(a, CaptureOwner::GlanceThumb(2.0), MouseButton::Left);
     assert_eq!(
-        overlaps, 3,
-        "today's three overlaps, each recorded; cut 3 brings this to zero"
+        press_against_the_slot(None, MouseButton::Left),
+        PressVerdict::Route
+    );
+    for pressed_in in [a, b] {
+        assert_eq!(
+            press_against_the_slot(Some(&held), MouseButton::Left),
+            PressVerdict::CancelThenRoute,
+            "a press of the held button in window {pressed_in:?} finds the capture stale"
+        );
+        assert_eq!(
+            press_against_the_slot(Some(&held), MouseButton::Right),
+            PressVerdict::Route,
+            "another button is routed as it always was (cut 4 rules on it)"
+        );
+    }
+    let road = crate::test_support::squeezed_body("Runtime", "mouse_input");
+    let precedence = road
+        .find("self.press_against_the_capture(button)?;")
+        .expect("the press asks the slot");
+    for (layer, door) in LAYERS_THAT_ATE_RELEASES {
+        let at = road.find(door).expect("the arm is on the press road");
+        assert!(precedence < at, "the slot is asked before {layer}");
+    }
+    assert!(
+        crate::test_support::squeezed_body("Runtime", "press_against_the_capture")
+            .contains("PressVerdict::CancelThenRoute=>self.cancel_stale_capture(),"),
+        "a stale capture is cancelled before the press goes on"
+    );
+}
+
+/// RED (T-POINTER-CAPTURE cut 3, cell C1·0) — **a divider let go anywhere
+/// commits, through the whole dispatch.**
+///
+/// The divider tests of `app_panes_tests` drive the release into
+/// `chrome_mouse_input` directly; this pins the road a real release takes:
+/// `mouse_input` asks the capture first, the capture names the divider, and
+/// the divider's release puts the cursor back and marks the session dirty —
+/// the ratio it was moving is the ratio chosen — before any layer is asked.
+///
+/// MUTATION: make `release_capture` answer the divider by handing it on
+/// (`Ok(false)`) — the second assertion fails.
+#[test]
+fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
+    let road = crate::test_support::squeezed_body("Runtime", "mouse_input");
+    assert!(
+        road.find("self.release_capture(") < road.find("self.chrome_mouse_input("),
+        "the capture is asked before the chrome's router"
+    );
+    let release = crate::test_support::squeezed_body("Runtime", "release_capture");
+    assert!(
+        release.contains("|CaptureOwner::TerminalFootMark(..)=>matchposition{Some(position)=>self.release_chrome_capture(button,position),"),
+        "the divider's release goes to the chrome capture's own let-go"
+    );
+    let let_go = crate::test_support::squeezed_body("Runtime", "release_chrome_capture");
+    let divider = let_go
+        .find("ifself.take_divider_drag().is_some(){")
+        .expect("the divider is let go");
+    assert!(
+        let_go[divider..].contains("self.mark_session_dirty(Instant::now());")
+            && let_go[divider..].contains("returnOk(true);"),
+        "and the ratio it was moving is committed and the release consumed"
+    );
+    assert_eq!(
+        crate::test_support::squeezed_body("Runtime", "a_gesture_holds_the_pointer"),
+        "{self.a_capture_holds_the_pointer()}",
+        "every capture holds the pointer — the one slot, not a list of latches (supersedes \
+         every_carry_this_window_can_hold_is_named_by_the_one_predicate)"
     );
 }

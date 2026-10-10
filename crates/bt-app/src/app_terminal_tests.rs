@@ -1948,22 +1948,22 @@ fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
 /// leaving the route latched — the first assertion names it.
 #[test]
 fn a_text_selection_drawn_into_the_strip_is_finished_in_its_own_pane() {
-    let release = squeezed_body("Runtime", "release_owned_gesture");
+    let release = squeezed_body("Runtime", "release_cell_route");
     assert!(
         release.contains(
-            "ifself.live_paste_target(drag.owner).is_none(){self.window.mouse_route=None;self.capture_mirror_end(CaptureOwner::TerminalSelection);returnOk(true);}self.finish_local_selection(*drag)?;Ok(true)}"
+            "ifself.live_paste_target(drag.owner).is_none(){self.drop_mouse_route();returnOk(true);}self.finish_local_selection(*drag)?;Ok(true)}"
         ),
         "a selection's release finishes it, wherever the pointer is"
     );
     assert_eq!(
         reader_names(&calls_of("Runtime", "finish_local_selection")),
-        ["release_owned_gesture"],
+        ["release_cell_route"],
         "and that is the one place a selection is finished by a release"
     );
     let moved = squeezed_body("Runtime", "pointer_moved");
     assert!(
         moved.contains(
-            "ifmatches!(self.window.mouse_route,Some(MouseRoute::Local(_))){returnself.extend_local_selection();}"
+            "ifmatches!(self.held_mouse_route(),Some(MouseRoute::Local(_))){returnself.extend_local_selection();}"
         ),
         "its moves go to its own pane"
     );
