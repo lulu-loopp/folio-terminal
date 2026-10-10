@@ -537,6 +537,7 @@ impl Install {
         };
         install_txn::durable_create(&self.home.receipt_path(self.txn, &nonce), &receipt.encode())
             .unwrap();
+        watch_receipt_decision(self.home.clone(), self.txn, nonce);
     }
 }
 
@@ -668,8 +669,31 @@ fn a_healthy_trial(install: &Install, children: &Children, carried: Option<Nonce
         };
         install_txn::durable_create(&home.receipt_path(txn, &nonce), &receipt.encode())
             .expect("the receipt");
+        watch_receipt_decision(home.clone(), txn, nonce);
         Ok(())
     })
+}
+
+/// Run the product watch beside a synthetic live trial. Once it reads
+/// `Committed`, it removes the receipt to acknowledge that its final mark
+/// decision is complete, just as the real trial does.
+fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
+    let journal = home.journal();
+    let mark = home.unkept(txn);
+    let receipt = home.receipt_path(txn, &nonce);
+    std::thread::spawn(move || {
+        let gate: &'static crate::update_trial::Gate =
+            Box::leak(Box::new(crate::update_trial::Gate::new()));
+        crate::update_trial::watch(
+            gate,
+            (&journal, &mark, &receipt),
+            txn,
+            Duration::from_millis(5),
+            &|| {},
+            None,
+            &mut crate::update_trial::watchdog_asleep(),
+        );
+    });
 }
 
 /// Wait until the journal on disk satisfies `until`, for as long as `applier` is still on its
@@ -1138,6 +1162,11 @@ fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
     let world = launching(Box::new(move |_, args| {
         let nonce = trial_nonce(args);
         std::fs::write(home.unkept(txn), version.as_bytes()).unwrap();
+        assert_eq!(
+            crate::update_apply::note_settled_unkept(&home, txn, &mut |_| {}),
+            Some(version.to_owned()),
+            "the settled commit writer reads the trial's final mark"
+        );
         let receipt = Receipt {
             txn,
             nonce,
@@ -4056,6 +4085,7 @@ fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
         &receipt.encode(),
     )
     .unwrap();
+    watch_receipt_decision(install.home.clone(), install.txn, nonce);
 }
 
 /// RED (U-37, design revision (h) H.1 R3–R4, on macOS) — **a running process

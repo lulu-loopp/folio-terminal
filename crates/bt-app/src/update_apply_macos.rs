@@ -1698,17 +1698,17 @@ impl<'a> Txn<'a> {
     fn commit(&mut self, worker: &WorkerCtx, places: &Places<'_>, actor: Actor) -> Ended {
         let mut debt = Vec::new();
         let home = self.road.home.clone();
-        let txn = self.road.txn;
         let limits = self.road.limits;
         let committed_unkept = match crate::update_apply::note_unkept_after_trial_decision(
             worker,
             &self.journal,
             &home,
-            txn,
             places.program,
             limits.poll,
-            limits.journal_held_within,
-            &mut |line| bt_platform::write_std_error(format!("{line}\n").as_bytes()),
+            crate::update_apply::JOURNAL_HELD_WITHIN,
+            &mut |line| {
+                bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            },
         ) {
             Ok(unkept) => unkept,
             Err(why) => {
@@ -1767,7 +1767,7 @@ impl<'a> Txn<'a> {
         let written = match unkept {
             Some(unkept) => {
                 self.record_saying_as(actor, &Event::Retired, Some(unkept), &mut |line| {
-                    bt_platform::write_std_error(format!("{line}\n").as_bytes())
+                    bt_platform::write_std_error(format!("{line}\n").as_bytes());
                 })
             }
             None => self.record(actor, &Event::Retired),

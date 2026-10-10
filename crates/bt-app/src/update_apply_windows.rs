@@ -2024,14 +2024,12 @@ impl<'a> Txn<'a> {
         world: &mut impl World,
     ) -> Result<(), String> {
         let home = self.road.home.clone();
-        let txn = self.txn();
         let installed = self.road.installed.clone();
         let limits = self.road.limits;
         let unkept = crate::update_apply::note_unkept_after_trial_decision(
             worker,
             &self.j.journal,
             &home,
-            txn,
             &installed,
             limits.poll,
             limits.journal_held_within,

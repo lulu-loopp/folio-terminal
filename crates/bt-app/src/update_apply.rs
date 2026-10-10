@@ -1287,7 +1287,6 @@ pub(crate) fn note_unkept_after_trial_decision(
     worker: &WorkerCtx,
     journal: &Journal,
     home: &Home,
-    txn: TxnId,
     program: &Path,
     poll: Duration,
     within: Duration,
@@ -1296,6 +1295,7 @@ pub(crate) fn note_unkept_after_trial_decision(
     if let Some(version) = &journal.body.unkept {
         return Ok(Some(version.clone()));
     }
+    let txn = journal.txn;
     let until = Instant::now() + within;
     loop {
         match survey(home, txn, program, &[]) {
@@ -1467,6 +1467,7 @@ pub(crate) fn before_deciding(
         Survey::Candidates {
             running,
             receipts_present: _,
+            ..
         },
     ) = (handed_back, &found)
         && !handed.ready
