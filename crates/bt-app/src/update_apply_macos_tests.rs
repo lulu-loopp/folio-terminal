@@ -436,6 +436,7 @@ impl Install {
                     crate::update_txn::Adapter::Ours
                 },
                 marker: self.carried.clone(),
+                unkept: None,
                 phase,
                 layout: Layout::Bundle {
                     old: self.old.clone(),
@@ -2040,6 +2041,75 @@ fn rolled_back_is_retired_at_the_next_start() {
         panic!("the start continues: {:?}", world.said);
     };
     assert_eq!(failed, Some(crate::update_job::Failure::RolledBack));
+    assert!(!journal.exists(), "the start retired the journal");
+}
+
+/// RED (0.4.8 E5, census #16) — **a rollback over a transaction a Folio ran
+/// over and did not keep is noted in the journal as the holder retires it,
+/// because the folder that held the mark goes with the retirement here; the
+/// restored build's start reads it and says *The update was undone.***
+///
+/// The mark is the one a trial that held a person's change, or a start that
+/// could start neither the rescue clone nor its own program as the new
+/// bundle, leaves (`update_trial`, `update_startup::hand_to_rescue`).
+///
+/// MUTATION: in `Txn::retire`, record `Retired` without reading the mark: the
+/// folder and the mark are gone, and the start says only that the previous
+/// version was restored.
+#[test]
+fn a_rollback_notes_what_it_did_not_keep_before_its_folder_goes() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("e5-undone");
+    install.write(Phase::RolledBack { untried: false });
+    install.arm();
+    let version = crate::version::VERSION;
+    std::fs::create_dir_all(install.home.transaction(install.txn)).unwrap();
+    std::fs::write(install.home.unkept(install.txn), version.as_bytes()).unwrap();
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
+    assert!(
+        !install.home.transaction(install.txn).exists(),
+        "the mark is gone with its folder"
+    );
+    let retired = install.on_disk().unwrap();
+    assert_eq!(
+        retired.body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack,
+            untried: false,
+        }
+    );
+    assert_eq!(retired.body.unkept.as_deref(), Some(version));
+
+    let journal = install.home.journal();
+    let exe = install.installed.join(EXE);
+    let argv = failed_words(&install.home).to_vec();
+    let mut world = StartWorld {
+        agents: install.agents.clone(),
+        said: Vec::new(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &exe,
+            home: &install.home,
+            argv: &argv,
+            trial: None,
+            failed: Some(&journal),
+            journal_held: None,
+        },
+        &mut world,
+    );
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", world.said);
+    };
+    assert_eq!(
+        failed,
+        Some(crate::update_job::Failure::Undone {
+            version: version.to_owned()
+        })
+    );
     assert!(!journal.exists(), "the start retired the journal");
 }
 

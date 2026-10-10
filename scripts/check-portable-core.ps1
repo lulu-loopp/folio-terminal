@@ -3,7 +3,7 @@
 # **The rule, and it is one sentence: platform-specific code lives behind
 # `bt-platform`'s interface, and no crate below `bt-app` calls Win32 directly.**
 #
-# `scripts/check-adapter-boundary.ps1` is the other half of the same discipline —
+# `bt_term::adapter_boundary_tests` is the other half of the same discipline —
 # it says the vendor seam may not import a policy crate — and the two are kept
 # apart because they answer different questions about different files. This one
 # is about a *platform*: `docs/plans/port/macos-spike-2026-09-07.md` measured

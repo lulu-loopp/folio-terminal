@@ -465,6 +465,18 @@ pub mod engine {
             }
 
             /// Unreachable.
+            #[cfg(any(test, feature = "trust-harness"))]
+            #[doc(hidden)]
+            pub fn state_reaching(
+                &self,
+                until: impl Fn(&EngineState) -> bool,
+                patience: Duration,
+            ) -> EngineState {
+                let _ = (until, patience);
+                match self._never {}
+            }
+
+            /// Unreachable.
             pub fn wait_for_metadata(&self, budget: Duration) -> bool {
                 let _ = budget;
                 match self._never {}

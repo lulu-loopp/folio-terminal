@@ -69,22 +69,16 @@ TabState.git_graphs	-	OBS	git	the 2026-09-25 table
 TabState.git_scroll	-	VIEW	git	the 2026-09-25 table
 TabState.git_trees	-	OBS	git	the 2026-09-25 table
 TabState.pending_keyboard_at	-	PROJ	keyboard	the 2026-09-25 table
-TabState.preview_block_drag	-	VIEW	preview	the 2026-09-25 table
 TabState.preview_block_hover	-	VIEW	preview	the 2026-09-25 table
-TabState.preview_body_drag	-	VIEW	preview	the 2026-09-25 table
 TabState.preview_edit_focus	-	VIEW	preview	the 2026-09-25 table
-TabState.preview_image_drag	-	VIEW	preview	the 2026-09-25 table
 TabState.preview_panes	-	VIEW	preview	the 2026-09-25 table
 TabState.preview_pool	-	DUR	preview	the 2026-09-25 table
-TabState.preview_selecting	-	VIEW	preview	the 2026-09-25 table
 TabState.preview_views	-	VIEW	preview	the 2026-09-25 table
 TabState.resize_present_owed	-	PROJ	frame	the 2026-09-25 table
 TabState.seat_layout	-	VIEW	panes	the 2026-09-25 table
 TabState.seat_overflow	-	PROJ	panes	the 2026-09-25 table
 TabState.seats	-	HUB	panes	the 2026-09-25 table
-TabState.terminal_column_drag	-	VIEW	mouse	the 2026-09-25 table
 TabState.terminal_column_hover	-	VIEW	mouse	the 2026-09-25 table
-TabState.terminal_thumb_drag	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.active_tab	-	HUB	tabs	the 2026-09-25 table
 WindowRuntime.advanced_reveal_sample	-	PROJ	main[settings]	the 2026-09-25 table
 WindowRuntime.animations	-	PROJ	preview	the 2026-09-25 table
@@ -98,16 +92,12 @@ WindowRuntime.composing	-	VIEW	keyboard	the 2026-09-25 table
 WindowRuntime.cursor_blink	-	VIEW	keyboard	the 2026-09-25 table
 WindowRuntime.dirty_gate	the pending destructive request	DUR	windows	revision (b)4 split
 WindowRuntime.dirty_gate	hover over the gate's card	VIEW	mouse	revision (b)4 split
-WindowRuntime.divider_drag	-	VIEW	panes	the 2026-09-25 table
-WindowRuntime.drag	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.file_menu	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.files_notice	-	PROJ	files	the 2026-09-25 table
 WindowRuntime.files_row_clicks	-	VIEW	files	the 2026-09-25 table
 WindowRuntime.first_run	-	VIEW	first_run	the 2026-09-25 table
 WindowRuntime.float	-	VIEW	floats	the 2026-09-25 table
-WindowRuntime.float_drag	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.float_git_pages_shown	-	PROJ	git	the 2026-09-25 table
-WindowRuntime.float_head_press	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.float_hover	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.focus_mode	-	VIEW	focus	proposed by census-1
 WindowRuntime.focus_reveal	-	VIEW	focus	proposed by census-1
@@ -128,13 +118,11 @@ WindowRuntime.last_presented_frame	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.layout_peek	-	VIEW	peek	the 2026-09-25 table
 WindowRuntime.local_wheel_subpixel_remainder	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.math_tool_pressed	-	VIEW	math	the 2026-09-25 table
-WindowRuntime.mouse_route	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.palette	-	VIEW	palette	the 2026-09-25 table
 WindowRuntime.palette_layout	-	PROJ	palette	the 2026-09-25 table
 WindowRuntime.pane_menu	-	VIEW	panes	the 2026-09-25 table
 WindowRuntime.pane_motion	-	PROJ	tabs	the 2026-09-25 table
 WindowRuntime.pane_motion_revision	-	PROJ	tabs	the 2026-09-25 table
-WindowRuntime.pane_press	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.paste_card_hover	-	VIEW	clipboard	the 2026-09-25 table
 WindowRuntime.peek_buffer	-	ASYNC	peek	the 2026-09-25 table
 WindowRuntime.peek_cache	-	PROJ	peek	the 2026-09-25 table
@@ -159,7 +147,6 @@ WindowRuntime.renderer	-	RES	—	the 2026-09-25 table
 WindowRuntime.restore_prompt	-	VIEW	windows	proposed by census-1: the restore card, ruled a full-window gate on 2026-09-25
 WindowRuntime.revealed_foot	-	ASYNC	handoff	the 2026-09-25 table
 WindowRuntime.root_menu	-	VIEW	profiles	proposed by census-1
-WindowRuntime.row_press	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.search	-	VIEW	search	the 2026-09-25 table
 WindowRuntime.search_scan	-	PROJ	search	the 2026-09-25 table
 WindowRuntime.seat_pointer	-	VIEW	mouse	the 2026-09-25 table
@@ -168,7 +155,6 @@ WindowRuntime.settings_scroll	-	VIEW	main[settings]	the 2026-09-25 table
 WindowRuntime.settling	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.tab_clicks	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.tab_menu	-	VIEW	tabs	the 2026-09-25 table
-WindowRuntime.tab_press	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.tab_scroll	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.term_menu	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.textless_frames	-	PROJ	frame	the 2026-09-25 table
@@ -177,7 +163,6 @@ WindowRuntime.tooltip_anchors	-	PROJ	tooltips	the 2026-09-25 table
 WindowRuntime.underlined_image_reference	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.unpainted_pane_output	-	PROJ	terminal	the 2026-09-25 table
 WindowRuntime.video	-	LIFE	preview	the 2026-09-25 table
-WindowRuntime.video_bar_drag	-	VIEW	preview	the 2026-09-25 table
 WindowRuntime.web	-	LIFE	web	the 2026-09-25 table
 WindowRuntime.web_cursor	-	PROJ	web	the 2026-09-25 table
 WindowRuntime.web_pointer_inside	-	VIEW	web	the 2026-09-25 table
@@ -186,3 +171,4 @@ App.update_job	-	ASYNC	the application (update_job)	proposed at the census-1 mer
 WindowRuntime.update_card	-	VIEW	update_card	proposed at the census-1 merge (2026-09-26): U-19's card state, written by the card module and by the window's pointer and settle roads
 WindowRuntime.powershell_profile_undo	-	ASYNC	profiles	T-INTEGRATION-INJECT-4: the success toast owns its one managed-line undo
 WindowRuntime.pending_external_drop	-	ASYNC	runtime::mouse	Linux drop observation: the window owns the captured batch; mouse queues and consumes its addressed answer, files withdraws it when a new batch starts.
+WindowRuntime.pane_head_clicks	-	VIEW	panes	T-POINTER-CAPTURE cut 3: the release ladder moved into runtime::pointer::release, which interrupts the pane-head click chain as the ladder did

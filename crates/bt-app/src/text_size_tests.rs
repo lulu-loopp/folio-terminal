@@ -11,6 +11,7 @@
 //! pinned on the item bodies through `bt_source`.
 
 use super::*;
+use crate::runtime::pointer::touch::pan_on_the_wheel_road;
 use crate::test_support::{
     cross_metrics, cross_solve, cross_tab, focused_frame, leaf_saying, tab_holding,
 };
