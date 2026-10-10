@@ -2010,8 +2010,17 @@ struct WindowHandoff<'a> {
 }
 
 impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for WindowHandoff<'_> {
-    fn park(&mut self, seat: &mut webhost::WebSeat) {
-        seat.park_for_handoff();
+    fn park(&mut self, seat: &mut webhost::WebSeat) -> Result<(), String> {
+        match seat.park_for_handoff() {
+            Ok(visible) => {
+                crate::diagnostics::note(&crate::web_spare::taken_line(visible));
+                Ok(())
+            }
+            Err(error) => {
+                self.answered = Some("KeptSource");
+                Err(error)
+            }
+        }
     }
 
     fn rehost(

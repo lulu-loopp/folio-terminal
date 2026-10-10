@@ -41,6 +41,18 @@ pub(crate) fn retired_line(why: &str) -> String {
     format!("the spare web page was retired: {why}")
 }
 
+/// The one diagnostics line written when the controller becomes the parked spare. The value is
+/// WebView2's `IsVisible` readback, not the application's desired-state cache.
+pub(crate) fn parked_line(visible: bool) -> String {
+    format!("the spare web page was parked: engine IsVisible={visible}")
+}
+
+/// The one diagnostics line written when a window takes the spare. It is read after the fresh
+/// parking hide and before the rehost begins.
+pub(crate) fn taken_line(visible: bool) -> String {
+    format!("the spare web page was taken: engine IsVisible={visible}")
+}
+
 /// **The spare's size on its never-shown parent**, physical pixels: the parent's own client
 /// area, as spike 59's harness had it (SW-5).
 pub(crate) const PARKED_BOUNDS: webhost::WebBounds = webhost::WebBounds {
@@ -62,6 +74,8 @@ pub(crate) trait SpareSeat<P> {
     /// Read everything the engine has said and act on it, **then** turn its clocks — so an answer
     /// that has already arrived is never read as silence by a deadline.
     fn advance(&mut self, parent: &P, now: Instant) -> Vec<WebOutcome>;
+    /// Hide the engine afresh, publish the hidden compositor state, and read visibility back.
+    fn park(&mut self, parent: &P) -> Result<bool, String>;
     /// Close it and start the wait for its browser (`WebSeat::close`).
     fn retire(&mut self, parent: &P) -> Vec<WebOutcome>;
     /// Close the controller and every answered orphan now, and wait for nothing.
@@ -93,6 +107,10 @@ impl SpareSeat<bt_platform::SpareParent> for WebSeat {
             outcomes.push(WebOutcome::Fault(error));
         }
         outcomes
+    }
+
+    fn park(&mut self, parent: &bt_platform::SpareParent) -> Result<bool, String> {
+        WebSeat::park(self, parent.compositor())
     }
 
     fn retire(&mut self, parent: &bt_platform::SpareParent) -> Vec<WebOutcome> {
@@ -206,7 +224,7 @@ impl<S: SpareSeat<P>, P> WebSpare<S, P> {
             return self.next;
         }
         let mut retire_for: Option<String> = None;
-        let mut park_under: Option<u64> = None;
+        let mut park_under: Option<(u64, bool)> = None;
         let mut orphans = false;
         if let Some((seat, parent)) = self.slot.held_mut() {
             for outcome in seat.advance(parent, now) {
@@ -226,7 +244,17 @@ impl<S: SpareSeat<P>, P> WebSpare<S, P> {
                         "another page's rebuild let the web environment go",
                     ));
                 } else if phase == SparePhase::Creating && seat.landed_on_blank() {
-                    park_under = seat.made_under();
+                    match seat.park(parent) {
+                        Ok(false) => {
+                            park_under = seat.made_under().map(|epoch| (epoch, false));
+                        }
+                        Ok(true) => {
+                            retire_for = Some(String::from(
+                                "the spare web page's engine remained visible after it was parked",
+                            ));
+                        }
+                        Err(error) => retire_for = Some(error),
+                    }
                 }
             }
             if let Some(why) = &retire_for {
@@ -238,8 +266,9 @@ impl<S: SpareSeat<P>, P> WebSpare<S, P> {
         }
         if retire_for.is_some() {
             self.slot.retire();
-        } else if let Some(epoch) = park_under {
+        } else if let Some((epoch, visible)) = park_under {
             self.slot.parked(epoch);
+            say(&parked_line(visible));
             crate::web_trace::line(|| String::from("spare parked"));
         }
         if self.slot.phase() == SparePhase::Retiring && self.gone && !orphans {
@@ -380,7 +409,7 @@ pub(crate) enum HandedOff {
 /// tests.
 pub(crate) trait Handoff<S, P> {
     /// Hide the seat and forget the spare's own rectangle (SW-5).
-    fn park(&mut self, seat: &mut S);
+    fn park(&mut self, seat: &mut S) -> Result<(), String>;
     /// Move it from `parent` into the page's window.
     fn rehost(&mut self, seat: &mut S, parent: &P) -> HandedOff;
 }
@@ -418,7 +447,13 @@ pub(crate) fn adopt<S: SpareSeat<P>, P>(
     let Some((seat, parent)) = spare.slot.adopting_mut() else {
         return Adoption::BuildYourOwn;
     };
-    door.park(seat);
+    if door.park(seat).is_err() {
+        spare.slot.finish_kept_source();
+        if let Some((seat, parent)) = spare.slot.held_mut() {
+            let _ = seat.retire(parent);
+        }
+        return Adoption::BuildYourOwn;
+    }
     match door.rehost(seat, parent) {
         HandedOff::Moved => spare
             .slot
@@ -583,6 +618,9 @@ mod spare_lifecycle_tests {
         /// Callbacks queued for later turns.
         queue: Rc<RefCell<VecDeque<Said>>>,
         controller: bool,
+        /// The controller's own visibility fact, as `IsVisible` would read it.
+        visible: bool,
+        parks: usize,
         pending: Option<u64>,
         landed: Option<u64>,
         made_under: Option<u64>,
@@ -602,6 +640,8 @@ mod spare_lifecycle_tests {
                 policy,
                 queue: Rc::default(),
                 controller: false,
+                visible: false,
+                parks: 0,
                 pending: None,
                 landed: None,
                 made_under: None,
@@ -654,6 +694,9 @@ mod spare_lifecycle_tests {
                         .asked
                         .push(Asked::Install(self.who));
                     self.controller = true;
+                    // Deliberately begin at the engine's unsafe default: the lifecycle test must
+                    // prove its own parked-edge hide independently of the platform callback's.
+                    self.visible = true;
                     self.pending = None;
                     Some(self.machine.on_events_installed(generation))
                 }
@@ -718,6 +761,7 @@ mod spare_lifecycle_tests {
                 self.engine.borrow_mut().asked.push(Asked::Close(self.who));
             }
             self.controller = false;
+            self.visible = false;
         }
 
         /// One callback, digested and filtered as `WebSeat::drive` does.
@@ -803,6 +847,12 @@ mod spare_lifecycle_tests {
                 }
             }
             outcomes
+        }
+
+        fn park(&mut self, _parent: &&'static str) -> Result<bool, String> {
+            self.parks += 1;
+            self.visible = false;
+            Ok(self.visible)
         }
 
         fn retire(&mut self, _parent: &&'static str) -> Vec<WebOutcome> {
@@ -1100,7 +1150,7 @@ mod spare_lifecycle_tests {
         let epoch = process.epoch();
         struct NeverCalled;
         impl Handoff<Recorded, &'static str> for NeverCalled {
-            fn park(&mut self, _: &mut Recorded) {
+            fn park(&mut self, _: &mut Recorded) -> Result<(), String> {
                 panic!("nothing to park: the spare is not parked");
             }
             fn rehost(&mut self, _: &mut Recorded, _: &&'static str) -> HandedOff {
@@ -1155,6 +1205,52 @@ mod spare_lifecycle_tests {
             process.asked()
         );
         process
+    }
+
+    /// RED (T-SPARE-WEBVIEW-STEALS-INPUT) — **Parked is admitted only after the controller has
+    /// been hidden and its own visibility reads false.** The lifecycle says that readback once in
+    /// diagnostics, rather than reporting its desired-state cache.
+    ///
+    /// MUTATION: make `Recorded::park` return without hiding and this reads a visible controller
+    /// in the parked slot.
+    #[test]
+    fn the_parked_spares_engine_visibility_fact_is_false() {
+        let mut process = parked();
+        let (seat, _) = process
+            .spare
+            .slot_mut()
+            .held_mut()
+            .expect("the parked slot owns its seat and parent");
+        assert!(!seat.visible, "the controller's own visibility fact");
+        assert_eq!(seat.parks, 1, "the lifecycle hid it at the parked edge");
+        assert_eq!(
+            process.said,
+            vec![super::parked_line(false)],
+            "one parked diagnostics line carries the engine readback"
+        );
+    }
+
+    /// RED (T-SPARE-WEBVIEW-STEALS-INPUT) — **parking is an action, not a cached state**: a
+    /// controller that came back visible is hidden afresh before it can be called the spare.
+    ///
+    /// MUTATION: remove the hide from `Recorded::park` and the readback remains true.
+    #[test]
+    fn parking_again_rehides_a_controller_that_came_back_visible() {
+        let engine = Shared::default();
+        let mut seat = Recorded::open(
+            "spare",
+            &engine,
+            crate::webnav::BLANK_PAGE,
+            RecoveryPolicy::Parked,
+        );
+        seat.controller = true;
+        seat.visible = true;
+        let parks = seat.parks;
+        let visible =
+            SpareSeat::park(&mut seat, &"parent").expect("parking can hide the controller");
+        assert!(!visible, "the engine's readback, not the wanted state");
+        assert!(!seat.visible);
+        assert_eq!(seat.parks, parks + 1, "a fresh hide was issued");
     }
 
     /// RED (60) — **a page and the spare hearing one browser exit rebuild once** — the page's
@@ -1268,7 +1364,7 @@ mod spare_lifecycle_tests {
         );
         struct NeverCalled;
         impl Handoff<Recorded, &'static str> for NeverCalled {
-            fn park(&mut self, _: &mut Recorded) {
+            fn park(&mut self, _: &mut Recorded) -> Result<(), String> {
                 panic!("a retired spare is not handed over");
             }
             fn rehost(&mut self, _: &mut Recorded, _: &&'static str) -> HandedOff {
@@ -1290,8 +1386,9 @@ mod spare_lifecycle_tests {
     }
 
     impl Handoff<Recorded, &'static str> for Door {
-        fn park(&mut self, _seat: &mut Recorded) {
+        fn park(&mut self, seat: &mut Recorded) -> Result<(), String> {
             self.parked += 1;
+            SpareSeat::park(seat, &"parent").map(|_| ())
         }
         fn rehost(&mut self, seat: &mut Recorded, _parent: &&'static str) -> HandedOff {
             self.handed += 1;
