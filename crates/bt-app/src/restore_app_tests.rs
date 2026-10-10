@@ -935,7 +935,7 @@ fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
     let (second, other) = a_file_being_edited("g7-saved-第二");
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
     let (other_tab, _) = tab_with_a_preview(2, vec![other]);
-    let mut tabs = [tab, other_tab];
+    let mut tabs = vec![tab, other_tab];
     let recovery = disk_scratch("g7-recovered-unused").join(preview::RECOVERED_FOLDER);
 
     let kept = keep_unsaved_edits_over(&mut tabs, &recovery, SystemTime::now());
@@ -982,7 +982,7 @@ fn an_unwritable_target_keeps_the_edit_in_a_recovery_copy_and_says_where() {
     let (moved, other) = a_file_being_edited("g7-conflict-改");
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
     let (other_tab, _) = tab_with_a_preview(2, vec![other]);
-    let mut tabs = vec![tab, other_tab];
+    let mut tabs = [tab, other_tab];
     let recovery = disk_scratch("g7-recovered-数据").join(preview::RECOVERED_FOLDER);
     // The file read-only refuses the write on Windows; its folder read-only refuses it on Unix,
     // where a rename replaces a read-only file. Both are set everywhere, and each is put back.
