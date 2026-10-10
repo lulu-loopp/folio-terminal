@@ -1,0 +1,112 @@
+name: Linux release artifact
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >
+          Optional release tag to check against the workspace version. Leave
+          empty to build the selected branch as a workflow artifact.
+        required: false
+        default: ""
+
+concurrency:
+  group: linux-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  linux-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: -C target-feature=-crt-static
+      GST_AUDIO_SINK: fakesink
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: ./.github/actions/toolchain
+        with:
+          cache: false
+
+      - uses: ./.github/actions/claimed-version
+
+      - name: install Linux desktop test runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers libxkbcommon-x11-0 \
+            fonts-noto-cjk fonts-noto-mono fonts-dejavu-core \
+            ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav
+
+      - name: build and stage the Linux release files
+        run: ./scripts/release/build-linux.sh --out target/linux-release
+
+      - name: the binary identifies this version and commit
+        run: |
+          actual_sha=$(git rev-parse HEAD)
+          if [ "$actual_sha" != "$GITHUB_SHA" ]; then
+            printf 'checked out %s, event commit is %s\n' "$actual_sha" "$GITHUB_SHA" >&2
+            exit 1
+          fi
+          short_commit=$(git rev-parse --short=10 HEAD)
+          expected="Folio $VERSION ($short_commit)"
+          actual=$(target/linux-release/bin/folio --version)
+          if [ "$actual" != "$expected" ]; then
+            printf 'expected %s, got %s\n' "$expected" "$actual" >&2
+            exit 1
+          fi
+
+      - name: fetch the sources the notices gates read
+        run: cargo fetch --locked
+
+      - name: cargo-about
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+
+      - name: the notices in the archive match the tree they came from
+        shell: pwsh
+        run: |
+          foreach ($gate in @("scripts/check-notices.ps1", "scripts/check-vendor-notices.ps1")) {
+            Write-Host "== $gate"
+            pwsh -NoLogo -NoProfile -File $gate
+            if ($LASTEXITCODE -ne 0) { throw "$gate failed with exit $LASTEXITCODE" }
+          }
+
+      - name: present release terminal text on private X11
+        run: >-
+          python3 scripts/ci/linux-smoke.py x11
+          --exe target/linux-release/bin/folio
+          --artifacts target/linux-release-smoke
+
+      - name: present release terminal text on private Wayland
+        run: >-
+          python3 scripts/ci/linux-smoke.py wayland
+          --exe target/linux-release/bin/folio
+          --artifacts target/linux-release-smoke
+
+      - name: package the workflow artifact
+        run: >-
+          ./scripts/release/package-linux.sh
+          --from target/linux-release
+          --out target/linux-release-package
+          --version "$VERSION"
+          --commit "$GITHUB_SHA"
+          --runner ubuntu-24.04
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: folio-${{ env.VERSION }}-linux-x86_64
+          path: target/linux-release-package
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

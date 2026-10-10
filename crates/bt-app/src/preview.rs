@@ -5811,6 +5811,7 @@ impl PreviewBuffer {
     /// ([`bt_platform::install_txn::durable_create`]: a temporary, a flush, a rename that never
     /// replaces, a flush of the folder); `folder` is created the same way when it is not there.
     /// Answers where the copy is, or why there is none.
+    #[cfg(any(test, not(target_os = "linux")))]
     pub fn recovery_copy(&self, folder: &Path, at: SystemTime) -> Result<PathBuf, String> {
         let Some(content) = self.content.as_deref() else {
             return Err(crate::i18n::Text::PreviewNothingToSave.text().to_owned());
@@ -5844,6 +5845,36 @@ impl PreviewBuffer {
             }
         }
         unreachable!("a folder holds fewer than u32::MAX copies of one name from one instant")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recovery_copy_on_stop(
+        &self,
+        folder: &Path,
+        at: SystemTime,
+        copy: &mut dyn FnMut(
+            &bt_platform::install_txn::RecoveryCopyRequest,
+        ) -> Result<PathBuf, bt_platform::install_txn::Failure>,
+    ) -> Result<PathBuf, String> {
+        let content = self
+            .content
+            .as_deref()
+            .ok_or_else(|| crate::i18n::Text::PreviewNothingToSave.text().to_owned())?;
+        let name = self
+            .source
+            .file_path()
+            .and_then(Path::file_name)
+            .map_or_else(
+                || self.name.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        let request = bt_platform::install_txn::RecoveryCopyRequest {
+            folder: folder.to_path_buf(),
+            instant: crate::seed::format_iso8601_utc(at).replace(':', ""),
+            name,
+            bytes: self.encoding.encode(content),
+        };
+        copy(&request).map_err(|failure| failure.to_string())
     }
 
     /// Over-limit files always name their actual size, including lossy heads.
@@ -6493,7 +6524,27 @@ impl PreviewPool {
     /// to look at as it does after a refused quit: the process is going. Its body is copied
     /// into `recovery` ([`PreviewBuffer::recovery_copy`]), never over the file. Every dirty
     /// buffer is tried, in the pool's order, and each answers what became of it ([`Kept`]).
+    #[cfg(any(test, not(target_os = "linux")))]
     pub fn keep_dirty(&mut self, recovery: &Path, at: SystemTime) -> Vec<Kept> {
+        self.keep_dirty_using(|buffer| buffer.recovery_copy(recovery, at))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn keep_dirty_on_stop(
+        &mut self,
+        recovery: &Path,
+        at: SystemTime,
+        copy: &mut dyn FnMut(
+            &bt_platform::install_txn::RecoveryCopyRequest,
+        ) -> Result<PathBuf, bt_platform::install_txn::Failure>,
+    ) -> Vec<Kept> {
+        self.keep_dirty_using(|buffer| buffer.recovery_copy_on_stop(recovery, at, copy))
+    }
+
+    fn keep_dirty_using(
+        &mut self,
+        mut recover: impl FnMut(&PreviewBuffer) -> Result<PathBuf, String>,
+    ) -> Vec<Kept> {
         self.buffers
             .iter_mut()
             .filter(|buffer| buffer.dirty)
@@ -6505,7 +6556,7 @@ impl PreviewPool {
                     SaveOutcome::Conflict => preview_conflict_notice().to_owned(),
                     SaveOutcome::Failed(error) => error,
                 };
-                match buffer.recovery_copy(recovery, at) {
+                match recover(buffer) {
                     Ok(copy) => Kept::Copied {
                         name,
                         file,

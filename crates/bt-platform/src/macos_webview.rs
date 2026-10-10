@@ -119,8 +119,9 @@ use objc2_web_kit::{
 use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
     RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
-    WebDpiOwnership, WebEvent, WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
-    WebRequestVerdict, WebSetting, http_status_of, install_rollback, new_window_answer,
+    WebDpiOwnership, WebEvent, WebFrame, WebGuards, WebImeEvent, WebInstallReport, WebKeyEvent,
+    WebMouseEvent, WebNavigationVerdict, WebRequestVerdict, WebSetting, http_status_of,
+    install_rollback, new_window_answer,
 };
 use crate::admission::{WaitToken, doors};
 use crate::macos_impl::{window_for, window_thread};
@@ -2031,6 +2032,24 @@ impl WebHost {
     ) -> Result<(), String> {
         let _ = (event, point, buttons_down);
         Ok(())
+    }
+
+    /// AppKit sends key events to the page's native view directly.
+    pub fn send_key(&self, event: WebKeyEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// AppKit sends IME composition to the page's native view directly.
+    pub fn send_ime(&self, event: WebImeEvent) -> Result<(), String> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// A `WKWebView` is drawn by AppKit in the window's native view hierarchy.
+    #[must_use]
+    pub fn take_frame(&self) -> Option<WebFrame> {
+        None
     }
 
     /// **A picture of the page, for the focus card.**

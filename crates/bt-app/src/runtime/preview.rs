@@ -1,6 +1,8 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+#[cfg(not(target_os = "linux"))]
+use crate::write_terminal_clipboard_text;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
@@ -51,8 +53,10 @@ use crate::{
     surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
     tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
     video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
-    webhost, webnav, wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    webhost, webnav, wheel_points_sideways, window_taskbar_progress,
 };
+#[cfg(target_os = "linux")]
+use crate::{ClipboardDestination, linux_clipboard_lane::ReadKind};
 use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::Result;
@@ -779,7 +783,7 @@ impl Runtime<'_> {
             ceiling.1 = ceiling.1.max(size.height);
         }
         if ceiling.0 == 0 || ceiling.1 == 0 {
-            let inner = self.window.window.inner_size();
+            let inner = self.client_size();
             ceiling = (inner.width.max(1), inner.height.max(1));
         }
         ceiling
@@ -7649,8 +7653,19 @@ impl Runtime<'_> {
         else {
             return;
         };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
-            eprintln!("recoverable preview copy failure: {error:#}");
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) =
+                self.submit_clipboard_write(text, "preview copy", crate::ClipboardWriteEffect::None)
+            {
+                eprintln!("recoverable preview copy failure: {error:#}");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Err(error) = write_terminal_clipboard_text(&text) {
+                eprintln!("recoverable preview copy failure: {error:#}");
+            }
         }
     }
 
@@ -7660,16 +7675,43 @@ impl Runtime<'_> {
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
     pub(in crate::runtime) fn paste_into_preview(&mut self) -> Result<()> {
-        let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        }) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!("recoverable preview paste failure: {error}");
+        #[cfg(target_os = "linux")]
+        {
+            let Some(surface) = self.preview_keyboard_surface() else {
+                return Ok(());
+            };
+            let Some(pane) = self.preview_pane(surface) else {
+                return Ok(());
+            };
+            let Some(source) = pane.buffer.clone() else {
+                return Ok(());
+            };
+            if !self.preview_is_editable(surface) {
                 return Ok(());
             }
-        };
-        self.apply_clipboard_text_to_preview(&text)
+            let target = self.clipboard_target(ClipboardDestination::Preview {
+                surface,
+                source,
+                identity: Arc::clone(&pane.instance_identity),
+            });
+            if let Err(error) = self.request_clipboard_read(target, ReadKind::Text) {
+                diagnostics::note(&format!("recoverable preview paste failure: {error}"));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
+                bt_platform::clipboard_text()
+            }) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!("recoverable preview paste failure: {error}");
+                    return Ok(());
+                }
+            };
+            self.apply_clipboard_text_to_preview(&text)
+        }
     }
 
     pub(in crate::runtime) fn apply_clipboard_text_to_preview(&mut self, text: &str) -> Result<()> {
@@ -10234,6 +10276,40 @@ impl Runtime<'_> {
                 radius_px: drawn.shape.radius_px,
                 opacity: 1.0,
                 stage: drawn.shape.stage,
+            });
+        }
+        #[cfg(target_os = "linux")]
+        for web in self.window.web.values() {
+            let Some((frame, bounds, above)) = web.frame_layer() else {
+                continue;
+            };
+            let Some(box_) = viewport_of_rect(bounds.as_rect()) else {
+                continue;
+            };
+            let stage = above.map_or(
+                bt_render::VideoStage::Seat,
+                bt_render::VideoStage::OverlayContent,
+            );
+            crate::web_trace::line(|| {
+                format!(
+                    "linux_frame layer page={:?} generation={} sequence={} stage={stage:?} bounds={bounds:?}",
+                    frame.page, frame.generation, frame.sequence,
+                )
+            });
+            layers.push(bt_render::VideoLayer {
+                key: format!("web:{:?}:{}", frame.page, frame.generation),
+                box_,
+                clip: box_,
+                frame: Some(bt_render::VideoFrameUpload {
+                    bgra: Arc::clone(&frame.bgra),
+                    width_px: frame.width_px,
+                    height_px: frame.height_px,
+                    generation: frame.sequence,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+                stage,
             });
         }
         layers

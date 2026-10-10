@@ -741,7 +741,18 @@ impl Runtime<'_> {
             // The document's own caret, which is measured in rows and columns
             // rather than in a prefix's width — the one field here whose box is
             // not a box somebody typed a line into.
-            ImeOwner::Preview => return self.preview_ime_cursor_area(),
+            ImeOwner::Preview => {
+                #[cfg(target_os = "linux")]
+                if let Some(leaf) = self.page_with_the_keyboard() {
+                    return self
+                        .window
+                        .web
+                        .get(&leaf)
+                        .and_then(|web| web.ime_cursor_rect())
+                        .map(ime_cursor_area_of);
+                }
+                return self.preview_ime_cursor_area();
+            }
             ImeOwner::Search => {
                 let capsule = self.search_capsule()?;
                 let (_, _, caret_x) = self.search_field_look();
@@ -775,6 +786,12 @@ impl Runtime<'_> {
     /// moves faster than 60Hz are held to one call per slot ([`ImeCursorSlot`]).
     pub(in crate::runtime) fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
         if !self.window.ime_active {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if bt_platform::linux_display_backend() == Some(bt_platform::linux_window::Backend::X11)
+            && !self.window.window_focused
+        {
             return;
         }
         let owner = ime_owner(self.keyboard_owner());
@@ -1034,6 +1051,26 @@ impl Runtime<'_> {
     /// report of a key that was already down when the window arrived is not one.
     pub(crate) fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {
         if !input::is_a_keystroke(event.state, is_synthetic) {
+            // Each seat releases only keys whose press it received, including
+            // when focus moved before the release. Synthetic reports stay out.
+            #[cfg(target_os = "linux")]
+            if !event.state.is_pressed() && !is_synthetic {
+                let modifiers = self.window.modifiers;
+                for web in self.window.web.values_mut() {
+                    let key = input::web_key_event(
+                        &event.logical_key,
+                        event.physical_key,
+                        event.location,
+                        modifiers,
+                        event.text.as_deref(),
+                        false,
+                        event.repeat,
+                    );
+                    if let Err(error) = web.send_key(key) {
+                        eprintln!("BT_WEB key release failed: {error}");
+                    }
+                }
+            }
             return Ok(());
         }
         // **A program that types for you is still typing** (T-REMOTE-INPUT-PACKET,
@@ -1964,6 +2001,32 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
+        // Linux pages are rendered in the app's window rather than in a
+        // native child window. Let the page receive keys only after Folio's
+        // shortcut and popup ladder has had first refusal; a page must never
+        // intercept its host's bindings or chrome fields.
+        #[cfg(target_os = "linux")]
+        let page = self.page_with_the_keyboard();
+        #[cfg(target_os = "linux")]
+        if let Some(leaf) = page
+            && matches!(ime_owner(self.keyboard_owner()), ImeOwner::Preview)
+        {
+            let key = input::web_key_event(
+                &event.logical_key,
+                event.physical_key,
+                event.location,
+                self.window.modifiers,
+                event.text.as_deref(),
+                true,
+                event.repeat,
+            );
+            if let Some(web) = self.window.web.get_mut(&leaf)
+                && let Err(error) = web.send_key(key)
+            {
+                eprintln!("BT_WEB key press failed: {error}");
+            }
+            return Ok(());
+        }
         // **`InputOwner::PreviewEdit`** (§7.1.5), beside the tree's rung and for
         // the same reasons: under every popup, so the window's own chords still
         // work over a file being edited; over the encoder, so not one character
@@ -2299,6 +2362,20 @@ impl Runtime<'_> {
                     return Ok(());
                 }
                 ImeOwner::Preview => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(leaf) = self.page_with_the_keyboard() {
+                        if let Some(web) = self.window.web.get_mut(&leaf)
+                            && let Some(input) = input::web_ime_event(&event)
+                            && let Err(error) = web.send_ime(input)
+                        {
+                            eprintln!("BT_WEB IME event failed: {error}");
+                        }
+                        self.window.preedit = None;
+                        if self.window.ime_active {
+                            self.offer_ime_caret(None);
+                        }
+                        return Ok(());
+                    }
                     self.preview_ime(event)?;
                     return Ok(());
                 }
@@ -2384,6 +2461,14 @@ impl Runtime<'_> {
                 })
             }
             Ime::Disabled => {
+                #[cfg(target_os = "linux")]
+                if let Some(leaf) = self.page_with_the_keyboard()
+                    && matches!(ime_owner(self.keyboard_owner()), ImeOwner::Preview)
+                    && let Some(web) = self.window.web.get_mut(&leaf)
+                    && let Err(error) = web.send_ime(bt_platform::WebImeEvent::Cancel)
+                {
+                    eprintln!("BT_WEB IME cancel failed: {error}");
+                }
                 let drawn_in_the_preview =
                     self.window.preedit.is_some() && self.preview_edit_focus().is_some();
                 self.window.preedit = None;
