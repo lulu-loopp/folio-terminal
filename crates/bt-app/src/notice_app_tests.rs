@@ -272,7 +272,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
 
     let input = squeezed_body("Runtime", "mouse_input");
     let owned = input
-        .find("ifstate==ElementState::Released&&self.release_owned_gesture(button)?")
+        .find("ifstate==ElementState::Released&&self.release_capture(")
         .expect("a release is first offered to the gesture that owns it");
     for later in [
         "self.quit_card_layout()",
@@ -285,7 +285,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
             .unwrap_or_else(|| panic!("`{later}` is in the router"));
         assert!(owned < at, "the owned release is answered before `{later}`");
     }
-    let release = squeezed_body("Runtime", "release_owned_gesture");
+    let release = squeezed_body("Runtime", "release_cell_route");
     assert!(
         release.contains("Some(MouseRoute::Forward{button:latched,owner,..})=>")
             && release.contains("self.forwarded_gesture_hit(seat)")
@@ -293,7 +293,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
         "the forwarded release is sent from the owner's cell"
     );
     assert!(
-        release.contains("self.window.mouse_route=None;returnOk(true);"),
+        release.contains("self.drop_mouse_route();returnOk(true);"),
         "and a pane with no frame still lets go of the route"
     );
     let hit = squeezed_body("Runtime", "forwarded_gesture_hit");
@@ -303,7 +303,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
     );
     let moved = squeezed_body("Runtime", "pointer_moved");
     let routed = moved
-        .find("ifmatches!(self.window.mouse_route,Some(MouseRoute::Forward{..})){returnself.forward_owned_drag_motion();}")
+        .find("ifmatches!(self.held_mouse_route(),Some(MouseRoute::Forward{..})){returnself.forward_owned_drag_motion();}")
         .expect("a routed drag's moves go to the pane that took the press");
     let guard = moved.find("ifhit.is_none(){").expect("the cell guard");
     assert!(

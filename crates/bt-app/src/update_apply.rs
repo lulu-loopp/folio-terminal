@@ -504,6 +504,52 @@ impl Recording for Journaled<'_> {
     }
 }
 
+/// **What a rollback did not keep** (0.4.8 E5): the version the
+/// transaction's mark names (`H\<txn>\unkept`, `Home::unkept` — a start that
+/// ran over the transaction with no recovery to hand it to, or a trial that
+/// held a person's change), read by the lock holder that retires a rollback
+/// before it records `Retired`, so that the journal carries it
+/// (`update_txn::Body::unkept`, `Journal::noting_unkept`) past the folder — a
+/// macOS holder removes the folder at once. `None` without a mark; a mark that
+/// cannot be read, or names no version, is said through `say` and is `None`:
+/// the restored build's card is then the rollback's own.
+pub(crate) fn unkept_version(home: &Home, txn: TxnId, say: &mut dyn FnMut(&str)) -> Option<String> {
+    let mark = home.unkept(txn);
+    match file_reads::read(Lane::UpdateJournal, &mark) {
+        Ok(bytes) => {
+            let named = std::str::from_utf8(&bytes)
+                .ok()
+                .map(str::trim)
+                .filter(|text| crate::update::Version::parse(text).is_some());
+            if named.is_none() {
+                say(&format!(
+                    "BT_UPDATE_ROLLBACK transaction {txn}: {} names no version; the rollback is recorded without it",
+                    mark.display()
+                ));
+            }
+            named.map(str::to_owned)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            say(&format!(
+                "BT_UPDATE_ROLLBACK transaction {txn}: {} could not be read ({error}); the rollback is recorded without it",
+                mark.display()
+            ));
+            None
+        }
+    }
+}
+
+/// **The line a lock holder says as it records a rollback's retirement that
+/// did not keep `version`'s changes** (0.4.8 E5): the transaction, the
+/// version, and the journal's phase before and after — never what the
+/// changes were.
+pub(crate) fn unkept_said(txn: TxnId, version: &str, before: PhaseKind) -> String {
+    format!(
+        "BT_UPDATE_ROLLBACK transaction {txn}: Folio {version} ran over it and the rollback does not keep its changes; the journal goes from {before:?} to Retired noting it"
+    )
+}
+
 /// **§C.4's authoritative test that O is gone**: the data directory `data`'s
 /// claim, tried until it is had and let go at once, sleeping `poll` between
 /// tries through the wait door, until `until`. A live holder or a transient
@@ -2893,6 +2939,7 @@ mod beyond_tests {
                 }),
                 adapter: Adapter::Ours,
                 marker: None,
+                unkept: None,
             },
         }
         .encode();

@@ -1107,7 +1107,11 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         scale: f32,
         measure_in: seats::PreviewRailMeasure,
-    ) -> (seats::PreviewRailMeasure, Option<seats::TabEdit>) {
+    ) -> (
+        seats::PreviewRailMeasure,
+        Option<seats::TabEdit>,
+        Option<(String, f32)>,
+    ) {
         // **The page this surface is showing, docked or torn off** (§7.7 ⑩ 欠账,
         // 2026-08-25). The editor was keyed by leaf on the day it was written
         // and is keyed by leaf still — what moved is only the question of which
@@ -1117,27 +1121,39 @@ impl Runtime<'_> {
             |editor| matches!(editor.subject, RenameSubject::WebAddress { leaf: at } if Some(at) == here),
         );
         if !editing {
-            return (measure_in, None);
+            return (measure_in, None, None);
         }
         let measure_in = seats::PreviewRailMeasure {
             address_width: ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD,
             ..measure_in
         };
         let Some(band) = self.rail_band(surface, scale) else {
-            return (measure_in, None);
+            return (measure_in, None, None);
         };
         let Some(field) = seats::preview_rail_geometry_in(band, scale, &measure_in).address else {
-            return (measure_in, None);
+            return (measure_in, None, None);
         };
-        let inset = (seats::PREVIEW_ADDRESS_PAD_X_LOGICAL_PX * scale).round();
-        let box_ = [
-            field[0] + inset,
-            field[1],
-            (field[2] - inset).max(field[0] + inset),
-            field[3],
-        ];
-        let box_width = box_[2] - box_[0];
         let font = seats::PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
+        // **What the commit said, measured before the draft is** (M-SWEEP-048):
+        // the sentence takes its width at the field's end, so the draft is
+        // fitted into what is left — the painter's own runs.
+        let refusal = self
+            .window
+            .rename
+            .as_ref()
+            .and_then(TabRename::address_refusal)
+            .map(|refusal| {
+                let said = refusal.text();
+                let width = self
+                    .window
+                    .renderer
+                    .measure_chrome_text(&mut self.app.gpu, said, font);
+                (said.to_owned(), width)
+            });
+        let (draft, _) =
+            seats::preview_address_runs(field, scale, refusal.as_ref().map(|(_, width)| *width));
+        let box_ = [draft[0], field[1], draft[1], field[3]];
+        let box_width = box_[2] - box_[0];
         let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
             .round()
             .max(1.0);
@@ -1146,7 +1162,7 @@ impl Runtime<'_> {
         // a string is, and this is the one place the two have to meet.
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let Some(editor) = self.window.rename.as_mut() else {
-            return (measure_in, None);
+            return (measure_in, None, None);
         };
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
         // An address has no address under it either: the field is seeded with
@@ -1162,7 +1178,7 @@ impl Runtime<'_> {
         // ruling moved as far as an IME is concerned.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        (measure_in, Some(edit))
+        (measure_in, Some(edit), refusal)
     }
 
     /// **The open crumb editor, measured into the segment it is drawn in** (B5,
@@ -2310,17 +2326,17 @@ impl Runtime<'_> {
             self.preview_edit_focus = None;
         }
         if self
-            .preview_selecting
+            .held_preview_selecting()
+            .copied()
             .is_some_and(|surface| !alive.contains(&surface))
         {
-            self.preview_selecting = None;
+            self.drop_preview_selecting();
         }
         if self
-            .preview_text_drag
-            .as_ref()
+            .held_preview_text_drag()
             .is_some_and(|drag| !alive.contains(&drag.surface))
         {
-            self.preview_text_drag = None;
+            self.drop_preview_text_drag();
         }
         // **The card is not in `alive` and must not be swept out by its
         // absence.** [`PreviewSurface::Peek`] is not in the tree and not in the
@@ -2329,10 +2345,10 @@ impl Runtime<'_> {
         // [`Self::hide_file_peek`] is where a gesture on the card is let go.
         // Without the guard, any seat-set change would drop a hand that is in
         // the middle of dragging a table sideways inside a glance.
-        if self.preview_block_drag.is_some_and(|drag| {
+        if self.held_preview_block_drag().copied().is_some_and(|drag| {
             drag.surface != PreviewSurface::Peek && !alive.contains(&drag.surface)
         }) {
-            self.preview_block_drag = None;
+            self.drop_preview_block_drag();
         }
         if self.preview_block_hover.is_some_and(|(surface, _)| {
             surface != PreviewSurface::Peek && !alive.contains(&surface)
@@ -2340,10 +2356,11 @@ impl Runtime<'_> {
             self.preview_block_hover = None;
         }
         if self
-            .preview_body_drag
+            .held_preview_body_drag()
+            .copied()
             .is_some_and(|drag| !alive.contains(&drag.surface))
         {
-            self.preview_body_drag = None;
+            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -3113,25 +3130,25 @@ impl Runtime<'_> {
         if self.preview_edit_focus == Some(surface) {
             self.preview_edit_focus = None;
         }
-        if self.preview_selecting == Some(surface) {
-            self.preview_selecting = None;
+        if self.held_preview_selecting().copied() == Some(surface) {
+            self.drop_preview_selecting();
         }
         // A selection being drawn across a page that has just been swapped out
         // is a selection of a document nobody is looking at any more.
         if self
-            .preview_text_drag
-            .as_ref()
+            .held_preview_text_drag()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_text_drag = None;
+            self.drop_preview_text_drag();
         }
         // A thumb held over the swap would be dragging a block that is not there
         // any more.
         if self
-            .preview_block_drag
+            .held_preview_block_drag()
+            .copied()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_block_drag = None;
+            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
@@ -3143,10 +3160,11 @@ impl Runtime<'_> {
         // length, so a thumb held across the swap would be dragging a track that
         // means something else.
         if self
-            .preview_body_drag
+            .held_preview_body_drag()
+            .copied()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_body_drag = None;
+            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -3474,6 +3492,7 @@ impl Runtime<'_> {
             meta: String::new(),
             edit: None,
             refused: false,
+            refusal: None,
             flip_to_source: false,
             web: seats::WebHeadState::default(),
         };
@@ -3590,10 +3609,11 @@ impl Runtime<'_> {
                 };
             }
         }
-        let (tools, edit) =
+        let (tools, edit, refusal) =
             self.dress_preview_address_editor(surface, scale, frame.measure.clone());
         frame.measure = tools;
         frame.edit = edit;
+        frame.refusal = refusal;
         // **And the tail's box, when this rail is the one holding it** (B5). The
         // two are mutually exclusive by construction — an `Address` rail has no
         // crumbs and a `Crumbs` rail has no address — so this cannot overwrite an
@@ -3609,15 +3629,27 @@ impl Runtime<'_> {
         // predicate that judged a phrase against a different engine's template
         // than the one Enter would use is a second door wearing the first one's
         // name.
+        //
+        // **And the same frame a path is resolved in** (M-SWEEP-048): this
+        // account's home and the folder of the local page the seat shows, read
+        // where the commit reads them.
         let engine = self.app.settings_store.loaded().search_engine;
-        frame.refused = matches!(
-            self.window.rename.as_ref().map(|editor| &editor.subject),
-            Some(RenameSubject::WebAddress { .. })
-        ) && !self
-            .window
-            .rename
-            .as_ref()
-            .is_some_and(|editor| webhost::WebSeat::would_go_to(editor.text(), engine));
+        let home = profiles::home_directory(&bt_pty::SystemShellEnvironment);
+        let folder = self
+            .web_of(surface)
+            .and_then(webhost::WebSeat::local_folder);
+        let local = webhost::LocalFrame {
+            home: home.as_deref(),
+            folder: folder.as_deref(),
+        };
+        frame.refused =
+            matches!(
+                self.window.rename.as_ref().map(|editor| &editor.subject),
+                Some(RenameSubject::WebAddress { .. })
+            ) && (frame.refusal.is_some()
+                || !self.window.rename.as_ref().is_some_and(|editor| {
+                    webhost::WebSeat::would_go_to(editor.text(), engine, local)
+                }));
         self.window
             .preview_rail_measures
             .insert(surface, frame.measure.clone());
@@ -4701,7 +4733,8 @@ impl Runtime<'_> {
     /// in have to be told "none of yours" rather than be handed the other's
     /// index.
     fn preview_block_lit(&self, surface: PreviewSurface) -> Option<(usize, bool)> {
-        self.preview_block_drag
+        self.held_preview_block_drag()
+            .copied()
             .filter(|drag| drag.surface == surface)
             .map(|drag| (drag.index, true))
             .or(self
@@ -4790,7 +4823,8 @@ impl Runtime<'_> {
             .flatten()
             .map(|bar| {
                 let state = ScrollThumbState::of(
-                    self.preview_body_drag
+                    self.held_preview_body_drag()
+                        .copied()
                         .is_some_and(|drag| drag.surface == surface && drag.axis == bar.axis),
                     self.preview_body_hover == Some((surface, bar.axis)),
                 );
@@ -5019,7 +5053,7 @@ impl Runtime<'_> {
                 Some(video_seat::BarSlot::Rate) => seat.cycle_rate(now),
                 Some(slot @ (video_seat::BarSlot::Seek | video_seat::BarSlot::Volume)) => {
                     seat.grab(slot, &layout, at, now);
-                    self.window.video_bar_drag = Some(surface);
+                    self.latch_video_bar_drag(surface);
                 }
                 // The bar's own ground. Taken and not passed through: a press
                 // that fell past a panel would land on the picture behind it,
@@ -5109,7 +5143,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(surface) = self.window.video_bar_drag else {
+        let Some(surface) = self.held_video_bar_drag().copied() else {
             return Ok(false);
         };
         let at = [position.x as f32, position.y as f32];
@@ -5322,7 +5356,7 @@ impl Runtime<'_> {
             preview::ScrollAxis::Horizontal => (bar.thumb[0], bar.thumb[2]),
             preview::ScrollAxis::Vertical => (bar.thumb[1], bar.thumb[3]),
         };
-        self.preview_body_drag = Some(PreviewBodyDrag {
+        self.latch_preview_body_drag(PreviewBodyDrag {
             surface,
             axis: bar.axis,
             grab: (bar.along([position.x as f32, position.y as f32]) - near).clamp(0.0, far - near),
@@ -5341,7 +5375,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_body_drag else {
+        let Some(drag) = self.held_preview_body_drag().copied() else {
             return Ok(false);
         };
         let scale = self.window.renderer.scale_factor() as f32;
@@ -5886,7 +5920,7 @@ impl Runtime<'_> {
             // is not this page's, and the ladder goes on underneath it.
             return Ok(false);
         }
-        self.preview_text_drag = Some(PreviewTextDrag {
+        self.latch_preview_text_drag(PreviewTextDrag {
             surface,
             // A shift-click has already extended the selection and must not have
             // to travel to keep it; the latch is what decides whether the *link*
@@ -5974,7 +6008,7 @@ impl Runtime<'_> {
     /// caret moved after, so the page is laid out again from where the caret and
     /// the rendered selection stand now.
     pub(crate) fn cancel_preview_text_drag(&mut self) -> Result<()> {
-        if self.preview_text_drag.take().is_some() {
+        if self.take_preview_text_drag().is_some() {
             self.repaint_preview()?;
         }
         Ok(())
@@ -6177,7 +6211,7 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
         let scale = self.window.renderer.scale_factor();
-        let Some(drag) = self.preview_text_drag.as_mut() else {
+        let Some(drag) = self.held_preview_text_drag_mut() else {
             return Ok(false);
         };
         let surface = drag.surface;
@@ -6209,7 +6243,7 @@ impl Runtime<'_> {
         // spends, so what this changes is what is drawn and nothing else.
         let mut reach_moved = false;
         if let Some(offset) = self.preview_md_file_offset_at(surface, position) {
-            if let Some(drag) = self.preview_text_drag.as_mut() {
+            if let Some(drag) = self.held_preview_text_drag_mut() {
                 reach_moved = drag.reached != Some(offset);
                 drag.reached = Some(offset);
             }
@@ -6266,7 +6300,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_text_drag.take() else {
+        let Some(drag) = self.take_preview_text_drag() else {
             return Ok(false);
         };
         let click = preview_press_opens_its_link(&drag.latch);
@@ -6487,7 +6521,7 @@ impl Runtime<'_> {
         let Some((surface, index, bar)) = self.preview_block_bar_under(position) else {
             return Ok(false);
         };
-        self.preview_block_drag = Some(PreviewBlockDrag {
+        self.latch_preview_block_drag(PreviewBlockDrag {
             surface,
             index,
             grab: (position.x as f32 - bar.thumb[0]).clamp(0.0, bar.thumb[2] - bar.thumb[0]),
@@ -6507,7 +6541,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_block_drag else {
+        let Some(drag) = self.held_preview_block_drag().copied() else {
             return Ok(false);
         };
         let scale = self.window.renderer.scale_factor() as f32;
@@ -7928,7 +7962,7 @@ impl Runtime<'_> {
         caret.place(&content, offset, self.window.modifiers.shift_key());
         self.preview_pane_mut(surface).caret = caret;
         self.preview_edit_focus = Some(surface);
-        self.preview_selecting = Some(surface);
+        self.latch_preview_selecting(surface);
         self.repaint_preview()?;
         Ok(true)
     }
@@ -7963,7 +7997,7 @@ impl Runtime<'_> {
             let toggled = image_zoom_toggled(self.preview_image_zoom(surface));
             self.set_preview_image_zoom(surface, toggled)?;
         } else {
-            self.preview_image_drag = Some(ImageDrag {
+            self.latch_preview_image_drag(ImageDrag {
                 surface,
                 last: point,
             });
@@ -7981,7 +8015,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(drag) = self.preview_image_drag else {
+        let Some(drag) = self.held_preview_image_drag().copied() else {
             return Ok(false);
         };
         let Some((body, image_px)) = self.preview_image_geometry(drag.surface) else {
@@ -7996,7 +8030,7 @@ impl Runtime<'_> {
             ],
             ..zoom
         };
-        self.preview_image_drag = Some(ImageDrag {
+        self.latch_preview_image_drag(ImageDrag {
             last: point,
             ..drag
         });
@@ -8015,7 +8049,7 @@ impl Runtime<'_> {
     ) -> Result<bool> {
         // The gesture's own surface, not the one under the pointer: a selection
         // belongs to the body it began in however far the hand has since gone.
-        let Some(surface) = self.preview_selecting else {
+        let Some(surface) = self.held_preview_selecting().copied() else {
             return Ok(false);
         };
         let scale = self.window.renderer.scale_factor() as f32;
@@ -8229,8 +8263,7 @@ impl Runtime<'_> {
         // which moves the caret, changes it once.
         let live_caret = self.preview_live_caret(surface);
         let in_flight = self
-            .preview_text_drag
-            .as_ref()
+            .held_preview_text_drag()
             .is_some_and(|drag| drag.surface == surface);
         let standing_source = live_caret.and_then(|caret| {
             preview_press::held_span(
@@ -8725,10 +8758,11 @@ impl Runtime<'_> {
         }
         // Drag and hover identities are positional too; a new parse retires them.
         if self
-            .preview_block_drag
+            .held_preview_block_drag()
+            .copied()
             .is_some_and(|drag| drag.surface == surface)
         {
-            self.preview_block_drag = None;
+            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
@@ -9657,8 +9691,7 @@ impl Runtime<'_> {
             band: preview_live::source_band(
                 caret.range(),
                 pane.md_select.as_ref(),
-                self.preview_text_drag
-                    .as_ref()
+                self.held_preview_text_drag()
                     .filter(|drag| drag.surface == surface)
                     .and_then(|drag| drag.reached),
                 blocks,
@@ -11973,6 +12006,10 @@ impl Runtime<'_> {
                         caret_lit: edit.caret_lit,
                         refused: frame.refused,
                     }),
+                    refusal: frame
+                        .refusal
+                        .as_ref()
+                        .map(|(sentence, width)| (sentence.as_str(), *width)),
                 },
                 match hover {
                     Some(float::FloatPart::Rail(part)) => Some(part),
@@ -13702,7 +13739,7 @@ impl Runtime<'_> {
     /// closed hand, because the shape changing mid-drag would say something
     /// happened when nothing did (K113, and the mock-up's own line 1710).
     pub(in crate::runtime) fn image_grasp(&self) -> Option<ImageGrasp> {
-        if self.preview_image_drag.is_some() {
+        if self.held_preview_image_drag().copied().is_some() {
             return Some(ImageGrasp::Closed);
         }
         let position = self.window.pointer_position?;

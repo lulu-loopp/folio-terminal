@@ -63,3 +63,83 @@ pub use session::{
     SessionMathTask, SessionStatus, TerminalNotification, decoration_state_label,
     extend_live_task_band, live_snapshot_logical_line_text, path_exists, verify_path,
 };
+
+/// **The adapter seam imports no policy crate** (the layering Task 00b
+/// repaired).
+///
+/// `adapter` and `cell_capture` are the vendor compatibility seam: their job is
+/// to report terminal facts. Importing document, detection or viewport policy
+/// there recreates the layering bug Task 00b removed — and the compiler allows
+/// it, because this crate depends on all three for its session. This is what
+/// does not.
+///
+/// The two modules are named by their paths, each with its whole tree, so a
+/// submodule either one gains is covered the day it is declared. Every byte of
+/// them is read, comments included, with a name's boundary on both sides: a doc
+/// link that names a policy crate is the import the next edit writes.
+///
+/// MUTATION: append `use bt_doc::HistoryDocument as _AdapterBoundaryProbe;` to
+/// `adapter.rs` and this goes red naming the line.
+#[cfg(test)]
+mod adapter_boundary_tests {
+    use std::path::PathBuf;
+
+    use bt_source::{
+        DiskScope, Index, ModuleSpec, Pattern, Scope, Search, TargetId, TargetKind, TargetRoot,
+        Universe, Vendor, View, needle, report,
+    };
+
+    const ALTERNATE_SOURCE_ROOT: &str = "BT_ADAPTER_BOUNDARY_SOURCE_ROOT";
+
+    fn alternate_index() -> Option<Index> {
+        let root = std::env::var_os(ALTERNATE_SOURCE_ROOT)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)?;
+        let universe = Universe::declare(
+            format!("bt-term's adapter seam at {}", root.display()),
+            vec![TargetRoot {
+                id: TargetId {
+                    package: "bt-term".to_owned(),
+                    kind: TargetKind::Library,
+                    name: "bt-term".to_owned(),
+                },
+                file: root.join("lib.rs"),
+            }],
+            vec![DiskScope::under(root)],
+            Vendor::Excluded,
+        )
+        .unwrap_or_else(|rejection| panic!("the alternate bt-term source root: {rejection}"));
+        Some(Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections))))
+    }
+
+    #[test]
+    fn the_adapter_seam_imports_no_policy_crate() {
+        let alternate = alternate_index();
+        let index = alternate
+            .as_ref()
+            .unwrap_or_else(|| Index::of_package("bt-term"));
+        let mut found = Vec::new();
+        for policy in ["bt_doc", "bt_detect", "bt_viewport"] {
+            let named = index
+                .search(
+                    &Search::new(needle!(Pattern::identifier(policy)), View::Raw).in_scope(
+                        Scope::Modules(vec![
+                            ModuleSpec::tree("crate::adapter"),
+                            ModuleSpec::tree("crate::cell_capture"),
+                        ]),
+                    ),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"));
+            for occurrence in named.occurrences() {
+                let location = index
+                    .locate(occurrence.span.start())
+                    .expect("an occurrence is in a file of the index");
+                found.push(format!("{location}: {policy}"));
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "the adapter seam names a policy crate: {found:#?}"
+        );
+    }
+}

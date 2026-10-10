@@ -8,18 +8,19 @@ use crate::{
     RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
     TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_into_layout, absorb_tab_into_strip, attention, blank_page_return, create_tab_state,
-    expire_leaf_attention, float, new_tab_leaf_seed, notify, pane_can_become_a_tab, pane_into_tab,
-    pane_strip_landing, presentation_physical_size, profiles, recoverable_wheel_scroll_amount,
-    restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
-    strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
+    diagnostics, exit_diagnostics, expire_leaf_attention, float, new_tab_leaf_seed, notify,
+    pane_can_become_a_tab, pane_into_tab, pane_strip_landing, presentation_physical_size, profiles,
+    recoverable_wheel_scroll_amount, restore, row_strip_landing, scrollback_quota, seats, seed,
+    settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
+    tear_pane_into_tab, two_tabs_mut, webnav,
 };
-use crate::{LeafView, TextScale};
+use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_math::{MathRaster, MathRenderError};
 use bt_render::{FrameSource, FrameTrigger, Travel};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
@@ -192,8 +193,8 @@ impl Runtime<'_> {
         let _ = self.window.pending_frames.take();
         self.window.last_presented_frame = None;
         self.window.preedit = None;
-        self.window.mouse_route = None;
-        self.window.divider_drag = None;
+        self.drop_mouse_route();
+        self.drop_divider_drag();
         self.window.seat_pointer = seats::ChromePointer::default();
         self.window.hyperlink_hover.clear();
         self.window.peek_hover.clear();
@@ -286,21 +287,21 @@ impl Runtime<'_> {
         }) {
             self.finish_rename(RenameExit::Blur)?;
         }
-        if self.window.tab_press.is_some_and(|press| {
+        if self.held_tab_press().copied().is_some_and(|press| {
             self.window
                 .tabs
                 .get(index)
                 .is_some_and(|tab| tab.id == press.tab)
         }) {
-            self.window.tab_press = None;
+            self.drop_tab_press();
         }
-        if self.window.drag.as_ref().is_some_and(|drag| {
+        if self.held_drag().is_some_and(|drag| {
             self.window
                 .tabs
                 .get(index)
                 .is_some_and(|tab| drag.tab() == Some(tab.id))
         }) {
-            self.window.drag = None;
+            self.drop_drag();
             // F2: the payload stopped existing, so the application's pointer has
             // nothing left to broker either.
             self.app.drag_broker = None;
@@ -536,7 +537,7 @@ impl Runtime<'_> {
                 },
             ));
         }
-        let drag = self.window.drag.as_ref()?;
+        let drag = self.held_drag()?;
         let DropLanding::StripExtract { slot } = drag.landing? else {
             return None;
         };
@@ -1812,9 +1813,9 @@ impl Runtime<'_> {
         // the very first one into a double.
         // One button, one press: whichever source the router chose, the others
         // are not being held.
-        self.window.pane_press = None;
-        self.window.row_press = None;
-        self.window.tab_press = Some(if index == self.window.active_tab {
+        self.drop_pane_press();
+        self.drop_row_press();
+        self.latch_tab_press(if index == self.window.active_tab {
             TabPress::settled(tab, position, now)
         } else {
             TabPress::armed(tab, position, now)
@@ -3241,15 +3242,20 @@ impl Runtime<'_> {
             // up red.
             if commit && !editor.text().trim().is_empty() {
                 let engine = self.app.settings_store.loaded().search_engine;
-                let compositor_outcomes = {
+                let home = profiles::home_directory(&bt_pty::SystemShellEnvironment);
+                let commit = {
                     let window = &mut *self.window;
-                    window
-                        .web
-                        .get_mut(&leaf)
-                        .map(|web| web.go_to(editor.text(), engine, &window.compositor))
+                    window.web.get_mut(&leaf).map(|web| {
+                        let folder = web.local_folder();
+                        let frame = webhost::LocalFrame {
+                            home: home.as_deref(),
+                            folder: folder.as_deref(),
+                        };
+                        web.go_to(editor.text(), engine, frame, &window.compositor)
+                    })
                 };
-                if let Some((taken, outcomes)) = compositor_outcomes {
-                    if taken {
+                match commit {
+                    Some(webhost::AddressCommit::Taken(outcomes)) => {
                         // The seat has been asked to go somewhere, so it is a
                         // page whatever comes back — a failure has a card of its
                         // own to stand on it. Spent before the outcomes are
@@ -3257,11 +3263,27 @@ impl Runtime<'_> {
                         // would ask again.
                         self.forget_a_blank_page(leaf);
                         self.apply_web_outcomes(leaf, outcomes)?;
-                    } else if exit.may_stay_open() {
+                    }
+                    // **A local file that is not a page opens on this pane as a
+                    // document** (M-SWEEP-048) — the door a file dropped here
+                    // takes, on the surface the page is drawn on. The pane is
+                    // the document's now, so a blank page minted for the field
+                    // is not withdrawn under it.
+                    Some(webhost::AddressCommit::Document(path)) => {
+                        self.forget_a_blank_page(leaf);
+                        let surface = self.surface_of_page(leaf);
+                        self.open_preview_onto(surface, path)?;
+                    }
+                    Some(webhost::AddressCommit::Refused(refusal)) if exit.may_stay_open() => {
                         // Enter, refused: the field stays exactly where the
                         // typing is, and the page does not move. Nothing else on
                         // this path runs — a blank page kept for a field that is
-                        // still open is a blank page still being used.
+                        // still open is a blank page still being used. What
+                        // only the commit could know is said in the field.
+                        let mut editor = editor;
+                        if let Some(refusal) = refusal {
+                            editor.refuse_address(refusal);
+                        }
                         self.window.rename = Some(editor);
                         self.refresh_chrome();
                         return self.present_chrome_change();
@@ -3269,6 +3291,7 @@ impl Runtime<'_> {
                     // A blur the door refused falls through: the address was not
                     // taken, so the page does not move — and the field goes,
                     // because leaving is what a blur already is.
+                    Some(webhost::AddressCommit::Refused(_)) | None => {}
                 }
             }
             // Escape, a click away, or an empty box: the field is gone, and a
@@ -3308,16 +3331,14 @@ impl Runtime<'_> {
     /// Route an event-loop tick to the press promise and the rename caret.
     pub(in crate::runtime) fn advance_tab_press_if_due(&mut self, now: Instant) -> Result<()> {
         let matured = self
-            .window
-            .tab_press
-            .as_mut()
+            .held_tab_press_mut()
             .is_some_and(|press| press.matured(now));
         if !matured {
             return Ok(());
         }
         let tab = self
-            .window
-            .tab_press
+            .held_tab_press()
+            .copied()
             .expect("a press that matured is a press")
             .tab;
         self.activate_tab(self.tab_index(tab), false)
@@ -3413,34 +3434,18 @@ impl Runtime<'_> {
     /// the same rule §7.1.4 already gives closing — the last pane closing is the
     /// tab closing — read from the other direction.
     pub(in crate::runtime) fn reap_exited_tabs(&mut self) -> Result<()> {
-        // Which panes of the *active* tab died: those are the ones that can be
-        // closed as panes, because `close_pane` re-solves the tab the user is
-        // looking at.
         let active = self.window.active_tab;
-        let mut exited_panes = Vec::new();
-        for (seat, leaf) in self.window.tabs[active].leaves_mut() {
-            let Some(pty) = leaf.pty.as_mut() else {
-                continue;
-            };
-            if pty.try_wait()?.is_some() {
-                exited_panes.push(*seat);
-            }
-        }
-        // Never close the last one here: an empty tab is not a state, and
-        // `close_pane` routes that case to `close_tab` on its own.
-        if self.window.tabs[active].sessions.len() > exited_panes.len() {
-            for seat in exited_panes {
-                self.close_pane(seat)?;
-            }
-        }
-
+        let now = Instant::now();
+        let mut exits = Vec::new();
+        let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // A tab has ended when every shell it holds has ended. A tab in
             // probe mode holds no PTY at all and never ends this way.
             let mut any_live = false;
             let mut any_pty = false;
-            for (_, leaf) in tab.leaves_mut() {
+            let tab_id = tab.id;
+            for (seat, leaf) in tab.leaves_mut() {
                 // A shell still being born is a shell this tab is about to have: the tab has not
                 // ended while one of its panes is in birth.
                 if leaf.birth.is_some() {
@@ -3450,13 +3455,42 @@ impl Runtime<'_> {
                     continue;
                 };
                 any_pty = true;
-                if pty.try_wait()?.is_none() {
-                    any_live = true;
+                match pty.try_wait()? {
+                    None => any_live = true,
+                    Some(status) => {
+                        if index == active {
+                            active_exited_panes.push(*seat);
+                        }
+                        if !leaf.shell_exit_said {
+                            leaf.shell_exit_said = true;
+                            exits.push((
+                                index,
+                                exit_diagnostics::ShellExit {
+                                    seat: seat.0,
+                                    code: status.signal().is_none().then(|| status.exit_code()),
+                                    elapsed: pty.age_at(now),
+                                    program: leaf.program.clone(),
+                                    tab: tab_id.0,
+                                    disposition: exit_diagnostics::ShellExitDisposition::TabKept,
+                                },
+                            ));
+                        }
+                    }
                 }
             }
             if any_pty && !any_live {
                 exited.push(index);
             }
+        }
+        // Which panes of the active tab died: those are the ones that can be closed as panes,
+        // because `close_pane` re-solves the tab the user is looking at. Never close the last one
+        // here: an empty tab is not a state, and `close_pane` routes that case to `close_tab` on
+        // its own.
+        let active_retires_panes = self.window.tabs[active].sessions.len()
+            > active_exited_panes.len()
+            && !active_exited_panes.is_empty();
+        if active_retires_panes {
+            exited.retain(|index| *index != active);
         }
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
@@ -3467,9 +3501,29 @@ impl Runtime<'_> {
             self.window.active_tab,
             exited,
         );
+        let retired_tabs: BTreeSet<_> = exited.iter().copied().collect();
+        for (index, exit) in &mut exits {
+            exit.disposition = if retired_tabs.contains(index) {
+                exit_diagnostics::ShellExitDisposition::TabRetired
+            } else if *index == active && active_retires_panes {
+                exit_diagnostics::ShellExitDisposition::PaneRetired
+            } else {
+                exit_diagnostics::ShellExitDisposition::TabKept
+            };
+        }
+        exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {
+            diagnostics::note(line);
+        });
+        if active_retires_panes {
+            for seat in active_exited_panes {
+                self.close_pane(seat)?;
+            }
+        }
         for index in exited.into_iter().rev() {
+            let final_tab = self.window.tabs.len() == 1 && index == 0;
             self.close_tab(index)?;
-            if self.window.tabs.len() == 1 && index == 0 {
+            if final_tab {
+                self.window.shell_exit_close_requested = true;
                 break;
             }
         }

@@ -21,6 +21,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from collections import Counter, defaultdict
 from datetime import date
 from difflib import SequenceMatcher
@@ -31,7 +32,13 @@ from tree_sitter import Language, Parser
 import tree_sitter_rust
 
 PARSER = Parser(Language(tree_sitter_rust.language()))
-PREFIX = 'crates/bt-app/'
+# The package and its binary's root file, as the manifests at the commit declare
+# them (`declare`, below): the workspace's `members`, the member whose package is
+# `bt-app`, and that package's one `[[bin]] path`. `PREFIX` is the package's
+# directory with a slash, `ROOT` the root file under it.
+PACKAGE = 'bt-app'
+PREFIX = None
+ROOT = None
 OUT = Path('docs/plans')
 STEM = 'bt-app-split-'
 
@@ -195,6 +202,22 @@ def tsv(path, rows, fields):
         w.writerow({k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for k,v in r.items()})
     path.write_text(out.getvalue(), encoding='utf-8', newline='\n')
 
+def declare(commit):
+    """(package directory with a slash, binary root under it) at `commit`."""
+    workspace = tomllib.loads(git('show', f'{commit}:Cargo.toml').decode())
+    found = []
+    for member in workspace['workspace']['members']:
+        manifest = tomllib.loads(git('show', f'{commit}:{member}/Cargo.toml').decode())
+        if manifest.get('package', {}).get('name') == PACKAGE:
+            found.append((member, manifest))
+    if len(found) != 1:
+        sys.exit(f'{commit}: {len(found)} workspace members are the package {PACKAGE}')
+    member, manifest = found[0]
+    bins = manifest.get('bin', [])
+    if len(bins) != 1 or 'path' not in bins[0]:
+        sys.exit(f'{commit}: {member}/Cargo.toml declares {len(bins)} [[bin]] tables; the census reads one, with its path')
+    return member + '/', bins[0]['path']
+
 def snapshot(commit):
     paths = git('ls-tree', '-r', '--name-only', commit, '--', PREFIX).decode().splitlines()
     paths = [p for p in paths if p.endswith('.rs')]
@@ -213,14 +236,14 @@ def analyse(files):
     for p,b in files.items():
         tree = PARSER.parse(b)
         if tree.root_node.has_error: result['errors'].append(p)
-        initial = () if p == 'src/main.rs' else tuple(p.removeprefix('src/').removesuffix('.rs').split('/'))
+        initial = () if p == ROOT else tuple(p.removeprefix('src/').removesuffix('.rs').split('/'))
         initial={'src/preview_viewport_tests.rs':('preview_viewport','tests'),'src/focus_thumb_restore_tests.rs':('focus_thumb','restore_tests'),'src/attention_words/mod.rs':('attention_words',)}.get(p,initial)
         def visit(n, ctx, attrs=(), enclosing=None, runtime=False):
             name = text(n.child_by_field_name('name'))
             isimpl = n.type == 'impl_item'
             ty = text(n.child_by_field_name('type')) if isimpl else ''
             trait = text(n.child_by_field_name('trait')) if isimpl else ''
-            rt = isimpl and ty == "Runtime<'_>" and not trait and p == 'src/main.rs'
+            rt = isimpl and ty == "Runtime<'_>" and not trait and p == ROOT
             ident = '::'.join(ctx + ((name,) if name else ()))
             row = {'file':p, 'symbol':ident, 'kind':n.type, 'start':extent(n)[0], 'end':extent(n)[1], 'attributes':list(attrs)}
             if n.type in ('mod_item','impl_item','function_item','struct_item','enum_item','const_item','static_item'):
@@ -518,7 +541,7 @@ def census(a, base, moves, overrides=None):
         for v in literals:
             if spent[v]: spent[v]-=1
             else: needles.append(v)
-        fnnames={x['name'] for x in defs if x['file']=='src/main.rs' and x['kind']=='function_item'}
+        fnnames={x['name'] for x in defs if x['file']==ROOT and x['kind']=='function_item'}
         file_subjects=set(re.findall(r'\bfn\s+(\w+)', '\n'.join(needles))) | {s for s in needles if s in fnnames}
         item_subjects={p['subject'] for p in pins}
         override=overrides.get(d['symbol'])
@@ -576,7 +599,7 @@ def census(a, base, moves, overrides=None):
             if override[2]: classes=override[2]
         if d['symbol']=='diagnostics::bt_environment_doc_tests::every_bt_name_in_the_source_is_in_the_document_and_the_reverse':
             classes=['whole-source prohibition','named body / positive requirement']; impact='recursive enumeration: coverage retained in 2a'
-        if d['symbol']=='tests::the_shell_page_is_gone' and d['file']=='src/main.rs':
+        if d['symbol']=='tests::the_shell_page_is_gone' and d['file']==ROOT:
             impact='silent coverage loss: nonrecursive source walk'; classes=['whole-source prohibition','path / selector (§6.2(c))']
         if d['symbol']=='platform_gate_tests::only_the_named_files_decide_what_platform_this_is':
             impact='recursive enumeration: coverage retained in 2a'; classes=['whole-source prohibition','arity / uniqueness']
@@ -686,6 +709,10 @@ pub fn apply_psreadline() {}
 }
 
 def self_check():
+    global ROOT
+    # The fixture's own crate root: it is a crate of two files, and this is the
+    # first of them.
+    ROOT = next(iter(SELF_CHECK_FILES))
     a=analyse(SELF_CHECK_FILES)
     assert not a['errors'], a['errors']
     moves={m['name']:m for m in manifest(a)}
@@ -729,6 +756,10 @@ def main():
     if ARGS.self_check: self_check(); return
     OUT=Path(ARGS.out)
     DATE=ARGS.date
+    global PREFIX, ROOT
+    PREFIX, ROOT = declare(ARGS.commit)
+    if declare(ARGS.base) != (PREFIX, ROOT):
+        sys.exit(f'{ARGS.base} and {ARGS.commit} declare {PACKAGE} differently: {declare(ARGS.base)} and {(PREFIX, ROOT)}')
     oldfiles=snapshot(ARGS.base); newfiles=snapshot(ARGS.commit)
     old=analyse(oldfiles); new=analyse(newfiles)
     assert not old['errors'] and not new['errors'], (old['errors'],new['errors'])
@@ -784,24 +815,24 @@ def main():
     tsv(OUT/f'{STEM}changes-{DATE}.tsv',[x for x in added if x['file'].startswith('src/') and x['kind'] in ('mod_item','impl_item')],['file','symbol','kind','start','end','attributes'])
     counts={}
     for label,a,files in [('baseline',old,oldfiles),('candidate',new,newfiles)]:
-        blocks=a['blocks']; total=len(files['src/main.rs'].splitlines())
+        blocks=a['blocks']; total=len(files[ROOT].splitlines())
         # Anchor each block by the name of its first and last method: a line
         # number stops being an anchor the moment anything above it moves.
         for b in blocks:
             inside=sorted((m for m in a['methods'] if b['start']<=m['start']<=b['end']),key=lambda m:m['start'])
             b.update(methods=len(inside),first_method=inside[0]['name'],last_method=inside[-1]['name'])
-        inc=[r for r in a['includes'] if r['file']=='src/main.rs' and r['text']=='include_str!("main.rs")']
-        function_paths={tuple(d['context']+[d['name']]) for d in a['defs'] if d['kind']=='function_item' and d['file']=='src/main.rs'}
+        inc=[r for r in a['includes'] if r['file']==ROOT and r['text']=='include_str!("main.rs")']
+        function_paths={tuple(d['context']+[d['name']]) for d in a['defs'] if d['kind']=='function_item' and d['file']==ROOT}
         def inscope(i):
             d=a['defs'][i['owner']]; ctx=d['context']
             return 'function' if d['kind']=='function_item' or any(tuple(ctx[:n]) in function_paths for n in range(1,len(ctx)+1)) else 'module'
-        counts[label]={'main_lines':total,'blocks':blocks,'block_lines':sum(b['end']-b['start']+1 for b in blocks),'methods':len(a['methods']),'method_lines':sum(m['lines'] for m in a['methods']),'residue':total-sum(b['end']-b['start']+1 for b in blocks),'main_self_includes':len(inc),'main_include_bindings':dict(Counter(i['binding_kind']+':'+i['binding_name'] for i in inc)),'main_include_scopes':dict(Counter(inscope(i) for i in inc)),'test_attributes':len(a['tests']),'main_platform': [r for r in a['platform'] if r['file']=='src/main.rs'],'main_self_include_sites':inc}
+        counts[label]={'main_lines':total,'blocks':blocks,'block_lines':sum(b['end']-b['start']+1 for b in blocks),'methods':len(a['methods']),'method_lines':sum(m['lines'] for m in a['methods']),'residue':total-sum(b['end']-b['start']+1 for b in blocks),'main_self_includes':len(inc),'main_include_bindings':dict(Counter(i['binding_kind']+':'+i['binding_name'] for i in inc)),'main_include_scopes':dict(Counter(inscope(i) for i in inc)),'test_attributes':len(a['tests']),'main_platform': [r for r in a['platform'] if r['file']==ROOT],'main_self_include_sites':inc}
     theme=defaultdict(lambda:{'methods':0,'lines':0})
     for r in rows: theme[r['destination']]['methods']+=1; theme[r['destination']]['lines']+=r['lines']
     oldinc={(r['file'], old['defs'][r['owner']]['symbol'] if r['owner'] is not None else r['symbol'],r['text']) for r in old['includes']}
     newinc=[r for r in new['includes'] if (r['file'], new['defs'][r['owner']]['symbol'] if r['owner'] is not None else r['symbol'],r['text']) not in oldinc]
-    moved_inputs=[r for r in new['includes'] if r['file']=='src/main.rs' and any(b['start']<=r['start']<=b['end'] for b in new['blocks'])]
-    mainlines=newfiles['src/main.rs'].decode().splitlines()
+    moved_inputs=[r for r in new['includes'] if r['file']==ROOT and any(b['start']<=r['start']<=b['end'] for b in new['blocks'])]
+    mainlines=newfiles[ROOT].decode().splitlines()
     platform_lexical=[{'line':i,'text':line.strip()} for i,line in enumerate(mainlines,1) if (code:=line.split('//')[0]) and any(s in code for s in ('cfg(','cfg!(','cfg_attr(')) and any(s in code for s in ('windows','unix','target_os','target_family','target_env','target_arch'))]
     graph_path=Path('target/bt-app-graph.json')
     graph=json.loads(graph_path.read_text(encoding='utf-8'))
@@ -818,11 +849,11 @@ def main():
       'scripts/ci/ignored-tests.txt':['direct_crt_receives_the_exact_literal_after_the_program_token','five in `bt-app`']}.items():
         lines=git('show',f'{ARGS.commit}:{path}').decode().splitlines()
         cited_external[path]=[{'line':i,'text':s.strip()} for i,s in enumerate(lines,1) if any(p in s for p in patterns)]
-    main_commits=git('rev-list',f'{ARGS.base}..{ARGS.commit}','--','crates/bt-app/src/main.rs').decode().splitlines()
+    main_commits=git('rev-list',f'{ARGS.base}..{ARGS.commit}','--',PREFIX+ROOT).decode().splitlines()
     summary_extra={'cited_external':cited_external,'main_touch_commits':len(main_commits),'root_prod_ratio':graph['cuts']['root_prod']['i18n']['free_lines']/graph['cuts']['root_prod']['baseline']['free_lines'], 'source_directories':sorted({str(Path(p).parent).replace('\\','/') for p in newfiles if p.startswith('src/')}),'whole_source_count_sites':[],'method_delta':delta,'method_delta_counts':dict(Counter(d['status'] for d in delta),moved_topic=sum(d['moved_topic'] for d in delta))}
     # AST-selected function bodies, then the guard's own lexical counter form.
     for d in new['defs']:
-        if d['file']!='src/main.rs' or d['kind']!='function_item': continue
+        if d['file']!=ROOT or d['kind']!='function_item': continue
         for hit in re.finditer(r'\b(SOURCE|MAIN)\s*\.\s*matches\([^;]*?\.count\(\)',d['body']):
             summary_extra['whole_source_count_sites'].append({'test':d['symbol'],'line':d['start']+d['body'][:hit.start()].count('\n'),'expression':hit[0]})
     summary={'source_commit':git('rev-parse',ARGS.commit).decode().strip(),'base_commit':git('rev-parse',ARGS.base).decode().strip(),'counts':counts,'themes':dict(sorted(theme.items())),'visibility':dict(Counter(r['visibility'] for r in rows)),'new_files':sorted(set(newfiles)-set(oldfiles)),'added_items':added,'new_platform_attributes':[r for r in new['platform'] if not any(r['file']==o['file'] and r['text']==o['text'] and r['symbol']==o['symbol'] for o in old['platform'])],'pin_rows':len(pins),'pin_new_status':dict(Counter(p['new'] for p in pins)),'pin_impacts':dict(Counter(p['impact'] for p in pins)),'includes':new['includes'],'new_includes':newinc,'moved_inputs':moved_inputs,'platform_lexical':platform_lexical,'attributes':new['attributes'],'retained_root_prod':{k:graph['cuts']['root_prod'][k] for k in ('baseline','i18n')},'retained_stats':graph['stats'],'references':references}

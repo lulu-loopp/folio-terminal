@@ -604,6 +604,10 @@ impl Runtime<'_> {
         stack.file_peek = self.file_peek_layer(below_peek, now);
         stack.drag_ghost = self.drag_ghost_layer();
         stack.window_ring = self.window_ring_layer().into();
+        // **And what the pointer router reads, in the same pass** (T-POINTER-CAPTURE
+        // §2.1): every layout above is the one the glass will show, so the router
+        // claims what this frame paints.
+        self.refresh_pointer_facts(now);
         let flattened = stack.flattened();
         dump_overlay_frame(&flattened);
         let marks::Band { layers, groups } = flattened;
@@ -2549,7 +2553,7 @@ impl Runtime<'_> {
             return;
         };
         let anchor = self.window.pending_math_context_anchor.take();
-        self.window.mouse_route = None;
+        self.drop_mouse_route();
         match (result, anchor) {
             (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor),
             (Ok(true), None) => {

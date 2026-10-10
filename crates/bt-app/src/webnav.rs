@@ -573,6 +573,65 @@ pub fn file_url_of_local_path(input: &str) -> Option<String> {
     }
 }
 
+/// **How a string an address field holds spells a path on this machine** — by
+/// its text alone (M-SWEEP-048, ruling 2026-10-09).
+///
+/// The address field's judgement is the same on every platform: a string that
+/// parses as a local filesystem path *here* is a document address and not a
+/// search phrase. Three spellings are paths, and each is asked of this
+/// machine's own grammar — `std::path::Path::is_absolute` and
+/// `std::path::is_separator` — so `D:\notes.md` is absolute on Windows and an
+/// unknown scheme on a Mac, `/Users/x/notes.md` the other way round, and `\`
+/// is a separator only where the platform says it is.
+///
+/// No disk is asked and no home is read: what the spelling resolves to is the
+/// caller's (`webhost::judge_address`), which knows which folder a relative
+/// spelling stands in. A share is not a local path — two separators open
+/// another machine's name — and it has a spelling of its own so that the field
+/// refuses it rather than searching for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LocalSpelling {
+    /// Absolute on this machine: `D:\Developer\notes.md`, `/Users/x/notes.md`.
+    Absolute(PathBuf),
+    /// Under the account's home: `~` and a separator, then what is under it
+    /// (`~/notes.md` is `notes.md`).
+    Home(PathBuf),
+    /// Relative to a folder: `./` or `../` and what follows, as written.
+    Relative(PathBuf),
+    /// Another machine's: two separators first (`\\server\share`, `//server/share`).
+    Network,
+}
+
+/// The spelling [`LocalSpelling`] names, or `None` when the text is not a path
+/// on this machine — an address, a phrase, a word, a phrase with a slash in it.
+#[must_use]
+pub fn local_path_spelling(input: &str) -> Option<LocalSpelling> {
+    let trimmed = input.trim();
+    let mut leading = trimmed.chars();
+    if leading.next().is_some_and(std::path::is_separator)
+        && leading.next().is_some_and(std::path::is_separator)
+    {
+        return Some(LocalSpelling::Network);
+    }
+    if Path::new(trimmed).is_absolute() {
+        return Some(LocalSpelling::Absolute(PathBuf::from(trimmed)));
+    }
+    // `~`, `..` and `.`, each followed by a separator: a bare `~` or `..` is a
+    // word somebody may search for, and `.x` is a name, not a place.
+    let after = |prefix: &str| {
+        trimmed
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix(std::path::is_separator))
+    };
+    if let Some(rest) = after("~") {
+        return Some(LocalSpelling::Home(PathBuf::from(rest)));
+    }
+    if after("..").is_some() || after(".").is_some() {
+        return Some(LocalSpelling::Relative(PathBuf::from(trimmed)));
+    }
+    None
+}
+
 /// Which door a candidate arrived at — the only thing that makes two identical
 /// strings get two different answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2333,8 +2392,11 @@ mod file_url_tests {
     /// PIN — **nothing in this crate compares the *text* of a `file:` URL**
     /// (A3; the class this change closes).
     ///
-    /// Read off the crate's own sources rather than off any one file's name, so
-    /// that a comparison added to a file that does not exist yet is caught too.
+    /// Read off the files this crate's own declarations reach
+    /// (`bt_source::Index::of_package`) rather than off any one file's name, so
+    /// that a comparison added to a module that does not exist yet is caught
+    /// the day it is declared; a file under `src/` that no declaration reaches
+    /// is refused by name, because this reading would pass it by.
     /// The one line that may hold both a `file://` literal and a comparison is
     /// the parser reading its own scheme; every other question about a `file:`
     /// URL is a question about the path it names, and [`LocalFileUrl`] is where
@@ -2351,42 +2413,37 @@ mod file_url_tests {
             r#".filter(|head| head.eq_ignore_ascii_case("file:"#,
             r#"///"))"#
         );
-        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let index = bt_source::Index::of_package("bt-app");
+        let unreached = &index.cross_check().only_on_disk;
+        assert!(
+            unreached.is_empty(),
+            "these files are under bt-app's src/ and no `mod` declaration reaches them: \
+             {unreached:#?}"
+        );
         let mut found: Vec<String> = Vec::new();
-        while let Some(directory) = stack.pop() {
-            for entry in std::fs::read_dir(&directory).expect("a directory of this crate") {
-                let path = entry.expect("a directory entry").path();
-                if path.is_dir() {
-                    stack.push(path);
+        for file in index.files() {
+            for line in index.text(file.span()).lines() {
+                let code = line.trim_start();
+                // A comment is prose about a rule and not a use of it. The
+                // test is the *start* of the line rather than the first `//` in
+                // it, because `file://` carries two slashes of its own and a
+                // cleverer reader would cut every needle in half.
+                if code.starts_with("//") || !code.contains(a_file_url) {
                     continue;
                 }
-                if path.extension().is_none_or(|extension| extension != "rs") {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&path).expect("a source file");
-                for line in text.lines() {
-                    let code = line.trim_start();
-                    // A comment is prose about a rule and not a use of it. The
-                    // test is the *start* of the line rather than the first
-                    // `//` in it, because `file://` carries two slashes of its
-                    // own and a cleverer reader would cut every needle in half.
-                    if code.starts_with("//") || !code.contains(a_file_url) {
-                        continue;
-                    }
-                    if [
-                        "eq_ignore_ascii_case",
-                        "starts_with",
-                        "ends_with",
-                        "strip_prefix",
-                        "to_lowercase(",
-                        "to_ascii_lowercase(",
-                        ".contains(",
-                    ]
-                    .iter()
-                    .any(|needle| code.contains(needle))
-                    {
-                        found.push(code.to_owned());
-                    }
+                if [
+                    "eq_ignore_ascii_case",
+                    "starts_with",
+                    "ends_with",
+                    "strip_prefix",
+                    "to_lowercase(",
+                    "to_ascii_lowercase(",
+                    ".contains(",
+                ]
+                .iter()
+                .any(|needle| code.contains(needle))
+                {
+                    found.push(code.to_owned());
                 }
             }
         }
