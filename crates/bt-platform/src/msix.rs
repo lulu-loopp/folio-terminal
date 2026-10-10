@@ -706,37 +706,63 @@ mod tests {
     /// notice them coming apart, and what it would cost is a package registered
     /// on a machine that goes on drawing the menu it read an hour ago.
     ///
-    /// **The suite's own half of the file is cut off before the search**, or
-    /// every needle below would find itself: the words this test is looking for
-    /// are words it is written in.
+    /// Asked of `bt-source` by identity: each deployment call
+    /// (`register_package`, `remove_package`) is made once in this crate's
+    /// product code, inside the body of the public door that names it, and that
+    /// body calls the wrapper; this module's product code calls the wrapper
+    /// twice. The suite's own words are test code and are not read.
     ///
     /// MUTATION: call `register_package` or `remove_package` directly from the
     /// public function and this goes red.
     #[test]
     fn every_deployment_this_module_makes_announces_itself_to_the_shell() {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("src")
-                .join("msix.rs"),
-        )
-        .expect("this module is a file in this crate");
-        let code = source
-            .split_once("#[cfg(test)]")
-            .expect("this module carries the suite this test is in")
-            .0;
+        let index = bt_source::Index::of_package("bt-platform");
+        let wrapped = index
+            .search(
+                &bt_source::Search::new(
+                    bt_source::needle!(bt_source::Pattern::path("crate::changing_explorer_menu")),
+                    bt_source::View::Identifiers,
+                )
+                .in_scope(bt_source::Scope::Modules(vec![
+                    bt_source::ModuleSpec::tree("crate::msix"),
+                ])),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(index);
         assert_eq!(
-            code.matches("crate::changing_explorer_menu(").count(),
+            wrapped.len(),
             2,
             "the two deployment calls are the two that go through the wrapper"
         );
-        for call in [
-            "register_package(msix, external)",
-            "remove_package(full_name)",
+        for (door, call) in [
+            ("register", "register_package"),
+            ("remove", "remove_package"),
         ] {
-            assert_eq!(
-                code.matches(call).count(),
-                1,
-                "{call} is reached from the wrapper and from nowhere else"
+            let door = index
+                .one(&bt_source::ItemQuery::function(door).in_module("crate::msix::deployment"))
+                .unwrap_or_else(|failure| panic!("{failure}"));
+            let body = door.body().expect("a door has a body");
+            assert!(
+                wrapped.spans().iter().any(|span| span.within(body)),
+                "`{}` calls the wrapper",
+                door.name()
+            );
+            let calls = index
+                .search(
+                    &bt_source::Search::new(
+                        bt_source::needle!(bt_source::Pattern::call(call)),
+                        bt_source::View::Identifiers,
+                    )
+                    .exempting_declarations_of(bt_source::ItemQuery::function(call)),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(index)
+                .spans();
+            assert!(
+                calls.len() == 1 && calls[0].within(body),
+                "{call} is reached from the wrapper in `{}` and from nowhere else: {} call(s)",
+                door.name(),
+                calls.len()
             );
         }
     }

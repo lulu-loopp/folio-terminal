@@ -165,6 +165,10 @@ pub(crate) enum Writer {
     /// The toast sender's identity in the registry (`NotificationDesk::show` →
     /// `bt_platform::Notifier::register_identity`).
     ToastIdentity,
+    /// The record of the recovered copies a start has said
+    /// (`recovered::ANNOUNCED_RECORD`, written by `recovered::begin`'s worker before its toast):
+    /// held back, the question is not asked, and the release asks it.
+    RecoveredAnnouncement,
 }
 
 impl Writer {
@@ -186,13 +190,14 @@ impl Writer {
             | Writer::PowerShellScript
             | Writer::PsReadLineUpgrade
             | Writer::ExplorerRepair
-            | Writer::ToastIdentity => false,
+            | Writer::ToastIdentity
+            | Writer::RecoveredAnnouncement => false,
         }
     }
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 16] = [
+    pub(crate) const ALL: [Writer; 17] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -209,6 +214,7 @@ impl Writer {
         Writer::PsReadLineUpgrade,
         Writer::ExplorerRepair,
         Writer::ToastIdentity,
+        Writer::RecoveredAnnouncement,
     ];
 }
 
@@ -688,8 +694,9 @@ enum Read {
 /// no holder can adopt — every holder runs the rescue copy the operating
 /// system refused — so without it a healthy trial would keep nothing. **And
 /// the mark** (0.4.8 E4): after step 1, while a person's change is held and
-/// the transaction undecided, `unkept` is written once (asked again each
-/// turn while the write fails); a commit read takes it back.
+/// the transaction undecided, `unkept` is written once, naming this build's
+/// version (0.4.8 E5: what a rollback's card names), asked again each turn
+/// while the write fails; a commit read takes it back.
 pub(crate) fn watch(
     gate: &Gate,
     (journal, unkept): (&Path, &Path),
@@ -748,7 +755,10 @@ pub(crate) fn watch(
             }
             // The mark that a person's change is held until the commit.
             if gate.owes_unkept_mark() {
-                match bt_platform::install_txn::durable_write(unkept, b"") {
+                match bt_platform::install_txn::durable_write(
+                    unkept,
+                    crate::version::VERSION.as_bytes(),
+                ) {
                     Ok(()) => {
                         gate.unkept_marked();
                         eprintln!(
@@ -1289,6 +1299,7 @@ mod tests {
             body: Body {
                 adapter: crate::update_txn::Adapter::Ours,
                 marker: None,
+                unkept: None,
                 phase,
                 layout: Layout::Members(Inventories {
                     old_shipped: Vec::new(),
@@ -1496,7 +1507,8 @@ mod tests {
     ///
     /// MUTATIONS: `Gate::owes_unkept_mark` answers `false`; the watch never
     /// writes the mark — the ended trial leaves no mark (the clean VM's
-    /// silent loss).
+    /// silent loss); the watch writes an empty mark — it names no version, and
+    /// a rollback's card has none to say (0.4.8 E5).
     #[test]
     fn a_persons_change_held_by_a_trial_is_marked_until_its_commit() {
         assert!(
@@ -1552,6 +1564,14 @@ mod tests {
             assert!(gate.has_marked_unkept(), "{phase:?}: marked while held");
             assert!(!gate.owes_unkept_mark(), "{phase:?}: once");
             assert_eq!(mark.exists(), kept_mark, "{phase:?}");
+            if kept_mark {
+                // The writer's version: what a rollback's card names (0.4.8 E5).
+                assert_eq!(
+                    std::fs::read(&mark).unwrap(),
+                    crate::version::VERSION.as_bytes(),
+                    "{phase:?}"
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2601,6 +2621,14 @@ mod tests {
             .write(&data)
             .unwrap();
         std::fs::write(root.join("profile.ps1"), "# the reader's own profile\n").unwrap();
+        // An edit an earlier stop kept and no start has said yet (T-RECOVERED-FOLDER).
+        let recovered = data.join(crate::preview::RECOVERED_FOLDER);
+        std::fs::create_dir_all(&recovered).unwrap();
+        std::fs::write(
+            recovered.join("2026-10-09T120000Z 说明.md"),
+            "typed by hand — 手写\n",
+        )
+        .unwrap();
         crate::psreadline::tests::an_older_build_stands_in(&root.join("documents"))
     }
 
@@ -2640,6 +2668,8 @@ mod tests {
             "Profiles"
         } else if name == "pins.json" {
             "Pins"
+        } else if name == crate::recovered::ANNOUNCED_RECORD {
+            "RecoveredAnnouncement"
         } else if name.starts_with("update-check") {
             "UpdateCheck"
         } else if text.starts_with("documents") {
@@ -2657,9 +2687,9 @@ mod tests {
     /// through its own product entry and each asked to write something: the
     /// data folder, the stores and a change to each, the update check's state,
     /// the integration marks' migration, the shell scripts and the PSReadLine
-    /// upgrade. The registry writers (the Explorer repair, the toast identity)
-    /// are not run here: a test that reached them would change the machine it
-    /// runs on.
+    /// upgrade, and the recovered folder's record. The registry writers (the
+    /// Explorer repair, the toast identity) are not run here: a test that
+    /// reached them would change the machine it runs on.
     ///
     /// Answers whether the marks' migration started (its worker's wake came).
     fn run_the_start_writers(root: &Path) -> bool {
@@ -2722,7 +2752,20 @@ mod tests {
             );
         }
 
-        let started = migration.recv_timeout(Duration::from_secs(3)).is_ok();
+        // And the recovered folder's question, which a start asks at its first frame
+        // (T-RECOVERED-FOLDER): its record is written on its worker before it wakes.
+        let (announced, announcement) = mpsc::channel();
+        crate::recovered::install_wake(move || {
+            let _ = announced.send(());
+        });
+        crate::recovered::begin(&storage);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let started = migration
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .is_ok();
+        let _ = announcement
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         // The session's own writer finishes what it was handed, or nothing.
         session.close();
         started
@@ -2784,6 +2827,7 @@ mod tests {
                 Writer::RefusedCopies,
                 Writer::UpdateCheck,
                 Writer::ProfileMigration,
+                Writer::RecoveredAnnouncement,
             ] {
                 assert!(pending.contains(&writer), "{writer:?} in {pending:?}");
             }
@@ -2833,6 +2877,7 @@ mod tests {
                 Writer::RefusedCopies,
                 Writer::UpdateCheck,
                 Writer::ProfileMigration,
+                Writer::RecoveredAnnouncement,
             ] {
                 assert!(pending.contains(&writer), "{writer:?} in {pending:?}");
             }
@@ -2897,6 +2942,7 @@ mod tests {
             "pins.json",
             "session.json",
             "update-check.json",
+            crate::recovered::ANNOUNCED_RECORD,
         ] {
             let path = data.join(name);
             assert!(

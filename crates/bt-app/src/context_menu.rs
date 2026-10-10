@@ -384,36 +384,59 @@ mod tests {
     /// repository for two releases, and a shell that is never told goes on
     /// drawing the menu it read when it started.
     ///
-    /// **The suite's half of the file is cut off before the search**, or the
-    /// needle would find the line that names it here.
+    /// Asked of `bt-source` by identity: this module's product code calls the
+    /// wrapper once, every call the product makes to the two writers is inside
+    /// the body of [`apply`], and that body is the one that calls the wrapper.
+    /// The suite's own words are test code and are not read.
     ///
     /// MUTATION: call `install_context_menu` or `remove_context_menu` outside
     /// the wrapper and this goes red.
     #[test]
     fn the_classic_registration_is_announced_to_the_shell_as_well() {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("src")
-                .join("context_menu.rs"),
-        )
-        .expect("this module is a file in this crate");
-        let code = source
-            .split_once("#[cfg(test)]")
-            .expect("this module carries the suite this test is in")
-            .0;
+        let index = bt_source::Index::of_package("bt-app");
+        let product_calls = |path: &str, scope: bt_source::Scope| {
+            index
+                .search(
+                    &bt_source::Search::new(
+                        bt_source::needle!(bt_source::Pattern::path(path)),
+                        bt_source::View::Identifiers,
+                    )
+                    .in_scope(scope),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(index)
+                .spans()
+        };
+        let wrapped = product_calls(
+            "bt_platform::changing_explorer_menu",
+            bt_source::Scope::Modules(vec![bt_source::ModuleSpec::tree("crate::context_menu")]),
+        );
         assert_eq!(
-            code.matches("bt_platform::changing_explorer_menu(").count(),
+            wrapped.len(),
             1,
             "one wrapper, around the one function that writes"
         );
-        for call in [
-            "bt_platform::install_context_menu(",
-            "bt_platform::remove_context_menu(",
+        let apply = index
+            .one(&bt_source::ItemQuery::function("apply").in_module("crate::context_menu"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let body = apply.body().expect("`apply` has a body");
+        assert!(
+            wrapped[0].within(body),
+            "the wrapper is called from `apply`"
+        );
+        for writer in [
+            "bt_platform::install_context_menu",
+            "bt_platform::remove_context_menu",
         ] {
+            let calls = product_calls(writer, bt_source::Scope::Everything);
             assert_eq!(
-                code.matches(call).count(),
+                calls.len(),
                 1,
-                "{call} is written once, inside that wrapper"
+                "{writer} is written once in this program, inside that wrapper"
+            );
+            assert!(
+                calls[0].within(body),
+                "{writer} is called from `apply`, where the wrapper is"
             );
         }
     }

@@ -2333,8 +2333,11 @@ mod file_url_tests {
     /// PIN — **nothing in this crate compares the *text* of a `file:` URL**
     /// (A3; the class this change closes).
     ///
-    /// Read off the crate's own sources rather than off any one file's name, so
-    /// that a comparison added to a file that does not exist yet is caught too.
+    /// Read off the files this crate's own declarations reach
+    /// (`bt_source::Index::of_package`) rather than off any one file's name, so
+    /// that a comparison added to a module that does not exist yet is caught
+    /// the day it is declared; a file under `src/` that no declaration reaches
+    /// is refused by name, because this reading would pass it by.
     /// The one line that may hold both a `file://` literal and a comparison is
     /// the parser reading its own scheme; every other question about a `file:`
     /// URL is a question about the path it names, and [`LocalFileUrl`] is where
@@ -2351,42 +2354,37 @@ mod file_url_tests {
             r#".filter(|head| head.eq_ignore_ascii_case("file:"#,
             r#"///"))"#
         );
-        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let index = bt_source::Index::of_package("bt-app");
+        let unreached = &index.cross_check().only_on_disk;
+        assert!(
+            unreached.is_empty(),
+            "these files are under bt-app's src/ and no `mod` declaration reaches them: \
+             {unreached:#?}"
+        );
         let mut found: Vec<String> = Vec::new();
-        while let Some(directory) = stack.pop() {
-            for entry in std::fs::read_dir(&directory).expect("a directory of this crate") {
-                let path = entry.expect("a directory entry").path();
-                if path.is_dir() {
-                    stack.push(path);
+        for file in index.files() {
+            for line in index.text(file.span()).lines() {
+                let code = line.trim_start();
+                // A comment is prose about a rule and not a use of it. The
+                // test is the *start* of the line rather than the first `//` in
+                // it, because `file://` carries two slashes of its own and a
+                // cleverer reader would cut every needle in half.
+                if code.starts_with("//") || !code.contains(a_file_url) {
                     continue;
                 }
-                if path.extension().is_none_or(|extension| extension != "rs") {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&path).expect("a source file");
-                for line in text.lines() {
-                    let code = line.trim_start();
-                    // A comment is prose about a rule and not a use of it. The
-                    // test is the *start* of the line rather than the first
-                    // `//` in it, because `file://` carries two slashes of its
-                    // own and a cleverer reader would cut every needle in half.
-                    if code.starts_with("//") || !code.contains(a_file_url) {
-                        continue;
-                    }
-                    if [
-                        "eq_ignore_ascii_case",
-                        "starts_with",
-                        "ends_with",
-                        "strip_prefix",
-                        "to_lowercase(",
-                        "to_ascii_lowercase(",
-                        ".contains(",
-                    ]
-                    .iter()
-                    .any(|needle| code.contains(needle))
-                    {
-                        found.push(code.to_owned());
-                    }
+                if [
+                    "eq_ignore_ascii_case",
+                    "starts_with",
+                    "ends_with",
+                    "strip_prefix",
+                    "to_lowercase(",
+                    "to_ascii_lowercase(",
+                    ".contains(",
+                ]
+                .iter()
+                .any(|needle| code.contains(needle))
+                {
+                    found.push(code.to_owned());
                 }
             }
         }
