@@ -2219,10 +2219,7 @@ impl Runtime<'_> {
     /// A refusal is said out loud and dropped: a page whose engine would not
     /// take the notice is a page whose context menu opens in the wrong place,
     /// which is not a reason to fail a window move.
-    pub(crate) fn window_moved(
-        &mut self,
-        position: crate::WindowOrigin,
-    ) -> Result<()> {
+    pub(crate) fn window_moved(&mut self, position: crate::WindowOrigin) -> Result<()> {
         self.note_winit_position(position);
         self.remember_summoned_arrangement();
         // **The window may be on another panel now** (owner's report

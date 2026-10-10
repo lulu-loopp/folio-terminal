@@ -2,10 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
-#[cfg(not(target_os = "linux"))]
-use crate::seats;
 use crate::{
-    ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
+    ClipboardWriteEffect, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
     TextFieldSeat, UserInputKind, copy_selection, hang_watch, input_line_needs_a_space_first,
     offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_target_is_live,
@@ -13,6 +11,8 @@ use crate::{
     recoverable_clipboard_write, restore, stage_paste, take_pending_paste, text_field, toast,
     write_selection_text, write_terminal_clipboard_text,
 };
+#[cfg(not(target_os = "linux"))]
+use crate::{Drag, seats};
 use anyhow::{Context, Result, anyhow};
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};

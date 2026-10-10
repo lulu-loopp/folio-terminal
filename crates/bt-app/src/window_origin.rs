@@ -27,10 +27,7 @@ mod tests {
 
     #[test]
     fn preserves_a_negative_multimonitor_origin() {
-        let origin = WindowOrigin {
-            x: -1920,
-            y: -1080,
-        };
+        let origin = WindowOrigin { x: -1920, y: -1080 };
         assert!(matches!(
             Position::from(origin),
             Position::Physical(position) if position == PhysicalPosition::new(-1920, -1080)

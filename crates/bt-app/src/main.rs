@@ -73914,8 +73914,7 @@ mod linux_window_tests {
 
         let request = crate::test_support::free_fn_body("request_owned_window_close");
         let app = crate::test_support::item_body(
-            &bt_source::ItemQuery::method("FolioApp", "user_event")
-                .of_trait("ApplicationHandler"),
+            &bt_source::ItemQuery::method("FolioApp", "user_event").of_trait("ApplicationHandler"),
         );
         assert!(request.contains("AppEvent::WindowCloseRequested(window.id())"));
         assert!(app.contains("AppEvent::WindowCloseRequested(window_id) =>"));

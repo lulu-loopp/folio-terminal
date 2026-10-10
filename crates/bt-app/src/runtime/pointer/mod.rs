@@ -31,14 +31,14 @@ pub(crate) use router::{
 };
 
 use crate::{
-    Drag, PasteTarget, PreviewSurface, Runtime, float, git_panel, hang_watch,
-    paste_offer_is_kept, risen_frame, seats,
+    Drag, PasteTarget, PreviewSurface, Runtime, float, git_panel, hang_watch, paste_offer_is_kept,
+    risen_frame, seats,
 };
 #[cfg(not(target_os = "linux"))]
 use crate::{native_window, platform_pointer_of};
+use anyhow::Result;
 #[cfg(not(target_os = "linux"))]
 use bt_platform::NativeWindow;
-use anyhow::Result;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{MouseButton, WindowEvent};
