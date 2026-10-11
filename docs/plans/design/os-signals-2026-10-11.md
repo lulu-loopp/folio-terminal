@@ -8,7 +8,9 @@ sentence, §3.5's procedure, §4.3's queue, filter and memory sentences, §6, §
 replaced by (b)1–(b)14. **Revision (c)**, after the Codex confirmation round
 (`B5-os-signals-design.review-codex-b.md`), follows (b) and stands wherever the two differ:
 (c)1–(c)10 replace (b)3's callback, (b)4's tests, (b)6's rerun, (b)11's probe door and
-retry rule, (b)13's ticket sizes and (b)14's Q2, Q3 and Q5. Revision (a) was the draft for review, written before any ticket
+retry rule, (b)13's ticket sizes and (b)14's Q2, Q3 and Q5. **Revision (d)**, after the
+scoped confirmation (`B5-os-signals-design.review-codex-c.md`), replaces (c)1's slot protocol
+(a close-request bit; one closer in every interleaving) and stands over (c) there. Revision (a) was the draft for review, written before any ticket
 below was dispatched.
 Plan row B5 ("OS-level change signals; deep palette refresh"), the last in the chain
 B1 → B2 → B3 → B4, all four landed. Read at `main` = `ae933eb7` on
@@ -1761,3 +1763,190 @@ microsecond residual is the price of a callback that cannot wait, and E-2 measur
   (`ProbeEnding`), `:5128-5134` (`probe_output_with_raw_tail`, `#[cfg(windows)]`);
   `watch_clock.rs:54-110` (`last_reread` as the floor's anchor); `main.rs:11907`
   (`PaneBirth`), `:39505` (the birth-road drawing test).
+
+---
+
+## Revision (d), 2026-10-11, after the scoped confirmation
+
+Codex's scoped confirmation of revision (c) (`e0bf0107`; review
+`B5-os-signals-design.review-codex-c.md`) answered **adopt with changes**, with one blocker
+and everything else accepted. The blocker, verbatim:
+
+> (c)1 must replace its stipulated one-shot CAS with retry/re-evaluation and boundary-race
+> coverage: if the callback reads `Idle` as the watcher wins `Idle → Issuing`, or reads
+> `Issuing` as the watcher restores `Idle`, its sole CAS fails and neither side closes the
+> handle.
+
+The blocker is correct. In (c)1 the callback read the state and then made one
+compare-and-swap whose expected value came from that read. If the watcher moved in between,
+the swap failed and the callback returned, and no transition recorded that a close had been
+asked. **This revision replaces (c)1's slot protocol entirely.** Where (d) and (c) differ,
+(d) stands. Every other part of (c) is unchanged.
+
+### (d)1 · The protocol: a close-request bit that every handle-holding exit must observe
+
+**The word.** `HandleSlot` stays one `AtomicU32`. It now holds a **base state** in its low
+bits and one flag, **`CLOSE`**. The handle is open exactly while the base is `Idle`,
+`Issuing` or `Reopening` (in `Reopening`, once the new handle has been opened). The other
+bases (`Closing`, `Draining`, `Suspended`, `Absent`, `Failed`) hold no usable handle.
+
+**The callback's intent** (what should follow a close) is kept beside the word, in a second
+atomic, `intent: AtomicU8`. Its values are `None`, `Rearm` and `Removed`. `Removed` is
+sticky: once written, nothing replaces it.
+
+The CM callbacks are written as follows. Each is **wait-free**: a bounded number of atomic
+operations, with no wait and no unbounded retry.
+
+```text
+QUERYREMOVE:
+  intent: Rearm → None (one compare-and-swap; Removed stays)
+  prev = word.fetch_or(CLOSE)                     // the request is recorded first, always
+  if base(prev) == Idle and !prev.CLOSE:
+      if word.compare_exchange(Idle|CLOSE, Closing) succeeds:
+          CancelIoEx; CloseHandle; word.store(Draining); signal the watcher
+  return ERROR_SUCCESS
+
+REMOVEPENDING / REMOVECOMPLETE:
+  intent.store(Removed); then exactly QUERYREMOVE's last four lines   // a removal while Active closes too
+QUERYREMOVEFAILED:
+  intent: None → Rearm (one compare-and-swap; Removed stays); signal the watcher; return
+```
+
+**The watcher's transitions** follow one rule: **every transition the watcher makes out of a
+handle-holding base is a compare-and-swap whose expected value has `CLOSE` clear.** If that
+swap fails, the watcher reads the word again. The only thing that can have changed while the
+watcher owned the base is the `CLOSE` bit. The watcher then takes the close path itself:
+
+```text
+completion while parked (base Idle):
+  CAS(Idle → Issuing)
+    fails ⇒ CLOSE is set (base Idle|CLOSE):
+            CAS(Idle|CLOSE → Closing): won ⇒ watcher closes; lost ⇒ the callback won and closes
+                                        (base Closing/Draining); the watcher goes to drain
+end of Issuing (read re-issued, nonblocking):
+  CAS(Issuing → Idle)
+    fails ⇒ the word is Issuing|CLOSE (only the bit can change while the watcher owns Issuing;
+            the callback never swaps out of Issuing) ⇒ watcher stores Closing and closes
+end of Reopening (new handle opened, first read issued):
+  CAS(Reopening → Idle)
+    fails ⇒ Reopening|CLOSE ⇒ watcher stores Closing and closes the new handle
+open failed in Reopening ⇒ store Failed ((c)2); there is no handle to close
+drain done (the cancelled read's completion observed, (c)1):
+  store by intent: Removed ⇒ Absent; Rearm ⇒ Reopening (intent ← None); otherwise Suspended
+  (the store clears CLOSE: the close it asked for has happened)
+Suspended, signalled with intent Rearm:
+  CAS(Suspended → Reopening)
+    fails ⇒ CLOSE was set by a later QUERYREMOVE ⇒ store Suspended (clear it) and stay closed
+```
+
+**Why exactly one side closes.**
+1. While the handle is open, `CLOSE` can only be **set** (by a callback). Nothing clears it
+   until the close it asked for has happened: the clearing stores are the drain's end, and
+   the `Suspended` and `Failed` stores, all made with no handle open.
+2. Each handle-holding base has exactly **one** party that may move it out:
+   - `Issuing` and `Reopening` belong to the watcher alone.
+   - From `Idle`, the watcher's exit is `Idle → Issuing`, and a swap to `Closing` may be
+     made only from `Idle|CLOSE`, by either side.
+3. Every exit from a handle-holding base expects `CLOSE` clear, **except** the swap to
+   `Closing`. So once `CLOSE` is set, the next transition out of that base must be to
+   `Closing`. Exactly one compare-and-swap succeeds at that, so exactly one party closes.
+4. The callback's `fetch_or` cannot fail. A request is therefore never lost, which was the
+   defect: (c)'s request lived only in a swap that could fail.
+5. The callback either wins `Idle|CLOSE → Closing` (it closes), or returns having set a bit
+   that the watcher's next swap must observe (the watcher closes), or finds the handle
+   already closed or being closed.
+
+**Termination and the residual.** The callback performs at most one `fetch_or` and one
+compare-and-swap per call, so it is wait-free. It does not loop, and it cannot be starved
+by a busy watcher. When the watcher is the closer, the close happens at the watcher's next
+transition: within its current re-issue (microseconds), or at once when woken. That is
+(c)1's stated residual, and E-2 measures it. The ordering of `intent` assumes the CM callbacks
+for one registration arrive one at a time, in order. That is assumption **A-1**, and E-2
+checks it by logging the action sequence. If it does not hold, `intent` takes a sequence
+number per callback, and the drain's end reads the newest.
+
+### (d)2 · The boundary races, and who closes
+
+| # | interleaving | what each side sees | who closes |
+|---|---|---|---|
+| 1a | Callback at `Idle`; the watcher wins `Idle → Issuing` **before** the callback's `fetch_or` | The callback's `prev` is `Issuing`, so it returns. The watcher's `Issuing → Idle` swap fails (`CLOSE`) | **watcher** |
+| 1b | Callback at `Idle`; the callback's `fetch_or` lands **before** the watcher's `Idle → Issuing` | The watcher's swap fails (`CLOSE` set). Both try `Idle\|CLOSE → Closing` | **whichever wins that swap**, exactly one |
+| 2a | Callback at `Issuing`; its `fetch_or` lands before the watcher's `Issuing → Idle` | The watcher's swap fails | **watcher** |
+| 2b | Callback at `Issuing`; the watcher restores `Idle` **before** the callback's `fetch_or` | The callback's `prev` is `Idle` with no `CLOSE`, so it tries `Idle\|CLOSE → Closing`, racing the watcher's next completion as in 1b | **callback**, or the watcher if its next completion wins the swap; exactly one |
+| 3 | Callback during `Closing` or `Draining` | `prev` is `Closing`/`Draining`, so the callback returns. The drain's end clears `CLOSE` | **already closing** (the earlier winner); no second close |
+| 4 | Callback during `Reopening`, before the new handle's first read | The callback returns. The watcher's `Reopening → Idle` swap fails | **watcher** (closes the new handle) |
+| 5 | Callback during `Suspended`, `Absent` or `Failed` | No handle. The bit makes the watcher's next `Suspended → Reopening` or (c)2 rearm swap fail, and the member stays closed (a later query-remove wins over an earlier failed one) | **nobody: nothing is open** |
+| 6 | Two callbacks (`QUERYREMOVE` then `REMOVECOMPLETE`) around one watcher transition | The second `fetch_or` finds `CLOSE` already set and attempts nothing. `intent` becomes `Removed` | **the closer of the first callback**; the drain ends `Absent` |
+
+### (d)3 · The test that pins it: an exhaustive interleaving model, hand-written
+
+**`loom` is not available**: no crate in the workspace depends on `loom` or `shuttle`
+(`Cargo.toml` files and `Cargo.lock` searched at `ae933eb7`). Adding one is a new
+third-party dependency, with a crate-edge, notice and wasm-floor review of its own, and this
+protocol does not need it. **T-DIRWATCH-LIFECYCLE ships a hand-written exhaustive interleaving
+test over the real transition functions.**
+
+**Production code is written as pure steps** over a `u32` and the intent byte, in
+`bt-platform`'s slot module:
+- `callback_steps(action) -> [Step; ≤3]`
+- `watcher_step(base_event, word) -> (Step, Effect)`
+
+The atomics are thin wrappers that apply one step as one atomic operation: `fetch_or`,
+`compare_exchange` or `store`. `Effect` names `Close`, `Drain` or nothing.
+
+**The test** (`slot_model_tests::every_interleaving_closes_the_handle_exactly_once`) keeps
+the word in a plain cell and enumerates by recursion **every** interleaving of:
+- one callback (`QUERYREMOVE`, and in a second run `REMOVECOMPLETE`, and in a third
+  `QUERYREMOVE` followed by `QUERYREMOVEFAILED` followed by `QUERYREMOVE`);
+- the watcher, starting from each of `Idle` (parked), `Issuing` and `Reopening`, and running
+  up to two completion cycles.
+
+That is at most a few hundred schedules. In every schedule it asserts that:
+- the handle is closed **exactly once**;
+- the close happens while no other side is in a handle-using step;
+- the callback ran at most two atomic operations (wait-freedom);
+- the end state is `Suspended`, `Absent` or `Reopening`/`Idle` as the intent says.
+
+The table of (d)2 is the test's named-schedule list. A failure prints the schedule.
+
+**Mutations** (each observed red):
+- (c)'s one-shot protocol (the callback reads, then makes one swap, with no `fetch_or`):
+  schedules 1a and 2b close **zero** times.
+- The watcher's `Issuing → Idle` written as an unconditional store: 1a and 2a close zero
+  times.
+- The `Idle|CLOSE → Closing` swap written as a store on both sides: 1b closes **twice**.
+- The drain's end store not clearing `CLOSE`: the third run's final rearm never happens.
+
+These replace (c)1's first two tests for this protocol:
+`…::a_query_remove_while_idle_closes_inside_the_callback` and
+`…::a_query_remove_while_issuing_…`. They remain as two named executed tests over the real
+thread with gates, on Windows. The model test runs on every platform: the slot logic is
+portable, and only the `CancelIoEx`/`CloseHandle` effects are Windows-only.
+
+**Where it lands:**
+- The protocol and the model test belong to **T-DIRWATCH-LIFECYCLE** (the slot is (c)7's
+  "atomic slot without notifications").
+- The callbacks that drive it, and the executed gate tests, stay in **T-WATCH-LETS-GO**.
+- Sizes and the order are unchanged (L, M, M, M, M; 1 → 2 → 3 → 4, and 1 + 2 + 3 → 5).
+- The owner questions are unchanged (Q1–Q5 as in (c)10). The answer to Q3 is unaffected:
+  the residual is the same microsecond window, now with a proof that the close is never lost.
+
+### Departures
+
+One, argued: **the callback does not loop.** The review asks for retry or re-evaluation
+until the callback "either wins a close-owning transition or observes a state in which the
+watcher is guaranteed to honour `CloseAsked`". (d)1 meets that end condition in one step
+rather than by looping. The `fetch_or` records the request unconditionally, so after it
+**every** state either has the callback attempting the one close-owning swap (`Idle|CLOSE`)
+or is a state whose owner is guaranteed to observe the bit (the watcher's exit swaps expect
+it clear). A compare-and-swap loop over a state-only word would be lock-free but not
+wait-free: a watcher cycling `Idle ↔ Issuing` could make it retry repeatedly inside a
+callback that must return quickly [S10]. The bit makes the retry unnecessary. The boundary
+races the review names are rows 1a and 2b of (d)2, and the model test enumerates them.
+
+### Sources
+
+- The scoped confirmation: `B5-os-signals-design.review-codex-c.md` (0.4.8 trace, 2026-10-11).
+- No new external source. (d)1 uses `fetch_or`/`compare_exchange` semantics as the Rust
+  standard library defines them (`std::sync::atomic::AtomicU32`), and [S10] (return quickly)
+  and [S31] (drain before reuse) as in (c).
