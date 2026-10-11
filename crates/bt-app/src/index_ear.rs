@@ -165,6 +165,7 @@ mod tests {
     use crate::watch_clock::WATCH_QUIET;
     use crate::watch_steward::Steward;
     use crate::watch_steward::fake::FakeDoor;
+    use std::path::Path;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -172,10 +173,10 @@ mod tests {
         std::env::temp_dir().join("folio-index-ear").join(name)
     }
 
-    fn ready(indexes: &mut FileIndexes, root: &PathBuf) {
+    fn ready(indexes: &mut FileIndexes, root: &Path) {
         let request = indexes.claim(root).expect("a first walk");
         indexes.accept(IndexResponse {
-            root: root.clone(),
+            root: root.to_path_buf(),
             epoch: request.epoch,
             index: FileIndex::default(),
         });
