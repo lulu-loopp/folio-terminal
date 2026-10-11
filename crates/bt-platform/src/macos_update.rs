@@ -843,12 +843,29 @@ fn points_under(root: &Path) -> Result<Vec<PathBuf>, Refusal> {
         .collect())
 }
 
-/// **Every mount point in the mount table**, from `getfsstat(2)` into a
-/// buffer this call owns (`getmntinfo(3)` reads the same table into one it
-/// keeps between calls). A table that grew between the count and the read is
-/// read again.
+/// **Every mount point in the mount table** ([`mount_table`]'s points).
 #[cfg(target_os = "macos")]
 fn mounted() -> io::Result<Vec<PathBuf>> {
+    Ok(mount_table()?
+        .into_iter()
+        .map(|mount| mount.point)
+        .collect())
+}
+
+/// **One record of the mount table**: where a file system is mounted, and its `MNT_*` flags.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MountRecord {
+    pub(crate) point: PathBuf,
+    pub(crate) flags: u32,
+}
+
+/// **The mount table**, from `getfsstat(2)` into a buffer this call owns (`getmntinfo(3)` reads
+/// the same table into one it keeps between calls), with `MNT_NOWAIT`: the kernel's cached
+/// records, so no file system — a network one that stopped answering among them — is asked
+/// anything. A table that grew between the count and the read is read again.
+#[cfg(target_os = "macos")]
+pub(crate) fn mount_table() -> io::Result<Vec<MountRecord>> {
     use std::os::unix::ffi::OsStrExt;
     loop {
         // SAFETY: a null buffer of size 0 asks only for the number of mounts;
@@ -879,7 +896,10 @@ fn mounted() -> io::Result<Vec<PathBuf>> {
                     .map(|&c| c as u8)
                     .take_while(|&byte| byte != 0)
                     .collect();
-                PathBuf::from(OsStr::from_bytes(&name))
+                MountRecord {
+                    point: PathBuf::from(OsStr::from_bytes(&name)),
+                    flags: record.f_flags,
+                }
             })
             .collect());
     }

@@ -5269,6 +5269,220 @@ pub fn probe_output_with_raw_tail(
     }
 }
 
+/// What a run of probes held to **one** total budget came back with ([`probe_outputs_within`]).
+/// Each answer is the command's output, or why it could not be run; a command that would not
+/// start is one answer and the next command still runs.
+#[derive(Debug)]
+pub enum ProbeRun {
+    /// Every command ended by itself within the budget: one answer per command, in order.
+    Finished(Vec<std::io::Result<std::process::Output>>),
+    /// The budget ran out while a command was running. That command was ended with its contained
+    /// tree and no later command was started; `finished` holds the answers before it, in order.
+    Overran {
+        finished: Vec<std::io::Result<std::process::Output>>,
+    },
+}
+
+/// **Run `commands` in order, each as a contained probe, all of them together within `total`**
+/// (B5 design note, revision (c)4).
+///
+/// Every command is a probe of [`spawn_probe`]'s, its output streams read as it runs, and held
+/// by the one owner of a probe's deadline ([`ProbeChild::wait_within`]) to a fixed
+/// [`ProbePatience`] of what is left of `total` since the run began: the budget is the run's, not
+/// each child's, so two children cannot take twice of it. A child still running when the budget is
+/// spent is ended with everything it started, and the run answers [`ProbeRun::Overran`] without
+/// starting the rest. Looked at every 20 ms on the worker through [`wait::sleep_within`], as
+/// [`probe_output_with_raw_tail`] is. Takes a [`admission::WorkerCtx`], so it cannot run on the
+/// window thread.
+pub fn probe_outputs_within(
+    worker: &admission::WorkerCtx,
+    commands: Vec<std::process::Command>,
+    total: std::time::Duration,
+) -> ProbeRun {
+    let began = std::time::Instant::now();
+    let mut finished = Vec::with_capacity(commands.len());
+    for mut command in commands {
+        let remaining = total.saturating_sub(began.elapsed());
+        if remaining.is_zero() {
+            return ProbeRun::Overran { finished };
+        }
+        match probe_output_held_to(worker, &mut command, remaining) {
+            Ok(ProbeEnding::Finished(output)) => finished.push(Ok(output)),
+            Ok(ProbeEnding::Overran) => return ProbeRun::Overran { finished },
+            Err(error) => finished.push(Err(error)),
+        }
+    }
+    ProbeRun::Finished(finished)
+}
+
+/// One probe of [`probe_outputs_within`]'s run: its output read while it runs (a child that fills
+/// a pipe nobody reads would otherwise look like one that hangs), held to `deadline`.
+fn probe_output_held_to(
+    worker: &admission::WorkerCtx,
+    command: &mut std::process::Command,
+    deadline: std::time::Duration,
+) -> std::io::Result<ProbeEnding> {
+    let mut child = spawn_probe(command, ProbeStdio::ANSWER)?;
+    drop(child.take_stdin());
+    let stdout = drain_probe_pipe("bt-probe-stdout", child.take_stdout())?;
+    let stderr = drain_probe_pipe("bt-probe-stderr", child.take_stderr())?;
+    let waited = child.wait_within(ProbePatience::fixed(deadline), &mut || {
+        wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    })?;
+    // Ended either way by now, its contained tree with it, so both readers reach their end.
+    let stdout = stdout.finish("stdout");
+    let stderr = stderr.finish("stderr");
+    match waited {
+        Ok(status) => Ok(ProbeEnding::Finished(std::process::Output {
+            status,
+            stdout: stdout?,
+            stderr: stderr?,
+        })),
+        Err(_) => Ok(ProbeEnding::Overran),
+    }
+}
+
+/// **A run of probes shares one budget** ([`probe_outputs_within`]).
+#[cfg(test)]
+mod probe_run_tests {
+    use super::*;
+    use bt_pty::test_shell::Hygiene;
+
+    /// The run's budget in the tests below, and how long each child of the shared-budget test
+    /// runs: 70 % of it, so the first child ends inside the budget with 30 % of it to spare and the
+    /// second cannot — and with a budget of its own each, both would end.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// A child that runs for about two seconds and says nothing, through the test-shell door.
+    #[cfg(windows)]
+    fn a_two_second_child(hygiene: &Hygiene) -> std::process::Command {
+        let system = std::env::var_os("SystemRoot").expect("Windows names its own folder");
+        let mut command = hygiene.command(
+            std::path::Path::new(&system).join(r"System32\PING.EXE"),
+            quiet_command,
+        );
+        // Three echoes one second apart: two seconds from the first to the last.
+        command.args(["-n", "3", "127.0.0.1"]);
+        command
+    }
+
+    /// A child that runs for about two seconds and says nothing, through the test-shell door.
+    #[cfg(not(windows))]
+    fn a_two_second_child(hygiene: &Hygiene) -> std::process::Command {
+        let mut command = hygiene.command("/bin/sh", quiet_command);
+        command.args(["-c", "sleep 2"]);
+        command
+    }
+
+    /// A child that says a mixed-script line and ends at once.
+    fn a_saying_child(hygiene: &Hygiene, said: &str) -> std::process::Command {
+        #[cfg(windows)]
+        let mut command = {
+            let system = std::env::var_os("SystemRoot").expect("Windows names its own folder");
+            let mut command = hygiene.command(
+                std::path::Path::new(&system).join(r"System32\cmd.exe"),
+                quiet_command,
+            );
+            // `/U`: an internal command writes UTF-16 to a pipe, so the line comes back whole.
+            command.args(["/D", "/U", "/C", "echo"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = hygiene.command("/bin/sh", quiet_command);
+            command.args(["-c", "echo \"$0\""]);
+            command
+        };
+        command.arg(said);
+        command
+    }
+
+    /// RED — **two children share one budget** (revision (c)4): the first runs 70 % of the run's
+    /// budget and ends; the second is given only what is left, is ended when that is spent, and
+    /// the run answers `Overran` with the first child's answer alone.
+    ///
+    /// MUTATION: give each child the whole `total` (`ProbePatience::fixed(total)` in
+    /// `probe_outputs_within`) — the second child ends by itself at about 140 % of the budget and
+    /// the run answers `Finished` with two answers.
+    ///
+    /// Real clock: two 2 s children against a 3 s budget leave about 1 s of margin, so a
+    /// severely stalled runner can fail this test falsely; the body itself neither sleeps nor
+    /// measures.
+    #[test]
+    fn two_children_share_one_budget() {
+        let hygiene = Hygiene::new();
+        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+            probe_outputs_within(
+                worker,
+                vec![a_two_second_child(&hygiene), a_two_second_child(&hygiene)],
+                BUDGET,
+            )
+        })
+        .expect("a worker")
+        .join()
+        .expect("the run answers");
+        match run {
+            ProbeRun::Overran { finished } => {
+                assert_eq!(
+                    finished.len(),
+                    1,
+                    "only the first child ended: {finished:?}"
+                );
+                let first = finished[0].as_ref().expect("the first child ran");
+                assert!(first.status.success(), "{first:?}");
+            }
+            ProbeRun::Finished(answers) => {
+                panic!("both children ended, so each had a budget of its own: {answers:?}")
+            }
+        }
+    }
+
+    /// PIN — **a run inside its budget answers every command's output, in order**, a command that
+    /// would not start among them as its own answer.
+    #[test]
+    fn a_run_inside_its_budget_answers_each_command_in_order() {
+        let hygiene = Hygiene::new();
+        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+            let missing = hygiene.command(
+                std::env::temp_dir().join("folio-no-such-program-探针"),
+                quiet_command,
+            );
+            probe_outputs_within(
+                worker,
+                vec![
+                    a_saying_child(&hygiene, "first-第一"),
+                    missing,
+                    a_saying_child(&hygiene, "third-第三"),
+                ],
+                BUDGET,
+            )
+        })
+        .expect("a worker")
+        .join()
+        .expect("the run answers");
+        let ProbeRun::Finished(answers) = run else {
+            panic!("three short commands overran the budget: {run:?}");
+        };
+        assert_eq!(answers.len(), 3);
+        let said = |answer: &std::io::Result<std::process::Output>| {
+            let bytes = &answer.as_ref().expect("it ran").stdout;
+            #[cfg(windows)]
+            let text = String::from_utf16_lossy(
+                &bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            );
+            #[cfg(not(windows))]
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            text.trim().to_owned()
+        };
+        assert_eq!(said(&answers[0]), "first-第一");
+        assert!(answers[1].is_err(), "{:?}", answers[1]);
+        assert_eq!(said(&answers[2]), "third-第三");
+    }
+}
+
 /// **Where this program's own files are: beside the file it runs from, not beside the path it was
 /// started by** (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS).
 #[cfg(all(test, windows))]
@@ -7919,12 +8133,63 @@ impl LocaleDeclaration {
 /// the platform does not use. That is the same rule this function states for
 /// macOS read from the other side — say what the system says, or say nothing.
 ///
-/// Read once per process: it costs two child processes, and the answer is a
-/// system setting that a running app does not watch.
+/// # How it is read
+///
+/// Two child processes, `defaults read -g AppleLocale` and `locale -a`, run in that order on a
+/// worker through [`probe_outputs_within`] with **one** budget for both,
+/// [`LOCALE_PROBE_BUDGET`] (B5 design note, revision (c)4). The reading is asked again whenever
+/// the system says the locale changed, and the asking, the newest answer and the retries belong
+/// to the application (`bt-app`'s locale cell); this function only reads.
+///
+/// **Each half may fail on its own** — a program that would not start, a non-zero exit, output
+/// that is not text, or the budget spent first — and its text is then empty, which is what
+/// [`choose_locale_declaration`] has always been handed for a machine that did not say: a machine
+/// that will not say what its region is still has an encoding, and the fallback is about the
+/// encoding alone. The reading says that it failed beside what it chose
+/// ([`LocaleReading::failure`]), so its owner asks again rather than keep it as the answer.
+pub fn read_system_locale_declaration(worker: &admission::WorkerCtx) -> LocaleReading {
+    #[cfg(target_os = "macos")]
+    {
+        read_macos_locale_declaration(worker)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = worker;
+        LocaleReading {
+            declaration: None,
+            failure: None,
+        }
+    }
+}
+
+/// **Whether this platform declares a locale to a new pane at all** — whether
+/// [`read_system_locale_declaration`] has anything to read. macOS does; Windows and every other
+/// platform answer `None` without a child, for the reason the declaration's own documentation
+/// gives.
 #[must_use]
-pub fn system_locale_declaration() -> Option<&'static LocaleDeclaration> {
-    static LOCALE: std::sync::OnceLock<Option<LocaleDeclaration>> = std::sync::OnceLock::new();
-    LOCALE.get_or_init(read_system_locale_declaration).as_ref()
+pub const fn system_locale_is_declared() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// How long both children of the locale reading may take **together** (revision (c)4): B3's ten
+/// seconds, once for the run rather than once per child.
+pub const LOCALE_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// **One reading of the system's locale** ([`read_system_locale_declaration`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocaleReading {
+    /// What [`choose_locale_declaration`] made of what the machine said.
+    pub declaration: Option<LocaleDeclaration>,
+    /// Why the reading is incomplete, when it is: which half did not answer, and how. `None`
+    /// when both answered.
+    pub failure: Option<String>,
 }
 
 /// Where Darwin keeps the one category its encoding-only locale defines.
@@ -7936,44 +8201,55 @@ pub fn system_locale_declaration() -> Option<&'static LocaleDeclaration> {
 pub const UTF8_CTYPE_LOCALE_FILE: &str = "/usr/share/locale/UTF-8/LC_CTYPE";
 
 #[cfg(target_os = "macos")]
-fn read_system_locale_declaration() -> Option<LocaleDeclaration> {
-    // Each of the two readings is allowed to fail on its own: a machine that
-    // will not say what its region is still has an encoding, and the fallback
-    // below is about the encoding alone.
-    let apple_locale =
-        quiet_command_text("defaults", &["read", "-g", "AppleLocale"]).unwrap_or_default();
-    let installed = quiet_command_text("locale", &["-a"]).unwrap_or_default();
-    choose_locale_declaration(
-        &apple_locale,
-        installed.lines(),
-        std::path::Path::new(UTF8_CTYPE_LOCALE_FILE).exists(),
-    )
+fn read_macos_locale_declaration(worker: &admission::WorkerCtx) -> LocaleReading {
+    const HALVES: [&str; 2] = ["defaults read -g AppleLocale", "locale -a"];
+    let mut defaults = quiet_command("defaults");
+    defaults.args(["read", "-g", "AppleLocale"]);
+    let mut locale = quiet_command("locale");
+    locale.arg("-a");
+    let (answers, overran) =
+        match probe_outputs_within(worker, vec![defaults, locale], LOCALE_PROBE_BUDGET) {
+            ProbeRun::Finished(answers) => (answers, false),
+            ProbeRun::Overran { finished } => (finished, true),
+        };
+    let mut failures = Vec::new();
+    let mut texts = [String::new(), String::new()];
+    for (index, answer) in answers.into_iter().enumerate() {
+        match said_text(answer) {
+            Ok(text) => texts[index] = text,
+            Err(why) => failures.push(format!("`{}` {why}", HALVES[index])),
+        }
+    }
+    if overran {
+        failures.push(format!(
+            "the reading was ended when its {} s budget was spent",
+            LOCALE_PROBE_BUDGET.as_secs()
+        ));
+    }
+    let [apple_locale, installed] = texts;
+    LocaleReading {
+        declaration: choose_locale_declaration(
+            &apple_locale,
+            installed.lines(),
+            std::path::Path::new(UTF8_CTYPE_LOCALE_FILE).exists(),
+        ),
+        failure: (!failures.is_empty()).then(|| failures.join("; ")),
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn read_system_locale_declaration() -> Option<LocaleDeclaration> {
-    None
-}
-
-/// One short-lived child, through the one door, read for its standard output.
-///
-/// `None` for a program that would not start, a non-zero exit and output that is
-/// not text — all three are the same answer here, which is *this machine did not
-/// say*, and the caller's whole contract is to carry on without it.
+/// One child's standard output as text, or why there is none: a program that would not start,
+/// a non-zero exit, or output that is not text.
 #[cfg(target_os = "macos")]
-fn quiet_command_text(program: &str, arguments: &[&str]) -> Option<String> {
-    let mut command = quiet_command(program);
-    command.args(arguments);
-    let output = probe_output(command).ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8(output.stdout).ok())
-        .flatten()
+fn said_text(answer: std::io::Result<std::process::Output>) -> Result<String, String> {
+    let output = answer.map_err(|error| format!("would not start ({error})"))?;
+    if !output.status.success() {
+        return Err(format!("ended with {}", output.status));
+    }
+    String::from_utf8(output.stdout).map_err(|_| "said something that is not text".to_owned())
 }
 
 /// `AppleLocale` as POSIX would spell it, most specific first — the candidates
-/// [`system_locale_declaration`] looks for among the locales a machine has.
+/// [`read_system_locale_declaration`] looks for among the locales a machine has.
 ///
 /// Two forms and no more, because a third would be a guess:
 ///
@@ -8028,7 +8304,7 @@ pub fn posix_locale_candidates(apple_locale: &str) -> Vec<String> {
 /// The match is exact on the name, because that is what `setlocale` will look up
 /// and a near-miss is a locale that is not there. `C.UTF-8` is looked for in the
 /// same list and by the same rule; `utf8_ctype_installed` is a separate argument
-/// rather than a line of it for the reason [`system_locale_declaration`] gives —
+/// rather than a line of it for the reason [`read_system_locale_declaration`] gives —
 /// `UTF-8` is one category rather than a locale, `locale -a` does not list it,
 /// and the fact is read off the file system instead.
 #[must_use]
@@ -8703,6 +8979,7 @@ mod windows_impl {
         path: &Path,
     ) -> std::io::Result<crate::ProgramPathDirectory> {
         use crate::ProgramPathDirectory;
+        use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
 
         if !path.is_absolute() {
             return Err(std::io::Error::new(
@@ -8733,10 +9010,10 @@ mod windows_impl {
         let root = [drive, b':' as u16, b'\\' as u16, 0];
         // SAFETY: `root` is a NUL-terminated drive-root string and remains live for the call.
         let kind = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
-        if kind == 4 {
+        if kind == DRIVE_REMOTE {
             return Ok(ProgramPathDirectory::Remote);
         }
-        let removable = kind == 2;
+        let removable = kind == DRIVE_REMOVABLE;
         if !std::fs::metadata(path)?.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotADirectory,
@@ -17766,8 +18043,10 @@ pub enum ProgramPathDirectory {
 
 /// Classify and validate one program-search directory on a worker thread.
 ///
-/// Windows asks the lexical drive root before metadata so a remote entry is never contacted.
-/// Other platforms deliberately decline this Windows ticket; their native PATH ear is ticket 3.
+/// Each arm learns where the path lives before it asks the path itself, so a remote entry is
+/// never contacted: Windows asks the lexical drive root's type, macOS finds the mount the path
+/// lies under in the mount table (read without waiting on any file system). Platforms with no
+/// directory watch have no PATH ear and refuse.
 pub fn program_path_directory(
     worker: &admission::WorkerCtx,
     path: &std::path::Path,
@@ -17776,13 +18055,35 @@ pub fn program_path_directory(
     {
         windows_impl::program_path_directory(worker, path)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_impl::program_path_directory(worker, path)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (worker, path);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "the PATH directory ear is not built on this platform yet",
+            "this platform has no directory watch, so no PATH directory ear",
         ))
+    }
+}
+
+/// **Whether a program-search directory's file names say which files are programs.**
+///
+/// On Windows they do: a program is found by its extension, from `PATHEXT`, so a name without
+/// one of those extensions cannot change what a search finds. On every other platform a file is
+/// a program by its mode bits, which no name shows, so every name a `PATH` directory reports is
+/// news to the PATH ear.
+#[must_use]
+pub const fn program_names_carry_their_kind() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -17800,9 +18101,14 @@ pub enum SystemNews {
     /// This thread's input language or keyboard layout changed: `WM_INPUTLANGCHANGE`.
     /// Windows only: the macOS summon key is a key position, which no layout moves.
     InputLanguage,
-    /// A volume arrived or completed its removal. Windows only in this ticket; the payload is
-    /// deliberately reduced to the transition, with no sender-owned pointer leaving the call.
+    /// A volume arrived or completed its removal: `DBT_DEVICEARRIVAL` /
+    /// `DBT_DEVICEREMOVECOMPLETE` for a volume on Windows, `NSWorkspace`'s did-mount /
+    /// did-unmount notifications on macOS. The payload is deliberately reduced to the
+    /// transition, with no sender-owned pointer leaving the call.
     Volumes { arrived: bool },
+    /// The user's locale changed: `NSCurrentLocaleDidChangeNotification`. macOS only, where a
+    /// new pane is told its locale (`LANG`, `LC_CTYPE`) by Folio.
+    Locale,
 }
 
 #[cfg(windows)]

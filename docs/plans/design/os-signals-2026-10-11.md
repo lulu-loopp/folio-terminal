@@ -1,6 +1,6 @@
 # OS-level change signals and the deep palette refresh: T-OS-SIGNALS and T-PALETTE-DEEP (0.4.8 B5), design note, 2026-10-11
 
-Status: **tickets 1, 2 and 4 built** (T-DIRWATCH-LIFECYCLE, T-OS-SIGNALS-WIN and T-PALETTE-DEEP, 2026-10-11; revision (f) records ticket 1 as built). Before that, **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
+Status: **tickets 1–4 built** (T-DIRWATCH-LIFECYCLE, T-OS-SIGNALS-WIN, T-OS-SIGNALS-MAC and T-PALETTE-DEEP, 2026-10-11; revision (f) records ticket 1 as built, revision (g) ticket 3 and revision (h) ticket 4). Before that, **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
 (`B5-os-signals-design.review-codex.md`, verdict *adopt with changes*, twelve required
 changes). Revision (b) is the dated section at the end. **Where revision (a)'s text and
 revision (b) differ, revision (b) stands**: in particular §2's totals, §3.1's forced-removal
@@ -2154,3 +2154,125 @@ holds the start open on a fake door and asserts the re-read.
 and the ticket's row-8 retirement require. (f)5 adds one reading per arming that the synchronous
 start did not need: one `git status` per repository a page newly shows, and one rescan of the
 schemes and storage folders after startup. Nothing else departs.
+
+## Revision (g), 2026-10-11, ticket 3 as built (T-OS-SIGNALS-MAC)
+
+T-OS-SIGNALS-MAC is built as (c)9 item 4 and (e)4 item 3 specify, under the ticket's brief. What
+follows records where the build had to choose, and what E-3 measured.
+
+### (g)1 · The `Volumes` and `Locale` arms on the existing observer
+
+`didMount` and `didUnmount` are registered on the workspace's notification centre beside the
+accessibility notification, and `NSCurrentLocaleDidChangeNotification` on the default centre beside
+the screen parameters. The five registrations live in one value, `NotificationRegistrations`, whose
+`Drop` removes the observer from each of the two centres it registered with; the appearance's
+key-value registration stays on `SystemSettingsWatch`, the only part that needs the window thread.
+That split is what lets a test post the real notifications on the real centres from a libtest
+thread (a centre delivers on the posting thread) and see each heard, then nothing after the drop
+(`macos_impl::tests::volumes_and_the_locale_are_heard_and_a_drop_removes_exactly_what_was_added`).
+No real mount was needed: an unmount ends a watch through ticket 1's FSEvents root/unmount end,
+which this arm does not touch.
+
+### (g)2 · `probe_outputs_within`, as written
+
+The door is `probe_outputs_within(worker, commands, total) -> ProbeRun`, and each answer in it is
+the command's `io::Result<Output>`: a command that will not start is its own answer, and the next
+command still runs, because the locale reading's two halves have always been allowed to fail on
+their own ((c)4: `choose_locale_declaration` gets each half's text, or empty). (c)4's
+`io::Result<ProbeRun>` would have let a missing `defaults` silence `locale -a`. Each child's output
+streams are read while it runs, so a child that fills a pipe cannot look like one that hangs.
+
+### (g)3 · The cell, and what a failed reading means
+
+The cell keeps `last_success`, `newest`, the reading `out` and the request waiting (the
+`CopilotProbe` shape (c)4 names). A reading carries `choose_locale_declaration`'s answer and, when
+a half did not answer, a failure. (b)11 says a failure gives "no declaration"; today's code, which
+Q5 keeps, gives the choice made from whatever was said (a missing region still yields Apple's
+encoding fallback). So a birth reads `last_success`, and while there has never been one, the
+newest reading's own choice: a cold first pane whose first reading fails gets exactly today's
+answer. (c)5's retry predicate is built as written. A reading whose worker will not start, or that
+unwinds, files a failed reading, so a cold pane's wait always ends.
+
+### (g)4 · The cold first pane
+
+A pane's birth asks the cell (`at_birth`) only when its shell would be told the locale: it starts
+a program, inherits no non-empty `LANG`, `LC_CTYPE` or `LC_ALL`, and its profile names none
+(`shell_integration::listens_for_a_locale`, the rule `locale_declaration` itself applies). When no
+reading has finished, the pane is made in birth with `BirthWait::Locale` on the rows' road, its
+original seed kept, and is made again by `Runtime::land_births` on `AppEvent::LocaleAnswered`.
+
+### (g)5 · Row 7
+
+Row 7 is `done`. Both product call sites read `locale_declaration::held()` (a lock); the reading is
+named in `bt-app`'s product only inside the cell; nothing fills a `OnceLock` from it
+(`locale_declaration::tests::row_7_no_birth_reads_the_locale_itself`). The bare-site inventory did
+not change.
+
+### (g)6 · E-3, measured on the Mac mini (macOS 26.6.2, Apple M4)
+
+The two commands run back to back in a shell: 27.5 ms the first time, then 13.6–14.3 ms (each
+about 7 ms). Through the product door (`read_system_locale_declaration` on a worker): 47.3–55.5 ms
+over twelve runs, because `ProbeChild::wait_within` looks at each child every 20 ms, so each child
+costs one look. Either way the reading lands inside window and GPU creation, so an ordinary cold
+first pane does not wait.
+
+### (g)7 · The PATH ear on macOS
+
+Ticket 2 left the ear in `bt-app` with no platform branch, and the platform's two answers in
+`bt-platform`. This ticket supplies them for macOS:
+- **Which directories.** `program_path_directory` finds the mount a path lies under in the mount
+  table, read with `MNT_NOWAIT` so no file system is asked anything (the deepest mount point that
+  is a whole-component ancestor). No `MNT_LOCAL` → remote, and the path is never contacted;
+  `MNT_REMOVABLE`, or a mount under `/Volumes` → removable, gated by `WATCH_REMOVABLE_VOLUMES`;
+  anything else is local and is then asked to be a directory. The mount-table reader is
+  `macos_update`'s own, which now also carries each record's flags.
+- **Which names.** `program_names_carry_their_kind()` is false off Windows: a file is a program by
+  its mode bits, so every name a `PATH` directory reports is news, and a `PATHEXT` the environment
+  happens to carry filters nothing.
+- **The snapshot** is the inherited process environment, as (b)10 says; nothing new.
+- **The watches** are ticket 2's: one steward member, one `DirWatch` (one FSEvents stream) per
+  directory. (a)'s one-stream `DirWatchSet` is not built, for the reason ticket 2 gave: ticket 1
+  left no set seam, and the brief for this ticket asks only for the platform rule.
+
+### (g)8 · Ticket 2's review nits
+
+`GetDriveTypeW`'s answer is compared with `DRIVE_REMOTE` and `DRIVE_REMOVABLE`. `GetDriveTypeW` is
+in the registry's vocabulary ("counted by call site, does not wait"), named in the Windows PATH
+classification's effects row and in the lint probe. The CHANGELOG sentence of ticket 2 stays as it
+is, because macOS now has its PATH ear.
+
+### Departures
+
+(g)2's answer type departs from (c)4's signature, for the reason given. (g)3 reads (b)11's
+"failure gives no declaration" as today's failure outcome, which is what Q5 keeps. (g)7 keeps one
+stream per `PATH` directory instead of (a)'s `DirWatchSet`. A fourth departure is process, not design: the six commits of ticket 3 were cut by hunk from one finished tree and only the final head was built and tested; two intermediate commits do not compile on their own (a `use` placed inside a struct body in 41887c1e; `Locale` listed in a re-export instead of the enum in 8853bd33). The branch lands by fast-forward as a whole, so this is cosmetic for the history and said here so nobody bisects into them.
+
+## Revision (h), 2026-10-11, ticket 4 as built (T-PALETTE-DEEP)
+
+T-PALETTE-DEEP is built as (c)9 item 5 and (e)4 item 4 specify, under the ticket's brief.
+What follows records the bounds and the ownership chosen by the build.
+
+### (h)1 · One retained root, one steward member, one clock
+
+Every retained palette root has one named tree member on the watch steward. Its callback admits
+overflow and paths the bounded walk could hold, stamps a mailbox and sends `FileIndexHeard`; the
+application owns one `WatchClock` per root and sends due work to the existing below-normal index
+worker. One walk may run and one clock debt may remain, so watch-driven walks stay at most one per
+two seconds per root. A clean, heard root costs no walk when the palette opens; missing, dirty and
+unheard roots keep the reader-triggered fallback, and a failed watch is tried once on the next open
+or volume arrival.
+
+### (h)2 · The two traversal bounds and E-5
+
+`INDEX_MAX_ENTRIES` independently bounds retained files and names read from one directory.
+`INDEX_MAX_DIRECTORIES = 30,000` bounds all directories enqueued, with the root first; either
+refusal sets the same `truncated` truth. E-5's first pass over this repository took 14.053 ms,
+retained 1,916 files and 588,814 bytes of indexed payload, enqueued and read 287 directories with
+a queue high-water of 83, and measured a 1,556,480-byte peak working-set delta while a held index
+and its replacement coexisted. The second pass took 11.965 ms. The chosen directory bound is more
+than one hundred times this real repository's count.
+
+### Departures
+
+None. The per-root watch, clock-gated rerun, unheard fallback and independent traversal bounds are
+built as specified.

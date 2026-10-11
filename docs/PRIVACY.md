@@ -265,12 +265,19 @@ profile. Do not put a secret in one.
   and looks for the one winget wrote for Folio, to see whether it names this
   copy's folder. Other programs' entries are passed over. What it found is one
   line of `diagnostics.log`, naming winget's entry and no folder.
-- **Program-search folders are watched locally.** On Windows, each program walk
-  reads the current account's `PATH` and `PATHEXT`, then keeps a shallow
+- **Program-search folders are watched locally.** On Windows and macOS, each
+  program walk reads the `PATH` it searches (on Windows the current account's,
+  with `PATHEXT`; on macOS the one Folio was started with), then keeps a shallow
   filesystem watch on each existing local directory named by `PATH` so a newly
   installed program can appear without another menu opening. It reads entry
-  names only when Windows reports a change; it does not read file contents,
+  names only when the system reports a change; it does not read file contents,
   contact remote `PATH` entries, or watch removable-volume entries.
+- **Your region, on macOS.** Folio asks the system for your region setting
+  (`defaults read -g AppleLocale`) and the list of installed locales
+  (`locale -a`) when it starts, again when the system says your region
+  changed, and again when a pane is born after the last reading failed, to
+  tell each new pane its `LANG`. Nothing is written, and the
+  answer stays in memory.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
   unless you set it. `docs/BT-ENVIRONMENT.md` lists all of them.
@@ -449,6 +456,7 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
 - **以上五项加上更新检查，正是初次设置卡所问的全部。** 它在从未运行过 Folio 的机器上
   出现一次，自己什么也不写：按下**完成**按的就是上面列举的那几行设置，而**暂不**一行
   也不按。卡本身记下的只有一件事：它已经出现过。
+<!-- zh: pending T-OS-SIGNALS-MAC — the English list above now names macOS in the program-search item and adds the "Your region, on macOS" item -->
 - **程序搜索文件夹只在本机受到监视。** Windows 上每次程序扫描都会读取当前账户的
   `PATH` 和 `PATHEXT`，并浅层监视 `PATH` 中现有的本地文件夹，让新安装的程序不必等到
   再次打开菜单就能出现。只有 Windows 报告变化时才读取条目名称；不读取文件内容，

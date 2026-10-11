@@ -37,6 +37,7 @@ disallowed-methods = [
     { path = "windows::Win32::UI::Shell::ShellExecuteExW", reason = "waits for the shell and its UAC surface" },
     { path = "windows::Win32::System::Threading::SetEvent", reason = "counted by call site, does not wait" },
     { path = "windows::Win32::Foundation::CloseHandle", reason = "counted by call site, does not wait" },
+    { path = "windows::Win32::Storage::FileSystem::GetDriveTypeW", reason = "counted by call site, does not wait" },
     { path = "libc::write", reason = "counted by call site, does not wait" },
     { path = "libc::close", reason = "counted by call site, does not wait" },
 ]

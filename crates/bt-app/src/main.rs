@@ -107,6 +107,7 @@ mod lane_contract_tests;
 mod launch_wire;
 mod layout_tables;
 mod linebreak;
+mod locale_declaration;
 mod marks;
 mod menubar;
 mod mouse_trace;
@@ -478,6 +479,13 @@ enum AppEvent {
     /// A watched PATH directory has executable-name news. This only brings the loop round;
     /// `ProgramsEar` owns the timestamps and coalescing.
     PathDirectoryChanged,
+    /// **The user's locale changed** (T-OS-SIGNALS-MAC; `bt_platform::SystemNews::Locale`). The
+    /// locale cell is asked to read it again, for the panes born after; a running shell keeps
+    /// what it was told (owner Q4).
+    LocaleChanged,
+    /// **A locale reading landed** (`locale_declaration`). Carries nothing: the answer is in the
+    /// cell by the time this is sent. Every window lands the panes that waited in birth for it.
+    LocaleAnswered,
     /// A named tree watch heard a path that can affect its palette index. The timestamp waits in
     /// `IndexEar`; this only brings the loop round to its event-armed clock.
     FileIndexHeard,
@@ -855,6 +863,7 @@ impl AppEvent {
             bt_platform::SystemNews::Display => Self::DisplayChanged,
             bt_platform::SystemNews::InputLanguage => Self::InputLanguageChanged,
             bt_platform::SystemNews::Volumes { arrived } => Self::VolumesChanged { arrived },
+            bt_platform::SystemNews::Locale => Self::LocaleChanged,
         }
     }
 
@@ -902,6 +911,7 @@ impl AppEvent {
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
             | Self::VolumesChanged { .. }
+            | Self::LocaleChanged
             | Self::DisplayChanged
             | Self::InputLanguageChanged
             | Self::WindowChromeChanged
@@ -911,6 +921,8 @@ impl AppEvent {
             // The station winit's own pan event would have been charged to:
             // this is the same gesture, answered by the system instead.
             Self::TouchPanned => Station::EventPan,
+            // The births a reading lands are charged where every birth's landing is.
+            Self::LocaleAnswered => Station::PtyBirth,
             // The writes a committed trial held back: documents, the marks
             // migration, the PSReadLine upgrade and the registrations, each
             // one write — charged a station of their own so a slow one is named.
@@ -11948,6 +11960,10 @@ enum BirthWait {
     /// The walk counts this pane as waiting while it is held, so every walk asked meanwhile runs in
     /// the band of a walk a pane waits on (`programs_lane::PaneWaits`).
     Programs { _waits: programs_lane::PaneWaits },
+    /// The system's locale, which its shell is to be told and no reading has answered yet: a
+    /// cold first pane on macOS (T-OS-SIGNALS-MAC, owner Q5). It is made again when a reading
+    /// lands, which the reading's one budget bounds.
+    Locale,
     /// Its pseudoconsole and process, asked of `bt-pty-birth` with everything decided.
     Shell(ShellLanding),
 }
@@ -39271,13 +39287,20 @@ mod shell_birth_tests {
         // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
         // locale and its line editor reads the CJK typed below as meta keys.
         #[cfg(not(windows))]
-        let command = bt_platform::system_locale_declaration()
-            .into_iter()
-            .flat_map(bt_platform::LocaleDeclaration::variables)
-            .fold(
-                bt_pty::PtyCommand::new("/bin/sh"),
-                |command, (name, value)| command.env(*name, value),
-            );
+        let command = bt_platform::spawn_at_priority(
+            "bt-locale-test",
+            bt_platform::ThreadPriority::Normal,
+            |worker| bt_platform::read_system_locale_declaration(worker).declaration,
+        )
+        .expect("a worker")
+        .join()
+        .expect("the reading answers")
+        .iter()
+        .flat_map(bt_platform::LocaleDeclaration::variables)
+        .fold(
+            bt_pty::PtyCommand::new("/bin/sh"),
+            |command, (name, value)| command.env(*name, value),
+        );
         let size = PtySize::cells(grid().columns, grid().rows);
         TestShell::spawn(command, size).map(TestShell::into_session)
     }
@@ -39833,9 +39856,13 @@ mod shell_birth_tests {
         });
         leaf.successor = Some(Box::new(waiting));
         assert!(leaf.restart_in_flight());
-        assert_eq!(births_due(&leaf, &|_| false), [], "the row is unknown");
         assert_eq!(
-            births_due(&leaf, &|_| true),
+            births_due(&leaf, &|_| false, true),
+            [],
+            "the row is unknown"
+        );
+        assert_eq!(
+            births_due(&leaf, &|_| true, true),
             [(BirthAt::Successor, BirthDue::Rows)],
             "the walk answered: the successor is due to be made again"
         );
@@ -39852,7 +39879,7 @@ mod shell_birth_tests {
         open.send(()).expect("the worker waits at the gate");
         woken_by_a_shell(&heard);
         assert_eq!(
-            births_due(&leaf, &|_| true),
+            births_due(&leaf, &|_| true, true),
             [(BirthAt::Successor, BirthDue::Shell)]
         );
         let SuccessorLanding::Landed(successor) =
@@ -39864,6 +39891,57 @@ mod shell_birth_tests {
         assert!(!leaf.restart_in_flight(), "the menu row is offered again");
         drop((leaf, successor));
         drop(hygiene.recv().expect("the shell's directory"));
+    }
+
+    /// RED (T-OS-SIGNALS-MAC, owner Q5) — **a cold first pane waiting in birth for its locale
+    /// draws its own empty grid, keeps what is typed, and is due only once a reading has
+    /// finished**, to be made again with its shell then (B2's road: `Runtime::land_pane_birth`).
+    ///
+    /// MUTATION: `birth_due` answering `Rows` for a `Locale` wait whatever the cell holds — the
+    /// pane is made again before any reading has finished, and born with nothing to be told.
+    #[test]
+    fn a_pane_waiting_for_its_locale_keeps_what_is_typed_and_is_due_once_a_reading_finishes() {
+        let decision = decided(Started::AsAsked);
+        let seed = seed_of(profiles::fallback_profile_id());
+        let mut leaf = bare(&decision, &seed);
+        finish_leaf_birth(&mut leaf, None, &decision, &seed, None, true).expect("a pane in birth");
+        leaf.birth = Some(PaneBirth {
+            seed: seed.clone(),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+            waiting: BirthWait::Locale,
+        });
+        let frame = leaf
+            .session
+            .viewport_frame(&mut leaf.projection)
+            .expect("a pane in birth projects a frame");
+        assert!(frame_matches_grid(&frame, leaf.grid), "of its own grid");
+        for line in ["echo 区域-region\r", "ls 目录\r"] {
+            assert_eq!(
+                offer_pty_input(leaf.input_target(), line.as_bytes(), "typed").expect("held"),
+                PtyInput::HeldForBirth
+            );
+        }
+        assert_eq!(
+            births_due(&leaf, &|_| true, false),
+            [],
+            "no reading has finished"
+        );
+        assert_eq!(
+            births_due(&leaf, &|_| true, true),
+            [(BirthAt::Pane, BirthDue::Rows)],
+            "a reading finished: the pane is made again, asking for its shell"
+        );
+        let mut delivered = Vec::new();
+        leaf.birth
+            .as_ref()
+            .expect("still in birth")
+            .deliver(|held| {
+                delivered.extend_from_slice(held);
+                Ok(())
+            })
+            .expect("delivered");
+        assert_eq!(delivered, "echo 区域-region\rls 目录\r".as_bytes());
     }
 
     /// RED (round 2, nit 5) — **a launch shell that could not start completes the startup
@@ -40003,7 +40081,9 @@ fn create_leaf_session(
     // asked for the rows it waits on, and `Runtime::land_births` comes back here with the
     // answers once they land.
     let decided = birth_here(seed, stored_default, programs);
-    let in_birth = decided.is_err();
+    let rows_wait = decided.is_err();
+    // The seed as it was handed in: a pane made in birth is made again from it at its landing.
+    let asked_seed = seed;
     let (seed, started): (LeafSeed, Started) = match decided {
         Ok(decided) => decided,
         Err(waiting) => {
@@ -40016,6 +40096,21 @@ fn create_leaf_session(
         Started::AsAsked | Started::Nothing => seed.profile.as_str(),
         Started::FellBack(to) => to.as_str(),
     };
+    // **And the locale its shell will be told** (T-OS-SIGNALS-MAC; owner Q5). A pane whose shell
+    // would be told the system's locale — it starts a program and inherits no locale variable,
+    // and its profile names none — asks the cell here and never waits for a reading: the cell
+    // answers from what it holds, and asks again when the newest reading failed. Only when no
+    // reading has finished at all (a cold first pane) is the pane made **in birth**, on the
+    // rows' road, and born when a reading lands (`Runtime::land_births`), within the reading's
+    // one budget.
+    let locale_waits = !rows_wait
+        && probe_input.is_none()
+        && programs.program(spawn_profile).is_some()
+        && profiles::row_of(spawn_profile).is_some_and(|row| {
+            shell_integration::listens_for_a_locale(&bt_pty::SystemShellEnvironment, &row.env)
+        })
+        && locale_declaration::at_birth() == locale_declaration::AtBirth::Waiting;
+    let in_birth = rows_wait || locale_waits;
     // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
     // this process, because the module that is broken is the one `Windows
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
@@ -40219,11 +40314,15 @@ fn create_leaf_session(
             finish_leaf_birth(&mut leaf, None, &decision, seed, probe_input, in_birth)?;
             if in_birth {
                 leaf.birth = Some(PaneBirth {
-                    seed: seed.clone(),
+                    seed: asked_seed.clone(),
                     probe_input: probe_input.map(<[u8]>::to_vec),
                     typed: std::cell::RefCell::default(),
-                    waiting: BirthWait::Programs {
-                        _waits: programs_lane::pane_waits(),
+                    waiting: if locale_waits {
+                        BirthWait::Locale
+                    } else {
+                        BirthWait::Programs {
+                            _waits: programs_lane::pane_waits(),
+                        }
                     },
                 });
             }
@@ -40667,8 +40766,9 @@ enum BirthAt {
     Successor,
 }
 
-/// **What a due birth is due for**: its rows answered (made again through `create_leaf_session`,
-/// asking for its shell), or its shell answered (landed, [`land_shell_birth`]).
+/// **What a due birth is due for**: its rows or its locale answered (made again through
+/// `create_leaf_session`, asking for its shell), or its shell answered (landed,
+/// [`land_shell_birth`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BirthDue {
     Rows,
@@ -40695,26 +40795,33 @@ impl LeafSession {
 }
 
 /// What one birth is due for now, if anything: a row-waiting birth whose rows `rows_decide`, a
-/// shell birth whose shell has answered.
-fn birth_due(birth: &PaneBirth, rows_decide: &dyn Fn(&LeafSeed) -> bool) -> Option<BirthDue> {
+/// locale-waiting birth once `locale_settled` (a reading has finished), a shell birth whose shell
+/// has answered.
+fn birth_due(
+    birth: &PaneBirth,
+    rows_decide: &dyn Fn(&LeafSeed) -> bool,
+    locale_settled: bool,
+) -> Option<BirthDue> {
     match &birth.waiting {
         BirthWait::Programs { .. } => rows_decide(&birth.seed).then_some(BirthDue::Rows),
+        BirthWait::Locale => locale_settled.then_some(BirthDue::Rows),
         BirthWait::Shell(landing) => landing.shell.answered().then_some(BirthDue::Shell),
     }
 }
 
 /// **The one scan of a pane's births** (round 2): both places a birth can sit — the pane's own
-/// and a *Restart shell* successor's — in both of its waits, so no birth is one no landing pass
+/// and a *Restart shell* successor's — in each of its waits, so no birth is one no landing pass
 /// looks at.
 fn births_due(
     leaf: &LeafSession,
     rows_decide: &dyn Fn(&LeafSeed) -> bool,
+    locale_settled: bool,
 ) -> Vec<(BirthAt, BirthDue)> {
     [BirthAt::Pane, BirthAt::Successor]
         .into_iter()
         .filter_map(|at| {
             leaf.birth_at(at)
-                .and_then(|birth| birth_due(birth, rows_decide))
+                .and_then(|birth| birth_due(birth, rows_decide, locale_settled))
                 .map(|due| (at, due))
         })
         .collect()
@@ -43887,6 +43994,14 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::CopilotProbed);
             });
         }
+        // And the locale reading's (T-OS-SIGNALS-MAC): a cold first pane waits in birth for its
+        // first answer, and that pane may be in a window nobody is touching.
+        {
+            let proxy = proxy.clone();
+            locale_declaration::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::LocaleAnswered);
+            });
+        }
         // **And the update check's**, which is the fourth of these and the only
         // one whose answer comes off a socket rather than off this machine. Its
         // three parts are deliberately three calls rather than one: the file is
@@ -44065,6 +44180,11 @@ impl Runtime<'_> {
             &settings_store.loaded().default_profile,
             &[],
         );
+        // **And the locale a new pane is told, on the same terms** (T-OS-SIGNALS-MAC): read on
+        // its own worker from here, so on an ordinary Mac the first pane finds it answered — two
+        // child processes take tens of milliseconds, inside the window's and the GPU's creation.
+        // Nothing is read where the platform declares no locale.
+        locale_declaration::ask(locale_declaration::LocaleTrigger::Launch);
         // The pin table, on the same terms and for a narrower reason: the root
         // menu's width is measured from the folder names in it, and a PINNED
         // section that arrived after the first measurement would be a menu drawn
@@ -67274,6 +67394,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             })
             .unwrap_or(Ok(())),
             AppEvent::PathDirectoryChanged => Ok(()),
+            // Asked again, for new panes only (owner Q4): no window is touched.
+            AppEvent::LocaleChanged => {
+                locale_declaration::ask(locale_declaration::LocaleTrigger::LocaleChanged);
+                Ok(())
+            }
+            AppEvent::LocaleAnswered => self.for_each_window(|runtime| runtime.land_births()),
             AppEvent::FileIndexHeard => Ok(()),
             AppEvent::ProgramsAnswered => self.adopt_program_walk(),
             // **Every window asks its display again** (T-FRESH-FACTS): a rate changed on the

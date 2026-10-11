@@ -106,13 +106,14 @@ use objc2_app_kit::{
     NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
     NSWindowDidResignKeyNotification, NSWindowDidResizeNotification, NSWindowDidUpdateNotification,
     NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
-    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidMountNotification,
+    NSWorkspaceDidUnmountNotification,
 };
 use objc2_core_foundation::{CFRetained, CFUUID};
 use objc2_core_graphics::CGDirectDisplayID;
 use objc2_foundation::{
-    NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification,
-    NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming,
+    NSArray, NSCurrentLocaleDidChangeNotification, NSDictionary, NSKeyValueObservingOptions,
+    NSLocale, NSNotification, NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming,
     NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
     ns_string,
 };
@@ -1912,7 +1913,7 @@ pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
 /// `zh-Hans-CN`, which is the shape `i18n::resolve` reads a primary subtag out
 /// of. The reader's *language*, which is the fact this door is about, and
 /// deliberately not `AppleLocale`: that one is the formatting locale
-/// `system_locale_declaration` already reads for a child process's locale, and
+/// `read_system_locale_declaration` already reads for a child process's locale, and
 /// the two are allowed to differ.
 ///
 /// `en` when the system names none, which is the portable arm's answer and the
@@ -1931,12 +1932,10 @@ pub fn os_ui_language() -> String {
 
 // ── the system settings watch (M1-3) ───────────────────────────────────────
 
-/// **The system saying a preference this program reads has moved.**
+/// **The system saying a fact this program reads has moved.**
 ///
-/// The twin of the `WM_SETTINGCHANGE` subclass, and it watches the same two
-/// facts that page changes: the appearance (light/dark) and the reduce-motion
-/// switch. Two subscriptions rather than one broadcast, because macOS has no
-/// single "something in Settings moved" message:
+/// The twin of the `WM_SETTINGCHANGE` subclass, and it watches what that one does. macOS has no
+/// single "something in Settings moved" message, so it is several subscriptions:
 ///
 /// * **KVO on `NSApplication.effectiveAppearance`** — the application's
 ///   appearance, which no window's own `appearance` override touches (see
@@ -1945,12 +1944,23 @@ pub fn os_ui_language() -> String {
 ///   is what replaces it). AppKit recomputes it when the desktop switches, so
 ///   this fires for exactly the change the reader made.
 /// * **`NSWorkspace`'s accessibility-display notification** — the one the system
-///   posts when Reduce Motion and its neighbours move.
+///   posts when Reduce Motion and its neighbours move. With the appearance, told to the wake as
+///   [`crate::SystemNews::Preferences`].
 /// * **`NSApplicationDidChangeScreenParametersNotification`** (T-FRESH-FACTS) —
 ///   a display was added, removed or changed mode, which is when the rate a
 ///   window paces its frames to can move without the window moving. Told to the
-///   wake as [`crate::SystemNews::Display`]; the other two are
-///   [`crate::SystemNews::Preferences`].
+///   wake as [`crate::SystemNews::Display`].
+/// * **`NSWorkspace`'s did-mount and did-unmount notifications** (T-OS-SIGNALS-MAC) — a volume
+///   came or went; the second is posted even when a volume vanishes at once. Told to the wake as
+///   [`crate::SystemNews::Volumes`]. A watch on a volume that went ends through its own stream,
+///   not through this.
+/// * **`NSCurrentLocaleDidChangeNotification`** (T-OS-SIGNALS-MAC) — the user's locale changed,
+///   which is what a new pane's `LANG` is read from. Told to the wake as
+///   [`crate::SystemNews::Locale`].
+///
+/// Each notification is registered on the centre that posts it — the workspace's own centre for
+/// the workspace's, the default centre for the application's and Foundation's — and removed from
+/// that same centre ([`NotificationRegistrations`]).
 ///
 /// **What the callback may do is nudge, and nothing else.** It runs inside
 /// AppKit's own delivery, on a turn this program did not choose; the reading
@@ -1963,13 +1973,15 @@ pub fn os_ui_language() -> String {
 /// anyway and a duplicate wake costs one re-read on a turn that was going to
 /// happen.
 pub struct SystemSettingsWatch {
-    /// The observer both subscriptions are registered with. Held because
-    /// unregistering needs it and because nothing else owns it.
+    /// The observer the appearance is observed with. Held because unregistering needs it and
+    /// because nothing else owns it.
     observer: Retained<SystemSettingsObserver>,
     /// The object the appearance is observed on. Held for the same reason: the
     /// `removeObserver:` has to name it, and reaching for `sharedApplication`
     /// again in `Drop` would need a thread marker `Drop` cannot ask for.
     application: Retained<NSApplication>,
+    /// The observer's notification registrations, removed from their centres when this drops.
+    _notifications: NotificationRegistrations,
 }
 
 impl SystemSettingsWatch {
@@ -1999,32 +2011,11 @@ impl SystemSettingsWatch {
                 std::ptr::null_mut::<c_void>(),
             );
         }
-        // SAFETY: the observer outlives the registration for the same reason,
-        // and it answers the selector named here.
-        unsafe {
-            NSWorkspace::sharedWorkspace()
-                .notificationCenter()
-                .addObserver_selector_name_object(
-                    &observer,
-                    sel!(folioSystemPreferencesChanged:),
-                    Some(NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
-                    None,
-                );
-        }
-        // SAFETY: the observer outlives the registration (`Drop` removes it from
-        // this centre), it answers the selector named here, and the name is
-        // AppKit's own constant, never written by anybody.
-        unsafe {
-            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
-                &observer,
-                sel!(folioDisplayChanged:),
-                Some(NSApplicationDidChangeScreenParametersNotification),
-                None,
-            );
-        }
+        let notifications = NotificationRegistrations::register(&observer);
         Ok(Self {
             observer,
             application,
+            _notifications: notifications,
         })
     }
 }
@@ -2032,10 +2023,79 @@ impl SystemSettingsWatch {
 impl Drop for SystemSettingsWatch {
     fn drop(&mut self) {
         // SAFETY: dropped on the thread that installed it (the value is not
-        // `Send`), and all three registrations are the ones made above.
+        // `Send`), and this is the key-value registration made above. The notification
+        // registrations are removed when the field holding them drops, right after this.
         unsafe {
             self.application
                 .removeObserver_forKeyPath(&self.observer, ns_string!("effectiveAppearance"));
+        }
+    }
+}
+
+/// **The observer's notification registrations**, each on the centre that posts it, and each
+/// removed from that same centre on `Drop`: the workspace's centre for the workspace's three
+/// notifications, the default centre for the two the application and Foundation post.
+///
+/// Apart from the appearance's key-value registration because none of these needs the window
+/// thread: a centre delivers on the thread that posts.
+struct NotificationRegistrations {
+    observer: Retained<SystemSettingsObserver>,
+}
+
+impl NotificationRegistrations {
+    /// Register `observer` for the five notifications.
+    fn register(observer: &Retained<SystemSettingsObserver>) -> Self {
+        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: the observer outlives every registration (`Drop` removes it from this centre),
+        // it answers each selector named here, and the names are AppKit's own constants, never
+        // written by anybody.
+        unsafe {
+            for (selector, name) in [
+                (
+                    sel!(folioSystemPreferencesChanged:),
+                    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+                ),
+                (sel!(folioVolumeMounted:), NSWorkspaceDidMountNotification),
+                (
+                    sel!(folioVolumeUnmounted:),
+                    NSWorkspaceDidUnmountNotification,
+                ),
+            ] {
+                workspace.addObserver_selector_name_object(observer, selector, Some(name), None);
+            }
+        }
+        // SAFETY: as above, for the default centre and its two names (AppKit's and Foundation's
+        // own constants).
+        unsafe {
+            for (selector, name) in [
+                (
+                    sel!(folioDisplayChanged:),
+                    NSApplicationDidChangeScreenParametersNotification,
+                ),
+                (
+                    sel!(folioLocaleChanged:),
+                    NSCurrentLocaleDidChangeNotification,
+                ),
+            ] {
+                NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                    observer,
+                    selector,
+                    Some(name),
+                    None,
+                );
+            }
+        }
+        Self {
+            observer: observer.clone(),
+        }
+    }
+}
+
+impl Drop for NotificationRegistrations {
+    fn drop(&mut self) {
+        // SAFETY: the observer is the one registered above, on these two centres; removing it
+        // from a centre takes every registration it holds there.
+        unsafe {
             NSWorkspace::sharedWorkspace()
                 .notificationCenter()
                 .removeObserver(&self.observer);
@@ -2044,7 +2104,7 @@ impl Drop for SystemSettingsWatch {
     }
 }
 
-/// What the three subscriptions call, and all it may do.
+/// What the subscriptions call, and all it may do.
 struct SystemSettingsWake(Box<dyn Fn(crate::SystemNews)>);
 
 define_class!(
@@ -2084,6 +2144,24 @@ define_class!(
         fn display_changed(&self, _notification: Option<&NSNotification>) {
             (self.ivars().0)(crate::SystemNews::Display);
         }
+
+        /// A volume was mounted.
+        #[unsafe(method(folioVolumeMounted:))]
+        fn volume_mounted(&self, _notification: Option<&NSNotification>) {
+            (self.ivars().0)(crate::SystemNews::Volumes { arrived: true });
+        }
+
+        /// A volume was unmounted, or vanished.
+        #[unsafe(method(folioVolumeUnmounted:))]
+        fn volume_unmounted(&self, _notification: Option<&NSNotification>) {
+            (self.ivars().0)(crate::SystemNews::Volumes { arrived: false });
+        }
+
+        /// The user's locale changed.
+        #[unsafe(method(folioLocaleChanged:))]
+        fn locale_changed(&self, _notification: Option<&NSNotification>) {
+            (self.ivars().0)(crate::SystemNews::Locale);
+        }
     }
 
     unsafe impl NSObjectProtocol for SystemSettingsObserver {}
@@ -2096,6 +2174,82 @@ impl SystemSettingsObserver {
         // allocation whose ivars are set.
         unsafe { msg_send![super(this), init] }
     }
+}
+
+// ── the PATH ear's directories (T-OS-SIGNALS-MAC) ──────────────────────────
+
+/// `MNT_REMOVABLE` of `<sys/mount.h>`: the file system is on removable media. The `libc` crate
+/// does not name it.
+const MNT_REMOVABLE: u32 = 0x0000_0200;
+
+/// Where macOS mounts the volumes a person attaches: a disk, a stick, a card, a disk image.
+const ATTACHED_VOLUMES: &str = "/Volumes";
+
+/// **Classify one absolute `PATH` directory without ever contacting a network server.**
+///
+/// The mount the path lies under is found in the mount table, which is read without waiting on
+/// any file system ([`crate::macos_update::mount_table`]); only a path on a local volume reaches
+/// the file system, and then only to ask that it is a directory.
+pub(crate) fn program_path_directory(
+    worker: &crate::admission::WorkerCtx,
+    path: &std::path::Path,
+) -> std::io::Result<crate::ProgramPathDirectory> {
+    program_path_directory_in(worker, path, &crate::macos_update::mount_table()?)
+}
+
+/// [`program_path_directory`] against the mount table `mounts`.
+fn program_path_directory_in(
+    _worker: &crate::admission::WorkerCtx,
+    path: &std::path::Path,
+    mounts: &[crate::macos_update::MountRecord],
+) -> std::io::Result<crate::ProgramPathDirectory> {
+    use crate::ProgramPathDirectory;
+
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "PATH entry is not absolute",
+        ));
+    }
+    let kind = mount_kind(path, mounts).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no mount in the mount table holds this PATH entry",
+        )
+    })?;
+    if kind == ProgramPathDirectory::Remote {
+        return Ok(kind);
+    }
+    if !std::fs::metadata(path)?.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "PATH entry is not a directory",
+        ));
+    }
+    Ok(kind)
+}
+
+/// **The kind of volume `path` lies on, from the mount table alone**: the record whose mount
+/// point is the deepest ancestor of `path`, compared component by component. A file system
+/// without `MNT_LOCAL` is remote; a local one on removable media, or attached under
+/// `/Volumes`, is removable; anything else is local. `None` when no record holds the path.
+fn mount_kind(
+    path: &std::path::Path,
+    mounts: &[crate::macos_update::MountRecord],
+) -> Option<crate::ProgramPathDirectory> {
+    use crate::ProgramPathDirectory;
+
+    let mount = mounts
+        .iter()
+        .filter(|mount| path.starts_with(&mount.point))
+        .max_by_key(|mount| mount.point.components().count())?;
+    Some(if mount.flags & libc::MNT_LOCAL.unsigned_abs() == 0 {
+        ProgramPathDirectory::Remote
+    } else if mount.flags & MNT_REMOVABLE != 0 || mount.point.starts_with(ATTACHED_VOLUMES) {
+        ProgramPathDirectory::Removable
+    } else {
+        ProgramPathDirectory::Local
+    })
 }
 
 #[cfg(test)]
@@ -2121,6 +2275,63 @@ mod tests {
             .join()
             .expect("the worker answers");
         assert_eq!(asked, system);
+    }
+
+    /// RED (T-OS-SIGNALS-MAC) — **a volume mounting or unmounting, and the locale changing, each
+    /// reach the wake as their own news; and a drop removes exactly what was added**, from the
+    /// centre each was added to. The notifications are posted on the centres that post them for
+    /// real (a centre delivers on the posting thread, so no window thread is needed); after the
+    /// registrations drop, the same five posts reach nothing.
+    ///
+    /// MUTATIONS: register only `didMount` — the unmount is not heard; drop the workspace centre's
+    /// removal from `NotificationRegistrations`' `Drop` — the posts after the drop are heard.
+    #[test]
+    fn volumes_and_the_locale_are_heard_and_a_drop_removes_exactly_what_was_added() {
+        use std::sync::mpsc;
+        let (said, heard) = mpsc::channel();
+        let observer = SystemSettingsObserver::new(Box::new(move |news| {
+            let _ = said.send(news);
+        }));
+        let registrations = NotificationRegistrations::register(&observer);
+        let workspace = NSWorkspace::sharedWorkspace();
+        let post_all = || {
+            // SAFETY: each name is the platform's own constant, posted on the centre that posts
+            // it, with the object the platform posts it with (the workspace) or none.
+            unsafe {
+                let centre = workspace.notificationCenter();
+                for name in [
+                    NSWorkspaceDidMountNotification,
+                    NSWorkspaceDidUnmountNotification,
+                    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+                ] {
+                    centre.postNotificationName_object(name, Some(&workspace));
+                }
+                for name in [
+                    NSApplicationDidChangeScreenParametersNotification,
+                    NSCurrentLocaleDidChangeNotification,
+                ] {
+                    NSNotificationCenter::defaultCenter().postNotificationName_object(name, None);
+                }
+            }
+        };
+        post_all();
+        assert_eq!(
+            heard.try_iter().collect::<Vec<_>>(),
+            vec![
+                crate::SystemNews::Volumes { arrived: true },
+                crate::SystemNews::Volumes { arrived: false },
+                crate::SystemNews::Preferences,
+                crate::SystemNews::Display,
+                crate::SystemNews::Locale,
+            ]
+        );
+        drop(registrations);
+        post_all();
+        assert_eq!(
+            heard.try_iter().collect::<Vec<_>>(),
+            Vec::new(),
+            "a registration outlived its drop"
+        );
     }
 
     use super::*;
@@ -2513,5 +2724,112 @@ mod tests {
     #[test]
     fn one_notch_is_one_line_because_the_system_has_already_scaled_it() {
         assert_eq!(wheel_scroll_amount(), Ok(WheelScrollAmount::Lines(1)));
+    }
+
+    /// A mount table record for the tests below.
+    fn mounted(point: &str, flags: u32) -> crate::macos_update::MountRecord {
+        crate::macos_update::MountRecord {
+            point: std::path::PathBuf::from(point),
+            flags,
+        }
+    }
+
+    /// `MNT_LOCAL`, as the mount table's flags carry it.
+    fn local() -> u32 {
+        libc::MNT_LOCAL.unsigned_abs()
+    }
+
+    /// RED (T-OS-SIGNALS-MAC) — **a `PATH` directory takes the kind of the deepest mount it lies
+    /// under**: a network file system is remote, a local one attached under `/Volumes` or on
+    /// removable media is removable, and the system's own volumes are local. Mount points are
+    /// matched by whole components, so `/opt/net` holds nothing of `/opt/network`.
+    ///
+    /// MUTATIONS: read the shallowest mount instead of the deepest (`min_by_key`) — every path is
+    /// the root's, local; ignore `MNT_LOCAL` — the network mounts read local; compare mount points
+    /// as strings — `/opt/network/bin` reads remote.
+    #[test]
+    fn a_path_directory_takes_the_kind_of_the_deepest_mount_it_lies_under() {
+        use crate::ProgramPathDirectory::{Local, Remote, Removable};
+        let mounts = [
+            mounted("/", local()),
+            mounted("/System/Volumes/Data", local()),
+            mounted("/Volumes/外接盘", local()),
+            mounted("/Volumes/Card", local() | MNT_REMOVABLE),
+            mounted("/Volumes/共享", 0),
+            mounted("/opt/net", 0),
+        ];
+        for (path, kind) in [
+            ("/opt/homebrew/bin", Local),
+            ("/System/Volumes/Data/工具/bin", Local),
+            ("/Volumes/外接盘/bin", Removable),
+            ("/Volumes/Card/bin", Removable),
+            ("/Volumes/共享/工具/bin", Remote),
+            ("/opt/net/bin", Remote),
+            ("/opt/network/bin", Local),
+        ] {
+            assert_eq!(
+                mount_kind(std::path::Path::new(path), &mounts),
+                Some(kind),
+                "{path}"
+            );
+        }
+    }
+
+    /// RED (T-OS-SIGNALS-MAC) — **a remote `PATH` directory is classified without being
+    /// contacted**: a path under a network mount that does not exist answers `Remote`, not the
+    /// file system's "not found", because the file system was never asked. A local one is asked,
+    /// and a relative entry is refused before anything.
+    ///
+    /// MUTATION: ask `std::fs::metadata` before the mount table's kind — the remote path answers
+    /// `NotFound`.
+    #[test]
+    fn a_remote_path_directory_is_classified_without_contacting_it() {
+        crate::spawn_at_priority(
+            "bt-path-directory-test",
+            crate::ThreadPriority::Normal,
+            |worker| {
+                let gone = std::env::temp_dir().join("folio-no-such-share-共享");
+                let mounts = [mounted("/", local()), mounted(gone.to_str().unwrap(), 0)];
+                assert_eq!(
+                    program_path_directory_in(worker, &gone.join("bin"), &mounts)
+                        .expect("classified"),
+                    crate::ProgramPathDirectory::Remote
+                );
+                let local_and_gone = [mounted("/", local())];
+                assert_eq!(
+                    program_path_directory_in(worker, &gone.join("bin"), &local_and_gone)
+                        .expect_err("a local path is asked")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                assert_eq!(
+                    program_path_directory_in(worker, std::path::Path::new("bin/工具"), &mounts)
+                        .expect_err("relative")
+                        .kind(),
+                    std::io::ErrorKind::InvalidInput
+                );
+            },
+        )
+        .expect("a worker")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    /// PIN (T-OS-SIGNALS-MAC) — **this Mac's own `/usr/bin` is a local `PATH` directory**, read
+    /// through the real mount table on a worker.
+    #[test]
+    fn this_macs_usr_bin_is_a_local_path_directory() {
+        let kind = crate::spawn_at_priority(
+            "bt-path-directory-test",
+            crate::ThreadPriority::Normal,
+            |worker| program_path_directory(worker, std::path::Path::new("/usr/bin")),
+        )
+        .expect("a worker")
+        .join()
+        .expect("it answers");
+        assert_eq!(
+            kind.expect("classified"),
+            crate::ProgramPathDirectory::Local
+        );
     }
 }
