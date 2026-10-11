@@ -8678,11 +8678,11 @@ mod windows_impl {
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DISPLAYCHANGE,
-                WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO,
-                WM_INPUTLANGCHANGE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN,
-                WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
-                WM_WINDOWPOSCHANGING, WindowFromPoint,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DEVICECHANGE,
+                WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE,
+                WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
+                WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE, WM_THEMECHANGED,
+                WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
@@ -11049,7 +11049,7 @@ mod windows_impl {
         }
     }
 
-    /// **Windows saying a system-wide preference, a display or the keyboard layout has moved.**
+    /// **Windows saying a system-wide preference, a display, keyboard layout or volume moved.**
     ///
     /// One subclass for three messages. `WM_SETTINGCHANGE` goes to every top-level
     /// window when somebody changes something in Settings — and the only thing
@@ -11140,11 +11140,49 @@ mod windows_impl {
     /// animation switch and the theme live, and a person turning one off often
     /// turns the other with it — a second re-read costs one `SystemParametersInfoW`.
     #[must_use]
-    pub(super) fn system_news_of(message: u32) -> Option<crate::SystemNews> {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) struct DeviceHeader {
+        pub(super) size: u32,
+        pub(super) device_type: u32,
+        pub(super) reserved: u32,
+    }
+
+    const DBT_DEVICEARRIVAL: usize = 0x8000;
+    const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
+    const DBT_DEVTYP_VOLUME: u32 = 0x0000_0002;
+
+    /// Read only the fixed header of a `WM_DEVICECHANGE` payload while the sender owns it.
+    ///
+    /// The pointer may be unaligned, so it never becomes a reference. A caller may inspect no
+    /// field after this header without first proving that the sender supplied the larger payload.
+    pub(super) unsafe fn device_header(lparam: LPARAM) -> Option<DeviceHeader> {
+        if lparam.0 == 0 {
+            return None;
+        }
+        // SAFETY: `system_settings_subclass` calls this only during `WM_DEVICECHANGE`, while the
+        // sender's payload is live. `read_unaligned` copies the fixed header without making a
+        // reference to sender-owned storage.
+        let header = unsafe { std::ptr::read_unaligned(lparam.0 as *const DeviceHeader) };
+        (header.size as usize >= std::mem::size_of::<DeviceHeader>()).then_some(header)
+    }
+
+    pub(super) fn system_news_of(
+        message: u32,
+        wparam: WPARAM,
+        header: Option<DeviceHeader>,
+    ) -> Option<crate::SystemNews> {
         match message {
             WM_SETTINGCHANGE | WM_THEMECHANGED => Some(crate::SystemNews::Preferences),
             WM_DISPLAYCHANGE => Some(crate::SystemNews::Display),
             WM_INPUTLANGCHANGE => Some(crate::SystemNews::InputLanguage),
+            WM_DEVICECHANGE
+                if matches!(wparam.0, DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE)
+                    && header.is_some_and(|header| header.device_type == DBT_DEVTYP_VOLUME) =>
+            {
+                Some(crate::SystemNews::Volumes {
+                    arrived: wparam.0 == DBT_DEVICEARRIVAL,
+                })
+            }
             _ => None,
         }
     }
@@ -11157,7 +11195,14 @@ mod windows_impl {
         _subclass_id: usize,
         reference_data: usize,
     ) -> LRESULT {
-        if let Some(news) = system_news_of(message) {
+        let header = if message == WM_DEVICECHANGE {
+            // SAFETY: the message sender owns a live device-broadcast payload for the duration of
+            // this subclass call. `device_header` reads only its fixed header.
+            unsafe { device_header(lparam) }
+        } else {
+            None
+        };
+        if let Some(news) = system_news_of(message, wparam, header) {
             let wake = reference_data as *const SystemSettingsWake;
             if !wake.is_null() {
                 // SAFETY: the owning `SystemSettingsWatch` holds this box for the
@@ -17656,6 +17701,9 @@ pub enum SystemNews {
     /// This thread's input language or keyboard layout changed: `WM_INPUTLANGCHANGE`.
     /// Windows only: the macOS summon key is a key position, which no layout moves.
     InputLanguage,
+    /// A volume arrived or completed its removal. Windows only in this ticket; the payload is
+    /// deliberately reduced to the transition, with no sender-owned pointer leaving the call.
+    Volumes { arrived: bool },
 }
 
 #[cfg(windows)]
@@ -21786,12 +21834,29 @@ mod apartment_order_tests {
 /// forward; this is the part with an opinion in it.
 #[cfg(all(test, windows))]
 mod system_preference_message_tests {
-    use super::windows_impl::system_news_of;
+    use super::windows_impl::{DeviceHeader, device_header, system_news_of};
     use crate::SystemNews;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE,
-        WM_THEMECHANGED,
+        WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE, WM_NCHITTEST,
+        WM_SETTINGCHANGE, WM_THEMECHANGED,
     };
+
+    const DBT_DEVICEARRIVAL: usize = 0x8000;
+    const DBT_DEVICEQUERYREMOVE: usize = 0x8001;
+    const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
+    const DBT_DEVNODES_CHANGED: usize = 0x0007;
+    const DBT_DEVTYP_VOLUME: u32 = 0x0000_0002;
+    const DBT_DEVTYP_PORT: u32 = 0x0000_0003;
+    const DBT_DEVTYP_DEVICEINTERFACE: u32 = 0x0000_0005;
+
+    fn header(device_type: u32) -> DeviceHeader {
+        DeviceHeader {
+            size: std::mem::size_of::<DeviceHeader>() as u32,
+            device_type,
+            reserved: 0,
+        }
+    }
 
     /// PIN — the two broadcasts that mean "ask again", and nothing else.
     ///
@@ -21802,15 +21867,15 @@ mod system_preference_message_tests {
     #[test]
     fn only_a_settings_or_theme_broadcast_asks_the_system_again() {
         assert_eq!(
-            system_news_of(WM_SETTINGCHANGE),
+            system_news_of(WM_SETTINGCHANGE, WPARAM(0), None),
             Some(SystemNews::Preferences)
         );
         assert_eq!(
-            system_news_of(WM_THEMECHANGED),
+            system_news_of(WM_THEMECHANGED, WPARAM(0), None),
             Some(SystemNews::Preferences)
         );
-        assert_eq!(system_news_of(WM_MOUSEMOVE), None);
-        assert_eq!(system_news_of(WM_NCHITTEST), None);
+        assert_eq!(system_news_of(WM_MOUSEMOVE, WPARAM(0), None), None);
+        assert_eq!(system_news_of(WM_NCHITTEST, WPARAM(0), None), None);
     }
 
     /// RED (T-FRESH-FACTS) — **a display mode change and a keyboard layout change
@@ -21822,11 +21887,74 @@ mod system_preference_message_tests {
     /// `None` — the window never hears that the panel's rate or the layout moved.
     #[test]
     fn a_display_change_and_a_layout_change_are_heard_as_themselves() {
-        assert_eq!(system_news_of(WM_DISPLAYCHANGE), Some(SystemNews::Display));
         assert_eq!(
-            system_news_of(WM_INPUTLANGCHANGE),
+            system_news_of(WM_DISPLAYCHANGE, WPARAM(0), None),
+            Some(SystemNews::Display)
+        );
+        assert_eq!(
+            system_news_of(WM_INPUTLANGCHANGE, WPARAM(0), None),
             Some(SystemNews::InputLanguage)
         );
+    }
+
+    /// RED (T-OS-SIGNALS-WIN) — only a volume arrival and remove-complete are volume news.
+    ///
+    /// MUTATION: answer `Volumes` for every `WM_DEVICECHANGE`; each negative row turns red.
+    #[test]
+    fn a_volume_arriving_or_leaving_is_heard_and_no_other_device_is() {
+        let cases = [
+            (
+                DBT_DEVICEARRIVAL,
+                Some(header(DBT_DEVTYP_VOLUME)),
+                Some(SystemNews::Volumes { arrived: true }),
+            ),
+            (
+                DBT_DEVICEREMOVECOMPLETE,
+                Some(header(DBT_DEVTYP_VOLUME)),
+                Some(SystemNews::Volumes { arrived: false }),
+            ),
+            (DBT_DEVNODES_CHANGED, None, None),
+            (
+                DBT_DEVICEARRIVAL,
+                Some(header(DBT_DEVTYP_DEVICEINTERFACE)),
+                None,
+            ),
+            (DBT_DEVICEARRIVAL, Some(header(DBT_DEVTYP_PORT)), None),
+            (DBT_DEVICEQUERYREMOVE, Some(header(DBT_DEVTYP_VOLUME)), None),
+        ];
+        for (event, header, expected) in cases {
+            assert_eq!(
+                system_news_of(WM_DEVICECHANGE, WPARAM(event), header),
+                expected,
+                "device event 0x{event:X} with {header:?}"
+            );
+        }
+    }
+
+    /// RED (T-OS-SIGNALS-WIN) — the sender-owned payload is copied unaligned, only when it is a
+    /// complete fixed header. Null and a header declaring itself short are no payload.
+    ///
+    /// MUTATION: remove the `size_of::<DeviceHeader>()` check; the short row becomes `Some`.
+    #[test]
+    fn a_device_header_must_be_present_and_whole_and_may_be_unaligned() {
+        assert_eq!(unsafe { device_header(LPARAM(0)) }, None);
+
+        let mut bytes = vec![0u8; std::mem::size_of::<DeviceHeader>() + 1];
+        let at = unsafe { bytes.as_mut_ptr().add(1).cast::<DeviceHeader>() };
+        unsafe { at.write_unaligned(header(DBT_DEVTYP_VOLUME)) };
+        assert_eq!(
+            unsafe { device_header(LPARAM(at as isize)) },
+            Some(header(DBT_DEVTYP_VOLUME))
+        );
+
+        unsafe {
+            at.write_unaligned(DeviceHeader {
+                size: 4,
+                device_type: DBT_DEVTYP_VOLUME,
+                reserved: 0,
+            })
+        };
+        assert_eq!(unsafe { device_header(LPARAM(at as isize)) }, None);
     }
 }
 

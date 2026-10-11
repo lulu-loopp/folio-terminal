@@ -163,6 +163,9 @@ pub struct FileIndex {
     files: Vec<IndexedFile>,
     /// Whether the walk stopped on a bound rather than because it ran out.
     truncated: bool,
+    /// Whether the root itself answered `read_dir`. An empty readable root and an absent volume
+    /// both have no files; this is the fact that lets a volume arrival distinguish them.
+    root_read: bool,
 }
 
 impl FileIndex {
@@ -191,6 +194,12 @@ impl FileIndex {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
+    }
+
+    /// Whether the root itself could be read when this index was built.
+    #[must_use]
+    pub fn root_was_read(&self) -> bool {
+        self.root_read
     }
 }
 
@@ -244,6 +253,9 @@ fn walk_bounded(root: &Path, max_depth: usize, max_entries: usize) -> FileIndex 
         let Ok(reader) = std::fs::read_dir(&directory.path) else {
             continue;
         };
+        if directory.depth == 0 {
+            index.root_read = true;
+        }
 
         // Read the whole directory before emitting any of it: the order of the
         // index is a promise the palette leans on, and `read_dir` makes no such
@@ -582,6 +594,20 @@ impl FileIndexes {
         }
     }
 
+    /// A volume arrived: roots that have no completed answer, or whose last walk could not read
+    /// the root, are stale. This marks only; opening the palette remains the event that walks.
+    pub fn volume_arrived(&mut self) {
+        for entry in self.roots.values_mut() {
+            if entry
+                .index
+                .as_ref()
+                .is_none_or(|index| !index.root_was_read())
+            {
+                entry.dirty = true;
+            }
+        }
+    }
+
     /// **The palette opened over this root: walk it again** (T-FRESH-FACTS).
     ///
     /// The files watch hears only the folders a tree has unfolded (`watched_files_dirs`), so a
@@ -677,6 +703,7 @@ mod tests {
                 })
                 .collect(),
             truncated: false,
+            root_read: true,
         }
     }
 
@@ -1279,5 +1306,33 @@ mod tests {
         assert!(register.get(&dropped).is_none());
         assert_eq!(register.state(&kept), IndexState::Ready);
         assert_eq!(register.get(&kept).map(FileIndex::len), Some(1));
+    }
+
+    /// RED (T-OS-SIGNALS-WIN) — a volume arrival marks an unread root dirty without walking it,
+    /// while a readable empty root remains current.
+    ///
+    /// MUTATION: remove the `root_was_read` distinction; both empty indexes take the same branch.
+    #[test]
+    fn a_volume_arrival_marks_only_roots_that_could_not_be_read() {
+        let unread = PathBuf::from("/Volumes/资料");
+        let empty = PathBuf::from("/roots/empty");
+        let mut register = FileIndexes::default();
+        for (root, index) in [(&unread, FileIndex::default()), (&empty, ready(&[]))] {
+            let request = register.claim(root).expect("a first claim");
+            register.accept(IndexResponse {
+                root: root.clone(),
+                epoch: request.epoch,
+                index,
+            });
+        }
+
+        register.volume_arrived();
+
+        assert!(register.roots[&unread].dirty, "the unread root is stale");
+        assert!(!register.roots[&unread].building, "nothing was walked");
+        assert!(
+            !register.roots[&empty].dirty,
+            "a readable empty root is current"
+        );
     }
 }

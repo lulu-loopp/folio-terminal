@@ -20,6 +20,25 @@ use std::time::{Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
 use winit::event::{KeyEvent, MouseScrollDelta};
 
+/// The visible folder readers a volume arrival asks again: a failed listing, or a listing whose
+/// requested watch is unheard. Kept pure so the two independent failure roads stay pinned.
+fn volume_rereads(
+    showing: &BTreeMap<PathBuf, Vec<(files::FilesHost, String)>>,
+    unheard: &BTreeSet<PathBuf>,
+    mut listing_failed: impl FnMut(files::FilesHost, &str) -> bool,
+) -> Vec<(files::FilesHost, String)> {
+    let mut asks = Vec::new();
+    for (directory, readers) in showing {
+        asks.extend(
+            readers
+                .iter()
+                .filter(|(host, key)| unheard.contains(directory) || listing_failed(*host, key))
+                .cloned(),
+        );
+    }
+    asks
+}
+
 impl Runtime<'_> {
     /// `Choose a folder…` in the starting-directory picker.
     pub(crate) fn browse_for_start_folder(&mut self) {
@@ -1256,6 +1275,21 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// A volume arrived: retry each visible failed folder once, mark unread palette roots stale,
+    /// and leave watch rearming to the steward's one process-wide volume hook.
+    pub(crate) fn volume_arrived(&mut self) -> Result<()> {
+        let showing = self.watched_files_dirs();
+        let unheard = self.window.files_watch.failed();
+        let asks = volume_rereads(&showing, &unheard, |host, key| {
+            self.files_dir_failed(host, key)
+        });
+        for (host, key) in asks {
+            self.ask_files_dir(host, &key);
+        }
+        self.app.file_indexes.volume_arrived();
+        Ok(())
+    }
+
     /// **Every folder this window has the contents of on the glass, and which
     /// trees are showing it.**
     ///
@@ -1355,6 +1389,28 @@ impl Runtime<'_> {
                 .live(epoch)
                 .and_then(float::FloatWin::files)
                 .is_some_and(|tree| tree.cache.get(key).is_some()),
+        }
+    }
+
+    /// Whether a visible files reader's last answer for this directory was a refusal.
+    fn files_dir_failed(&self, host: files::FilesHost, key: &str) -> bool {
+        match host {
+            files::FilesHost::Preview(_) => false,
+            files::FilesHost::Docked(leaf) => self
+                .window
+                .tabs
+                .iter()
+                .find(|tab| tab.id == leaf.tab)
+                .and_then(|tab| tab.file_trees.get(&leaf.seat))
+                .and_then(|cache| cache.get(key))
+                .is_some_and(|node| matches!(node, files::DirNode::Failed(_))),
+            files::FilesHost::Float(epoch) => self
+                .window
+                .float
+                .live(epoch)
+                .and_then(float::FloatWin::files)
+                .and_then(|tree| tree.cache.get(key))
+                .is_some_and(|node| matches!(node, files::DirNode::Failed(_))),
         }
     }
 
@@ -3042,5 +3098,52 @@ impl Runtime<'_> {
             ) || self.panel_covers(position)
         });
         dropped_files_seat_at(&self.seat_layout, position, covered)
+    }
+}
+
+#[cfg(test)]
+mod volumes_tests {
+    use super::*;
+    use crate::TabId;
+
+    fn host(tab: u64, seat: u64) -> files::FilesHost {
+        files::FilesHost::Docked(LeafId {
+            tab: TabId(tab),
+            seat: SeatId(seat),
+        })
+    }
+
+    /// RED (T-OS-SIGNALS-WIN) — a volume arrival asks a failed listing once and leaves a healthy
+    /// listing alone.
+    ///
+    /// MUTATION: remove `listing_failed(*host, key)` from `volume_rereads`; `missing` vanishes.
+    #[test]
+    fn a_folder_that_was_not_found_is_asked_again_when_a_volume_arrives() {
+        let root = PathBuf::from(r"C:\Users\alice\项目");
+        let showing = BTreeMap::from([(
+            root,
+            vec![
+                (host(1, 1), "missing".to_owned()),
+                (host(1, 2), "ready".to_owned()),
+            ],
+        )]);
+        assert_eq!(
+            volume_rereads(&showing, &BTreeSet::new(), |_, key| key == "missing"),
+            vec![(host(1, 1), "missing".to_owned())]
+        );
+    }
+
+    /// RED (T-OS-SIGNALS-WIN) — a folder whose watch is `Failed` is re-read even when its last
+    /// listing succeeded.
+    ///
+    /// MUTATION: remove `unheard.contains(directory)` from `volume_rereads`; no ask remains.
+    #[test]
+    fn an_unwatched_folder_is_attempted_again_after_a_volume_arrives() {
+        let root = PathBuf::from(r"D:\资料");
+        let showing = BTreeMap::from([(root.clone(), vec![(host(2, 7), "listed".to_owned())])]);
+        assert_eq!(
+            volume_rereads(&showing, &BTreeSet::from([root]), |_, _| false),
+            vec![(host(2, 7), "listed".to_owned())]
+        );
     }
 }

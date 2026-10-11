@@ -467,6 +467,12 @@ enum AppEvent {
     /// which is why it carries nothing itself. Windows told this window that
     /// *something* changed; the answer to *what* is the read on the next turn.
     SystemPreferencesChanged,
+    /// **A volume arrived or completed its removal** (T-OS-SIGNALS-WIN;
+    /// `bt_platform::SystemNews::Volumes`). Only an arrival asks failed readers and watches
+    /// again; a removal is reported by each watch's own `Ended` transition.
+    VolumesChanged {
+        arrived: bool,
+    },
     /// **A display changed mode, or one came or went** (T-FRESH-FACTS;
     /// `bt_platform::SystemNews::Display`). The rate each window paces its frames to
     /// is read again in every window, which a rate changed on the same panel moves
@@ -840,6 +846,7 @@ impl AppEvent {
             bt_platform::SystemNews::Preferences => Self::SystemPreferencesChanged,
             bt_platform::SystemNews::Display => Self::DisplayChanged,
             bt_platform::SystemNews::InputLanguage => Self::InputLanguageChanged,
+            bt_platform::SystemNews::Volumes { arrived } => Self::VolumesChanged { arrived },
         }
     }
 
@@ -886,6 +893,7 @@ impl AppEvent {
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
+            | Self::VolumesChanged { .. }
             | Self::DisplayChanged
             | Self::InputLanguageChanged
             | Self::WindowChromeChanged
@@ -915,6 +923,12 @@ impl AppEvent {
             | Self::SessionEnding => Station::Woken,
         }
     }
+}
+
+/// Run the volume-arrival arm only for an arrival. A remove-complete is news so the loop can
+/// account for it, but the watch that actually ended is the only owner of that transition.
+fn run_for_volume_arrival<T>(arrived: bool, action: impl FnOnce() -> T) -> Option<T> {
+    arrived.then(action)
 }
 
 /// One answer from the picture worker (§7.1.6c-4d).
@@ -67195,6 +67209,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
                 adopted
             }
+            AppEvent::VolumesChanged { arrived } => run_for_volume_arrival(arrived, || {
+                // The message carries no drive path: its fixed header is the only sender-owned
+                // payload we read. One arrival therefore retries every failed steward member
+                // once; each ear still decides what a successful arm means to its reader.
+                watch_steward::volume_arrived();
+                self.for_each_window(|runtime| runtime.volume_arrived())
+            })
+            .unwrap_or(Ok(())),
             AppEvent::ProgramsAnswered => self.adopt_program_walk(),
             // **Every window asks its display again** (T-FRESH-FACTS): a rate changed on the
             // panel a window stands on moves neither the window nor its scale, the two events
@@ -72492,6 +72514,7 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
 /// the watch's callback does nothing but nudge this loop.
 #[cfg(test)]
 mod system_preference_wiring_tests {
+    use super::run_for_volume_arrival;
     // **P14's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.5),
     // taken with P3's because §6.0 rule 4 batches by module. Both readers here
     // asked `main.rs` for its text; both now ask `bt-source` about an *item* of
@@ -72568,6 +72591,19 @@ mod system_preference_wiring_tests {
                 .ends_with("fn adopt_system_canvas(&mut self) -> Result<()>"),
             "and the reader it names is this window's own:\n{reader}"
         );
+    }
+
+    /// RED (T-OS-SIGNALS-WIN) — remove-complete ends no watch and starts no reader by itself;
+    /// each watch reports its own `Ended` transition. An arrival runs the arm once.
+    ///
+    /// MUTATION: drop the `arrived.then` gate in `run_for_volume_arrival`; the removal increments.
+    #[test]
+    fn a_volume_removal_does_nothing_by_itself() {
+        let mut calls = 0;
+        assert_eq!(run_for_volume_arrival(false, || calls += 1), None);
+        assert_eq!(calls, 0);
+        assert_eq!(run_for_volume_arrival(true, || calls += 1), Some(()));
+        assert_eq!(calls, 1);
     }
 }
 

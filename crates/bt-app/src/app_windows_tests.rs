@@ -1979,4 +1979,12 @@ fn each_system_news_wakes_the_loop_for_its_own_fact() {
         AppEvent::of_system_news(bt_platform::SystemNews::InputLanguage),
         AppEvent::InputLanguageChanged
     ));
+    assert!(matches!(
+        AppEvent::of_system_news(bt_platform::SystemNews::Volumes { arrived: true }),
+        AppEvent::VolumesChanged { arrived: true }
+    ));
+    assert!(matches!(
+        AppEvent::of_system_news(bt_platform::SystemNews::Volumes { arrived: false }),
+        AppEvent::VolumesChanged { arrived: false }
+    ));
 }

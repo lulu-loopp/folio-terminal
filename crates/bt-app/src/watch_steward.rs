@@ -625,13 +625,10 @@ pub fn open_ear(depth: Depth, listener: Listener) -> EarHandle {
     STEWARD.open_ear(depth, listener)
 }
 
-/// [`Steward::volume_arrived`] on the product's steward.
-#[expect(
-    dead_code,
-    reason = "T-OS-SIGNALS-WIN until 2026-12-31: the Volumes signal (B5 ticket 2) calls it; the hook is pinned through a test steward"
-)]
-pub fn volume_arrived(root: PathBuf) {
-    STEWARD.volume_arrived(root);
+/// [`Steward::volume_arrived`] on the product's steward. `WM_DEVICECHANGE` deliberately reads
+/// only the fixed header, which carries no root, so the empty path covers every failed member.
+pub fn volume_arrived() {
+    STEWARD.volume_arrived(PathBuf::new());
 }
 
 /// **A door a test writes** (T-DIRWATCH-LIFECYCLE): starts that succeed or are refused by path,

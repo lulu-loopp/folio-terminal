@@ -248,6 +248,16 @@ impl FilesWatch {
         }
     }
 
+    /// The folders whose requested watches are unheard. A volume arrival re-reads these folders;
+    /// the steward's volume hook owns the single rearm attempt itself.
+    pub fn failed(&self) -> BTreeSet<PathBuf> {
+        self.dirs
+            .iter()
+            .filter(|(_, entry)| entry.heard == Heard::Failed)
+            .map(|(directory, _)| directory.clone())
+            .collect()
+    }
+
     /// **Which watched folders have gone quiet since something moved in them.**
     ///
     /// Folding the news in and answering are one step for `GitWatch::due`'s
