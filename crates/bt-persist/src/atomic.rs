@@ -37,6 +37,31 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), WriteError> {
     commit_rename(&tmp_path, path)
 }
 
+/// Write a new sibling document atomically, carrying the permissions and other
+/// metadata the source document can lend to a rename.
+///
+/// Unlike [`atomic_replace_keeping_metadata`], `path` need not exist: the
+/// metadata belongs to `source`, while the name made visible by the final
+/// rename belongs to `path`. This is the shape a one-generation backup needs —
+/// its bytes and access are the session document that was read, but it has a
+/// different name and must never be visible half-written.
+pub fn atomic_write_carrying_from(
+    path: &Path,
+    contents: &[u8],
+    source: &Path,
+) -> Result<(), WriteError> {
+    let tmp_path = temp_sibling_path(path).map_err(|source| WriteError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    write_temp(&tmp_path, contents, TempBirth::OwnerOnly).map_err(|source| WriteError::Io {
+        path: tmp_path.clone(),
+        source,
+    })?;
+    bt_platform::carry_metadata(&tmp_path, source);
+    commit_rename(&tmp_path, path)
+}
+
 /// Replace an existing user-owned file without discarding its metadata.
 /// Windows merges DACLs, streams and creation time through ReplaceFileW;
 /// Unix carries ownership, mode and extended attributes before rename.
@@ -280,6 +305,33 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (T-STORE-PWSH-AND-SESSION-BACKUP) — **a sibling written from a
+    /// source carries the source's access, not the destination's.**
+    ///
+    /// MUTATION: remove `carry_metadata` from `atomic_write_carrying_from`;
+    /// the sibling keeps its owner-only birth mode instead of `0640`.
+    #[cfg(unix)]
+    #[test]
+    fn a_sibling_write_carries_its_sources_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = bt_testpath::temp_path("bt-carrying-sibling");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("session.json");
+        fs::write(&source, b"source").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+        let sibling = dir.join("session.prev.json");
+
+        atomic_write_carrying_from(&sibling, "备份 backup".as_bytes(), &source).unwrap();
+
+        assert_eq!(fs::read(&sibling).unwrap(), "备份 backup".as_bytes());
+        assert_eq!(
+            fs::metadata(&sibling).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn preserving_replace_writes_content_and_refuses_hardlinks() {

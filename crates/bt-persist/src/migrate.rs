@@ -1530,10 +1530,27 @@ pub(crate) fn read_with_fallback<T>(
 where
     T: DeserializeOwned + Default,
 {
+    let (value, report, _loaded_bytes) =
+        read_with_fallback_bytes(path, current_version, migrations, keeping);
+    (value, report)
+}
+
+/// [`read_with_fallback`], also returning the exact bytes that produced a
+/// loaded document. Refused and missing documents return no bytes: callers may
+/// copy only a document this reader accepted whole.
+pub(crate) fn read_with_fallback_bytes<T>(
+    path: &Path,
+    current_version: u32,
+    migrations: &[(u32, MigrationStep)],
+    keeping: Keeping,
+) -> (T, ReadReport, Option<Vec<u8>>)
+where
+    T: DeserializeOwned + Default,
+{
     let now = keeping == Keeping::Now;
     let bytes = match read_bounded(path, MAX_DOCUMENT_BYTES) {
         Ok(bytes) => bytes,
-        Err(BoundedRead::NotFound) => return (T::default(), ReadReport::NotFound),
+        Err(BoundedRead::NotFound) => return (T::default(), ReadReport::NotFound, None),
         Err(BoundedRead::Io(message)) => {
             // Nothing was obtained, so there is nothing to keep: the file is
             // exactly as it was and this build simply could not open it.
@@ -1543,6 +1560,7 @@ where
                     reason: FallbackReason::Io(message),
                     kept: None,
                 },
+                None,
             );
         }
         Err(BoundedRead::TooLarge { bytes }) => {
@@ -1556,6 +1574,7 @@ where
                     // Moved rather than copied — see [`keep_oversized`].
                     kept: if now { keep_oversized(path) } else { None },
                 },
+                None,
             );
         }
     };
@@ -1564,7 +1583,7 @@ where
     // keeps them. One call rather than five sites, so a reason added later
     // cannot be the one that forgets.
     match parse_document::<T>(&bytes, current_version, migrations) {
-        Ok(value) => (value, ReadReport::Loaded),
+        Ok(value) => (value, ReadReport::Loaded, Some(bytes)),
         Err(reason) => (
             T::default(),
             ReadReport::FellBackToDefaults {
@@ -1575,6 +1594,7 @@ where
                 },
                 reason,
             },
+            None,
         ),
     }
 }
