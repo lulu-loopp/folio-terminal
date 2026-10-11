@@ -13,6 +13,8 @@ Three documents, three jobs:
 - **`docs/RULES.md`** — the rules **in force**, by subsystem.
 - **`docs/DESIGN.md`** — the **history** of how those rules were decided. It is
   append-only and it is evidence, not instruction.
+- **[`docs/ARCHITECTURE-GUARDS.md`](ARCHITECTURE-GUARDS.md)** — the live map from
+  each architectural tripwire to its rule, enforcement point, and red action.
 
 Nothing here carries a line number. `crates/bt-app/src/main.rs` is being split;
 a line number written today is wrong within the week.
