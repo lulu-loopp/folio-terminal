@@ -707,7 +707,6 @@ impl FileIndexes {
 
     /// **The palette opened over this root: walk only when its held answer may be stale.**
     ///
-    /// The files watch hears only the folders a tree has unfolded (`watched_files_dirs`), so a
     /// A heard, clean root is already current and answers [`Reopened::Current`] without touching
     /// the worker. Missing, dirty and unheard roots keep B3's reader-triggered walk, with the held
     /// index shown until it lands. **A walk already out answers the open** —
