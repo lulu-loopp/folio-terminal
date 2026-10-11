@@ -195,6 +195,7 @@ bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	wo
 bt-platform	[windows]	crate::windows_impl::program_path_directory	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-platform	[windows]	crate::windows_impl::DirWatch::start_scoped	std::sync::mpsc::Receiver::recv 1, std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1, std::thread::JoinHandle::join 2	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "macos"]	crate::macos_impl::program_path_directory_in	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners

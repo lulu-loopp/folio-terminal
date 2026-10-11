@@ -18025,8 +18025,10 @@ pub enum ProgramPathDirectory {
 
 /// Classify and validate one program-search directory on a worker thread.
 ///
-/// Windows asks the lexical drive root before metadata so a remote entry is never contacted.
-/// Other platforms deliberately decline this Windows ticket; their native PATH ear is ticket 3.
+/// Each arm learns where the path lives before it asks the path itself, so a remote entry is
+/// never contacted: Windows asks the lexical drive root's type, macOS finds the mount the path
+/// lies under in the mount table (read without waiting on any file system). Platforms with no
+/// directory watch have no PATH ear and refuse.
 pub fn program_path_directory(
     worker: &admission::WorkerCtx,
     path: &std::path::Path,
@@ -18035,13 +18037,35 @@ pub fn program_path_directory(
     {
         windows_impl::program_path_directory(worker, path)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_impl::program_path_directory(worker, path)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (worker, path);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "the PATH directory ear is not built on this platform yet",
+            "this platform has no directory watch, so no PATH directory ear",
         ))
+    }
+}
+
+/// **Whether a program-search directory's file names say which files are programs.**
+///
+/// On Windows they do: a program is found by its extension, from `PATHEXT`, so a name without
+/// one of those extensions cannot change what a search finds. On every other platform a file is
+/// a program by its mode bits, which no name shows, so every name a `PATH` directory reports is
+/// news to the PATH ear.
+#[must_use]
+pub const fn program_names_carry_their_kind() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -18064,6 +18088,9 @@ pub enum SystemNews {
     /// did-unmount notifications on macOS. The payload is deliberately reduced to the
     /// transition, with no sender-owned pointer leaving the call.
     Volumes { arrived: bool },
+    /// The user's locale changed: `NSCurrentLocaleDidChangeNotification`. macOS only, where a
+    /// new pane is told its locale (`LANG`, `LC_CTYPE`) by Folio.
+    Locale,
 }
 
 #[cfg(windows)]
@@ -18088,9 +18115,6 @@ pub use windows_impl::{
     take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
     thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
     virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
-    /// The user's locale changed: `NSCurrentLocaleDidChangeNotification`. macOS only, where a
-    /// new pane is told its locale (`LANG`, `LC_CTYPE`) by Folio.
-    Locale,
     work_area_at, write_std_error, write_to_console,
 };
 

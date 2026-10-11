@@ -1,8 +1,9 @@
 //! The shallow directory ear for the program walk's exact `PATH` snapshot.
 //!
 //! Each eligible directory is a steward member. Watcher threads keep only a timestamp after the
-//! pure `PATHEXT` name filter, and the application turns those timestamps through `WatchClock`.
-//! No directory is read here and silence schedules no work.
+//! pure name filter — `PATHEXT` where the platform finds programs by extension (Windows), every
+//! name where it does not (macOS) — and the application turns those timestamps through
+//! `WatchClock`. No directory is read here and silence schedules no work.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -27,7 +28,7 @@ struct Watched {
 #[derive(Default)]
 pub struct ProgramsEar {
     news: Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
-    extensions: Arc<Mutex<Vec<OsString>>>,
+    extensions: Arc<Mutex<NameRule>>,
     watched: BTreeMap<PathBuf, Watched>,
     ear: Option<EarHandle>,
 }
@@ -57,7 +58,10 @@ impl ProgramsEar {
         now: Instant,
         make_ear: impl FnOnce() -> EarHandle,
     ) {
-        *lock(&self.extensions) = extensions(snapshot.pathext.as_deref());
+        *lock(&self.extensions) = name_rule(
+            bt_platform::program_names_carry_their_kind(),
+            snapshot.pathext.as_deref(),
+        );
         let wanted: BTreeSet<PathBuf> = snapshot.directories.iter().cloned().collect();
         let rearm = self
             .watched
@@ -127,18 +131,29 @@ impl ProgramsEar {
 
 fn listener(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
-    extensions: &Arc<Mutex<Vec<OsString>>>,
+    extensions: &Arc<Mutex<NameRule>>,
     proxy: &EventLoopProxy<AppEvent>,
 ) -> Listener {
     let news = Arc::clone(news);
     let extensions = Arc::clone(extensions);
     let proxy = proxy.clone();
     Arc::new(move |directory, change| {
-        if executable_change(change, &lock(&extensions)) {
+        if executable_change(change, lock(&extensions).as_deref()) {
             lock(&news).insert(directory.to_path_buf(), Instant::now());
             let _ = proxy.send_event(AppEvent::PathDirectoryChanged);
         }
     })
+}
+
+/// Which names in a `PATH` directory can change what a program search finds: the extensions of
+/// the walk's own `PATHEXT` (`Some`), or every name (`None`).
+type NameRule = Option<Vec<OsString>>;
+
+/// **The name rule of a walk's snapshot**: `PATHEXT`'s extensions where the platform finds
+/// programs by extension, and every name where it does not — there a file is a program by its
+/// mode bits, and a `PATHEXT` the environment happens to carry says nothing about them.
+fn name_rule(names_carry_their_kind: bool, pathext: Option<&OsStr>) -> NameRule {
+    names_carry_their_kind.then(|| extensions(pathext))
 }
 
 fn extensions(value: Option<&OsStr>) -> Vec<OsString> {
@@ -157,12 +172,16 @@ fn extensions(value: Option<&OsStr>) -> Vec<OsString> {
         .collect()
 }
 
-/// Whether a named shallow change could alter the executable search result. Unknown is always
+/// Whether a named shallow change could alter the executable search result: any name when the
+/// rule admits every name (`None`), a name with one of `extensions` otherwise. Unknown is always
 /// admitted: it means the kernel overflowed precisely when dropping it would be unsafe.
-fn executable_change(change: DirChange<'_>, extensions: &[OsString]) -> bool {
+fn executable_change(change: DirChange<'_>, extensions: Option<&[OsString]>) -> bool {
     match change {
         DirChange::Unknown => true,
         DirChange::Named(names) => names.iter().any(|name| {
+            let Some(extensions) = extensions else {
+                return true;
+            };
             let extension = Path::new(name).extension();
             extensions.iter().any(|wanted| {
                 extension.is_some_and(|extension| {
@@ -242,23 +261,59 @@ mod tests {
     #[test]
     fn only_pathext_names_and_unknown_are_news() {
         let wanted = extensions(Some(OsStr::new(".EXE;.Cmd")));
+        let wanted = Some(wanted.as_slice());
         assert!(executable_change(
             DirChange::Named(&[OsString::from("foo.exe")]),
-            &wanted
+            wanted
         ));
         assert!(executable_change(
             DirChange::Named(&[OsString::from("foo.CMD")]),
-            &wanted
+            wanted
         ));
         assert!(!executable_change(
             DirChange::Named(&[OsString::from("foo.txt")]),
-            &wanted
+            wanted
         ));
         assert!(!executable_change(
             DirChange::Named(&[OsString::from("foo")]),
-            &wanted
+            wanted
         ));
-        assert!(executable_change(DirChange::Unknown, &wanted));
+        assert!(executable_change(DirChange::Unknown, wanted));
+    }
+
+    /// RED (T-OS-SIGNALS-MAC) — **where a file is a program by its mode bits, every name in a
+    /// `PATH` directory is news**: `brew install` links a bare `rg` into Homebrew's `bin`, and a
+    /// `PATHEXT` the environment happens to carry (a shared dotfile) filters nothing. Where
+    /// programs are found by extension, that environment's `PATHEXT` is the rule.
+    ///
+    /// MUTATIONS: build the rule from `PATHEXT` whatever the platform (`name_rule` ignoring its
+    /// first argument) — the bare name is not news; drop the every-name arm of
+    /// `executable_change` — likewise.
+    #[test]
+    fn where_names_do_not_say_which_files_are_programs_every_name_is_news() {
+        let carried = Some(OsStr::new(".EXE;.CMD"));
+        let by_mode = name_rule(false, carried);
+        for name in ["rg", "工具", "node.js", "README.md"] {
+            assert!(
+                executable_change(
+                    DirChange::Named(&[OsString::from(name)]),
+                    by_mode.as_deref()
+                ),
+                "{name}"
+            );
+        }
+        assert!(executable_change(DirChange::Unknown, by_mode.as_deref()));
+        assert!(!executable_change(DirChange::Ended, by_mode.as_deref()));
+
+        let by_extension = name_rule(true, carried);
+        assert!(!executable_change(
+            DirChange::Named(&[OsString::from("rg")]),
+            by_extension.as_deref()
+        ));
+        assert!(executable_change(
+            DirChange::Named(&[OsString::from("工具.exe")]),
+            by_extension.as_deref()
+        ));
     }
 
     /// RED (T-OS-SIGNALS-WIN) — add/remove changes the steward set exactly.
