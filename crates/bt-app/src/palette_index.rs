@@ -13,7 +13,7 @@
 //! So this module is the one place in the program that reads a directory nobody
 //! asked to see. That is a debt, and everything below is the shape of paying it.
 //!
-//! # Why the index is bounded, and bounded in three different ways
+//! # Why the index is bounded, and bounded in four different ways
 //!
 //! A files root is somebody's home directory as often as it is a checkout. The
 //! honest answer to "index everything under it" is that there is no such thing:
@@ -29,8 +29,9 @@
 //!   something true about the palette. Neither is reported as truncation,
 //!   because neither is a failure to finish: they are the definition of what was
 //!   being finished.
-//! - [`INDEX_MAX_ENTRIES`] says **where this particular tree outgrew the
-//!   index**. That *is* reported ([`FileIndex::truncated`]), because it is a
+//! - [`INDEX_MAX_ENTRIES`] and [`INDEX_MAX_DIRECTORIES`] say **where this particular tree
+//!   outgrew the index**: too many retained files or names in one directory, or too many
+//!   directories queued in total. Either is reported ([`FileIndex::truncated`]), because it is a
 //!   fact about the root in front of you and not about the feature — and a
 //!   palette that quietly stops knowing about half a repository, with no way to
 //!   tell that from a repository that genuinely has no match, is the kind of
@@ -208,7 +209,7 @@ impl FileIndex {
         &self.files
     }
 
-    /// Whether [`INDEX_MAX_ENTRIES`] cut the walk short.
+    /// Whether [`INDEX_MAX_ENTRIES`] or [`INDEX_MAX_DIRECTORIES`] cut the walk short.
     ///
     /// True only when a file was actually refused, so a root with exactly the
     /// cap's worth of files is not truncated — it ran out, which is a different
@@ -237,7 +238,7 @@ impl FileIndex {
 
 /// The walk itself — a pure function of a directory tree, runs on the worker.
 ///
-/// Everything it can be asked is fixed by the three constants, so there is one
+/// Everything it can be asked is fixed by the four bounds, so there is one
 /// index per root and never a question of which parameters produced it.
 #[must_use]
 pub fn walk(root: &Path) -> FileIndex {
@@ -976,6 +977,21 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(files);
         let _ = std::fs::remove_dir_all(directories);
+    }
+
+    /// RED (T-PALETTE-DEEP) — exhausting the directory budget exactly is a complete walk, not a
+    /// truncation. MUTATION: set `truncated` when the count reaches the cap rather than when one
+    /// more directory is refused.
+    #[test]
+    fn a_walk_with_exactly_the_directory_budget_is_not_truncated() {
+        let root = scratch("directory-cap-exact");
+        touch(&root.join("only-child").join("kept.txt"));
+
+        let index = walk_bounded(&root, INDEX_MAX_DEPTH, 100, 100, 2);
+        assert_eq!(relatives(&index), vec!["only-child/kept.txt".to_owned()]);
+        assert!(!index.truncated());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// RED (T-PALETTE-DEEP) — `INDEX_MAX_ENTRIES` has both promised meanings: files retained,
