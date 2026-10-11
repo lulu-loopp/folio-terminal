@@ -145,6 +145,7 @@ windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
 windows::Win32::UI::Shell::ShellExecuteExW	windows	waits for the shell and its UAC surface
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
+windows::Win32::Storage::FileSystem::GetDriveTypeW	windows	counted by call site, does not wait
 libc::write	macos	counted by call site, does not wait
 libc::close	macos	counted by call site, does not wait
 
@@ -192,10 +193,10 @@ bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
-bt-platform	[windows]	crate::windows_impl::program_path_directory	std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-platform	[windows]	crate::windows_impl::program_path_directory	std::fs::metadata 1, windows::Win32::Storage::FileSystem::GetDriveTypeW 1	worker-door-body	WorkerCtx	
 bt-platform	[windows]	crate::windows_impl::DirWatch::start_scoped	std::sync::mpsc::Receiver::recv 1, std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1, std::thread::JoinHandle::join 2	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::macos_impl::program_path_directory_in	std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1, std::thread::JoinHandle::join 2	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners

@@ -196,14 +196,20 @@ pub fn probe_34(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::Foundation::CloseHandle(h) } // probe: windows::Win32::Foundation::CloseHandle
 }
 
+/// `windows::Win32::Storage::FileSystem::GetDriveTypeW` - windows
+#[cfg(windows)]
+pub fn probe_35(r: windows::core::PCWSTR) -> impl Sized {
+    unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(r) } // probe: windows::Win32::Storage::FileSystem::GetDriveTypeW
+}
+
 /// `libc::write` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_35(fd: i32, b: &[u8]) -> impl Sized {
+pub fn probe_36(fd: i32, b: &[u8]) -> impl Sized {
     unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) } // probe: libc::write
 }
 
 /// `libc::close` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_36(fd: i32) -> impl Sized {
+pub fn probe_37(fd: i32) -> impl Sized {
     unsafe { libc::close(fd) } // probe: libc::close
 }

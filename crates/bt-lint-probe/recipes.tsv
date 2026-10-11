@@ -37,5 +37,6 @@ windows::Win32::UI::Shell::ShellExecuteW		o: windows::core::PCWSTR, n: windows::
 windows::Win32::UI::Shell::ShellExecuteExW		i: &mut windows::Win32::UI::Shell::SHELLEXECUTEINFOW	unsafe { windows::Win32::UI::Shell::ShellExecuteExW(i) }
 windows::Win32::System::Threading::SetEvent		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::System::Threading::SetEvent(h) }
 windows::Win32::Foundation::CloseHandle		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::Foundation::CloseHandle(h) }
+windows::Win32::Storage::FileSystem::GetDriveTypeW		r: windows::core::PCWSTR	unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(r) }
 libc::write		fd: i32, b: &[u8]	unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) }
 libc::close		fd: i32	unsafe { libc::close(fd) }
