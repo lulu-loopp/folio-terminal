@@ -2999,6 +2999,8 @@ text_entries! {
     /// The title of the error toast for a pane whose shell could not be started
     /// (T-BIRTH-OFF-WINDOW); its body is the reason.
     ShellDidNotStart,
+    /// The face kept at the bottom of a pane whose shell ended before it became usable.
+    ShellBirthDeath,
     /// About > Version: no newer release is known.
     VersionUpToDate,
     /// About > Version controls and inline links.
@@ -6012,6 +6014,11 @@ impl Text {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
             Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
+            Self::ShellBirthDeath => pick(
+                lang,
+                "exited at birth",
+                "exited at birth", // zh: pending T-SHELL-BIRTH-DEATH
+            ),
         }
     }
 
@@ -6181,6 +6188,9 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
+        (Self::ShellBirthDeath, HostPlatform::Windows),
+        (Self::ShellBirthDeath, HostPlatform::MacOs),
         // zh: pending T-RECOVERED-FOLDER — the start's toast for the edits a stop kept in the
         // recovered folder.
         (Self::RecoveredEditKept, HostPlatform::Windows),

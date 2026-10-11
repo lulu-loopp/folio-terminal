@@ -473,6 +473,7 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
     let fallback = bt_pty::ShellFallback {
         requested: std::ffi::OsString::from(requested_program),
         started: bt_pty::LAST_RESORT_SHELL,
+        error: "refused by the test".to_owned(),
     };
     let banner = fallback_banner(&fallback, requested_profile);
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
@@ -518,6 +519,7 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
             "/usr/local/bin/dash",
         )),
         started: bt_pty::LAST_RESORT_SHELL,
+        error: "refused by the test".to_owned(),
     };
     let banner = fallback_banner(&inside, profiles::fallback_profile_id());
     let mut one = DualPlaneSession::with_quotas_and_cell_height(

@@ -1458,6 +1458,8 @@ pub struct OutputRing {
     capacity: NonZeroUsize,
     state: Mutex<RingState>,
     changed: Condvar,
+    /// Bytes the reader has handed over in this ring's whole lifetime.
+    received: AtomicU64,
 }
 
 impl OutputRing {
@@ -1466,6 +1468,7 @@ impl OutputRing {
             capacity,
             state: Mutex::new(RingState::default()),
             changed: Condvar::new(),
+            received: AtomicU64::new(0),
         }
     }
 
@@ -1508,6 +1511,10 @@ impl OutputRing {
         }
         state.bytes += chunk.len();
         state.maximum_bytes = state.maximum_bytes.max(state.bytes);
+        self.received.fetch_add(
+            u64::try_from(chunk.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         state.chunks.push_back(Chunk {
             bytes: chunk,
             capped,
@@ -1579,6 +1586,12 @@ impl OutputRing {
             blocked_pushes: state.blocked_pushes,
             closed: state.closed,
         }
+    }
+
+    /// How many bytes the child has ever written to this PTY.
+    #[must_use]
+    pub fn received_bytes(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
     }
 }
 
@@ -1752,9 +1765,11 @@ pub struct PtySession {
     dump: Option<Arc<Mutex<PtyDump>>>,
     input_dump: Option<Mutex<PtyDump>>,
     /// Set once, only when a spawn had to fall back to [`LAST_RESORT_SHELL`] after the
-    /// resolved shell failed to start. `Runtime` turns it into the pane's first line, then
-    /// discards it.
+    /// resolved shell failed to start. `Runtime` turns it into the pane's first line and resident
+    /// diagnostic, then discards it.
     shell_fallback: Option<ShellFallback>,
+    /// The last-resort command this session may take if its first child dies before it is usable.
+    birth_fallback: Option<BirthFallback>,
 }
 
 /// The process id of the shell at the root of one pane's pseudoconsole tree. The PTY remains the
@@ -1781,10 +1796,9 @@ impl ShellProcessId {
 /// `NUL` terminator `CreateProcessW` requires still on the end of it, and the working directory
 /// again.
 ///
-/// So the crate that knows *why* keeps that for the log ([`eprintln!`], where a debugging string
-/// is exactly right), and hands up only what it also knows to be true: this program did not start,
-/// that one did. The crate that knows the **profiles** is the one that can name them, and it is
-/// the one that writes the line.
+/// So this crate hands the reason up as a diagnostic fact together with what else it knows to be
+/// true: this program did not start, that one did. The crate that knows the **profiles** is the
+/// one that can name them, and it is the one that writes the user's line.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShellFallback {
     /// The program that would not start.
@@ -1792,6 +1806,36 @@ pub struct ShellFallback {
     /// The program that did — always [`LAST_RESORT_SHELL`], which is part of the operating
     /// system whichever one this is.
     pub started: &'static str,
+    /// The operating system's account of why the requested program did not start.
+    pub error: String,
+}
+
+/// The one last-resort command retained for a shell that starts and then dies at birth.
+#[derive(Debug)]
+pub struct BirthFallback {
+    requested: OsString,
+    command: PtyCommand,
+    size: PtySize,
+}
+
+impl BirthFallback {
+    /// The program whose early death made this fallback necessary.
+    #[must_use]
+    pub fn requested(&self) -> &OsStr {
+        &self.requested
+    }
+
+    /// Start the retained last-resort command on a birth worker.
+    pub fn spawn(
+        mut self,
+        columns: NonZeroU16,
+        rows: NonZeroU16,
+        wake: OutputWake,
+    ) -> Result<PtySession, PtyError> {
+        self.size.columns = columns;
+        self.size.rows = rows;
+        PtySession::spawn(self.command, self.size, wake)
+    }
 }
 
 /// The command interpreter, and the arguments it needs, when `program` is a
@@ -1924,6 +1968,48 @@ fn quoted_for_cmd(token: &OsStr, line: &mut OsString) {
 }
 
 impl PtySession {
+    /// A completed PTY with a stable age and byte history for another crate's runtime tests.
+    #[cfg(any(test, feature = "test-shell"))]
+    #[doc(hidden)]
+    pub fn fake_exited(
+        age: Duration,
+        code: u32,
+        output_bytes: &[u8],
+        has_birth_fallback: bool,
+    ) -> Self {
+        let output = Arc::new(OutputRing::new(PTY_RING_BYTES));
+        if !output_bytes.is_empty() {
+            output
+                .push_read(output_bytes.to_vec(), false)
+                .expect("the fake output fits the product ring");
+            let _ = output.try_pop(TERM_READ_QUANTUM);
+        }
+        output.close();
+        let size = PtySize::cells(
+            NonZeroU16::new(80).expect("nonzero"),
+            NonZeroU16::new(24).expect("nonzero"),
+        );
+        Self {
+            master: None,
+            child: None,
+            born_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+            exited: Some(ExitStatus::with_exit_code(code)),
+            output,
+            input: Arc::new(InputRing::new(PTY_INPUT_RING_BYTES)),
+            reader: None,
+            writer: None,
+            conpty_source: conpty_source(),
+            dump: None,
+            input_dump: None,
+            shell_fallback: None,
+            birth_fallback: has_birth_fallback.then(|| BirthFallback {
+                requested: OsString::from("preferred-shell"),
+                command: PtyCommand::last_resort_shell(&last_resort_arguments()),
+                size,
+            }),
+        }
+    }
+
     /// Shell selection order (rulings 2026-08-04 and 2026-09-12): `BT_SHELL` wins outright on
     /// every platform. On Windows, `pwsh.exe` (PowerShell 7) is used when
     /// [`resolve_default_shell`]'s probe can find an install, and `powershell.exe` (Windows
@@ -1997,8 +2083,8 @@ impl PtySession {
     /// `fallback_args` answers that retry's complete argument list ([`last_resort_arguments`] for
     /// a caller with nothing to add): the variables above belong to the shell that would not
     /// start, but an argument the caller adds to *every* PowerShell it starts belongs to the retry
-    /// too. It is asked only when the retry happens, because composing it may cost the caller
-    /// something (the app prepares a script file for it) that a spawn which starts has no use for.
+    /// too. The birth worker asks once and retains the resulting command when the first shell
+    /// starts, because that same command is the pane's one fallback if the child dies at birth.
     pub fn spawn_shell_in(
         program: impl Into<OsString>,
         args: &[OsString],
@@ -2199,16 +2285,22 @@ impl PtySession {
             None => command,
         };
         match (spawn(command, size, wake.clone()), fall_back) {
-            (Ok(session), _) => Ok(session),
+            (Ok(mut session), Some(fallback_args)) => {
+                let fallback = PtyCommand::last_resort_shell(&fallback_args())
+                    .working_directory(working_directory);
+                let fallback = match environment_refresh {
+                    Some(refresh) => fallback.refresh_environment(refresh),
+                    None => fallback,
+                };
+                session.birth_fallback = Some(BirthFallback {
+                    requested: program,
+                    command: fallback,
+                    size,
+                });
+                Ok(session)
+            }
+            (Ok(session), None) => Ok(session),
             (Err(spawn_error), Some(fallback_args)) => {
-                // The whole of the operating system's account, kept where a debugging string is
-                // the right register and read by whoever is debugging. It is deliberately not
-                // carried up: see [`ShellFallback`].
-                eprintln!(
-                    "recoverable shell spawn failure: {} did not start ({spawn_error}); \
-                     using {LAST_RESORT_SHELL} instead",
-                    Path::new(&program).display()
-                );
                 let fallback = PtyCommand::last_resort_shell(&fallback_args())
                     .working_directory(working_directory);
                 let fallback = match environment_refresh {
@@ -2219,6 +2311,7 @@ impl PtySession {
                 session.shell_fallback = Some(ShellFallback {
                     requested: program,
                     started: LAST_RESORT_SHELL,
+                    error: spawn_error.to_string(),
                 });
                 Ok(session)
             }
@@ -2230,6 +2323,17 @@ impl PtySession {
     /// `None` for every session that started its resolved shell cleanly.
     pub fn take_shell_fallback(&mut self) -> Option<ShellFallback> {
         self.shell_fallback.take()
+    }
+
+    /// Take the one delayed fallback available to a shell that dies at birth.
+    pub fn take_birth_fallback(&mut self) -> Option<BirthFallback> {
+        self.birth_fallback.take()
+    }
+
+    /// Whether this session still has its one delayed birth fallback.
+    #[must_use]
+    pub fn has_birth_fallback(&self) -> bool {
+        self.birth_fallback.is_some()
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
@@ -2314,6 +2418,7 @@ impl PtySession {
             dump,
             input_dump,
             shell_fallback: None,
+            birth_fallback: None,
         })
     }
 
@@ -2431,6 +2536,12 @@ impl PtySession {
 
     pub fn output_is_drained(&self) -> bool {
         self.output.is_closed_and_drained()
+    }
+
+    /// Bytes the child wrote before its output stream ended, including bytes already drained.
+    #[must_use]
+    pub fn output_bytes_received(&self) -> u64 {
+        self.output.received_bytes()
     }
 
     pub fn ring_stats(&self) -> RingStats {
@@ -3830,6 +3941,7 @@ mod tests {
             dump: None,
             input_dump: Some(Mutex::new(dump)),
             shell_fallback: None,
+            birth_fallback: None,
         };
         session.write_with_reason(b"a", "keyboard input").unwrap();
         session.write(b"b").unwrap();
