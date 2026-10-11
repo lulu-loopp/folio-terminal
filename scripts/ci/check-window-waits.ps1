@@ -1,8 +1,9 @@
 # the_window_threads_checks_that_are_not_rust
 #
-# Four checks the thread-door note 2026-09-26 gives A2a (revisions (j)1, (j)3,
-# (j)11.4-(j)11.6; budget note C-2), each reported under its own name, all run
-# before the script answers:
+# Five checks — four the thread-door note 2026-09-26 gives A2a (revisions (j)1,
+# (j)3, (j)11.4-(j)11.6; budget note C-2) and one the side-effects contract
+# 2026-10-11 gives S-1 — each reported under its own name, all run before the
+# script answers:
 #
 #   1. the bare-site inventory only shrinks (below);
 #   2. the configuration fence: the five clippy.toml locations;
@@ -15,6 +16,8 @@
 #      this script is told (M7e);
 #   4. a registry row added without a ruling is refused, and the rows pending
 #      a ruling only shrink (M9).
+#   5. the completions ledger's repairs only shrink: a status that names a
+#      D-row or a registry row may only lose them, to `conforms` (S-1).
 #
 # ── 1. the_bare_site_inventory_only_shrinks
 #
@@ -284,6 +287,53 @@ foreach ($row in $rowsNow.Keys) {
     }
 }
 
+# ── 5. the completions ledger's repairs only shrink (S-1) ─────────────────────────────────────
+# `# completions` (side-effects contract 2026-10-11, section 3.1): a row's status is `conforms`,
+# `owner-thread`, or the repairs that owe it (`D-<n>`, `row <n>`). The equality half is the
+# source guard's tests in `hang_watch::window_waits_tests`; this is the historical half, the
+# shape rule 4 gives `# rows`: against the merge base, a row's repairs only shrink — a status
+# that names repairs may drop some of them or become `conforms`, never name one it did not; a
+# row that conformed (or was a C7 member) never comes to owe one; and a new row names none.
+# A merge base without the section is the change that introduces it: nothing to compare.
+function Read-Completions([string[]]$lines) {
+    $rows = [ordered]@{}
+    $inside = $false
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.StartsWith("##")) { continue }
+        if ($line.StartsWith("# ")) { $inside = ($line -eq "# completions"); continue }
+        if (-not $inside -or $line.Length -eq 0) { continue }
+        if (-not $header) { $header = $true; continue }
+        $cells = $line -split "`t"
+        $rows[$cells[0]] = $cells[7]
+    }
+    return $rows
+}
+function Get-Repairs([string]$status) {
+    if ($status -eq "conforms" -or $status -eq "owner-thread") { return @() }
+    return @($status -split ", ")
+}
+$ledgerNow = Read-Completions ([IO.File]::ReadAllLines((Join-Path $repo $registry)))
+$ledgerThen = Read-Completions ($then -split "`r?`n")
+if ($ledgerThen.Count -eq 0) {
+    Write-Host "the merge base has no # completions section: this change introduces it ($($ledgerNow.Count) rows), and there is nothing to compare."
+} else {
+    foreach ($class in $ledgerNow.Keys) {
+        $now = Get-Repairs $ledgerNow[$class]
+        if (-not $ledgerThen.Contains($class)) {
+            if ($now.Count -gt 0) {
+                $failures += "[completions] '$class' is a new row that names repairs ($($ledgerNow[$class])): a new row conforms or is a ruled C7 member"
+            }
+            continue
+        }
+        $before = Get-Repairs $ledgerThen[$class]
+        $grown = @($now | Where-Object { $before -notcontains $_ })
+        if ($grown.Count -gt 0) {
+            $failures += "[completions] '$class' was '$($ledgerThen[$class])' at the merge base and is '$($ledgerNow[$class])': a status's repairs only shrink, to conforms ($($grown -join ', ') added)"
+        }
+    }
+}
+
 $added = @()
 $grown = @()
 $shrunk = 0
@@ -323,5 +373,6 @@ if ($failures.Count -gt 0) {
 }
 Write-Host "the configuration fence holds: the five clippy.toml locations, no other, no CLIPPY_CONF_DIR, no legacy .cargo/config."
 Write-Host "no workflow, cargo configuration or script flag lowers the lint; its two tables stand at '$WorkspaceLintLevel' and '$PlatformLintLevel'."
+Write-Host "the completions ledger: $($ledgerNow.Count) rows, no repair added against the merge base."
 Write-Host "no registry row was added without a ruling; $(@($rowsNow.Values | Where-Object { $_.status -eq 'pending' }).Count) row(s) pending."
 Write-Host "the window thread's bare sites: $total pending (docs/ARCHITECTURE.md section 6)."
