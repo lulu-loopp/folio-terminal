@@ -79,6 +79,8 @@
 
 use std::time::{Duration, Instant};
 
+use winit::keyboard::ModifiersState;
+
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, MOTION_SLOW, OverlayQuad, POPUP_ENTER, Travel,
 };
@@ -121,15 +123,29 @@ pub const CARD_HINT_CHORD_GAP_LOGICAL_PX: f32 = 6.0;
 /// size reads as a word in the sentence.
 pub const CARD_HINT_PLUS_FONT_LOGICAL_PX: f32 = 11.0;
 
-/// The cap this card prints, which is the modifier the gesture is held under.
+/// **The modifier the card gesture is held under** — one flag, read by the
+/// wheel's own decision (`column_notch`) and printed by this card.
 ///
-/// Written here rather than derived from the shortcut table, and that is the
-/// honest arrangement: `Alt`+wheel is not a row of `Shortcuts::BINDINGS` at all
-/// — it is a wheel gesture, and the table has no wheel in it — so a lookup
-/// would be this file pretending to read something that does not exist. The
-/// name it prints is the same name [`crate::shortcuts::live_caps`] prints for
-/// the same key, which is the only agreement that has to hold.
-pub const CARD_HINT_CAP: &str = "Alt";
+/// Not a row of `Shortcuts::BINDINGS`: `Alt`+wheel is a wheel gesture, and the
+/// table has no wheel in it. What has to agree is the key the hand holds and
+/// the key the card names, so both read this flag.
+pub const CARD_AIM_MODIFIER: ModifiersState = ModifiersState::ALT;
+
+/// The cap this card prints: [`CARD_AIM_MODIFIER`] in this machine's own
+/// spelling — `Option` on a Mac, `Alt` elsewhere — through the same
+/// [`crate::shortcuts::modifier_caps_on`] every shortcut cap is spelled by. It
+/// was the literal `"Alt"`, which a Mac keyboard does not have
+/// (AUDIT-hardcode SET-2).
+#[must_use]
+pub fn card_hint_cap() -> String {
+    card_hint_cap_on(bt_platform::host_platform())
+}
+
+/// [`card_hint_cap`] for a named platform.
+#[must_use]
+pub fn card_hint_cap_on(platform: bt_platform::HostPlatform) -> String {
+    crate::shortcuts::modifier_caps_on(CARD_AIM_MODIFIER, platform).concat()
+}
 
 // ── the clock ──────────────────────────────────────────────────────────────
 
@@ -419,7 +435,7 @@ pub fn place(
     let inset = px(KEY_HINT_WINDOW_INSET_LOGICAL_PX);
     let chord_gap = px(CARD_HINT_CHORD_GAP_LOGICAL_PX);
 
-    let cap_width = cap_box_width(CARD_HINT_CAP, cap_font, scale, measure).round();
+    let cap_width = cap_box_width(&card_hint_cap(), cap_font, scale, measure).round();
     let plus_width = measure("+", plus_font).ceil();
     // The wheel takes the house's own box for a mark standing beside words,
     // which is the box the optical gate holds every drawing to — see
@@ -565,7 +581,7 @@ pub fn build(layout: &CardHintLayout, palette: &ChromePalette, scale: f32) -> Ve
     push_cap(
         &mut layer,
         layout.cap,
-        CARD_HINT_CAP,
+        &card_hint_cap(),
         palette.peek_leaf_focus_fill,
         palette.menu_item_text_selected,
         scale,
@@ -855,7 +871,7 @@ mod tests {
         for lang in [crate::i18n::Lang::English, crate::i18n::Lang::Chinese] {
             let said = crate::i18n::Text::CardGestureHint.in_lang(lang);
             assert!(
-                !said.contains(CARD_HINT_CAP),
+                !said.contains(&card_hint_cap()),
                 "{lang:?} says {said:?}, which prints the cap a second time",
             );
             assert!(
@@ -887,5 +903,22 @@ mod tests {
         assert!(bubble.plus[2] <= bubble.wheel[0]);
         assert!(bubble.wheel[2] <= bubble.say[0]);
         assert!(bubble.frame[0] < bubble.cap[0]);
+    }
+
+    /// RED (AUDIT-hardcode SET-2) — **the card names the key the hand holds,
+    /// in this keyboard's word for it**: `Option` on a Mac, `Alt` on Windows.
+    ///
+    /// MUTATION: make `card_hint_cap_on` answer `"Alt"` — the Mac row goes red.
+    #[test]
+    fn the_card_names_the_held_modifier_in_this_keyboards_word() {
+        use bt_platform::HostPlatform;
+        assert_eq!(card_hint_cap_on(HostPlatform::MacOs), "Option");
+        assert_eq!(card_hint_cap_on(HostPlatform::Windows), "Alt");
+        // And it is the flag the wheel decision reads, so the card and the
+        // gesture cannot name two different keys.
+        assert_eq!(
+            crate::column_notch(CARD_AIM_MODIFIER),
+            crate::ColumnNotch::Aim
+        );
     }
 }

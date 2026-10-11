@@ -25459,7 +25459,7 @@ enum ColumnNotch {
 /// told to make of that key, which is also the only reading that lets the
 /// gesture be written down once for both dialects.
 fn column_notch(modifiers: ModifiersState) -> ColumnNotch {
-    if modifiers.alt_key() {
+    if modifiers.contains(cardhint::CARD_AIM_MODIFIER) {
         ColumnNotch::Aim
     } else {
         ColumnNotch::List

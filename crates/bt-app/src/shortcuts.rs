@@ -1881,19 +1881,27 @@ pub(crate) fn hint_global_needs_modifier() -> &'static str {
 /// needs its own ruling about what the child loses, and no ruling has been made.
 /// A row in `BINDINGS` is one this window claims; these are rows it declines,
 /// and the editor greys them to say so.
+///
+/// **The modifiers are flags, not words** (AUDIT-hardcode SET-2): a row
+/// declines a chord, and the chord's modifiers are spelled on the page the way
+/// every other row's are ([`modifier_caps_on`], in the table's dialect) — so a
+/// Mac reads `Option` where a Windows machine reads `Alt`, for the same key.
 struct ReservedRow {
     title: Text,
-    caps: &'static [&'static str],
+    held: ModifiersState,
+    keys: &'static str,
 }
 
 const RESERVED_ROWS: &[ReservedRow] = &[
     ReservedRow {
         title: Text::ShortcutReservedMoveFocus,
-        caps: &["Alt", ARROW_CAPS],
+        held: ModifiersState::ALT,
+        keys: ARROW_CAPS,
     },
     ReservedRow {
         title: Text::ShortcutReservedResizePane,
-        caps: &["Alt", "Shift", ARROW_CAPS],
+        held: ModifiersState::ALT.union(ModifiersState::SHIFT),
+        keys: ARROW_CAPS,
     },
 ];
 
@@ -2439,7 +2447,11 @@ impl Shortcuts {
             ids: Vec::new(),
             title: row.title.text(),
             note: Some(Cow::Borrowed(NOTE_RESERVED_ALT_ARROW.text())),
-            caps: row.caps.iter().map(|cap| (*cap).to_owned()).collect(),
+            caps: {
+                let mut caps = modifier_caps_on(row.held, self.dialect);
+                caps.push(row.keys.to_owned());
+                caps
+            },
             recordable: false,
             reserved: true,
             overridden: false,
@@ -2975,7 +2987,10 @@ fn modifier_caps(modifiers: ModifiersState) -> Vec<String> {
 ///
 /// The platform is a parameter for [`Shortcuts::defaults_for`]'s reason: the
 /// documents generator prints both columns from whichever machine runs it.
-fn modifier_caps_on(modifiers: ModifiersState, platform: bt_platform::HostPlatform) -> Vec<String> {
+pub(crate) fn modifier_caps_on(
+    modifiers: ModifiersState,
+    platform: bt_platform::HostPlatform,
+) -> Vec<String> {
     let mac = platform == bt_platform::HostPlatform::MacOs;
     let mut caps = Vec::new();
     if modifiers.super_key() && !mac {
@@ -5500,6 +5515,36 @@ mod tests {
                 .all(|line| line.reserved),
             "they stand after the rows this window actually claims"
         );
+    }
+
+    /// RED (AUDIT-hardcode SET-2) — **a declined row spells its modifiers in the
+    /// table's own hand**: `Option` on a Mac, `Alt` on Windows, never the
+    /// Windows word on a keyboard that has no such key.
+    ///
+    /// MUTATION: spell the reserved rows' caps as the literal `"Alt"` again —
+    /// the Mac rows go red.
+    #[test]
+    fn a_declined_row_names_the_modifier_this_keyboard_has() {
+        use bt_platform::HostPlatform;
+        for (platform, alt) in [
+            (HostPlatform::MacOs, "Option"),
+            (HostPlatform::Windows, "Alt"),
+        ] {
+            let lines = Shortcuts::defaults_for(platform).editor_rows();
+            let caps: Vec<Vec<String>> = lines
+                .iter()
+                .filter(|line| line.reserved)
+                .map(|line| line.caps.clone())
+                .collect();
+            assert_eq!(
+                caps,
+                vec![
+                    vec![alt.to_owned(), ARROW_CAPS.to_owned()],
+                    vec![alt.to_owned(), "Shift".to_owned(), ARROW_CAPS.to_owned()],
+                ],
+                "{platform:?}"
+            );
+        }
     }
 
     /// The name a picture-in-picture slot is called on the page.
