@@ -190,11 +190,15 @@ mod tests {
     use crate::watch_steward::fake::FakeDoor;
     use std::sync::mpsc;
 
-    fn snapshot(directories: &[&str]) -> ProgramEnvironmentSnapshot {
+    fn directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join("folio-programs-ear").join(name)
+    }
+
+    fn snapshot(directories: &[PathBuf]) -> ProgramEnvironmentSnapshot {
         ProgramEnvironmentSnapshot {
             path: Some(std::env::join_paths(directories).unwrap()),
             pathext: Some(".COM;.EXE;.CMD".into()),
-            directories: directories.iter().map(PathBuf::from).collect(),
+            directories: directories.to_vec(),
         }
     }
 
@@ -264,12 +268,13 @@ mod tests {
         let door = FakeDoor::default();
         let mut rig = Rig::over(door.clone());
         let now = Instant::now();
-        let first = snapshot(&[r"C:\Tools", r"C:\Users\alice\bin"]);
+        let alice = directory("alice-bin");
+        let first = snapshot(&[alice.clone(), directory("tools")]);
         rig.sync(&first, now);
         rig.after_wake(now, "the first PATH set");
         assert_eq!(door.live(), first.directories);
 
-        let second = snapshot(&[r"C:\Users\alice\bin", r"D:\SDK\bin"]);
+        let second = snapshot(&[alice, directory("sdk-bin")]);
         rig.sync(&second, now);
         rig.after_wake(now, "the changed PATH set");
         door.wait_for_drops(1);
@@ -283,8 +288,8 @@ mod tests {
         let door = FakeDoor::default();
         let mut rig = Rig::over(door.clone());
         let now = Instant::now();
-        let path = PathBuf::from(r"C:\Tools");
-        let wanted = snapshot(&[r"C:\Tools"]);
+        let path = directory("tools");
+        let wanted = snapshot(std::slice::from_ref(&path));
         door.refuse(&path);
         rig.sync(&wanted, now);
         rig.after_wake(now, "the refusal");
@@ -304,7 +309,7 @@ mod tests {
         let door = FakeDoor::default();
         door.hold_starts();
         let mut rig = Rig::over(door.clone());
-        rig.sync(&snapshot(&[r"C:\Tools"]), Instant::now());
+        rig.sync(&snapshot(&[directory("tools")]), Instant::now());
         door.wait_for_a_held_start();
         assert_eq!(door.in_progress(), (1, 0));
         assert_eq!(door.threads().0, vec!["watch-steward"]);
@@ -316,7 +321,7 @@ mod tests {
     #[test]
     fn two_hundred_events_coalesce_to_one_walk() {
         let start = Instant::now();
-        let path = PathBuf::from(r"C:\Tools");
+        let path = directory("tools");
         let mut ear = ProgramsEar::default();
         ear.watched.insert(
             path.clone(),

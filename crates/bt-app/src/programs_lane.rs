@@ -1111,9 +1111,10 @@ pub(crate) mod tests {
         use bt_platform::ProgramPathDirectory::{Remote, Removable};
 
         let local = bin_dir();
-        let remote = PathBuf::from(r"\\server.invalid\tools");
-        let removable = PathBuf::from(r"R:\portable\bin");
-        let missing = PathBuf::from(r"C:\missing\bin");
+        let fixture = std::env::temp_dir().join("folio-program-environment");
+        let remote = fixture.join("remote");
+        let removable = fixture.join("removable");
+        let missing = fixture.join("missing");
         let relative = PathBuf::from("relative-bin");
         let entries = vec![
             local.clone(),
