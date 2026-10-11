@@ -1,6 +1,6 @@
 # How a side effect is asked for and how it ends: the execution / completion contract — design note, 2026-10-11
 
-Status: **draft, 2026-10-11**, for Codex review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the second of the two contract notes the 2026-09-21 structure review asked for before 0.5. Ledger rows **D-16** (the door pattern, the contract's admission half) and **D-33** (the lane contract as one shape, its completion half), both 0.5 preconditions. D-55 (each publication declares its kind) also waits on this note. The companion is `ownership-contract-2026-10-11.md` (OC), which says *who* owns a fact. This note says how an owner asks the world to change something and how it learns the outcome. Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test, no cargo run for this note. Facts are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named).
+Status: **revision (b), 2026-10-11**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the second of the two contract notes the 2026-09-21 structure review asked for before 0.5. Ledger rows **D-16** (the door pattern, the contract's admission half) and **D-33** (the lane contract as one shape, its completion half), both 0.5 preconditions. D-55 (each publication declares its kind) also waits on this note. The companion is `ownership-contract-2026-10-11.md` (OC), which says *who* owns a fact. This note says how an owner asks the world to change something and how it learns the outcome. Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test, no cargo run for this note. Facts are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named).
 
 **Section signs.** A bare `§n` is a section of this note. `A§n` is `docs/ARCHITECTURE.md`; `TD§n` is `docs/plans/design/thread-door-2026-09-26.md`; `WTB§n` is `docs/plans/design/window-thread-budget-2026-09-25.md`; `OC§n` is the companion note; `RULES n` is a row of `docs/RULES.md`. *The registry* is `crates/bt-app/src/window_waits.tsv`, and *row n* is its `# rows` section (= A§5.3). *The lane suite* is `crates/bt-app/src/lane.rs` with `lane_contract_tests`.
 
@@ -284,3 +284,334 @@ After these: the session writer's wake and its failure retry (§6 Q3, one line i
 - **Owned facts.** None moves. Each lane's owed-request bookkeeping gains a terminal state (`Superseded`, `WorkerGone`) in S-4 and S-5. Those are facts of the lane that already owns the requests.
 - **Doors.** S-6 adds a storage lane door for document saves, and S-7 a clipboard worker door. Each is a new `# completions` row and a `# effects` worker row. Rows 20 (its save half) and 26 leave `# rows` when they land. No door is added by S-1…S-3.
 - **Debt.** Repays D-72, D-73, D-85 (S-4), D-70, D-71 (S-5), and row 20's save half and row 26 (S-6, S-7). Narrows D-33 (the ledger covers every class) and D-16 (the admission half, by S-2). This note adds no debt row. The ledger's statuses are the list of what remains.
+
+---
+
+## Revision (b), 2026-10-11, after the Codex review
+
+Review: `reports/J5-05-contracts.review-codex.md` (trace tree, 0.4.8). Verdict on this note: **adopt with changes**, ten items, N2-1 to N2-10. All ten are applied, and none is argued. The review's findings that stand unchanged:
+- V1, V2 and V3 are real.
+- Dirty clears only on a `Saved { revision }` receipt that matches the document's current revision.
+- Waiting across turns, never on the window thread, is the right shape for close and quit.
+- Q1–Q5 are the right questions; Q2, Q3 and Q5 are revised below.
+
+**The B6 note** (`docs/plans/design/settings-reread-2026-10-11.md`, revision (a), on `design/settings-reread`, itself under review) is now read. (b)8 makes S-6's lane B6's storage worker.
+
+### (b)0 · What changed, item by item
+
+| item | the review's words (abridged) | disposition | where |
+|---|---|---|---|
+| N2-1 | *"The 23-row table is neither complete nor normalized enough to generate `# completions` … Derive the table at request-protocol granularity from the registry, `AppEvent` answers, every lane, and all open/pending wait rows. Recompute the 11/8/4 counts"* | applied | (b)1 replaces §1.2 and its counts; §0's counts read as (b)1's |
+| N2-2 | *"'Returns at once' should mean 'performs no synchronous external effect and waits on no lock, thread, process, filesystem, network, GPU, or owner door' … Make the guard walk the resolved call graph to the enqueue boundary, fail closed on unresolved dynamic calls"* | applied | (b)2 replaces C1 and §3.2 |
+| N2-3 | *"a door invocation either refuses synchronously with its terminal outcome or mints an identity … Row 2's shell retirement … cannot be called conformant without either defining it as detached maintenance … Apply the same distinction to coalesced probe triggers"* | applied | (b)3 adds to C2 |
+| N2-4 | *"Same-revision save requests are joined, not superseded … Introduce `Joined { with }` … Reserve `Superseded { by }` for a request displaced by a newer operation"* | applied | (b)4 amends C2's terminal set, C4 and §4's third case |
+| N2-5 | *"Rewrite C5 as: no new request is autonomously scheduled after a terminal failure; debounce may schedule a request from new input, and one admitted worker request may contain a declared bounded contention acquisition … Q3 must acknowledge"* the crash-loss trade-off | applied | (b)5 replaces C5 and Q3 |
+| N2-6 | *"C7 needs an exact closed list and a meaning for 'bounded' … Reconcile 'presentation stays on the owner thread' with registry row 9's existing 0.5 presentation-lane disposition"* | applied | (b)6 replaces C7 and Q1 |
+| N2-7 | *"The scripted-worker harness is not buildable through the present adapters as described … Specify the product seam … Separate caught task panic from worker-thread death. Either reduce S-3 … or size the full injection refactor as L"* | applied: the reduced S-3 plus a named seam that each lane adopts in its repair ticket | (b)7 replaces §3.3 |
+| N2-8 | *"S-6 must preserve the B6 conditional-write protocol and define close/quit timeout outcomes … A close timeout must become `Failed`/`WorkerGone` and leave the gate open … S-6 is L or should be split"* | applied: split into S-6a/b/c | (b)8 replaces S-6 and Q5 |
+| N2-9 | *"S-7 does not retire registry row 26 as written … Move every Windows `OpenClipboard` road or say the row is merely narrowed. Also scope the message-only-window solution to Windows … Size S-7 as M"* | applied | (b)9 replaces S-7 and Q2 |
+| N2-10 | *"S-1 is M … S-2 is M … S-3 is L if it injects … S-6 is L or split; S-7 is M. The order ledger → guard/harness → lane repairs remains right"* | applied | (b)10 replaces §3.4 |
+
+### (b)1 · The effect inventory at request-protocol granularity (N2-1)
+
+**How it was derived.** One row per *request protocol*: one door, one thread, one completion signal. The rows were taken from:
+- every `# rows` entry of the registry that is `open`, `pending` or `ruled to stay`;
+- every `# doors` entry;
+- every worker-door body in `# effects`;
+- every `AppEvent` variant that answers a request (`main.rs:457–854`);
+- every `lane::LaneName`;
+- the thread door's named spawns.
+
+**Kept out on purpose**, and recorded as excluded:
+- ingress that no Folio code asked for: IME composition, endpoint listening and admission, watch and OS news delivery (`SystemNews`, `StorageChanged`, `SchemesChanged`, `AttentionSpoke`, `LaunchAsked`);
+- the door processes (`--update-apply`, `--update-recover`, `--uninstall*`, `--explorer-command`), which run in another process and whose contract is the update journal (A§4.4).
+
+**Status codes:**
+- **✓** conforms, including §2's C7 members and the exit-phase waits ruled to stay;
+- **◐** has a door or an admission but misses one obligation, or is an admitted interim wait due to move;
+- **✗** a window-thread effect with no admission (a bare registry row);
+- **?** not yet classified. S-1 reads it before the ledger is written.
+
+| # | protocol | door | thread | signal | failure road | identity · supersession · sink | status |
+|---:|---|---|---|---|---|---|---|
+| | **Session transport** | | | | | | |
+| 1 | a pane's shell birth | `pty_door::spawn` → `bear(&WorkerCtx)` | `bt-pty-birth` | pane wake `PtyOutput` → `land_births` | `Born::Err`; a panic becomes `PtyError::Backend` | generation; abandoned → retired off thread | ✓ |
+| 2 | birth-death fallback shell | `pty_door::request` from `reap_exited_tabs` | `bt-pty-birth` | as 1 → `land_birth_death_fallback` | `BirthDeathLanding::Kept` + line | generation; as 1 | ✓ |
+| 3 | shell retirement | `bt_pty::retire_session` | `pty-retirement` | none: **detached maintenance** ((b)3) | the retirement thread's own line | the sink accepts at once | ✓ under (b)3 |
+| 4 | input to a shell | `offer_pty_input` → `InputRing::try_push` | window (row 19, ruled) | synchronous `Accepted` / `InputRefused` | the refusal is the terminal | refused synchronously or taken | ✓ |
+| 5 | a shell's resize | `pty_door::resize` (`PtyResize`) | window (row 12) | the return | error value | owed while in birth | ◐ interim, 0.5→0.6 |
+| 6 | quit's retirement wait | `pty_door::wait_for_retirements` | window, exit (row 15) | the count still going | proceeds at deadline | — | ✓ exit, deadline |
+| | **Observation** | | | | | | |
+| 7 | PSReadLine version and policy | `PsReadLineProbe` / `spawn_probe` | `psreadline-probe` | `PsReadLineProbed` | `Unknown`, never cached | request number; triggers merge ((b)3) | ✓ |
+| 8 | `$PROFILE` observation | probe | `powershell-profile-observation` | `PowerShellProfileProbed` | `Unknown` | as 7 | ✓ |
+| 9 | Copilot version | `CopilotProbe` | `copilot-version-probe` | `CopilotProbed` | `Unknown` | as 7 | ✓ |
+| 10 | locale reading | `LocaleCell` | `locale-reading` | `LocaleAnswered` | failed reading → asked again by a birth | newest reading wins | ✓ |
+| 11 | foreground program | `foreground_program::request` | `bt-foreground-program-worker` | answer by address + incarnation | `Unknown` | one pending successor | ✓ |
+| 12 | program walk | `programs_lane` | `program-walk` | `ProgramsAnswered` | line at walk end | coalesced requests get no terminal | ◐ **V3** D-85 |
+| 13 | font list | `settings::FontLane` | `font-families` | `FontsScanned` | — | coalesced: no terminal; a dead walk stays `running` | ◐ **V3** D-72 |
+| 14 | taskbar auto-hide | `taskbar_lane` | `taskbar-state` | `TaskbarAnswered` | — | skipped requests: no terminal | ◐ **V3** D-73 |
+| 15 | install channel | `install_channel` (once per process) | `bt-install-channel` | `InstallChannelRead` | `Channel::Unknown` | one request | ✓ |
+| 16 | recovered edits listing | `recovered` | `bt-recovered` | `RecoveredEditsListed` | — | one request | ✓ |
+| 17 | Explorer package probe, deploy, removal | `explorer_menu::request` (`BUSY` latch, one queued press) | `folio-explorer-*` | `ExplorerPackageChanged` | the row's refusal line | a press during `BUSY` is queued and only the last is run; earlier presses get no terminal | ◐ C4 |
+| 18 | PSReadLine installed copy | `refresh_psreadline_installed` | window (row 4) | the return | — | — | ✗ |
+| | **Reads and computation** | | | | | | |
+| 19 | files column listing | files worker | `bt-files-worker` | `FilesReady` | worker disabled, said once | not in the lane suite | ◐ D-33 |
+| 20 | preview read | preview worker | `bt-preview-worker` | `PreviewReady` | `HeadOutcome` error → the strip | `land_read` refuses a read the buffer moved past | ✓ |
+| 21 | git questions (status, refs, log, show, search) | `GitWorker` | `bt-git-worker` | `GitReady` | `GitAnswer` fault per question (`git.rs:2505–2525`) | not in the lane suite | ◐ D-33 |
+| 22 | **git mutations** (`Write`, `Checkout`) | the same `GitWorker` (`GitQuestion::Write`, `::Checkout`, `git.rs:2802`) | `bt-git-worker` | `GitReady` (`GitAnswer::Write`, `::Checkout`) | fault answer | a storage-class effect on a read worker: no per-repository serialisation or operation identity is stated | ◐ storage rules (A§5.1) unstated |
+| 23 | file index | index worker | (index thread) | `FileIndexReady` | — | — | ◐ D-33 |
+| 24 | formula and decoration | `MathWorker` | `bt-math-worker` | `MathReady` | stale and closed panes ignored | no request identity | ◐ D-74/75/76 |
+| 25 | image scale | `MathWorker`'s scale queue | `bt-image-scale-worker` | `MathReady` | — | as 24 | ◐ D-76 |
+| 26 | path verification | `MathWorker`'s path queue | `bt-path-verify-worker` | `MathReady` | — | as 24 | ◐ D-76 |
+| 27 | background picture decode | `background-picture` worker | `background-picture` | `BackgroundPictureReady` | — | — | ? |
+| 28 | folder chooser | `FolderPicker::request` (posted) | window's own loop, outside the callback | collected next turn | `Result` | one dialog | ✓ |
+| | **Hand-offs and notifications** | | | | | | |
+| 29 | OS hand-off | `handoff_lane::submit` | `bt-os-handoff` | `HandoffAnswered` | `Result` | request id; gone window → nowhere | ◐ D-70, D-71 |
+| 30 | desktop notification | `notifications.show` (`runtime/attention.rs:789`) | window | the return | `refusal` kept | — | ? (no registry row; S-1 measures whether it waits) |
+| | **Storage** | | | | | | |
+| 31 | the session file | `SessionStore::flush_if_due` → `SessionWriter` | `session-writer` | receipt by generation, polled | re-dirtied, retried at the next quiet window | stale receipts judged | ◐ C5, no wake ((b)5) |
+| 32 | quit's session write wait | `SessionWriter::wait_for` (`SessionWriteWait`) | window, exit (row 16) | the verdict | timeout → `stalled`, quit proceeds | — | ✓ exit, deadline |
+| 33 | session writer close | `SessionWriter::close` (`SessionWriterRetire`) | window, exit (row 16b) | the return | — | — | ◐ pending |
+| 34 | trial receipt write | `SessionStore::write_receipt` | `session-writer` | `ReceiptWritten` on its channel | `Err` | one per trial | ✓ |
+| 35 | update hand-off to the applier | `update_handoff` at `QuitStep::Exit` | `session-writer` | job report | `Failed` | one job | ✓ |
+| 36 | **document save** | `save_preview_on` → `PreviewBuffer::save` | window (row 20) | the return | `SaveOutcome::{Conflict, Failed}` | — | ✗ **V1** |
+| 37 | renames (preview file, files row) | `rename_preview_file`, `rename_files_row` | window (row 20) | the return | toast | — | ✗ |
+| 38 | settings, keybindings, profiles, pins writes | the stores' `write_now` | window (row 20) | the return | `DocumentWrites` streak | — | ✗ (B6 moves them, (b)8) |
+| 39 | `$PROFILE` marks install | `add_to_profile` → `install_recorded` | window (row 2) | the return | — | lock + `sleep` up to 2 s | ✗ |
+| 40 | PSReadLine apply | `apply_psreadline` | window (row 3) | the return | — | — | ✗ |
+| 41 | shell-integration enable, undo, removal | `profile_runtime` jobs | `powershell-profile-install`, `-undo`, `-removal` | `PowerShellProfileProbed` | the row's refusal | — | ? |
+| | **Clipboard** | | | | | | |
+| 42 | clipboard text write | `write_terminal_clipboard_text` → `set_clipboard_text` | window (row 26) | the return | `anyhow` | sleep-and-retry inside | ✗ **V2** |
+| 43 | clipboard text read (paste) | `clipboard_text` | window (row 26) | the return | `Err` | as 42 | ✗ |
+| 44 | clipboard picture: open | `WindowsClipboard::begin` | window (row 26) | the return | `Err` | as 42 | ✗ |
+| 45 | clipboard picture: save | `clipboard-picture` worker | `clipboard-picture` | `ClipboardPictureReady` | — | — | ✓ |
+| | **Network and update** | | | | | | |
+| 46 | update check | `update::begin` | `bt-update-check` | `UpdateChecked` | a refusal stamps `attempted_at_ms` | one check out | ✓ |
+| 47 | update job (download, verify, stage) | `update_job::Job` | the job's worker | `UpdateJobProgress` | `Failed` state | one job per process | ✓ (D-82: the request's `Drop` waits) |
+| 48 | trial watch | `update_trial` watch | `folio-trial-watch` | `TrialWritesReleased` | the transaction is handed back | one per trial | ✓ |
+| 49 | trial claim | `update_trial::take_the_claim_within` | main, before the loop (row 28) | the return | — | 100 ms tries | ✗ pre-loop |
+| 50 | update leave guard | `update_handoff::leave_armed` (`UpdateLeave`) | main, after the loop (row 29) | the answer | `LEAVE_WITHIN` deadline | — | ✓ exit, deadline |
+| | **Web** | | | | | | |
+| 51 | web environment, controller, rehost | `WebHost::request_environment` / `request_controller` / `rehost` (`WebEnvironment`, `WebController`, `WebRehost`) | window (row 21) | engine callback (`Controller { generation }`) → `WebPageSpoke` | `error` in the callback | generation | ◐ C7 member with an open cost (D-64) |
+| 52 | **web navigation** | `WebHost::navigate` (`webview.rs:3029`) | window; returns at once | `NavigationStarting` / `NavigationCompleted { uri, success, status, http_status }` → `WebPageSpoke` | `success: false` | **no request id**: matched by uri; supersession unstated (E-1) | ◐ C2, C4 |
+| | **Presentation and GPU** | | | | | | |
+| 53 | present | `PresentFrame`, `CompositorCommit` | window (row 9) | the return | device loss → row 54 | frame identity | ◐ interim C7 (0.5 lane, (b)6) |
+| 54 | device recovery | `recovered_from_a_lost_device` | window (row 10) | the return | three attempts with 150/450 ms sleeps | — | ✗ |
+| 55 | first GPU open | `gpu_door::open_first_window` (`GpuOpen`) | window (row 23) | the return | — | once per process | ◐ pending |
+| 56 | surface and compositor birth, window size | `SurfaceBirth`, `CompositorBirth`, `CompositorWindowSize` | window | the return | — | per window, per resize | ✓ C7 |
+| 57 | title, cursor, visibility, focus, IME caret area | `TitleFlush`, `SetCursor`, `SetVisible`, `FocusWindow`, `ImeCaretArea` | window | the return; title and caret are wanted values | a refusal keeps the value wanted | latest value | ✓ C7 |
+| 58 | font family lookup | `FontFamilyLookup` | window (row 5, done) | the return | — | one per stored face | ✓ C7 |
+| | **Lifecycle** | | | | | | |
+| 59 | data-directory endpoints start | `open_the_data_directorys_endpoints` | window (row 24) | the return | `recv_timeout(5 s)` + join | — | ✗ |
+| 60 | video seat shutdown | `VideoSeats::{close, open, put}` | window (row 25) | the return | `SHUTDOWN_BUDGET` poll + join | — | ✗ |
+| 61 | media quiet at exit | `video::shutdown_media_session` | main, after the loop (row 27) | the return | `MEDIA_QUIET_BUDGET` | — | ✗ exit |
+| 62 | trace flush | `trace_sink::flush` (`TraceFlush`) | main, exit (row 17) | the return | `FLUSH_TIMEOUT` | — | ✓ exit, deadline |
+| 63 | launch hand-over | `launch_wire::hand_over` (`LaunchHandOver`) | main, before the loop (row 18) | the return | `HANDOVER_BUDGET` | — | ✓ pre-loop, deadline |
+
+**Counts, recomputed.** 63 protocols:
+- **✓ 27**: rows 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 15, 16, 20, 28, 32, 34, 35, 45, 46, 47, 48, 50, 56, 57, 58, 62, 63;
+- **◐ 19**: rows 5, 12, 13, 14, 17, 19, 21, 22, 23, 24, 25, 26, 29, 31, 33, 51, 52, 53, 55;
+- **✗ 14**: rows 18, 36, 37, 38, 39, 40, 42, 43, 44, 49, 54, 59, 60, 61;
+- **? 3**: rows 27, 30, 41.
+
+S-1's ledger is generated from this list. These counts replace §0's and §1.2's *11/8/4*. Revision (a)'s row 9 (*file, preview, git and index reads*) was the conflation N2-1 names. Git's mutations are now row 22, a ◐ with its storage-lane rules unstated.
+
+### (b)2 · C1, operationally, and a transitive guard (N2-2)
+
+**C1, replaced.** A request door **performs no synchronous external effect and waits on nothing**:
+- no lock that another thread may hold across work;
+- no thread, process, file system, network, GPU or owner door.
+
+It may:
+- read and write the window's own memory;
+- take its lane's mailbox lock, which is declared and held only across a queue operation;
+- send on a channel;
+- return a synchronous refusal.
+
+C1 sets no time limit. It names the kinds of operation that may not occur on the way from the door to its enqueue.
+
+**§3.2, replaced: `every_request_door_returns_at_once`.**
+- **Each door's row names its enqueue boundary**: the send, submit or `Condvar::notify` after which the request belongs to the worker.
+- **The guard walks the resolved call graph** (`bt-source`'s item resolution, as the census and the `# effects` guard use it) from the door to that boundary. It fails on:
+  - any `# vocabulary` path;
+  - any `# entrances` path;
+  - any `owner-door-body` item;
+  - a blocking synchronisation primitive (`Mutex::lock`, `RwLock::{read, write}`, `Condvar::wait*`, `Receiver::recv*`, `JoinHandle::join`), except the declared mailbox lock.
+- **It fails closed:**
+  - on a dynamic call it cannot resolve (a trait object, a stored closure, a function pointer), unless the row lists that callee as reviewed;
+  - on a macro invocation whose expansion it cannot see, unless the macro is on a short standard allow-list (`format!`, `vec!`, `matches!`, `debug_assert!`, and the like).
+- **MUTATIONS** (each must go red):
+  - a helper that calls `std::fs::write`, called from `handoff_lane::submit`;
+  - a `Mutex::lock` on a lock the worker holds, in a door's helper;
+  - a `Box<dyn Fn>` call on the path that the row does not list.
+
+S-2 is **M**.
+
+### (b)3 · Admission, synchronous refusal, and detached work (N2-3)
+
+**Added to C2.** A door invocation does exactly one of two things:
+- it **refuses synchronously**, and the refusal is its terminal outcome (`InputRefused`; the hand-off lane's refusal over its bound of 32);
+- or it **mints an identity**.
+
+Every minted identity then receives exactly one terminal completion. Nothing else counts as a request.
+
+Two shapes are named, so the ledger can state them:
+- **Detached maintenance** (row 3, shell retirement). The door's synchronous return is the terminal, `Detached`: the requester has handed the work to a sink that accepts it at once and owes nobody an answer. The sink's own failures go to `diagnostics.log` (C3). A detached protocol has no completion signal, and its ledger row says `detached`. The quit's bounded wait over all retirements (row 6) is a separate protocol with its own completion.
+- **Triggers that are not requests.** A probe trigger with nobody waiting on its answer (a page opening, a birth asking the PSReadLine cell, a volume arriving) is an **ear event**. It mints no identity, and coalescing it into the probe already out owes nothing. A trigger *becomes* a request only when its caller holds the identity and waits for it (the walk a pane in birth waits on: `programs_lane::PaneWaits`). Then it must complete, which is why row 12 is ◐ and rows 7–9 are ✓.
+
+### (b)4 · `Joined` is not `Superseded` (N2-4)
+
+The terminal set becomes `Done(result)`, `Failed(error)`, `Cancelled`, `Superseded { by }`, `Joined { with }` and `WorkerGone`.
+- **`Superseded { by }`** is reserved for a request displaced by a **newer, different** operation: a later navigation, or a later walk answering for a different program set.
+- **`Joined { with }`** is for a request that is the **same** operation as one already admitted (the same document at the same revision; the same probe question). It completes with the joined request's own outcome, delivered independently to each identity.
+
+§4's third case reads: a second `save(revision)` at the same revision completes as `Joined { with: first }`, carrying the first's receipt. C4 keeps "the later wins" for `Superseded` only.
+
+### (b)5 · C5, two kinds of retry, and the honest trade-off (N2-5)
+
+**C5, replaced.**
+1. **No new request is scheduled autonomously after a terminal failure.** A failed effect is tried again only by a new request: new input, the next ear event, a trial's release, or the quit.
+2. **A debounce may schedule a request from new input.** It coalesces requests that input made; it is not a retry.
+3. **One admitted worker request may contain one declared, bounded contention acquisition** before it produces its single terminal result. Its row in the ledger names the resource, the bound, and that it runs on a worker. On the window thread, no wait is allowed (C1).
+
+This makes the relationships precise:
+- `WatchClock` and B5's watches ("tried again once at the next reader-triggered event, and never because time passed") are rule 1;
+- B6's owed edits (*retried when a write could succeed, never on a clock*, B6 §4.1) are rule 1;
+- the clipboard's `OpenClipboard` contention (S-7) is rule 3, on a worker.
+
+**Q3, replaced: should a failed session backup be retried only by the next change, the next ear event or the quit's write, not by the debounce clock?** **Recommend yes, with this trade-off stated.** If the write fails and nothing changes afterwards, the newest session state stays unwritten until the next change or the quit. A crash in that interval loses it. The previous snapshot on disk (the last landed write, and `session.prev.json` from launch) limits what is lost to the changes since the last landed write, **but does not make the loss zero**. Today's re-arm narrows that interval for a transient failure. The recommendation keeps C5's letter because a disk that refused once on a quiet machine usually refuses again, and the person is told once per streak either way.
+
+### (b)6 · C7 as a closed list, with what "bounded" means (N2-6)
+
+A `WaitToken` admits and meters a call. It supplies **no elapsed-time bound**. Each member is therefore marked with its bound:
+- **count**: how many calls per turn, request or window;
+- **deadline**: an explicit timeout inside the call;
+- **measured**: metered by `hang_watch` and nothing more.
+
+| member | door(s) | bound | permanence |
+|---|---|---|---|
+| window title | `TitleFlush` | count (≤ 1 per frame) · measured | permanent (platform affinity) |
+| IME caret area | `ImeCaretArea` | count (≤ 1 per frame) · measured | permanent |
+| cursor, visibility, focus | `SetCursor`, `SetVisible`, `FocusWindow` | count (on change, per gesture) · measured | permanent |
+| surface and compositor birth, window size | `SurfaceBirth`, `CompositorBirth`, `CompositorWindowSize` | count (per window, per resize) · measured | permanent |
+| compositor commit | `CompositorCommit` | count (per present or seat change) · measured | permanent |
+| web environment, controller, rehost | `WebEnvironment`, `WebController`, `WebRehost` | count (per page, per rehost) · measured | permanent (engine affinity); the cost is D-64's |
+| font family lookup | `FontFamilyLookup` | count (one per stored face) · measured | permanent |
+| **present** | `PresentFrame` | count (per frame) · measured | **interim**: row 9's disposition (*0.5 — presentation lane*) stands; C7 holds it until that lane lands |
+| PTY resize | `PtyResize` | count (per leaf per settle) · measured | **interim**: row 12, 0.5→0.6 |
+| first GPU open | `GpuOpen` | count (once per process) · measured | **interim**: row 23, pending |
+| exit and pre-loop waits | `PaneRetirementWait`, `SessionWriteWait`, `SessionWriterRetire`, `TraceFlush`, `UpdateLeave`, `LaunchHandOver` | **deadline** each (`wait_for_retirements` budget, `SESSION_SAVE_BUDGET`, the close poll, `FLUSH_TIMEOUT`, `LEAVE_WITHIN`, `HANDOVER_BUDGET`) | permanent; outside the running phase |
+
+The list is closed. A new member needs an owner ruling and a row here, and the guard of (b)2 refuses an unlisted owner-door call reached from a request door.
+
+**Q1, replaced: should these members (the permanent rows above) be a closed class whose completion is their return value, with present, PTY resize and the first GPU open admitted only until their lanes land?** **Recommend yes.** "Present stays on the owner thread" in revision (a) is withdrawn. It stays there only until row 9's 0.5 lane.
+
+### (b)7 · The harness: a ledger in the product, and a seam each lane adopts (N2-7)
+
+The review is right. `LaneUnderTest` drives five real lanes, and a scripted fake lane would prove only itself. §3.3 is replaced.
+
+**The product seam** (`bt-app::lane`, made product code for the first time) has three parts that a lane adopts:
+1. **`Executor`**, a worker factory. The real one spawns through `spawn_at_priority`; the test one runs a scripted body on a test-owned thread. A lane is built from an `Executor` instead of calling the thread door itself.
+2. **`Ledger<Id, Owed>`**, the request ledger. It mints identities (or refuses synchronously), records what each identity is owed, and turns every identity into exactly one terminal: `Done`, `Failed`, `Cancelled`, `Superseded`, `Joined` or `WorkerGone`.
+3. **Hooks**: `publish(id, terminal)` is called by the worker, and `worker_ended(cause)` is called by the `Executor` when the worker's thread ends.
+
+Two causes are kept separate:
+- **A task panic** is caught *inside* the worker body around one request. It becomes `Failed(Panicked)` for that request, and the worker goes on.
+- **Worker death** is the thread ending, whether by an uncaught panic outside a task or by returning. `worker_ended` turns every owed identity into `WorkerGone` and leaves the lane in a fault state the consumer can see.
+
+**S-3, reduced (M):**
+- the `Executor`, `Ledger` and hooks;
+- an exhaustive state-machine proof over `Ledger` alone: N = 3 identities, every interleaving of the six outcomes and of requester drop and `worker_ended`, each identity exactly one terminal. This proves product code, the ledger every lane will use;
+- the new claims (`ASupersededRequestSaysSo`, `AJoinedRequestCarriesItsTwin`, `AFailureIsSaidOnce`, `AnOrphanedAnswerReachesItsSink`) and the `Twice` failure kind.
+
+**Per-lane conformance** moves into each lane's repair ticket (S-4, S-5, S-6a, S-7). Each lane adopts the seam, and its `LaneUnderTest` adapter injects the scripted `Executor` into the **real** lane, so the suite drives the lane's own admission and acceptance.
+
+MUTATIONS:
+- in the ledger, drop a superseded identity's terminal;
+- deliver twice on a cancel racing an answer;
+- let `worker_ended` skip the owed set;
+- let a caught task panic end the worker.
+
+### (b)8 · S-6 is B6's storage worker; close and quit time out explicitly (N2-8)
+
+**One storage worker, two protocols.** S-6's lane **is B6's storage worker**: `persist::SessionWriter` on `session-writer`, which B6 extends with `StorageJob::Document` and `StorageJob::Read` (B6 §3.2) and wakes with `AppEvent::DocumentsAnswered`.
+
+A document save becomes one more job kind on that worker, `StorageJob::Save { source, revision, bytes, baseline, answer }`. It shares **scheduling and per-resource serialisation**: one worker, one channel, in order, so a quit's final session job lands after every save queued before it. Each job kind keeps its own protocol:
+
+- **Configuration documents keep B6's protocol unchanged**, as B6 states it:
+  - revision = exact bytes (`Revision<T> { bytes, document }`);
+  - the precondition read, then the conditional exchange (`replace_keeping_displaced` / `RENAME_SWAP`) that hands back the displaced file;
+  - `Landed`, `Moved`, `Displaced { kept }` and `Refused`;
+  - the three-way merge;
+  - owed edits defined as *the in-memory document differs from its revision*, retried only on the triggers of B6 §4.1.
+- **Document saves keep the preview's own baseline-and-conflict protocol.** That is `PreviewBuffer::save`'s preserving save, judged against the buffer's disk baseline (`disk_mtime`, `DiskNews`): `SaveOutcome::{Saved, Conflict, Failed}`, carried as `Saved { revision }`, `Conflict { revision }` or `Failed { revision, error }`. Dirty clears only on `Saved` for the document's current revision. A document save is not merged three ways. A conflict is said to the person, as today.
+
+**Timeouts, defined separately:**
+- **A pane, tab or window close** whose dirty gate is waiting on an owed save receipt waits across turns, up to a close deadline (a new constant, `SAVE_RECEIPT_DEADLINE`, named by S-6b; a clock on the turn, never a wait on the thread). If the deadline passes, the save's outcome counts **for the gate** as `Failed(TimedOut)`. The gate **stays open** and asks its question (*Save · Discard · Cancel*) over a document that is still dirty. Dirty is never cleared by the timeout. A receipt that arrives later still settles the document if its revision is still current.
+- **An ordinary application quit** hands every owed save to the worker before its final session job (B6 §4.3's rule, the same order). The quit's existing wait (row 16, `SESSION_SAVE_BUDGET`) covers them, so there is no new wait. A save not landed by the budget is a refused write. Under A§11 (*a refused disk means do not leave*) the quit is **cancelled** and the gate comes back saying the save did not finish. The quit does not leave with an unsaved document behind a timeout.
+- **A forced stop** (`FolioApp::fail`, `exiting`: `stop_every_window`, A§11) **cannot wait**. Per the recovery-copy ruling (G7, T-RECOVERED-FOLDER), each dirty document goes to `keep_dirty`. When a save of that document is still owed on the worker, the forced road does **not** write over the file. It writes the recovery copy into the data directory's `recovered` folder, which is the rule's *never over the source file merely because Folio is failing*, and says where in one `diagnostics.log` line.
+
+S-6 is split into three tickets: S-6a (the job kind and lane adoption, M), S-6b (the close gate's wait and its timeout, M) and S-6c (quit and forced-stop integration, M). B6 carries the cross-reference into its own review round; this note states it here and in (b)10.
+
+**Q5, replaced: should a close wait for an owed save, and what happens at the deadline?** **Recommend:**
+- the close waits silently across turns;
+- at the deadline the gate asks, with the document still dirty;
+- a quit whose saves have not landed by its budget is cancelled, not completed;
+- a forced stop writes the recovery copy.
+
+### (b)9 · S-7 moves every Windows `OpenClipboard` road; macOS is a separate question (N2-9)
+
+Row 26 covers three roads: `clipboard_text` (paste), `set_clipboard_text` (copy) and `WindowsClipboard::begin` (the picture's open) (`window_waits.tsv:80`). S-7 moves **all three** onto one Windows clipboard worker, which owns a message-only window (`HWND_MESSAGE`) for `OpenClipboard`. Only then is **row 26 retired**. Each road becomes a request:
+- `ClipboardWrite(text)` → `ClipboardWritten(result)`;
+- `ClipboardRead` → `ClipboardRead(result)`;
+- `ClipboardPictureOpen` → the existing picture road.
+
+The bounded contention acquisition is declared in the worker's row (C5 rule 3).
+
+**Paste becomes a request with a completion.** Keys typed after a paste request and before its completion are held behind it in the pane's input order, the way a pane in birth holds typed bytes (`PaneBirth::hold`), so the paste never lands after them.
+
+**macOS is out of S-7's scope.** The macOS pasteboard arm leaves *the main-thread question* open (`crates/bt-platform/src/lib.rs:19213`). Until **experiment E-2** answers it (do `NSPasteboard` reads and writes off the main thread behave on the macOS versions Folio supports), the macOS clipboard stays a C7 owner-thread member, *pending* (bound: count, one call per gesture · measured). It is not promised a worker.
+
+**Q2, replaced: may the Windows clipboard worker hold a declared, bounded contention wait for `OpenClipboard`?** **Recommend yes, on that worker only, for Windows.** macOS waits on E-2. S-7 is **M**.
+
+### (b)10 · Tickets, re-sized and in order (N2-10)
+
+| # | ticket | size | after | closes |
+|---|---|---|---|---|
+| S-1 | T-COMPLETIONS-LEDGER: classify (b)1's three `?` rows; write `# completions` from (b)1's 63 rows, each with its enqueue boundary and its terminal shape (`completes`, `detached`, `owner-thread`, `exit`); the four held equalities | **M** | — | the ledger |
+| S-2 | T-REQUEST-DOOR-GUARD: (b)2's transitive guard and its three canaries | **M** | S-1 | C1 as a gate |
+| S-3 | T-COMPLETION-HARNESS: (b)7's `Executor`, `Ledger`, hooks, the exhaustive ledger proof, and the new claims | **M** (reduced) | S-1 | C2–C4, C6 proven on the shared ledger |
+| S-4 | T-LANES-SAY-SUPERSEDED: the font, taskbar and program-walk lanes adopt the seam; per-lane conformance through scripted `Executor` injection | **L** | S-3 | **V3**: D-72, D-73, D-85 |
+| S-5 | T-HANDOFF-DEATH: the hand-off lane adopts the seam; owed ids end `WorkerGone`; answers bounded | M | S-3 | D-70, D-71 |
+| S-6a | T-DOCUMENT-SAVE-JOB: `StorageJob::Save` on B6's storage worker; the preview's baseline protocol; `Saved`/`Conflict`/`Failed { revision }` | M | S-3, B6's T-STORE-CONDITIONAL-WRITE, OC O-7 | **V1**, row 20's save half |
+| S-6b | T-CLOSE-GATE-WAITS: the gate's wait across turns, `SAVE_RECEIPT_DEADLINE`, the timeout keeping the gate open | M | S-6a | (b)8's close rule |
+| S-6c | T-QUIT-AND-STOP-SAVES: owed saves before the final session job; a cancelled quit on a missed budget; the forced stop's recovery copy | M | S-6b | (b)8's quit and stop rules |
+| S-7 | T-CLIPBOARD-LANE (Windows): the three `OpenClipboard` roads on one worker; paste ordering; row 26 retired | **M** | S-3 | **V2**, row 26 |
+
+The order the review confirmed stands: ledger, then guard and harness, then lane repairs. Left after these:
+- the session writer's wake and its re-arm (Q3);
+- rows 2–4 (onto the storage lane);
+- git mutations' storage rules (row 22);
+- web navigation identity (row 52, after E-1);
+- rows 10, 24, 25, 27 and 28;
+- the computation lane (D-74…D-76).
+
+### (b)11 · The owner questions, revised (five)
+
+1. **(b)6** Should the permanent owner-thread members be a closed class completed by their return value, with present, PTY resize and the first GPU open admitted only until their lanes land? **Recommend yes.**
+2. **(b)9** Should the Windows clipboard worker hold a declared, bounded `OpenClipboard` contention wait, with macOS left on the owner thread until E-2? **Recommend yes.**
+3. **(b)5** Should a failed session backup be retried only by the next change, ear event or quit, accepting that a crash before then loses the changes since the last landed write? **Recommend yes.**
+4. Unchanged: **should superseded or joined completions ever reach the person?** **Recommend no.** Only failures reach `diagnostics.log`.
+5. **(b)8** Should a close wait silently for an owed save, ask at the deadline with the document still dirty, cancel a quit whose saves missed the budget, and write a recovery copy on a forced stop? **Recommend yes.**
+
+### (b)12 · Experiments owed, revised
+
+- **E-1** as §5: does each engine complete every superseded or cancelled navigation exactly once, and how is it marked? It also decides whether row 52 needs Folio's own navigation id (WebView2's `NavigationStarting` carries a `NavigationId`; the event as Folio records it today does not keep it, `webview.rs:176–195`).
+- **E-2** (new, before any macOS clipboard ticket): `NSPasteboard` read and write off the main thread, on the supported macOS versions.
+
+### (b)13 · Architecture impact, revised
+
+As §8, with three changes:
+- **Doors.** S-6a adds a job kind to the existing storage worker, not a new door.
+- **Product code.** `bt-app::lane` becomes product code (S-3).
+- **Registry.** Row 26 leaves `# rows` only with all three Windows roads moved (S-7). Row 20 narrows twice: once by B6 (the four stores) and once by S-6a (the save). The rename half remains.
