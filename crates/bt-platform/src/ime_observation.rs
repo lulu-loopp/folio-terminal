@@ -104,6 +104,7 @@ pub fn snapshot(window: NativeWindow) -> NativeFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Index, Needle, Pattern, Scope, Search, View};
 
     #[test]
     fn ime_observation_unknown_is_not_native_mode() {
@@ -112,10 +113,20 @@ mod tests {
 
     #[test]
     fn ime_observation_reads_only_the_supplied_window() {
-        let source = include_str!("ime_observation.rs");
-        let reader = source.split("#[cfg(test)]").next().unwrap();
-        assert!(reader.contains("ImmGetContext(hwnd)"));
-        assert!(reader.contains("ImmReleaseContext(hwnd, context)"));
+        let source = Index::of_package("bt-platform");
+        let found = |spelling: &str| {
+            source
+                .search(
+                    &Search::new(Needle::new(Pattern::text(spelling)), View::Raw)
+                        .in_scope(Scope::Module("crate::ime_observation".to_owned())),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(source)
+        };
+        assert!(!found("ImmGetContext(hwnd)").is_empty());
+        assert!(!found("ImmReleaseContext(hwnd, context)").is_empty());
+        // MUTATION: add any state-changing IME/COM/focus call to `snapshot` and
+        // this names it.
         for mutation in [
             "ImmSet",
             "ImmAssociate",
@@ -123,7 +134,7 @@ mod tests {
             "CoInitialize",
             "ActivateProfile(",
         ] {
-            assert!(!reader.contains(mutation), "unexpected mutation {mutation}");
+            assert!(found(mutation).is_empty(), "unexpected mutation {mutation}");
         }
     }
 }
