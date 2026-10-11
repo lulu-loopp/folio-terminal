@@ -1121,6 +1121,9 @@ windows = { version = "0.62.2", features = [
     # `Win32_System_Com_StructuredStorage` above, which was already here for the
     # memory stream a page's thumbnail is captured into.
     "Win32_System_Variant",
+    # `DRIVE_REMOTE` / `DRIVE_REMOVABLE`: the names of the two kinds `GetDriveTypeW` answers that
+    # the PATH ear reads (`program_path_directory`). A feature, not a package.
+    "Win32_System_WindowsProgramming",
     # `RtlGetVersion` — the build number the compatibility shims do not touch.
     # `GetVersionExW` answers "Windows 8" for a process with no application
     # manifest, and `folio.exe` has none; this decides whether the machine has a

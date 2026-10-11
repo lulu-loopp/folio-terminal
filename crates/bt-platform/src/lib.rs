@@ -8733,10 +8733,10 @@ mod windows_impl {
         let root = [drive, b':' as u16, b'\\' as u16, 0];
         // SAFETY: `root` is a NUL-terminated drive-root string and remains live for the call.
         let kind = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
-        if kind == 4 {
+        if kind == DRIVE_REMOTE {
             return Ok(ProgramPathDirectory::Remote);
         }
-        let removable = kind == 2;
+        let removable = kind == DRIVE_REMOVABLE;
         if !std::fs::metadata(path)?.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotADirectory,
@@ -8975,6 +8975,7 @@ mod windows_impl {
         /// carried only a matrix would not say what the matrix is on. Never
         /// read, hence the leading underscore; its release is the band's drop.
         _visual: IDCompositionVisual,
+        use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
         /// Scale on the diagonal, origin in the last row — the 3×2 convention
         /// `IDCompositionMatrixTransform` shares with Direct2D. Mutated in
         /// place, four floats, rather than rebuilt per resize.
