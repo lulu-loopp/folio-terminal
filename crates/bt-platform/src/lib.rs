@@ -22876,8 +22876,7 @@ mod dir_watch_tests {
         std::fs::write(scratch.0.join("sentinel.txt"), b"done")
             .expect("complete the observation through the same watch");
         assert!(
-            rx.recv_timeout(ARRIVES_WITHIN)
-                .expect("the root sentinel completes the observation"),
+            next_word(&rx).expect("the root sentinel completes the observation"),
             "the named tree watch reports `one/two/deep.txt` before the later root sentinel"
         );
         drop(watch);
