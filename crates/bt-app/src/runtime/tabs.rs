@@ -119,6 +119,46 @@ pub(super) fn keep_birth_death_face(
     Ok(())
 }
 
+/// What the landing of a birth death's in-place fallback leaves the runtime to say.
+pub(super) enum BirthDeathLanding {
+    /// The last-resort shell has not answered yet.
+    Waiting,
+    /// It took the pane; the exit line names the fallback.
+    FellBack(exit_diagnostics::ShellExit),
+    /// It could not start: the pane is kept with its face, and the error is owed a line.
+    Kept(exit_diagnostics::ShellExit, String),
+}
+
+/// Land a silent birth death's last-resort shell in its pane, or keep the pane when it failed.
+///
+/// The birth-death facts of a pane (`birth_death_fallback`, `birth_death_kept`, the exit's age and
+/// whether it was said) are this module's, written by the reaper above and here; the shell itself
+/// is seated by the birth road (`land_birth_death_fallback_shell`).
+pub(super) fn land_birth_death_fallback(
+    leaf: &mut crate::LeafSession,
+) -> Result<BirthDeathLanding> {
+    let Some(mut pending) = leaf.birth_death_fallback.take() else {
+        return Ok(BirthDeathLanding::Waiting);
+    };
+    let Some(answer) = pending.shell.take() else {
+        leaf.birth_death_fallback = Some(pending);
+        return Ok(BirthDeathLanding::Waiting);
+    };
+    match answer.session {
+        Ok(pty) => {
+            crate::land_birth_death_fallback_shell(leaf, pty)?;
+            leaf.shell_exit_age = None;
+            leaf.shell_exit_said = false;
+            Ok(BirthDeathLanding::FellBack(pending.exit))
+        }
+        Err(error) => {
+            pending.exit.disposition = exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept;
+            keep_birth_death_face(leaf, &pending.exit, false)?;
+            Ok(BirthDeathLanding::Kept(pending.exit, error.to_string()))
+        }
+    }
+}
+
 impl Runtime<'_> {
     /// The `+`'s verb: a tab on the default profile, which is what the button's
     /// own tooltip promises in the mock-up (`New tab (${defaultProfile().title})`).
@@ -3582,17 +3622,16 @@ impl Runtime<'_> {
                             if let Some(fallback) = fallback
                                 && let Some(wake) = leaf.wake.as_ref().map(|wake| wake.output())
                             {
-                                let requested = fallback.requested().to_os_string();
-                                let record = bt_pty::ShellFallback {
-                                    requested,
-                                    started: bt_pty::LAST_RESORT_SHELL,
-                                    error: "the requested shell exited at birth".to_owned(),
-                                };
+                                let why = format!(
+                                    "exited with code {} {} ms after its start",
+                                    code.map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                                    elapsed.as_millis()
+                                );
                                 let columns = leaf.conpty_grid.columns;
                                 let rows = leaf.conpty_grid.rows;
                                 let worker_wake = wake.clone();
                                 match pty_door::request(
-                                    move |_| fallback.spawn(columns, rows, worker_wake),
+                                    move |_| fallback.spawn(columns, rows, worker_wake, why),
                                     wake,
                                 ) {
                                     Ok(shell) => {
@@ -3600,12 +3639,7 @@ impl Runtime<'_> {
                                             bt_pty::LAST_RESORT_SHELL,
                                         );
                                         leaf.birth_death_fallback =
-                                            Some(crate::BirthDeathFallback {
-                                                shell,
-                                                fallback: record,
-                                                requested_profile: leaf.profile.clone(),
-                                                exit,
-                                            });
+                                            Some(crate::BirthDeathFallback { shell, exit });
                                     }
                                     Err(error) => {
                                         keep_birth_death_face(leaf, &exit, false)?;
@@ -3833,7 +3867,8 @@ mod birth_death_tests {
     }
 
     /// MUTATION (observed RED): make a silent birth death answer `Keep` (the disposition assertion
-    /// fails); drop `|| leaf.birth_death_kept` from the reaper's liveness rule, or let the
+    /// fails); drop the record from `BirthFallback::spawn` and the landing writes no banner and
+    /// keeps the asked-for program; drop `|| leaf.birth_death_kept` from the reaper's liveness rule, or let the
     /// birth-death arm fall through to the retirement road, and the wiring pin fails.
     #[test]
     fn a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab() {
@@ -3849,6 +3884,39 @@ mod birth_death_tests {
         };
         let banner = crate::fallback_banner(&record, profiles::fallback_profile_id());
         assert!(banner.contains("failed to start"), "{banner:?}");
+        // The retained command starts, and its pane is re-seated on the birth road: the banner,
+        // the last-resort program, and no fallback record left over for a second line.
+        let size = (
+            std::num::NonZeroU16::new(80).expect("nonzero"),
+            std::num::NonZeroU16::new(24).expect("nonzero"),
+        );
+        let started = fallback
+            .spawn(
+                size.0,
+                size.1,
+                std::sync::Arc::new(|| {}),
+                "exited".to_owned(),
+            )
+            .expect("the last-resort shell starts");
+        let mut leaf = test_support::leaf_saying("");
+        leaf.program = Some(PathBuf::from("preferred-shell"));
+        crate::land_birth_death_fallback_shell(&mut leaf, started)
+            .expect("the birth road seats the fallback");
+        assert!(leaf.pty.is_some() && leaf.spawn_fallback.is_none());
+        assert_eq!(leaf.profile, profiles::fallback_profile_id());
+        assert_eq!(
+            leaf.program.as_deref(),
+            Some(Path::new(bt_pty::LAST_RESORT_SHELL))
+        );
+        let squeeze = |text: &str| -> String {
+            text.chars()
+                .filter(|character| !character.is_whitespace())
+                .collect()
+        };
+        let visible = leaf.session.terminal().visible_text().join("\n");
+        // The banner's text, without the dim attribute that wraps it on the wire.
+        let shown = banner.replace("\u{1b}[2m", "").replace("\u{1b}[0m", "");
+        assert!(squeeze(&visible).contains(&squeeze(&shown)), "{visible:?}");
         // The reaper is what `record_session` inherits its tab count from: a birth death must
         // be decided before the retirement road and leave the pane live, so no restored tab is
         // retired by it. Read through `bt_source`, as the reaper's other wiring pins are.

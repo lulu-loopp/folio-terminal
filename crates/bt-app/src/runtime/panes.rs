@@ -107,67 +107,23 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Land the last-resort shell requested in place after a silent birth death.
+    /// Land the last-resort shell requested in place after a silent birth death, and say what
+    /// became of the pane (`runtime::tabs::land_birth_death_fallback`).
     fn land_birth_death_fallback(&mut self, tab_index: usize, seat: SeatId) -> Result<()> {
         let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) else {
             return Ok(());
         };
-        let Some(mut pending) = leaf.birth_death_fallback.take() else {
-            return Ok(());
-        };
-        let Some(answer) = pending.shell.take() else {
-            leaf.birth_death_fallback = Some(pending);
-            return Ok(());
-        };
-        match answer.session {
-            Ok(pty) => {
-                leaf.session
-                    .feed(
-                        crate::fallback_banner(&pending.fallback, &pending.requested_profile)
-                            .as_bytes(),
-                    )
-                    .context("write the birth-death fallback banner into the pane")?;
-                let born_named = leaf.born_named;
-                if pending.requested_profile != profiles::fallback_profile_id() {
-                    let (spawn_place, at_shell_home) = crate::birth_place_of_the_started_shell(
-                        &pending.requested_profile,
-                        profiles::fallback_profile_id(),
-                        leaf.spawn_place.take(),
-                        false,
-                    );
-                    leaf.session.set_spawn_directory(spawn_place.clone());
-                    leaf.spawn_place = spawn_place;
-                    leaf.session.set_spawn_at_shell_home(at_shell_home);
-                }
-                leaf.born_named = born_named && leaf.spawn_place.is_some();
-                leaf.profile = profiles::fallback_profile_id().to_owned();
-                leaf.program = Some(Path::new(bt_pty::LAST_RESORT_SHELL).to_path_buf());
-                leaf.paste_recipient = profiles::paste_recipient(
-                    profiles::index_of_id(&leaf.profile),
-                    &bt_pty::SystemShellEnvironment,
-                );
-                leaf.integration = profiles::row_of(&leaf.profile)
-                    .map_or(profiles::Integration::None, |row| profiles::served_by(&row));
-                leaf.session.set_pty_transport(match pty.conpty_kind() {
-                    bt_pty::ConPtyKind::Shipped | bt_pty::ConPtyKind::Inbox => {
-                        bt_term::PtyTransport::ConPty
-                    }
-                    bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
-                });
-                leaf.pty = Some(pty);
-                leaf.shell_exit_age = None;
-                leaf.shell_exit_said = false;
-                exit_diagnostics::say_shell_exits([&pending.exit], diagnostics::note);
+        match crate::runtime::tabs::land_birth_death_fallback(leaf)? {
+            crate::runtime::tabs::BirthDeathLanding::Waiting => {}
+            crate::runtime::tabs::BirthDeathLanding::FellBack(exit) => {
+                exit_diagnostics::say_shell_exits([&exit], diagnostics::note);
             }
-            Err(error) => {
-                pending.exit.disposition =
-                    exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept;
-                crate::runtime::tabs::keep_birth_death_face(leaf, &pending.exit, false)?;
-                exit_diagnostics::say_shell_exits([&pending.exit], diagnostics::note);
+            crate::runtime::tabs::BirthDeathLanding::Kept(exit, error) => {
+                exit_diagnostics::say_shell_exits([&exit], diagnostics::note);
                 exit_diagnostics::say_spawn_failure(
                     seat.0,
                     Some(Path::new(bt_pty::LAST_RESORT_SHELL)),
-                    &error.to_string(),
+                    &error,
                     diagnostics::note,
                 );
             }
@@ -218,7 +174,7 @@ impl Runtime<'_> {
         let requested = leaf
             .successor
             .as_deref()
-            .and_then(|successor| successor.program.clone());
+            .and_then(|successor: &LeafSession| successor.program.clone());
         match land_successor(leaf, diagnostics::note)? {
             SuccessorLanding::Waiting => Ok(()),
             SuccessorLanding::Refused(refusal) => {

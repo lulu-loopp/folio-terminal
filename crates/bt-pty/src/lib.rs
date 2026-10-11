@@ -1825,16 +1825,25 @@ impl BirthFallback {
         &self.requested
     }
 
-    /// Start the retained last-resort command on a birth worker.
+    /// Start the retained last-resort command on a birth worker. The session carries the same
+    /// [`ShellFallback`] record a spawn-time fallback leaves, with `why` as its reason, so the
+    /// caller lands it on the road that already turns that record into the pane's first line.
     pub fn spawn(
         mut self,
         columns: NonZeroU16,
         rows: NonZeroU16,
         wake: OutputWake,
+        why: String,
     ) -> Result<PtySession, PtyError> {
         self.size.columns = columns;
         self.size.rows = rows;
-        PtySession::spawn(self.command, self.size, wake)
+        let mut session = PtySession::spawn(self.command, self.size, wake)?;
+        session.shell_fallback = Some(ShellFallback {
+            requested: self.requested,
+            started: LAST_RESORT_SHELL,
+            error: why,
+        });
+        Ok(session)
     }
 }
 

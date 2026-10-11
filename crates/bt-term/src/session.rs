@@ -12169,6 +12169,13 @@ impl DualPlaneSession {
         self.spawn_at_shell_home = at_shell_home;
     }
 
+    /// Whether the spawn directory is the shell's own home mark
+    /// ([`Self::set_spawn_at_shell_home`]).
+    #[must_use]
+    pub fn spawn_at_shell_home(&self) -> bool {
+        self.spawn_at_shell_home
+    }
+
     /// Where relative text printed into this pane is measured from: §7.1.4's ladder read once —
     /// the last OSC 7 report, else where the shell was put down.
     ///

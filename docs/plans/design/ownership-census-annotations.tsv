@@ -59,6 +59,8 @@ LeafSession.frame_image_references	-	PROJ	frame	the 2026-09-25 table
 LeafSession.projection	-	PROJ	frame	the 2026-09-25 table
 LeafSession.pty	-	LIFE	panes	the 2026-09-25 table
 LeafSession.session	-	HUB	terminal	the 2026-09-25 table
+LeafSession.spawn_fallback	-	LIFE	main (the leaf-birth road, finish_leaf_birth)	T-SHELL-BIRTH-DEATH (2026-10-10): a hand-off, not a shared state: the birth road stores bt-pty's fallback record when it seats a shell, and runtime::panes takes it once, at the landing, because only the runtime knows the pane's seat that the diagnostics line names
+LeafSession.wake	-	LIFE	main (the leaf-birth road, finish_leaf_birth)	T-SHELL-BIRTH-DEATH (2026-10-10): the field is Some exactly when pty is; the birth road sets it with the shell, and runtime::tabs clears it when the reaper retires a birth-death PTY and keeps the pane without one
 TabState.file_trees	-	OBS	files	the 2026-09-25 table
 TabState.files	-	VIEW	files	the 2026-09-25 table
 TabState.flip	-	PROJ	tabs	the 2026-09-25 table

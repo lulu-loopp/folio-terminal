@@ -11939,8 +11939,6 @@ struct ShellLanding {
 #[derive(Debug)]
 struct BirthDeathFallback {
     shell: pty_door::ShellBirth,
-    fallback: bt_pty::ShellFallback,
-    requested_profile: String,
     exit: exit_diagnostics::ShellExit,
 }
 
@@ -40483,6 +40481,32 @@ fn finish_leaf_birth(
     leaf.profile = profile;
     leaf.program = resolved_program;
     leaf.pty = pty;
+    Ok(())
+}
+
+/// **A silent birth death's last-resort shell takes its pane on the birth road**
+/// (T-SHELL-BIRTH-DEATH). The pane is finished from it exactly as a pane whose own program would
+/// not start is ([`finish_leaf_birth`] over a session carrying bt-pty's fallback record): the same
+/// banner under the profile that was asked for, the profile, program, place, paste recipient and
+/// integration of the shell that started. The decision is the dead shell's own, read back from the
+/// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
+/// exit line names the fallback — so it is spent with the landing.
+fn land_birth_death_fallback_shell(leaf: &mut LeafSession, pty: PtySession) -> Result<()> {
+    let decision = BirthDecision {
+        started: Started::AsAsked,
+        spawn_profile: leaf.profile.clone(),
+        spawn_place: leaf.spawn_place.clone(),
+        at_shell_home: leaf.session.spawn_at_shell_home(),
+        named: leaf.born_named,
+        program: leaf.program.clone(),
+        unless_gone: None,
+    };
+    let seed = LeafSeed {
+        profile: leaf.profile.clone(),
+        ..LeafSeed::default()
+    };
+    finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
+    leaf.spawn_fallback = None;
     Ok(())
 }
 
