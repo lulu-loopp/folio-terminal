@@ -518,22 +518,30 @@ fn cell_count(text: &str) -> usize {
 
 /// Put two physical lines of one row back together.
 ///
-/// A space goes back in only where one was taken out. A program that wraps Latin text breaks at a
-/// space and drops it, so `and` over `six` is `and six`; a program that wraps CJK, or that runs out
-/// of row in the middle of a token, breaks between two characters that were adjacent, and putting a
-/// space there would insert a word the program never printed.
+/// A space goes back in only where one was taken out. A program that wraps words written with
+/// spaces between them — Latin, accented Latin, Cyrillic, Greek, Korean — breaks at a space and
+/// drops it, so `and` over `six` is `and six` and `café` over `au` is `café au`; a program that
+/// wraps CJK, or that runs out of row in the middle of a token, breaks between two characters that
+/// were adjacent, and putting a space there would insert a word the program never printed.
+///
+/// The rule is "no space next to a character written without spaces", not "a space only between
+/// ASCII letters" — the second glued every non-ASCII word to the next (AUDIT-hardcode LIB-15).
 fn join_continuation(left: &str, right: &str) -> String {
     let mut joined = String::with_capacity(left.len() + right.len() + 1);
     joined.push_str(left);
-    if is_ascii_word(left.chars().next_back()) && is_ascii_word(right.chars().next()) {
+    if is_spaced_word(left.chars().next_back()) && is_spaced_word(right.chars().next()) {
         joined.push(' ');
     }
     joined.push_str(right);
     joined
 }
 
-fn is_ascii_word(character: Option<char>) -> bool {
-    character.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+/// A word character of a script that separates its words with spaces.
+fn is_spaced_word(character: Option<char>) -> bool {
+    character.is_some_and(|character| {
+        (character.is_alphanumeric() || character == '_')
+            && !crate::is_written_without_spaces(character)
+    })
 }
 
 /// Whether the last thing on the line, before any trailing spaces, is an unescaped pipe.
@@ -1670,5 +1678,36 @@ and then some prose"
             is_refused(&ACCEPT_W7N, ACCEPT_COLUMNS),
             "a row three cells wide under four headings refuses the table"
         );
+    }
+
+    /// RED (AUDIT-hardcode LIB-15) — **a wrapped row is rejoined with the space the wrap
+    /// took out, in every script that separates words with spaces, and with none next to a
+    /// character written without them.**
+    ///
+    /// The rule was "a space only between two ASCII word characters", so accented Latin,
+    /// Cyrillic, Greek and Korean words were glued to the next one (`café` + `au` →
+    /// `caféau`).
+    ///
+    /// MUTATION: make `is_spaced_word` ASCII-only again — the `café`, Cyrillic, Greek and
+    /// Korean rows go red.
+    #[test]
+    fn a_wrapped_cell_gets_its_space_back_in_every_spaced_script() {
+        for (left, right, joined) in [
+            ("five and", "six", "five and six"),
+            ("café", "au lait", "café au lait"),
+            ("Привет", "мир", "Привет мир"),
+            ("καλή", "μέρα", "καλή μέρα"),
+            ("안녕하세요", "세계", "안녕하세요 세계"),
+            ("中文", "表格", "中文表格"),
+            ("日本語の", "テーブル", "日本語のテーブル"),
+            ("中文", "word", "中文word"),
+            ("token-", "suffix", "token-suffix"),
+        ] {
+            assert_eq!(
+                join_continuation(left, right),
+                joined,
+                "{left:?} + {right:?}"
+            );
+        }
     }
 }
