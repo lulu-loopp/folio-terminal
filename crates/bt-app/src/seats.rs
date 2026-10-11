@@ -21582,11 +21582,7 @@ pub struct PreviewCardButton {
 /// exact moment the window is at its least trustworthy, and a number wearing the
 /// wrong verb is one more thing that looks broken.
 fn overflow_notice(hidden: usize) -> String {
-    if hidden == 1 {
-        "1 more does not fit".to_owned()
-    } else {
-        format!("{hidden} more do not fit")
-    }
+    crate::i18n::seat_overflow_notice(hidden)
 }
 
 /// The same name, cut to the one segment that answers "which one is this".

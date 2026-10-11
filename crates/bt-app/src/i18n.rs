@@ -940,6 +940,11 @@ text_entries! {
     RecoveredEditKept,
     /// The same, for `{count}` copies.
     RecoveredEditsKept,
+    /// The tail line of a crowded pane strip, for one seat it has no row for
+    /// (AUDIT-hardcode SEAT-1; filled by [`seat_overflow_notice_in`]).
+    SeatOverflowOne,
+    /// The same, for `{count}` seats.
+    SeatOverflowMany,
     PreviewFailedImageLoad,
     /// **A picture file longer than the picture lane will read** (owner's ruling
     /// 2026-09-12; `bt_term::MAX_LOCAL_IMAGE_FILE_BYTES`).
@@ -3796,6 +3801,16 @@ impl Text {
                 "{count} unsaved edits were kept at {folder}",
                 "{count} unsaved edits were kept at {folder}", // zh: pending T-RECOVERED-FOLDER
             ),
+            Self::SeatOverflowOne => pick(
+                lang,
+                "1 more does not fit",
+                "1 more does not fit", // zh: pending H2
+            ),
+            Self::SeatOverflowMany => pick(
+                lang,
+                "{count} more do not fit",
+                "{count} more do not fit", // zh: pending H2
+            ),
             Self::PreviewFailedImageLoad => pick(
                 lang,
                 "Preview failed: image could not be loaded",
@@ -6205,6 +6220,11 @@ impl Text {
         // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
         (Self::WebAddressNoSuchFile, HostPlatform::Windows),
         (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
+        // zh: pending H2 — the crowded pane strip's tail line (AUDIT-hardcode SEAT-1).
+        (Self::SeatOverflowOne, HostPlatform::Windows),
+        (Self::SeatOverflowOne, HostPlatform::MacOs),
+        (Self::SeatOverflowMany, HostPlatform::Windows),
+        (Self::SeatOverflowMany, HostPlatform::MacOs),
     ];
 }
 
@@ -7265,6 +7285,27 @@ pub fn recovered_edits_kept_in(lang: Lang, count: usize, folder: &str) -> String
         .in_lang(lang)
         .replace("{count}", &count.to_string())
         .replace("{folder}", folder)
+}
+
+/// **The crowded pane strip's tail line**: how many seats it has no row for,
+/// with the verb agreeing with the count (AUDIT-hardcode SEAT-1 — it was an
+/// English sentence with an English plural rule, outside this table).
+#[must_use]
+pub fn seat_overflow_notice(count: usize) -> String {
+    seat_overflow_notice_in(current(), count)
+}
+
+/// [`seat_overflow_notice`] in a named language.
+#[must_use]
+pub fn seat_overflow_notice_in(lang: Lang, count: usize) -> String {
+    let template = if count == 1 {
+        Text::SeatOverflowOne
+    } else {
+        Text::SeatOverflowMany
+    };
+    template
+        .in_lang(lang)
+        .replace("{count}", &count.to_string())
 }
 
 #[must_use]
@@ -10745,5 +10786,38 @@ mod tests {
             windows,
             "the Windows column's Chinese was written long ago and stays written"
         );
+    }
+
+    /// RED (AUDIT-hardcode SEAT-1) — **the crowded strip's tail line is this
+    /// table's, in both languages, with the verb agreeing with the count.**
+    ///
+    /// It was an English sentence with an English plural rule written in
+    /// `seats.rs`, so the Chinese window drew English. The Chinese rows are
+    /// pending (`CHINESE_PENDING`), and the entries are the table's either way.
+    ///
+    /// MUTATION: drop the one-seat template from `seat_overflow_notice_in` —
+    /// "1 more do not fit" goes red.
+    #[test]
+    fn the_strips_overflow_line_is_the_tables_and_agrees_with_its_count() {
+        assert_eq!(
+            seat_overflow_notice_in(Lang::English, 1),
+            "1 more does not fit"
+        );
+        assert_eq!(
+            seat_overflow_notice_in(Lang::English, 3),
+            "3 more do not fit"
+        );
+        for lang in Lang::ALL {
+            assert_eq!(
+                seat_overflow_notice_in(lang, 1),
+                Text::SeatOverflowOne.in_lang(lang).replace("{count}", "1")
+            );
+            assert_eq!(
+                seat_overflow_notice_in(lang, 12),
+                Text::SeatOverflowMany
+                    .in_lang(lang)
+                    .replace("{count}", "12")
+            );
+        }
     }
 }
