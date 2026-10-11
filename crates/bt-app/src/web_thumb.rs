@@ -105,14 +105,36 @@ use crate::LeafId;
 /// of 3.0.
 pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(2);
 
-/// The largest picture this lane will keep for one seat, in pixels.
+/// **The largest picture this lane will keep for one seat: a whole card body,
+/// at the window's scale.**
 ///
-/// A card body is 263 logical pixels wide and at most 320 tall, so at 200% that
-/// is 526 × 640 — 1.3 MB of RGBA. The cap is stated as an area rather than as a
-/// pair so that a very wide seat in a very short card is refused by the same
-/// rule, and it is here rather than at the resample so that a demand asking for
-/// something absurd is refused *before* a browser is asked for a picture.
-const MAX_PICTURE_PIXELS: u32 = 526 * 640;
+/// A card body is the focus column less its border and padding — 263 logical
+/// pixels wide — and at most the tallest card height, 320; a mini cell is part
+/// of one. The cap is that box at the scale the cell was measured at, stated as
+/// an area so that a very wide seat in a very short card is refused by the same
+/// rule, and asked before a browser is asked for a picture so that a demand for
+/// something absurd costs nothing. It was the 200 % box written as a number
+/// (526 × 640), so at 250 % and 300 % every card cell was "absurd" and no page
+/// was ever photographed for a card (AUDIT-hardcode PRV-5).
+fn max_picture_pixels(scale: f32) -> u32 {
+    let width = bt_render::FOCUS_COLUMN_WIDTH_LOGICAL_PX
+        - bt_render::RAIL_BORDER_LOGICAL_PX
+        - 2.0 * bt_render::RAIL_PADDING_X_LOGICAL_PX;
+    let height = bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX
+        .into_iter()
+        .max()
+        .unwrap_or_default() as f32;
+    let side = |logical: f32| (logical * scale).ceil() as u32;
+    side(width).saturating_mul(side(height))
+}
+
+/// **A card's mini cell, in physical pixels, and the scale it was measured at**
+/// — the resample's target, and what [`max_picture_pixels`] bounds it by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardCell {
+    pub size: (u32, u32),
+    pub scale: f32,
+}
 
 /// The largest **pane-sized** frame this lane will keep for one seat, in pixels.
 ///
@@ -183,7 +205,7 @@ pub struct PageDemand {
     /// The two readers are two demands and one photograph: whichever of them the
     /// clock lets through takes the picture, and the products are decided by who
     /// is waiting for one when it comes back.
-    pub card: Option<(u32, u32)>,
+    pub card: Option<CardCell>,
 }
 
 /// **Which of one photograph's two products this job is for** (§7.8 ⑩).
@@ -242,7 +264,7 @@ pub struct Entry {
     /// need not be the same: a pane's demand may be what the clock lets through
     /// on the frame a card is also waiting, and a card that gets nothing back
     /// because the pane asked first would blank for two seconds at a time.
-    card: Option<(u32, u32)>,
+    card: Option<CardCell>,
     /// How many pictures this seat has had. Part of [`Picture::key`], and the
     /// whole of the projection's damage key: a card re-projects when, and only
     /// when, this moves.
@@ -290,7 +312,7 @@ pub struct ShrinkJob {
     pub png: Vec<u8>,
     /// The box to resample into, or `None` for the decode alone at the size the
     /// bytes are already in — see [`Product`].
-    pub target: Option<(u32, u32)>,
+    pub target: Option<CardCell>,
     pub product: Product,
 }
 
@@ -719,8 +741,9 @@ impl Entry {
 }
 
 /// Whether a card cell is worth photographing a page for.
-fn usable_target(target: (u32, u32)) -> bool {
-    target.0 >= 1 && target.1 >= 1 && target.0.saturating_mul(target.1) <= MAX_PICTURE_PIXELS
+fn usable_target(cell: CardCell) -> bool {
+    let (width, height) = cell.size;
+    width >= 1 && height >= 1 && width.saturating_mul(height) <= max_picture_pixels(cell.scale)
 }
 
 /// Whether a page's own viewport is one this lane will keep a frame of — the same
@@ -804,7 +827,7 @@ impl PageShrinker {
 /// build cannot read, which is a fact about the answer and not a reason to
 /// invent pixels.
 #[must_use]
-pub fn shrink(png: &[u8], target: Option<(u32, u32)>) -> Option<(Vec<u8>, u32, u32)> {
+pub fn shrink(png: &[u8], target: Option<CardCell>) -> Option<(Vec<u8>, u32, u32)> {
     if let Some(target) = target
         && !usable_target(target)
     {
@@ -831,7 +854,7 @@ pub fn shrink(png: &[u8], target: Option<(u32, u32)>) -> Option<(Vec<u8>, u32, u
     // 14 ms spent to arrive back where it started. A frame past the ceiling is
     // refused here as well as at the ask, because the two are asked at
     // different moments and the second is the one holding the memory.
-    let Some(target) = target else {
+    let Some(CardCell { size: target, .. }) = target else {
         let rgba = decoded.to_rgba8();
         let (width, height) = (rgba.width(), rgba.height());
         if !usable_frame((width, height)) {
@@ -889,7 +912,10 @@ mod tests {
             leaf,
             url: String::from("http://127.0.0.1:8080/"),
             facts,
-            card: Some((263, 320)),
+            card: Some(CardCell {
+                size: (263, 320),
+                scale: 1.0,
+            }),
         }
     }
 
@@ -1304,11 +1330,26 @@ mod tests {
     /// really does refuse bytes it cannot read.
     #[test]
     fn the_shrinker_answers_the_box_it_was_asked_for_and_refuses_what_it_cannot_read() {
-        let (rgba, width, height) =
-            shrink(&a_real_png(1146, 777), Some((263, 320))).expect("a picture");
+        let (rgba, width, height) = shrink(
+            &a_real_png(1146, 777),
+            Some(CardCell {
+                size: (263, 320),
+                scale: 1.0,
+            }),
+        )
+        .expect("a picture");
         assert_eq!((width, height), (263, 320));
         assert_eq!(rgba.len(), 263 * 320 * 4);
-        assert!(shrink(b"not a png at all", Some((263, 320))).is_none());
+        assert!(
+            shrink(
+                b"not a png at all",
+                Some(CardCell {
+                    size: (263, 320),
+                    scale: 1.0
+                })
+            )
+            .is_none()
+        );
     }
 
     /// RED — **a capture larger than a pane could be is refused before it is
@@ -1332,11 +1373,25 @@ mod tests {
     #[test]
     fn a_capture_past_the_frame_ceiling_is_never_decoded() {
         assert!(
-            shrink(&a_real_png(5000, 3000), Some((263, 320))).is_none(),
+            shrink(
+                &a_real_png(5000, 3000),
+                Some(CardCell {
+                    size: (263, 320),
+                    scale: 1.0
+                })
+            )
+            .is_none(),
             "a picture past the frame ceiling is not decoded to be thrown away",
         );
         assert!(
-            shrink(&a_real_png(1146, 777), Some((263, 320))).is_some(),
+            shrink(
+                &a_real_png(1146, 777),
+                Some(CardCell {
+                    size: (263, 320),
+                    scale: 1.0
+                })
+            )
+            .is_some(),
             "and a real capture is untouched",
         );
     }
@@ -1433,7 +1488,10 @@ mod tests {
                 leaf: seat(id),
                 url: format!("http://127.0.0.1:8080/page-{id}"),
                 facts: facts(),
-                card: Some((263, 320)),
+                card: Some(CardCell {
+                    size: (263, 320),
+                    scale: 1.0,
+                }),
             })
             .collect();
         let mut thumbs = WebThumbs::default();
@@ -1464,10 +1522,16 @@ mod tests {
     fn an_impossible_box_is_refused_before_the_engine_is_asked() {
         let mut thumbs = WebThumbs::default();
         let mut huge = demand(1, facts());
-        huge.card = Some((4000, 4000));
+        huge.card = Some(CardCell {
+            size: (4000, 4000),
+            scale: 1.0,
+        });
         assert!(thumbs.due(&[huge], Instant::now()).is_empty());
         let mut nothing = demand(2, facts());
-        nothing.card = Some((0, 40));
+        nothing.card = Some(CardCell {
+            size: (0, 40),
+            scale: 1.0,
+        });
         assert!(thumbs.due(&[nothing], Instant::now()).is_empty());
     }
 
@@ -1620,7 +1684,13 @@ mod tests {
             )
             .expect("the card that asked is still owed its cell");
         assert_eq!(job.product, Product::Card);
-        assert_eq!(job.target, Some((263, 320)));
+        assert_eq!(
+            job.target,
+            Some(CardCell {
+                size: (263, 320),
+                scale: 1.0
+            })
+        );
     }
 
     /// Red gate: **a pane too large to keep a frame of is refused before the
@@ -1671,7 +1741,10 @@ mod tests {
             leaf: seat(1),
             ticket: 1,
             png: a_real_png(8, 8),
-            target: Some((4, 4)),
+            target: Some(CardCell {
+                size: (4, 4),
+                scale: 1.0,
+            }),
             product: Product::Card,
         });
         assert_eq!(
@@ -1681,5 +1754,36 @@ mod tests {
         let finished = shrinker.collect();
         assert_eq!(finished.len(), 1, "the picture came back before the wake");
         assert!(finished[0].rgba.is_some(), "and it decoded");
+    }
+
+    /// RED (AUDIT-hardcode PRV-5) — **a card cell is photographed at every
+    /// scale a window can stand at**, up to a whole card body at that scale and
+    /// no further.
+    ///
+    /// The cap was the 200 % card written as a number, so at 250 % and 300 %
+    /// the full-width cell of a 320-tall card was refused as absurd and no page
+    /// ever got a card picture.
+    ///
+    /// MUTATION: make `max_picture_pixels` answer `526 * 640` again — the 250 %
+    /// and 300 % rows go red.
+    #[test]
+    fn a_card_cell_is_usable_at_every_scale_up_to_a_whole_card() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0, 2.5, 3.0] {
+            let side = |logical: f32| (logical * scale).ceil() as u32;
+            let whole = CardCell {
+                size: (side(263.0), side(320.0)),
+                scale,
+            };
+            assert!(usable_target(whole), "a whole card body at {scale}");
+            let past = CardCell {
+                size: (side(263.0) + 1, side(320.0) + 1),
+                scale,
+            };
+            assert!(!usable_target(past), "and nothing past it at {scale}");
+        }
+        assert!(!usable_target(CardCell {
+            size: (0, 100),
+            scale: 1.0
+        }));
     }
 }

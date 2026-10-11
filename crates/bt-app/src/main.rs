@@ -52095,10 +52095,13 @@ impl Runtime<'_> {
                                 leaf,
                                 url: web.identity().unwrap_or_default().to_owned(),
                                 facts: web.capture_facts(),
-                                card: Some((
-                                    (seat.rect[2] - seat.rect[0]).round().max(0.0) as u32,
-                                    (seat.rect[3] - seat.rect[1]).round().max(0.0) as u32,
-                                )),
+                                card: Some(web_thumb::CardCell {
+                                    size: (
+                                        (seat.rect[2] - seat.rect[0]).round().max(0.0) as u32,
+                                        (seat.rect[3] - seat.rect[1]).round().max(0.0) as u32,
+                                    ),
+                                    scale,
+                                }),
                             });
                         }
                         // **The picture on this seat, if this window has one**
