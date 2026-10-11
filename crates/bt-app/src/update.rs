@@ -1641,6 +1641,7 @@ mod tests {
         Schedule, Version, check_entry_allowed, due, eligible, mark_is_lit, newer_than, newest_tag,
     };
     use bt_persist::UpdateCheckV1;
+    use bt_source::{Index, Needle, Pattern, Scope, Search, View};
 
     /// RED (U-8) — **a build without the flag is never eligible, and a build
     /// with `FOLIO_UPDATER=on` always is.**
@@ -2431,31 +2432,35 @@ mod tests {
     /// `main.rs` names the file a second time, from the other direction.
     #[test]
     fn the_check_asks_one_stack_on_every_platform() {
-        const SOURCE: &str = include_str!("update.rs");
-        // **The module above these pins**, because a pin that searched the
-        // whole file would find its own assertion — the needle below is spelled
-        // out twice in this function.
-        let above = SOURCE
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("these pins are in this file")
-            .0;
-        let code = above
-            .lines()
-            .map(|line| line.find("//").map_or(line, |at| &line[..at]))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source = Index::of_package("bt-app");
+        let update = Scope::Module("crate::update".to_owned());
         for word in ["windows", "macos", "target_os", "target_family"] {
-            for opener in ["cfg(", "cfg!(", "cfg_attr("] {
-                for line in code.lines().filter(|line| line.contains(opener)) {
-                    assert!(
-                        !line.contains(word),
-                        "this file decides what platform it is on again: {line}"
-                    );
-                }
-            }
+            let found = source
+                .search(
+                    &Search::new(Needle::new(Pattern::identifier(word)), View::Identifiers)
+                        .in_scope(update.clone()),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(source);
+            assert!(
+                found.is_empty(),
+                "this module decides what platform it is on again: {word}"
+            );
         }
+        let call = source
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::text(
+                        "bt_platform::http::https_get(&bt_platform::http::HttpsGet {",
+                    )),
+                    View::Raw,
+                )
+                .in_scope(update),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(source);
         assert!(
-            code.contains("bt_platform::http::https_get(&bt_platform::http::HttpsGet {"),
+            !call.is_empty(),
             "the one call to the platform's HTTP stack has moved or gone"
         );
     }

@@ -292,6 +292,7 @@ pub(crate) fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Index, ItemQuery, Needle, Pattern, Search, View};
     use std::fs;
 
     type Apply = fn(&Path, Decision, &Path, &Path) -> Outcome;
@@ -782,39 +783,31 @@ mod tests {
     /// its module and `Config::resolve` is its only caller, so a second resolution is not
     /// something a later edit would have to remember not to write — it is something that does not
     /// compile outside one function (re-review B1).
+    ///
+    /// MUTATION: name `editable_target` from any third product item and the
+    /// product-scoped occurrence count goes red.
     #[test]
     fn attention_only_one_function_resolves_a_configuration_path() {
-        let hooks = include_str!("attention_hooks.rs");
-        let production = hooks
-            .split_once(concat!("#[cfg(", "test)]"))
-            .map_or(hooks, |(before, _)| before);
-        // Doc comments name it as often as they need to; code names it twice.
-        let code = production
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("///"))
-            .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+        let index = Index::of_package("bt-app");
+        let hits = index
+            .search(&Search::new(
+                Needle::new(Pattern::identifier("editable_target")),
+                View::Identifiers,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(index);
         assert_eq!(
-            code.matches(concat!("editable", "_target")).count(),
+            hits.len(),
             2,
             "the definition, and the one call in `Config::resolve`"
         );
-        assert!(production.contains(concat!("fn editable", "_target(path: &Path)")));
-        assert!(!production.contains(concat!("pub(crate) fn editable", "_target")));
-        for (name, source) in [
-            ("attention_codex", include_str!("attention_codex.rs")),
-            ("attention_copilot", include_str!("attention_copilot.rs")),
-            ("main", include_str!("main.rs")),
-            ("settings", include_str!("settings.rs")),
-        ] {
-            assert!(
-                !source.contains(concat!("editable", "_target")),
-                "{name} resolves a configuration path of its own"
-            );
-        }
+        let declaration = index
+            .declaration_of(
+                &ItemQuery::function("editable_target").in_module("crate::attention_hooks"),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(declaration.contains("fn editable_target(path: &Path)"));
+        assert!(!declaration.contains("pub(crate) fn editable_target"));
     }
 
     /// RED (re-review B2) — **the verb says a Folio wrote this; only the name says which program.**
