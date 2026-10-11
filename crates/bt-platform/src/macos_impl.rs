@@ -112,8 +112,9 @@ use objc2_core_foundation::{CFRetained, CFUUID};
 use objc2_core_graphics::CGDirectDisplayID;
 use objc2_foundation::{
     NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification,
-    NSNotificationCenter, NSNumber, NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect,
-    NSSize, NSString, NSUserDefaults, ns_string,
+    NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming,
+    NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
+    ns_string,
 };
 
 use crate::{NativeWindow, WheelScrollAmount, WindowRect};
@@ -1495,18 +1496,25 @@ fn read_button_pitch(ns_window: &NSWindow) -> ButtonPitch {
 /// and a placement that still will not hold against them is a fact about this
 /// platform worth reporting rather than papering over.
 ///
-/// **And the sixth is `NSWindowDidUpdate`, because those five are not all of
-/// them** — measured on the Mac on 2026-09-12, at the merge with T-MAC-LIGHTS.
+/// **And the sixth notification is `NSWindowDidUpdate`, because those five are
+/// not all of them** — measured on the Mac on 2026-09-12, at the merge with T-MAC-LIGHTS.
 /// The five hold the placement through a resize and a full-screen round trip,
 /// and they did not hold it through a launch: the trace shows the frames set to
 /// the strip's axis, read back from AppKit at 9 again a moment later, set once
 /// more when the window became key — and the window that was then photographed
 /// still had them at 9. Something in the display pass lays the title bar out
 /// again and posts none of the five. `NSWindowDidUpdate` is posted at the end of
-/// every pass in which this window was updated, which is *after* whatever did
-/// it, so it is the one subscription that cannot be outrun. It is affordable for
+/// every ordinary pass in which this window was updated. It is affordable for
 /// the reason [`centre_window_buttons`] is written the way it is: a placement
 /// that is already right writes nothing.
+///
+/// **A title write is the seventh trigger, and it owns its later half.** AppKit
+/// may lay the title bar out after `setTitle:` returns, after a `DidUpdate` that
+/// still sees Folio's placement, or without posting any of these six
+/// notifications. [`Self::set_title`] therefore re-states the placement once
+/// synchronously and schedules this same observer once on the next main-run-loop
+/// turn. That is the title change's completion, not a timer: a quiet window does
+/// no work after that one turn, and another title owns another pair of passes.
 ///
 /// The registration is scoped to this window (`object:`), so a second window's
 /// resize does not wake this one's observer.
@@ -1622,13 +1630,48 @@ impl WindowButtonsWatch {
         placement.bar_logical_px.set(band_logical_px);
         centre_window_buttons(&placement.window, band_logical_px, placement.pitch);
     }
+
+    /// Write this window's title and keep its buttons on Folio's band through
+    /// the title bar layout that AppKit performs after the write.
+    ///
+    /// The immediate placement covers a synchronous relayout. The one deferred
+    /// selector covers the layout AppKit is allowed to finish after `setTitle:`
+    /// returns. It calls the same idempotent placement as the six notifications,
+    /// so a button AppKit did not move costs a read and no write.
+    pub fn set_title(&self, title: &str) {
+        let placement = self.observer.ivars();
+        placement.window.setTitle(&NSString::from_str(title));
+        centre_window_buttons(
+            &placement.window,
+            placement.bar_logical_px.get(),
+            placement.pitch,
+        );
+        // SAFETY: the selector is defined by this observer and accepts one
+        // optional object, which is `nil` here. The run loop retains the target
+        // until the perform fires, and `Drop` cancels any perform still owed.
+        unsafe {
+            self.observer.performSelector_withObject_afterDelay(
+                sel!(folioWindowButtonsNeedCentring:),
+                None,
+                0.0,
+            );
+        }
+    }
 }
 
 impl Drop for WindowButtonsWatch {
     fn drop(&mut self) {
+        let target: &AnyObject = &self.observer;
         // SAFETY: dropped on the thread that installed it (the value is not
-        // `Send`), and the registrations are the ones made above.
-        unsafe { NSNotificationCenter::defaultCenter().removeObserver(&self.observer) };
+        // `Send`); the perform and registrations are the ones made above.
+        unsafe {
+            NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(
+                target,
+                sel!(folioWindowButtonsNeedCentring:),
+                None,
+            );
+            NSNotificationCenter::defaultCenter().removeObserver(&self.observer);
+        }
     }
 }
 
@@ -1666,7 +1709,8 @@ define_class!(
     struct WindowButtonsObserver;
 
     impl WindowButtonsObserver {
-        /// AppKit has just laid this window's title bar out again.
+        /// AppKit has just laid this window's title bar out again, or the title
+        /// road's next-turn selector has reached its completion point.
         #[unsafe(method(folioWindowButtonsNeedCentring:))]
         fn buttons_need_centring(&self, _notification: Option<&NSNotification>) {
             let placement = self.ivars();

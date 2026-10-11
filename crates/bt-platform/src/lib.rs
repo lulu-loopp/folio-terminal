@@ -10048,6 +10048,13 @@ mod windows_impl {
             Ok(())
         }
 
+        /// This frame owns no native title layout, so the caller keeps using
+        /// its existing winit title write.
+        pub fn set_title(&self, title: &str) -> bool {
+            let _ = title;
+            false
+        }
+
         /// **Answer a press on the empty part of the title bar.** Refused here,
         /// and the refusal is the design: this window's title bar answers
         /// `HTCAPTION` from [`custom_frame_hit_test`] and the OS takes the press

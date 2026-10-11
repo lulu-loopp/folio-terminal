@@ -681,8 +681,11 @@ impl Runtime<'_> {
         // An owner-thread door (`doors::TitleFlush`, whose station the meter enters). A refusal
         // keeps the title wanted, and the next turn writes it.
         let window = &self.window.window;
-        if admitted::<doors::TitleFlush, _>(|token| owner_door::set_title(token, window, &title))
-            .is_err()
+        let frame = &self.window.custom_window_frame;
+        if admitted::<doors::TitleFlush, _>(|token| {
+            owner_door::set_title(token, window, frame, &title)
+        })
+        .is_err()
         {
             self.window.title.refused(title);
         }
