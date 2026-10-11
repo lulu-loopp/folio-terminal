@@ -24907,18 +24907,15 @@ mod tests {
         SQUEEZED.get_or_init(|| module_code_without_space("crate"))
     }
 
-    /// The same, with this file's own tests cut off the end.
-    ///
-    /// A rule counting how many times production code names something has to be
-    /// checked against production code alone: a gate that says "there is one
-    /// exit" and searches the whole file counts the two string literals in its
-    /// own body and reports three.
-    fn production_source() -> &'static str {
-        let source = source_without_prose();
-        let tests = source
-            .find(concat!("#[cfg(", "test)]modtests{"))
-            .expect("this file's own test module");
-        &source[..tests]
+    /// One resolved item's body with spacing removed. The item scope replaces
+    /// the former textual cut at this file's `#[cfg(test)]` module.
+    fn item_body_without_space(query: &ItemQuery) -> String {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
     }
 
     /// PIN (§7.36) — **a window has one glyphon `Viewport`, and every batch of
@@ -25056,14 +25053,10 @@ mod tests {
     }
 
     fn handle_surface_failure_source() -> String {
-        let source = production_source();
-        let start = source
-            .find("fnhandle_surface_failure(&mutself,gpu:&GpuContext,")
-            .expect("handle_surface_failure");
-        let end = source[start..]
-            .find("fnconfigure_surface_if_needed(")
-            .expect("configure_surface_if_needed follows handle_surface_failure");
-        source[start..start + end].to_owned()
+        item_body_without_space(&ItemQuery::method(
+            "WindowRenderer",
+            "handle_surface_failure",
+        ))
     }
 
     /// PIN (GitHub issue #5) — **no exit from a frame may leave its uploads
@@ -25229,12 +25222,8 @@ mod tests {
     /// that does not call it.
     #[test]
     fn no_text_prepare_failure_is_swallowed() {
-        let source = production_source();
-        let start = source.find("fncompose_frame(").expect("compose_frame");
-        let end = source[start..]
-            .find("fnprepare_text_rows(&mutself,")
-            .expect("prepare_text_rows follows compose_frame");
-        let frame = &source[start..start + end];
+        let index = source();
+        let frame = item_body_without_space(&ItemQuery::method("WindowRenderer", "compose_frame"));
         // Nothing in the frame reaches the exit on its own: the frame's only
         // verb is `accept_text_prepare`, which is the one caller.
         assert_eq!(
@@ -25244,29 +25233,40 @@ mod tests {
         );
         // `PrepareError` is glyphon's own answer, and the only place in this
         // crate that turns one into a decision is the exit.
+        let exit_calls = index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::call("text_upload_refused")),
+                    View::Identifiers,
+                )
+                .in_scope(Scope::Module("crate".to_owned())),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(index);
         assert_eq!(
-            source.matches("fntext_upload_refused(").count(),
-            1,
-            "there is one exit for a refused text upload"
-        );
-        assert_eq!(
-            source.matches("text_upload_refused(").count(),
+            exit_calls.len(),
             2,
-            "and one caller of it — its own definition and `accept_text_prepare`"
+            "there is one product caller plus the exit's declaration: {}",
+            exit_calls.report(index)
         );
+        let policy_calls = index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::call("prepare_failure_policy")),
+                    View::Identifiers,
+                )
+                .in_scope(Scope::Module("crate".to_owned())),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(index);
         assert_eq!(
-            source.matches("prepare_failure_policy(").count(),
+            policy_calls.len(),
             2,
-            "the policy is spent at the exit and asserted in its own test, nowhere else"
+            "the policy has one product call plus its declaration: {}",
+            policy_calls.report(index)
         );
         // And the exit does the three things a refusal means.
-        let start = source
-            .find("fntext_upload_refused(")
-            .expect("text_upload_refused");
-        let end = source[start..]
-            .find("fnpresent_outcome(")
-            .expect("present_outcome follows text_upload_refused");
-        let exit = &source[start..start + end];
+        let exit = item_body_without_space(&ItemQuery::function("text_upload_refused"));
         assert!(
             exit.contains("*text_complete=false;"),
             "a refusal marks the frame incomplete, which is how the retry is asked for"
@@ -29397,7 +29397,7 @@ mod tests {
         // And the acquire is what tells them apart: `Occluded` is the only
         // reading that means the window itself, and only the Metal backend ever
         // returns it.
-        let source = production_source();
+        let source = item_body_without_space(&ItemQuery::method("WindowRenderer", "acquire"));
         assert!(
             source.contains(concat!(
                 "wgpu::CurrentSurfaceTexture::Occluded=>{SurfaceAcquisition::Failed(",

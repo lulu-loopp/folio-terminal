@@ -648,6 +648,7 @@ fn path_from_bytes(bytes: Vec<u8>, url: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Needle, Pattern, Scope, View};
 
     /// A sender that keeps what it was given, in order.
     fn collector() -> (
@@ -1044,7 +1045,6 @@ mod tests {
     #[test]
     fn the_service_this_bundle_declares_is_the_one_the_provider_answers() {
         const SELECTOR: &str = "openInFolio:userData:error:";
-        const PROVIDER: &str = include_str!("macos_services.rs");
         let plist = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../packaging/macos/Info.plist.in"
@@ -1056,8 +1056,17 @@ mod tests {
             SELECTOR,
             "the origin names the method AppKit sends"
         );
-        assert!(
-            PROVIDER.contains(&format!("#[unsafe(method({SELECTOR}))]")),
+        let provider_has = |spelling: &str| {
+            crate::source_test::found(
+                Needle::new(Pattern::text(spelling)),
+                View::Raw,
+                Scope::Module("crate::macos_services".to_owned()),
+            )
+            .len()
+        };
+        assert_eq!(
+            provider_has("#[unsafe(method(openInFolio:userData:error:))]"),
+            1,
             "the provider class does not answer {SELECTOR}"
         );
         let message = plist_string(&plist, "NSMessage");
@@ -1083,11 +1092,11 @@ mod tests {
             "a required context would take the row off files or off folders"
         );
         assert!(
-            PROVIDER.contains("NSUpdateDynamicServices()"),
+            provider_has("NSUpdateDynamicServices()") >= 1,
             "a freshly built or freshly moved bundle's row would not appear until a logout"
         );
         assert!(
-            PROVIDER.contains("AppDelegateOrigin::Services"),
+            provider_has("AppDelegateOrigin::Services") >= 1,
             "the provider posts a Service as something else"
         );
     }

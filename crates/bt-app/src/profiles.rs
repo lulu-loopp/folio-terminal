@@ -14533,6 +14533,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::host_spelling;
+    use bt_source::ItemQuery;
 
     /// RED (ticket 22) — **the section labels inside every menu `profiles.rs`
     /// builds are on the section-label scale, not their own smaller, more
@@ -17935,21 +17936,20 @@ mod tests {
         // copied down from the Windows rows is a compile-time fact, not a
         // runtime one, and would slip past every assertion above on a machine
         // where the file it names is missing.
-        for header in [
-            "fn unix_shipped(",
-            "fn unix_system_shells(",
-            "fn unix_shell_row(",
-            "fn users_shell(",
+        for function in [
+            "unix_shipped",
+            "unix_system_shells",
+            "unix_shell_row",
+            "users_shell",
         ] {
-            let region = crate::source_pin::code_of(crate::source_pin::source_region(
-                include_str!("profiles.rs"),
-                header,
+            let region = crate::test_support::squeezed(crate::test_support::item_body(
+                &ItemQuery::function(function),
             ))
             .to_ascii_lowercase();
             for word in forbidden {
                 assert!(
                     !region.contains(word),
-                    "{header}: the off-Windows table's own source names {word}"
+                    "{function}: the off-Windows table's own source names {word}"
                 );
             }
         }
@@ -27621,6 +27621,7 @@ mod paste_tests {
     #[cfg(windows)]
     use crate::shell_literal::{PathSpelling, Recipient};
     use crate::shell_literal::{Refusal, ShellGrammar};
+    use bt_source::ItemQuery;
 
     struct EmptyMachine;
     impl ShellEnvironment for EmptyMachine {
@@ -27998,24 +27999,12 @@ mod paste_tests {
 
     #[test]
     fn namespace_resolver_keeps_its_standing_inputs_and_grammar_does_not_use_served_by() {
-        let source = include_str!("profiles.rs");
-        let resolver = source
-            .split_once("pub fn printed_path_namespace(")
-            .unwrap()
-            .1
-            .split_once("/// Which distribution")
-            .unwrap()
-            .0;
+        let resolver =
+            crate::test_support::item_body(&ItemQuery::function("printed_path_namespace"));
         assert!(resolver.contains("match (paths(index), integration(index))"));
         assert!(!resolver.contains("paste_as"));
         assert!(!resolver.contains("paste_paths_as"));
-        let grammar = source
-            .split_once("pub fn derive_grammar(")
-            .unwrap()
-            .1
-            .split_once("pub fn grammar(")
-            .unwrap()
-            .0;
+        let grammar = crate::test_support::item_body(&ItemQuery::function("derive_grammar"));
         assert!(!grammar.contains("served_by("));
         assert!(!grammar.contains("paste_paths_as"));
     }

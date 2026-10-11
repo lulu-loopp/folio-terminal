@@ -776,6 +776,7 @@ pub fn scan_frames(modules: &[ModuleRange], stack: &[u8], max_frames: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::{ModuleRange, ModuleSite, resolve, scan_frames};
+    use bt_source::ItemQuery;
 
     fn map() -> Vec<ModuleRange> {
         vec![
@@ -869,30 +870,6 @@ mod tests {
 
     // ── M4-11, read off this file on any machine ───────────────────────────
 
-    /// This file, as text. The macOS arms do not compile on the workstation
-    /// where they are written, and the three properties below are decisions
-    /// rather than values — which is what a source pin is for.
-    const SOURCE: &str = include_str!("hang.rs");
-
-    /// One item of this file, from its signature to the closing brace at the
-    /// same indent.
-    fn item(needle: &str) -> String {
-        let indent: String = needle
-            .trim_start_matches('\n')
-            .chars()
-            .take_while(|character| *character == ' ')
-            .collect();
-        let closer = format!("\n{indent}}}\n");
-        let at = SOURCE
-            .find(needle)
-            .unwrap_or_else(|| panic!("`{needle}` is in this file"));
-        let rest = &SOURCE[at..];
-        let end = rest
-            .find(&closer)
-            .unwrap_or_else(|| panic!("`{needle}` opens an item that is never closed"));
-        rest[..end].to_owned()
-    }
-
     /// PIN (M4-11, `docs/DESIGN.md` §13.31) — **the macOS question is put to
     /// Core Foundation, in the common modes, and not to winit.**
     ///
@@ -910,7 +887,11 @@ mod tests {
     /// loop proxy instead and the last assertion names the file.
     #[test]
     fn the_macos_liveness_question_is_put_to_the_run_loop_in_the_common_modes() {
-        let arm = item("#[cfg(target_os = \"macos\")]\n#[must_use]\npub fn ask_thread_to_answer(");
+        let arm = crate::source_test::body_in_reaching_variant(
+            &ItemQuery::function("ask_thread_to_answer").in_module("crate::hang"),
+            3,
+            "target_os = \"macos\"",
+        );
         assert!(
             arm.contains("MAIN_THREAD_PORT") && arm.contains("Answer::NoWindow"),
             "an id that is not the main thread's owns no window to ask:\n{arm}"
@@ -919,7 +900,9 @@ mod tests {
             arm.contains("ask_run_loop_to_answer(&run_loop, timeout)"),
             "and the one that is goes to the main run loop:\n{arm}"
         );
-        let body = item("\nfn ask_run_loop_to_answer(");
+        let body = crate::source_test::body(
+            &ItemQuery::function("ask_run_loop_to_answer").in_module("crate::hang"),
+        );
         assert!(
             body.contains("kCFRunLoopCommonModes"),
             "the question is asked in the mode a tracked drag also turns:\n{body}"
@@ -955,21 +938,31 @@ mod tests {
     /// naming the arm that was supposed to refuse.
     #[test]
     fn the_stack_sample_is_still_refused_on_every_platform_but_windows() {
-        let body = item("#[cfg(not(windows))]\n#[must_use]\npub fn capture_thread_stack(");
+        let query = ItemQuery::function("capture_thread_stack").in_module("crate::hang");
+        let body = crate::source_test::body_in_reaching_variant(&query, 3, "not(windows)");
         assert!(
             body.contains("StackSample::refused(\"stack capture is a Windows facility\")"),
             "the off-Windows arm refuses, in one sentence:\n{body}"
         );
+        let records = crate::source_test::index()
+            .find(&query.expecting(3))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(
-            SOURCE.matches("\npub fn capture_thread_stack(").count(),
+            records.len(),
             3,
             "three arms and no fourth: x86-64 Windows, other Windows, everything else"
         );
         assert!(
-            !SOURCE.contains(
-                "#[cfg(target_os = \"macos\")]\n#[must_use]\npub fn capture_thread_stack"
-            ),
-            "and none of the three is a macOS sampler"
+            records
+                .iter()
+                .all(|record| record.identities().all(|identity| {
+                    !identity
+                        .variant
+                        .predicates()
+                        .iter()
+                        .any(|predicate| predicate == "target_os = \"macos\"")
+                })),
+            "and none of the three is a dedicated macOS sampler"
         );
     }
 
@@ -985,7 +978,11 @@ mod tests {
     /// acceptance line, which launches from an isolated home on purpose.
     #[test]
     fn the_system_crash_reports_are_looked_for_in_the_accounts_own_home() {
-        let body = item("\npub fn system_crash_reports_directory() -> Option<PathBuf> {\n    use");
+        let body = crate::source_test::body_in_reaching_variant(
+            &ItemQuery::function("system_crash_reports_directory").in_module("crate::hang"),
+            2,
+            "target_os = \"macos\"",
+        );
         assert!(
             body.contains("libc::getpwuid(libc::getuid())"),
             "the home comes from the account record:\n{body}"

@@ -573,6 +573,8 @@ pub fn delegate_answers_the_four_selectors() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use bt_source::ItemQuery;
+
     /// RED — **the four encodings say what the four implementations are.**
     ///
     /// A type encoding is a string AppKit reads at run time; a wrong one is not
@@ -584,7 +586,9 @@ mod tests {
     /// selector above it, which is the plausible mistake — and this fails.
     #[test]
     fn each_selector_carries_the_encoding_of_its_own_implementation() {
-        const SOURCE: &str = include_str!("macos_app.rs");
+        let body = crate::source_test::body(
+            &ItemQuery::function("add_the_delegate_selectors").in_module("crate::macos_app"),
+        );
         for (selector, encoding) in [
             ("applicationShouldHandleReopen:hasVisibleWindows:", "B@:@B"),
             ("applicationShouldTerminate:", "Q@:@"),
@@ -601,10 +605,10 @@ mod tests {
             ("copy:", "v@:@"),
             ("paste:", "v@:@"),
         ] {
-            let at = SOURCE
+            let at = body
                 .find(&format!("selector: sel!({selector})"))
                 .unwrap_or_else(|| panic!("{selector} is one of the four"));
-            let entry = &SOURCE[at..];
+            let entry = &body[at..];
             let entry = &entry[..entry.find("},").unwrap_or(entry.len())];
             assert!(
                 entry.contains(&format!("c\"{encoding}\"")),
@@ -627,11 +631,13 @@ mod tests {
     /// MUTATION: move the entry back above any other and this fails.
     #[test]
     fn the_terminate_selector_is_the_last_one_injected() {
-        const SOURCE: &str = include_str!("macos_app.rs");
-        let table = SOURCE
+        let body = crate::source_test::body(
+            &ItemQuery::function("add_the_delegate_selectors").in_module("crate::macos_app"),
+        );
+        let table = body
             .find("let selectors = [")
             .expect("the injection table is declared in this file");
-        let table = &SOURCE[table..];
+        let table = &body[table..];
         let terminate = table
             .find("selector: sel!(applicationShouldTerminate:)")
             .expect("the terminate selector is injected");

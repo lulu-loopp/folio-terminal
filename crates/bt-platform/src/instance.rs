@@ -1008,6 +1008,7 @@ pub fn try_claim_data_directory(_directory: &Path) -> Result<DataDirectoryClaim,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::ItemQuery;
 
     /// PIN — two spellings of one directory claim one name, and two directories
     /// claim two.
@@ -1212,24 +1213,20 @@ mod tests {
     /// goes red on Windows.
     #[test]
     fn the_unix_claim_is_a_flock_on_a_descriptor_in_a_private_runtime_directory() {
-        let source = include_str!("instance.rs");
-
-        let claim = source
-            .split("#[cfg(unix)]\npub struct DataDirectoryClaim {")
-            .nth(1)
-            .expect("the Unix arm declares a DataDirectoryClaim with a body");
-        let body = claim.split("\n}\n").next().unwrap_or_default();
+        let body = crate::source_test::body_in_reaching_variant(
+            &ItemQuery::type_item("DataDirectoryClaim").in_module("crate::instance"),
+            3,
+            "unix",
+        );
         assert!(
             body.contains("lock: std::fs::File"),
             "the Unix claim holds an owned descriptor for the life of the process, \
              and a unit struct holds nothing: {body}"
         );
 
-        let take = source
-            .split("#[cfg(unix)]\nfn try_claim_data_directory_in")
-            .nth(1)
-            .expect("the Unix arm has its own claim implementation");
-        let take = take.split("\n}\n").next().unwrap_or_default();
+        let take = crate::source_test::body(
+            &ItemQuery::function("try_claim_data_directory_in").in_module("crate::instance"),
+        );
         assert!(
             take.contains("libc::LOCK_EX | libc::LOCK_NB"),
             "the claim asks and does not wait, and it is exclusive: {take}"
@@ -1253,20 +1250,16 @@ mod tests {
             );
         }
 
-        let prepare = source
-            .split("fn prepare_runtime_directory()")
-            .nth(1)
-            .expect("the Unix arm prepares its own runtime directory");
-        let prepare = prepare.split("\n}\n").next().unwrap_or_default();
+        let prepare = crate::source_test::body(
+            &ItemQuery::function("prepare_runtime_directory").in_module("crate::instance"),
+        );
         assert!(
             prepare.contains("prepare_private_directory(&runtime_directory(), uid)"),
             "the runtime directory uses the shared private-directory preparation"
         );
-        let prepare = source
-            .split("fn prepare_private_directory(")
-            .nth(1)
-            .expect("the private-directory helper is present");
-        let prepare = prepare.split("\n}\n").next().unwrap_or_default();
+        let prepare = crate::source_test::body(
+            &ItemQuery::function("prepare_private_directory").in_module("crate::instance"),
+        );
         assert!(
             prepare.contains(".mode(0o700)"),
             "the runtime directory is created 0700 rather than chmod-ed to it: {prepare}"
@@ -1534,13 +1527,9 @@ mod tests {
     /// Windows, naming the line.
     #[test]
     fn the_runtime_directory_is_asked_of_the_system_and_not_of_the_environment() {
-        let source = include_str!("instance.rs");
-
-        let rule = source
-            .split("#[cfg(unix)]\n#[must_use]\npub fn runtime_directory()")
-            .nth(1)
-            .expect("the Unix arm says where this user's runtime files live");
-        let rule = rule.split("\n}\n").next().unwrap_or_default();
+        let rule = crate::source_test::body(
+            &ItemQuery::function("runtime_directory").in_module("crate::instance"),
+        );
         assert!(
             !rule.contains("TMPDIR") && !rule.contains("env::var"),
             "the runtime directory is read out of the environment again, so a Folio \
@@ -1553,11 +1542,11 @@ mod tests {
              temporary directory is: {rule}"
         );
 
-        let asked = source
-            .split("#[cfg(target_os = \"macos\")]\n#[must_use]\nfn per_user_temporary_directory()")
-            .nth(1)
-            .expect("the macOS arm asks the system");
-        let asked = asked.split("\n}\n").next().unwrap_or_default();
+        let asked = crate::source_test::body_in_reaching_variant(
+            &ItemQuery::function("per_user_temporary_directory").in_module("crate::instance"),
+            2,
+            "target_os = \"macos\"",
+        );
         assert!(
             asked.contains("libc::_CS_DARWIN_USER_TEMP_DIR"),
             "confstr(_CS_DARWIN_USER_TEMP_DIR) is the directory launchd sets $TMPDIR \

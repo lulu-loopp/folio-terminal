@@ -506,10 +506,19 @@ fn file_reads_every_product_content_door_has_a_lane() {
             "{key} lost its counting adapter"
         );
     }
-    let animation = include_str!("animation.rs");
-    assert!(animation.contains("file_reads::LEDGER.add("));
-    assert!(animation.contains("Lane::Animation"));
-    assert!(animation.contains("Lane::Peek"));
+    for spelling in ["file_reads::LEDGER.add(", "Lane::Animation", "Lane::Peek"] {
+        let found = source_index()
+            .search(
+                &bt_source::Search::new(
+                    bt_source::Needle::new(bt_source::Pattern::text(spelling)),
+                    bt_source::View::Raw,
+                )
+                .in_scope(bt_source::Scope::Module("crate::animation".to_owned())),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(source_index());
+        assert!(!found.is_empty(), "animation lost `{spelling}`");
+    }
 }
 
 /// **Every item-keyed row is a fact about an item, asked of the crate.**

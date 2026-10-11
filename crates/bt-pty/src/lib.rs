@@ -2734,6 +2734,7 @@ mod tests {
     };
 
     use super::*;
+    use bt_source::{Index, ItemQuery};
     use bt_term::{DualPlaneSession, RESIZE_REQUEST_QUIET, TerminalAdapter, TerminalCursor};
     use test_shell::TestShell;
 
@@ -3906,10 +3907,10 @@ mod tests {
 
     #[test]
     fn input_dump_off_write_path_has_only_the_option_gate() {
-        let source = include_str!("lib.rs");
-        let start = source.find("    pub fn write_with_reason(").unwrap();
-        let body = &source[start..];
-        let body = &body[..body.find("\n    }\n").unwrap()];
+        let index = Index::of_package("bt-pty");
+        let body = index
+            .body_of(&ItemQuery::method("PtySession", "write_with_reason"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         let (ordinary, enabled) = body
             .split_once("if let Some(dump) = &self.input_dump {")
             .unwrap();
@@ -3929,7 +3930,7 @@ mod tests {
         }
         assert!(enabled.contains("dump.write_input_at(bytes, reason, elapsed_us)"));
         let disabled_tail = enabled.rsplit_once("\n        }").unwrap().1.trim();
-        assert_eq!(disabled_tail, "Ok(())");
+        assert_eq!(disabled_tail.trim_end_matches('}').trim(), "Ok(())");
     }
 
     #[test]
@@ -4578,13 +4579,10 @@ mod tests {
     /// Mutation: put a `write_all` back in `PtySession::write` and both halves go.
     #[test]
     fn the_only_thread_that_meets_the_pipe_is_the_writer_thread() {
-        const SOURCE: &str = include_str!("lib.rs");
-        let head = "\n    pub fn write_with_reason(&self, bytes: &[u8], reason: &'static str) -> Result<(), PtyError> {";
-        let start = SOURCE
-            .find(head)
-            .expect("`PtySession::write` takes `&self` and answers a `PtyError`")
-            + head.len();
-        let body = &SOURCE[start..start + SOURCE[start..].find("\n    }\n").unwrap()];
+        let index = Index::of_package("bt-pty");
+        let body = index
+            .body_of(&ItemQuery::method("PtySession", "write_with_reason"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         for pipe in ["write_all", "flush"] {
             assert!(
                 !body.contains(pipe),
@@ -4595,11 +4593,9 @@ mod tests {
             body.contains("input.try_push"),
             "it hands the bytes to the bounded ring and returns"
         );
-        let thread_body = {
-            let head = "\nfn pump_pty_input(writer: &mut dyn Write, input: &InputRing) {";
-            let start = SOURCE.find(head).expect("the writer thread's loop") + head.len();
-            &SOURCE[start..start + SOURCE[start..].find("\n}\n").unwrap()]
-        };
+        let thread_body = index
+            .body_of(&ItemQuery::function("pump_pty_input"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
             thread_body.contains("write_all") && thread_body.contains("flush"),
             "and the pipe is met there, on a thread no message pump is waiting on"
