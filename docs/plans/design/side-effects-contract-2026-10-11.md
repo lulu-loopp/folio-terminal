@@ -1,6 +1,6 @@
 # How a side effect is asked for and how it ends: the execution / completion contract — design note, 2026-10-11
 
-Status: **revision (b), 2026-10-11**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the second of the two contract notes the 2026-09-21 structure review asked for before 0.5. Ledger rows **D-16** (the door pattern, the contract's admission half) and **D-33** (the lane contract as one shape, its completion half), both 0.5 preconditions. D-55 (each publication declares its kind) also waits on this note. The companion is `ownership-contract-2026-10-11.md` (OC), which says *who* owns a fact. This note says how an owner asks the world to change something and how it learns the outcome. Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test, no cargo run for this note. Facts are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named).
+Status: **revision (c), 2026-10-11**, after the Codex confirmation round (`reports/J5-05-contracts.review-codex-b.md`); revision (c) stands over (b) where they differ, and (b) over (a). Before that, **revision (b)**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the second of the two contract notes the 2026-09-21 structure review asked for before 0.5. Ledger rows **D-16** (the door pattern, the contract's admission half) and **D-33** (the lane contract as one shape, its completion half), both 0.5 preconditions. D-55 (each publication declares its kind) also waits on this note. The companion is `ownership-contract-2026-10-11.md` (OC), which says *who* owns a fact. This note says how an owner asks the world to change something and how it learns the outcome. Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test, no cargo run for this note. Facts are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named).
 
 **Section signs.** A bare `§n` is a section of this note. `A§n` is `docs/ARCHITECTURE.md`; `TD§n` is `docs/plans/design/thread-door-2026-09-26.md`; `WTB§n` is `docs/plans/design/window-thread-budget-2026-09-25.md`; `OC§n` is the companion note; `RULES n` is a row of `docs/RULES.md`. *The registry* is `crates/bt-app/src/window_waits.tsv`, and *row n* is its `# rows` section (= A§5.3). *The lane suite* is `crates/bt-app/src/lane.rs` with `lane_contract_tests`.
 
@@ -615,3 +615,149 @@ As §8, with three changes:
 - **Doors.** S-6a adds a job kind to the existing storage worker, not a new door.
 - **Product code.** `bt-app::lane` becomes product code (S-3).
 - **Registry.** Row 26 leaves `# rows` only with all three Windows roads moved (S-7). Row 20 narrows twice: once by B6 (the four stores) and once by S-6a (the save). The rename half remains.
+
+---
+
+## Revision (c), 2026-10-11, after the Codex confirmation round
+
+Review: `reports/J5-05-contracts.review-codex-b.md`. Verdict on this note: **adopt with changes (blockers only)**. N2-3 to N2-7 are confirmed. Four blockers remain: the inventory (N2-1), the guard (N2-2), the save lane (N2-8) and the paste ordering (N2-9). Each is applied below and none is argued.
+
+Item 3 is also the **coordinator's ruling for both notes**: one storage worker, one request protocol (B6's), and two semantic policies. B6's revision (c) is being written to the same words. **Where (b) and (c) differ, (c) stands.**
+
+### (c)0 · What changed
+
+| # | the review's words (abridged) | disposition | where |
+|---|---|---|---|
+| 1 | *"The three `?` rows are already classifiable … Row 27 … partial … Row 30 … window-thread effect without admission … Row 41 … must be at least two rows … 'S-1 must explicitly split row 41 and recount … The minimum is 64 protocols.'"* | applied | (c)1 amends (b)1's rows 27, 30 and 41, its counts, and S-1 |
+| 2 | *"The C1 guard requires a new `bt-source` feature. Today `Index` explicitly says that no query resolves a path to its definition … split that engine into an L prerequisite and leave the request-door assertion as S/M. S-2 as M is not credible"* | applied: split | (c)2 replaces S-2 in (b)10 |
+| 3 | *"S-6 contradicts B6 revision (b) … the conditional exchange is the lane protocol … must use B6's shared request `Document { expected: exact_disk_bytes, bytes, mode: Restore, link_policy }`. It must not retain the old mtime-only `PreviewBuffer::save` … S-6c must also use B6's multi-turn `Documents` quit phase"* | applied; this is also the coordinator's ruling | (c)3 replaces (b)8's "two protocols" paragraph and S-6a/c |
+| 4 | *"S-7 needs a per-pane held-input cap plus an enqueue-to-terminal paste deadline. On timeout/`WorkerGone`, it must cancel the paste, release the buffered keys in order, and ignore a late paste result."* | applied, with the numbers and the tests | (c)4 amends (b)9 and S-7 |
+
+### (c)1 · The three unclassified rows, classified; row 41 split (64 protocols)
+
+**Row 27, background picture decode: ◐.**
+- the spawn's refusal is discarded;
+- a superseded generation gets no terminal outcome;
+- the worker's death has no completion.
+
+**Row 30, desktop notification: ✗.** `notifications.show` (`runtime/attention.rs:787–792`) is a window-thread call with no admission. It is **not** a member of (b)6's closed C7 list. S-1 writes it as a window-thread effect, and its disposition is an owner question if it is to stay there (Q1's closed list does not include it).
+
+**Row 41 splits into two protocols:**
+
+| # | protocol | door | thread | signal | failure road | identity · sink | status |
+|---:|---|---|---|---|---|---|---|
+| 41a | shell-integration enable and undo | `profile_runtime` install/undo jobs | `powershell-profile-install`, `powershell-profile-install-undo` | an addressed `ProfileInstallOutcome` (`profile_runtime.rs:14`) | the outcome's refusal | addressed to its asker | ◐ (the spawn refusal and a worker's death have no stated terminal; to measure in S-1) |
+| 41b | shell-integration removal | `profile_runtime::begin_removal` (`profile_runtime.rs:655`) | `powershell-profile-removal` | a global `REMOVAL` slot plus `WAKE`, taken by `take_removal` | the `Report` | no identity: the newest report overwrites the slot, and a spawn refusal is discarded (`let _ =`) | ◐ C2 |
+
+The review counts *arguably three doors* (install, undo, removal). S-1 decides whether install and undo are one protocol (one outcome type, one address) or two, and the count moves with that decision.
+
+**Counts, recomputed (64):** ✓ 27, ◐ 22 (19 plus rows 27, 41a and 41b), ✗ 15 (14 plus row 30), and nothing unclassified. **S-1 takes this list as its floor, not as a fixed input.** It re-derives the inventory from the registry, the `AppEvent` answers, the lanes and the spawns, splits wherever one row has two doors or two answer shapes, and recounts.
+
+### (c)2 · The C1 guard needs a call-graph engine first
+
+Revision (b)'s guard needed resolution that `bt-source` does not have. `Index` says so explicitly: *no query in this crate resolves a path to a definition* (`crates/bt-source/src/index.rs:795–797`). The census's receiver resolver is private and specific to field writes. The `# effects` guard examines only an effect function's own body. S-2 therefore splits:
+
+- **S-2a T-BT-SOURCE-CALL-GRAPH (L).** A public, resolved, execution-aware call graph over the product universe:
+  - paths resolved to their item (functions, methods by receiver type, through `use` and the module tree), reusing the census's receiver rules as a public resolver;
+  - edges annotated with what they cannot see: dynamic dispatch (trait objects, stored closures, function pointers) and macro token trees, each marked **unresolved**;
+  - a walk from a set of roots that **stops at declared boundary items** and reports every unresolved edge on the way;
+  - its own fixtures, each going red under a named mutation: a helper two calls deep, a method resolved through `Deref`, a trait-object call that must report as unresolved, and a macro that must report as unresolved.
+- **S-2b T-REQUEST-DOOR-GUARD (S/M), after S-2a.** The assertion of (b)2 on top of the engine:
+  - from each `# completions` door to its enqueue boundary, no `# vocabulary` or `# entrances` path, no `owner-door-body` item, and no blocking primitive outside the declared mailbox lock;
+  - **fail closed** on every unresolved edge that the row does not list as reviewed;
+  - (b)2's three canaries.
+
+**Until S-2a lands**, C1 is held by what exists today, stated as such:
+- `every_bare_site_is_a_row_and_every_row_a_site` keeps the window thread's bare waits from growing;
+- the `# effects` guard keeps waiting effects inside registered bodies;
+- each request door's **own body** is checked against `# vocabulary` (a direct-body check over the `# completions` items, which `bt-source` can do now) as part of S-1.
+
+This interim check is explicitly **not** a C1 gate. A helper bypasses it, which is the review's point.
+
+### (c)3 · The save lane: B6's request, the preview's policy
+
+**The coordinator's ruling, for both notes.** One storage worker (`persist::SessionWriter`), **one request protocol, B6's**, and two semantic policies. Revision (b)'s *"document saves keep the preview's own baseline-and-conflict protocol"* and its `StorageJob::Save` are **withdrawn**.
+
+- **The request** is B6's shared job:
+  `Document { expected: exact_disk_bytes, bytes, mode, link_policy }`.
+  - `expected` is the disk revision **as exact bytes**: what the buffer last read, or last landed.
+  - The worker runs B6's conditional exchange: a precondition read, an exchange that hands back the displaced file, and a verification. Its answers are B6's: `Landed`, `Moved`, `Displaced` and `Refused`.
+  - The old mtime-only check in `PreviewBuffer::save` (`preview.rs:5778` ff.) is **retired**. It does not survive as a separate mechanism or job kind.
+- **The preview's semantic policy** sends `mode: Restore`.
+  - When the worker finds displaced bytes that are not `expected`, it puts them back (B6's `Restore`) and answers **`Conflict`**: nothing lost, and no three-way merge.
+  - `Moved` is also `Conflict` for the preview.
+  - The four configuration stores send `Merge` and keep B6's merge and owed-edit rules.
+- **Two revisions per preview request.** The request carries the buffer's **body revision** beside `expected`.
+  - `Landed` for the current body revision maps to `Saved { revision }` and clears `dirty`.
+  - `Landed` for an older body revision updates the disk revision only. Dirty stays, and the newer body is owed.
+  - `Conflict` and `Refused` leave `dirty` as it is.
+- **`link_policy`**: the preview keeps `PlainWriter` until a ruling. That ruling is J5's to ask, and it is asked as part of Q5 below. The configuration stores keep B6's `Refuse`.
+- **S-6c uses B6's multi-turn quit phases** (B6 revision (c)2), not FIFO followed by the blocking session wait. That wait cannot process `DocumentsAnswered`.
+  - **Documents phase**, until `QUIT_DOCUMENTS_BY`: owed preview saves and owed stores are sent, and each answer is processed on the window thread across turns.
+  - **Recovery phase**, until `QUIT_RECOVERY_BY`: configuration debts with a terminal refusal take B6's road for them (B6's recovery copy).
+  - **Then the session write**, behind landed copies, waiting as today (row 16).
+  - **An ordinary quit with an unresolved preview save is cancelled.** This is (b)8's rule, and B6 (c)2 states the same cancellation. B6's *a second quit for the same refusal leaves, and says so* applies to the preview as well.
+- **Close and forced stop** are as (b)8:
+  - a close that reaches its deadline counts the save as `Failed(TimedOut)` for the gate, which stays open with the document still dirty;
+  - a forced stop writes the recovery copy and never writes over the file.
+
+**Tickets, replacing S-6a and S-6c** (S-6b unchanged):
+
+| # | ticket | size | after | closes |
+|---|---|---|---|---|
+| S-6a | T-PREVIEW-ON-THE-STORAGE-LANE: the preview sends B6's `Document` with `mode: Restore` and its body revision; the disk revision becomes exact bytes; `PreviewBuffer::save`'s mtime check is retired | M | B6's lane ticket, S-3, OC O-7 | **V1**, row 20's save half |
+| S-6c | T-QUIT-AND-STOP-SAVES: preview saves inside B6's `Documents` phase; the quit cancelled on an unresolved save; the forced stop's recovery copy | M | S-6b, B6's quit ticket | (b)8's quit and stop rules |
+
+### (c)4 · The paste hold, bounded
+
+A paste is a request (`ClipboardRead`). Keys typed after it are held behind it in the pane's input order, under two bounds:
+
+- **A per-pane held-input cap of 1 MiB**: `bt_pty::PTY_INPUT_RING_BYTES` (`crates/bt-pty/src/lib.rs:183`), the same capacity a pane in birth holds (`PaneBirth::hold`). A key that would push the held bytes over the cap **cancels the paste early**, as the deadline does.
+- **An enqueue-to-terminal paste deadline of 1 s**, `PASTE_DEADLINE`, a clock on the turn and never a wait. It is measured from the request's enqueue to its terminal answer.
+  - It covers the worker backlog, the contention wait (at most 75 ms: five `OpenClipboard` attempts with 5 + 10 + 20 + 40 ms between them, the bound S-7 keeps), and the source application's delayed rendering inside `GetClipboardData`, which has no bound of its own.
+  - One second is long enough for a contended clipboard and short enough that held keys never read as a lost keystroke.
+
+**On the deadline, on `WorkerGone`, or on the cap:**
+1. the paste is **cancelled** (`Cancelled`);
+2. the held keys are **released to the shell in their order**;
+3. a later answer for that paste is **ignored**, because its identity is no longer owed;
+4. one `diagnostics.log` line says the paste was cancelled and why.
+
+**Backlog.** The clipboard worker admits at most one outstanding request per pane and four per process. A fifth is refused synchronously (`ClipboardBusy`, C2's synchronous refusal), and the copy or paste gesture says so once.
+
+**Text size.** No cap is added. A paste goes whole, as today (`bt-pty` *one paste is one write*), and the deadline is what bounds the wait for it.
+
+Tests in S-7. Each uses a fake clipboard worker and a fake clock, types Chinese and mixed-script keys after the paste, and goes red under the named mutation:
+- `keys_typed_after_a_paste_reach_the_shell_after_the_pasted_text`. MUTATION: deliver held keys before the paste's answer.
+- `a_paste_past_its_deadline_is_cancelled_and_the_held_keys_go_in_order`. MUTATION: no deadline (the keys are held for ever).
+- `a_late_paste_answer_after_cancellation_is_ignored`. MUTATION: write the late text.
+- `worker_gone_cancels_the_paste_and_releases_the_keys`. MUTATION: leave the identity owed.
+- `held_keys_over_the_cap_cancel_the_paste_and_go_in_order`. MUTATION: drop the key that crossed the cap.
+- `a_fifth_outstanding_clipboard_request_is_refused_at_once`. MUTATION: queue it.
+
+S-7 stays **M**.
+
+### (c)5 · Tickets, in order, revised
+
+| # | ticket | size | after |
+|---|---|---|---|
+| S-1 | T-COMPLETIONS-LEDGER: re-derive from (c)1's 64-row floor, split where needed, recount; write `# completions`; the interim direct-body check ((c)2) | M | — |
+| S-2a | T-BT-SOURCE-CALL-GRAPH | **L** | — |
+| S-2b | T-REQUEST-DOOR-GUARD | **S/M** | S-1, S-2a |
+| S-3 | T-COMPLETION-HARNESS (as (b)7) | M | S-1 |
+| S-4 | T-LANES-SAY-SUPERSEDED | L | S-3 |
+| S-5 | T-HANDOFF-DEATH | M | S-3 |
+| S-6a | T-PREVIEW-ON-THE-STORAGE-LANE ((c)3) | M | B6's lane ticket, S-3, OC O-7 |
+| S-6b | T-CLOSE-GATE-WAITS (as (b)10) | M | S-6a |
+| S-6c | T-QUIT-AND-STOP-SAVES ((c)3) | M | S-6b, B6's quit ticket |
+| S-7 | T-CLIPBOARD-LANE (Windows), with (c)4's bounds and tests | M | S-3 |
+
+### (c)6 · The owner questions, revised (still five)
+
+Q1–Q4 are as (b)11. Q1's closed list does not include the desktop notification (row 30); S-1 brings it back as a request door or as a ruled member. Q5 replaces (b)11's Q5:
+
+5. **(a)** Should a close wait silently for an owed save, ask at the deadline with the document still dirty, cancel a quit whose preview saves are unresolved at `QUIT_DOCUMENTS_BY`, and write the recovery copy on a forced stop? **Recommend yes.**
+
+   **(b)** What should a preview save do with a file that is a symbolic link? Today the save **replaces the link with a file**: the link's target keeps the old bytes, and nobody has ruled on it (`preview.rs:5766–5773`, *a rename replaces the link, not what it points at*). B6's `link_policy` offers `PlainWriter`, which keeps today's behaviour, or `Refuse`. **Recommend `Refuse` for the preview, with the refusal said on the pane.** Silently turning a person's link into a copy breaks the link without telling them, and a refusal they can see is better.
+
+   Writing *through* the link to its target is a third policy that the lane does not have. If wanted, it is a separate ticket with its own ruling. Until this question is answered, S-6a keeps `PlainWriter`, so today's behaviour does not change by accident.
