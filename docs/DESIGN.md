@@ -14775,6 +14775,44 @@ The engine ledger has one owner on every platform, `bt_platform::engine_ledger`:
 
 **Pinned by** `persist::tests::{launch_keeps_the_session_it_read_before_this_runs_first_write, an_empty_session_leaves_the_prior_backup_untouched, an_absent_session_creates_no_backup}`, `update_trial::tests::a_flush_in_the_trial_release_gap_keeps_the_launch_backup_first`, and `bt-persist`'s `atomic::tests::a_sibling_write_carries_its_sources_mode`. The launch test goes red if the request is dropped, snapshots the later in-memory document, or reserializes away the mixed-script unknown field; the trial test deterministically goes red when the head call to `queue_launch_backup` is removed from `flush_judged`; the other two app tests go red if an empty or absent launch replaces or invents a generation, and the atomic test goes red if the sibling writer stops carrying the source mode.
 
+### 2026-10-10 — Homebrew's own record recognizes an official-cask copy without install-time attributes (D2)
+
+**What is built.** A macOS bundle is Homebrew-managed when the installed
+version's `Folio.app` link in Homebrew's Caskroom names that exact bundle, even
+when no install marker or Caskroom attribute exists. With no Caskroom
+attribute, `install_channel` checks the two fixed documented locations,
+`/opt/homebrew/Caskroom/folio` and `/usr/local/Caskroom/folio`; a custom prefix
+still requires the attribute. `Fact::line` says `Homebrew record (attribute)`
+or `Homebrew record (default prefix)`. `HomebrewMarks` and
+`update_txn::Carried` hold each attribute optionally, and Prepare carries only
+the bytes that existed.
+
+**The rule.** Homebrew's own link is sufficient evidence that this path is its
+live artifact. Folio reads no `HOMEBREW_PREFIX` and starts no `brew` process.
+The marker remains composed by the package manager; Folio may carry its exact
+bytes but never invents a missing marker or Caskroom attribute.
+
+**Pinned by**
+`install_channel::tests::{a_default_prefix_record_without_attributes_is_homebrew, another_apps_record_and_no_default_record_leave_the_copy_row}`,
+`update_prepare_macos::tests::{homebrews_record_is_read_as_homebrew_reads_it, a_homebrew_carry_writes_each_existing_attribute_and_no_missing_one}`,
+and the existing Homebrew Prepare/Activate M rows.
+
+### 2026-10-10 — Homebrew record identity follows canonical bundle paths (D2 round 2)
+
+**What is built.** The Caskroom link target and the running bundle are both
+canonicalized before they are compared. A bundle reached through a symlinked
+ancestor — including macOS's `/var` spelling of `/private/var` — is therefore
+recognized by Homebrew's record without weakening the requirement that the
+record name that exact bundle. The cask source carries the current 0.4.7
+release and CI audits it by token in a throwaway local tap on a macOS runner.
+
+**The rule.** Homebrew evidence compares filesystem identity, not two textual
+spellings of a path. The audit road never needs a maintainer's tap checkout.
+
+**Pinned by**
+`install_channel::tests::a_default_prefix_record_without_attributes_is_homebrew`;
+its `mutation-default-record` arm refuses to derive the Homebrew channel.
+
 ### 2026-10-10 — A shell that dies at birth never costs the person their layout (T-SHELL-BIRTH-DEATH)
 
 **What is built.** A pane shell that ends within three seconds of its PTY's own birth is a birth death. After the reader has handed over every byte, a silent child with an available last-resort shell starts that fallback in the same pane and writes the existing fallback banner; a child that wrote anything, or had no fallback, leaves its transcript in place with a one-line face naming the program, exit code and elapsed milliseconds. The kept pane owns no live PTY: writes, pastes and child resizes are no-ops, while its transcript still reflows with the pane. It counts as live for the tab's exit rule until the person closes or restarts it. An exit after the grace follows the old pane and tab retirement road unchanged.

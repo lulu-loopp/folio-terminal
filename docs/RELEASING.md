@@ -1425,6 +1425,15 @@ since 0.4.6 the file the tap should match. The `-preview` in the URL is part of
 the **tag**, not the version; a release tagged any other way needs that line
 changed once, in `packaging/homebrew/folio.rb`.
 
+Before committing the tap's cask:
+
+- [ ] Render `Casks/folio.rb` with `scripts/release/macos/cask.sh` from
+  `packaging/homebrew/folio.rb`; never hand-edit the rendered cask.
+- [ ] Require CI's macOS `cask-audit` job — a throwaway local tap — to pass
+  `brew style --cask` and `brew audit --cask --strict --online --new` cleanly.
+- [ ] Require that job's `brew livecheck --cask` result to return the release's
+  new version.
+
 ### The lane, and its four secrets
 
 `.github/workflows/release.yml`'s macOS lane builds, bundles, signs, notarizes

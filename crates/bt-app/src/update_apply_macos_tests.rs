@@ -5558,7 +5558,7 @@ impl Install {
         let caskroom = homebrew_install(&prefix, "1.0", &install.installed);
         let calls = fake_brew(&prefix);
         let carried = Carried {
-            install: HOMEBREW_MARKER.as_bytes().to_vec(),
+            install: Some(HOMEBREW_MARKER.as_bytes().to_vec()),
             caskroom: Some(caskroom.to_str().unwrap().as_bytes().to_vec()),
         };
         bt_platform::macos_update::carry_attributes(
@@ -5566,7 +5566,7 @@ impl Install {
             &[
                 (
                     crate::install_channel::MARKER_ATTRIBUTE,
-                    carried.install.as_slice(),
+                    carried.install.as_deref().unwrap(),
                 ),
                 (
                     crate::install_channel::CASKROOM_ATTRIBUTE,
@@ -5588,7 +5588,7 @@ impl Install {
             .ok()
             .map(|marks| Carried {
                 install: marks.marker,
-                caskroom: Some(marks.caskroom),
+                caskroom: marks.caskroom,
             })
     }
 

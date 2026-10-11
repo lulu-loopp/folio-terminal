@@ -1,18 +1,23 @@
 cask "folio" do
-  version "0.4.5"
-  sha256 "7052892ef8343085e4c7be8b46392089abc55956ade37458c9ad686e2ef79b53"
+  version "0.4.7"
+  sha256 "d97b9f103aaa645b44d872505a2eb25f42e060812779b3d1b8bea65d300d56a1"
 
   url "https://github.com/lulu-loopp/folio-terminal/releases/download/v#{version}-preview/Folio-#{version}-macos-arm64.dmg"
   name "Folio"
-  desc "Terminal that typesets formulas where a command prints them, with files previewed beside the prompt"
+  desc "Typesets formulas in terminal output and previews files beside the prompt"
   homepage "https://github.com/lulu-loopp/folio-terminal"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+    regex(/^v?(\d+(?:\.\d+)+)-preview$/i)
+  end
 
   # Folio updates itself in place from its own card (the bundle at the app
   # target this cask recorded, replaced as a whole). With this, a plain
   # `brew upgrade` upgrades Folio only when the bundle's own version is older
   # than this cask's, and never puts back a version Folio has moved past.
   auto_updates true
-
   depends_on arch: :arm64
   depends_on macos: :sonoma
 

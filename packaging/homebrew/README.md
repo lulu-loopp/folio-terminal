@@ -9,14 +9,33 @@ Mac, `scripts/release/macos/cask.sh`) renders it for a release — `version` and
 "Distribution manifests"). A change to the cask is made here; an edit made in the
 tap by hand is taken away by the next release.
 
+The macOS `cask-audit` job in `.github/workflows/ci.yml` gives this file a
+throwaway `local/folio-audit` tap and runs Homebrew 7's three gates by token:
+
+```sh
+brew style --cask local/folio-audit/folio
+brew audit --cask --strict --online --new local/folio-audit/folio
+brew livecheck --cask local/folio-audit/folio
+```
+
+The job sets `HOMEBREW_NO_AUTO_UPDATE=1` and `HOMEBREW_NO_INSTALL_FROM_API=1`;
+the runner and tap are disposable, and no maintainer checkout is used.
+`livecheck` follows the latest GitHub release tagged `v<version>-preview` and
+returns the manifest version without the tag's `v` and `-preview` parts.
+
 ## The hooks (0.4.6, U-2)
 
-- **`postflight`** writes the extended attribute
-  `io.github.lulu-loopp.folio.install` on the installed `Folio.app` bundle
+- **`postflight_steps`** writes two extended attributes. The first,
+  `io.github.lulu-loopp.folio.install`, is on the installed `Folio.app` bundle
   directory: `{"v":1,"manager":"homebrew","uninstall_hook":false}`, the install
   channel marker Folio reads at start (`crates/bt-app/src/install_channel.rs`).
-  It runs at every install, `brew upgrade` and `brew reinstall`, so a bundle
-  copied without its extended attributes gets it back at the next of these.
+  The second, `io.github.lulu-loopp.folio.caskroom`, records the Caskroom whose
+  `Folio.app` link identifies the bundle Homebrew installed. Both run at every
+  install, `brew upgrade` and `brew reinstall`, so a bundle copied without its
+  extended attributes gets them back at the next of these.
+- **`auto_updates true`** tells plain `brew upgrade` to compare the live
+  bundle's version, so it does not replace a Folio that has already updated
+  itself with an older Caskroom version.
 - **`zap`** runs `Folio.app/Contents/MacOS/folio --uninstall-cleanup` with
   `must_succeed: false`, then trashes the data folder. There is no `uninstall`
   hook, and the marker says so: Homebrew runs a cask's `uninstall` steps on

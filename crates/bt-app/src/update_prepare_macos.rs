@@ -348,7 +348,7 @@ impl PreparePoint for Ours {
 /// [`Ours`] at the app target Homebrew recorded, with the cask's marks
 /// carried. Before anything is written, the running bundle must be the app
 /// Homebrew's record names (R-H2, `install_channel::homebrew_record`) and
-/// both of its marks are read (M1); a copy that fails is refused as one the
+/// the marks that exist are read (M1); a copy that fails is refused as one the
 /// road does not update ([`Stop::NotOurs`]). After the staged bundle's
 /// second identity check and the rescue clone, the running bundle's marks
 /// are read again and must still be the recorded bytes (M2), and they are
@@ -365,7 +365,7 @@ impl PreparePoint for Homebrew {
             ));
             Stop::NotOurs
         })?;
-        Ok(Some(carried_of(marks)))
+        Ok(Some(carried_of(marks.marks)))
     }
 
     fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout {
@@ -401,7 +401,7 @@ impl PreparePoint for Homebrew {
 fn carried_of(marks: crate::install_channel::HomebrewMarks) -> Carried {
     Carried {
         install: marks.marker,
-        caskroom: Some(marks.caskroom),
+        caskroom: marks.caskroom,
     }
 }
 
@@ -411,10 +411,10 @@ fn carried_of(marks: crate::install_channel::HomebrewMarks) -> Carried {
 /// # Errors
 /// [`Stop::Copy`]: one was not written, not read back equal, or not flushed.
 fn carry(bundle: &Path, carried: &Carried) -> Result<(), Stop> {
-    let mut attributes = vec![(
-        crate::install_channel::MARKER_ATTRIBUTE,
-        carried.install.as_slice(),
-    )];
+    let mut attributes = Vec::new();
+    if let Some(install) = &carried.install {
+        attributes.push((crate::install_channel::MARKER_ATTRIBUTE, install.as_slice()));
+    }
     if let Some(caskroom) = &carried.caskroom {
         attributes.push((
             crate::install_channel::CASKROOM_ATTRIBUTE,
