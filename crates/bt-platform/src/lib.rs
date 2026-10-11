@@ -5269,6 +5269,216 @@ pub fn probe_output_with_raw_tail(
     }
 }
 
+/// What a run of probes held to **one** total budget came back with ([`probe_outputs_within`]).
+/// Each answer is the command's output, or why it could not be run; a command that would not
+/// start is one answer and the next command still runs.
+#[derive(Debug)]
+pub enum ProbeRun {
+    /// Every command ended by itself within the budget: one answer per command, in order.
+    Finished(Vec<std::io::Result<std::process::Output>>),
+    /// The budget ran out while a command was running. That command was ended with its contained
+    /// tree and no later command was started; `finished` holds the answers before it, in order.
+    Overran {
+        finished: Vec<std::io::Result<std::process::Output>>,
+    },
+}
+
+/// **Run `commands` in order, each as a contained probe, all of them together within `total`**
+/// (B5 design note, revision (c)4).
+///
+/// Every command is a probe of [`spawn_probe`]'s, its output streams read as it runs, and held
+/// by the one owner of a probe's deadline ([`ProbeChild::wait_within`]) to a fixed
+/// [`ProbePatience`] of what is left of `total` since the run began: the budget is the run's, not
+/// each child's, so two children cannot take twice of it. A child still running when the budget is
+/// spent is ended with everything it started, and the run answers [`ProbeRun::Overran`] without
+/// starting the rest. Looked at every 20 ms on the worker through [`wait::sleep_within`], as
+/// [`probe_output_with_raw_tail`] is. Takes a [`admission::WorkerCtx`], so it cannot run on the
+/// window thread.
+pub fn probe_outputs_within(
+    worker: &admission::WorkerCtx,
+    commands: Vec<std::process::Command>,
+    total: std::time::Duration,
+) -> ProbeRun {
+    let began = std::time::Instant::now();
+    let mut finished = Vec::with_capacity(commands.len());
+    for mut command in commands {
+        let remaining = total.saturating_sub(began.elapsed());
+        if remaining.is_zero() {
+            return ProbeRun::Overran { finished };
+        }
+        match probe_output_held_to(worker, &mut command, remaining) {
+            Ok(ProbeEnding::Finished(output)) => finished.push(Ok(output)),
+            Ok(ProbeEnding::Overran) => return ProbeRun::Overran { finished },
+            Err(error) => finished.push(Err(error)),
+        }
+    }
+    ProbeRun::Finished(finished)
+}
+
+/// One probe of [`probe_outputs_within`]'s run: its output read while it runs (a child that fills
+/// a pipe nobody reads would otherwise look like one that hangs), held to `deadline`.
+fn probe_output_held_to(
+    worker: &admission::WorkerCtx,
+    command: &mut std::process::Command,
+    deadline: std::time::Duration,
+) -> std::io::Result<ProbeEnding> {
+    let mut child = spawn_probe(command, ProbeStdio::ANSWER)?;
+    drop(child.take_stdin());
+    let stdout = drain_probe_pipe("bt-probe-stdout", child.take_stdout())?;
+    let stderr = drain_probe_pipe("bt-probe-stderr", child.take_stderr())?;
+    let waited = child.wait_within(ProbePatience::fixed(deadline), &mut || {
+        wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    })?;
+    // Ended either way by now, its contained tree with it, so both readers reach their end.
+    let stdout = stdout.finish("stdout");
+    let stderr = stderr.finish("stderr");
+    match waited {
+        Ok(status) => Ok(ProbeEnding::Finished(std::process::Output {
+            status,
+            stdout: stdout?,
+            stderr: stderr?,
+        })),
+        Err(_) => Ok(ProbeEnding::Overran),
+    }
+}
+
+/// **A run of probes shares one budget** ([`probe_outputs_within`]).
+#[cfg(test)]
+mod probe_run_tests {
+    use super::*;
+    use bt_pty::test_shell::Hygiene;
+
+    /// The run's budget in the tests below, and how long each child of the shared-budget test
+    /// runs: 70 % of it, so the first child ends inside the budget with 30 % of it to spare and the
+    /// second cannot — and with a budget of its own each, both would end.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// A child that runs for about two seconds and says nothing, through the test-shell door.
+    #[cfg(windows)]
+    fn a_two_second_child(hygiene: &Hygiene) -> std::process::Command {
+        let system = std::env::var_os("SystemRoot").expect("Windows names its own folder");
+        let mut command = hygiene.command(
+            std::path::Path::new(&system).join(r"System32\PING.EXE"),
+            quiet_command,
+        );
+        // Three echoes one second apart: two seconds from the first to the last.
+        command.args(["-n", "3", "127.0.0.1"]);
+        command
+    }
+
+    /// A child that runs for about two seconds and says nothing, through the test-shell door.
+    #[cfg(not(windows))]
+    fn a_two_second_child(hygiene: &Hygiene) -> std::process::Command {
+        let mut command = hygiene.command("/bin/sh", quiet_command);
+        command.args(["-c", "sleep 2"]);
+        command
+    }
+
+    /// A child that says a mixed-script line and ends at once.
+    fn a_saying_child(hygiene: &Hygiene, said: &str) -> std::process::Command {
+        #[cfg(windows)]
+        let mut command = {
+            let system = std::env::var_os("SystemRoot").expect("Windows names its own folder");
+            let mut command = hygiene.command(
+                std::path::Path::new(&system).join(r"System32\cmd.exe"),
+                quiet_command,
+            );
+            // `/U`: an internal command writes UTF-16 to a pipe, so the line comes back whole.
+            command.args(["/D", "/U", "/C", "echo"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = hygiene.command("/bin/sh", quiet_command);
+            command.args(["-c", "echo \"$0\""]);
+            command
+        };
+        command.arg(said);
+        command
+    }
+
+    /// RED — **two children share one budget** (revision (c)4): the first runs 70 % of the run's
+    /// budget and ends; the second is given only what is left, is ended when that is spent, and
+    /// the run answers `Overran` with the first child's answer alone.
+    ///
+    /// MUTATION: give each child the whole `total` (`ProbePatience::fixed(total)` in
+    /// `probe_outputs_within`) — the second child ends by itself at about 140 % of the budget and
+    /// the run answers `Finished` with two answers.
+    #[test]
+    fn two_children_share_one_budget() {
+        let hygiene = Hygiene::new();
+        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+            probe_outputs_within(
+                worker,
+                vec![a_two_second_child(&hygiene), a_two_second_child(&hygiene)],
+                BUDGET,
+            )
+        })
+        .expect("a worker")
+        .join()
+        .expect("the run answers");
+        match run {
+            ProbeRun::Overran { finished } => {
+                assert_eq!(
+                    finished.len(),
+                    1,
+                    "only the first child ended: {finished:?}"
+                );
+                let first = finished[0].as_ref().expect("the first child ran");
+                assert!(first.status.success(), "{first:?}");
+            }
+            ProbeRun::Finished(answers) => {
+                panic!("both children ended, so each had a budget of its own: {answers:?}")
+            }
+        }
+    }
+
+    /// PIN — **a run inside its budget answers every command's output, in order**, a command that
+    /// would not start among them as its own answer.
+    #[test]
+    fn a_run_inside_its_budget_answers_each_command_in_order() {
+        let hygiene = Hygiene::new();
+        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+            let missing = hygiene.command(
+                std::env::temp_dir().join("folio-no-such-program-探针"),
+                quiet_command,
+            );
+            probe_outputs_within(
+                worker,
+                vec![
+                    a_saying_child(&hygiene, "first-第一"),
+                    missing,
+                    a_saying_child(&hygiene, "third-第三"),
+                ],
+                BUDGET,
+            )
+        })
+        .expect("a worker")
+        .join()
+        .expect("the run answers");
+        let ProbeRun::Finished(answers) = run else {
+            panic!("three short commands overran the budget: {run:?}");
+        };
+        assert_eq!(answers.len(), 3);
+        let said = |answer: &std::io::Result<std::process::Output>| {
+            let bytes = &answer.as_ref().expect("it ran").stdout;
+            #[cfg(windows)]
+            let text = String::from_utf16_lossy(
+                &bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            );
+            #[cfg(not(windows))]
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            text.trim().to_owned()
+        };
+        assert_eq!(said(&answers[0]), "first-第一");
+        assert!(answers[1].is_err(), "{:?}", answers[1]);
+        assert_eq!(said(&answers[2]), "third-第三");
+    }
+}
+
 /// **Where this program's own files are: beside the file it runs from, not beside the path it was
 /// started by** (G-SWEEP-048, T-EXE-SYMLINK-SIDECARS).
 #[cfg(all(test, windows))]
@@ -8765,6 +8975,7 @@ mod windows_impl {
     ///
     /// **Why the backend keeps this instead of asking the caller** (M1-9,
     /// `docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②). `OpenClipboard`
+        use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
     /// wants a window and `NSPasteboard` does not, so a window in the
     /// signature is a Windows requirement charged to every platform. It is the
     /// backend's requirement, so the backend answers it: a window constructor
@@ -8975,7 +9186,6 @@ mod windows_impl {
         /// carried only a matrix would not say what the matrix is on. Never
         /// read, hence the leading underscore; its release is the band's drop.
         _visual: IDCompositionVisual,
-        use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
         /// Scale on the diagonal, origin in the last row — the 3×2 convention
         /// `IDCompositionMatrixTransform` shares with Direct2D. Mutated in
         /// place, four floats, rather than rebuilt per resize.
