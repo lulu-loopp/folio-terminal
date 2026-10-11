@@ -1307,8 +1307,7 @@ fn a_pooled_document_no_pane_is_on_still_follows_its_file() {
     buffer.accept(preview::read_head(&elsewhere));
     assert!(
         buffer
-            .content
-            .as_deref()
+            .text()
             .is_some_and(|body| body.contains("version two")),
         "and the body on the glass is the file's"
     );

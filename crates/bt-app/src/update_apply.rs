@@ -1224,7 +1224,7 @@ pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Runnin
         return Survey::Nothing;
     }
     let folder = home.transaction(txn);
-    let listing = match crate::files::read_directory(&folder) {
+    let listing: crate::files::DirListing = match crate::files::read_directory(&folder) {
         crate::files::DirOutcome::Listed(listing) => listing,
         crate::files::DirOutcome::Failed(fault) => {
             return Survey::Unlistable(format!("{}: {fault:?}", folder.display()));

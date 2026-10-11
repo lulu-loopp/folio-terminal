@@ -7,12 +7,12 @@ use crate::{
     PaneArrival, PaneMotion, Popup, PreviewRestore, PreviewSurface, RenameExit, RenameSubject,
     RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
     TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
-    absorb_tab_into_layout, absorb_tab_into_strip, attention, banner_line, blank_page_return,
-    create_tab_state, diagnostics, exit_diagnostics, expire_leaf_attention, float,
-    new_tab_leaf_seed, notify, pane_can_become_a_tab, pane_into_tab, pane_strip_landing,
-    presentation_physical_size, profiles, pty_door, recoverable_wheel_scroll_amount, restore,
-    row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
-    strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
+    absorb_tab_into_layout, absorb_tab_into_strip, attention_trace, banner_line, blank_page_return,
+    create_tab_state, diagnostics, end_leaves_of, exit_diagnostics, float, new_tab_leaf_seed,
+    notify, pane_can_become_a_tab, pane_into_tab, pane_strip_landing, presentation_physical_size,
+    profiles, pty_door, recoverable_wheel_scroll_amount, restore, row_strip_landing,
+    scrollback_quota, seats, seed, settling, solve_seats, stepped_tab, strip_insert_slot,
+    tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
 };
 use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;
@@ -469,28 +469,20 @@ impl Runtime<'_> {
                     self.app.recent.record(seed, pages, SystemTime::now());
                 }
                 let mut removed = self.window.tabs.remove(index);
-                // Every place this tab's panes held, given up before its shells are — the same
-                // door `close_pane` uses, asked of every leaf because a tab closes all of them.
-                let reach = notify::desktop_reach(was_active, self.window.place());
-                let now = Instant::now();
-                for (seat, leaf) in removed.leaves_mut() {
-                    expire_leaf_attention(
-                        attention::Site {
-                            tab: index,
-                            seat: *seat,
-                        },
-                        reach,
-                        leaf,
-                        &mut self.window.attention_next_place,
-                        now,
-                    );
-                }
-                // Every leaf's shell, not the focused one's. Reaching for
-                // `removed.pty` went through the deref and closed exactly one of
-                // them — see [`TabState::retire_all_shells`] for the ConPTY a
-                // two-pane tab used to leak on the way out, and for why closing
-                // this tab does not wait for any of them to die.
-                removed.retire_all_shells();
+                // **The ending step, for every leaf of the tab** ([`end_leaves_of`]): each place
+                // given up, then each shell retired — every leaf's, not the focused one's, and
+                // none of them waited for (T-PANE-CLOSE-OFF-THREAD).
+                let place = self.window.place();
+                let moving = self.cargo_in_flight();
+                end_leaves_of(
+                    [(index, &mut removed)],
+                    None,
+                    moving.as_ref(),
+                    |_| notify::desktop_reach(was_active, place),
+                    &mut self.window.attention_next_place,
+                    Instant::now(),
+                    attention_trace::global(),
+                );
                 self.window.active_tab = active_tab;
                 self.apply_window_min_inner_size()?;
                 if was_active {
@@ -3836,7 +3828,7 @@ impl Runtime<'_> {
                 let Some(name) = self
                     .preview_pool
                     .get(&source)
-                    .map(|buffer| buffer.name.clone())
+                    .map(|buffer| buffer.name().to_owned())
                 else {
                     return Ok(());
                 };

@@ -2130,7 +2130,7 @@ pub(crate) fn tab_with_a_preview(
         .expect("the preview seat lands");
     let focused = seats.identity();
     let mut pool = preview::PreviewPool::default();
-    let showing = buffers.first().map(|buffer| buffer.source.clone());
+    let showing = buffers.first().map(|buffer| buffer.source().clone());
     for buffer in buffers {
         pool.insert(buffer);
     }
@@ -2427,6 +2427,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         born_named: false,
         session,
         attention: attention::AttentionLedger::default(),
+        attention_ended: false,
         bell_reported: false,
         attention_clock: attention_wire::WaitClock::default(),
         // A fixture has no shell, so nothing was ever told a capability — and an empty string
@@ -2624,7 +2625,7 @@ pub(crate) fn edited_buffer(
         }),
         "the fixture's own edit landed"
     );
-    assert!(buffer.dirty, "so the buffer is dirty, which is the point");
+    assert!(buffer.dirty(), "so the buffer is dirty, which is the point");
     buffer
 }
 
@@ -2636,7 +2637,7 @@ pub(crate) fn edited_buffer(
 pub(crate) fn document_on(tab: &TabState, seat: SeatId) -> Option<&str> {
     let pane = tab.preview_panes.get(tab.preview_here(seat))?;
     let source = pane.buffer.as_ref()?;
-    tab.preview_pool.get(source)?.content.as_deref()
+    tab.preview_pool.get(source)?.text()
 }
 
 // ── §7.1.6k⁗: the picture follows its pane, and the lane follows with it ─

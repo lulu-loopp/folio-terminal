@@ -13,9 +13,9 @@ use crate::{
     NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState, PaneTransform, PopoverTrigger, Popup,
     PopupOwner, PresentIntent, PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY,
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
-    TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention, auto_split_axis,
-    card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail, column_notch,
-    create_leaf_session, divider_drag_still_holds_its_pointer, expire_leaf_attention,
+    TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention_trace,
+    auto_split_axis, card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail,
+    column_notch, create_leaf_session, divider_drag_still_holds_its_pointer, end_leaves_of,
     file_menu_powers, files, float, float_dock_label, glyph_trace, hang_watch, host_screen_after,
     leaf_resize_plan, marks, mouse_trace, native_window, notice, notify,
     pages_that_move_with_their_panes, palette, pane_fade_veil_layers, panel_opacity,
@@ -1506,30 +1506,27 @@ impl Runtime<'_> {
         // Closing the pane and leaving the ConPTY alive would leak a process
         // with nothing to draw it and nothing to read it — the pipe fills, and
         // the child blocks forever on a write no one will ever drain.
-        if kind == bt_layout::SeatKind::Terminal
-            && let Some(mut leaf) = self.sessions.remove(&seat)
-        {
-            // And the place it held in this window's queue, which is one of the three doors out
-            // (`attention` plan §4 B4): the program never withdrew and nobody answered, so the
-            // ledger says `expire … reason=leaf-gone` and the serial stands where it is.
+        if kind == bt_layout::SeatKind::Terminal && self.sessions.contains_key(&seat) {
+            // **The ending step, for this one leaf** ([`end_leaves_of`]): the place it held in
+            // this window's queue is given up — the program never withdrew and nobody answered,
+            // so the ledger says `expire … reason=leaf-gone` and the serial stands where it is —
+            // and then its shell is taken, and taken apart somewhere else
+            // (T-PANE-CLOSE-OFF-THREAD): a click that closes a pane may not be answered with a
+            // `ClosePseudoConsole` that returns when the program inside has finished winding
+            // down.
             let index = self.window.active_tab;
-            let reach = notify::desktop_reach(true, self.window.place());
-            expire_leaf_attention(
-                attention::Site { tab: index, seat },
-                reach,
-                &mut leaf,
+            let place = self.window.place();
+            let moving = self.cargo_in_flight();
+            end_leaves_of(
+                [(index, &mut self.window.tabs[index])],
+                Some(seat),
+                moving.as_ref(),
+                |_| notify::desktop_reach(true, place),
                 &mut self.window.attention_next_place,
                 Instant::now(),
+                attention_trace::global(),
             );
-            // **Taken, and taken apart somewhere else** (T-PANE-CLOSE-OFF-THREAD).
-            // The leaf is already out of `sessions`; the session comes out of the
-            // leaf, and what happens to it next happens on a thread nobody is
-            // waiting for. A click that closes a pane may not be answered with a
-            // `ClosePseudoConsole` that returns when the program inside has
-            // finished winding down.
-            if let Some(pty) = leaf.pty.take() {
-                bt_pty::retire_session(pty);
-            }
+            self.sessions.remove(&seat);
             // Keyboard focus cannot stay on a seat that no longer exists. The
             // rule is [`TabState::refocus_after_losing`]'s, shared with the two
             // cross-boundary gestures that also take a leaf out of a tab.
@@ -3351,7 +3348,7 @@ impl Runtime<'_> {
                 }
                 tab.preview_panes
                     .get(PreviewSurface::Seat(leaf))
-                    .and_then(|pane| pane.image.as_ref())
+                    .and_then(|pane: &crate::PreviewPane| pane.image.as_ref())
                     .is_some_and(|image| preview::path_names_a_video(&image.path))
             })
             .collect()

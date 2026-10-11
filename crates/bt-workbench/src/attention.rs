@@ -48,6 +48,15 @@
 //! and the reason it is a red line is that every regression this block is about began with an event
 //! being promoted to a state.
 //!
+//! # Where a pane ends
+//!
+//! **Every road that ends a pane retires its shell and expires its attention exactly once.** The
+//! window has five such roads — a pane closed, a tab closed, a window closed or retired by the
+//! quit, a window a refused move had opened, and the launch placeholder taken away — and all five
+//! take one ending step, which hands each leaf [`Event::LeafGone`] before its shell is retired,
+//! never twice, and not to a pane a pending handover is carrying to another window. A ledger that
+//! is not told is a request whose closing line the trace never writes.
+//!
 //! # What is deliberately not here
 //!
 //! Nothing in this file reads the window, **and nothing in it reads a clock**. The four-state

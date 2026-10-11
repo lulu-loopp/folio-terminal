@@ -634,7 +634,7 @@ fn expand_from<R: Read + Seek>(
 ) -> Result<Expanded, Refusal> {
     deadline.check(None)?;
     let root = release_manifest::archive_root(expected.version);
-    let members = directory(&mut archive, &root)?;
+    let members: Vec<Located> = directory(&mut archive, &root)?;
 
     let executable = members
         .iter()
@@ -730,7 +730,7 @@ fn expand_from<R: Read + Seek>(
         manifest,
         members: members
             .into_iter()
-            .map(|member| member.name.as_str().to_owned())
+            .map(|member: Located| member.name.as_str().to_owned())
             .collect(),
     })
 }

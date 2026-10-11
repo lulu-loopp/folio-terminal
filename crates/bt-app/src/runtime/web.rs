@@ -1657,14 +1657,14 @@ impl Runtime<'_> {
         let shown = tab.preview_panes.showing();
         // The name it already had where it has been here before, and its site
         // where it has not. A title is slice ④'s to read.
-        let name = tab
-            .preview_pool
-            .get(&source)
-            .map_or_else(|| webnav::site_label(&key), |buffer| buffer.name.clone());
+        let name = tab.preview_pool.get(&source).map_or_else(
+            || webnav::site_label(&key),
+            |buffer| buffer.name().to_owned(),
+        );
         tab.preview_pool.open(source.clone(), name, &shown);
         // No caret and no scroll to file or restore: a page's view is the
         // engine's, and this window has never held one.
-        tab.preview_panes.entry(surface).buffer = Some(source);
+        tab.preview_panes.entry(surface).show_source(source);
         self.mark_session_dirty(Instant::now());
         self.refresh_preview_for_layout();
         self.refresh_chrome();

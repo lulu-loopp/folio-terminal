@@ -71,12 +71,12 @@ they answer "what does this machine do" — not by debt.
 | 0.4.5 | 8 | 0 | 8 |
 | 0.4.6 | 4 | 0 | 4 |
 | 0.4.7 | 0 | 0 | 0 |
-| 0.4.8 (plan ticket on the row) | 26 | 26 | 0 |
+| 0.4.8 (plan ticket on the row) | 27 | 27 | 0 |
 | 0.5 (reason on the row; D-1, D-16 and D-33 are its preconditions) | 13 | 13 | 0 |
 | deferred (reason on the row) | 4 | 4 | 0 |
 | unassigned (no 0.4.8 plan ticket; listed for the coordinator) | 37 | 37 | 0 |
 | already repaid | 2 | 0 | 2 |
-| **total** | **94** | **80** | **14** |
+| **total** | **95** | **81** | **14** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -116,6 +116,9 @@ added by T-PROGRAMS-REFRESH on 2026-10-08.)
 
 (2026-10-11, S-1 round 2: D-86…D-92 name their repair tickets — S-3, S-6a — and move from
 unassigned to 0.4.8; D-93 and D-94 are owner questions and stay unassigned.)
+
+(2026-10-11, the merge of S-1 with T-ATTENTION-WINDOW-EXPIRY: D-95, added on 0.4.8 with O-4,
+is counted — 0.4.8 27 rows, total 95/81/14.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -315,7 +318,7 @@ ledger's.
 | D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | CC-3 (`bt-effects`), CC-4 | 0.4.8 — J2 (T-WRONG-EDGES), after J1; the boundary crate is also I1's prerequisite | open; **2026-10-08 (J4):** **widened**: a fourth product import surface, `bt_platform::host_names` (`inline_image`'s local-host set, `ae514613`, 0.4.6); was 0.4.6; **2026-10-08 (CC-3):** **narrowed**: the read ledger is `bt-effects`', and three surfaces remain for CC-4 (thread priority, `resolved_for_a_door`, `host_names`); **repaid on `744cc02a` (CC-4; the product edge went in `0479c1ca`, the last, dev, edge in `744cc02a`)**: `bt-term`'s manifest names `bt-platform` nowhere (not as a dev-dependency either); the host names and the resample pool's thread-start hook are installed by the host (`bt_term::install_host_names`, `install_pool_thread_start`; `bt-app`'s `host_answers::install`), and `verify_path` takes the door-ready resolver as a parameter |
 | D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27; CC-5, CC-6b, CC-7 (design T-COMPOSE-CRATE §3.4) | 0.4.8 — J2 (T-WRONG-EDGES): the design decides; J1's allow-list records it until then | open (recorded debt); **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-08 (CC-5):** **narrowed**: the four math data types are `bt_doc::math`'s (re-exported by `bt-math`); what remains is execution — `MathEngine`/`key_for_em_px` in `session.rs` (CC-6b), `rasterize_svg_document` in `inline_image` and the `MathEngine` re-export (CC-7); **2026-10-08 (CC-6a):** untouched; the receiving crate exists — `bt-compose`, layer 6, which `typeset` moves into with CC-6b; **2026-10-09 (CC-6b):** **narrowed**: math execution is `bt_compose::typeset`'s (moved verbatim; `bt-app`'s lane and the tools call it); what remains is CC-7's — `rasterize_svg_document` in `inline_image` and the `MathEngine` re-export; **repaid on `ac33d15c` (CC-7)**: the SVG codec is installed by the host (`bt_term::install_svg_rasterizer`; `bt-app`'s `host_answers::install` and `bt_corpus::install_host_answers` install `bt_math::rasterize_svg_document`), its two types are `bt_doc::svg`'s, the `MathEngine` re-export is gone, and `bt-term`'s manifest names `bt-math` nowhere; the exemption row is deleted (the list has none) |
 | D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.5 — **0.5 precondition**: the side-effect contract's admission half; its note is 0.4.8 J5 (T-05-CONTRACTS); the enumeration lane and the observation threads' band are built in 0.5 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain; **2026-10-08 (J4):** untouched: every thread 0.4.7 added comes through the door (T-PROBE-CHILD's reader, T-KEYBOARD-CTRLALT's `folio-layout-tables`, T-UNINSTALL-UX's remover pipe); `folio-web-thumb` still stands at `Normal`; RULES 53's 0.4.7 ticket was never cut; was 0.4.7 |
-| D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.5 — with D-1's document owner, after J5's note | open; **2026-10-08 (J4):** untouched; was 0.4.7 |
+| D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.5 — with D-1's document owner, after J5's note | open; **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-11 (O-7):** document owner = `PreviewBuffer` (O-7); the view enum follows in O-8 |
 | D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | repaid (census-2, 0.4.6) — each subject is item-bound or file-bound by how the test reads it (`ITEM_QUERIES` and the helpers derived from it); only a file-bound subject read out of `main.rs` is a reader 2a must retarget; `--self-check` holds the fixture |
 | D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 — L1-small | 0.4.8 — L1-small (2026-10-09) | **narrowed**; **2026-10-09 (L1-small):** 3 → 1 row. `scripts/dev/bt-app-graph.py` takes the binary root from `cargo metadata` and its files from the `mod` declarations, no directory walk; a declaration that names no file or two stops the run (output byte-identical: graph JSON and stdout). `scripts/dev/bt-app-split-table.py` retired from the list: it reads the graph JSON, never source (it exits 1 today: its row manifest is stale against the graph). `scripts/dev/bt-app-split-freshness.py` takes the package directory and root from the manifests at the commit (outputs byte-identical); its row stays: module contexts are path-derived with a hand table of three `#[path]` files, and deriving them from declarations renames the symbols of every `#[path]`-reached file (`uninstall_tests` → `uninstall::tests`, …), which is a change of output to decide, not to slip in. The graph no longer reports an unreached file: it reads only what a declaration reaches, so a file under `src/` that nothing declares is absent rather than listed under `unreached` (always empty now) — `platform_gate_tests` refuses such a file by name over the same crate; open; **2026-10-08 (J4):** untouched; was 0.4.6 |
 | D-20 | MIGRATION-DEBT class P10 — the platform-file walk (1 row) | same | P10 — L1-small | 0.4.8 — L1-small (2026-10-09) | **repaid 2026-10-09 (L1-small)**: `platform_gate_tests::sources` reads the files `Index::of_package("bt-app")` reaches and refuses an unreached one; 282 files before and after; open — narrowed by T-GATES-047: the script twin and agreement pin are gone; the one Rust directory walk remains on MIGRATION-DEBT; **2026-10-08 (J4):** no further change; was 0.4.6 |
@@ -393,6 +396,7 @@ ledger's.
 | D-92 | git mutations (`GitQuestion::Write`, `::Checkout`) run on the read worker with no per-repository serialisation or operation identity stated (A§5.1's storage rule) | the side-effects contract (`docs/plans/design/side-effects-contract-2026-10-11.md`, C1–C7); S-1 (T-COMPLETIONS-LEDGER, 2026-10-11), `window_waits.tsv` `# completions` | S-6a (T-PREVIEW-ON-THE-STORAGE-LANE): the one storage worker and its request protocol, which the mutations join (revision (c)3's ruling: one storage worker, one protocol) | 0.4.8 — S-6a | open |
 | D-93 | the desktop notification is shown on the window thread with no admission (`NotificationDesk::show`: COM initialisation and the toast notifier built on first use) and is not a member of revision (b)6's closed C7 list; whether it becomes a request door or a ruled member is an owner question (revision (c)1) | the side-effects contract (`docs/plans/design/side-effects-contract-2026-10-11.md`, C1–C7); S-1 (T-COMPLETIONS-LEDGER, 2026-10-11), `window_waits.tsv` `# completions` | owner question (revision (c)1, beside Q1): a request door, or a ruled C7 member | unassigned — owner question (2026-10-11) | open |
 | D-94 | `PlaceHidden` and `PlaceExposure` are admitted owner-thread doors (`window_is_hidden`, `window_is_exposed`, through `Runtime::observe_window_place`) that revision (b)6's closed C7 list does not name; a new member needs an owner ruling | the side-effects contract (`docs/plans/design/side-effects-contract-2026-10-11.md`, C1–C7); S-1 (T-COMPLETIONS-LEDGER, 2026-10-11), `window_waits.tsv` `# completions` | owner question (revision (b)6: a new member of the closed C7 list needs a ruling) | unassigned — owner question (2026-10-11) | open |
+| D-95 | the ending step's wiring: the five roads that end a pane (`close_pane`, `close_tab`, `let_go_of_this_window` for a window close and the quit, `abandon_a_window_nothing_arrived_in`, `answer_restore`'s placeholder removal) each call `end_leaves_of` before their shells go, and no test drives those calls — a `Runtime` is a window and no test builds one; the step itself is pinned (`every_road_that_ends_a_pane_emits_leaf_gone_once`), as the 5400 bt-app tests drive `TabState` the same way | T-ATTENTION-WINDOW-EXPIRY (2026-10-11) | O-4 | 0.4.8 — O-4 gives `WindowRuntime` a window-free core the roads can be driven through | open |
 
 ---
 
@@ -1070,7 +1074,7 @@ both faces consume it. Do **not** unify the three selection representations.
 
 **Version.** 0.5, with the document owner of D-1. **Status.** open.
 
-**Ledger.** source: C-4 · ticket: none yet · version: 0.5 — with D-1's document owner, after J5's note · status: open; **2026-10-08 (J4):** untouched; was 0.4.7.
+**Ledger.** source: C-4 · ticket: none yet · version: 0.5 — with D-1's document owner, after J5's note · status: open; **2026-10-08 (J4):** untouched; was 0.4.7; **2026-10-11 (O-7):** document owner = `PreviewBuffer` (O-7); the view enum follows in O-8.
 
 ---
 
@@ -1696,3 +1700,11 @@ wait on some road, and none has a ruling that it may.
   worker gone and reports the walk that died, and the next request starts a new
   worker), so only the outcome half is owed: a "superseded by walk N" outcome the
   drain can report once per request, if a consumer ever needs one.
+
+## D-95 — the row added on 2026-10-11 by T-ATTENTION-WINDOW-EXPIRY
+
+- **D-95 · the ending step's wiring.** The roads' calls into the ending step are unpinned until O-4 gives
+  `WindowRuntime` a window-free core; the 5400 bt-app tests drive `TabState` the same way. The step
+  (`end_leaves_of`: the per-leaf mark, the skip of a handover's cargo, expire before retire) is pinned
+  behaviourally; that each of the five roads calls it, once and before its shells, is read by review
+  only, because a `Runtime` holds a real window, renderer and compositor and no test constructs one.

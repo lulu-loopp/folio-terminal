@@ -87,7 +87,7 @@ impl Runtime<'_> {
             .files_trees(now)
             .get(&seat)
             .and_then(|tree| tree.rows.iter().find(|row| row.key == key))
-            .map(|row| row.name.clone())
+            .map(|row: &crate::files::TreeRow| row.name.clone())
         else {
             return Ok(());
         };

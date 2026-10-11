@@ -202,6 +202,29 @@ struct Asks {
     worker: bool,
 }
 
+impl Asks {
+    /// This ear's request changed, or it closed: the worker owes it a round.
+    fn owe(&mut self, ear: Ear) {
+        self.dirty.insert(ear);
+    }
+
+    /// The worker owes every open ear a round.
+    fn owe_every_open_ear(&mut self) {
+        let open: Vec<Ear> = self.ears.keys().copied().collect();
+        self.dirty.extend(open);
+    }
+
+    /// Nothing for the worker to serve: no ear owed a round, no watch ended, no volume arrived.
+    fn nothing_owed(&self) -> bool {
+        self.dirty.is_empty() && !self.ended && self.arrived.is_empty()
+    }
+
+    /// The ears owed a round, taken for the worker to serve.
+    fn take_owed(&mut self) -> BTreeSet<Ear> {
+        std::mem::take(&mut self.dirty)
+    }
+}
+
 /// **The steward's shared half**: the door, the standing requests, the wake. The worker's half,
 /// which holds the watches, is [`WatchSteward`].
 pub struct Steward {
@@ -269,8 +292,7 @@ impl Steward {
         }
         asks.worker = true;
         // A worker that starts serves every open ear: one that ended took its watches with it.
-        let open: Vec<Ear> = asks.ears.keys().copied().collect();
-        asks.dirty.extend(open);
+        asks.owe_every_open_ear();
         drop(asks);
         let started = bt_platform::spawn_at_priority(
             "watch-steward",
@@ -347,7 +369,7 @@ impl EarHandle {
         };
         ask.wanted.clone_from(wanted);
         ask.rearm.extend(rearm);
-        asks.dirty.insert(self.ear);
+        asks.owe(self.ear);
         self.steward.see_it_served(asks);
     }
 
@@ -373,7 +395,7 @@ impl Drop for EarHandle {
     fn drop(&mut self) {
         let mut asks = self.steward.lock();
         asks.ears.remove(&self.ear);
-        asks.dirty.insert(self.ear);
+        asks.owe(self.ear);
         self.steward.see_it_served(asks);
     }
 }
@@ -429,14 +451,14 @@ impl WatchSteward {
         loop {
             let (rounds, ended, arrived, open) = {
                 let mut asks = self.lane.lock();
-                while asks.dirty.is_empty() && !asks.ended && asks.arrived.is_empty() {
+                while asks.nothing_owed() {
                     asks = self
                         .lane
                         .asked
                         .wait(asks)
                         .unwrap_or_else(PoisonError::into_inner);
                 }
-                let dirty = std::mem::take(&mut asks.dirty);
+                let dirty = asks.take_owed();
                 let rounds: Vec<Round> = dirty
                     .into_iter()
                     .map(|ear| Round {

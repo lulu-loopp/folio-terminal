@@ -5826,7 +5826,7 @@ impl Runtime<'_> {
             && let Some((surface, body)) = self.preview_surface_at(position)
             && self
                 .preview_buffer_on(surface)
-                .is_some_and(|buffer| buffer.content.is_some())
+                .is_some_and(|buffer| buffer.content().is_some())
         {
             self.mouse_trace(|| {
                 format!("wheel_route taken=pane at=preview-body surface={surface:?}")

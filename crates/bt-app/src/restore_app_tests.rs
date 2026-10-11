@@ -59,7 +59,7 @@ fn a_file_being_edited(tag: &str) -> (PathBuf, preview::PreviewBuffer) {
     std::fs::write(&path, "one\n").expect("write the file");
     let mut buffer = buffer_read_from(&path);
     let mut caret = preview_edit::EditCaret::default();
-    let body = buffer.content.clone().expect("the head landed");
+    let body = buffer.content().cloned().expect("the head landed");
     caret.place(&body, 4, false);
     assert!(
         buffer.edit_by_caret(&mut caret, |content, caret| {
@@ -67,7 +67,7 @@ fn a_file_being_edited(tag: &str) -> (PathBuf, preview::PreviewBuffer) {
         }),
         "the keystroke landed"
     );
-    assert!(buffer.dirty, "there is unsaved work");
+    assert!(buffer.dirty(), "there is unsaved work");
     (path, buffer)
 }
 
@@ -76,10 +76,9 @@ fn still_holds_the_edit(tab: &TabState, path: &Path) -> bool {
     tab.preview_pool
         .get(&preview::PreviewSource::file(path))
         .is_some_and(|buffer| {
-            buffer.dirty
+            buffer.dirty()
                 && buffer
-                    .content
-                    .as_deref()
+                    .text()
                     .is_some_and(|body| body.contains("typed by hand"))
         })
 }

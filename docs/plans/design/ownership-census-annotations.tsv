@@ -126,7 +126,6 @@ WindowRuntime.pane_menu	-	VIEW	panes	the 2026-09-25 table
 WindowRuntime.pane_motion	-	PROJ	tabs	the 2026-09-25 table
 WindowRuntime.pane_motion_revision	-	PROJ	tabs	the 2026-09-25 table
 WindowRuntime.paste_card_hover	-	VIEW	clipboard	the 2026-09-25 table
-WindowRuntime.peek_buffer	-	ASYNC	peek	the 2026-09-25 table
 WindowRuntime.peek_cache	-	PROJ	peek	the 2026-09-25 table
 WindowRuntime.peek_facts	-	ASYNC	peek	the 2026-09-25 table
 WindowRuntime.peek_hover	-	VIEW	peek	the 2026-09-25 table
