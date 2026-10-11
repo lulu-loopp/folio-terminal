@@ -8,7 +8,7 @@ fallback, `Displaced` row and receipts, §3.3's base, §3.4's four policies, §3
 claim, §3.6's wording, §4, §7, §8, §9 and §10 are replaced or amended by (b)1–(b)17.
 **Revision (c)**, after the Codex confirmation round (`B6-settings-reread-design.review-codex-b.md`),
 follows (b) and stands wherever the two differ: (c)1 replaces (b)3's revision bookkeeping,
-(c)2 replaces (b)5's quit, (c)3 replaces (b)16's J5 join, and (c)4 and (c)5 replace (b)17's
+(c)2 replaces (b)5's quit, (c)3 amends (b)16's J5 join, and (c)4 and (c)5 replace (b)17's
 tickets and (b)18's questions.
 Revision (a) was the draft for review. No ticket below has been dispatched. Plan row B6 ("hand-edited settings/keybindings/profiles/pins re-read — design
 first (storage transaction: revision preconditions, field-level merge, explicit conflict,
@@ -1613,11 +1613,13 @@ the silent loss this design exists to end.
 The confirmation (`B6-settings-reread-design.review-codex-b.md`, in the 0.4.8 trace) adopts
 revision (b)'s items 1–2, 4, 6–13 and 15. It finds the pins departure acceptable "if Q1
 adopts it" and the refusal on volumes that cannot exchange correct. It finds the two preview
-revisions and the stated head-of-line cost "sound in principle". It leaves **three blockers**,
-and all three are applied below; none is argued away. **Where revision (b) and revision (c)
-differ, revision (c) stands**: (c)1 replaces (b)3's revision bookkeeping, (c)2 replaces (b)5,
-(c)3 replaces (b)16, (c)4 replaces (b)17, and (c)5 replaces (b)18. Everything else in (b)
-stands.
+revisions and the stated head-of-line cost "sound in principle". It leaves **three blockers**.
+Blockers 1 and 2 are applied as stated. Blocker 3 was overtaken, before this revision was
+finished, by the confirmation on J5's own revision (b), which ruled the other way; the
+coordinator adopted that ruling for both notes, and (c)3 applies it (see *Departures*).
+**Where revision (b) and revision (c) differ, revision (c) stands**: (c)1 replaces (b)3's
+revision bookkeeping, (c)2 replaces (b)5, (c)3 amends (b)16, (c)4 replaces (b)17, and (c)5
+replaces (b)18. Everything else in (b) stands.
 
 ### The change table
 
@@ -1625,7 +1627,7 @@ stands.
 |---|---|---|---|
 | 1 | "After `Displaced`, revision (b) incorrectly moves the revision to `theirs` although the target contains `written`, so a subsequent `Moved` can merge against the wrong base and discard a change recovered from the first displacement" | applied: after a landed exchange the revision is `written`; the displaced bytes are merged as `T` against the pre-exchange revision; the merged result becomes `desired`, owed when it differs from `written` | (c)1 |
 | 2 | "The quit design submits its sidecar at an already-expired deadline … timeout must instead cancel quit or reserve a realizable recovery phase" | applied, both: a documents phase with its own sub-budget, a recovery phase that writes the copy **first** with the time that is left, the session write only behind a landed copy, and **the quit cancelled** when either phase runs out — J5 (b)8's rule | (c)2 |
-| 3 | "The claimed J5 join is not the current J5 contract: J5 revision (b) specifies one worker with two protocols, the preview's existing baseline semantics, explicit quit cancellation on timeout, and S-6a/b/c" | applied: `Merge \| Restore`, the link-policy parameter and the jointly owned ticket are withdrawn; one worker, two protocols, shared scheduling and per-file order; ticket 4 becomes the worker's job kinds and per-file order, which S-6a extends; what B6 needs from S-6a/b/c is listed | (c)3 |
+| 3 | "The claimed J5 join is not the current J5 contract: J5 revision (b) specifies one worker with two protocols, the preview's existing baseline semantics, explicit quit cancellation on timeout, and S-6a/b/c" | **superseded by the coordinator's ruling** after J5's own confirmation (`J5-05-contracts.review-codex-b.md` item 3: "B6 is right: the conditional exchange is the lane protocol"): one worker, **one** request protocol (this note's, with `Merge \| Restore` and a link policy), **two** semantic policies (the stores merge; the preview reports `Conflict` and keeps its body revision); no `StorageJob::Save`; ticket 4 stays the shared request ticket, jointly owned with S-6a; what the preview's policy needs from it is listed | (c)3, *Departures* |
 | — | consequences: the ticket table and the owner questions | revised | (c)4, (c)5 |
 
 ### (c)1 · After an exchange, the revision is what the target holds: adopted
@@ -1735,58 +1737,85 @@ Tests (replacing (b)14 items 6–7):
 - `app_diagnostics_tests::a_forced_stop_keeps_an_owed_settings_change_in_recovered`. MUTATION: skip
   the stores in the forced stop's recovery step.
 
-### (c)3 · The J5 join, as J5 has it: one worker, two protocols: adopted
+### (c)3 · The J5 join: one worker, one request protocol, two semantic policies: adopted as the coordinator ruled
 
-Revision (b)'s (b)16 claimed that this note's conditional write **is** the save lane's protocol,
-and joined them with a `Merge | Restore` mode, a link-policy parameter, two revisions per buffer
-and one jointly owned M ticket. That is **withdrawn**. J5 revision (b) (its (b)8,
-`side-effects-contract-2026-10-11.md:535-554`, and S-6a/b/c, `:586-588`) has a different and
-simpler contract, and this note adopts it as stated there:
+The confirmation's third blocker asked this note to restate the join as J5 revision (b) then
+had it: one worker, two protocols, with the preview keeping its modified-time save as a separate
+`StorageJob::Save`. Before revision (c) was finished, the confirmation on J5's own revision (b)
+(`J5-05-contracts.review-codex-b.md`, item 3) ruled the other way, and the coordinator adopted
+that ruling for both notes:
 
-- **One storage worker**: `persist::SessionWriter` on `session-writer`, extended by this note with
-  `StorageJob::Document` and `StorageJob::Read` and woken with `AppEvent::DocumentsAnswered`.
-- **Two protocols on it, sharing only scheduling and per-file order:**
-  - the four configuration documents keep this note's protocol unchanged: revision = exact bytes;
-    the precondition read; the exchange that hands back the displaced file; `Landed`, `Moved`,
-    `Displaced`, `Refused`; the three-way merge; owed edits;
-  - document saves keep the preview's own protocol: `PreviewBuffer::save`'s preserving save judged
-    against the buffer's disk baseline (`preview.rs:5778-5801`), as `StorageJob::Save` with
-    `Saved { revision }`, `Conflict { revision }`, `Failed { revision, error }`. A document save is
-    not merged three ways and is not exchanged; its links and its baseline stay J5's.
-- **Timeouts, J5's**: a close keeps its gate open with the document dirty at
-  `SAVE_RECEIPT_DEADLINE` (S-6b); a quit whose saves miss the budget is cancelled (S-6c); a forced
-  stop writes the recovery copy (S-6c). (c)2 brings this note's quit into the same rules.
+> "B6 is right: the conditional exchange is the lane protocol. The preview may retain its semantic
+> policy — conflict rather than three-way merge — but must use B6's shared request
+> `Document { expected: exact_disk_bytes, bytes, mode: Restore, link_policy }`. It must not retain
+> the old mtime-only `PreviewBuffer::save` as a separate `StorageJob::Save`. B6's `Restore` mode
+> restores displaced bytes and reports `Conflict`; the preview separately carries its body
+> revision so dirty clears only for the current body. S-6c must also use B6's multi-turn
+> `Documents` quit phase; configuration debts may take B6's sidecar road; an ordinary quit with
+> an unresolved preview save may still be cancelled as J5 requires."
 
-**This note's ticket 4 becomes T-STORAGE-WORKER-JOBS: the storage worker's job kinds and per-file
-order**, which S-6a extends with `StorageJob::Save`. J5 names B6's ticket as S-6a's dependency
-(`:586`); that dependency now points at ticket 4.
+So (b)16 **stands**, with the amendments below, and the blocker is answered by the ruling rather
+than by withdrawing (b)16 (see *Departures*).
 
-**What B6 still needs from S-6a, S-6b and S-6c:**
-1. **Per-file order across job kinds (S-6a).** A preview can open and save one of the four
-   documents. Jobs naming one path — a `Document`, a `Read` and a `Save` — must run in the order they
-   were queued, never reordered by kind. The two protocols then coexist on one file without a
-   third rule, because each checks before it writes: a preview save after a store write finds a new
-   modified time and answers `Conflict`; a store write after a preview save finds bytes that are not
-   its revision and answers `Moved`, and the storage watch hears the save as a hand edit (by name,
-   (b)9). The preview's own race window (its modified-time check, then a replace) stays the
-   preview's, under J5.
-2. **No new wake (S-6a).** `StorageJob::Save` answers through `AppEvent::DocumentsAnswered`, so the
-   handler that drains this note's answers drains the saves too, and (b)7's failure-card routing
-   is in one place.
-3. **One quit phase and one budget split (S-6c).** The documents phase of (c)2 is the phase S-6c's
-   "owed saves before the final session job" runs in: owed saves are sent in phase 1 beside owed
-   configuration documents, under the same `QUIT_DOCUMENTS_BY`, and a save not landed by then
-   cancels the quit as J5 says. S-6c uses (c)2's two constants rather than a second split. Ticket 5
-   (T-QUIT-DOCUMENTS) builds the phase; S-6c adds saves to it.
-4. **The forced stop's recovery step takes configuration documents too (S-6c).** The step that
-   writes dirty documents into `recovered` (`main.rs:66335-66348`) also writes each store's owed
-   desired document, with the same `diagnostics.log` line and the same start-time sentence.
-5. **Nothing else.** The close gate (S-6b) concerns document saves only; a store has no gate.
+**The contract, in three lines:**
+- **One storage worker**: `persist::SessionWriter` on `session-writer`, woken with
+  `AppEvent::DocumentsAnswered`.
+- **One request protocol**, this note's:
+  `Document { which, generation, expected: Option<Arc<[u8]>>, bytes, mode: Merge | Restore, link_policy }`;
+  the stable precondition read (b)9; the exchange that hands back the displaced file (b)1–(b)2;
+  every receipt processed in worker order (b)4; the answers `Landed`, `Moved`, `Displaced`,
+  `Refused`. There is no `StorageJob::Save`.
+- **Two semantic policies**, chosen by `mode`:
+  - **`Merge`** — the four stores. A `Displaced` answer keeps `kept` on disk and is merged by
+    (c)1's bookkeeping; a `Moved` answer is merged; owed edits are (b)6's.
+  - **`Restore`** — the preview. On displaced bytes that are not `expected`, the worker exchanges
+    **again**, conditional on the target still holding `written`, which puts the displaced bytes
+    back under their own name, and answers `Conflict { theirs }`. If that second exchange is itself
+    crossed (the target no longer holds `written`), both files are kept, nothing is removed, and the
+    answer is `Conflict { theirs, kept }` naming where each is. A `Moved` answer is `Conflict` with
+    nothing written. Nothing is merged; the conflict is said to the person, as today.
 
-**What the join no longer costs**: the mode, the link-policy parameter, the second revision per
-buffer and the bytes copy per open buffer of (b)16 items 1–4 are gone; the preview's protocol is
-not touched by B6. **What it still costs**: the head-of-line delay of one worker ((b)16 item 5), and
-ticket 4's ordering rule, which is now a contract S-6a builds on and must not break.
+**Revision bookkeeping under `Restore`.** (c)1's invariant holds for both modes: the revision is
+what Folio last read from or placed at the target. After a restoring exchange the target holds
+`theirs` again, so the preview's disk revision becomes `theirs` — the file the person now has —
+and its body stays dirty.
+
+**What the preview's policy needs from ticket 4** (and what S-6a builds on it):
+1. **`mode: Restore`**, implemented in the worker, with the second conditional exchange above and
+   its own test (`…::restore_puts_the_displaced_file_back_and_answers_conflict`; MUTATION: answer
+   `Conflict` without the second exchange).
+2. **`link_policy: Refuse | PlainWriter`** on the request. The four stores send `Refuse` (Q5). The
+   preview's links are J5's to rule (`preview.rs:5766-5773`, "nobody has ruled it"); until then it
+   sends whatever J5 decides, and `PlainWriter` — the current behaviour — is honoured only for a link,
+   never for a no-exchange volume, which is refused for every request ((b)1).
+3. **An exact-byte disk revision for a buffer.** The preview's precondition moves from
+   `file_mtime(&path) != self.disk_mtime` (`preview.rs:5785`) to the bytes it last read or wrote. That
+   is one encoded copy of the file per open buffer with a save owed or possible, bounded by the
+   preview's own read cap; `Arc<[u8]>` shares it with the job ((b)10).
+4. **The body revision travels with the request and comes back on the receipt untouched.** The
+   worker never reads it; the preview clears dirty only on `Landed` for its current body revision
+   (J5). Ticket 4's `Document` carries an opaque `asker: u64` for this, echoed on every answer.
+5. **Per-file order** across every `Document` and `Read` naming one path, whichever store or buffer
+   queued it: a preview open on `settings.json` and the settings store then write one file through one
+   queue, and each sees the other's write as a file that moved.
+6. **Metadata**: the exchange door's (b)2 contract already carries what the preview's preserving save
+   carries today (`atomic.rs:150-164`), so the preview loses nothing by moving onto it.
+
+**The quit, aligned** ((c)2): S-6c uses this note's multi-turn `Documents` phase and its two
+constants. Owed preview saves are sent in phase 1 beside owed configuration documents. A preview save
+not landed by `QUIT_DOCUMENTS_BY`, or answered `Conflict`/`Refused`, **cancels the quit** as J5
+requires (the gate comes back over a dirty document); configuration debts take (c)2's recovery phase
+(the copy into `recovered`). A forced stop writes both into `recovered` (c)2.
+
+**Ticket 4 stays the storage worker's shared request ticket**, now named
+**T-STORAGE-WORKER-REQUEST**, jointly owned with J5's S-6a: ticket 4 builds the request, both modes,
+the link policy, the `asker` echo and per-file order, and moves the four stores onto it; S-6a moves
+`PreviewBuffer::save` onto it in `Restore` mode and retires its separate write. J5's S-6a dependency
+on "B6's T-STORE-CONDITIONAL-WRITE" points at ticket 4.
+
+**What the join costs this design**: `Restore`'s second exchange and its test; the `asker` echo; the
+link-policy parameter; and one worker's head-of-line delay ((b)16 item 5). The request protocol itself
+is unchanged.
 
 ### (c)4 · The tickets, revised
 
@@ -1795,14 +1824,15 @@ ticket 4's ordering rule, which is now a contract S-6a builds on and must not br
 | 1 | T-STORAGE-EAR-NAMED | S | — (E-3) | as (b)17 | as (b)17 |
 | 2 | T-STORE-REVISION | S | 1 | as (b)17 | as (b)17 |
 | 3 | T-EXCHANGE-DOOR | M | — (E-1, E-2, E-5) | as (b)17 | as (b)17 |
-| 4 | **T-STORAGE-WORKER-JOBS** | M | 2, 3 | `StorageJob::Document` and `StorageJob::Read` with stable reads (b)9; **per-file order across job kinds** (c)3; one in flight per document and every receipt processed (b)4; `desired` and owed (b)6 with (c)1's bookkeeping; **a `Moved` or `Displaced` before ticket 6 leaves the document owed and keeps `kept` on disk** (no merge yet, nothing removed); faults to cards (b)7; no mid-run `.rejected-`; row 20's four stores | 2's in-flight variant, 5, 8, 9, 10, 17, 18, 19; (b)14-5, -8, -15, -17; `…::jobs_for_one_path_run_in_queue_order_across_kinds` (MUTATION: a queue per kind) |
+| 4 | **T-STORAGE-WORKER-REQUEST** (jointly owned with J5's S-6a) | M | 2, 3 | the one request protocol (c)3: `StorageJob::Document` with `mode: Merge \| Restore` (`Restore`'s second conditional exchange and `Conflict`), `link_policy`, the `asker` echo, and `StorageJob::Read`, with stable reads (b)9; **per-file order** across every request naming one path (c)3; one in flight per document and every receipt processed (b)4; `desired` and owed (b)6 with (c)1's bookkeeping; **a `Moved` or `Displaced` before ticket 6 leaves the document owed and keeps `kept` on disk** (no merge yet, nothing removed); faults to cards (b)7; no mid-run `.rejected-`; row 20's four stores | 2's in-flight variant, 5, 8, 9, 10, 17, 18, 19; (b)14-5, -8, -15, -17; `…::jobs_for_one_path_run_in_queue_order_across_kinds` (MUTATION: a queue per kind); `…::restore_puts_the_displaced_file_back_and_answers_conflict` (MUTATION: answer `Conflict` without the second exchange); `…::the_asker_comes_back_on_every_answer` (MUTATION: drop it on `Displaced`) |
 | 5 | T-QUIT-DOCUMENTS | M | 4 | (c)2: the two phases, the two constants, the copy into `recovered`, cancellation, the second quit, the forced stop's step for the stores | 4; (c)2's five |
 | 6 | T-STORE-MERGE-SETTINGS | M | 4 | as (b)17, with (c)1's table | 3, 15, 16; (c)1's three; (b)14-9 |
 | 7 | T-STORE-MERGE-KEYBINDINGS | S | 6 | as (b)17 | as (b)17 |
 | 8 | T-STORE-MERGE-PROFILES-PINS | M | 6 | as (b)17 | as (b)17 |
 | 9 | T-STORE-NOTICE | S | 7, 8 | as (b)17 | as (b)17 |
 
-J5's S-6a follows ticket 4; S-6c follows ticket 5 and S-6b. Ticket 5 may run beside 6–8; 7 beside 8.
+J5's S-6a (moving `PreviewBuffer::save` onto the shared request in `Restore` mode) follows ticket 4;
+S-6c (the preview's saves in the `Documents` quit phase) follows ticket 5 and S-6b. Ticket 5 may run beside 6–8; 7 beside 8.
 Between tickets 4 and 6 a crossing edit is kept, not merged: the store stays owed against a file it
 will not write over, and the displaced file stays on disk — the protocol is safe before it is
 complete, which is what lets the merge land separately.
@@ -1835,13 +1865,25 @@ so rather than overwrite?** Unchanged from (b)18. **Recommendation: yes.**
 
 ### Departures
 
-None. All three blockers are applied as the review states them; (c)2 takes both of the review's
-alternatives at once (a recovery phase *and* cancellation when it cannot be realised), which is the
-combination the coordinator's message names.
+- **Blocker 3 is not applied as the confirmation states it.** The confirmation asked for "one
+  worker with two protocols, the preview's existing baseline semantics … and S-6a/b/c", and for
+  `Merge | Restore` and the jointly owned ticket to be reconciled away. The confirmation on J5's
+  revision (b) then ruled, of the same question, "B6 is right: the conditional exchange is the lane
+  protocol … [the preview] must not retain the old mtime-only `PreviewBuffer::save` as a separate
+  `StorageJob::Save`", and the coordinator adopted that ruling for both notes: one worker, one
+  request protocol, two semantic policies. (c)3 follows the ruling. What remains of blocker 3 is
+  applied: J5's timeouts (a close keeps its gate open; an ordinary quit with an unresolved preview
+  save is cancelled; a forced stop writes the recovery copy) are this note's too, and the preview's
+  conflict policy and body revision stay J5's.
+- Blockers 1 and 2 are applied as stated; (c)2 takes both of the review's alternatives at once (a
+  recovery phase *and* cancellation when it cannot be realised), the combination the coordinator's
+  message names.
 
 ### Sources added
 
 - The confirmation: `B6-settings-reread-design.review-codex-b.md` (the 0.4.8 trace, 2026-10-11).
+- The confirmation on J5's revision (b): `J5-05-contracts.review-codex-b.md`, item 3 (the 0.4.8
+  trace, 2026-10-11), and the coordinator's ruling adopting it for both notes.
 - J5 revision (b): `docs/plans/design/side-effects-contract-2026-10-11.md` (on `j5-contracts`),
   (b)8 (`:535-554`) and S-6a/b/c (`:586-588`).
 - Folio at `77399d57`: `preview.rs:7059` (`RECOVERED_FOLDER`), `main.rs:66335-66348` (the forced
