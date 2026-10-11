@@ -8179,15 +8179,41 @@ fn leads_to(
         || starts.contains(&(door, starter_key(world, root).as_str()))
 }
 
-/// **The worker door bodies no product code asks for yet**, by `# effects` key, each with why: a
-/// body here is compiled into the product and reached from no thread it starts, so it belongs to
-/// no protocol until its caller exists. A listed body that a thread reaches, or that `# effects`
-/// no longer has, is refused, and so is an unlisted body that nothing reaches.
-const UNASKED_WORKER_BODIES: [(&str, &str); 1] = [(
-    "bt-platform [windows] crate::elevated_pipe::shell_execute_runas",
-    "the elevated host's launch (`launch_elevated_host`): the admin terminal's parent side \
-     (design note admin-terminal-2026-10-04) has no product caller yet",
-)];
+/// **The worker door bodies no product code calls yet** (`docs/plans/completions-uncalled-bodies.tsv`):
+/// each compiled into the product and reached from no thread it starts, so it belongs to no
+/// protocol until its caller exists, with the ticket that will call it. A listed body that a
+/// thread reaches, or that `# effects` no longer has, is refused, and so is an unlisted body that
+/// nothing reaches; `scripts/ci/check-window-waits.ps1` refuses a line added against the merge
+/// base, so the list only shrinks.
+const UNCALLED_BODIES: &str = include_str!("../../../docs/plans/completions-uncalled-bodies.tsv");
+const UNCALLED_COLUMNS: [&str; 3] = ["body", "ticket", "reason"];
+
+/// The bodies of [`UNCALLED_BODIES`], each line checked for its columns.
+fn uncalled_bodies() -> BTreeSet<&'static str> {
+    let mut lines = UNCALLED_BODIES
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines
+        .next()
+        .expect("completions-uncalled-bodies.tsv has a header")
+        .split('\t')
+        .collect();
+    assert_eq!(
+        header, UNCALLED_COLUMNS,
+        "completions-uncalled-bodies.tsv's columns"
+    );
+    lines
+        .map(|line| {
+            let cells: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cells.len(), 3, "completions-uncalled-bodies.tsv: {line}");
+            assert!(
+                !cells[1].trim().is_empty() && !cells[2].trim().is_empty(),
+                "{line}: a body not yet called names the ticket that will call it, and why"
+            );
+            cells[0]
+        })
+        .collect()
+}
 
 /// RED (S-1, rounds 1 and 2) — **every worker's door body is reached from a row's door**
 /// (the side-effects contract §3.1, the fourth held equality).
@@ -8199,7 +8225,7 @@ const UNASKED_WORKER_BODIES: [(&str, &str); 1] = [(
 /// holds the function that starts that thread — a call path, never a shared type or module
 /// ([`leads_to`]); a lane started once elsewhere is joined to its door only by a line of
 /// `docs/plans/completions-door-starts.tsv`, which is refused when stale or unused. Every body must be reached from some row, or be one of
-/// [`UNASKED_WORKER_BODIES`]; a door process's body (`enter_standalone_main`) needs its row like
+/// `docs/plans/completions-uncalled-bodies.tsv` ([`UNCALLED_BODIES`]); a door process's body (`enter_standalone_main`) needs its row like
 /// any other. A row's thread that the product starts under no such name is refused too. This is
 /// the interim reachability `bt-source`'s items allow: a call through a trait object, a stored
 /// closure or an untyped receiver whose name is shared is not followed (S-2a's call graph is).
@@ -8270,6 +8296,7 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
             ));
         }
     }
+    let uncalled = uncalled_bodies();
     let mut listed = BTreeSet::new();
     for cells in section("effects", &EFFECT_COLUMNS) {
         if cells[4] != "worker-door-body" {
@@ -8287,14 +8314,11 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
             .enumerate()
             .filter(|(_, root)| root.reached.contains(&key))
             .collect();
-        if UNASKED_WORKER_BODIES
-            .iter()
-            .any(|(body, _)| *body == spelled)
-        {
+        if uncalled.contains(spelled.as_str()) {
             if !on.is_empty() {
                 failures.push(format!(
-                    "{spelled}: listed as asked for by nobody, and a thread the product starts \
-                     reaches it"
+                    "{spelled}: listed in completions-uncalled-bodies.tsv, and a thread the \
+                     product starts reaches it — its caller exists: delete the line"
                 ));
             }
             continue;
@@ -8319,7 +8343,11 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
             })
             .collect();
         failures.push(if threads.is_empty() {
-            format!("{spelled}: no thread the product starts reaches it")
+            format!(
+                "{spelled}: no thread the product starts reaches it — a body with no product \
+                 caller yet is a line of docs/plans/completions-uncalled-bodies.tsv, naming the \
+                 ticket that will call it"
+            )
         } else {
             format!(
                 "{spelled}: runs on {}, and no `# completions` row's door leads there",
@@ -8327,10 +8355,11 @@ fn every_worker_door_body_is_reached_from_a_completions_door() {
             )
         });
     }
-    for (body, _) in UNASKED_WORKER_BODIES {
-        if !listed.contains(body) {
+    for body in &uncalled {
+        if !listed.contains(*body) {
             failures.push(format!(
-                "{body}: listed as asked for by nobody, and `# effects` has no such body"
+                "{body}: listed in completions-uncalled-bodies.tsv, and `# effects` has no such \
+                 body"
             ));
         }
     }

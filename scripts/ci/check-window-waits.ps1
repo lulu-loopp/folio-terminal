@@ -19,7 +19,9 @@
 #   5. the completions ledger's repairs only shrink: a status that names a
 #      D-row or a registry row may only lose them, to `conforms` (S-1);
 #   6. the completions doors joined to a thread started elsewhere
-#      (`docs/plans/completions-door-starts.tsv`) only shrink (S-1 round 3).
+#      (`docs/plans/completions-door-starts.tsv`) and the worker door bodies no
+#      product code calls yet (`docs/plans/completions-uncalled-bodies.tsv`)
+#      only shrink (S-1).
 #
 # ── 1. the_bare_site_inventory_only_shrinks
 #
@@ -373,6 +375,27 @@ if (-not $startsAtBase) {
     foreach ($pair in $startsNow) {
         if ($startsBefore -notcontains $pair) {
             $failures += "[door-starts] $startsRelative adds '$($pair -replace "`t", ' -> ')': a door reaches its thread by a call path, and this list only shrinks"
+        }
+    }
+}
+# The bodies no product code calls yet (`docs/plans/completions-uncalled-bodies.tsv`) only shrink
+# too: a line is a body without its door, and a new one is refused against the merge base.
+$uncalledRelative = "docs/plans/completions-uncalled-bodies.tsv"
+$uncalledNow = @(Read-DoorStarts ([IO.File]::ReadAllLines((Join-Path $repo $uncalledRelative))) | ForEach-Object { ($_ -split "`t")[0] })
+Push-Location $repo
+try {
+    $uncalledText = (& git show "${base}:${uncalledRelative}" 2>$null) | Out-String
+    $uncalledAtBase = $LASTEXITCODE -eq 0
+} finally {
+    Pop-Location
+}
+if (-not $uncalledAtBase) {
+    Write-Host "the merge base has no $uncalledRelative`: this change introduces it ($($uncalledNow.Count) lines), and there is nothing to compare."
+} else {
+    $uncalledBefore = @(Read-DoorStarts ($uncalledText -split "`r?`n") | ForEach-Object { ($_ -split "`t")[0] })
+    foreach ($body in $uncalledNow) {
+        if ($uncalledBefore -notcontains $body) {
+            $failures += "[uncalled] $uncalledRelative adds '$body': a worker's door body has a door, and this list only shrinks"
         }
     }
 }
