@@ -299,6 +299,8 @@ foreach ($row in $rowsNow.Keys) {
 # that names repairs may drop some of them or become `conforms`, never name one it did not; a
 # row that conformed (or was a C7 member) never comes to owe one; and a new row names none.
 # A merge base without the section is the change that introduces it: nothing to compare.
+# Its names are its own (`$repairsNow`, `$repairsBefore`, `$repairsAdded`): `$now`, `$before`
+# and `$grown` are the bare-site inventory's, read again after this block.
 function Read-Completions([string[]]$lines) {
     $rows = [ordered]@{}
     $inside = $false
@@ -323,17 +325,17 @@ if ($ledgerThen.Count -eq 0) {
     Write-Host "the merge base has no # completions section: this change introduces it ($($ledgerNow.Count) rows), and there is nothing to compare."
 } else {
     foreach ($class in $ledgerNow.Keys) {
-        $now = Get-Repairs $ledgerNow[$class]
+        $repairsNow = Get-Repairs $ledgerNow[$class]
         if (-not $ledgerThen.Contains($class)) {
-            if ($now.Count -gt 0) {
+            if ($repairsNow.Count -gt 0) {
                 $failures += "[completions] '$class' is a new row that names repairs ($($ledgerNow[$class])): a new row conforms or is a ruled C7 member"
             }
             continue
         }
-        $before = Get-Repairs $ledgerThen[$class]
-        $grown = @($now | Where-Object { $before -notcontains $_ })
-        if ($grown.Count -gt 0) {
-            $failures += "[completions] '$class' was '$($ledgerThen[$class])' at the merge base and is '$($ledgerNow[$class])': a status's repairs only shrink, to conforms ($($grown -join ', ') added)"
+        $repairsBefore = Get-Repairs $ledgerThen[$class]
+        $repairsAdded = @($repairsNow | Where-Object { $repairsBefore -notcontains $_ })
+        if ($repairsAdded.Count -gt 0) {
+            $failures += "[completions] '$class' was '$($ledgerThen[$class])' at the merge base and is '$($ledgerNow[$class])': a status's repairs only shrink, to conforms ($($repairsAdded -join ', ') added)"
         }
     }
 }
