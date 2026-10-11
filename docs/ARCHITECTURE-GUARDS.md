@@ -10,13 +10,13 @@ The rule: every product file/content read in `bt-app` has a named lane and an
 owner. `file_reads_source_tests` walks the product files declared by
 `bt_source::Index`, compares the doors with
 `crates/bt-app/src/file_reads_doors.txt`, and requires every item-keyed row to
-resolve exactly once. This descends from the 2026-09-20 file-read ruling.
+resolve exactly once (uniqueness is the sibling test `file_reads_every_item_keyed_door_answers_to_one_item`). This descends from the 2026-09-20 file-read ruling.
 
 Where and what to do: the guard is
 `file_reads_source_tests::file_reads_every_product_content_door_has_a_lane`.
 When it is red, classify the read, put it through the correct lane, and re-key a
 moved owner by item identity; do not add a file key unless the collision is an
-explicit row of `docs/plans/MIGRATION-DEBT.tsv`.
+explicit row of `docs/plans/MIGRATION-DEBT.tsv`; that coupling is prose, kept equal by review, not by a test.
 
 ## Platform cfg boundaries
 
@@ -39,7 +39,7 @@ proved multi-writer facts are explicit annotations. Unknowns may shrink but not
 grow. The owner's rulings are dated 2026-09-25.
 
 Where and what to do: `crates/bt-source/tests/census.rs` compares against
-`docs/plans/design/ownership-census-{2026-09-25,annotations,unknowns}.tsv`, and
+`docs/plans/design/ownership-census-{annotations,unknowns}.tsv` (the dated `ownership-census-2026-09-25.tsv` is a record, not an enforcement input), and
 `scripts/ci/check-census-unknowns.ps1` enforces the shrink direction. When red,
 fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
@@ -53,7 +53,7 @@ registry and the generated architecture table descend from the thread-door and
 window-wait rulings of 2026-09-26.
 
 Where and what to do: `window_waits_tests::every_door_is_where_the_registry_says`,
-`docs/plans/window-waits.tsv`, `scripts/ci/check-window-waits.ps1`, and the
+`crates/bt-app/src/window_waits.tsv`, `scripts/ci/check-window-waits.ps1`, and the
 generated window-waits section of `ARCHITECTURE.md` agree. When red, remove the
 wait from the window path or route it through an admitted worker; update the
 registry through `scripts/dev/generate-window-waits-table.ps1`, never by
