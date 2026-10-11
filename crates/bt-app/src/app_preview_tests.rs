@@ -57,7 +57,7 @@ fn the_content_section_writes_a_file_exactly_as_it_always_did() {
         },
         "main.rs".to_owned(),
     );
-    diff.dirty = true;
+    diff.set_dirty_for_test(true);
     pool.insert(diff);
     // And v2 ②'s range, which is skipped by the same one rule rather than by
     // a second one: it has no file behind it, so `file_path` answers `None`,
@@ -6138,7 +6138,10 @@ fn two_surfaces_on_one_markdown_buffer_flip_independently() {
         content.push_str("more\n");
         true
     });
-    assert!(buffer.dirty, "an edit through either face dirties the file");
+    assert!(
+        buffer.dirty(),
+        "an edit through either face dirties the file"
+    );
     assert_eq!(
         pool.buffers().count(),
         1,
@@ -6403,7 +6406,7 @@ fn a_preview_seat_is_found_in_the_tab_that_owns_it() {
         let tab = &tabs[index];
         tab.preview_pool
             .get(tab.preview_panes.get(surface)?.buffer.as_ref()?)
-            .map(|buffer| buffer.name.clone())
+            .map(|buffer| buffer.name().to_owned())
     };
     assert_eq!(read(here).as_deref(), Some("todo.txt"));
     assert_eq!(read(next_door).as_deref(), Some("README.md"));

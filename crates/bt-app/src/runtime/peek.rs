@@ -209,7 +209,7 @@ impl Runtime<'_> {
                 None => tab
                     .preview_pool
                     .get(pane.buffer.as_ref()?)
-                    .map(|buffer| buffer.name.clone()),
+                    .map(|buffer| buffer.name().to_owned()),
             }
         };
         // The peek reads the caption through the same door the head does, and
@@ -1014,14 +1014,14 @@ impl Runtime<'_> {
             // over a card full of legible source is the card contradicting
             // itself.
             ftype: match preview::preview_ftype(&peek.name) {
-                preview::PreviewFtype::Unknown => buffer.ftype,
+                preview::PreviewFtype::Unknown => buffer.ftype(),
                 named => named,
             },
             // A network path or a type this window will not read says so in the
             // card's own one line, exactly as the preview pane's unknown card
             // does — the refusal is the preview's judgement, borrowed.
             refused: buffer.refusal().is_some(),
-            dirty: buffer.dirty,
+            dirty: buffer.dirty(),
             anchor: self.peek_anchor(peek),
         })
     }
@@ -1243,7 +1243,8 @@ impl Runtime<'_> {
         // extent at once — which is `file_peek_layer`'s own rule about a
         // document, applied to the body that has no document.
         let column = file_peek::peek_page_column_max_scroll(pages.unwrap_or(1), scale);
-        self.window.peek_pane.scroll[1] = self.window.peek_pane.scroll[1].clamp(0.0, column);
+        let top = self.window.peek_pane.scroll[1].clamp(0.0, column);
+        self.window.peek_pane.scroll_top_to(top);
         // **The pages are asked for after the count and with it.** The count is what says how long
         // the column is, and until it lands the column is one slot — so a request run filed before
         // it would be a run that asked for exactly the cover and then never widened, because the
@@ -1899,7 +1900,7 @@ impl Runtime<'_> {
             scale,
             self.window.peek_pane.scroll,
         );
-        self.window.peek_pane.scroll = scroll;
+        self.window.peek_pane.scroll_to(scroll);
         // The same channel a preview float's document rides, for the same
         // reason: the body has to be drawn *above* the card's own face, and
         // the seats' document lane is a whole pass below the overlays.
@@ -2202,7 +2203,7 @@ impl Runtime<'_> {
         if (wanted - self.window.peek_pane.scroll[1]).abs() < f32::EPSILON {
             return Ok(true);
         }
-        self.window.peek_pane.scroll[1] = wanted;
+        self.window.peek_pane.scroll_top_to(wanted);
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }

@@ -597,7 +597,7 @@ fn a_keystroke_relays_a_full_head_read_inside_a_frame() {
         buffer.edit_content(|content| preview_edit::insert(content, &mut caret, "x"));
         // What the painter does with the result, every key: the document is
         // re-derived from the new revision.
-        let lines = preview_edit::display_lines(buffer.content.as_deref().unwrap());
+        let lines = preview_edit::display_lines(buffer.text().unwrap());
         assert!(!lines.is_empty(), "key {index}");
         std::hint::black_box(&lines);
     }

@@ -320,7 +320,7 @@ impl Runtime<'_> {
                     .and_then(|pane| pane.image.as_ref())
                 {
                     Some(image) => image.title(),
-                    None => self.preview_buffer_on(surface)?.name.clone(),
+                    None => self.preview_buffer_on(surface)?.name().to_owned(),
                 };
                 Some((seat, title))
             })
@@ -485,8 +485,8 @@ impl Runtime<'_> {
                     // a diff with nothing in it, or a repository that would not
                     // answer (G-3, [`preview::PreviewBuffer::body_notice`]).
                     (None, Some(buffer)) => {
-                        if buffer.load == preview::PreviewLoad::Pending {
-                            Some(i18n::preview_loading(&buffer.name))
+                        if *buffer.load() == preview::PreviewLoad::Pending {
+                            Some(i18n::preview_loading(buffer.name()))
                         } else {
                             buffer.body_notice().map(str::to_owned)
                         }
@@ -565,10 +565,10 @@ impl Runtime<'_> {
                 // machine may be able to. Asked before the buffer below because
                 // a picture *is* not one (`preview_chrome_on`), so the two
                 // cannot both answer.
-                if let Some(refusal) = self
+                let refusal: Option<&crate::PictureRefusal> = self
                     .preview_picture(here)
-                    .and_then(PreviewImageState::refusal)
-                {
+                    .and_then(PreviewImageState::refusal);
+                if let Some(refusal) = refusal {
                     return Some((
                         seat,
                         refused_preview_card(
@@ -1802,7 +1802,7 @@ impl Runtime<'_> {
                         _ => None,
                     };
                     if selection.is_some() {
-                        self.preview_pane_mut(surface).md_select = selection;
+                        self.preview_pane_mut(surface).select(selection);
                         self.repaint_preview()?;
                     }
                     Ok(())
@@ -2855,7 +2855,7 @@ impl Runtime<'_> {
         // the working-tree file a git document is a reading of.
         let Some(path) = self
             .preview_buffer_on(surface)
-            .and_then(|buffer| revealable_preview_file(&buffer.source))
+            .and_then(|buffer| revealable_preview_file(buffer.source()))
             .or_else(|| {
                 self.preview_pane(surface)
                     .and_then(|pane| pane.image.as_ref())
@@ -2992,7 +2992,7 @@ impl Runtime<'_> {
             // (user ruling 2026-08-24): a markdown with a breadcrumb wears its
             // `</>` down there, and one without keeps it upstairs. Two flips on
             // one window would be the head and the row each claiming the verb.
-            flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown)
+            flip: buffer.is_some_and(|buffer| buffer.ftype() == preview::PreviewFtype::Markdown)
                 && rail.is_none(),
             rail: rail.is_some(),
         }
@@ -3279,10 +3279,10 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         open_label: &str,
     ) -> Option<CardWords> {
-        if let Some(refusal) = self
+        let refusal: Option<&crate::PictureRefusal> = self
             .preview_picture(surface)
-            .and_then(PreviewImageState::refusal)
-        {
+            .and_then(PreviewImageState::refusal);
+        if let Some(refusal) = refusal {
             return Some(refused_preview_card(
                 refusal.notice.clone(),
                 refusal.offers_the_default_app,
