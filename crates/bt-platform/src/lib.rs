@@ -26202,5 +26202,10 @@ mod file_replace;
 pub use file_replace::set_file_attributes;
 pub use file_replace::{
     ReplaceRefusal, carry_metadata, extended_attribute_names, file_link_count,
-    replace_file_preserving, volume_cannot_replace,
+    replace_file_preserving, sibling_path, volume_cannot_replace,
+};
+mod exchange;
+pub use exchange::{
+    Displaced, ExchangeRefusal, flush_directory, rename_without_replacing_durably,
+    replace_keeping_displaced,
 };

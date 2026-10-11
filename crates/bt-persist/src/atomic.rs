@@ -14,8 +14,6 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bt_platform::ReplaceRefusal;
 
@@ -272,34 +270,11 @@ fn commit_rename(tmp_path: &Path, target: &Path) -> Result<(), WriteError> {
     }
 }
 
+/// The staging file's name: `<name>.tmp-<pid>-<nanos>-<n>` beside `path`,
+/// made by the one owner of the sibling-name recipe
+/// ([`bt_platform::sibling_path`]).
 fn temp_sibling_path(path: &Path) -> io::Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut name = file_name.to_os_string();
-    name.push(format!(".tmp-{}", unique_suffix()));
-    Ok(dir.join(name))
-}
-
-/// Unique-enough-within-this-process suffix for temp file names: a
-/// monotonic per-process counter (guarantees uniqueness across calls in the
-/// same process even if the clock doesn't advance) combined with wall-clock
-/// nanoseconds and the process ID (guards against collisions with another
-/// Folio process writing the same directory). Not cryptographic
-/// randomness — collision avoidance, not secrecy, is the requirement.
-fn unique_suffix() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    format!("{pid:x}-{nanos:x}-{n:x}")
+    bt_platform::sibling_path(path, "tmp")
 }
 
 #[cfg(test)]
