@@ -20453,20 +20453,24 @@ mod macos_window_backend_tests {
             .collect();
         assert_eq!(callbacks.len(), 1, "the observer has one value callback");
         let callback = callbacks[0];
-        let next_callback = ["preferences_changed", "display_changed"]
-            .into_iter()
-            .flat_map(|name| {
-                source_test::found(
-                    Needle::new(Pattern::identifier(name)),
-                    View::Identifiers,
-                    Scope::Module("crate::macos_impl".to_owned()),
-                )
-                .spans()
-            })
-            .filter(|span| span.within(observer_class) && span.start() > callback.end())
-            .map(bt_source::Span::start)
-            .min()
-            .unwrap_or_else(|| observer_class.end());
+        let tail = &source_test::index().union()[callback.end()..observer_class.end()];
+        let opening = tail.find('{').expect("the callback has a body");
+        let mut depth = 0usize;
+        let mut callback_end = None;
+        for (offset, character) in tail[opening..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        callback_end = Some(callback.end() + opening + offset + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let callback_end = callback_end.expect("the callback body closes");
         for (pattern, forbidden) in [
             (
                 Pattern::call("effectiveAppearance"),
@@ -20485,7 +20489,7 @@ mod macos_window_backend_tests {
             )
             .spans()
             .into_iter()
-            .any(|span| span.start() >= callback.end() && span.end() <= next_callback);
+            .any(|span| span.start() >= callback.end() && span.end() <= callback_end);
             assert!(
                 !inside_callback,
                 "the observer reads `{forbidden}` inside AppKit's own delivery instead of on the \
@@ -21267,6 +21271,35 @@ mod watch_contract_tests {
             1,
             "not(any(windows, target_os = \"macos\"))",
         );
+        let portable_module = source_test::index()
+            .modules()
+            .iter()
+            .find(|module| {
+                module
+                    .module_paths()
+                    .iter()
+                    .any(|path| path == "crate::portable_impl")
+            })
+            .expect("the portable module is declared");
+        let portable_impls: Vec<_> = source_test::index()
+            .impls()
+            .iter()
+            .filter(|block| {
+                block.type_owner() == "DirWatch"
+                    && block.trait_name().is_none()
+                    && block.whole().within(portable_module.span())
+            })
+            .collect();
+        assert_eq!(
+            portable_impls.len(),
+            1,
+            "the portable DirWatch has one inherent impl block"
+        );
+        assert_eq!(
+            portable_impls[0].variant().predicates(),
+            ["not(any(windows, target_os = \"macos\"))"],
+            "the platform gate belongs to the DirWatch impl block, not only to one method"
+        );
         let portable_reexport = source_test::found(
             Needle::new(Pattern::text(
                 "pub use portable_impl::{DirChange, DirWatch};",
@@ -21553,9 +21586,10 @@ mod macos_process_door_tests {
         );
         assert_eq!(
             source_test::found(
-                bt_source::needle!(Pattern::text(
+                bt_source::needle!(Pattern::text(concat!(
+                    "#[cfg(target_os = \"macos\")]\n",
                     "pub use macos_fonts::{cjk_font_families, monospace_family_named, monospace_font_families};"
-                )),
+                ))),
                 View::CodeKeepingLiterals,
                 Scope::Module("crate".to_owned()),
             )
