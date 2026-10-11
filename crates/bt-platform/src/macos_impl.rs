@@ -106,13 +106,14 @@ use objc2_app_kit::{
     NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
     NSWindowDidResignKeyNotification, NSWindowDidResizeNotification, NSWindowDidUpdateNotification,
     NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
-    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidMountNotification,
+    NSWorkspaceDidUnmountNotification,
 };
 use objc2_core_foundation::{CFRetained, CFUUID};
 use objc2_core_graphics::CGDirectDisplayID;
 use objc2_foundation::{
-    NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification,
-    NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming,
+    NSArray, NSCurrentLocaleDidChangeNotification, NSDictionary, NSKeyValueObservingOptions,
+    NSLocale, NSNotification, NSNotificationCenter, NSNumber, NSObjectNSDelayedPerforming,
     NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
     ns_string,
 };
@@ -1912,7 +1913,7 @@ pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
 /// `zh-Hans-CN`, which is the shape `i18n::resolve` reads a primary subtag out
 /// of. The reader's *language*, which is the fact this door is about, and
 /// deliberately not `AppleLocale`: that one is the formatting locale
-/// `system_locale_declaration` already reads for a child process's locale, and
+/// `read_system_locale_declaration` already reads for a child process's locale, and
 /// the two are allowed to differ.
 ///
 /// `en` when the system names none, which is the portable arm's answer and the
@@ -1931,12 +1932,10 @@ pub fn os_ui_language() -> String {
 
 // ── the system settings watch (M1-3) ───────────────────────────────────────
 
-/// **The system saying a preference this program reads has moved.**
+/// **The system saying a fact this program reads has moved.**
 ///
-/// The twin of the `WM_SETTINGCHANGE` subclass, and it watches the same two
-/// facts that page changes: the appearance (light/dark) and the reduce-motion
-/// switch. Two subscriptions rather than one broadcast, because macOS has no
-/// single "something in Settings moved" message:
+/// The twin of the `WM_SETTINGCHANGE` subclass, and it watches what that one does. macOS has no
+/// single "something in Settings moved" message, so it is several subscriptions:
 ///
 /// * **KVO on `NSApplication.effectiveAppearance`** — the application's
 ///   appearance, which no window's own `appearance` override touches (see
@@ -1945,12 +1944,23 @@ pub fn os_ui_language() -> String {
 ///   is what replaces it). AppKit recomputes it when the desktop switches, so
 ///   this fires for exactly the change the reader made.
 /// * **`NSWorkspace`'s accessibility-display notification** — the one the system
-///   posts when Reduce Motion and its neighbours move.
+///   posts when Reduce Motion and its neighbours move. With the appearance, told to the wake as
+///   [`crate::SystemNews::Preferences`].
 /// * **`NSApplicationDidChangeScreenParametersNotification`** (T-FRESH-FACTS) —
 ///   a display was added, removed or changed mode, which is when the rate a
 ///   window paces its frames to can move without the window moving. Told to the
-///   wake as [`crate::SystemNews::Display`]; the other two are
-///   [`crate::SystemNews::Preferences`].
+///   wake as [`crate::SystemNews::Display`].
+/// * **`NSWorkspace`'s did-mount and did-unmount notifications** (T-OS-SIGNALS-MAC) — a volume
+///   came or went; the second is posted even when a volume vanishes at once. Told to the wake as
+///   [`crate::SystemNews::Volumes`]. A watch on a volume that went ends through its own stream,
+///   not through this.
+/// * **`NSCurrentLocaleDidChangeNotification`** (T-OS-SIGNALS-MAC) — the user's locale changed,
+///   which is what a new pane's `LANG` is read from. Told to the wake as
+///   [`crate::SystemNews::Locale`].
+///
+/// Each notification is registered on the centre that posts it — the workspace's own centre for
+/// the workspace's, the default centre for the application's and Foundation's — and removed from
+/// that same centre ([`NotificationRegistrations`]).
 ///
 /// **What the callback may do is nudge, and nothing else.** It runs inside
 /// AppKit's own delivery, on a turn this program did not choose; the reading
@@ -1963,13 +1973,15 @@ pub fn os_ui_language() -> String {
 /// anyway and a duplicate wake costs one re-read on a turn that was going to
 /// happen.
 pub struct SystemSettingsWatch {
-    /// The observer both subscriptions are registered with. Held because
-    /// unregistering needs it and because nothing else owns it.
+    /// The observer the appearance is observed with. Held because unregistering needs it and
+    /// because nothing else owns it.
     observer: Retained<SystemSettingsObserver>,
     /// The object the appearance is observed on. Held for the same reason: the
     /// `removeObserver:` has to name it, and reaching for `sharedApplication`
     /// again in `Drop` would need a thread marker `Drop` cannot ask for.
     application: Retained<NSApplication>,
+    /// The observer's notification registrations, removed from their centres when this drops.
+    _notifications: NotificationRegistrations,
 }
 
 impl SystemSettingsWatch {
@@ -1999,32 +2011,11 @@ impl SystemSettingsWatch {
                 std::ptr::null_mut::<c_void>(),
             );
         }
-        // SAFETY: the observer outlives the registration for the same reason,
-        // and it answers the selector named here.
-        unsafe {
-            NSWorkspace::sharedWorkspace()
-                .notificationCenter()
-                .addObserver_selector_name_object(
-                    &observer,
-                    sel!(folioSystemPreferencesChanged:),
-                    Some(NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
-                    None,
-                );
-        }
-        // SAFETY: the observer outlives the registration (`Drop` removes it from
-        // this centre), it answers the selector named here, and the name is
-        // AppKit's own constant, never written by anybody.
-        unsafe {
-            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
-                &observer,
-                sel!(folioDisplayChanged:),
-                Some(NSApplicationDidChangeScreenParametersNotification),
-                None,
-            );
-        }
+        let notifications = NotificationRegistrations::register(&observer);
         Ok(Self {
             observer,
             application,
+            _notifications: notifications,
         })
     }
 }
@@ -2032,10 +2023,79 @@ impl SystemSettingsWatch {
 impl Drop for SystemSettingsWatch {
     fn drop(&mut self) {
         // SAFETY: dropped on the thread that installed it (the value is not
-        // `Send`), and all three registrations are the ones made above.
+        // `Send`), and this is the key-value registration made above. The notification
+        // registrations are removed when the field holding them drops, right after this.
         unsafe {
             self.application
                 .removeObserver_forKeyPath(&self.observer, ns_string!("effectiveAppearance"));
+        }
+    }
+}
+
+/// **The observer's notification registrations**, each on the centre that posts it, and each
+/// removed from that same centre on `Drop`: the workspace's centre for the workspace's three
+/// notifications, the default centre for the two the application and Foundation post.
+///
+/// Apart from the appearance's key-value registration because none of these needs the window
+/// thread: a centre delivers on the thread that posts.
+struct NotificationRegistrations {
+    observer: Retained<SystemSettingsObserver>,
+}
+
+impl NotificationRegistrations {
+    /// Register `observer` for the five notifications.
+    fn register(observer: &Retained<SystemSettingsObserver>) -> Self {
+        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: the observer outlives every registration (`Drop` removes it from this centre),
+        // it answers each selector named here, and the names are AppKit's own constants, never
+        // written by anybody.
+        unsafe {
+            for (selector, name) in [
+                (
+                    sel!(folioSystemPreferencesChanged:),
+                    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+                ),
+                (sel!(folioVolumeMounted:), NSWorkspaceDidMountNotification),
+                (
+                    sel!(folioVolumeUnmounted:),
+                    NSWorkspaceDidUnmountNotification,
+                ),
+            ] {
+                workspace.addObserver_selector_name_object(observer, selector, Some(name), None);
+            }
+        }
+        // SAFETY: as above, for the default centre and its two names (AppKit's and Foundation's
+        // own constants).
+        unsafe {
+            for (selector, name) in [
+                (
+                    sel!(folioDisplayChanged:),
+                    NSApplicationDidChangeScreenParametersNotification,
+                ),
+                (
+                    sel!(folioLocaleChanged:),
+                    NSCurrentLocaleDidChangeNotification,
+                ),
+            ] {
+                NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                    observer,
+                    selector,
+                    Some(name),
+                    None,
+                );
+            }
+        }
+        Self {
+            observer: observer.clone(),
+        }
+    }
+}
+
+impl Drop for NotificationRegistrations {
+    fn drop(&mut self) {
+        // SAFETY: the observer is the one registered above, on these two centres; removing it
+        // from a centre takes every registration it holds there.
+        unsafe {
             NSWorkspace::sharedWorkspace()
                 .notificationCenter()
                 .removeObserver(&self.observer);
@@ -2044,7 +2104,7 @@ impl Drop for SystemSettingsWatch {
     }
 }
 
-/// What the three subscriptions call, and all it may do.
+/// What the subscriptions call, and all it may do.
 struct SystemSettingsWake(Box<dyn Fn(crate::SystemNews)>);
 
 define_class!(
@@ -2083,6 +2143,24 @@ define_class!(
         #[unsafe(method(folioDisplayChanged:))]
         fn display_changed(&self, _notification: Option<&NSNotification>) {
             (self.ivars().0)(crate::SystemNews::Display);
+        }
+
+        /// A volume was mounted.
+        #[unsafe(method(folioVolumeMounted:))]
+        fn volume_mounted(&self, _notification: Option<&NSNotification>) {
+            (self.ivars().0)(crate::SystemNews::Volumes { arrived: true });
+        }
+
+        /// A volume was unmounted, or vanished.
+        #[unsafe(method(folioVolumeUnmounted:))]
+        fn volume_unmounted(&self, _notification: Option<&NSNotification>) {
+            (self.ivars().0)(crate::SystemNews::Volumes { arrived: false });
+        }
+
+        /// The user's locale changed.
+        #[unsafe(method(folioLocaleChanged:))]
+        fn locale_changed(&self, _notification: Option<&NSNotification>) {
+            (self.ivars().0)(crate::SystemNews::Locale);
         }
     }
 
@@ -2199,6 +2277,63 @@ mod tests {
             20.0 - 14.0 / 2.0,
             "which is the same air the button keeps from the top, so its centre \
              is (20, 20) — the corner's own diagonal"
+    /// RED (T-OS-SIGNALS-MAC) — **a volume mounting or unmounting, and the locale changing, each
+    /// reach the wake as their own news; and a drop removes exactly what was added**, from the
+    /// centre each was added to. The notifications are posted on the centres that post them for
+    /// real (a centre delivers on the posting thread, so no window thread is needed); after the
+    /// registrations drop, the same five posts reach nothing.
+    ///
+    /// MUTATIONS: register only `didMount` — the unmount is not heard; drop the workspace centre's
+    /// removal from `NotificationRegistrations`' `Drop` — the posts after the drop are heard.
+    #[test]
+    fn volumes_and_the_locale_are_heard_and_a_drop_removes_exactly_what_was_added() {
+        use std::sync::mpsc;
+        let (said, heard) = mpsc::channel();
+        let observer = SystemSettingsObserver::new(Box::new(move |news| {
+            let _ = said.send(news);
+        }));
+        let registrations = NotificationRegistrations::register(&observer);
+        let workspace = NSWorkspace::sharedWorkspace();
+        let post_all = || {
+            // SAFETY: each name is the platform's own constant, posted on the centre that posts
+            // it, with the object the platform posts it with (the workspace) or none.
+            unsafe {
+                let centre = workspace.notificationCenter();
+                for name in [
+                    NSWorkspaceDidMountNotification,
+                    NSWorkspaceDidUnmountNotification,
+                    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+                ] {
+                    centre.postNotificationName_object(name, Some(&workspace));
+                }
+                for name in [
+                    NSApplicationDidChangeScreenParametersNotification,
+                    NSCurrentLocaleDidChangeNotification,
+                ] {
+                    NSNotificationCenter::defaultCenter().postNotificationName_object(name, None);
+                }
+            }
+        };
+        post_all();
+        assert_eq!(
+            heard.try_iter().collect::<Vec<_>>(),
+            vec![
+                crate::SystemNews::Volumes { arrived: true },
+                crate::SystemNews::Volumes { arrived: false },
+                crate::SystemNews::Preferences,
+                crate::SystemNews::Display,
+                crate::SystemNews::Locale,
+            ]
+        );
+        drop(registrations);
+        post_all();
+        assert_eq!(
+            heard.try_iter().collect::<Vec<_>>(),
+            Vec::new(),
+            "a registration outlived its drop"
+        );
+    }
+
         );
         assert_eq!(
             place(32.0),

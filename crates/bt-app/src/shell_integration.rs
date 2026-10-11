@@ -633,7 +633,7 @@ pub fn shell_command(
         mine,
     ));
     command.environment.extend(locale_declaration(
-        bt_platform::system_locale_declaration(),
+        crate::locale_declaration::held().as_ref(),
         environment,
         mine,
     ));
@@ -706,7 +706,7 @@ pub(crate) fn derive_environment_for_birth(
     }
     if !LOCALE_VARIABLES.iter().any(|name| profile_has(name)) {
         folio.extend(locale_declaration(
-            bt_platform::system_locale_declaration(),
+            crate::locale_declaration::held().as_ref(),
             &environment,
             &[],
         ));
@@ -1941,8 +1941,8 @@ const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
 /// # Why this exists on one platform and not on the other
 ///
 /// A Windows pane inherits a full environment from a logon session, and `LANG`
-/// is not part of how that platform tells a child its encoding, so
-/// [`bt_platform::system_locale_declaration`] answers `None` there and this
+/// is not part of how that platform tells a child its encoding, so the locale cell
+/// ([`crate::locale_declaration::held`]) holds `None` there and this
 /// declares nothing — the Windows spawn is byte for byte what it was. An app
 /// launched from Finder inherits `launchd`'s environment instead, which sets
 /// `HOME`, `USER`, `SHELL`, `TMPDIR` and a bare `PATH` and **no `LC_*` at all**:
@@ -1992,13 +1992,7 @@ fn locale_declaration(
     let Some(declaration) = system else {
         return Vec::new();
     };
-    let answered = LOCALE_VARIABLES.iter().any(|name| {
-        environment
-            .var_os(name)
-            .is_some_and(|value| !value.is_empty())
-            || mine.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
-    });
-    if answered {
+    if !listens_for_a_locale(environment, mine) {
         return Vec::new();
     }
     declaration
@@ -2006,6 +2000,24 @@ fn locale_declaration(
         .iter()
         .map(|(name, value)| (OsString::from(*name), OsString::from(value)))
         .collect()
+}
+
+/// **Whether a pane would be told the system's locale** — [`locale_declaration`]'s one rule
+/// read without the declaration: no locale variable it inherits answers already (a `LANG`,
+/// `LC_CTYPE` or `LC_ALL` that is not empty), and the profile's own environment names none of
+/// them. A pane's birth asks this before it waits for the system's locale (T-OS-SIGNALS-MAC): a
+/// pane that would not be told one has nothing to wait for.
+#[must_use]
+pub(crate) fn listens_for_a_locale(
+    environment: &dyn ShellEnvironment,
+    mine: &[(String, String)],
+) -> bool {
+    !LOCALE_VARIABLES.iter().any(|name| {
+        environment
+            .var_os(name)
+            .is_some_and(|value| !value.is_empty())
+            || mine.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
+    })
 }
 
 /// **Whether a session of this profile is told this terminal renders links** —
@@ -8341,8 +8353,8 @@ mod tests {
     /// A Finder-launched app inherits `launchd`'s environment, which sets no
     /// `LC_*`, and a shell started in it runs in the `C` locale where a UTF-8
     /// filename lists as question marks and `天下为公` comes back out of the line
-    /// editor a character at a time. Off macOS
-    /// `bt_platform::system_locale_declaration` answers `None` and this declares
+    /// editor a character at a time. Off macOS the locale cell
+    /// (`crate::locale_declaration::held`) holds `None` and this declares
     /// nothing at all, which is what keeps the Windows spawn byte for byte what
     /// it was.
     ///
@@ -9144,7 +9156,7 @@ mod tests {
             assert_eq!(
                 command.environment,
                 locale_declaration(
-                    bt_platform::system_locale_declaration(),
+                    crate::locale_declaration::held().as_ref(),
                     &bare(),
                     &profile.env
                 ),

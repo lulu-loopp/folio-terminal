@@ -8129,12 +8129,63 @@ impl LocaleDeclaration {
 /// the platform does not use. That is the same rule this function states for
 /// macOS read from the other side — say what the system says, or say nothing.
 ///
-/// Read once per process: it costs two child processes, and the answer is a
-/// system setting that a running app does not watch.
+/// # How it is read
+///
+/// Two child processes, `defaults read -g AppleLocale` and `locale -a`, run in that order on a
+/// worker through [`probe_outputs_within`] with **one** budget for both,
+/// [`LOCALE_PROBE_BUDGET`] (B5 design note, revision (c)4). The reading is asked again whenever
+/// the system says the locale changed, and the asking, the newest answer and the retries belong
+/// to the application (`bt-app`'s locale cell); this function only reads.
+///
+/// **Each half may fail on its own** — a program that would not start, a non-zero exit, output
+/// that is not text, or the budget spent first — and its text is then empty, which is what
+/// [`choose_locale_declaration`] has always been handed for a machine that did not say: a machine
+/// that will not say what its region is still has an encoding, and the fallback is about the
+/// encoding alone. The reading says that it failed beside what it chose
+/// ([`LocaleReading::failure`]), so its owner asks again rather than keep it as the answer.
+pub fn read_system_locale_declaration(worker: &admission::WorkerCtx) -> LocaleReading {
+    #[cfg(target_os = "macos")]
+    {
+        read_macos_locale_declaration(worker)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = worker;
+        LocaleReading {
+            declaration: None,
+            failure: None,
+        }
+    }
+}
+
+/// **Whether this platform declares a locale to a new pane at all** — whether
+/// [`read_system_locale_declaration`] has anything to read. macOS does; Windows and every other
+/// platform answer `None` without a child, for the reason the declaration's own documentation
+/// gives.
 #[must_use]
-pub fn system_locale_declaration() -> Option<&'static LocaleDeclaration> {
-    static LOCALE: std::sync::OnceLock<Option<LocaleDeclaration>> = std::sync::OnceLock::new();
-    LOCALE.get_or_init(read_system_locale_declaration).as_ref()
+pub const fn system_locale_is_declared() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// How long both children of the locale reading may take **together** (revision (c)4): B3's ten
+/// seconds, once for the run rather than once per child.
+pub const LOCALE_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// **One reading of the system's locale** ([`read_system_locale_declaration`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocaleReading {
+    /// What [`choose_locale_declaration`] made of what the machine said.
+    pub declaration: Option<LocaleDeclaration>,
+    /// Why the reading is incomplete, when it is: which half did not answer, and how. `None`
+    /// when both answered.
+    pub failure: Option<String>,
 }
 
 /// Where Darwin keeps the one category its encoding-only locale defines.
@@ -8146,44 +8197,55 @@ pub fn system_locale_declaration() -> Option<&'static LocaleDeclaration> {
 pub const UTF8_CTYPE_LOCALE_FILE: &str = "/usr/share/locale/UTF-8/LC_CTYPE";
 
 #[cfg(target_os = "macos")]
-fn read_system_locale_declaration() -> Option<LocaleDeclaration> {
-    // Each of the two readings is allowed to fail on its own: a machine that
-    // will not say what its region is still has an encoding, and the fallback
-    // below is about the encoding alone.
-    let apple_locale =
-        quiet_command_text("defaults", &["read", "-g", "AppleLocale"]).unwrap_or_default();
-    let installed = quiet_command_text("locale", &["-a"]).unwrap_or_default();
-    choose_locale_declaration(
-        &apple_locale,
-        installed.lines(),
-        std::path::Path::new(UTF8_CTYPE_LOCALE_FILE).exists(),
-    )
+fn read_macos_locale_declaration(worker: &admission::WorkerCtx) -> LocaleReading {
+    const HALVES: [&str; 2] = ["defaults read -g AppleLocale", "locale -a"];
+    let mut defaults = quiet_command("defaults");
+    defaults.args(["read", "-g", "AppleLocale"]);
+    let mut locale = quiet_command("locale");
+    locale.arg("-a");
+    let (answers, overran) =
+        match probe_outputs_within(worker, vec![defaults, locale], LOCALE_PROBE_BUDGET) {
+            ProbeRun::Finished(answers) => (answers, false),
+            ProbeRun::Overran { finished } => (finished, true),
+        };
+    let mut failures = Vec::new();
+    let mut texts = [String::new(), String::new()];
+    for (index, answer) in answers.into_iter().enumerate() {
+        match said_text(answer) {
+            Ok(text) => texts[index] = text,
+            Err(why) => failures.push(format!("`{}` {why}", HALVES[index])),
+        }
+    }
+    if overran {
+        failures.push(format!(
+            "the reading was ended when its {} s budget was spent",
+            LOCALE_PROBE_BUDGET.as_secs()
+        ));
+    }
+    let [apple_locale, installed] = texts;
+    LocaleReading {
+        declaration: choose_locale_declaration(
+            &apple_locale,
+            installed.lines(),
+            std::path::Path::new(UTF8_CTYPE_LOCALE_FILE).exists(),
+        ),
+        failure: (!failures.is_empty()).then(|| failures.join("; ")),
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn read_system_locale_declaration() -> Option<LocaleDeclaration> {
-    None
-}
-
-/// One short-lived child, through the one door, read for its standard output.
-///
-/// `None` for a program that would not start, a non-zero exit and output that is
-/// not text — all three are the same answer here, which is *this machine did not
-/// say*, and the caller's whole contract is to carry on without it.
+/// One child's standard output as text, or why there is none: a program that would not start,
+/// a non-zero exit, or output that is not text.
 #[cfg(target_os = "macos")]
-fn quiet_command_text(program: &str, arguments: &[&str]) -> Option<String> {
-    let mut command = quiet_command(program);
-    command.args(arguments);
-    let output = probe_output(command).ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8(output.stdout).ok())
-        .flatten()
+fn said_text(answer: std::io::Result<std::process::Output>) -> Result<String, String> {
+    let output = answer.map_err(|error| format!("would not start ({error})"))?;
+    if !output.status.success() {
+        return Err(format!("ended with {}", output.status));
+    }
+    String::from_utf8(output.stdout).map_err(|_| "said something that is not text".to_owned())
 }
 
 /// `AppleLocale` as POSIX would spell it, most specific first — the candidates
-/// [`system_locale_declaration`] looks for among the locales a machine has.
+/// [`read_system_locale_declaration`] looks for among the locales a machine has.
 ///
 /// Two forms and no more, because a third would be a guess:
 ///
@@ -8238,7 +8300,7 @@ pub fn posix_locale_candidates(apple_locale: &str) -> Vec<String> {
 /// The match is exact on the name, because that is what `setlocale` will look up
 /// and a near-miss is a locale that is not there. `C.UTF-8` is looked for in the
 /// same list and by the same rule; `utf8_ctype_installed` is a separate argument
-/// rather than a line of it for the reason [`system_locale_declaration`] gives —
+/// rather than a line of it for the reason [`read_system_locale_declaration`] gives —
 /// `UTF-8` is one category rather than a locale, `locale -a` does not list it,
 /// and the fact is read off the file system instead.
 #[must_use]
@@ -8913,6 +8975,7 @@ mod windows_impl {
         path: &Path,
     ) -> std::io::Result<crate::ProgramPathDirectory> {
         use crate::ProgramPathDirectory;
+        use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
 
         if !path.is_absolute() {
             return Err(std::io::Error::new(
@@ -8975,7 +9038,6 @@ mod windows_impl {
     ///
     /// **Why the backend keeps this instead of asking the caller** (M1-9,
     /// `docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②). `OpenClipboard`
-        use windows::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
     /// wants a window and `NSPasteboard` does not, so a window in the
     /// signature is a Windows requirement charged to every platform. It is the
     /// backend's requirement, so the backend answers it: a window constructor
@@ -17997,8 +18059,10 @@ pub enum SystemNews {
     /// This thread's input language or keyboard layout changed: `WM_INPUTLANGCHANGE`.
     /// Windows only: the macOS summon key is a key position, which no layout moves.
     InputLanguage,
-    /// A volume arrived or completed its removal. Windows only in this ticket; the payload is
-    /// deliberately reduced to the transition, with no sender-owned pointer leaving the call.
+    /// A volume arrived or completed its removal: `DBT_DEVICEARRIVAL` /
+    /// `DBT_DEVICEREMOVECOMPLETE` for a volume on Windows, `NSWorkspace`'s did-mount /
+    /// did-unmount notifications on macOS. The payload is deliberately reduced to the
+    /// transition, with no sender-owned pointer leaving the call.
     Volumes { arrived: bool },
 }
 
@@ -18024,6 +18088,9 @@ pub use windows_impl::{
     take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
     thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
     virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
+    /// The user's locale changed: `NSCurrentLocaleDidChangeNotification`. macOS only, where a
+    /// new pane is told its locale (`LANG`, `LC_CTYPE`) by Folio.
+    Locale,
     work_area_at, write_std_error, write_to_console,
 };
 

@@ -78,11 +78,12 @@ impl Runtime<'_> {
             let due: Vec<(SeatId, BirthAt, BirthDue)> = {
                 let programs = &self.app.profile_programs;
                 let rows_decide = |seed: &LeafSeed| decided_birth(seed, &stored, programs).is_ok();
+                let locale_settled = crate::locale_declaration::settled();
                 self.window.tabs[tab_index]
                     .sessions
                     .iter()
                     .flat_map(|(seat, leaf)| {
-                        births_due(leaf, &rows_decide)
+                        births_due(leaf, &rows_decide, locale_settled)
                             .into_iter()
                             .map(|(at, due)| (*seat, at, due))
                     })
