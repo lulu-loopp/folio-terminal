@@ -14821,6 +14821,13 @@ its `mutation-default-record` arm refuses to derive the Homebrew channel.
 
 **Pinned by** `runtime::tabs::birth_death_tests::{a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab, a_birth_death_with_output_keeps_the_pane_and_appends_its_face, an_exit_after_the_birth_grace_retires_as_before}` and `exit_diagnostics::tests::{a_spawn_fallback_names_both_programs_and_the_error_in_resident_diagnostics, a_nonrecoverable_spawn_failure_has_one_resident_line, birth_death_diagnostics_name_the_fallback_and_the_kept_pane}`.
 
+### 2026-10-10 — The macOS Dock badge destructor is not a thread-door exception (H5)
+
+`macos_notify::Taskbar::drop` performs only an atomic owner comparison and, when still on AppKit's
+main thread, clears the shared Dock badge. It starts and waits for nothing. The closed `Drop`
+inventory therefore retires its precautionary row; the thirteen debt-backed exception chains
+remain unchanged and are labelled TD-1 through TD-13 in the thread-door note's revision (n).
+
 ### 2026-10-10 — A pending birth-death fallback is owed the pane's latest size (T-FALLBACK-OWED-RESIZE)
 
 **What is built.** The pending last-resort shell carries the same landing record as an ordinary shell birth. A resize released before either shell lands is recorded there and reaches the new PTY through the existing landing-time resize door; a fallback that cannot start drops the owed size with its pending record when the pane is kept.

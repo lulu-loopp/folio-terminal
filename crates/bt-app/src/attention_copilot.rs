@@ -1724,10 +1724,21 @@ mod tests {
                 .expect("fixture");
         assert!(!declares_folio(&theirs));
         assert!(rows_declared_by(&theirs).is_empty());
-        // `apply` refuses, and the sentence is the one the user reads.
-        let source = include_str!("attention_copilot.rs");
-        assert!(source.contains("a hook file of your own already stands under that name"));
-        assert!(source.contains("is not one this build can read"));
+        // Drive the real filesystem seam: both decisions refuse with the sentence the user reads,
+        // and neither one rewrites a byte of the foreign document.
+        let home = scratch("foreign");
+        let hooks = home.join(HOOKS_DIRECTORY);
+        let path = hooks.join(HOOKS_FILE);
+        std::fs::create_dir_all(&hooks).expect("a scratch directory");
+        let bytes = serde_json::to_vec(&theirs).expect("fixture renders");
+        std::fs::write(&path, &bytes).expect("their hook file");
+        for install in [true, false] {
+            assert_eq!(
+                apply_to(&path, install, &exe()),
+                Outcome::Refused("a hook file of your own already stands under that name")
+            );
+            assert_eq!(std::fs::read(&path).expect("still there"), bytes);
+        }
         // And the entry test looks at all three columns, so a user who wrote their command in the
         // cross-platform `command` field is still recognised as themselves.
         for column in ["bash", "powershell", "command"] {
@@ -1761,6 +1772,7 @@ mod tests {
         assert!(has_unowned_entries(&mixed));
         // A document with no `hooks` at all is somebody's, whatever else it says.
         assert!(has_unowned_entries(&serde_json::json!({ "version": 1 })));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// **A version proved too old is refused; an absent answer is not.**

@@ -59,6 +59,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- On macOS and Linux, a profile that asks for PowerShell 7 now finds a `pwsh` on `PATH` (it used to find nothing outside Windows). <!-- zh: pending H5 -->
 - A copy installed with winget still updates with `winget upgrade`; the card is for zip, scoop and Homebrew copies. <!-- // zh: pending D2 -->
 - A Homebrew-installed copy is recognized from Homebrew's own record even when an official cask does not add Folio's install attributes. <!-- // zh: pending D2 -->
 - A long address in a web pane shows its site and page instead of being cut off: the middle of the path folds into …, and a narrow pane keeps the site. <!-- zh: 网页窗格中的长地址显示站点和页面，不再被截断：路径中段折叠为 …，窄窗格保留站点。 -->

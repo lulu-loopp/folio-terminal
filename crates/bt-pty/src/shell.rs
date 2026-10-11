@@ -36,7 +36,10 @@ use std::{
 };
 
 const BT_SHELL_ENV: &str = "BT_SHELL";
+#[cfg(windows)]
 const PWSH_EXE: &str = "pwsh.exe";
+#[cfg(unix)]
+const PWSH_EXE: &str = "pwsh";
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_EXE: &str = "powershell.exe";
 
@@ -329,7 +332,7 @@ fn system_shell_candidates() -> &'static [&'static str] {
     }
 }
 
-/// PowerShell 7 and **only** PowerShell 7 — `BT_SHELL`'s override, else an install of `pwsh.exe`,
+/// PowerShell 7 and **only** PowerShell 7 — `BT_SHELL`'s override, else an install of `pwsh`,
 /// else nothing.
 ///
 /// The same first two steps as [`resolve_default_shell`] without its third, and the difference is
@@ -344,10 +347,10 @@ fn system_shell_candidates() -> &'static [&'static str] {
 /// verbatim and unprobed — an override that pointed at nothing would leave the profile greyed
 /// rather than silently ignored, which is the honest reading of "used verbatim".
 ///
-/// It compiles off Windows and answers `None` there, which is the truth rather than an
-/// accommodation: `pwsh.exe` is a file name no Unix install of PowerShell 7 uses. The shipped
-/// profiles a macOS build offers are M1-5's, and the day one of them is a PowerShell this
-/// function grows the name that platform spells it with.
+/// On Windows the install probes below retain their `pwsh.exe` and well-known-location order. On
+/// Unix, where PowerShell is optional and has no shipped profile row, the one honest probe is an
+/// executable `pwsh` on `PATH`. That is also the resolution tests use when their subject really
+/// is PowerShell rather than the platform's default shell.
 #[must_use]
 pub fn resolve_powershell_seven(environment: &dyn ShellEnvironment) -> Option<OsString> {
     if let Some(overridden) = environment
@@ -359,12 +362,13 @@ pub fn resolve_powershell_seven(environment: &dyn ShellEnvironment) -> Option<Os
     find_pwsh(environment)
 }
 
-/// `PATH` search first, then the two well-known install locations that are not guaranteed to be
+/// On Windows, `PATH` search first, then the two well-known install locations that are not guaranteed to be
 /// on `PATH`: the traditional MSI/`winget` layout under `%ProgramFiles%\PowerShell\7`, and the
 /// Microsoft Store app-execution alias under `%LocalAppData%\Microsoft\WindowsApps`. All three are
 /// probed by direct filesystem check rather than assumed present, because on a real machine
 /// PowerShell 7 can land through any one of an MSI install, `winget`, or the Store, and only the
 /// first of those reliably ends up on `PATH`.
+#[cfg(windows)]
 fn find_pwsh(environment: &dyn ShellEnvironment) -> Option<OsString> {
     if let Some(found) = search_path_for(environment, PWSH_EXE) {
         return Some(found.into_os_string());
@@ -388,6 +392,12 @@ fn find_pwsh(environment: &dyn ShellEnvironment) -> Option<OsString> {
         }
     }
     None
+}
+
+/// Unix PowerShell has one portable executable name and no platform-owned install location.
+#[cfg(unix)]
+fn find_pwsh(environment: &dyn ShellEnvironment) -> Option<OsString> {
+    search_path_for(environment, PWSH_EXE).map(PathBuf::into_os_string)
 }
 
 /// A `PATH`-directory search for `file_name`, going through the injected probe end to end
@@ -631,6 +641,26 @@ mod tests {
         let resolved = resolve_default_shell(&environment);
         assert_eq!(resolved.choice, ShellChoice::Override);
         assert_eq!(resolved.program, OsStr::new("my-shell"));
+    }
+
+    /// PowerShell is optional on Unix, but when a test asks specifically for PowerShell the
+    /// repository's resolver finds the platform spelling instead of silently starting zsh.
+    ///
+    /// MUTATION: search for `pwsh.exe` here, or return `None` from Unix's `find_pwsh`, and this
+    /// loses the executable planted in the second `PATH` directory.
+    #[cfg(unix)]
+    #[test]
+    fn powershell_seven_on_unix_is_resolved_from_path() {
+        let pwsh = PathBuf::from("/opt/powershell/bin/pwsh");
+        let path = env::join_paths(["/usr/bin", "/opt/powershell/bin"])
+            .expect("Unix fixture paths join cleanly");
+        let environment = FakeShellEnvironment::new()
+            .with_var("PATH", path)
+            .with_file(pwsh.clone());
+        assert_eq!(
+            resolve_powershell_seven(&environment),
+            Some(pwsh.into_os_string())
+        );
     }
 
     #[cfg(windows)]

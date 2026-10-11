@@ -10,6 +10,7 @@ use crate::test_support::{
     text_buffer,
 };
 use bt_source::{ItemQuery, Pattern, Search, View, needle};
+use std::ffi::OsString;
 use std::time::Duration;
 
 /// Runs the actual production queue in a disposable process. The watchdog
@@ -447,12 +448,33 @@ fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_plac
 fn real_powershell_input_reaches_a_viewport_owned_frame() {
     let columns = std::num::NonZeroU16::new(48).unwrap();
     let rows = std::num::NonZeroU16::new(10).unwrap();
-    // The default shell, resolved as a pane resolves it, but started through `TestShell`:
+    let powershell = bt_pty::resolve_powershell_seven(&bt_pty::SystemShellEnvironment);
+    #[cfg(windows)]
+    let powershell = powershell.unwrap_or_else(|| OsString::from(bt_pty::WINDOWS_POWERSHELL));
+    #[cfg(unix)]
+    let Some(powershell) = powershell else {
+        eprintln!(
+            "BT_APP_TEST skipped=tests::real_powershell_input_reaches_a_viewport_owned_frame \
+             reason=no-pwsh-on-path"
+        );
+        return;
+    };
+    let arguments = [OsString::from("-NoLogo")];
+    // PowerShell, found through the repository's shell resolution and started through
+    // `TestShell`:
     // without the user's `$PROFILE`, and with history refused (and read back) before the line
     // below is typed. Started the ordinary way, this test appended that line to the user's own
     // PSReadLine history on every run (T-TEST-SHELL-HYGIENE).
-    let mut pty =
-        bt_pty::test_shell::TestShell::spawn_default(PtySize::cells(columns, rows)).unwrap();
+    let mut pty = bt_pty::test_shell::TestShell::spawn_shell_in(
+        bt_pty::test_shell::Hygiene::new(),
+        powershell,
+        &arguments,
+        &bt_pty::last_resort_arguments,
+        &[],
+        PtySize::cells(columns, rows),
+        None,
+    )
+    .unwrap();
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
         nonzero_u32(columns.get()),
         nonzero_u32(rows.get()),

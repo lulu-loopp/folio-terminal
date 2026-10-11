@@ -6145,3 +6145,43 @@ dated DESIGN entry of this revision:
 added without a ruling; two rows pending); `cargo test -p bt-app -j 6 -- window_wait every_bare_site_is_a_row`
 (the registry's six tests, the §5.3 table among them); `cargo test -p bt-source --test census` and
 `--test real_workspace` (the wholly-test files stay the twenty `main` pins); `scripts/check-machine-paths.ps1`.
+
+---
+
+## Revision (n), 2026-10-10 — the live exception table is thirteen rows
+
+H5 re-ran the spawn census on `dd284ece`: `std::thread::spawn`, `thread::Builder`,
+`spawn_blocking`, the thread door and the window-thread doors. There is no new product bypass.
+The live census remains the architecture table's 54 production spawn sites: 36 in `bt-app`, 14
+in `bt-platform`, four deliberately bare in `bt-pty`, plus the one rayon pool. The executable
+guard `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` remains the
+authority for the 50 first-party sites that owe the door.
+
+The exception table is reconciled below. Stable `TD` labels belong to the rows from this revision
+onward; a retained row keeps its label until repayment.
+
+| id | live exception | debt / present justification | 2026-10-10 disposition |
+|---|---|---|---|
+| TD-1 | `DirWatch` (Windows) | D-40; `Drop` signals and joins the watcher | retained |
+| TD-2 | `DirWatch` (macOS) | D-40; `Drop` stops and joins the event stream | retained |
+| TD-3 | `trace_sink::Shutdown` | D-78; `Drop` performs the admitted trace flush | retained |
+| TD-4 | `AttentionPipe` (Windows) | D-79; `Drop` joins the listener | retained |
+| TD-5 | `AttentionPipe` (Unix) | D-79; `Drop` joins the listener | retained |
+| TD-6 | `LaunchPipe` (Windows) | D-79; `Drop` joins the listener | retained |
+| TD-7 | `LaunchPipe` (Unix) | D-79; `Drop` joins the listener | retained |
+| TD-8 | `video::engine::Engine` | D-80; `Drop` shuts down and joins the engine | retained |
+| TD-9 | `macos_player::Engine` | D-80; `Drop` shuts down and joins the player | retained |
+| TD-10 | `VideoSeat` | D-80; `Drop` reaches the engine shutdown | retained |
+| TD-11 | `VideoSeats` | D-80; `Drop` reaches each seat shutdown | retained |
+| TD-12 | `PtySession` | D-81; `Drop` finishes the dump and performs bounded reap/join | retained |
+| TD-13 | `http::Request` (Windows) | D-82; `Drop` waits for WinHTTP close on the update worker | retained |
+| TD-14 | `Taskbar` (macOS) | no debt row; atomic owner check plus main-thread Dock badge clear only | **retired 2026-10-10** |
+
+TD-14 was admitted on 2026-10-05 as a precaution around the new shared Dock badge. Its current
+body reaches no wait, join, spawn, child process or file-read vocabulary: `MainThreadMarker::new`
+is a non-blocking runtime proof, not a wait. The source-only resolver cannot index objc2 and used
+to lend that exact foreign call every first-party method named `new`, including the compositor
+constructor; the guard now excludes only that fully qualified call in Taskbar's destructor, with
+a mutation that restores the false edge. Keeping the row would turn a closed inventory into a
+list of harmless destructors. `EXCEPTIONS` therefore contracts 14 → 13 and `PINNED` 41 → 40; the
+source walker still closes every retained chain. No structural-debt row is closed or changed.
