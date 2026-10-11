@@ -1,5 +1,44 @@
 //! Native metadata needed when replacing a file owned by the user.
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+/// **A fresh name beside `path`**: `<name>.<kind>-<pid>-<nanos>-<n>`, in the
+/// same directory, so a rename or an exchange between the two never crosses a
+/// volume. The one recipe for every sibling a write makes — the staging file
+/// (`bt_persist`'s `.tmp-`) and the exchange door's displaced copy
+/// (`.displaced-`).
+///
+/// Unique within the process by its counter, even when the clock does not
+/// advance between two calls; the wall clock and the process id keep two
+/// processes writing one directory apart. Collision avoidance, not secrecy: a
+/// caller that must not reuse a name asks the filesystem, and the exchange
+/// door refuses a name that is already taken.
+///
+/// # Errors
+/// `InvalidInput` when `path` has no file name.
+pub fn sibling_path(path: &Path, kind: &str) -> io::Result<PathBuf> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let mut name = file_name.to_os_string();
+    name.push(format!(".{kind}-{pid:x}-{nanos:x}-{n:x}"));
+    Ok(dir.join(name))
+}
 
 /// Query the opened file, not a path inferred from its name.
 pub fn file_link_count(file: &fs::File) -> io::Result<u64> {
@@ -316,6 +355,31 @@ fn replace_file_preserving_with(
     rename: impl Fn(&Path, &Path) -> io::Result<()>,
     link: impl Fn(&Path, &Path) -> io::Result<()>,
 ) -> Result<(), ReplaceRefusal> {
+    replace_keeping_backup_with(temp, target, recovery, replace, rename, link)?;
+    let _ = retire_recovery(recovery, target);
+    Ok(())
+}
+
+/// **`ReplaceFileW` and its ladder, with the backup left where the call put
+/// it.** The one owner of the call's partial states, shared by the preserving
+/// save (which then retires the backup) and the exchange door
+/// (`crate::exchange`, which answers with it: after a successful call the
+/// backup holds exactly the bytes the target held).
+///
+/// On a refusal the ladder is the same for both: `ERROR_UNABLE_TO_MOVE_REPLACEMENT_2`
+/// renames the backup back under the target's name; any other code is
+/// classified from the filesystem (`target` still there, `backup` never made)
+/// before anything is cleaned, and a backup that is only a redundant copy is
+/// removed.
+#[cfg(windows)]
+pub(crate) fn replace_keeping_backup_with(
+    temp: &Path,
+    target: &Path,
+    backup: &Path,
+    replace: impl Fn(&Path, &Path, &Path) -> io::Result<()>,
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), ReplaceRefusal> {
     use std::os::windows::fs::MetadataExt;
     let attributes = fs::metadata(target).ok().map(|data| data.file_attributes());
     // Hidden/Archive/System flags are not in ReplaceFileW's documented merge
@@ -326,21 +390,21 @@ fn replace_file_preserving_with(
     if let Some(word) = attributes {
         let _ = set_file_attributes(temp, word & !READ_ONLY);
     }
-    if let Err(error) = replace(temp, target, recovery) {
+    if let Err(error) = replace(temp, target, backup) {
         // Asked of the filesystem rather than assumed from the error code: the
         // document is still under its own name, and no backup was materialised.
         // Read before anything is cleaned up, because the cleanup would change
         // the answer.
-        let untouched = target.exists() && !recovery.exists();
+        let untouched = target.exists() && !backup.exists();
         if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
             return Err(ReplaceRefusal::Refused(restore_replaced(
-                error, recovery, target, rename, link,
+                error, backup, target, rename, link,
             )));
         }
         // Classified from the code the volume gave, before any message is built
         // around it.
         let cannot = untouched && volume_cannot_replace(error.raw_os_error());
-        let error = retiring(error, recovery, target);
+        let error = retiring(error, backup, target);
         return Err(if cannot {
             ReplaceRefusal::VolumeCannot(error)
         } else {
@@ -354,7 +418,6 @@ fn replace_file_preserving_with(
     if let Some(word) = attributes {
         let _ = set_file_attributes(target, word);
     }
-    let _ = retire_recovery(recovery, target);
     Ok(())
 }
 
@@ -422,7 +485,7 @@ fn restore_replaced(
 }
 
 #[cfg(windows)]
-fn replace_file_w(temp: &Path, target: &Path, recovery: &Path) -> io::Result<()> {
+pub(crate) fn replace_file_w(temp: &Path, target: &Path, recovery: &Path) -> io::Result<()> {
     use windows::{
         Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW},
         core::PCWSTR,
@@ -445,12 +508,12 @@ fn replace_file_w(temp: &Path, target: &Path, recovery: &Path) -> io::Result<()>
 }
 
 #[cfg(windows)]
-fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
 #[cfg(windows)]
-fn link_path(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn link_path(from: &Path, to: &Path) -> io::Result<()> {
     fs::hard_link(from, to)
 }
 
