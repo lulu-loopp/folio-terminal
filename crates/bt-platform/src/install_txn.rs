@@ -363,7 +363,7 @@ const COPY_CHUNK: usize = 64 * 1024;
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// The directory a path is in; `.` for a bare file name.
-fn directory_of(path: &Path) -> &Path {
+pub(crate) fn directory_of(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -509,6 +509,17 @@ pub(crate) fn durable_create_dir_with<S: Surface>(
         .create_directory(path)
         .map_err(|error| Failure::at(Stage::CreateDirectory, path, error))?;
     flush_directory(surface, directory_of(path))
+}
+
+/// **The directory flush, alone, with the operating system's calls** — the
+/// step every durable effect here ends with, lent to the exchange door
+/// (`crate::exchange::flush_directory`) so a document's exchange is made
+/// durable by the same calls an update's journal is: `FlushFileBuffers` on a
+/// handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, `F_FULLFSYNC` on the
+/// directory's descriptor.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn flush_directory_on_disk(directory: &Path) -> Result<(), Failure> {
+    flush_directory(&mut arm::Os, directory)
 }
 
 fn flush_directory<S: Surface>(surface: &mut S, directory: &Path) -> Result<(), Failure> {
