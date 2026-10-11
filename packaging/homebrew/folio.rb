@@ -18,7 +18,6 @@ cask "folio" do
   # `brew upgrade` upgrades Folio only when the bundle's own version is older
   # than this cask's, and never puts back a version Folio has moved past.
   auto_updates true
-
   depends_on arch: :arm64
   depends_on macos: :sonoma
 
