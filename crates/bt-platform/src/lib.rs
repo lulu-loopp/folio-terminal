@@ -16019,11 +16019,19 @@ mod windows_impl {
     /// completion and on a stop event at once, so `drop` is a `SetEvent` and a
     /// join rather than a flag the thread notices on its next notification —
     /// which for a directory nothing is writing to would be never.
+    ///
+    /// **It can also end on its own** (T-DIRWATCH-LIFECYCLE): a read the kernel
+    /// refuses after the first, or a completion that reports an error (the
+    /// directory removed, the share gone, the handle closed under it), ends the
+    /// watcher thread. The error is kept in `crate::watch_end::WatchEnd`,
+    /// [`DirWatch::is_armed`] turns false, and `wake` is called once with
+    /// [`DirChange::Ended`].
     pub struct DirWatch {
         dir: SendHandle,
         stop: SendHandle,
         change: SendHandle,
         thread: Option<std::thread::JoinHandle<()>>,
+        end: Arc<crate::watch_end::WatchEnd>,
     }
 
     /// A kernel handle on its way to the thread that will use it.
@@ -16108,6 +16116,24 @@ mod windows_impl {
         /// changed; nothing can say what. **A name filter must let this through**
         /// — see [`DirWatch`].
         Unknown,
+        /// **The watch ended on its own** (T-DIRWATCH-LIFECYCLE): the last call
+        /// `wake` gets. The watch is no longer armed and
+        /// [`DirWatch::take_failure`] holds why. A drop is not an end and sends
+        /// nothing.
+        Ended,
+    }
+
+    impl DirChange<'_> {
+        /// **What a nameless door says**: every change is [`Self::Unknown`] —
+        /// *something moved* — and the end is still the end. The two nameless
+        /// doors hand their callers this, so the names never leave the door.
+        #[must_use]
+        pub fn nameless(self) -> DirChange<'static> {
+            match self {
+                Self::Ended => DirChange::Ended,
+                Self::Named(_) | Self::Unknown => DirChange::Unknown,
+            }
+        }
     }
 
     /// **Test-only: a place to hold the watcher thread just short of a read.**
@@ -16269,20 +16295,23 @@ mod windows_impl {
     }
 
     impl DirWatch {
-        /// A returned watcher has already armed its first read.
+        /// Whether the watcher is still listening: a returned watcher has armed
+        /// its first read, and stays armed until it ends on its own.
         #[must_use]
         pub fn is_armed(&self) -> bool {
-            true
+            self.end.still_armed()
         }
 
-        /// Windows reports watch failures before returning the watcher.
+        /// The error that ended the watcher on its own, handed over once.
         pub fn take_failure(&mut self) -> Option<std::io::Error> {
-            None
+            self.end.take_failure()
         }
 
         /// Start watching `path` and everything under it.
         ///
-        /// `wake` is called on the watcher thread, once per notification, and is
+        /// `wake` is called on the watcher thread, once per notification, with
+        /// [`DirChange::Unknown`] (this door reads no names) and, if the watch
+        /// ends on its own, once more with [`DirChange::Ended`]. It is
         /// expected to do nothing but record the news and nudge whatever loop is
         /// going to act on it. Anything slower belongs on the other side of that
         /// nudge: this thread is the only thing standing between the kernel's
@@ -16308,11 +16337,18 @@ mod windows_impl {
         /// that is refused is one of these: it comes back from here as an `Err`
         /// with a thread already joined behind it, not as a thread that quietly
         /// stops after the caller has been told it has a watcher.
+        ///
+        /// **Only a worker may start one** (`ctx`, the thread door's capability):
+        /// the wait for the first read and the join on refusal happen here, and
+        /// the window thread never waits (B5 design note, revision (c)3).
         pub fn start(
+            ctx: &crate::admission::WorkerCtx,
             path: &Path,
-            wake: impl Fn() + Send + 'static,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
         ) -> Result<Self, std::io::Error> {
-            Self::start_scoped(path, WatchDepth::Tree, move |_| wake())
+            Self::start_scoped(ctx, path, WatchDepth::Tree, move |change| {
+                wake(change.nameless())
+            })
         }
 
         /// The same subscription over **this directory and no deeper**.
@@ -16326,10 +16362,13 @@ mod windows_impl {
         /// mean a `target\debug` under the folder somebody is previewing a
         /// README out of woke this thread for every object file a build wrote.
         pub fn start_shallow(
+            ctx: &crate::admission::WorkerCtx,
             path: &Path,
-            wake: impl Fn() + Send + 'static,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
         ) -> Result<Self, std::io::Error> {
-            Self::start_scoped(path, WatchDepth::HereOnly, move |_| wake())
+            Self::start_scoped(ctx, path, WatchDepth::HereOnly, move |change| {
+                wake(change.nameless())
+            })
         }
 
         /// **The same shallow subscription, told which entry moved** (user
@@ -16346,13 +16385,15 @@ mod windows_impl {
         /// an overflow, and a filter is the cheapest possible thing to do here —
         /// which is the point.
         pub fn start_shallow_named(
+            ctx: &crate::admission::WorkerCtx,
             path: &Path,
             wake: impl Fn(DirChange<'_>) + Send + 'static,
         ) -> Result<Self, std::io::Error> {
-            Self::start_scoped(path, WatchDepth::HereOnly, wake)
+            Self::start_scoped(ctx, path, WatchDepth::HereOnly, wake)
         }
 
         fn start_scoped(
+            _ctx: &crate::admission::WorkerCtx,
             path: &Path,
             depth: WatchDepth,
             wake: impl Fn(DirChange<'_>) + Send + 'static,
@@ -16413,10 +16454,12 @@ mod windows_impl {
             // that dies in private after the caller has been told it has a
             // watcher.
             let (armed, listening) = std::sync::mpsc::channel::<Result<(), std::io::Error>>();
+            let end = Arc::new(crate::watch_end::WatchEnd::default());
+            let ended = Arc::clone(&end);
             let thread = crate::spawn_at_priority(
                 "bt-dir-watch",
                 crate::ThreadPriority::Normal,
-                move |_ctx| watch_loop(dir, change, stop, depth, armed, wake),
+                move |_ctx| watch_loop(dir, change, stop, depth, armed, &ended, wake),
             );
             let thread = match thread {
                 Ok(thread) => thread,
@@ -16439,6 +16482,7 @@ mod windows_impl {
                         stop,
                         change,
                         thread: Some(thread),
+                        end,
                     });
                 }
                 Ok(Err(error)) => error,
@@ -16485,13 +16529,17 @@ mod windows_impl {
     ///
     /// `armed` carries the outcome of the *first* read back to [`DirWatch::start`],
     /// which is blocked on it — see the promise that function makes. Every pass
-    /// after that one is this thread's own business.
+    /// after that one is this thread's own business, and a pass that fails ends
+    /// the watch through `end` (T-DIRWATCH-LIFECYCLE): the error is recorded and
+    /// `wake` hears [`DirChange::Ended`] once. Only the stop event ends it
+    /// without a word.
     fn watch_loop(
         dir: SendHandle,
         change: SendHandle,
         stop: SendHandle,
         depth: WatchDepth,
         armed: std::sync::mpsc::Sender<Result<(), std::io::Error>>,
+        end: &crate::watch_end::WatchEnd,
         wake: impl Fn(DirChange<'_>),
     ) {
         // `u32` and not `u8`: the kernel writes `FILE_NOTIFY_INFORMATION` records
@@ -16547,30 +16595,52 @@ mod windows_impl {
                 first_read_gate::note_read_issued(depth);
             }
             if let Some(armed) = armed.take() {
+                // The first pass answers `start`, whose error a refused first
+                // read is: the caller never had a watch, so nothing has ended.
                 let _ = armed.send(issued.clone().map_err(win32_io_error));
-            }
-            if issued.is_err() {
-                // The directory went away, or the handle did. There is nothing
-                // left to watch and nothing to report: the caller keeps whatever
-                // it last knew, and the page's own refresh is still there.
+                if issued.is_err() {
+                    return;
+                }
+            } else if let Err(error) = issued {
+                // The directory went away, or the handle did, after the caller
+                // was told it had a watch: the watch has ended.
+                end.record(win32_io_error(error));
+                wake(DirChange::Ended);
                 return;
             }
             let signalled = unsafe { WaitForMultipleObjects(&[stop.0, change.0], false, INFINITE) };
             if signalled != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
-                // Stopped, or the wait itself failed. Either way this thread is
+                // Stopped, or the wait itself failed — the error read before
+                // anything else can overwrite it. Either way this thread is
                 // finished — but the read it issued is still outstanding, and the
                 // `OVERLAPPED` it is writing into is about to go out of scope, so
                 // it is cancelled and *waited for* before that happens.
+                let failed = (signalled != WAIT_OBJECT_0).then(std::io::Error::last_os_error);
                 unsafe {
                     let _ = CancelIoEx(dir.0, Some(std::ptr::from_ref(&overlapped)));
                     let mut ignored = 0u32;
                     let _ = GetOverlappedResult(dir.0, &overlapped, &mut ignored, true);
                 }
+                // The stop is the owner's drop and says nothing; a failed wait
+                // is an end.
+                if let Some(error) = failed {
+                    end.record(error);
+                    wake(DirChange::Ended);
+                }
                 return;
             }
             let mut written = 0u32;
             let completed = unsafe { GetOverlappedResult(dir.0, &overlapped, &mut written, false) };
-            if completed.is_err() {
+            if let Err(error) = completed {
+                // `ERROR_NOTIFY_ENUM_DIR` is the kernel saying it could not keep
+                // the list (a remote directory's overflow): something changed and
+                // it will not say what, which is not an end.
+                if error.code() == windows::Win32::Foundation::ERROR_NOTIFY_ENUM_DIR.to_hresult() {
+                    wake(DirChange::Unknown);
+                    continue;
+                }
+                end.record(win32_io_error(error));
+                wake(DirChange::Ended);
                 return;
             }
             // `written == 0` is the kernel saying the buffer overflowed and it
@@ -18122,6 +18192,11 @@ pub use macos_dialogs::{
 /// this crate makes and owns. See the module's own header for why a run loop
 /// rather than a dispatch queue, and for what the shallow contract costs on a
 /// platform whose watcher cannot be told to stop at one level.
+/// **A directory watch's terminal failure, kept in one place** for both arms that can arm one
+/// (T-DIRWATCH-LIFECYCLE).
+#[cfg(any(windows, target_os = "macos"))]
+mod watch_end;
+
 #[cfg(target_os = "macos")]
 mod macos_watch;
 
@@ -20658,7 +20733,7 @@ mod watch_contract_tests {
         // them to the caller.
         for (arm, source) in &arms {
             assert!(
-                body_of(source, "start_shallow").contains("move |_| wake()"),
+                body_of(source, "start_shallow").contains("wake(change.nameless())"),
                 "the {arm} arm's nameless shallow door now carries names into a callback that \
                  does not take them"
             );
@@ -22283,11 +22358,26 @@ mod thread_priority_tests {
 /// (`bt_app::git_watch`).
 #[cfg(all(test, windows))]
 mod dir_watch_tests {
-    use super::{DirWatch, windows_impl::first_read_gate};
+    use super::{DirWatch, admission::WorkerCtx, windows_impl::first_read_gate};
     use std::{
         sync::mpsc,
         time::{Duration, Instant},
     };
+
+    /// **A watch is started where the product starts one: on a worker** — the
+    /// thread door lends the `WorkerCtx` every start takes. The test thread waits
+    /// for the worker's answer, as the steward does for its own starts.
+    fn on_a_worker<T: Send + 'static>(start: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+        super::spawn_at_priority("bt-dir-watch-test", super::ThreadPriority::Normal, start)
+            .expect("start a worker for the watch")
+            .join()
+            .expect("the worker answered")
+    }
+
+    /// The next thing a watch said, within [`ARRIVES_WITHIN`].
+    fn next_word<T>(rx: &mpsc::Receiver<T>) -> Option<T> {
+        rx.recv_timeout(ARRIVES_WITHIN).ok()
+    }
 
     /// Generous, because this is a claim about *eventually* and the machine
     /// running it may be building something. A notification for a local
@@ -22329,8 +22419,11 @@ mod dir_watch_tests {
         let _turn = first_read_gate::watchers_take_turns();
         let scratch = Scratch::new("basic");
         let (tx, rx) = mpsc::channel::<()>();
-        let watch = DirWatch::start(&scratch.0, move || {
-            let _ = tx.send(());
+        let path = scratch.0.clone();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start(ctx, &path, move |_| {
+                let _ = tx.send(());
+            })
         })
         .expect("watch a directory this process just made");
 
@@ -22411,8 +22504,11 @@ mod dir_watch_tests {
         std::fs::create_dir_all(&subtree).expect("make the subtree before arming");
         let recursive_reads_before = first_read_gate::recursive_reads();
         let (tx, rx) = mpsc::channel::<()>();
-        let watch = DirWatch::start_shallow(&scratch.0, move || {
-            let _ = tx.send(());
+        let path = scratch.0.clone();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start_shallow(ctx, &path, move |_| {
+                let _ = tx.send(());
+            })
         })
         .expect("watch a directory this process just made");
 
@@ -22461,15 +22557,18 @@ mod dir_watch_tests {
         let _turn = first_read_gate::watchers_take_turns();
         let scratch = Scratch::new("named");
         let (tx, rx) = mpsc::channel::<Vec<String>>();
-        let watch = DirWatch::start_shallow_named(&scratch.0, move |change| {
-            let names = match change {
-                super::DirChange::Named(names) => names
-                    .iter()
-                    .map(|name| name.to_string_lossy().to_lowercase())
-                    .collect(),
-                super::DirChange::Unknown => Vec::new(),
-            };
-            let _ = tx.send(names);
+        let path = scratch.0.clone();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start_shallow_named(ctx, &path, move |change| {
+                let names = match change {
+                    super::DirChange::Named(names) => names
+                        .iter()
+                        .map(|name| name.to_string_lossy().to_lowercase())
+                        .collect(),
+                    super::DirChange::Unknown | super::DirChange::Ended => Vec::new(),
+                };
+                let _ = tx.send(names);
+            })
         })
         .expect("watch a directory this process just made");
 
@@ -22533,8 +22632,11 @@ mod dir_watch_tests {
         // cannot get a read out under its own steam, so "a read is outstanding"
         // can only mean `start` waited for one.
         let gate = first_read_gate::hold();
-        let watch = DirWatch::start(&scratch.0, move || {
-            let _ = tx.send(());
+        let path = scratch.0.clone();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start(ctx, &path, move |_| {
+                let _ = tx.send(());
+            })
         })
         .expect("watch a directory this process just made");
         let outstanding_when_start_returned = gate.a_read_is_outstanding();
@@ -22584,7 +22686,8 @@ mod dir_watch_tests {
     fn a_directory_that_is_not_there_declines_to_be_watched() {
         let missing = bt_testpath::temp_path("bt-dir-watch-no-such-directory");
         let _ = std::fs::remove_dir_all(&missing);
-        let error = DirWatch::start(&missing, || {})
+        let path = missing.clone();
+        let error = on_a_worker(move |ctx| DirWatch::start(ctx, &path, |_| {}))
             .err()
             .expect("nothing to subscribe to, and no thread left running to say so later");
         assert_eq!(
@@ -22594,12 +22697,103 @@ mod dir_watch_tests {
         );
 
         let deeper = missing.join("nor").join("this");
-        let error = DirWatch::start(&deeper, || {}).err().expect("nor this one");
+        let error = on_a_worker(move |ctx| DirWatch::start(ctx, &deeper, |_| {}))
+            .err()
+            .expect("nor this one");
         assert_eq!(
             error.kind(),
             std::io::ErrorKind::NotFound,
             "and a folder whose parent is missing reports the same thing: {error}"
         );
+    }
+
+    /// PIN (T-DIRWATCH-LIFECYCLE; B5 design note, revision (b)5) — **a watch whose
+    /// directory goes away after it armed ends: unarmed, its error kept once, and
+    /// one `Ended` said.**
+    ///
+    /// Until this ticket `watch_loop` returned without a word when a later read
+    /// failed, `is_armed` answered `true` for ever and `take_failure` `None`, so a
+    /// folder whose watch had ended was believed heard. The directory is removed
+    /// under the open handle (all three share modes are granted, so the removal
+    /// goes through), which is the read error a deleted folder or a vanished share
+    /// gives.
+    ///
+    /// MUTATIONS: make `is_armed` answer `true` again — the second assertion goes
+    /// red; drop the `end.record` and `wake(DirChange::Ended)` from the failed
+    /// read's arm — no `Ended` is heard and the first goes red.
+    #[test]
+    fn a_watch_whose_directory_goes_away_ends_unarmed_and_says_so() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("ends");
+        let (tx, rx) = mpsc::channel::<bool>();
+        let path = scratch.0.clone();
+        let mut watch = on_a_worker(move |ctx| {
+            DirWatch::start(ctx, &path, move |change| {
+                let _ = tx.send(change == super::DirChange::Ended);
+            })
+        })
+        .expect("watch a directory this process just made");
+        assert!(watch.is_armed(), "a watch that has just started is armed");
+        std::fs::remove_dir_all(&scratch.0).expect("remove the watched directory");
+        let mut ended = false;
+        while let Some(end) = next_word(&rx) {
+            if end {
+                ended = true;
+                break;
+            }
+        }
+        assert!(
+            ended,
+            "the watch said `Ended` after its directory was removed"
+        );
+        assert!(
+            !watch.is_armed(),
+            "a watch whose directory is gone is not armed"
+        );
+        let error = watch.take_failure();
+        assert!(error.is_some(), "the error that ended it is kept");
+        assert!(
+            watch.take_failure().is_none(),
+            "and handed over once, not every time it is asked"
+        );
+        drop(watch);
+    }
+
+    /// PIN (T-DIRWATCH-LIFECYCLE) — **the named door hears the end as
+    /// `DirChange::Ended`, said once and last.**
+    ///
+    /// The steward tells an end from news by this variant alone, so it is pinned
+    /// at the door that carries variants.
+    ///
+    /// MUTATION: send `DirChange::Unknown` instead of `DirChange::Ended` in the
+    /// failed read's arm, and no `Ended` arrives.
+    #[test]
+    fn the_named_door_says_ended_when_its_directory_goes_away() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("ends-named");
+        let (tx, rx) = mpsc::channel::<bool>();
+        let path = scratch.0.clone();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start_shallow_named(ctx, &path, move |change| {
+                let _ = tx.send(change == super::DirChange::Ended);
+            })
+        })
+        .expect("watch a directory this process just made");
+        std::fs::remove_dir_all(&scratch.0).expect("remove the watched directory");
+        let mut ended = false;
+        while let Some(end) = next_word(&rx) {
+            if end {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "the end of the watch is said as `Ended`");
+        assert!(
+            next_word(&rx).is_none(),
+            "and nothing is said after it: the watcher thread has finished"
+        );
+        assert!(!watch.is_armed());
+        drop(watch);
     }
 }
 

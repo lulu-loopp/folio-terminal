@@ -808,6 +808,22 @@ pub enum DirChange<'a> {
     /// The watcher lost track. Something changed; nothing can say what. **A
     /// name filter must let this through.**
     Unknown,
+    /// The watch ended on its own, the last word a watcher says. Never said
+    /// here, where no watch starts.
+    Ended,
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl DirChange<'_> {
+    /// What a nameless door says: every change is [`Self::Unknown`], and the end
+    /// is still the end.
+    #[must_use]
+    pub fn nameless(self) -> DirChange<'static> {
+        match self {
+            Self::Ended => DirChange::Ended,
+            Self::Named(_) | Self::Unknown => DirChange::Unknown,
+        }
+    }
 }
 
 /// **A subscription to a directory, before FSEvents** (M2-1).
@@ -842,26 +858,32 @@ impl DirWatch {
     }
 
     /// The tree contract. Refused; M2-1.
-    pub fn start(path: &Path, wake: impl Fn() + Send + 'static) -> Result<Self, std::io::Error> {
-        let _ = (path, wake);
+    pub fn start(
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<Self, std::io::Error> {
+        let _ = (ctx, path, wake);
         Err(unwatched())
     }
 
     /// The here-only contract. Refused; M2-1.
     pub fn start_shallow(
+        ctx: &crate::admission::WorkerCtx,
         path: &Path,
-        wake: impl Fn() + Send + 'static,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
     ) -> Result<Self, std::io::Error> {
-        let _ = (path, wake);
+        let _ = (ctx, path, wake);
         Err(unwatched())
     }
 
     /// The named here-only contract. Refused; M2-1.
     pub fn start_shallow_named(
+        ctx: &crate::admission::WorkerCtx,
         path: &Path,
         wake: impl Fn(DirChange<'_>) + Send + 'static,
     ) -> Result<Self, std::io::Error> {
-        let _ = (path, wake);
+        let _ = (ctx, path, wake);
         Err(unwatched())
     }
 }
