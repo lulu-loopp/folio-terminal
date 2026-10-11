@@ -62,7 +62,8 @@ impl ProgramsEar {
         let rearm = self
             .watched
             .iter()
-            .filter_map(|(path, watched)| (!watched.heard).then(|| path.clone()))
+            .filter(|(_, watched)| !watched.heard)
+            .map(|(path, _)| path.clone())
             .collect();
         self.watched.retain(|path, _| wanted.contains(path));
         for path in &wanted {
