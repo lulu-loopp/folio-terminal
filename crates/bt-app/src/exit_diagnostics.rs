@@ -289,8 +289,7 @@ mod tests {
         let fallback = bt_pty::ShellFallback {
             requested: PathBuf::from("private").join("pwsh.exe").into_os_string(),
             started: bt_pty::LAST_RESORT_SHELL,
-            error: "access denied at C:\\Users\\alice\\pwsh.exe\nby the package broker"
-                .to_owned(),
+            error: "access denied at C:\\Users\\alice\\pwsh.exe\nby the package broker".to_owned(),
         };
         let mut lines = Vec::new();
         say_spawn_fallback(9, &fallback, |line| lines.push(line.to_owned()));
