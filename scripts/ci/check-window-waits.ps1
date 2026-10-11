@@ -60,6 +60,10 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
+# `git show` hands the registry back as UTF-8; read it as that, whatever the console's code page
+# (a GBK console swallows the tab after an em dash and shifts every later cell).
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $failures = @()
 
