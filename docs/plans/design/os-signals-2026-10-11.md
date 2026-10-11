@@ -1,6 +1,6 @@
 # OS-level change signals and the deep palette refresh: T-OS-SIGNALS and T-PALETTE-DEEP (0.4.8 B5), design note, 2026-10-11
 
-Status: **tickets 1–2 built** (T-DIRWATCH-LIFECYCLE and T-OS-SIGNALS-WIN, 2026-10-11; revision (f) records ticket 1 as built). Before that, **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
+Status: **tickets 1, 2 and 4 built** (T-DIRWATCH-LIFECYCLE, T-OS-SIGNALS-WIN and T-PALETTE-DEEP, 2026-10-11; revision (f) records ticket 1 as built). Before that, **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
 (`B5-os-signals-design.review-codex.md`, verdict *adopt with changes*, twelve required
 changes). Revision (b) is the dated section at the end. **Where revision (a)'s text and
 revision (b) differ, revision (b) stands**: in particular §2's totals, §3.1's forced-removal
