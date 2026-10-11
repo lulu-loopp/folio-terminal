@@ -386,4 +386,62 @@ mod tests {
             "the 50 ms landing can place the last floor just outside the minute: {claims}"
         );
     }
+
+    /// RED (T-PALETTE-DEEP) — changes during one walk are one Boolean-shaped debt: no request
+    /// overtakes the running walk, and exactly one rerun becomes claimable at the prior claim's
+    /// floor.
+    ///
+    /// MUTATION: on accept, claim whenever `due_at` is merely present rather than when `take_due`
+    /// says it is due; the pre-floor assertion receives an immediate rerun.
+    #[test]
+    fn changes_during_a_walk_are_one_more_walk_and_no_more() {
+        let start = Instant::now();
+        let root = root("one-owed");
+        let mut ear = IndexEar::default();
+        let mut indexes = FileIndexes::default();
+        ready(&mut indexes, &root);
+        indexes.mark_heard(&root);
+        ear.watched.insert(
+            root.clone(),
+            Watched {
+                heard: true,
+                clock: WatchClock::default(),
+            },
+        );
+
+        lock(&ear.news).insert(root.clone(), start);
+        assert!(ear.advance(&mut indexes, start).is_empty());
+        let first_at = start + WATCH_QUIET;
+        let first = ear
+            .advance(&mut indexes, first_at)
+            .pop()
+            .expect("the first clock-driven walk");
+
+        for offset in 1..=200 {
+            let at = first_at + Duration::from_millis(offset);
+            lock(&ear.news).insert(root.clone(), at);
+            assert!(
+                ear.advance(&mut indexes, at).is_empty(),
+                "a running walk is never overtaken"
+            );
+        }
+        let landed = first_at + Duration::from_millis(250);
+        indexes.accept(IndexResponse {
+            root: root.clone(),
+            epoch: first.epoch,
+            index: FileIndex::default(),
+        });
+        assert!(
+            ear.advance(&mut indexes, landed).is_empty(),
+            "the owed rerun waits for the previous claim's floor"
+        );
+
+        let floor = first_at + crate::watch_clock::WATCH_FLOOR;
+        let rerun = ear.advance(&mut indexes, floor);
+        assert_eq!(rerun.len(), 1, "all two hundred changes owe one rerun");
+        assert!(
+            ear.advance(&mut indexes, floor).is_empty(),
+            "and no further walk is queued"
+        );
+    }
 }
