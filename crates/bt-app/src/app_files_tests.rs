@@ -6,11 +6,10 @@
 use super::*;
 use crate::test_support::{
     A, TAB_ONE, buffer_read_from, calls_of, cross_seats, cross_solve, dir_entry, disk_scratch,
-    files_column, found, host_path, host_spelling, in_product, leaf_saying, listed, method_body,
+    files_column, host_path, host_spelling, in_product, leaf_saying, listed, method_body,
     move_the_disk_forward, pane_rects_of, saved_files_and_terminal, saved_row_of_two, seat_of,
     tab_with_a_files_column, tab_with_a_preview,
 };
-use bt_source::{Pattern, View, needle};
 use std::time::Duration;
 
 // ── `.files-tree:focus-visible` (user ruling 2026-08-12) ────────────────
@@ -933,25 +932,17 @@ fn a_right_press_on_the_columns_ground_raises_the_roots_menu() {
              file…` places its box at the top level and the path verbs get the \
              root itself"
     );
-    // One opener, and it still hangs the menu where the press landed.
-    //
-    // The two needles are **assembled** rather than written out, for the
-    // reason this whole family of tests has to watch for: a literal spelled
-    // in full here is itself a line of `main.rs`, so `SOURCE.contains` would
-    // be asking whether this test exists. Split across a `concat`, the
-    // phrase appears in the file exactly where the code is.
+    // One opener, and its caller still hangs the menu where the press landed.
+    // Both assertions read product item bodies, so this test's own spelling is
+    // outside their scope and needs no disguised needle.
     assert_eq!(
         in_product(&calls_of("Runtime", "file_row_under")),
         1,
         "the ground and the rows go through one right-press opener"
     );
-    let anchored = [
-        "self.open_file_menu(target, ",
-        "[position.x as f32, position.y as f32])?;",
-    ]
-    .concat();
     assert!(
-        !found(needle!(Pattern::text(anchored.as_str())), View::Raw).is_empty(),
+        method_body("Runtime", "mouse_input")
+            .contains("self.open_file_menu(target, [position.x as f32, position.y as f32])?;"),
         "hung at the pointer, which is where a menu raised by a press belongs"
     );
 }

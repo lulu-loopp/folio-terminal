@@ -59,7 +59,7 @@ fn a_shell_the_system_ends_after_the_freeze_keeps_its_pane_in_the_document() {
         .find("session_end::holds_the_document()")
         .expect("the one door onto the document asks whether the system's end holds it");
     let handed = door
-        .find(["self.session_store", ".record("].concat().as_str())
+        .find("self.session_store.record(")
         .expect("the door still hands the store a document");
     assert!(
         asked < handed,
