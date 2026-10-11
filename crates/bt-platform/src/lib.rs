@@ -22847,18 +22847,25 @@ mod dir_watch_tests {
     fn a_file_two_levels_down_is_named_relative_to_the_root() {
         let _turn = first_read_gate::watchers_take_turns();
         let scratch = Scratch::new("named-tree");
-        let (tx, rx) = mpsc::channel::<Vec<String>>();
+        let (tx, rx) = mpsc::channel::<bool>();
+        let saw_deep = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_saw_deep = std::sync::Arc::clone(&saw_deep);
         let path = scratch.0.clone();
         let watch = on_a_worker(move |ctx| {
             DirWatch::start_named(ctx, &path, move |change| {
-                let names = match change {
-                    super::DirChange::Named(names) => names
-                        .iter()
-                        .map(|name| name.to_string_lossy().replace('\\', "/").to_lowercase())
-                        .collect(),
-                    super::DirChange::Unknown | super::DirChange::Ended => Vec::new(),
+                let super::DirChange::Named(names) = change else {
+                    return;
                 };
-                let _ = tx.send(names);
+                for name in names {
+                    let name = name.to_string_lossy().replace('\\', "/").to_lowercase();
+                    if name == "one/two/deep.txt" {
+                        callback_saw_deep.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    if name == "sentinel.txt" {
+                        let _ =
+                            tx.send(callback_saw_deep.load(std::sync::atomic::Ordering::Acquire));
+                    }
+                }
             })
         })
         .expect("watch a directory tree this process just made");
@@ -22866,18 +22873,13 @@ mod dir_watch_tests {
         let nested = scratch.0.join("one").join("two");
         std::fs::create_dir_all(&nested).expect("make the nested directory");
         std::fs::write(nested.join("deep.txt"), b"deep").expect("write the nested file");
-        let deadline = Instant::now() + ARRIVES_WITHIN;
-        let mut heard = false;
-        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let Ok(names) = rx.recv_timeout(left) else {
-                break;
-            };
-            if names.iter().any(|name| name == "one/two/deep.txt") {
-                heard = true;
-                break;
-            }
-        }
-        assert!(heard, "the named tree watch reports `one/two/deep.txt`");
+        std::fs::write(scratch.0.join("sentinel.txt"), b"done")
+            .expect("complete the observation through the same watch");
+        assert!(
+            rx.recv()
+                .expect("the root sentinel completes the observation"),
+            "the named tree watch reports `one/two/deep.txt` before the later root sentinel"
+        );
         drop(watch);
     }
 
