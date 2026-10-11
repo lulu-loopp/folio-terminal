@@ -3144,10 +3144,7 @@ impl Runtime<'_> {
     /// only *what* the keys mean — there is now something to type into, and it
     /// takes every key exactly as the graph's search field does.
     pub(in crate::runtime) fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
-        use text_field::TextMove;
-        // The application's modifier — see `search_field_key`'s note (M1-7).
-        let control = input::is_command_chord(self.window.modifiers);
-        let shift = self.window.modifiers.shift_key();
+        let modifiers = self.window.modifiers;
         if self
             .window
             .git_menu
@@ -3197,44 +3194,10 @@ impl Runtime<'_> {
             else {
                 return Ok(());
             };
-            match &event.logical_key {
-                Key::Named(NamedKey::Backspace) => {
-                    field.backspace();
-                }
-                Key::Named(NamedKey::Delete) => {
-                    field.delete();
-                }
-                Key::Named(NamedKey::Home) => field.step(TextMove::Home, shift),
-                Key::Named(NamedKey::End) => field.step(TextMove::End, shift),
-                Key::Named(NamedKey::ArrowLeft) => field.step(
-                    if control {
-                        TextMove::WordLeft
-                    } else {
-                        TextMove::Left
-                    },
-                    shift,
-                ),
-                Key::Named(NamedKey::ArrowRight) => field.step(
-                    if control {
-                        TextMove::WordRight
-                    } else {
-                        TextMove::Right
-                    },
-                    shift,
-                ),
-                Key::Character(text) if control => {
-                    if text.eq_ignore_ascii_case("a") {
-                        field.select_all();
-                    }
-                }
-                // A chord is not text (M1-7) — see `search_field_key`'s own arm.
-                Key::Character(text) if input::types_a_character(self.window.modifiers) => {
-                    field.insert(text);
-                }
-                // A modifier on its own, a function key, anything else: the field
-                // owns it and does nothing with it.
-                _ => {}
-            }
+            // The editing keys every one-line field shares, a space among them
+            // (AUDIT-hardcode RT-2). A modifier on its own, a function key,
+            // anything else: the field owns it and does nothing with it.
+            let _ = input::one_line_field_key(field, &event.logical_key, modifiers);
             if self.refresh_chrome() {
                 self.present_chrome_change()?;
             }
@@ -3414,10 +3377,8 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         event: &KeyEvent,
     ) -> Result<bool> {
-        use text_field::TextMove;
-        // The application's modifier — see `search_field_key`'s note (M1-7).
-        let control = input::is_command_chord(self.window.modifiers);
-        let shift = self.window.modifiers.shift_key();
+        let modifiers = self.window.modifiers;
+        let shift = modifiers.shift_key();
         let tab = self.preview_tab_index(surface);
         enum Then {
             /// Nothing but a repaint.
@@ -3447,58 +3408,13 @@ impl Runtime<'_> {
                     Then::Ask
                 }
             }
-            Key::Named(NamedKey::Backspace) => {
-                view.search.backspace();
+            // The editing keys every one-line field shares, a space among them
+            // (AUDIT-hardcode RT-2). A modifier on its own, a function key,
+            // anything else: the field owns it and does nothing with it.
+            key => {
+                let _ = input::one_line_field_key(&mut view.search, key, modifiers);
                 Then::Draw
             }
-            Key::Named(NamedKey::Delete) => {
-                view.search.delete();
-                Then::Draw
-            }
-            Key::Named(NamedKey::Home) => {
-                view.search.step(TextMove::Home, shift);
-                Then::Draw
-            }
-            Key::Named(NamedKey::End) => {
-                view.search.step(TextMove::End, shift);
-                Then::Draw
-            }
-            Key::Named(NamedKey::ArrowLeft) => {
-                view.search.step(
-                    if control {
-                        TextMove::WordLeft
-                    } else {
-                        TextMove::Left
-                    },
-                    shift,
-                );
-                Then::Draw
-            }
-            Key::Named(NamedKey::ArrowRight) => {
-                view.search.step(
-                    if control {
-                        TextMove::WordRight
-                    } else {
-                        TextMove::Right
-                    },
-                    shift,
-                );
-                Then::Draw
-            }
-            Key::Character(text) if control => {
-                if text.eq_ignore_ascii_case("a") {
-                    view.search.select_all();
-                }
-                Then::Draw
-            }
-            // A chord is not text (M1-7) — see `search_field_key`'s own arm.
-            Key::Character(text) if input::types_a_character(self.window.modifiers) => {
-                view.search.insert(text);
-                Then::Draw
-            }
-            // A modifier on its own, a function key, anything else: the field
-            // owns it and does nothing with it.
-            _ => Then::Draw,
         };
         match then {
             Then::Draw => {}

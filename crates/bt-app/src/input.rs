@@ -96,6 +96,95 @@ pub(crate) fn types_a_character(modifiers: ModifiersState) -> bool {
     !modifiers.control_key() && !modifiers.super_key()
 }
 
+/// What one of [`one_line_field_key`]'s keys did to the field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FieldEdit {
+    /// The text changed.
+    Typed,
+    /// The caret or the selection moved, or nothing did: a repaint at most.
+    Moved,
+}
+
+/// **The keys every one-line field answers the same way** (AUDIT-hardcode
+/// RT-2) — the command palette's box, the in-pane find bar, the git branch
+/// prompt and the commit graph's search.
+///
+/// Each of the four used to match these by hand, and the copies had drifted:
+/// the graph's search and the git prompt had no `Space` arm, so a space could
+/// not be typed into either, and only the palette had `Ctrl+Backspace`. A field
+/// answers its own keys first — Enter, Escape, the vertical arrows, a paste, the
+/// find bar's `Alt` toggles — and hands everything else to this one reading:
+///
+/// * `Backspace` / `Delete`, and with the application's modifier the word behind
+///   the caret (the edge `Ctrl+←` walks to);
+/// * `←` `→` by character, or by word with the application's modifier; `Home`
+///   `End`; each extending the selection under `Shift`;
+/// * the application's modifier with `A` selects all; any other chord with it
+///   is the field's and does nothing;
+/// * a character or a space, when the press is typing ([`types_a_character`]).
+///
+/// `None` for a key that is none of these, which the field then owns and
+/// ignores.
+pub(crate) fn one_line_field_key(
+    field: &mut crate::text_field::TextField,
+    key: &Key,
+    modifiers: ModifiersState,
+) -> Option<FieldEdit> {
+    one_line_field_key_on(field, key, modifiers, bt_platform::host_platform())
+}
+
+/// [`one_line_field_key`] on a named platform.
+pub(crate) fn one_line_field_key_on(
+    field: &mut crate::text_field::TextField,
+    key: &Key,
+    modifiers: ModifiersState,
+    platform: HostPlatform,
+) -> Option<FieldEdit> {
+    use crate::text_field::TextMove;
+    let command = is_command_chord_on(modifiers, platform);
+    let shift = modifiers.shift_key();
+    let typed = |changed: bool| {
+        if changed {
+            FieldEdit::Typed
+        } else {
+            FieldEdit::Moved
+        }
+    };
+    let motion = match key {
+        Key::Named(NamedKey::ArrowLeft) if command => Some(TextMove::WordLeft),
+        Key::Named(NamedKey::ArrowLeft) => Some(TextMove::Left),
+        Key::Named(NamedKey::ArrowRight) if command => Some(TextMove::WordRight),
+        Key::Named(NamedKey::ArrowRight) => Some(TextMove::Right),
+        Key::Named(NamedKey::Home) => Some(TextMove::Home),
+        Key::Named(NamedKey::End) => Some(TextMove::End),
+        _ => None,
+    };
+    if let Some(motion) = motion {
+        field.step(motion, shift);
+        return Some(FieldEdit::Moved);
+    }
+    Some(match key {
+        Key::Named(NamedKey::Backspace) if command => typed(field.delete_word_back()),
+        Key::Named(NamedKey::Backspace) => typed(field.backspace()),
+        Key::Named(NamedKey::Delete) => typed(field.delete()),
+        Key::Character(text) if command => {
+            if text.eq_ignore_ascii_case("a") {
+                field.select_all();
+            }
+            FieldEdit::Moved
+        }
+        Key::Character(text) if types_a_character(modifiers) => {
+            field.insert(text);
+            FieldEdit::Typed
+        }
+        Key::Named(NamedKey::Space) if types_a_character(modifiers) => {
+            field.insert(" ");
+            FieldEdit::Typed
+        }
+        _ => return None,
+    })
+}
+
 // ── The same rule, said about the pointer (T-MAC-CMDCLICK, §13.45) ──────────
 
 /// **Whether the hand is holding the modifier that hands a pointer gesture
@@ -1850,6 +1939,78 @@ mod tests {
     // The three spellings a key can have when the platform could not name it,
     // and one it could — only the tests need to build these by hand.
     use winit::keyboard::{KeyCode, NativeKey, NativeKeyCode};
+
+    /// RED (AUDIT-hardcode RT-2) — **every one-line field answers the shared
+    /// editing keys the same way, a space included, on both keyboards.**
+    ///
+    /// The graph's search and the git prompt had no `Space` arm, so a space
+    /// could not be typed into either; only the palette had the word-delete.
+    /// One reader now answers for the four fields, and this walks it on both
+    /// platforms with Chinese text.
+    ///
+    /// MUTATION: drop the `Space` arm from `one_line_field_key_on` — the
+    /// "搜索 词" rows go red.
+    #[test]
+    fn one_line_fields_share_their_editing_keys_and_type_a_space() {
+        use crate::text_field::TextField;
+        let character = |text: &str| Key::Character(text.into());
+        for (platform, command) in [
+            (HostPlatform::Windows, ModifiersState::CONTROL),
+            (HostPlatform::MacOs, ModifiersState::SUPER),
+        ] {
+            let mut field = TextField::holding("搜索");
+            let press = |field: &mut TextField, key: Key, modifiers| {
+                one_line_field_key_on(field, &key, modifiers, platform)
+            };
+            assert_eq!(
+                press(
+                    &mut field,
+                    Key::Named(NamedKey::Space),
+                    ModifiersState::empty()
+                ),
+                Some(FieldEdit::Typed)
+            );
+            assert_eq!(
+                press(&mut field, character("词"), ModifiersState::empty()),
+                Some(FieldEdit::Typed)
+            );
+            assert_eq!(field.text(), "搜索 词", "{platform:?}");
+            // The word behind the caret, with the application's modifier.
+            assert_eq!(
+                press(&mut field, Key::Named(NamedKey::Backspace), command),
+                Some(FieldEdit::Typed)
+            );
+            assert_eq!(field.text(), "搜索 ", "{platform:?}");
+            // Select all, and a chord is never typed as its letter.
+            assert_eq!(
+                press(&mut field, character("a"), command),
+                Some(FieldEdit::Moved)
+            );
+            assert_eq!(field.selected_text(), "搜索 ");
+            assert_eq!(
+                press(&mut field, character("c"), command),
+                Some(FieldEdit::Moved)
+            );
+            assert_eq!(field.text(), "搜索 ", "{platform:?}: a chord typed nothing");
+            // Keys that are not the field's shared vocabulary are left to it.
+            assert_eq!(
+                press(
+                    &mut field,
+                    Key::Named(NamedKey::Enter),
+                    ModifiersState::empty()
+                ),
+                None
+            );
+            assert_eq!(
+                press(
+                    &mut field,
+                    Key::Named(NamedKey::Escape),
+                    ModifiersState::empty()
+                ),
+                None
+            );
+        }
+    }
 
     const MODIFIERS: [ModifiersState; 8] = [
         ModifiersState::empty(),

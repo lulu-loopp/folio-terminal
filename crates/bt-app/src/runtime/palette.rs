@@ -4,7 +4,6 @@
 use crate::{
     ApplicationChange, MenuPaint, Popup, RecallFlash, Runtime, i18n, input,
     install_page_ground_color, install_theme_class_background, palette, recall_flash, shortcuts,
-    text_field,
 };
 use anyhow::Result;
 use bt_render::{FrameSource, FrameTrigger, Travel};
@@ -406,73 +405,20 @@ impl Runtime<'_> {
                         typed = true;
                     }
                 }
-                // `Ctrl+Backspace` takes the word behind the caret, which is
-                // the edge `Ctrl+←` walks to — one answer to "where does a word
-                // start" for the two keys that ask.
-                Key::Named(NamedKey::Backspace) if ctrl => typed = field.delete_word_back(),
-                Key::Named(NamedKey::Backspace) => typed = field.backspace(),
-                Key::Named(NamedKey::Delete) => typed = field.delete(),
-                Key::Named(NamedKey::ArrowLeft) => {
-                    field.step(
-                        if ctrl {
-                            text_field::TextMove::WordLeft
-                        } else {
-                            text_field::TextMove::Left
-                        },
-                        self.window.modifiers.shift_key(),
-                    );
-                    moved = true;
-                }
-                Key::Named(NamedKey::ArrowRight) => {
-                    field.step(
-                        if ctrl {
-                            text_field::TextMove::WordRight
-                        } else {
-                            text_field::TextMove::Right
-                        },
-                        self.window.modifiers.shift_key(),
-                    );
-                    moved = true;
-                }
-                Key::Named(NamedKey::Home) => {
-                    field.step(
-                        text_field::TextMove::Home,
-                        self.window.modifiers.shift_key(),
-                    );
-                    moved = true;
-                }
-                Key::Named(NamedKey::End) => {
-                    field.step(text_field::TextMove::End, self.window.modifiers.shift_key());
-                    moved = true;
-                }
-                Key::Character(text) if ctrl && text.eq_ignore_ascii_case("a") => {
-                    field.select_all();
-                    moved = true;
-                }
-                // A modified character is a chord somebody meant for something
-                // else, and typing its letter into the box would be the box
-                // answering a question it was not asked.
-                //
-                // **And `!ctrl` was only half of that** (M1-7, X-3 §4 ③): the
-                // box took `Cmd+C`, `Cmd+V` and `Cmd+A` as `c`, `v` and `a` on
-                // the Mac — `helcv` is in X-3's own evidence — and `Win+C` here
-                // for the identical reason, which is that neither of these two
-                // guards ever asked about the fourth modifier.
-                Key::Character(text)
-                    if input::types_a_character(self.window.modifiers)
-                        && !self.window.modifiers.alt_key() =>
-                {
-                    field.insert(text);
-                    typed = true;
-                }
-                Key::Named(NamedKey::Space)
-                    if input::types_a_character(self.window.modifiers)
-                        && !self.window.modifiers.alt_key() =>
-                {
-                    field.insert(" ");
-                    typed = true;
-                }
-                _ => {}
+                // **An `Alt`-modified character is not typed here**: the palette
+                // reads it as a chord somebody meant for something else, and
+                // typing its letter would be the box answering a question it was
+                // not asked. The one difference from the other fields' reading.
+                Key::Character(_) | Key::Named(NamedKey::Space)
+                    if self.window.modifiers.alt_key() && !ctrl => {}
+                // The editing keys every one-line field shares (AUDIT-hardcode
+                // RT-2): the word verbs, select-all, and a chord never typed as
+                // its letter (M1-7, X-3 §4 ③).
+                key => match input::one_line_field_key(field, key, self.window.modifiers) {
+                    Some(input::FieldEdit::Typed) => typed = true,
+                    Some(input::FieldEdit::Moved) => moved = true,
+                    None => {}
+                },
             }
         }
         if typed {

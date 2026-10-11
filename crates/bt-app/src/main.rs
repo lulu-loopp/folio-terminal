@@ -76969,7 +76969,10 @@ mod palette_wiring_tests {
     /// MUTATIONS:
     /// (1) insert the clipboard verbatim — the second assertion goes red, and a
     ///     three-row paste becomes a query nothing matches;
-    /// (2) drop the `ctrl` guard from the `Backspace` arm — the third goes red.
+    /// (2) answer the box's editing keys in `palette_key` itself rather than
+    ///     through the shared reader — the third goes red. What the shared
+    ///     reader does with `Ctrl+Backspace` and `Ctrl+A` is pinned by
+    ///     `input::tests::one_line_fields_share_their_editing_keys_and_type_a_space`.
     #[test]
     fn the_palette_field_pastes_and_deletes_a_word() {
         let keys = method_body("Runtime", "palette_key");
@@ -76982,14 +76985,8 @@ mod palette_wiring_tests {
             "and what it hands the field is one line of printable text"
         );
         assert!(
-            keys.contains(
-                "Key::Named(NamedKey::Backspace) if ctrl => typed = field.delete_word_back()"
-            ),
-            "Ctrl+Backspace takes the word the word walk would have crossed"
-        );
-        assert!(
-            keys.contains("Key::Character(text) if ctrl && text.eq_ignore_ascii_case(\"a\")"),
-            "and Ctrl+A still selects everything"
+            keys.contains("input::one_line_field_key(field, key, self.window.modifiers)"),
+            "Ctrl+Backspace and Ctrl+A are the shared one-line field's (AUDIT-hardcode RT-2)"
         );
     }
 
@@ -79035,26 +79032,39 @@ mod field_command_tests {
     /// and that field starts typing `c` on `Cmd+C`; swap any one's
     /// `input::is_command_chord` back to `control_key()` and that field's own
     /// select-all, copy and paste stop answering on the Mac's keyboard.
+    ///
+    /// **Four of the fields read their typing through one reader**
+    /// (AUDIT-hardcode RT-2): the palette, the find bar, the git prompt and the
+    /// graph's search hand their editing keys to `input::one_line_field_key`,
+    /// whose own test walks a command chord on both keyboards
+    /// (`input::tests::one_line_fields_share_their_editing_keys_and_type_a_space`);
+    /// here each is held to asking it, and the reader to asking both predicates.
     #[test]
     fn a_command_chord_never_types_its_letter_into_a_field() {
-        // The five that live here, each named by its handler.
         for name in [
             "palette_key",
             "search_field_key",
-            "settings_field_key",
             "git_menu_key",
             "graph_search_key",
         ] {
-            let handler = method_body("Runtime", name);
             assert!(
-                handler.contains(concat!("input::", "types_a_character")),
-                "{name} inserts a character without asking whether this press is typing"
-            );
-            assert!(
-                handler.contains(concat!("input::", "is_command_chord")),
-                "{name} decides what this application's modifier is for itself"
+                method_body("Runtime", name).contains(concat!("input::", "one_line_field_key(")),
+                "{name} reads its editing keys for itself again"
             );
         }
+        let reader = free_fn_body("one_line_field_key_on");
+        assert!(reader.contains("types_a_character(modifiers)"));
+        assert!(reader.contains("is_command_chord_on(modifiers, platform)"));
+        // The one that still reads its own keys, the settings dialog's field.
+        let handler = method_body("Runtime", "settings_field_key");
+        assert!(
+            handler.contains(concat!("input::", "types_a_character")),
+            "settings_field_key inserts a character without asking whether this press is typing"
+        );
+        assert!(
+            handler.contains(concat!("input::", "is_command_chord")),
+            "settings_field_key decides what this application's modifier is for itself"
+        );
         // The sixth is the Markdown page, whose one key handler is a pure
         // function in its own module. It asks the other predicate of the pair,
         // and that is written down at the arm: this surface exempts AltGr, so

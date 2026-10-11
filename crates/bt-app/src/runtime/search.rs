@@ -3,7 +3,7 @@
 
 use crate::{
     PointerTarget, Runtime, SearchRefresh, SearchScanCache, frame_row_of_anchor, hang_watch, input,
-    marks, native_window, rescan_leaf_for_search, search, seats, text_field, tooltip, trace_sink,
+    marks, native_window, rescan_leaf_for_search, search, seats, tooltip, trace_sink,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -551,7 +551,6 @@ impl Runtime<'_> {
         if !self.window.search.is_focused() {
             return Ok(false);
         }
-        use text_field::TextMove;
         let shift = self.window.modifiers.shift_key();
         // The application's modifier, whichever key it is printed on here
         // (M1-7): this box's own `Ctrl+A` and `Ctrl+F` are `Cmd+A` and `Cmd+F` on
@@ -580,43 +579,11 @@ impl Runtime<'_> {
                 self.step_search(false)?;
                 return Ok(true);
             }
-            Key::Named(NamedKey::Backspace) => edited = self.window.search.field_mut().backspace(),
-            Key::Named(NamedKey::Delete) => edited = self.window.search.field_mut().delete(),
-            Key::Named(NamedKey::ArrowLeft) => self.window.search.field_mut().step(
-                if control {
-                    TextMove::WordLeft
-                } else {
-                    TextMove::Left
-                },
-                shift,
-            ),
-            Key::Named(NamedKey::ArrowRight) => self.window.search.field_mut().step(
-                if control {
-                    TextMove::WordRight
-                } else {
-                    TextMove::Right
-                },
-                shift,
-            ),
-            Key::Named(NamedKey::Home) => {
-                self.window.search.field_mut().step(TextMove::Home, shift)
-            }
-            Key::Named(NamedKey::End) => self.window.search.field_mut().step(TextMove::End, shift),
-            // The space is text and answers the guard the character arm below
-            // answers, for its reason (M1-7).
-            Key::Named(NamedKey::Space) if input::types_a_character(self.window.modifiers) => {
-                self.window.search.field_mut().insert(" ");
-                edited = true;
-            }
-            Key::Character(text) if control => {
-                match text.as_str() {
-                    "a" | "A" => self.window.search.field_mut().select_all(),
-                    // `Ctrl+F` with the caret already in the box selects what is there (B73), so
-                    // the chord means the same thing wherever it is pressed: "put me in the search,
-                    // ready to replace the query".
-                    "f" | "F" => self.window.search.field_mut().select_all(),
-                    _ => {}
-                }
+            // `Ctrl+F` with the caret already in the box selects what is there (B73), so
+            // the chord means the same thing wherever it is pressed: "put me in the search,
+            // ready to replace the query".
+            Key::Character(text) if control && text.eq_ignore_ascii_case("f") => {
+                self.window.search.field_mut().select_all();
             }
             // **`Alt+C` / `Alt+W` / `Alt+R` — the three toggles from the keyboard**, which is what
             // VS Code's find bar binds and what a reader who never takes their hands off the keys
@@ -636,18 +603,17 @@ impl Runtime<'_> {
                 }
                 return Ok(true);
             }
-            // **A chord is not text** (M1-7, X-3 §4 ③). The arm above answers
-            // this platform's application modifier and the guard here answers
-            // the other one, so neither a `Cmd`-modified key on a Mac nor a
-            // `Win`-modified key here types its letter into the box — which is
-            // what `Cmd+C` did, measured, into three of this window's fields.
-            Key::Character(text) if input::types_a_character(self.window.modifiers) => {
-                self.window.search.field_mut().insert(text);
-                edited = true;
-            }
-            // Everything else is swallowed. A key the field has no use for is still not the
+            // The editing keys every one-line field shares (AUDIT-hardcode RT-2) — a
+            // chord is never typed as its letter there (M1-7, X-3 §4 ③). Everything
+            // else is swallowed: a key the field has no use for is still not the
             // shell's while the caret is in the field.
-            _ => {}
+            key => {
+                edited = input::one_line_field_key(
+                    self.window.search.field_mut(),
+                    key,
+                    self.window.modifiers,
+                ) == Some(input::FieldEdit::Typed);
+            }
         }
         if edited {
             self.window.search_revision = self.window.search_revision.wrapping_add(1);
