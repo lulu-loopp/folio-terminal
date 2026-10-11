@@ -1,6 +1,8 @@
 # OS-level change signals and the deep palette refresh: T-OS-SIGNALS and T-PALETTE-DEEP (0.4.8 B5), design note, 2026-10-11
 
 Status: **tickets 1–4 built** (T-DIRWATCH-LIFECYCLE, T-OS-SIGNALS-WIN, T-OS-SIGNALS-MAC and T-PALETTE-DEEP, 2026-10-11; revision (f) records ticket 1 as built, revision (g) ticket 3 and revision (h) ticket 4). Before that, **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
+
+Owner rulings 2026-10-11 (afternoon, "全按推荐" — every recommendation stands as the ruling; `trace/tickets-048/00-PLAN-048.md`, Owner rulings 2026-10-11 afternoon): Q1 PATH-directory watch yes; Q2 background palette index yes; Q3 silent eject yes, pending experiment E-2; Q4 a macOS locale change reaches new panes only; Q5 the cold first pane keeps today's outcome through the bounded in-birth locale wait.
 (`B5-os-signals-design.review-codex.md`, verdict *adopt with changes*, twelve required
 changes). Revision (b) is the dated section at the end. **Where revision (a)'s text and
 revision (b) differ, revision (b) stands**: in particular §2's totals, §3.1's forced-removal

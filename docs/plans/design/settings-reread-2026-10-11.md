@@ -1,6 +1,8 @@
 # Hand-edited settings, keybindings, profiles and pins, re-read as a storage transaction: T-SETTINGS-REREAD (0.4.8 B6), design note, 2026-10-11
 
 Status: **revision (b), 2026-10-11, after the Codex review** (`B6-settings-reread-design.review-codex.md`,
+
+Owner rulings 2026-10-11 (afternoon, "全按推荐" — every recommendation stands as the ruling; `trace/tickets-048/00-PLAN-048.md`, Owner rulings 2026-10-11 afternoon): Q1 on a true conflict the file wins with one notice (a pin removed in the file stays removed); Q2 a conflict-free hand edit takes effect with no card; Q3 settings.json and keybindings.json are followed while Folio runs (R33 reversed); Q4 an unsaveable change stops the quit with one choice "Leave without this change", a forced stop says so in the system message box; Q5 Folio refuses to replace a file it cannot replace safely (links, no atomic exchange) and says so. Tickets 1–9 may be opened.
 verdict *adopt with changes*, fifteen required changes). Revision (b) is the dated section at
 the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands**: in
 particular §1.5's defect 1 and the failure card, §2.2's filter, §3.1's memory, §3.2's
