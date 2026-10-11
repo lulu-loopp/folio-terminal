@@ -86,6 +86,7 @@ mod i18n;
 mod icons;
 mod ime_outbound;
 mod ime_report;
+mod index_ear;
 mod input;
 mod install_channel;
 /// **Every journey this window runs, put through the worst schedule it can be
@@ -477,6 +478,9 @@ enum AppEvent {
     /// A watched PATH directory has executable-name news. This only brings the loop round;
     /// `ProgramsEar` owns the timestamps and coalescing.
     PathDirectoryChanged,
+    /// A named tree watch heard a path that can affect its palette index. The timestamp waits in
+    /// `IndexEar`; this only brings the loop round to its event-armed clock.
+    FileIndexHeard,
     /// **A display changed mode, or one came or went** (T-FRESH-FACTS;
     /// `bt_platform::SystemNews::Display`). The rate each window paces its frames to
     /// is read again in every window, which a rate changed on the same panel moves
@@ -920,6 +924,7 @@ impl AppEvent {
             | Self::PreviewFileChanged
             | Self::FilesDirChanged
             | Self::PathDirectoryChanged
+            | Self::FileIndexHeard
             | Self::WatchStewardAnswered
             | Self::QuakeSummoned
             | Self::LaunchAsked
@@ -12626,6 +12631,8 @@ struct App {
     git_watch: git_watch::GitWatch,
     /// The process-wide shallow watches for the exact PATH snapshot the last program walk used.
     programs_ear: programs_ear::ProgramsEar,
+    /// The process-wide named tree watches for roots held by `file_indexes`.
+    index_ear: index_ear::IndexEar,
     /// The thread that reads directories, and whether it is still there.
     ///
     /// One for the window rather than one per column, exactly as `math_worker`
@@ -44650,6 +44657,7 @@ impl Runtime<'_> {
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
             programs_ear: programs_ear::ProgramsEar::default(),
+            index_ear: index_ear::IndexEar::default(),
             handoff_lane,
             layout_tables,
             math_worker,
@@ -63852,6 +63860,20 @@ impl FolioApp {
         app.programs_ear.deadline()
     }
 
+    /// Bring the palette ear level with the retained register, spend event-earned clocks on the
+    /// existing below-normal worker, and return the next such deadline. Silence creates none.
+    fn advance_index_ear(&mut self, now: Instant) -> Option<Instant> {
+        self.retain_file_indexes();
+        let app = self.app.as_mut()?;
+        let roots = app.file_indexes.roots();
+        app.index_ear
+            .sync(&roots, &mut app.file_indexes, now, &app.event_proxy);
+        for request in app.index_ear.advance(&mut app.file_indexes, now) {
+            let _ = app.file_index_worker.request(request);
+        }
+        app.index_ear.deadline(&app.file_indexes)
+    }
+
     /// **Tell the two windows the ring moved between** (B9).
     ///
     /// A menu row in one window lights a mark in another, so the frame it earns
@@ -66361,6 +66383,8 @@ impl FolioApp {
         }
         let programs_deadline = self.advance_programs_ear(now);
         wake_deadline = earliest_deadline([wake_deadline, programs_deadline]);
+        let index_deadline = self.advance_index_ear(now);
+        wake_deadline = earliest_deadline([wake_deadline, index_deadline]);
         if self.windows.is_empty() {
             // **An application with no windows waits, and waits properly**
             // (M3-1). Until this ticket an empty registry was a loop that had
@@ -67250,6 +67274,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             })
             .unwrap_or(Ok(())),
             AppEvent::PathDirectoryChanged => Ok(()),
+            AppEvent::FileIndexHeard => Ok(()),
             AppEvent::ProgramsAnswered => self.adopt_program_walk(),
             // **Every window asks its display again** (T-FRESH-FACTS): a rate changed on the
             // panel a window stands on moves neither the window nor its scale, the two events

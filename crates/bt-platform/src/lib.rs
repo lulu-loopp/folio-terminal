@@ -16568,6 +16568,20 @@ mod windows_impl {
             })
         }
 
+        /// **The same tree subscription, told each relative path that moved.**
+        ///
+        /// The palette index's door: its pure filter knows which subtrees the bounded walk can
+        /// ever enter, so names from generated trees can be refused on this watcher thread before
+        /// they touch a mailbox or wake the event loop. An overflow is still [`DirChange::Unknown`]
+        /// and must be admitted by that filter.
+        pub fn start_named(
+            ctx: &crate::admission::WorkerCtx,
+            path: &Path,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<Self, std::io::Error> {
+            Self::start_scoped(ctx, path, WatchDepth::Tree, wake)
+        }
+
         /// The same subscription over **this directory and no deeper**.
         ///
         /// `ReadDirectoryChangesW` takes the depth as an argument, so this is
@@ -18427,7 +18441,7 @@ mod watch_end;
 #[cfg(target_os = "macos")]
 mod macos_watch;
 
-/// **The three watch contracts, on macOS** (M2-1).
+/// **The four watch contracts, on macOS** (M2-1 and T-PALETTE-DEEP).
 ///
 /// A list of its own rather than two more names in the AppKit list above,
 /// because the split is a different one: the window and screen doors moved
@@ -20804,8 +20818,8 @@ mod dock_badge_tests {
     }
 }
 
-/// **The three watch contracts keep their contracts on every platform** (ticket
-/// M2-1).
+/// **The four watch contracts keep their contracts on every platform** (M2-1 and
+/// T-PALETTE-DEEP).
 ///
 /// Source pins, for `macos_window_backend_tests`' reason: the module they are
 /// about is the one this workstation does not compile, and what is being claimed
@@ -20816,7 +20830,7 @@ mod dock_badge_tests {
 /// The failure they exist to catch is the one the backend inventory warned about
 /// (`docs/plans/port/backend-inventory-2026-09-12.md` §6 ⑤): `WatchDepth` is not
 /// part of the public interface, so a port that "preserved the enum" and folded
-/// two of the three doors into one would compile everywhere and be wrong in
+/// two of the four doors into one would compile everywhere and be wrong in
 /// exactly one place — a preview seat woken by a build it is not reading.
 #[cfg(test)]
 mod watch_contract_tests {
@@ -20828,16 +20842,17 @@ mod watch_contract_tests {
     /// one M1-3 put on the window and screen doors.
     const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
 
-    /// The three doors, and the depth each is required to pass.
-    const CONTRACTS: [(&str, &str); 3] = [
+    /// The four doors, and the depth each is required to pass.
+    const CONTRACTS: [(&str, &str); 4] = [
         ("start", "WatchDepth::Tree"),
+        ("start_named", "WatchDepth::Tree"),
         ("start_shallow", "WatchDepth::HereOnly"),
         ("start_shallow_named", "WatchDepth::HereOnly"),
     ];
 
-    /// RED — **three doors, and each passes the depth its contract is.**
+    /// RED — **four doors, and each passes the depth its contract is.**
     ///
-    /// Asserted against both real arms at once, because "all three contracts" is
+    /// Asserted against both real arms at once, because "all four contracts" is
     /// a claim about the pair: a macOS arm that passed `Tree` everywhere would be
     /// a files column that woke for every object file a build wrote, and a
     /// Windows arm that passed `HereOnly` to `start` would be a git page that
@@ -20845,7 +20860,7 @@ mod watch_contract_tests {
     ///
     /// MUTATION: swap either depth in either file and this names the door.
     #[test]
-    fn the_three_constructors_keep_their_contracts_on_every_platform() {
+    fn the_four_constructors_keep_their_contracts_on_every_platform() {
         for (door, depth) in CONTRACTS {
             for (arm, module) in [
                 ("macOS", "crate::macos_watch"),
@@ -20917,7 +20932,7 @@ mod watch_contract_tests {
             .owners(source_test::index())
             .keys()
             .all(|owner| owner.module_path != "crate"),
-            "the crate root exports the depth, so the three doors are no longer the three \
+            "the crate root exports the depth, so the four doors are no longer the four \
              contracts"
         );
     }
@@ -21011,7 +21026,7 @@ mod watch_contract_tests {
         );
     }
 
-    /// RED — **the four create flags the three contracts rest on.**
+    /// RED — **the four create flags the four contracts rest on.**
     ///
     /// `FileEvents` is what makes an event name an item rather than a directory,
     /// and both shallow contracts are filters over that name; `UseCFTypes` is how
@@ -22821,6 +22836,48 @@ mod dir_watch_tests {
             "and it names the *directory* whose write time a build moved, which \
              is the entry a repository root hears the whole build through"
         );
+        drop(watch);
+    }
+
+    /// RED (T-PALETTE-DEEP) — **a named tree watch reports a file below the root by its
+    /// relative path.**
+    ///
+    /// MUTATION: make `start_named` pass `WatchDepth::HereOnly`; `deep.txt` is never named.
+    #[test]
+    fn a_file_two_levels_down_is_named_relative_to_the_root() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("named-tree");
+        let (tx, rx) = mpsc::channel::<Vec<String>>();
+        let path = scratch.0.clone();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start_named(ctx, &path, move |change| {
+                let names = match change {
+                    super::DirChange::Named(names) => names
+                        .iter()
+                        .map(|name| name.to_string_lossy().replace('\\', "/").to_lowercase())
+                        .collect(),
+                    super::DirChange::Unknown | super::DirChange::Ended => Vec::new(),
+                };
+                let _ = tx.send(names);
+            })
+        })
+        .expect("watch a directory tree this process just made");
+
+        let nested = scratch.0.join("one").join("two");
+        std::fs::create_dir_all(&nested).expect("make the nested directory");
+        std::fs::write(nested.join("deep.txt"), b"deep").expect("write the nested file");
+        let deadline = Instant::now() + ARRIVES_WITHIN;
+        let mut heard = false;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(names) = rx.recv_timeout(left) else {
+                break;
+            };
+            if names.iter().any(|name| name == "one/two/deep.txt") {
+                heard = true;
+                break;
+            }
+        }
+        assert!(heard, "the named tree watch reports `one/two/deep.txt`");
         drop(watch);
     }
 

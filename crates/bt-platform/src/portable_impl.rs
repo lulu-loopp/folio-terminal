@@ -789,17 +789,17 @@ impl ImeSystemCaret {
 
 // ── the directory watch (M2-1 for everything but macOS) ────────────────────
 //
-// M2-1 gave macOS a real arm over FSEvents (`macos_watch.rs`), so the three
+// M2-1 gave macOS a real arm over FSEvents (`macos_watch.rs`), so the four
 // doors below are now what a third platform meets and nothing else. They keep
-// the shape rather than the behaviour: the contracts are three constructors and
+// the shape rather than the behaviour: the contracts are four constructors and
 // the enum is not part of the interface, which is what a Linux arm will have to
 // preserve when it is written.
 
 /// **What one completion of the watch said changed.**
 ///
 /// The same two answers FSEvents gives — named entries, or *more than I could
-/// write down* — which is why the enum travels unchanged. M2-1 owns all three
-/// of the contracts the three constructors carry.
+/// write down* — which is why the enum travels unchanged. The four constructors carry all four
+/// contracts.
 #[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirChange<'a> {
@@ -828,8 +828,8 @@ impl DirChange<'_> {
 
 /// **A subscription to a directory, before FSEvents** (M2-1).
 ///
-/// The three contracts — `Tree`, `HereOnly`, named `HereOnly` — are three
-/// constructors here as on Windows, and M2-1 must preserve all three rather
+/// The four contracts — named and nameless `Tree`, named and nameless `HereOnly` — are four
+/// constructors here as on Windows, and every platform preserves all four rather
 /// than folding them: the inventory's §6 ⑤ notes that the depth enum is not
 /// part of the public interface, so the contracts *are* the doors.
 ///
@@ -859,6 +859,16 @@ impl DirWatch {
 
     /// The tree contract. Refused; M2-1.
     pub fn start(
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<Self, std::io::Error> {
+        let _ = (ctx, path, wake);
+        Err(unwatched())
+    }
+
+    /// The named tree contract. Refused on an unsupported platform.
+    pub fn start_named(
         ctx: &crate::admission::WorkerCtx,
         path: &Path,
         wake: impl Fn(DirChange<'_>) + Send + 'static,

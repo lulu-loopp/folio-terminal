@@ -2840,7 +2840,9 @@ impl Runtime<'_> {
     /// [`palette_index::FileIndexes::reopened`]). An open that a walk already out answers is said
     /// once in `diagnostics.log`.
     pub(in crate::runtime) fn ask_for_file_indexes_on_open(&mut self) {
-        for root in self.palette_files_roots() {
+        let roots = self.palette_files_roots();
+        self.app.index_ear.reader_asked(&roots);
+        for root in roots {
             match self.app.file_indexes.reopened(&root) {
                 palette_index::Reopened::Asked(request) => {
                     let _ = self.app.file_index_worker.request(request);
@@ -2850,6 +2852,7 @@ impl Runtime<'_> {
                      that walk answers this opening",
                     root.display()
                 )),
+                palette_index::Reopened::Current => {}
             }
         }
     }

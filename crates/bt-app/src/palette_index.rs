@@ -77,6 +77,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
+use bt_platform::DirChange;
 use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
@@ -101,6 +102,14 @@ pub const INDEX_MAX_DEPTH: usize = 6;
 /// the disk: doubling it would double the work done between one letter and the
 /// next.
 pub const INDEX_MAX_ENTRIES: usize = 30_000;
+
+/// How many directories one walk may enqueue in total.
+///
+/// The root counts as the first enqueued directory, so `n` admits the root and at most `n - 1`
+/// descendants. E-5 measured 287 directories enqueued for this repository, a queue high-water of
+/// 83 and a 1,556,480-byte held-index-plus-replacement peak working-set delta; 30,000 preserves
+/// more than one hundred times that real-tree headroom while bounding a directory-only tree.
+pub const INDEX_MAX_DIRECTORIES: usize = 30_000;
 
 /// Directory names never descended into.
 ///
@@ -131,6 +140,29 @@ pub const SKIPPED_DIRECTORIES: &[&str] = &[
     ".cargo",
     ".gradle",
 ];
+
+/// Whether named watcher news could change the bounded index.
+///
+/// Only non-final components are known to be directories after a rename or delete. A final file
+/// named `build` or `target` is indexable and therefore passes; a path below a skipped directory
+/// does not. Overflow is conservatively news.
+#[must_use]
+pub fn bears_on_index(change: DirChange<'_>) -> bool {
+    match change {
+        DirChange::Unknown => true,
+        DirChange::Ended => false,
+        DirChange::Named(names) => names.iter().any(|name| {
+            let components: Vec<_> = Path::new(name).components().collect();
+            components.len() <= INDEX_MAX_DEPTH
+                && components[..components.len().saturating_sub(1)]
+                    .iter()
+                    .all(|component| {
+                        !SKIPPED_DIRECTORIES
+                            .contains(&component.as_os_str().to_string_lossy().as_ref())
+                    })
+        }),
+    }
+}
 
 /// The name of the thread the walk runs on.
 const INDEX_WORKER_THREAD: &str = "bt-index-worker";
@@ -209,7 +241,13 @@ impl FileIndex {
 /// index per root and never a question of which parameters produced it.
 #[must_use]
 pub fn walk(root: &Path) -> FileIndex {
-    walk_bounded(root, INDEX_MAX_DEPTH, INDEX_MAX_ENTRIES)
+    walk_bounded(
+        root,
+        INDEX_MAX_DEPTH,
+        INDEX_MAX_ENTRIES,
+        INDEX_MAX_ENTRIES,
+        INDEX_MAX_DIRECTORIES,
+    )
 }
 
 /// A directory waiting to be read, and everything the reading needs to know.
@@ -232,9 +270,16 @@ struct Pending {
 /// and a test that had to build thirty thousand files to prove the cap works
 /// would be a test nobody runs. `max_depth` is the greatest depth an entry may
 /// have, counting the root's own children as 1.
-fn walk_bounded(root: &Path, max_depth: usize, max_entries: usize) -> FileIndex {
+fn walk_bounded(
+    root: &Path,
+    max_depth: usize,
+    max_files: usize,
+    max_names_per_directory: usize,
+    max_directories: usize,
+) -> FileIndex {
     let mut index = FileIndex::default();
     let mut queue: VecDeque<Pending> = VecDeque::new();
+    let mut directories_enqueued = 0;
     enqueue(
         &mut queue,
         Pending {
@@ -244,6 +289,9 @@ fn walk_bounded(root: &Path, max_depth: usize, max_entries: usize) -> FileIndex 
             ancestors: canonical(root).into_iter().collect(),
         },
         max_depth,
+        max_directories,
+        &mut directories_enqueued,
+        &mut index.truncated,
     );
 
     'walk: while let Some(directory) = queue.pop_front() {
@@ -274,7 +322,7 @@ fn walk_bounded(root: &Path, max_depth: usize, max_entries: usize) -> FileIndex 
             // anyway; stopping here is the same answer reached without the
             // allocation, and it is recorded as truncation for the same reason
             // the emit below records it.
-            if entries.len() >= max_entries {
+            if entries.len() >= max_names_per_directory {
                 index.truncated = true;
                 break;
             }
@@ -302,7 +350,7 @@ fn walk_bounded(root: &Path, max_depth: usize, max_entries: usize) -> FileIndex 
         for (name, is_directory) in entries {
             let relative = child_relative(&directory.relative, &name);
             if !is_directory {
-                if index.files.len() >= max_entries {
+                if index.files.len() >= max_files {
                     index.truncated = true;
                     break 'walk;
                 }
@@ -332,6 +380,9 @@ fn walk_bounded(root: &Path, max_depth: usize, max_entries: usize) -> FileIndex 
                     ancestors,
                 },
                 max_depth,
+                max_directories,
+                &mut directories_enqueued,
+                &mut index.truncated,
             );
         }
     }
@@ -342,10 +393,23 @@ fn walk_bounded(root: &Path, max_depth: usize, max_entries: usize) -> FileIndex 
 ///
 /// The one place the depth bound is applied, so that the root is subject to it
 /// on exactly the same terms as everything below it.
-fn enqueue(queue: &mut VecDeque<Pending>, pending: Pending, max_depth: usize) {
-    if pending.depth < max_depth {
-        queue.push_back(pending);
+fn enqueue(
+    queue: &mut VecDeque<Pending>,
+    pending: Pending,
+    max_depth: usize,
+    max_directories: usize,
+    directories_enqueued: &mut usize,
+    truncated: &mut bool,
+) {
+    if pending.depth >= max_depth {
+        return;
     }
+    if *directories_enqueued >= max_directories {
+        *truncated = true;
+        return;
+    }
+    queue.push_back(pending);
+    *directories_enqueued += 1;
 }
 
 /// A child's `/`-joined path from the root.
@@ -486,6 +550,8 @@ pub enum Reopened {
     Asked(IndexRequest),
     /// The walk with this epoch was already out, and answers this open too.
     Merged(u64),
+    /// A heard, clean index is already current; opening costs no walk.
+    Current,
 }
 
 /// What the palette can say about a root right now.
@@ -508,7 +574,7 @@ struct Entry {
     /// the same number as "never asked".
     epoch: u64,
     /// A walk for [`Self::epoch`] is out.
-    building: bool,
+    running: bool,
     /// The last complete answer, deliberately **kept across a rebuild**: the
     /// files that were under this root a second ago are overwhelmingly still
     /// there, and blanking the palette while it re-reads them would be a worse
@@ -516,6 +582,8 @@ struct Entry {
     index: Option<FileIndex>,
     /// Something under the root moved since the current walk was asked for.
     dirty: bool,
+    /// Whether the root's named tree watch is listening. An unheard root is walked on every open.
+    heard: bool,
 }
 
 /// The per-root register (`docs/DESIGN.md` §7.55 ④).
@@ -534,7 +602,7 @@ impl FileIndexes {
     #[must_use]
     pub fn state(&self, root: &Path) -> IndexState {
         match self.roots.get(root) {
-            Some(entry) if entry.building => IndexState::Building,
+            Some(entry) if entry.running => IndexState::Building,
             Some(entry) if entry.index.is_some() => IndexState::Ready,
             // An entry that is neither building nor holding an index knows
             // exactly as much about the root as no entry at all does, and says
@@ -563,14 +631,11 @@ impl FileIndexes {
     /// already being walked for the epoch they would have asked about.
     pub fn claim(&mut self, root: &Path) -> Option<IndexRequest> {
         let entry = self.roots.entry(root.to_path_buf()).or_default();
-        if !entry.dirty && (entry.building || entry.index.is_some()) {
+        if entry.running || (!entry.dirty && entry.index.is_some()) {
             return None;
         }
-        // A dirty root supersedes its own walk rather than waiting for it: the
-        // answer in flight was asked about a tree that has since moved, and
-        // `accept` will drop it on the epoch.
         entry.dirty = false;
-        entry.building = true;
+        entry.running = true;
         entry.epoch += 1;
         Some(IndexRequest {
             root: root.to_path_buf(),
@@ -592,6 +657,37 @@ impl FileIndexes {
         if let Some(entry) = self.roots.get_mut(root) {
             entry.dirty = true;
         }
+    }
+
+    /// The watch is listening. Arming itself is news in the ear, so that gap is covered there.
+    pub(crate) fn mark_heard(&mut self, root: &Path) {
+        if let Some(entry) = self.roots.get_mut(root) {
+            entry.heard = true;
+        }
+    }
+
+    /// The watch cannot hear this root. Keep the held index, but make the next open read again.
+    pub(crate) fn mark_unheard(&mut self, root: &Path) {
+        if let Some(entry) = self.roots.get_mut(root) {
+            entry.heard = false;
+            entry.dirty = true;
+        }
+    }
+
+    /// Whether a walk is currently out for this root.
+    #[must_use]
+    pub(crate) fn running(&self, root: &Path) -> bool {
+        self.roots.get(root).is_some_and(|entry| entry.running)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dirty(&self, root: &Path) -> bool {
+        self.roots.get(root).is_some_and(|entry| entry.dirty)
+    }
+
+    /// The roots this register currently owns, for the ear whose wanted set is exactly theirs.
+    pub(crate) fn roots(&self) -> BTreeSet<PathBuf> {
+        self.roots.keys().cloned().collect()
     }
 
     /// A volume arrived: roots that have no completed answer, or whose last walk could not read
@@ -618,8 +714,11 @@ impl FileIndexes {
     /// caller in diagnostics — so a palette opened three times in a second is one walk, not three.
     pub fn reopened(&mut self, root: &Path) -> Reopened {
         if let Some(entry) = self.roots.get_mut(root) {
-            if entry.building {
+            if entry.running {
                 return Reopened::Merged(entry.epoch);
+            }
+            if entry.heard && !entry.dirty && entry.index.is_some() {
+                return Reopened::Current;
             }
             entry.dirty = true;
         }
@@ -641,7 +740,7 @@ impl FileIndexes {
         if entry.epoch != response.epoch {
             return;
         }
-        entry.building = false;
+        entry.running = false;
         entry.index = Some(response.index);
     }
 
@@ -660,6 +759,29 @@ impl FileIndexes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+
+    /// RED (T-PALETTE-DEEP) — the watcher filter is the walk's directory-only skip rule.
+    ///
+    /// MUTATIONS: check every component (the final `build` file fails); check only the first
+    /// component (`a/node_modules/b/c.js` passes).
+    #[test]
+    fn a_name_under_a_skipped_folder_or_too_deep_does_not_bear_on_the_index() {
+        for (name, expected) in [
+            ("build", true),
+            ("target", true),
+            ("target/debug/x.o", false),
+            ("a/node_modules/b/c.js", false),
+            ("src/build/notes.md", false),
+            ("a/b/c/d/e/f/g.txt", false),
+            ("src/new.rs", true),
+        ] {
+            let names = [OsString::from(name)];
+            assert_eq!(bears_on_index(DirChange::Named(&names)), expected, "{name}");
+        }
+        assert!(bears_on_index(DirChange::Unknown));
+        assert!(!bears_on_index(DirChange::Ended));
+    }
 
     /// A scratch directory of this test's own, never shared with another.
     ///
@@ -790,7 +912,7 @@ mod tests {
             touch(&root.join(format!("file-{number:02}.txt")));
         }
 
-        let index = walk_bounded(&root, INDEX_MAX_DEPTH, 3);
+        let index = walk_bounded(&root, INDEX_MAX_DEPTH, 3, 3, INDEX_MAX_DIRECTORIES);
 
         assert_eq!(index.len(), 3, "exactly the cap, and not one more");
         assert!(index.truncated(), "and the palette is told there was more");
@@ -815,7 +937,7 @@ mod tests {
             touch(&root.join(format!("file-{number:02}.txt")));
         }
 
-        let index = walk_bounded(&root, INDEX_MAX_DEPTH, 100);
+        let index = walk_bounded(&root, INDEX_MAX_DEPTH, 100, 100, INDEX_MAX_DIRECTORIES);
 
         assert_eq!(index.len(), 10, "all ten, none refused");
         assert!(
@@ -824,6 +946,69 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-PALETTE-DEEP) — either independent traversal bound sets the same one `truncated`
+    /// truth, and the root is the first directory counted.
+    ///
+    /// MUTATIONS: refuse a directory without setting `truncated`; start the directory count after
+    /// the root, which admits `b` and its file at the boundary.
+    #[test]
+    fn either_bound_sets_the_one_truncated_flag() {
+        let files = scratch("either-bound-files");
+        for number in 0..5 {
+            touch(&files.join(format!("file-{number}.txt")));
+        }
+        let file_limited = walk_bounded(&files, INDEX_MAX_DEPTH, 2, 100, 100);
+        assert_eq!(file_limited.len(), 2);
+        assert!(file_limited.truncated());
+
+        let directories = scratch("either-bound-directories");
+        touch(&directories.join("a").join("kept.txt"));
+        touch(&directories.join("b").join("refused.txt"));
+        let directory_limited = walk_bounded(&directories, INDEX_MAX_DEPTH, 100, 100, 2);
+        assert_eq!(
+            relatives(&directory_limited),
+            vec!["a/kept.txt".to_owned()],
+            "the root and `a` exhaust a two-directory budget"
+        );
+        assert!(directory_limited.truncated());
+
+        let _ = std::fs::remove_dir_all(files);
+        let _ = std::fs::remove_dir_all(directories);
+    }
+
+    /// RED (T-PALETTE-DEEP) — `INDEX_MAX_ENTRIES` has both promised meanings: files retained,
+    /// and names read from any one directory before traversal continues.
+    ///
+    /// MUTATIONS: remove the file-retention guard; remove the per-directory name-collection
+    /// guard. The first or second half respectively exceeds three visible entries.
+    #[test]
+    fn the_entry_bound_limits_files_and_names_read_from_one_directory() {
+        let files = scratch("entry-files");
+        for number in 0..10 {
+            touch(&files.join(format!("file-{number:02}.txt")));
+        }
+        assert_eq!(
+            walk_bounded(&files, INDEX_MAX_DEPTH, 3, 100, 100).len(),
+            3,
+            "only three files are retained"
+        );
+
+        let names = scratch("entry-names");
+        for number in 0..10 {
+            touch(&names.join(format!("dir-{number:02}")).join("inside.txt"));
+        }
+        let from_one_directory = walk_bounded(&names, INDEX_MAX_DEPTH, 100, 3, 100);
+        assert_eq!(
+            from_one_directory.len(),
+            3,
+            "only three root names are collected, so only three child directories are read"
+        );
+        assert!(from_one_directory.truncated());
+
+        let _ = std::fs::remove_dir_all(files);
+        let _ = std::fs::remove_dir_all(names);
     }
 
     /// PIN — a skipped directory is skipped **by its whole name**.
@@ -1069,6 +1254,8 @@ mod tests {
 
         // Made under a folder no tree has unfolded: no watch heard it, nothing marked the root.
         std::fs::write(root.join("折叠的").join("新文件.md"), b"").unwrap();
+        register.mark_heard(&root);
+        register.mark_dirty(&root);
         let Reopened::Asked(second) = register.reopened(&root) else {
             panic!("the next open walks the root again");
         };
@@ -1159,6 +1346,40 @@ mod tests {
         );
     }
 
+    /// RED (T-PALETTE-DEEP) — opening twice over a clean, heard root costs one walk in all.
+    /// MUTATION: restore B3's unconditional dirty mark in `reopened`; the second open asks.
+    #[test]
+    fn an_open_over_a_heard_clean_root_does_not_walk() {
+        let root = PathBuf::from("/roots/heard");
+        let mut register = FileIndexes::default();
+        let request = register.claim(&root).expect("the first open walks");
+        register.accept(IndexResponse {
+            root: root.clone(),
+            epoch: request.epoch,
+            index: ready(&["one.txt"]),
+        });
+        register.mark_heard(&root);
+
+        assert_eq!(register.reopened(&root), Reopened::Current);
+        assert_eq!(register.state(&root), IndexState::Ready);
+    }
+
+    /// RED (T-PALETTE-DEEP) — an unheard root keeps B3's walk-on-open fallback.
+    /// MUTATION: treat every ready root as heard; the open answers `Current`.
+    #[test]
+    fn an_open_over_an_unheard_root_walks() {
+        let root = PathBuf::from("/roots/unheard");
+        let mut register = FileIndexes::default();
+        let request = register.claim(&root).expect("the first open walks");
+        register.accept(IndexResponse {
+            root: root.clone(),
+            epoch: request.epoch,
+            index: ready(&["one.txt"]),
+        });
+
+        assert!(matches!(register.reopened(&root), Reopened::Asked(_)));
+    }
+
     /// PIN — a root that moved is claimed again, with a higher epoch, and keeps
     /// its old index until the new one lands.
     ///
@@ -1217,63 +1438,28 @@ mod tests {
         );
     }
 
-    /// PIN — an answer from a superseded epoch is dropped, and does not
-    /// overwrite a newer index.
+    /// RED (T-PALETTE-DEEP) — dirty claims while a walk is out issue no epoch and collapse into
+    /// one owed rerun after the current answer lands.
     ///
-    /// This is the case the epoch exists for: a slow walk that was already on
-    /// the thread when the tree moved comes back describing a tree that is gone.
-    /// Filing it would replace a correct index with an out-of-date one, and the
-    /// state would say `Ready` about it.
-    ///
-    /// MUTATIONS:
-    /// - deleting the `entry.epoch != response.epoch` guard in `accept`: the
-    ///   stale answer lands, both length assertions go red.
-    /// - `!=` → `<`: the stale answer still lands.
-    /// - `accept` rewritten as `self.roots.entry(..).or_default()` **and** the
-    ///   epoch guard removed together: the ghost lands and the last assertion
-    ///   goes red. Named as a pair because it is a pair — either change alone
-    ///   is caught by the other guard, since a freshly defaulted entry carries
-    ///   epoch 0 and no real answer ever does.
+    /// MUTATIONS: issue an epoch while `running`; clear `dirty` in `accept`.
     #[test]
-    fn an_answer_from_a_superseded_epoch_does_not_overwrite_a_newer_index() {
+    fn claims_while_a_walk_is_out_are_one_owed_rerun_and_no_queued_walk() {
         let root = PathBuf::from("/roots/four");
         let mut register = FileIndexes::default();
         let first = register.claim(&root).expect("a first claim");
-        register.mark_dirty(&root);
-        let second = register
-            .claim(&root)
-            .expect("a dirty root is claimed again");
-
-        register.accept(IndexResponse {
-            root: root.clone(),
-            epoch: second.epoch,
-            index: ready(&["new-one.txt", "new-two.txt"]),
-        });
-        assert_eq!(register.get(&root).map(FileIndex::len), Some(2));
-
+        for _ in 0..10 {
+            register.mark_dirty(&root);
+            assert_eq!(register.claim(&root), None, "no superseded walk is queued");
+            assert_eq!(register.roots[&root].epoch, first.epoch);
+        }
         register.accept(IndexResponse {
             root: root.clone(),
             epoch: first.epoch,
-            index: ready(&["stale.txt"]),
+            index: ready(&["first.txt"]),
         });
-        assert_eq!(
-            register.get(&root).map(FileIndex::len),
-            Some(2),
-            "the walk that was already out described a tree that has moved"
-        );
-        assert_eq!(register.state(&root), IndexState::Ready);
-
-        let stranger = PathBuf::from("/roots/never-asked");
-        register.accept(IndexResponse {
-            root: stranger.clone(),
-            epoch: 1,
-            index: ready(&["ghost.txt"]),
-        });
-        assert_eq!(
-            register.state(&stranger),
-            IndexState::Missing,
-            "an answer about a root this register never asked about is not its answer"
-        );
+        let owed = register.claim(&root).expect("exactly one rerun is owed");
+        assert_eq!(owed.epoch, first.epoch + 1);
+        assert_eq!(register.claim(&root), None, "and no third walk is queued");
     }
 
     /// PIN — a root nobody wants any more is forgotten.
@@ -1329,7 +1515,7 @@ mod tests {
         register.volume_arrived();
 
         assert!(register.roots[&unread].dirty, "the unread root is stale");
-        assert!(!register.roots[&unread].building, "nothing was walked");
+        assert!(!register.roots[&unread].running, "nothing was walked");
         assert!(
             !register.roots[&empty].dirty,
             "a readable empty root is current"

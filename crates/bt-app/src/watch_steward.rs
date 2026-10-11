@@ -43,12 +43,15 @@ use bt_platform::admission::WorkerCtx;
 pub const WATCH_REMOVABLE_VOLUMES: bool = false;
 
 /// **How far under a member the kernel listens, and whether the names reach the listener** — the
-/// three doors of `bt_platform::DirWatch`, one each.
+/// four doors of `bt_platform::DirWatch`, one each.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Depth {
     /// The directory and everything under it (`DirWatch::start`): a repository, the storage
     /// folder.
     Tree,
+    /// The directory and everything under it, with relative names
+    /// (`DirWatch::start_named`): a palette file-index root.
+    TreeNamed,
     /// The directory's own entries, nameless (`DirWatch::start_shallow`): a files-column folder.
     Shallow,
     /// The directory's own entries, by name (`DirWatch::start_shallow_named`): the folder a
@@ -158,6 +161,7 @@ impl Door for Kernel {
     ) -> std::io::Result<Box<dyn Held>> {
         let watch = match depth {
             Depth::Tree => bt_platform::DirWatch::start(ctx, path, wake),
+            Depth::TreeNamed => bt_platform::DirWatch::start_named(ctx, path, wake),
             Depth::Shallow => bt_platform::DirWatch::start_shallow(ctx, path, wake),
             Depth::ShallowNamed => bt_platform::DirWatch::start_shallow_named(ctx, path, wake),
         }?;

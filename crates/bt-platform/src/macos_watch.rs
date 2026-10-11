@@ -1,13 +1,13 @@
 //! **A subscription to a directory, over FSEvents** (ticket M2-1).
 //!
 //! The macOS twin of `windows_impl`'s [`DirWatch`], and the one door in this
-//! crate whose *contract* is three doors: `start` watches a tree, `start_shallow`
-//! watches one directory's own entries, and `start_shallow_named` watches the
-//! same entries and says which of them moved. The backend inventory
+//! crate whose *contract* is four doors: `start` watches a nameless tree, `start_named` watches a
+//! named tree, `start_shallow` watches one directory's own entries, and
+//! `start_shallow_named` watches the same entries and says which moved. The backend inventory
 //! (`docs/plans/port/backend-inventory-2026-09-12.md` §6 ⑤) is explicit that the
 //! depth enum is **not** part of the public interface — `bt-app` reaches the
-//! three contracts through the three constructors — so preserving the contracts
-//! means preserving the three doors, and this module does not export a depth.
+//! four contracts through the four constructors — so preserving the contracts
+//! means preserving the four doors, and this module does not export a depth.
 //!
 //! # Why FSEvents and not kqueue
 //!
@@ -20,7 +20,7 @@
 //! the tree whenever one appears. That is not a watcher, it is a crawler with a
 //! trigger.
 //!
-//! # The three contracts, and the one that costs something here
+//! # The four contracts, and the one that costs something here
 //!
 //! **`Tree` is free.** FSEvents is recursive by nature: a stream is created over
 //! a root and reports everything beneath it. `start` is therefore the natural
@@ -273,12 +273,12 @@ const LOST_TRACK: FsEventStreamEventFlags = MUST_SCAN_SUB_DIRS | USER_DROPPED | 
 /// deciding "it stopped changing" down here, where the decision does not belong.
 const LATENCY_SECONDS: f64 = 0.300;
 
-// ── the three contracts ────────────────────────────────────────────────────
+// ── the four contracts ─────────────────────────────────────────────────────
 
 /// **How far under a watched directory a notification is allowed to come from.**
 ///
 /// Private, exactly as it is on Windows and for the reason the backend inventory
-/// gives (§6 ⑤): the three contracts are the three constructors, and the enum is
+/// gives (§6 ⑤): the four contracts are the four constructors, and the enum is
 /// the value one of them passes rather than a thing a caller names. It carries
 /// no `recursive()` here because FSEvents is not asked — the stream is always
 /// recursive and this is what the watcher thread does with what arrives.
@@ -434,6 +434,19 @@ impl DirWatch {
         Self::start_scoped(ctx, path, WatchDepth::Tree, move |change| {
             wake(change.nameless())
         })
+    }
+
+    /// **The same tree subscription, told each relative path that moved.**
+    ///
+    /// FSEvents already supplies paths below the root. The palette index uses them to refuse
+    /// generated subtrees with the same pure rule as its walk, while an overflow remains
+    /// [`DirChange::Unknown`] and is conservatively admitted.
+    pub fn start_named(
+        ctx: &WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<Self, std::io::Error> {
+        Self::start_scoped(ctx, path, WatchDepth::Tree, wake)
     }
 
     /// The same subscription over **this directory and no deeper**.
@@ -1140,24 +1153,43 @@ mod tests {
     }
 
     /// A named watch that reports its batches as lowercase strings.
-    fn named_watch(root: &Path) -> (DirWatch, mpsc::Receiver<Vec<String>>) {
+    fn named_watch_at(
+        root: &Path,
+        start: impl FnOnce(
+            &WorkerCtx,
+            &Path,
+            Box<dyn Fn(DirChange<'_>) + Send>,
+        ) -> Result<DirWatch, std::io::Error>
+        + Send
+        + 'static,
+    ) -> (DirWatch, mpsc::Receiver<Vec<String>>) {
         let (tx, rx) = mpsc::channel::<Vec<String>>();
         let root = root.to_path_buf();
         let watch = on_a_worker(move |ctx| {
-            DirWatch::start_shallow_named(ctx, &root, move |change| {
-                let names = match change {
-                    DirChange::Named(names) => names
-                        .iter()
-                        .map(|name| name.to_string_lossy().to_lowercase())
-                        .collect(),
-                    DirChange::Unknown => vec!["<unknown>".to_owned()],
-                    DirChange::Ended => vec!["<ended>".to_owned()],
-                };
-                let _ = tx.send(names);
-            })
+            start(
+                ctx,
+                &root,
+                Box::new(move |change| {
+                    let names = match change {
+                        DirChange::Named(names) => names
+                            .iter()
+                            .map(|name| name.to_string_lossy().to_lowercase())
+                            .collect(),
+                        DirChange::Unknown => vec!["<unknown>".to_owned()],
+                        DirChange::Ended => vec!["<ended>".to_owned()],
+                    };
+                    let _ = tx.send(names);
+                }),
+            )
         })
         .expect("watch a directory this process just made");
         (watch, rx)
+    }
+
+    fn named_watch(root: &Path) -> (DirWatch, mpsc::Receiver<Vec<String>>) {
+        named_watch_at(root, |ctx, root, wake| {
+            DirWatch::start_shallow_named(ctx, root, wake)
+        })
     }
 
     /// PIN — **a tree watch hears a file three levels down.**
@@ -1190,6 +1222,28 @@ mod tests {
         std::fs::write(deep.join("deep.txt"), b"hi").expect("write three levels down");
         rx.recv_timeout(ARRIVES_WITHIN)
             .expect("a tree watch hears a file three directories under its root");
+        drop(watch);
+    }
+
+    /// RED (T-PALETTE-DEEP) — **a named tree watch reports a nested file by its relative
+    /// path.**
+    ///
+    /// MUTATION: give `start_named` `WatchDepth::HereOnly`; the nested name is filtered out.
+    #[test]
+    fn a_file_two_levels_down_is_named_relative_to_the_root() {
+        let _turn = stream_gate::watchers_take_turns();
+        let scratch = Scratch::new("named-tree");
+        let (watch, rx) = named_watch_at(&scratch.0, |ctx, root, wake| {
+            DirWatch::start_named(ctx, root, wake)
+        });
+        let nested = scratch.0.join("one").join("two");
+        std::fs::create_dir_all(&nested).expect("make the nested directory");
+        std::fs::write(nested.join("deep.txt"), b"deep").expect("write the nested file");
+        let (hit, seen) = heard(&rx, &["one/two/deep.txt"]);
+        assert!(
+            hit,
+            "the named tree watch reports its relative path: {seen:?}"
+        );
         drop(watch);
     }
 
@@ -1607,7 +1661,7 @@ mod tests {
         );
     }
 
-    /// PIN — **the three contracts, read off the table that decides them.**
+    /// PIN — **the four contracts, read off the table that decides their two depths.**
     ///
     /// The depth filter stated once, over paths rather than over a filesystem: a
     /// tree watch names the whole relative path the way `FILE_NOTIFY_INFORMATION`
