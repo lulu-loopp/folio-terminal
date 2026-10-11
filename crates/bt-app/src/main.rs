@@ -11938,8 +11938,36 @@ struct ShellLanding {
 /// The last-resort shell replacing a silent birth death, and the exit it will account for.
 #[derive(Debug)]
 struct BirthDeathFallback {
-    shell: pty_door::ShellBirth,
+    landing: ShellLanding,
     exit: exit_diagnostics::ShellExit,
+}
+
+impl BirthDeathFallback {
+    /// Hold a last-resort shell on the same landing record as every other shell birth, so a pane
+    /// resize released before it answers is owed through the same field and landing code.
+    fn waiting(
+        leaf: &LeafSession,
+        shell: pty_door::ShellBirth,
+        exit: exit_diagnostics::ShellExit,
+    ) -> Self {
+        Self {
+            landing: ShellLanding {
+                shell,
+                decision: BirthDecision {
+                    started: Started::AsAsked,
+                    spawn_profile: leaf.profile.clone(),
+                    spawn_place: leaf.spawn_place.clone(),
+                    at_shell_home: leaf.session.spawn_at_shell_home(),
+                    named: leaf.born_named,
+                    program: leaf.program.clone(),
+                    unless_gone: None,
+                },
+                born_grid: leaf.conpty_grid,
+                owed_physical: None,
+            },
+            exit,
+        }
+    }
 }
 
 /// **What the window thread decided about a pane's shell before asking for it**: the rule's
@@ -21224,15 +21252,18 @@ fn release_due_leaf_resize(
     )?;
     leaf.grid = pending.grid;
     leaf.conpty_grid = pending.grid;
-    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW): it was
-    // asked for at the grid of its request, and nothing above could tell it.
-    if let Some(PaneBirth {
-        waiting: BirthWait::Shell(landing),
-        ..
-    }) = leaf.birth.as_mut()
-        && commit.told_the_child
-    {
-        landing.owed_physical = Some(pending.physical);
+    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW,
+    // T-FALLBACK-OWED-RESIZE): it was asked for at the grid of its request, and nothing above
+    // could tell it. A pane's first birth and a birth-death fallback carry the same landing fact.
+    if commit.told_the_child {
+        if let Some(PaneBirth {
+            waiting: BirthWait::Shell(landing),
+            ..
+        }) = leaf.birth.as_mut()
+        {
+            landing.owed_physical = Some(pending.physical);
+        }
+        runtime::owe_birth_death_fallback_resize(leaf, pending.physical);
     }
     Ok((Some(commit), wake))
 }
@@ -40491,22 +40522,46 @@ fn finish_leaf_birth(
 /// integration of the shell that started. The decision is the dead shell's own, read back from the
 /// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
 /// exit line names the fallback — so it is spent with the landing.
-fn land_birth_death_fallback_shell(leaf: &mut LeafSession, pty: PtySession) -> Result<()> {
-    let decision = BirthDecision {
-        started: Started::AsAsked,
-        spawn_profile: leaf.profile.clone(),
-        spawn_place: leaf.spawn_place.clone(),
-        at_shell_home: leaf.session.spawn_at_shell_home(),
-        named: leaf.born_named,
-        program: leaf.program.clone(),
-        unless_gone: None,
-    };
+fn land_birth_death_fallback_shell(
+    leaf: &mut LeafSession,
+    pty: PtySession,
+    landing: ShellLanding,
+) -> Result<()> {
+    let ShellLanding {
+        decision,
+        born_grid,
+        owed_physical,
+        ..
+    } = landing;
     let seed = LeafSeed {
         profile: leaf.profile.clone(),
         ..LeafSeed::default()
     };
     finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
+    apply_owed_shell_resize(leaf, born_grid, owed_physical)?;
     leaf.spawn_fallback = None;
+    Ok(())
+}
+
+/// Tell a shell that has just landed the last pane size released after its birth was asked for.
+/// Both an ordinary pane birth and a birth-death fallback spend [`ShellLanding::owed_physical`]
+/// here, through the same admitted PTY-resize door.
+fn apply_owed_shell_resize(
+    leaf: &mut LeafSession,
+    born_grid: GridSize,
+    owed_physical: Option<PhysicalSize<u32>>,
+) -> Result<()> {
+    if let (Some(pty), Some(physical)) = (leaf.pty.as_mut(), owed_physical)
+        && leaf.conpty_grid != born_grid
+    {
+        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
+        let grid = leaf.conpty_grid;
+        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
+            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+        .context("tell a landed shell the grid its pane moved to while it was being born")?;
+    }
     Ok(())
 }
 
@@ -40598,17 +40653,7 @@ fn land_shell_birth(
         .as_ref()
         .map_or_else(LeafSeed::default, |birth| birth.seed.clone());
     finish_leaf_birth(leaf, pty, &decision, &seed, None, false)?;
-    if let (Some(pty), Some(physical)) = (leaf.pty.as_mut(), owed_physical)
-        && leaf.conpty_grid != born_grid
-    {
-        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
-        let grid = leaf.conpty_grid;
-        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
-            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
-        })
-        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
-        .context("tell a landed shell the grid its pane moved to while it was being born")?;
-    }
+    apply_owed_shell_resize(leaf, born_grid, owed_physical)?;
     if let Some(birth) = &held {
         deliver_held_input(birth, leaf.input_target(), note)?;
     }

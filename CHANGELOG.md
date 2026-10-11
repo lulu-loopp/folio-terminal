@@ -13,6 +13,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A system shell that replaces one which stopped during startup now opens at the pane's current size, even when the window was resized while the replacement was starting. <!-- zh: pending T-FALLBACK-OWED-RESIZE -->
 - Folio keeps one `session.prev.json` copy of the layout it saw at startup, so a useful earlier layout remains available if a later session save goes wrong. <!-- zh: Folio 会在 `session.prev.json` 中保留启动时看到的一份布局；之后的会话保存若出错，仍可找回此前有用的布局。 -->
 - A shell that stops as Folio starts no longer removes its restored pane or tab: Folio falls back to the system shell when it can, or keeps the shell's output and the pane in place. <!-- zh: pending T-SHELL-BIRTH-DEATH -->
 - The diagnostics log now says when a pane's shell exits and why Folio's last window closed. <!-- zh: pending T-SHELL-EXIT-DIAG-LINE -->

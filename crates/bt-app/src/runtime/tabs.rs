@@ -129,6 +129,17 @@ pub(super) enum BirthDeathLanding {
     Kept(exit_diagnostics::ShellExit, String),
 }
 
+/// Record the last pane size released while its birth-death fallback is pending. This module owns
+/// the pending record; the shared shell-landing road spends the size once the PTY exists.
+pub(crate) fn owe_birth_death_fallback_resize(
+    leaf: &mut crate::LeafSession,
+    physical: winit::dpi::PhysicalSize<u32>,
+) {
+    if let Some(pending) = leaf.birth_death_fallback.as_mut() {
+        pending.landing.owed_physical = Some(physical);
+    }
+}
+
 /// Land a silent birth death's last-resort shell in its pane, or keep the pane when it failed.
 ///
 /// The birth-death facts of a pane (`birth_death_fallback`, `birth_death_kept`, the exit's age and
@@ -140,16 +151,17 @@ pub(super) fn land_birth_death_fallback(
     let Some(mut pending) = leaf.birth_death_fallback.take() else {
         return Ok(BirthDeathLanding::Waiting);
     };
-    let Some(answer) = pending.shell.take() else {
+    let Some(answer) = pending.landing.shell.take() else {
         leaf.birth_death_fallback = Some(pending);
         return Ok(BirthDeathLanding::Waiting);
     };
     match answer.session {
         Ok(pty) => {
-            crate::land_birth_death_fallback_shell(leaf, pty)?;
+            let crate::BirthDeathFallback { landing, exit } = pending;
+            crate::land_birth_death_fallback_shell(leaf, pty, landing)?;
             leaf.shell_exit_age = None;
             leaf.shell_exit_said = false;
-            Ok(BirthDeathLanding::FellBack(pending.exit))
+            Ok(BirthDeathLanding::FellBack(exit))
         }
         Err(error) => {
             pending.exit.disposition = exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept;
@@ -3638,8 +3650,9 @@ impl Runtime<'_> {
                                         exit.disposition = exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
                                             bt_pty::LAST_RESORT_SHELL,
                                         );
-                                        leaf.birth_death_fallback =
-                                            Some(crate::BirthDeathFallback { shell, exit });
+                                        leaf.birth_death_fallback = Some(
+                                            crate::BirthDeathFallback::waiting(leaf, shell, exit),
+                                        );
                                     }
                                     Err(error) => {
                                         keep_birth_death_face(leaf, &exit, false)?;
@@ -3852,6 +3865,57 @@ impl Runtime<'_> {
 mod birth_death_tests {
     use super::*;
     use crate::test_support;
+    use std::num::NonZeroU16;
+    use std::sync::{Arc, Barrier, mpsc};
+
+    fn grid(columns: u16, rows: u16) -> crate::GridSize {
+        crate::GridSize {
+            columns: NonZeroU16::new(columns).expect("nonzero columns"),
+            rows: NonZeroU16::new(rows).expect("nonzero rows"),
+        }
+    }
+
+    fn waking() -> (bt_pty::OutputWake, mpsc::Receiver<()>) {
+        let (said, heard) = mpsc::sync_channel(8);
+        (
+            Arc::new(move || {
+                let _ = said.try_send(());
+            }),
+            heard,
+        )
+    }
+
+    fn wait_for_answer(shell: &pty_door::ShellBirth, heard: &mpsc::Receiver<()>) {
+        while !shell.answered() {
+            heard.recv().expect("a birth publishes before it wakes");
+        }
+    }
+
+    fn resize_pending_shell(
+        leaf: &mut crate::LeafSession,
+        next: crate::GridSize,
+        physical: winit::dpi::PhysicalSize<u32>,
+    ) {
+        let started = Instant::now();
+        assert!(
+            crate::schedule_leaf_grid_change(
+                leaf,
+                next,
+                physical,
+                started,
+                crate::LeafOnStage::Shown,
+                "pending shell resize",
+                crate::card_trace::Pane::untraced(),
+            )
+            .expect("the pane reflows")
+        );
+        let commit =
+            crate::release_due_leaf_resize(leaf, started + crate::WINDOW_RESIZE_QUIET, false)
+                .expect("the resize is released")
+                .0
+                .expect("the child is owed a resize");
+        assert!(commit.told_the_child);
+    }
 
     fn disposition(pty: &mut bt_pty::PtySession) -> Option<BirthDeathDisposition> {
         let status = pty
@@ -3866,12 +3930,14 @@ mod birth_death_tests {
         )
     }
 
-    /// MUTATION (observed RED): make a silent birth death answer `Keep` (the disposition assertion
-    /// fails); drop the record from `BirthFallback::spawn` and the landing writes no banner and
-    /// keeps the asked-for program; drop `|| leaf.birth_death_kept` from the reaper's liveness rule, or let the
-    /// birth-death arm fall through to the retirement road, and the wiring pin fails.
+    /// MUTATION (observed RED): drop `owed_physical` at the fallback landing and the PTY remains at
+    /// its born size; make a silent birth death answer `Keep` and the disposition assertion fails;
+    /// drop the record from `BirthFallback::spawn` and the landing writes no banner and keeps the
+    /// asked-for program; drop `|| leaf.birth_death_kept` from the reaper's liveness rule, or let
+    /// the birth-death arm fall through to the retirement road, and the wiring pin fails.
     #[test]
     fn a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab() {
+        test_support::on_the_window_thread();
         let mut pty = bt_pty::PtySession::fake_exited(Duration::from_millis(400), 23, b"", true);
         assert_eq!(disposition(&mut pty), Some(BirthDeathDisposition::FallBack));
         let fallback = pty
@@ -3884,25 +3950,75 @@ mod birth_death_tests {
         };
         let banner = crate::fallback_banner(&record, profiles::fallback_profile_id());
         assert!(banner.contains("failed to start"), "{banner:?}");
-        // The retained command starts, and its pane is re-seated on the birth road: the banner,
-        // the last-resort program, and no fallback record left over for a second line.
-        let size = (
-            std::num::NonZeroU16::new(80).expect("nonzero"),
-            std::num::NonZeroU16::new(24).expect("nonzero"),
-        );
-        let started = fallback
-            .spawn(
-                size.0,
-                size.1,
-                std::sync::Arc::new(|| {}),
-                "exited".to_owned(),
-            )
-            .expect("the last-resort shell starts");
         let mut leaf = test_support::leaf_saying("");
         leaf.program = Some(PathBuf::from("preferred-shell"));
-        crate::land_birth_death_fallback_shell(&mut leaf, started)
-            .expect("the birth road seats the fallback");
+        let born_grid = leaf.conpty_grid;
+        let (wake, heard) = waking();
+        let worker_wake = Arc::clone(&wake);
+        let open = Arc::new(Barrier::new(2));
+        let worker_open = Arc::clone(&open);
+        let shell = pty_door::request(
+            move |_| {
+                worker_open.wait();
+                fallback.spawn(
+                    born_grid.columns,
+                    born_grid.rows,
+                    worker_wake,
+                    "exited".to_owned(),
+                )
+            },
+            wake,
+        )
+        .expect("the fallback birth worker starts");
+        let exit = exit_diagnostics::ShellExit {
+            seat: 4,
+            code: Some(23),
+            elapsed: Duration::from_millis(400),
+            program: leaf.program.clone(),
+            tab: 8,
+            disposition: exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
+                bt_pty::LAST_RESORT_SHELL,
+            ),
+        };
+        leaf.birth_death_fallback = Some(crate::BirthDeathFallback::waiting(&leaf, shell, exit));
+
+        let resized_grid = grid(52, 7);
+        let resized_physical = winit::dpi::PhysicalSize::new(777, 333);
+        resize_pending_shell(&mut leaf, resized_grid, resized_physical);
+        assert_eq!(
+            leaf.birth_death_fallback
+                .as_ref()
+                .and_then(|pending| pending.landing.owed_physical),
+            Some(resized_physical),
+            "the pending fallback owns the released size"
+        );
+
+        open.wait();
+        wait_for_answer(
+            &leaf
+                .birth_death_fallback
+                .as_ref()
+                .expect("the fallback is pending")
+                .landing
+                .shell,
+            &heard,
+        );
+        assert!(matches!(
+            land_birth_death_fallback(&mut leaf).expect("the fallback lands"),
+            BirthDeathLanding::FellBack(_)
+        ));
         assert!(leaf.pty.is_some() && leaf.spawn_fallback.is_none());
+        let landed_size = leaf
+            .pty
+            .as_ref()
+            .expect("the fallback is seated")
+            .size()
+            .expect("the fallback PTY reports its size");
+        assert_eq!(
+            landed_size,
+            crate::pty_size(resized_grid, resized_physical),
+            "the fallback PTY receives the size released while it was pending"
+        );
         assert_eq!(leaf.profile, profiles::fallback_profile_id());
         assert_eq!(
             leaf.program.as_deref(),
@@ -3937,6 +4053,77 @@ mod birth_death_tests {
         assert!(!tab_has_ended(true, true) && tab_has_ended(true, false));
     }
 
+    /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW): drop an ordinary landing's owed size and the
+    /// PTY remains at its born size. This is the no-regression twin of the fallback test above.
+    #[test]
+    fn a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending() {
+        test_support::on_the_window_thread();
+        let mut leaf = test_support::leaf_saying("");
+        let born_grid = leaf.conpty_grid;
+        let decision = crate::BirthDecision {
+            started: crate::Started::AsAsked,
+            spawn_profile: leaf.profile.clone(),
+            spawn_place: None,
+            at_shell_home: false,
+            named: false,
+            program: Some(PathBuf::from("fresh-shell")),
+            unless_gone: None,
+        };
+        let seed = crate::LeafSeed {
+            profile: leaf.profile.clone(),
+            ..crate::LeafSeed::default()
+        };
+        let (wake, heard) = waking();
+        let open = Arc::new(Barrier::new(2));
+        let worker_open = Arc::clone(&open);
+        let (kept, hygiene) = mpsc::channel();
+        let shell = pty_door::request(
+            move |_| {
+                worker_open.wait();
+                bt_pty::test_shell::TestShell::spawn_default(bt_pty::PtySize::cells(
+                    born_grid.columns,
+                    born_grid.rows,
+                ))
+                .map(|shell| {
+                    let (session, shell_hygiene) = shell.into_session();
+                    let _ = kept.send(shell_hygiene);
+                    session
+                })
+            },
+            wake,
+        )
+        .expect("the fresh birth worker starts");
+        crate::await_shell(&mut leaf, shell, decision, &seed);
+
+        let resized_grid = grid(57, 9);
+        let resized_physical = winit::dpi::PhysicalSize::new(901, 407);
+        resize_pending_shell(&mut leaf, resized_grid, resized_physical);
+        open.wait();
+        let landing = match leaf.birth.as_ref().map(|birth| &birth.waiting) {
+            Some(crate::BirthWait::Shell(landing)) => landing,
+            _ => panic!("the fresh shell is pending"),
+        };
+        wait_for_answer(&landing.shell, &heard);
+        assert!(
+            crate::land_shell_birth(&mut leaf, |_| {})
+                .expect("the fresh birth lands")
+                .is_none()
+        );
+        let landed_size = leaf
+            .pty
+            .as_ref()
+            .expect("the fresh shell is seated")
+            .size()
+            .expect("the fresh PTY reports its size");
+        assert_eq!(
+            landed_size,
+            crate::pty_size(resized_grid, resized_physical),
+            "the fresh PTY still receives the size released while it was pending"
+        );
+        drop(leaf);
+        drop(hygiene.recv().expect("the fresh shell's hygiene"));
+    }
+
     /// MUTATION (observed RED): ignore the byte count and choose the fallback; the disposition
     /// changes, or omit the face feed and the shell's output is the only visible text, or let
     /// `settle_exit_dispositions` relabel a birth death and its line says `retired pane`.
@@ -3969,7 +4156,8 @@ mod birth_death_tests {
             compact.contains("broken-shellexitedatbirth(code23,900ms)."),
             "{visible:?}"
         );
-        assert!(leaf.birth_death_kept && !tab_has_ended(true, true));
+        assert!(leaf.birth_death_kept && leaf.wake.is_none() && leaf.pty.is_none());
+        assert!(!tab_has_ended(true, true));
 
         // The reaper settles every collected exit once the turn's retirements are known; a kept
         // birth death beside an ordinary exit in the same active tab, whose pane that turn

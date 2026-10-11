@@ -32,6 +32,7 @@ mod profiles;
 mod quake;
 mod search;
 mod tabs;
+pub(crate) use tabs::owe_birth_death_fallback_resize;
 mod terminal;
 mod tooltips;
 mod update_card;

@@ -14820,3 +14820,11 @@ its `mutation-default-record` arm refuses to derive the Homebrew channel.
 **The rule.** Automatic shell birth and death cannot reduce a restored layout. Only a person's close verb may remove a birth-death pane. The resident diagnostics line distinguishes a fallback from a kept pane and includes the exit facts; spawn failures likewise reach resident diagnostics, while the pane's fallback banner remains the existing user-facing sentence without technical details.
 
 **Pinned by** `runtime::tabs::birth_death_tests::{a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab, a_birth_death_with_output_keeps_the_pane_and_appends_its_face, an_exit_after_the_birth_grace_retires_as_before}` and `exit_diagnostics::tests::{a_spawn_fallback_names_both_programs_and_the_error_in_resident_diagnostics, a_nonrecoverable_spawn_failure_has_one_resident_line, birth_death_diagnostics_name_the_fallback_and_the_kept_pane}`.
+
+### 2026-10-10 — A pending birth-death fallback is owed the pane's latest size (T-FALLBACK-OWED-RESIZE)
+
+**What is built.** The pending last-resort shell carries the same landing record as an ordinary shell birth. A resize released before either shell lands is recorded there and reaches the new PTY through the existing landing-time resize door; a fallback that cannot start drops the owed size with its pending record when the pane is kept.
+
+**The rule.** A pane size released while any shell birth is pending is owed to that shell. There is one owed-size fact and one landing implementation for ordinary births and birth-death fallbacks.
+
+**Pinned by** `runtime::tabs::birth_death_tests::{a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab, a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending}`.

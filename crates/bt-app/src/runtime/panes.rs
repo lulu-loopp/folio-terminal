@@ -67,7 +67,7 @@ impl Runtime<'_> {
                 .filter_map(|(seat, leaf)| {
                     leaf.birth_death_fallback
                         .as_ref()
-                        .is_some_and(|pending| pending.shell.answered())
+                        .is_some_and(|pending| pending.landing.shell.answered())
                         .then_some(*seat)
                 })
                 .collect();
