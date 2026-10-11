@@ -1434,6 +1434,29 @@ pub fn clamp_graph_scroll(
     scroll_px.clamp(0.0, max)
 }
 
+/// **Where one wheel report leaves a graph's scroll** — `stored` moved back by
+/// what `travel` answers for this graph's page, then clamped.
+///
+/// `travel` is the window's wheel rule (`Runtime::vertical_wheel_travel`), handed
+/// the **screenful of rows in pixels** — the rows' own box, which is what "one
+/// screen at a time" scrolls by. It was once handed the row *count*, so with
+/// that setting on, one notch over a 400-commit graph moved it 400 pixels and
+/// one over a 12-commit graph moved it 12 (AUDIT-hardcode RT-5).
+#[must_use]
+pub fn wheel_graph_scroll(
+    body: [f32; 4],
+    content: &GraphContent,
+    stored: f32,
+    scale: f32,
+    travel: impl FnOnce(f32) -> f32,
+) -> f32 {
+    let mut probe = content.clone();
+    probe.scroll_px = 0.0;
+    let viewport = graph_geometry(body, &probe, scale).viewport;
+    let moved = travel(viewport[3] - viewport[1]);
+    clamp_graph_scroll(body, content, stored - moved, scale)
+}
+
 // ── building one frame ─────────────────────────────────────────────────────
 
 /// How wide a run of text is — [`crate::git_panel::Measure`]'s own closure, for
@@ -8497,6 +8520,47 @@ mod tests {
                 .iter()
                 .all(|box_| box_[2] <= graph_column_rects(narrow, columns, 1.0).description_right),
             "and what is drawn is drawn whole"
+        );
+    }
+
+    /// RED (AUDIT-hardcode RT-5) — **a page of the wheel over a graph is a
+    /// screenful of its rows, in pixels, whatever the number of commits.**
+    ///
+    /// The scroller used to hand the wheel rule the row count as its page, so
+    /// with "one screen at a time" on, one notch moved a 400-commit graph 400
+    /// pixels and a 12-commit graph 12. Two graphs of different lengths in the
+    /// same body are handed the same page, and it is the rows' box.
+    ///
+    /// MUTATION: hand `travel` `content.total_rows as f32` in
+    /// `wheel_graph_scroll` — both pages are the row counts and go red.
+    #[test]
+    fn a_wheel_page_over_a_graph_is_its_rows_box_not_its_row_count() {
+        let body = [0.0, 0.0, 600.0, 500.0];
+        let mut pages = Vec::new();
+        for rows in [12_usize, 400] {
+            let mut content = sample_graph_for_tests(body, 1.0);
+            content.total_rows = rows;
+            let viewport = graph_geometry(body, &content, 1.0).viewport;
+            let rows_box = viewport[3] - viewport[1];
+            let mut handed = None;
+            let after = wheel_graph_scroll(body, &content, 0.0, 1.0, |page| {
+                handed = Some(page);
+                -page
+            });
+            let page = handed.expect("the wheel rule is asked for the page");
+            assert!(
+                (page - rows_box).abs() < f32::EPSILON,
+                "{rows} rows: the page is the rows' box ({rows_box}), not {page}"
+            );
+            assert!(
+                (after - clamp_graph_scroll(body, &content, rows_box, 1.0)).abs() < f32::EPSILON,
+                "and one page forward is one rows' box, clamped"
+            );
+            pages.push(page);
+        }
+        assert!(
+            (pages[0] - pages[1]).abs() < f32::EPSILON,
+            "one body, one page"
         );
     }
 }

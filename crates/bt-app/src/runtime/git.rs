@@ -1961,13 +1961,13 @@ impl Runtime<'_> {
             return Ok(());
         };
         let scale = self.window.renderer.scale_factor() as f32;
-        let extent = (content.total_rows.max(1)) as f32;
-        let travel = self.vertical_wheel_travel(delta, extent);
         let stored = self.window.tabs[tab]
             .git_graph_view
             .get(&surface)
             .map_or(0.0, |view| view.scroll_px);
-        let wanted = git_graph::clamp_graph_scroll(body, content, stored - travel, scale);
+        let wanted = git_graph::wheel_graph_scroll(body, content, stored, scale, |page| {
+            self.vertical_wheel_travel(delta, page)
+        });
         if (wanted - stored).abs() < f32::EPSILON {
             return Ok(());
         }
