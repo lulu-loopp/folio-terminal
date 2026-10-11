@@ -1,6 +1,6 @@
 # Who owns a pane: the session / document / view contract, and how `LeafSession` splits — design note, 2026-10-11
 
-Status: **revision (c), 2026-10-11**, after the Codex confirmation round (`reports/J5-05-contracts.review-codex-b.md`); revision (c) stands over (b) where they differ, and (b) over (a). Before that, **revision (b)**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the first of the two contract notes the 2026-09-21 structure review asked for before 0.5; ledger row **D-1** (*session state has no owner independent of the window*, the 0.5 precondition). The companion note is `side-effects-contract-2026-10-11.md` (D-16, D-33). Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test. One cargo run: `cargo test -p bt-source --test census` (10 passed), whose query reports under `target/ownership-census/` are §1's measured column. Facts about Folio are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named) with the symbol beside the line.
+Status: **revision (d), 2026-10-11**, after the scoped Codex look (`reports/J5-05-contracts.review-codex-c.md`); (d) stands over (c). Before that, **revision (c)**, after the Codex confirmation round (`reports/J5-05-contracts.review-codex-b.md`); revision (c) stands over (b) where they differ, and (b) over (a). Before that, **revision (b)**, after the Codex review (`reports/J5-05-contracts.review-codex.md`, both notes *adopt with changes*). Revision (b) is the dated section at the end. **Where revision (a)'s text and revision (b) differ, revision (b) stands.** Revision (a) was the draft for review. Plan row J5 (T-05-CONTRACTS, 0.4.8), the first of the two contract notes the 2026-09-21 structure review asked for before 0.5; ledger row **D-1** (*session state has no owner independent of the window*, the 0.5 precondition). The companion note is `side-effects-contract-2026-10-11.md` (D-16, D-33). Read at `main` = `77399d57` on `design/05-contracts`. No product code, no test. One cargo run: `cargo test -p bt-source --test census` (10 passed), whose query reports under `target/ownership-census/` are §1's measured column. Facts about Folio are cited `file:line` at `77399d57` (paths under `crates/bt-app/src/` unless another crate is named) with the symbol beside the line.
 
 **Section signs.** A bare `§n` is a section of this note. `A§n` is a section of `docs/ARCHITECTURE.md`; `DESIGN §n` of `docs/DESIGN.md`; `SE§n` of the companion note; `CEN§n` of `docs/plans/design/ownership-census-2026-09-25.md`; `SPLIT§n` of `docs/plans/bt-app-split.md`; `WB§n` of `docs/plans/design/agent-workbench-0.5-2026-09-20.md`.
 
@@ -490,3 +490,54 @@ O-4's table test `every_life_transition_is_one_method_and_no_other` drives exact
 ### (c)4 · Tickets and questions
 
 The tickets are unchanged from (b)6. O-4 stays **L** and carries (c)2's table test and (c)3's four pins. O-3 carries (c)1's census assertion. The owner questions are unchanged from (b)7.
+
+---
+
+## Revision (d), 2026-10-11, after the scoped Codex look
+
+Review: `reports/J5-05-contracts.review-codex-c.md`. Verdict on this note: **adopt with changes (blockers only)**, three factual corrections to (c)2's table. Everything else in scope is closed. All three are applied; none is argued. **Where (c) and (d) differ, (d) stands.**
+
+### (d)0 · What changed
+
+| # | the review's words | disposition | where |
+|---|---|---|---|
+| 1 | *"`FallingBack` still retains `wake` after an accepted fallback request. The table must list it or explicitly keep `wake` outside `Phase`; showing it only under `Live` is inaccurate."* | applied: `wake` is kept **outside** `Phase` and dropped from the `Live` row | (d)1 |
+| 2 | *"`Shellless` is also created directly for no-program and `BT_PROBE_INPUT` panes, and reached after a failed `Bearing` birth — not only 'a landing with `Started::Nothing`.'"* | applied: the entry edges are corrected | (d)1 |
+| 3 | *"'Every close also expires attention' is false. `close_pane` and `close_tab` call `expire_leaf_attention`, but window close and quit retirement only retire the shells in `let_go_of_this_window`."* | applied: the close column is split by road, and the gap is recorded as finding F-1 with a ticket, not written into the contract | (d)2 |
+
+### (d)1 · `wake` and `Shellless`, corrected
+
+**`wake` is not part of `Phase`.** Under (b)3 it belongs to the binding and is transport debt until O-6, so `ShellLife` does not hold it. In today's code the field is `Some` from the moment a shell is asked for until the pane is left without one. It stays `Some` through `Live`, `ExitDraining`, `Exited` and `FallingBack`: the accepted fallback request is handed `leaf.wake`'s output (`runtime/tabs.rs:3632–3645`), and the field is not cleared. `keep_birth_death_face` clears it (`tabs.rs:115`), so it is `None` in `Kept`. In O-4 that clear stays where it is, on the `Kept` transition. The field itself stays on the session record, beside `ShellLife` and outside it, until O-6 moves it to the binding. (c)2's `Live` row reads **payload: `pty`**, without `wake`.
+
+**`Shellless` is entered three ways:**
+1. **Directly at creation**, for a pane with no program on this machine (the no-program banner) and for a `BT_PROBE_INPUT` pane, which has no ConPTY behind it;
+2. **from `Deciding`**, when `land_pane_birth` decides `Started::Nothing`;
+3. **from `Bearing`**, when the shell's birth fails (`land_shell_birth`'s refusal: the pane is said over with no shell).
+
+(c)2's `Shellless` row reads **entered when: (1)–(3) above**. The table test in O-4 drives all three entries.
+
+### (d)2 · Closes, by road; finding F-1
+
+The close column of (c)2 is right about **what each phase's payload needs** (drop the pane birth; abandon a pending birth's number; retire the PTY; nothing). It was wrong to say every close does the same around that. The roads differ:
+
+| road | retires the shell (`retire_session` / `retire_all_shells`) | expires the pane's attention (`expire_leaf_attention`, `Event::LeafGone`) |
+|---|---|---|
+| `close_pane` (`runtime/panes.rs:1466` ff.) | yes | **yes** |
+| `close_tab` | yes | **yes** |
+| a window close and the quit's retirement, through `let_go_of_this_window` (`runtime/windows.rs:2055` ff.) | yes | **no** |
+| `abandon_a_window_nothing_arrived_in` (`windows.rs:2030` ff.) | yes (`retire_all_shells`) | no |
+
+**Finding F-1.** The window-ending roads retire the shells without emitting their panes' `LeafGone`. `expire_leaf_attention`'s own doc names only two doors, *"a pane closed on its own, and every pane of a tab closed together"* (`main.rs:28164–28168`), and no DESIGN entry says the window roads leave it out on purpose. So this note reads it as **an omission, not a design**.
+
+What it costs, as far as this read establishes: the window's place counter (`attention_next_place`) dies with the window, so no place is leaked. But the attention trace (`emit_attention_lines`) gets no closing line for any episode still standing in a window that closed. Whether a desktop notification or a row in another window is left pointing at such a pane is **not established here**, and the ticket checks it first.
+
+- **Ticket: T-ATTENTION-WINDOW-EXPIRY (S).** `let_go_of_this_window` and `abandon_a_window_nothing_arrived_in` expire each leaf's attention through `expire_leaf_attention` before retiring the shells. Every road that ends a pane then emits `LeafGone` once.
+  - Pin: `every_road_that_ends_a_pane_emits_leaf_gone_once`, a table over the four roads, with a recording attention trace.
+  - MUTATION: remove the call from `let_go_of_this_window`.
+  - It can land independently of the contract tickets, before O-4 or with it. O-4's `ShellLife` close method is where the four roads meet afterwards.
+
+**The contract, as it now reads.** Every road that ends a pane retires its shell **and** expires its attention exactly once. Today two of the four roads do the second; F-1's ticket makes it four. Until then, (c)2's sentence *"Every close also expires the pane's attention"* is withdrawn as a statement about today, and stays only as the rule the ticket enforces.
+
+### (d)3 · Tickets and questions
+
+T-ATTENTION-WINDOW-EXPIRY (S) is added beside the O-series. It has no dependency, and O-4 keeps its pin. All other tickets are as (b)6 and (c)4, and the owner questions are as (b)7.
