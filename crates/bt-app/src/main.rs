@@ -54021,11 +54021,11 @@ mod popover_trigger_tests {
             6,
             "and each one stops there when the press was its own close, or its pin"
         );
-        // Assembled rather than written out: a literal spelled in full here is
-        // itself a line of `main.rs`, and the scan would find its own needle.
-        let stale = ["!matches!(self.", "chrome_target_at(position)"].concat();
+        // The searched scope is the product item's body, so this test's own
+        // spelling cannot answer the question.
+        let stale = "!matches!(self.chrome_target_at(position)";
         assert!(
-            !router.contains(stale.as_str()),
+            !router.contains(stale),
             "a popup is answering the trigger question for itself again"
         );
     }
@@ -55619,7 +55619,7 @@ mod files_locate_door_tests {
     // comment off before it could forbid a spelling that stands in it. The crate
     // stops at the closing brace, so the trim is gone with the finder.
 
-    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -55865,11 +55865,11 @@ mod files_locate_door_tests {
     /// list of its own — to admit or to refuse.
     #[test]
     fn one_predicate_says_whether_a_card_has_a_window_to_become() {
-        // Assembled, so the pin cannot match its own text.
-        let asks = ["file_peek", "_promotes()"].concat();
+        // Each reading below is scoped to one product item's body.
+        let asks = "file_peek_promotes()";
         for name in ["press_file_peek", "file_peek_head_grasp"] {
             assert!(
-                method_body("Runtime", name).contains(&asks),
+                method_body("Runtime", name).contains(asks),
                 "{name} decides about the card's head without asking whether it has a window"
             );
         }
@@ -56496,12 +56496,11 @@ mod files_locate_door_tests {
     /// "helpfully follow the file" change somebody will one day want to make.
     #[test]
     fn opening_a_file_never_moves_the_files_tree() {
-        // Assembled rather than written out, so a pin that scans the file it
-        // lives in cannot match its own text.
+        // Each reading below is scoped to one product item's body.
         let verbs = [
-            ["reroot", "_files_column"].concat(),
-            ["show_folder", "_in_files_column"].concat(),
-            ["locate_folder", "_in_files_column"].concat(),
+            "reroot_files_column",
+            "show_folder_in_files_column",
+            "locate_folder_in_files_column",
         ];
         for name in [
             "open_preview",
@@ -56512,9 +56511,9 @@ mod files_locate_door_tests {
             "activate_files_row",
         ] {
             let text = method_body("Runtime", name);
-            for verb in &verbs {
+            for verb in verbs {
                 assert!(
-                    !text.contains(verb.as_str()),
+                    !text.contains(verb),
                     "{name} moves the files tree by calling `{verb}` — \
                      opening a file has no side effect on the tree"
                 );
@@ -56537,12 +56536,11 @@ mod files_locate_door_tests {
     /// double click — each of which *names a root* rather than a place to go).
     #[test]
     fn re_rooting_is_reached_only_after_the_question_about_range() {
-        // Assembled, so neither half of this pin matches its own text. The
-        // scope is every file `bt-app` declares and not this one: a caller that
-        // moves to a file beside this one is still a caller.
-        let hard = ["self.show_folder", "_in_files_column("].concat();
-        let soft = ["locate_folder", "_in_files_column"].concat();
-        let calls = found(needle!(Pattern::text(hard.as_str())), View::Raw);
+        // The full product reading excludes this test by declared compilation,
+        // so the needle records no construction site and stays readable.
+        let hard = "self.show_folder_in_files_column(";
+        let soft = "locate_folder_in_files_column";
+        let calls = found(Needle::new(Pattern::text(hard)), View::Raw).in_the_product(source());
         // One call since 2026-09-23 (ticket 12): the soft verb's two outer arms —
         // no column, and a folder outside the tree — became one arm of
         // `files_locate`'s answer, `FilesLocate::Root`, and the call went with them.
@@ -56554,9 +56552,9 @@ mod files_locate_door_tests {
             calls.len(),
             calls.report(source())
         );
-        let body = method_body("Runtime", soft.as_str());
+        let body = method_body("Runtime", soft);
         assert_eq!(
-            body.matches(hard.as_str()).count(),
+            body.matches(hard).count(),
             1,
             "and it is inside the verb that asks whether the folder is inside the tree first"
         );
@@ -56564,7 +56562,7 @@ mod files_locate_door_tests {
             .find("files_locate(")
             .expect("the soft verb asks the range question");
         assert!(
-            asked < body.find(hard.as_str()).expect("the hard verb is called"),
+            asked < body.find(hard).expect("the hard verb is called"),
             "the range is asked before the column is re-rooted"
         );
     }
@@ -57097,15 +57095,14 @@ mod formula_tool_seat_tests {
             "and it arms no half-second first — every other hover in this window \
              leaves on the pointer's own event:\n{pointer}"
         );
-        // Spelled in two halves so that this reader is not itself the occurrence
-        // it forbids — P18's ticket, left alone here. The reading was this file
-        // up to this module and is now every file this package compiles: the
-        // approved widening (§4.1), because the field would be as gone in
-        // `runtime/` as it is here and a reader watching one file could not say
-        // so.
-        let armed = ["self.window.math_hover", "_clear_at"].concat();
+        // The reading is every product item this package compiles. Test items
+        // are excluded by declared compilation, so the needle can be written
+        // whole and records no construction site.
+        let armed = "self.window.math_hover_clear_at";
         assert!(
-            found(needle!(Pattern::text(&armed)), View::Raw).is_empty(),
+            found(Needle::new(Pattern::text(armed)), View::Raw)
+                .in_the_product(source())
+                .is_empty(),
             "the grace's field is gone with it, so nothing can arm it again"
         );
 
@@ -57566,6 +57563,8 @@ mod formula_tool_seat_tests {
         );
     }
 
+    /// MUTATION: drop the retained anchor field or stop checking any one of its
+    /// three identities before opening the delayed menu and this goes red.
     #[test]
     fn delayed_math_menu_validates_tab_seat_and_incarnation() {
         let target = PasteTarget {
@@ -57583,13 +57582,11 @@ mod formula_tool_seat_tests {
         }
         // The same approved widening: read out of this file before, read out of
         // every file this package compiles now.
-        let retained = [
-            "pending_math_context_anchor: Option<(",
-            "PasteTarget, MathBlockAnchor)>",
-        ]
-        .concat();
+        let retained = "pending_math_context_anchor: Option<(PasteTarget, MathBlockAnchor)>";
         assert!(
-            !found(needle!(Pattern::text(&retained)), View::Raw).is_empty(),
+            !found(Needle::new(Pattern::text(retained)), View::Raw)
+                .in_the_product(source())
+                .is_empty(),
             "the menu must retain the tab, seat and shell incarnation from the press"
         );
         let press = method_body("Runtime", "mouse_input");
@@ -57884,13 +57881,13 @@ mod formula_tool_seat_tests {
             "a press that could not be measured is the press that most needs naming, and it is \
              the one that would never print:\n{press}"
         );
-        for road in [
-            "journey",
-            "one_frame_reduced_motion",
-            "one_frame_unmeasurable",
+        for (road, spelling) in [
+            ("journey", "\"journey\""),
+            ("one_frame_reduced_motion", "\"one_frame_reduced_motion\""),
+            ("one_frame_unmeasurable", "\"one_frame_unmeasurable\""),
         ] {
             assert!(
-                press.contains(&["\"", road, "\""].concat()),
+                press.contains(spelling),
                 "every road out of this door has a name in the trace: {road}"
             );
         }
@@ -57986,11 +57983,8 @@ mod formula_copy_clock_tests {
     // comment. Narrowing to the body changes no verdict; the equivalence commit is
     // what established that.
     //
-    // **The advancer's name is still spelled in halves.** It is no longer this
-    // module's concern — a body query is not a text search — but the file is
-    // still read as text by readers this batch does not touch, and joining the
-    // halves would hand them one more occurrence to find. P18 is where the halves
-    // go.
+    // **The advancer's name is written plainly.** The body query's item scope
+    // cannot include this test, so P18 needs no self-hiding spelling here.
     use super::*;
 
     use bt_source::{Index, ItemQuery};
@@ -58124,7 +58118,7 @@ mod formula_copy_clock_tests {
             !turning.contains("map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)"),
             "the unconditional deadline is gone:\n{turning}"
         );
-        let advancer = method_body("Runtime", &["advance_math_tools", "_if_due"].concat());
+        let advancer = method_body("Runtime", "advance_math_tools_if_due");
         assert!(
             advancer.contains("retire_spent_math_copy(&mut self.window.math_copied, now)"),
             "and the band's own turn is what takes the tick down:\n{advancer}"
@@ -58174,7 +58168,7 @@ mod focus_mode_door_tests {
     // `    fn mini_source` in this file, which is a method of whatever `impl`
     // happens to come first, and the equivalence commit is what established the
     // owner rather than assumed it.
-    use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -58228,7 +58222,10 @@ mod focus_mode_door_tests {
         let union = index.union();
         let mut lines: Vec<&'static str> = Vec::new();
         let mut last = None;
-        for occurrence in found(needle!(needle), View::Raw).occurrences() {
+        for occurrence in found(Needle::new(Pattern::text(needle)), View::Raw)
+            .in_the_product(index)
+            .occurrences()
+        {
             let at = occurrence.span.start();
             let file = index
                 .file_at(at)
@@ -58251,14 +58248,14 @@ mod focus_mode_door_tests {
 
     /// **Every write of the bit, and there are two.**
     ///
-    /// Both the needle **and the two lines it expects** are assembled at run
-    /// time rather than written out, because a pin that scans the file it lives
-    /// in must not be able to match its own text — spelled-out literals here
-    /// would count as extra doors and the pin would end up describing itself.
+    /// The product-item filter excludes this test module, so the needle and the
+    /// two expected lines are written as the code spells them.
+    ///
+    /// MUTATION: write the focus bit from a third door and this names it.
     #[test]
     fn only_the_chord_and_the_settings_row_write_the_bit() {
-        let needle = ["self", ".", "set_focus_mode", "("].concat();
-        let doors = lines_holding(needle.as_str());
+        let needle = "self.set_focus_mode(";
+        let doors = lines_holding(needle);
         let expected = [
             // `Appearance ▸ Focus mode: On/Off`, through `focus_mode_requested`.
             format!("{needle}on)?;"),
@@ -58306,6 +58303,9 @@ mod focus_mode_door_tests {
     /// and only when the window it is going into has published a card to draw it
     /// in. Every other window with no column still returns before either read
     /// exists.
+    ///
+    /// MUTATION: call `arm_card_reads` anywhere but the guarded projection pass
+    /// and this names the extra door.
     #[test]
     fn the_card_arms_its_reads_only_behind_the_mode_gate() {
         let arming = method_body("Runtime", "arm_card_reads");
@@ -58318,8 +58318,8 @@ mod focus_mode_door_tests {
 
         // And that one place is reached from one call site, which stands below
         // the gate that answers "is there a card column at all".
-        let needle = ["self", ".", "arm_card_reads", "("].concat();
-        let callers = lines_holding(needle.as_str());
+        let needle = "self.arm_card_reads(";
+        let callers = lines_holding(needle);
         assert_eq!(
             callers.len(),
             1,
@@ -58330,7 +58330,7 @@ mod focus_mode_door_tests {
             .find("focus_rail_geometry_now")
             .expect("the projection pass opens by asking whether there is a column at all");
         let call = pass
-            .find(needle.as_str())
+            .find(needle)
             .expect("the arming is spent by the projection pass");
         assert!(
             gate < call,
@@ -58366,8 +58366,8 @@ mod focus_mode_door_tests {
     /// scroll range reserved for a card nobody drew.
     #[test]
     fn the_guests_the_column_holds_room_for_are_counted_at_one_door() {
-        let needle = ["self", ".", "strip_guests", "("].concat();
-        let readers = lines_holding(needle.as_str());
+        let needle = "self.strip_guests(";
+        let readers = lines_holding(needle);
         assert_eq!(
             readers.len(),
             2,
@@ -58403,9 +58403,9 @@ mod focus_mode_door_tests {
     #[test]
     fn the_stand_ins_thumbnail_slot_carries_the_pane_rather_than_a_hole() {
         let pass = method_body("Runtime", "refresh_chrome_with_overlay");
-        let insert = ["focus_thumbnails", ".insert("].concat();
+        let insert = "focus_thumbnails.insert(";
         let at = pass
-            .find(insert.as_str())
+            .find(insert)
             .expect("the guest is inserted into the thumbnail list beside the tab list");
         let line = &pass[at..pass[at..].find('\n').map_or(pass.len(), |end| at + end)];
         assert!(
@@ -58415,9 +58415,9 @@ mod focus_mode_door_tests {
         );
         // Both lists, at one slot, from one `if let`: the tab list's insert and
         // the thumbnail list's stand under the same binding of `strip_preview`.
-        let guard = ["if let Some(slot) = ", "strip_preview"].concat();
+        let guard = "if let Some(slot) = strip_preview";
         let opened = pass
-            .find(guard.as_str())
+            .find(guard)
             .expect("the guest's slot is bound once and spent on both lists");
         let tabs_insert = pass
             .find("tabs.insert(slot, stand_in)")
@@ -58482,9 +58482,8 @@ mod focus_mode_door_tests {
     /// one thing a reader who blinked through a four-second card cannot fix for
     /// themselves.
     ///
-    /// The needle and the two lines it expects are assembled at run time, on
-    /// this module's own standing reason: a pin that scans the file it lives in
-    /// must not be able to match its own text.
+    /// The product-item filter excludes this test module, so the needle and the
+    /// two expected lines are written as the code spells them.
     ///
     /// MUTATION: spend the offer anywhere else — on the frame the bubble comes
     /// *down*, say — and this names the extra line, and a window closed four
@@ -58492,16 +58491,15 @@ mod focus_mode_door_tests {
     /// restore out of `reset_advanced_group` and this names its absence.
     #[test]
     fn the_cards_offer_is_spent_in_one_place_and_given_back_in_one() {
-        let field = ["cards", "_gesture_hint_offer"].concat();
-        let needle = ["settings", ".", field.as_str(), " ="].concat();
-        let writes = lines_holding(needle.as_str());
+        let needle = "settings.cards_gesture_hint_offer =";
+        let writes = lines_holding(needle);
         assert_eq!(
             writes,
             [
                 // Spent on the frame the bubble is raised.
                 format!("{needle} false;"),
                 // And given back by `Reset to defaults` on the page Cards is on.
-                needle.clone(),
+                needle.to_owned(),
             ],
             "the offer has one spender and one restorer",
         );
@@ -58510,15 +58508,13 @@ mod focus_mode_door_tests {
         // Terminal page's ground has nothing to say about a column of cards.
         let reset = method_body("Runtime", "reset_advanced_group");
         assert!(
-            reset.contains(needle.as_str()),
+            reset.contains(needle),
             "the restoring half lives in the reset verb",
         );
         let guard = reset
             .find("SettingsCategory::Appearance")
             .expect("the restore is guarded by the page Cards lives on");
-        let write = reset
-            .find(needle.as_str())
-            .expect("the restore is in this body");
+        let write = reset.find(needle).expect("the restore is in this body");
         assert!(
             guard < write,
             "the restore stands under the page guard, or every page gives it back",
@@ -58610,7 +58606,7 @@ mod focus_column_notch_tests {
     // have told the difference — and its slice ran 1,346 bytes past
     // `scroll_rail`'s body, so that method's two prohibitions were being asked of
     // its neighbour as well.
-    use bt_source::{Found, Index, ItemQuery, Needle, Search, View, needle};
+    use bt_source::{Found, Index, ItemQuery, Needle, Search, View};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -58657,7 +58653,10 @@ mod focus_column_notch_tests {
         let union = index.union();
         let mut lines: Vec<&'static str> = Vec::new();
         let mut last = None;
-        for occurrence in found(needle!(needle), View::Raw).occurrences() {
+        for occurrence in found(Needle::new(needle), View::Raw)
+            .in_the_product(index)
+            .occurrences()
+        {
             let at = occurrence.span.start();
             let file = index
                 .file_at(at)
@@ -58680,8 +58679,8 @@ mod focus_column_notch_tests {
 
     /// **There is one call to the aim, and it stands inside the modified arm.**
     ///
-    /// The needle is assembled at run time so that this pin cannot match its own
-    /// text — [`focus_mode_door_tests`]' rule, for its reason.
+    /// The product-item filter excludes this test module, so the needle is
+    /// written as the code spells it.
     ///
     /// Red gate: this is the defect. Before the ruling the one call was the
     /// first statement of the column's wheel door with nothing in front of it,
@@ -58689,15 +58688,15 @@ mod focus_column_notch_tests {
     /// the whole column — was spent aiming and the list never moved.
     #[test]
     fn the_only_aim_stands_inside_the_modified_arm() {
-        let needle = ["self", ".", "aim_focus_card_window", "("].concat();
-        let calls = lines_holding(needle.as_str());
+        let needle = "self.aim_focus_card_window(";
+        let calls = lines_holding(needle);
         assert_eq!(
             calls.len(),
             1,
             "the aim is reached from one place, so there is one line to read"
         );
         assert!(
-            calls[0].contains(&["ColumnNotch", "::", "Aim"].concat()),
+            calls[0].contains("ColumnNotch::Aim"),
             "a notch reaches the aim without the ruling having been asked: {}",
             calls[0]
         );
@@ -58706,11 +58705,14 @@ mod focus_column_notch_tests {
     /// **The ruling is asked before the list is measured**, which is the half
     /// the line above cannot say: a decision taken after the column has already
     /// scrolled would move both.
+    ///
+    /// MUTATION: move `column_notch` below `vertical_wheel_travel` and this goes
+    /// red.
     #[test]
     fn the_column_asks_the_ruling_before_it_scrolls() {
         let scroll_rail = method_body("Runtime", "scroll_rail");
         let decision = scroll_rail
-            .find(&["column_notch", "("].concat())
+            .find("column_notch(")
             .expect("the column's own wheel door names the ruling");
         let travel = scroll_rail
             .find("vertical_wheel_travel")
@@ -58739,10 +58741,10 @@ mod focus_column_notch_tests {
         let call = scroll_rail
             .lines()
             .map(str::trim)
-            .find(|line| line.contains(&["column_notch", "("].concat()))
+            .find(|line| line.contains("column_notch("))
             .expect("the column's own wheel door names the ruling");
         assert!(
-            call.contains(&["modifiers", "_held"].concat()),
+            call.contains("modifiers_held"),
             "the notch is read off a state the Option key has been taken out of, \
              so ⌥+wheel is dead on every Mac: {call}"
         );
@@ -58750,10 +58752,12 @@ mod focus_column_notch_tests {
 
     /// **And there is exactly one door the two states are written at**, so they
     /// cannot be a turn apart.
+    ///
+    /// MUTATION: write `modifiers_held` at a second door and this names it.
     #[test]
     fn one_door_writes_both_readings_of_the_modifiers() {
-        let needle = ["window", ".", "modifiers_held", " = "].concat();
-        let writes = lines_holding(needle.as_str());
+        let needle = "window.modifiers_held = ";
+        let writes = lines_holding(needle);
         assert_eq!(
             writes.len(),
             1,
@@ -58818,7 +58822,7 @@ mod pointer_chord_site_tests {
     // matters because the spelling these forbid is read out of code. Each names
     // its survivor by the item it stands in (§4.1) rather than by the text of
     // its line, because an item is what a move keeps.
-    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -58896,18 +58900,18 @@ mod pointer_chord_site_tests {
     /// defect.
     #[test]
     fn every_pointer_door_reads_the_platforms_hand_over_modifier() {
-        // Assembled at run time so that this pin cannot match its own text.
-        let door = ["input", "::", "pointer_chord_held", "("].concat();
-        let hand = ["window", ".", "modifiers_held"].concat();
+        // Each reading is scoped to one product item's body.
+        let door = "input::pointer_chord_held(";
+        let hand = "window.modifiers_held";
         for name in POINTER_DOORS {
             let text = method_body("Runtime", name);
             assert!(
-                text.contains(door.as_str()),
+                text.contains(door),
                 "`Runtime::{name}` decides a pointer gesture and must ask \
                  `{door})` which key this platform spends on one"
             );
             assert!(
-                text.contains(hand.as_str()),
+                text.contains(hand),
                 "`Runtime::{name}` must strike the ruling against what the hand is \
                  holding and not against what the keyboard means (§13.33 ①)"
             );
@@ -58921,10 +58925,10 @@ mod pointer_chord_site_tests {
     /// which is a door that answers twice.
     #[test]
     fn no_pointer_door_still_reads_control_by_name() {
-        let raw = ["modifiers", ".", "control_key", "()"].concat();
+        let raw = "modifiers.control_key()";
         for name in POINTER_DOORS {
             assert!(
-                !method_body("Runtime", name).contains(raw.as_str()),
+                !method_body("Runtime", name).contains(raw),
                 "`Runtime::{name}` still reads `{raw}` for a gesture — on a Mac that is \
                  the secondary click and not this window's modifier"
             );
@@ -58940,12 +58944,13 @@ mod pointer_chord_site_tests {
     /// door written the old way lands in this list and fails.
     #[test]
     fn no_other_door_reads_the_raw_control_key_for_a_gesture() {
-        let raw = ["self", ".window", ".modifiers", ".", "control_key", "()"].concat();
-        // The one survivor, spelled at run time for the reason the needle is:
-        // a keyboard's question in `preview_browse_key`, asking whether the
-        // player's five transport keys arrived bare.
+        let raw = "self.window.modifiers.control_key()";
+        // The one product survivor is a keyboard's question in
+        // `preview_browse_key`, asking whether the player's five transport keys
+        // arrived bare. Test items are excluded by declared compilation.
         let keyboards = format!("&& !{raw}");
-        let survivors = found(needle!(Pattern::text(&raw)), View::CodeKeepingLiterals);
+        let survivors = found(Needle::new(Pattern::text(raw)), View::CodeKeepingLiterals)
+            .in_the_product(source());
         assert_eq!(
             owner_names(&survivors),
             ["preview_browse_key×1"],
@@ -58969,9 +58974,9 @@ mod pointer_chord_site_tests {
     #[test]
     fn the_secondary_click_is_settled_once_and_above_every_router() {
         let text = method_body("Runtime", "mouse_input");
-        let needle = ["input", "::", "pressed_button_of_gesture", "("].concat();
+        let needle = "input::pressed_button_of_gesture(";
         let settle = text
-            .find(needle.as_str())
+            .find(needle)
             .unwrap_or_else(|| panic!("`mouse_input` asks `{needle})` what button this press is"));
         let first_return = text.find("return ").unwrap_or(text.len());
         assert!(
@@ -58987,7 +58992,9 @@ mod pointer_chord_site_tests {
              made above it would erase"
         );
         assert_eq!(
-            found(needle!(Pattern::text(&needle)), View::Raw).len(),
+            found(Needle::new(Pattern::text(needle)), View::Raw)
+                .in_the_product(source())
+                .len(),
             1,
             "one door decides what button a press is, as one door decides what \
              modifiers are held"
@@ -59001,10 +59008,17 @@ mod pointer_chord_site_tests {
     /// release. The application capture door reads the owner's copy when a
     /// release arrives in another window and clears it when that remote release
     /// or cancellation ends the gesture.
+    ///
+    /// MUTATION: touch `secondary_press` in a third product item and the owner
+    /// list goes red.
     #[test]
     fn one_field_remembers_which_press_is_under_the_hand() {
-        let needle = ["window", ".", "secondary_press"].concat();
-        let touches = found(needle!(Pattern::text(&needle)), View::CodeKeepingLiterals);
+        let needle = "window.secondary_press";
+        let touches = found(
+            Needle::new(Pattern::text(needle)),
+            View::CodeKeepingLiterals,
+        )
+        .in_the_product(source());
         assert_eq!(
             owner_names(&touches),
             ["capture_before_pointer_event×3", "mouse_input×1"],
@@ -59465,7 +59479,7 @@ mod page_under_the_tab_list_tests {
     // and is now a count over the package, which is the wider and the right
     // reading: a second caller written into another file of this crate was
     // invisible to it and is not invisible to this.
-    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -59522,15 +59536,23 @@ mod page_under_the_tab_list_tests {
     /// Each axis' hit test is reached from exactly one place in this file, and
     /// that place is [`Runtime::tab_list_target_at`] — which is what makes
     /// "the tab list is over this pixel" one answer rather than two.
+    ///
+    /// MUTATION: call any axis hit test from a second product item and this
+    /// names it.
     #[test]
     fn every_axis_of_the_tab_list_is_reached_from_one_place() {
         let door = method_body("Runtime", "tab_list_target_at");
-        for hit in ["hit_rail_chrome", "hit_tab_chrome", "hit_focus_rail"] {
-            let needle = ["seats", "::", hit, "("].concat();
-            let calls = found(needle!(Pattern::text(needle.as_str())), View::Raw).len();
+        for (hit, needle) in [
+            ("hit_rail_chrome", "seats::hit_rail_chrome("),
+            ("hit_tab_chrome", "seats::hit_tab_chrome("),
+            ("hit_focus_rail", "seats::hit_focus_rail("),
+        ] {
+            let calls = found(Needle::new(Pattern::text(needle)), View::Raw)
+                .in_the_product(source())
+                .len();
             assert_eq!(calls, 1, "{hit} is called from {calls} places, not one");
             assert!(
-                door.contains(needle.as_str()),
+                door.contains(needle),
                 "{hit} is called from somewhere other than the tab list's own door",
             );
         }
@@ -59668,16 +59690,14 @@ mod multiwindow_session_tests {
     // writer is `App::record_session`. The package is the right scope for the
     // claim: "a second `record` call is a second writer" is about the program, and
     // after the move a second one need not be written in this file to be a second
-    // writer. The needle is still assembled, so this test's own prose is not one
-    // of the call sites it counts; `needle!` excludes the expression that built
-    // it, which on this tree excludes nothing, because the joined spelling is
-    // nowhere in the construction.
+    // writer. The plain needle records no site; `in_the_product` excludes this
+    // test module from the call sites it counts.
     use super::{
         LayoutNodeV1, LeafNodeV1, NewWindowPlan, QuakeRestoreV1, SessionWindowV1, TabV1,
         TermLeafV1, plan_windows, restore_row_seed, seed, seeded_tab,
     };
 
-    use bt_source::{Found, Index, Needle, Search, View, needle};
+    use bt_source::{Found, Index, Needle, Search, View};
 
     /// The rung a fresh `settings.json` carries, which is what every test here that is not *about*
     /// the rung is asking for. Named once rather than spelled at each call, so the day the shipped
@@ -60103,13 +60123,15 @@ mod multiwindow_session_tests {
     /// Red gate: give `mark_session_dirty` a store call of its own beside
     /// `record_window` and the count is 2.
     ///
-    /// The needle is assembled at run time rather than written out, so that this
-    /// test's own prose is not one of the call sites it is counting.
+    /// The search excludes test-only source, so this pin can spell the production
+    /// call plainly without counting itself.
     #[test]
     fn only_one_line_in_this_file_hands_the_store_a_document() {
-        let needle = ["session_store", ".record("].concat();
+        let needle = "session_store.record(";
         assert_eq!(
-            found(needle!(needle.as_str()), View::Raw).len(),
+            found(Needle::new(needle), View::Raw)
+                .in_the_product(source())
+                .len(),
             1,
             "every window's change goes through `App::record_session`, which is \
              what makes two windows one write"
@@ -60129,7 +60151,7 @@ mod quit_transaction_tests {
     use super::{SessionWindowV1, TabV1, quit, restore, seed, session_windows};
     use std::time::SystemTime;
 
-    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View};
 
     fn window(cwd: &str) -> SessionWindowV1 {
         SessionWindowV1 {
@@ -60206,9 +60228,8 @@ mod quit_transaction_tests {
     ///
     /// It reads at two grains, the file of §2.3 and the item of §2.4, where
     /// this module used to read only the first. The two answer the same number
-    /// here, measured needle by needle before the readings were joined: every
-    /// needle this module counts is assembled at run time, so none of its own
-    /// assertions is among the occurrences.
+    /// here, measured needle by needle before the readings were joined. The
+    /// needles are plain, and product filtering keeps their test items out.
     fn in_product(found: &Found) -> usize {
         found.in_the_product(source()).len()
     }
@@ -60349,15 +60370,15 @@ mod quit_transaction_tests {
     /// move the existing call out of the `else` and the second assertion goes.
     #[test]
     fn the_only_door_into_the_vault_is_a_window_the_user_closed() {
-        let door = ["vault_this_", "window("].concat();
+        let door = "vault_this_window(";
         assert_eq!(
-            found(needle!(Pattern::text(&door)), View::Raw).len(),
+            in_product(&found(Needle::new(Pattern::text(door)), View::Raw)),
             2,
             "one definition and one call site"
         );
         let close = method_body("Runtime", "close_window");
         assert!(
-            close.contains(&["} else {\n            self.", door.as_str()].concat()),
+            close.contains("} else {\n            self.vault_this_window("),
             "the vault is the branch a shut that is *not* the process ending takes"
         );
         let retire = method_body("Runtime", "retire_window");
@@ -60383,7 +60404,7 @@ mod quit_transaction_tests {
     /// the count names it.
     #[test]
     fn a_pane_that_closes_is_taken_apart_somewhere_else() {
-        let on_this_thread = ["pty.shut", "down()"].concat();
+        let on_this_thread = "pty.shutdown()";
         // **The one place the two readings part company, and it is a widening**
         // (§4.1). This file's count is over `main.rs`; the crate's is over every
         // file the package declares, and `tests.rs` — wholly test code by its
@@ -60392,7 +60413,10 @@ mod quit_transaction_tests {
         // product build compiles, which is the question this pin was always
         // asking and the one the text of `main.rs` could only approximate.
         assert_eq!(
-            in_product(&found(needle!(Pattern::text(&on_this_thread)), View::Raw)),
+            in_product(&found(
+                Needle::new(Pattern::text(on_this_thread)),
+                View::Raw,
+            )),
             // None at all, counted over every file a product build of this package
             // compiles. The one written anywhere in the package is the fixture in
             // `tests.rs`, which `mod tests` took with it on 2026-09-18 and which the
@@ -60407,13 +60431,13 @@ mod quit_transaction_tests {
         ] {
             let text = method_body(owner, name);
             assert!(
-                !text.contains(&on_this_thread),
+                !text.contains(on_this_thread),
                 "`{owner}::{name}` hands the session over rather than taking it apart here"
             );
         }
-        let handed = ["bt_pty::retire_", "session("].concat();
+        let handed = "bt_pty::retire_session(";
         assert!(
-            method_body("TabState", "retire_all_shells").contains(handed.as_str()),
+            method_body("TabState", "retire_all_shells").contains(handed),
             "and the hand-over is what it does instead"
         );
     }
@@ -60517,9 +60541,9 @@ mod quit_transaction_tests {
     #[test]
     fn the_quit_and_the_loops_own_backstop_stay_two_machines() {
         let settle = method_body("FolioApp", "settle_quit");
-        let shut = ["close_", "window"].concat();
+        let shut = "close_window";
         assert!(
-            !settle.contains(shut.as_str()),
+            !settle.contains(shut),
             "a quit never spends the per-window shut"
         );
         let exiting =
@@ -60692,11 +60716,9 @@ mod pty_drain_budget_tests {
     //    bytes are what `include_str!` gave them and a view change is a changed
     //    contract (§4.2 rule 3) that belongs to whoever wants it, not to a
     //    migration.
-    // 4. **`needle!` is how a reader stops matching itself.** It records the
-    //    caller's `file!`/`line!`/`column!`, and the search excludes the
-    //    expression that built it — nothing else. The `[..].concat()` halves in
-    //    this module are left exactly as they were: removing them is P18's
-    //    ticket and ~110 chances to get an edit wrong.
+    // 4. **A needle says its text plainly and its scope excludes the test.**
+    //    Whole-product counts use `Needle::new` and `in_the_product`; item-body
+    //    pins need no search-site exclusion because they search only that item.
     // 5. **"In the product" is a filter over the answer** — `in_product` —
     //    because the two counts that wanted it used to take a text prefix of
     //    this file, and a text prefix is the thing that does not survive a
@@ -61425,8 +61447,8 @@ mod pty_drain_budget_tests {
     /// goes red, which is the moment there are two doors again.
     #[test]
     fn the_window_thread_sends_a_child_bytes_through_exactly_one_door() {
-        let door = ["offer_pty_", "input"].concat();
-        let body = free_fn_body(&door);
+        let door = "offer_pty_input";
+        let body = free_fn_body(door);
         let refusal = body
             .find("PtyError::InputRefused")
             .expect("the door is the place that knows what a refusal is");
@@ -61438,9 +61460,9 @@ mod pty_drain_budget_tests {
             "a refusal turned back into an `Err` reaches `App::fail` and ends the process over \
              one wedged shell"
         );
-        let forgiving = ["write_pty_", "input"].concat();
+        let forgiving = "write_pty_input";
         assert!(
-            free_fn_body(&forgiving).contains(&[&door, "(pty, bytes, what).map(drop)"].concat()),
+            free_fn_body(forgiving).contains("offer_pty_input(pty, bytes, what).map(drop)"),
             "the forgiving spelling has grown a body of its own, so there are two places that \
              know what a refusal is"
         );
@@ -61450,9 +61472,10 @@ mod pty_drain_budget_tests {
         // on 2026-09-18 — a cut that means nothing the moment either side of it moves. What the
         // crate answers instead is which files a product build compiles, from the declarations
         // that compile them, and `tests.rs` is wholly test code by its own.
-        let with_reason = ["pty.", "write_with_reason("].concat();
-        let plain = ["pty.", "write("].concat();
-        let reasoned = found(needle!(Pattern::text(&with_reason)), View::Raw);
+        let with_reason = "pty.write_with_reason(";
+        let plain = "pty.write(";
+        let reasoned =
+            found(Needle::new(Pattern::text(with_reason)), View::Raw).in_the_product(source());
         assert_eq!(
             in_product(&reasoned),
             1,
@@ -61470,11 +61493,11 @@ mod pty_drain_budget_tests {
              relocate this call and the total does not move but this does"
         );
         assert_eq!(
-            in_product(&found(needle!(Pattern::text(&plain)), View::Raw)),
+            in_product(&found(Needle::new(Pattern::text(plain)), View::Raw)),
             0,
             "every product write must carry its reason into the input dump"
         );
-        assert!(body.contains(&["pty.", "write_with_reason(bytes, what)"].concat()));
+        assert!(body.contains("pty.write_with_reason(bytes, what)"));
     }
 
     /// PIN — **no path reaches ConPTY with a rectangle except through the quiet window.**
@@ -61490,9 +61513,9 @@ mod pty_drain_budget_tests {
     /// goes to three.
     #[test]
     fn the_only_road_from_a_solved_rectangle_to_conpty_is_the_quiet_window() {
-        let call = ["commit_leaf_", "resize("].concat();
+        let call = "commit_leaf_resize(";
         assert_eq!(
-            in_product(&found(needle!(Pattern::text(&call)), View::Raw)),
+            in_product(&found(Needle::new(Pattern::text(call)), View::Raw)),
             // Its declaration and the one production release, counted over every file a
             // product build of this package compiles. The number was the same when the
             // reading was "the whole of `main.rs`", and for a reason that had nothing to
@@ -61504,12 +61527,12 @@ mod pty_drain_budget_tests {
             "the commit has one caller in the product, and that caller is the release"
         );
         assert!(
-            free_fn_body("release_due_leaf_resize").contains(call.as_str()),
+            free_fn_body("release_due_leaf_resize").contains(call),
             "and the release is it"
         );
         let solve = method_body("Runtime", "resize_leaves_to_layout");
         assert!(
-            !solve.contains(call.as_str()),
+            !solve.contains(call),
             "a layout solve schedules; it does not commit — the sibling panes committing here \
              is the defect this pin exists for"
         );
@@ -66537,7 +66560,7 @@ mod resident_run_tests {
         let reads: Vec<&str> = drain
             .lines()
             .map(str::trim)
-            .filter(|line| line.contains(&["command_marks", "_watermark("].concat()))
+            .filter(|line| line.contains("command_marks_watermark("))
             .collect();
         assert_eq!(
             reads.len(),
@@ -66546,7 +66569,7 @@ mod resident_run_tests {
              comparison is not a comparison: {reads:?}"
         );
         let asked = drain
-            .rfind(&["command_marks", "_watermark()"].concat())
+            .rfind("command_marks_watermark()")
             .expect("the drain compares the two readings");
         let published = drain
             .find("publish_pty_drain_frame")
@@ -71148,11 +71171,8 @@ mod floated_page_tests {
             "the one door onto the document does not ask whether the quit has \
              already written one:\n{door}"
         );
-        // Assembled rather than written out, for
-        // `only_one_line_in_this_file_hands_the_store_a_document`'s reason: this
-        // case's own prose must not be one of the call sites that pin counts.
         let session = door
-            .find(["self.session_store", ".record("].concat().as_str())
+            .find("self.session_store.record(")
             .expect("the door still hands the store a document");
         let guard = door
             .find("return;")
@@ -80822,7 +80842,7 @@ mod printed_path_provenance_tests {
     };
     use crate::test_support::{host_file_uri, host_path};
     use bt_layout::SeatId;
-    use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
+    use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View};
     use std::{cell::RefCell, path::Path};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -81155,15 +81175,15 @@ mod printed_path_provenance_tests {
     /// two answers this ticket exists to collapse into one.
     #[test]
     fn every_gesture_that_meets_a_reference_asks_the_one_question() {
-        let door = ["self.ask_the_worker_about_a_link_", "target("].concat();
+        let door = "self.ask_the_worker_about_a_link_target(";
         // The press asks through the re-check door, which is the same question with the held
         // verdict's de-duplication skipped (closure re-review B-1').
-        let press_door = ["self.re_ask_the_worker_about_a_link_", "target("].concat();
-        let pointer_door = ["ask_about_the_link_under_the_", "pointer("].concat();
+        let press_door = "self.re_ask_the_worker_about_a_link_target(";
+        let pointer_door = "ask_about_the_link_under_the_pointer(";
         for (name, needle) in [
-            ("pointer_moved", door.as_str()),
-            ("begin_local_selection", press_door.as_str()),
-            ("publish_frame_inner", pointer_door.as_str()),
+            ("pointer_moved", door),
+            ("begin_local_selection", press_door),
+            ("publish_frame_inner", pointer_door),
         ] {
             assert!(
                 method_body("Runtime", name).contains(needle),
@@ -81184,31 +81204,35 @@ mod printed_path_provenance_tests {
             .find("event if runtime::pointer::is_pointer_event")
             .unwrap_or(arm.len())];
         assert!(
-            arm.contains(pointer_door.as_str()),
+            arm.contains(pointer_door),
             "the hand-over modifier going down is a gesture that meets a reference"
         );
         // And the two functions are still the only places the question is put — in this package,
         // now, rather than in this file: a door written into `runtime/` would be a third one.
         assert_eq!(
-            found(needle!(door.as_str()), View::Raw).len(),
+            found(Needle::new(door), View::Raw)
+                .in_the_product(source())
+                .len(),
             2,
             "the pointer move and the pointer-wide door — and nobody else"
         );
         assert_eq!(
-            found(needle!(press_door.as_str()), View::Raw).len(),
+            found(Needle::new(press_door), View::Raw)
+                .in_the_product(source())
+                .len(),
             1,
             "the press, and only the press, skips a held verdict"
         );
         // **And both ask through the one lexical gate** (ticket 14): a share is never asked about
         // on any of the four gestures, and that is `link_target_to_ask_about`'s answer rather than
         // two callers agreeing.
-        let gate = ["link_target_to_ask_", "about("].concat();
+        let gate = "link_target_to_ask_about(";
         for name in [
             "ask_the_worker_about_a_link_target",
             "re_ask_the_worker_about_a_link_target",
         ] {
             assert!(
-                method_body("Runtime", name).contains(gate.as_str()),
+                method_body("Runtime", name).contains(gate),
                 "`{name}` asks through `{gate})`"
             );
         }
@@ -81327,16 +81351,16 @@ mod printed_path_provenance_tests {
     /// the reader had named, with a sentence about running programs, was answering a question
     /// nobody had asked. `bt_platform::names_a_program` refuses what it refuses on `main`, no
     /// more and no less.
+    ///
+    /// MUTATION: put either retired platform query back in `crate::handoff` and
+    /// this names it.
     #[test]
     fn the_user_chosen_door_asks_no_machine_about_the_file() {
-        for call in [
-            ["Assoc", "IsDangerous", "("].concat(),
-            ["SHGetFileInfo", "W", "("].concat(),
-        ] {
+        for call in ["AssocIsDangerous(", "SHGetFileInfoW("] {
             assert!(
                 found_in_package(
                     "bt-platform",
-                    needle!(call.as_str()),
+                    Needle::new(call),
                     View::Raw,
                     Scope::Module("crate::handoff".to_owned()),
                 )
@@ -81564,9 +81588,9 @@ mod printed_path_provenance_tests {
         // And the resolved name is the doors' own transform, not a second reading of it: the
         // path-verification lane hands `bt_term::verify_path` the door's own function as its
         // resolver (CC-4; `bt-term` names no platform function itself).
-        let door = ["bt_platform::resolved_for_a_", "door"].concat();
+        let door = "bt_platform::resolved_for_a_door";
         assert!(
-            free_fn_body("run_path_verify_worker").contains(&door),
+            free_fn_body("run_path_verify_worker").contains(door),
             "the worker produces the door's input with the door's own function"
         );
     }
@@ -81624,17 +81648,17 @@ mod printed_path_provenance_tests {
         "press_file_peek_foot",
     ];
 
-    /// The filesystem calls none of them may make. Assembled at run time so this pin cannot match
-    /// its own text.
-    fn filesystem_calls() -> Vec<String> {
-        vec![
-            ["fs", "::", "metadata"].concat(),
-            ["symlink_", "metadata"].concat(),
-            [".", "exists", "()"].concat(),
-            [".", "is_dir", "()"].concat(),
-            ["canonicali", "ze"].concat(),
-            ["read_", "link"].concat(),
-            ["may_read_unasked_through_", "links"].concat(),
+    /// The filesystem calls none of them may make. These are item-body pins, so
+    /// spelling them plainly cannot make the test match itself.
+    fn filesystem_calls() -> [&'static str; 7] {
+        [
+            "fs::metadata",
+            "symlink_metadata",
+            ".exists()",
+            ".is_dir()",
+            "canonicalize",
+            "read_link",
+            "may_read_unasked_through_links",
         ]
     }
 
@@ -81697,7 +81721,7 @@ mod printed_path_provenance_tests {
             let text = method_body("Runtime", name);
             for call in filesystem_calls() {
                 assert!(
-                    !text.contains(call.as_str()),
+                    !text.contains(call),
                     "`{name}` reaches `{call}` on the thread that paints — a path a program \
                      printed may name a mapped drive whose server is gone, and the answer costs \
                      the redirector's own timeout"
@@ -81723,7 +81747,7 @@ mod printed_path_provenance_tests {
             let text = free_fn_body(name);
             for call in filesystem_calls() {
                 assert!(
-                    !text.contains(call.as_str()),
+                    !text.contains(call),
                     "`{name}` reaches `{call}`, and every caller of it is on the window thread"
                 );
             }
@@ -81744,28 +81768,14 @@ mod printed_path_provenance_tests {
         // links; the ledger's two questions are asked in the terminal's grammar in front of it.
         let table = free_fn_body("reference_activation");
         let grammar = free_fn_body("terminal_reference_row");
-        let arm = [
-            "(LocalKnown::File, ClickIntent",
-            "::",
-            "System) => HyperlinkActivation",
-            "::",
-            "External(",
-        ]
-        .concat();
+        let arm = "(LocalKnown::File, ClickIntent::System) => HyperlinkActivation::External(";
         assert!(
-            table.contains(arm.as_str()),
+            table.contains(arm),
             "the modifier is the only half that hands a file to the machine"
         );
-        let plain = [
-            "(LocalKnown::File, ClickIntent",
-            "::",
-            "Here) => HyperlinkActivation",
-            "::",
-            "Preview(",
-        ]
-        .concat();
+        let plain = "(LocalKnown::File, ClickIntent::Here) => HyperlinkActivation::Preview(";
         assert!(
-            table.contains(plain.as_str()),
+            table.contains(plain),
             "and the plain half is still this window's own seat"
         );
         for gate in ["verdict.exists", "verdict.directory"] {
@@ -81783,11 +81793,11 @@ mod printed_path_provenance_tests {
             "the asking door belongs to the surfaces where the user picked the file"
         );
         // And the refusal is the platform door's own, with the list it has always had.
-        let refusal = ["names_a_", "program(&path,"].concat();
+        let refusal = "names_a_program(&path,";
         assert!(
             !found_in_package(
                 "bt-platform",
-                needle!(refusal.as_str()),
+                Needle::new(refusal),
                 View::Raw,
                 Scope::Module("crate::handoff".to_owned()),
             )

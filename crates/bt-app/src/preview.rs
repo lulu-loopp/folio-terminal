@@ -8100,6 +8100,7 @@ pub const MIXED_SCRIPT_PAGE: &str = concat!(
 mod tests {
     use super::*;
     use crate::test_support::host_path;
+    use bt_source::{Index, ItemQuery, Needle, Pattern, Scope, Search, View};
 
     /// Ruling 2026-08-14, both axes: however long the document, the thumb is
     /// never drawn shorter than a hand can see and take — and the floor costs
@@ -12803,27 +12804,15 @@ mod tests {
     /// [`PreviewBuffer::save`] and the second assertion names it.
     #[test]
     fn a_save_is_written_by_the_writer_that_keeps_what_the_file_carried() {
-        // Spelled in halves so the assertion is not its own counter-example:
-        // the source being read is this file, and one whole spelling here would
-        // be found by the search it makes.
-        let keeping = concat!("bt_persist::", "atomic_replace_keeping_metadata(&path");
-        let plain = concat!("bt_persist::", "atomic_write(&path");
-        let source = include_str!("preview.rs");
-        let module = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("this file carries its tests at the end")
-            .0;
-        let body = module
-            .split_once("pub fn save(&mut self) -> SaveOutcome {")
-            .expect("the editor's save")
-            .1;
-        let end = body.find("\n    }\n").expect("its end");
+        let body = Index::of_package("bt-app")
+            .body_of(&ItemQuery::method("PreviewBuffer", "save"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
-            body[..end].contains(keeping),
+            body.contains("bt_persist::atomic_replace_keeping_metadata(&path"),
             "the document is replaced by the writer that carries its metadata"
         );
         assert!(
-            !body[..end].contains(plain),
+            !body.contains("bt_persist::atomic_write(&path"),
             "and not by the one that leaves it behind"
         );
     }
@@ -13845,11 +13834,7 @@ mod tests {
     /// [`preview_ftype`] or from [`PreviewBuffer::new`] and the count moves.
     #[test]
     fn sniffing_happens_off_the_window_thread() {
-        const SOURCE: &str = include_str!("preview.rs");
-        let (module, tests) = SOURCE
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("this file carries its tests at the end");
-        assert!(!tests.is_empty(), "and the split found them");
+        let source = Index::of_package("bt-app");
 
         // The definition, and the one call — **for each of the two reads**
         // (T2 ③, 2026-09-10). The whole-file read is a second, larger trip to
@@ -13857,20 +13842,26 @@ mod tests {
         // read on the window thread is the frame budget spent on a file's size,
         // and 8MB of it would be worse than 64KB by exactly the factor between
         // them.
-        let spawned_at = module
-            .find("pub fn spawn(proxy: EventLoopProxy<AppEvent>)")
-            .expect("PreviewWorker::spawn is declared here");
         for reader in ["read_head(", "read_whole("] {
-            assert_eq!(
-                module.matches(reader).count(),
-                2,
-                "{reader} is defined once and called once outside the tests"
-            );
-            let called_at = module
-                .rfind(reader)
-                .expect("the call the count above just found");
+            let name = reader.trim_end_matches('(');
+            let declaration = ItemQuery::function(name).in_module("crate::preview");
+            source
+                .one(&declaration)
+                .unwrap_or_else(|failure| panic!("{failure}"));
+            let found = source
+                .search(
+                    &Search::new(Needle::new(Pattern::call(name)), View::Identifiers)
+                        .in_scope(Scope::Module("crate::preview".to_owned()))
+                        .exempting_declarations_of(declaration),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(source);
+            assert_eq!(found.len(), 1, "{reader} has one call outside the tests");
             assert!(
-                called_at > spawned_at,
+                source
+                    .body_of(&ItemQuery::method("PreviewWorker", "spawn"))
+                    .unwrap_or_else(|failure| panic!("{failure}"))
+                    .contains(reader),
                 "and {reader}'s one call is inside the worker's thread body"
             );
         }
@@ -13878,11 +13869,16 @@ mod tests {
         // Neither door the window thread asks is allowed to touch a disk. Both
         // are pure functions of a name and a source, and the assertions say so
         // in the vocabulary a reviewer would use.
-        for signature in [
-            "pub fn preview_ftype(name: &str) -> PreviewFtype {",
-            "pub fn new(source: PreviewSource, name: String) -> Self {",
+        for (subject, query) in [
+            ("preview_ftype", ItemQuery::function("preview_ftype")),
+            (
+                "PreviewBuffer::new",
+                ItemQuery::method("PreviewBuffer", "new"),
+            ),
         ] {
-            let body = one_function(module, signature);
+            let body = source
+                .body_of(&query)
+                .unwrap_or_else(|failure| panic!("{failure}"));
             // **Calls, not mentions.** Both of these functions are allowed to
             // *say* where the answer comes from — that is what their comments
             // are for — and neither may go and get it.
@@ -13895,7 +13891,7 @@ mod tests {
             ] {
                 assert!(
                     !body.contains(disk),
-                    "{signature} must not reach the disk, and it calls {disk}"
+                    "{subject} must not reach the disk, and it calls {disk}"
                 );
             }
         }
@@ -14378,27 +14374,6 @@ mod tests {
                 MarkdownBlock::Paragraph(vec![Span::plain(" here")]),
             ],
         );
-    }
-
-    /// One function's text, from its signature to whichever closing brace comes
-    /// first — [`sniffing_happens_off_the_window_thread`]'s reader.
-    ///
-    /// Both indentations are tried and the **nearer** wins, because the two
-    /// functions read here are declared at different depths: a free function
-    /// closes at column zero and a method closes four spaces in, and taking the
-    /// first of the two that merely *exists* would hand a method the whole rest
-    /// of its `impl`.
-    fn one_function<'src>(source: &'src str, signature: &str) -> &'src str {
-        let start = source
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &source[start + signature.len()..];
-        let end = ["\n}", "\n    }"]
-            .into_iter()
-            .filter_map(|close| rest.find(close))
-            .min()
-            .unwrap_or(rest.len());
-        &rest[..end]
     }
 
     /// PIN (R1-12) — **the card's button belongs to the refusals that are about

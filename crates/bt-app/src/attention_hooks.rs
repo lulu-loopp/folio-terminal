@@ -1059,6 +1059,7 @@ pub(crate) fn today() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Index, Needle, Pattern, Scope, Search, View};
 
     /// RED (T-FRESH-FACTS) — **an older walk's reading of the agent folders never replaces a
     /// newer walk's**, and a walk that read the same thing moves nothing.
@@ -1577,46 +1578,35 @@ mod tests {
     /// only, because a test may write whatever fixture it likes.
     #[test]
     fn a_landing_is_whole_or_it_is_nothing_at_all() {
-        // Spelled in halves so this assertion is not its own counter-example — the source these
-        // read is this file, and one whole spelling here would be found in the half it is looking
-        // at. `concat!` puts them back together at compile time.
-        let raw_write = concat!("fs::", "write(");
-        let atomic = concat!("bt_persist::", "atomic_write(");
-        let production = |source: &str| {
-            source
-                .split_once(concat!("#[cfg(", "test)]"))
-                .map_or(source, |(before, _)| before)
-                .to_owned()
+        let index = Index::of_package("bt-app");
+        let found = |module: &str, spelling: &str| {
+            index
+                .search(
+                    &Search::new(Needle::new(Pattern::text(spelling)), View::Raw)
+                        .in_scope(Scope::Module(format!("crate::{module}"))),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(index)
         };
         // `land`'s own dated copy is the one raw write left on this path, and it is a write to a
         // file nothing else has ever read — never to the target.
-        let hooks = production(include_str!("attention_hooks.rs"));
         assert_eq!(
-            hooks.matches(raw_write).count(),
+            found("attention_hooks", "fs::write(").len(),
             1,
             "the only raw write left in this module is `land`'s dated copy"
         );
         assert_eq!(
-            hooks.matches(atomic).count(),
+            found("attention_hooks", "bt_persist::atomic_write(").len(),
             1,
             "and the target is replaced through the one atomic writer"
         );
-        for (name, source) in [
-            (
-                "attention_codex",
-                production(include_str!("attention_codex.rs")),
-            ),
-            (
-                "attention_copilot",
-                production(include_str!("attention_copilot.rs")),
-            ),
-        ] {
+        for name in ["attention_codex", "attention_copilot"] {
             assert!(
-                !source.contains(raw_write),
+                found(name, "fs::write(").is_empty(),
                 "{name} writes a configuration file behind `land`'s back"
             );
             assert!(
-                source.contains(concat!("config.", "land(")),
+                !found(name, "config.land(").is_empty(),
                 "{name} must land its bytes through the one writer, on the one resolution"
             );
         }

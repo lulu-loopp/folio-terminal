@@ -8825,6 +8825,7 @@ fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Index, ItemQuery};
 
     /// RED (T-ABOUT-NITS) — **"Last checked" counts in the singular at one,
     /// in every unit**, and Chinese reads the same count either way.
@@ -10175,9 +10176,6 @@ mod tests {
     /// machines where the shell speaks up, months later. So the guard is here, at
     /// the door translations come in through, and it reads the source file
     /// itself.
-    /// It reads only the half above `mod tests`, because the needles it is
-    /// hunting for have to be written out down here to be hunted for.
-    ///
     /// **The cut does not land where that sentence says, and this gate is
     /// therefore reading almost nothing** — found by T-MAC-FIT while moving a
     /// test-only constant around this file, and left for its own ticket
@@ -10190,13 +10188,16 @@ mod tests {
     /// fixture spells `"WSL"` as a sample value. Whether the needles or those
     /// two strings are the wrong ones is a ruling about this gate's own
     /// subject, which a port ticket is not entitled to take — so what changed
-    /// here is that this comment now says what the code does.
+    /// here is that this comment now says what the code does. P16 preserves that
+    /// narrow judgment by naming the `Lang` item directly; it removes the brittle
+    /// file cut without silently widening the policy.
+    ///
+    /// MUTATION: put any title literal in `Lang`'s declaration and this goes red.
     #[test]
     fn no_profile_title_has_been_pulled_into_the_language_table() {
-        let source = include_str!("i18n.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("a split always yields a first piece");
+        let source = Index::of_package("bt-app")
+            .body_of(&ItemQuery::type_item("Lang"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         for title in [
             "PowerShell 7",
             "Windows PowerShell 5.1",
@@ -10366,27 +10367,20 @@ mod tests {
     /// that used to stand here was reasonable while the switch needed a restart,
     /// and the next person to want one will write it as a new variant rather
     /// than by reviving the old name.
+    ///
+    /// MUTATION: put "restart" back into either `DescLanguage` value and this
+    /// goes red.
     #[test]
     fn no_string_in_this_table_asks_for_a_relaunch() {
-        let source = include_str!("i18n.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("a split always yields a first piece");
-        for needle in ["Restart", "restart", "重启"] {
-            assert!(
-                !source.contains(needle),
-                "{needle:?} is still in this table — the language now switches \
-                 where the reader is standing"
-            );
-        }
-        // Not a source-wide needle: `TabTipPinned` says 下次启动会恢复 about a
-        // pinned tab, which is a true sentence about a *tab* and has nothing to
-        // do with this row.
-        for lang in Lang::ALL {
-            assert!(!Text::DescLanguage.in_lang(lang).contains("下次启动"));
-        }
         for lang in Lang::ALL {
             let description = Text::DescLanguage.in_lang(lang);
+            for needle in ["Restart", "restart", "重启", "下次启动"] {
+                assert!(
+                    !description.contains(needle),
+                    "{needle:?} is still in the Language row — the language now switches \
+                     where the reader is standing"
+                );
+            }
             assert!(
                 description.contains("中文"),
                 "{lang:?}: the row names what is on offer — {description:?}"

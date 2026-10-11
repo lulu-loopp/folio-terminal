@@ -3416,7 +3416,7 @@ fn a_press_inside_a_float_never_names_a_docked_row() {
     );
     let body = method_body("Runtime", "file_row_under");
     assert!(
-        !body.contains(["self.float_hit_at", "("].concat().as_str()),
+        !body.contains("self.float_hit_at("),
         "the menu's door asks the one router and never the windows directly: \
              a second reading of the floats is a second rule to forget, and \
              forgetting it once is what left the hover transparent"

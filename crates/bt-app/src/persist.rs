@@ -2335,6 +2335,7 @@ fn relocate(previous: &Path, current: &Path) -> Relocation {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use bt_source::{Index, ItemQuery, Needle, Pattern, Scope, Search, View};
 
     /// RED (T-HARDCODE-047 round 2, SET-3) — **the ordinary keybindings
     /// writer records the dialect whose chord spelling it writes.**
@@ -3108,43 +3109,59 @@ pub(crate) mod tests {
     /// a fallback of its own, and the counts below name it.
     #[test]
     fn the_only_thread_that_fsyncs_session_json_is_the_writer() {
-        const SOURCE: &str = include_str!("persist.rs");
-        let body = |head: &str| -> &'static str {
-            let start = SOURCE
-                .find(head)
-                .unwrap_or_else(|| panic!("`{head}` is declared as written here"))
-                + head.len();
-            &SOURCE[start..start + SOURCE[start..].find("\n    }\n").expect("a method ends")]
+        let source = Index::of_package("bt-app");
+        let body = |owner: &str, name: &str| -> &'static str {
+            source
+                .body_of(&ItemQuery::method(owner, name))
+                .unwrap_or_else(|failure| panic!("{failure}"))
         };
         assert!(
-            !body("\n    pub fn flush_if_due(&mut self, now: Instant) {").contains("atomic"),
+            !body("SessionStore", "flush_if_due").contains("atomic"),
             "the turn-by-turn autosave does not touch a disk"
         );
-        // Split so this test's own text is not one of the matches it counts.
-        let raw = ["bt_persist::atomic_", "write("].concat();
+        let raw = "bt_persist::atomic_write(";
+        let persist = Scope::Module("crate::persist".to_owned());
+        let raw_hits = source
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::path("bt_persist::atomic_write")),
+                    View::Identifiers,
+                )
+                .in_scope(persist.clone()),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(source);
         assert_eq!(
-            SOURCE.matches(raw.as_str()).count(),
+            raw_hits.len(),
             1,
             "the raw atomic write appears once, inside the writer thread's loop"
         );
         assert!(
-            SOURCE
-                .find(raw.as_str())
-                .is_some_and(|at| SOURCE[..at].contains("ThreadPriority::BelowNormal")),
+            body("SessionWriter", "start").contains(raw)
+                && body("SessionWriter", "start").contains("ThreadPriority::BelowNormal"),
             "and that one is downstream of the spawn that puts it on its own thread"
         );
         // And the session's own named write is not called anywhere in this module
         // (release review X-9): the store reaches the file through the writer thread's loop or
         // it does not reach it at all. `SettingsStore` and friends still write where they are
         // called, and that is a human's click rather than a per-turn autosave.
-        let named = ["write_session", "_atomic("].concat();
         assert_eq!(
-            SOURCE.matches(named.as_str()).count(),
+            source
+                .search(
+                    &Search::new(
+                        Needle::new(Pattern::call("write_session_atomic")),
+                        View::Identifiers,
+                    )
+                    .in_scope(persist),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(source)
+                .len(),
             0,
             "no road to `session.json` outside the one thread that owns it"
         );
         assert!(
-            !body("\n    fn hand_over(&mut self, now: Instant) {").contains("atomic"),
+            !body("SessionStore", "hand_over").contains("atomic"),
             "and the hand-over that finds no thread reports instead of writing"
         );
     }

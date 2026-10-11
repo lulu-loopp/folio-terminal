@@ -79,7 +79,6 @@ crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::the_settings_fi
 crates/bt-app/src/attention_copilot.rs	attention_copilot::tests::what_is_written_never_carries_two_layers_of_one_request	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_copy_that_cannot_be_kept_refuses_to_write	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_dead_owner_can_be_replaced_after_moving_folio	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_landing_is_whole_or_it_is_nothing_at_all	include_str!	attention_codex.rs;attention_copilot.rs;attention_hooks.rs	P14	no
 crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_notification_subtype_is_registered_as_a_matcher	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_could_not_be_read_is_never_written_over	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/attention_hooks.rs	attention_hooks::tests::a_settings_file_that_is_not_there_is_the_one_that_gets_created	fixture / manifest read	(the file it reads)	P14	no
@@ -98,85 +97,26 @@ crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_a
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_an_operation_resolves_its_configuration_once	fixture / manifest read	target	P14	no
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_codex_takeover_never_replaces_a_user_notifier	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_malformed_future_schema_and_readonly_are_byte_identical	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_only_one_function_resolves_a_configuration_path	include_str!	editable;main	P14	no
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_relative_operand_names_nobody_and_is_removable	fixture / manifest read	remove	P14	no
 crates/bt-app/src/attention_ownership.rs	attention_ownership::tests::attention_untrusted_executable_and_bad_record_refuse_without_config_changes	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/clipboard_picture.rs	clipboard_picture::tests::every_encoding_is_judged_by_the_one_ceiling	include_str!	png_from;png_from_dib	P14	no
 crates/bt-app/src/diagnostics.rs	diagnostics::tests::a_run_heads_its_log_before_anything_else_can_write_into_it	include_str!	choose_resident_channel;open_run_log	P14	no
 crates/bt-app/src/diagnostics.rs	diagnostics::tests::nothing_branches_on_the_two_console_no_ops	include_str!	choose_resident_channel;main	P14	no
-crates/bt-app/src/file_reads_doors.txt	animation.rs: file_source_in_lane: FileAnimationSource::open	ledger key naming a file	file_source_in_lane (1 site(s), FileAnimationSource::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	animation.rs: first_frame: open	ledger key naming a file	first_frame (1 site(s), open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	animation.rs: open_in_lane: std::fs::File::open	ledger key naming a file	open_in_lane (1 site(s), std::fs::File::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	animation.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	animation.rs: read_head: .read	ledger key naming a file	read_head (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	animation.rs: stream: open	ledger key naming a file	stream (1 site(s), open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	attention_copilot.rs: run_probe: .output	ledger key naming a file	run_probe (1 site(s), .output)	P16	no
 crates/bt-app/src/file_reads_doors.txt	attention_ownership.rs: record: Marks::read	ledger key naming a file	record (1 site(s), Marks::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	attention_wire.rs: payload_on_stdin: .read_to_end	ledger key naming a file	payload_on_stdin (1 site(s), .read_to_end)	P16	no
-crates/bt-app/src/file_reads_doors.txt	attention_words.rs: lede_in_tail: .read_to_end	ledger key naming a file	lede_in_tail (1 site(s), .read_to_end)	P16	no
-crates/bt-app/src/file_reads_doors.txt	attention_words.rs: transcript_lede: File::open	ledger key naming a file	transcript_lede (1 site(s), File::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	clipboard_picture.rs: reserve: .open	ledger key naming a file	reserve (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	diagnostics.rs: append_note: .open	ledger key naming a file	append_note (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	files_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	git.rs: drain: .read_to_end	ledger key naming a file	drain (1 site(s), .read_to_end)	P16	no
-crates/bt-app/src/file_reads_doors.txt	git_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	hang_watch.rs: append_healed: .open	ledger key naming a file	append_healed (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: append_panic_report: .open	ledger key naming a file	append_panic_report (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: create_leaf_session: .output	ledger key naming a file	create_leaf_session (1 site(s), .output)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: dump_chrome_frame: .open	ledger key naming a file	dump_chrome_frame (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: dump_overlay_frame: .open	ledger key naming a file	dump_overlay_frame (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: new_window_runtime: .open	ledger key naming a file	new_window_runtime (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: attention_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), attention_wire::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: launch_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), launch_wire::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	pdf.rs: count_pages: .read	ledger key naming a file	count_pages (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	pdf.rs: read_capped: .read_to_end	ledger key naming a file	read_capped (1 site(s), .read_to_end)	P16	no
-crates/bt-app/src/file_reads_doors.txt	persist.rs: open: SessionWriter::open	ledger key naming a file	open (1 site(s), SessionWriter::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	preview.rs: read_up_to: .read_to_end	ledger key naming a file	read_up_to (1 site(s), .read_to_end)	P16	no
-crates/bt-app/src/file_reads_doors.txt	preview_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	profiles.rs: table: .read	ledger key naming a file	table (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	profiles.rs: title: .read	ledger key naming a file	title (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	profiles.rs: with_table: read	ledger key naming a file	with_table (1 site(s), read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	psreadline.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	psreadline.rs: is_folios_copy_at: installed_disk::read	ledger key naming a file	is_folios_copy_at (1 site(s), installed_disk::read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	psreadline.rs: read: .read	ledger key naming a file	read (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	psreadline.rs: run_probe: .output	ledger key naming a file	run_probe (1 site(s), .output)	P16	no
-crates/bt-app/src/file_reads_doors.txt	psreadline.rs: unclaimed_or_foreign: installed_disk::read	ledger key naming a file	unclaimed_or_foreign (1 site(s), installed_disk::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	schemes.rs: catalogue: .read	ledger key naming a file	catalogue (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	settings.rs: adopted: .read	ledger key naming a file	adopted (2 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	settings.rs: get: .read	ledger key naming a file	get (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	settings.rs: scanned: .read	ledger key naming a file	scanned (2 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: profile_path_reason: std::fs::File::open	ledger key naming a file	profile_path_reason (1 site(s), std::fs::File::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .open	ledger key naming a file	read_profile_for_edit (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .read	ledger key naming a file	read_profile_for_edit (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .read_to_end	ledger key naming a file	read_profile_for_edit (1 site(s), .read_to_end)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: replace_profile: .open	ledger key naming a file	replace_profile (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .open	ledger key naming a file	lock (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .read	ledger key naming a file	lock (1 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: rewrite_recorded: Decoded::read	ledger key naming a file	rewrite_recorded (1 site(s), Decoded::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_runtime.rs: operate_with: Marks::read	ledger key naming a file	operate_with (1 site(s), Marks::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	trace.rs: append: .open	ledger key naming a file	append (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	trace.rs: create: .open	ledger key naming a file	create (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	trace.rs: open: .open	ledger key naming a file	open (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	uninstall.rs: execute_with_claim: Marks::read	ledger key naming a file	execute_with_claim (1 site(s), Marks::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	update.rs: take: .open	ledger key naming a file	take (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	video_seat.rs: open: Engine::open	ledger key naming a file	open (1 site(s), Engine::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	video_seat.rs: open: VideoSeat::open	ledger key naming a file	open (1 site(s), VideoSeat::open)	P16	no
 crates/bt-app/src/file_reads_source_tests.rs	file_reads_source_tests::file_reads_every_product_content_door_has_a_lane	include_str!	animation.rs	P14	no
-crates/bt-app/src/file_reads_source_tests.rs	file_reads_source_tests::file_reads_reporting_borrows_the_watchdog_and_installs_no_wake	include_str!	watch_forever	P14	no
 crates/bt-app/src/first_run.rs	first_run::tests::the_card_names_no_platform_of_its_own	include_str!	first_run.rs	P14	no
-crates/bt-app/src/formula_tools.rs	formula_tools::tests::the_marks_fade_in_travel_and_fade_out_on_the_tips_own_ninety_milliseconds	include_str!	cubic_bezier	P14	no
-crates/bt-app/src/i18n.rs	i18n::tests::no_profile_title_has_been_pulled_into_the_language_table	include_str!	i18n.rs	P14	no
-crates/bt-app/src/i18n.rs	i18n::tests::no_string_in_this_table_asks_for_a_relaunch	include_str!	i18n.rs	P14	no
 crates/bt-app/src/icons.rs	icons::tests::a_path_strip_wears_the_folder_it_is_standing_in	include_str!	push_files_foot	P14	no
 crates/bt-app/src/icons.rs	icons::tests::no_drawing_carries_a_bare_alpha	include_str!	marks.rs	P14	no
 crates/bt-app/src/icons.rs	icons::tests::no_font_character_stands_in_for_a_mark	include_str!	file_peek.rs;float.rs;git_graph.rs;git_panel.rs;notice.rs;peek_strip.rs;profiles.rs;restore.rs;search.rs;seats.rs;settings.rs;toast.rs	P14	no
 crates/bt-app/src/icons.rs	icons::tests::no_surface_reaches_past_the_registry_for_a_disclosure	include_str!	float.rs;git_graph.rs;git_panel.rs;profiles.rs;search.rs;seats.rs;settings.rs	P14	no
 crates/bt-app/src/icons.rs	icons::tests::the_punctuation_that_stayed_a_character_is_set_as_type	include_str!	seats.rs;settings.rs	P14	no
-crates/bt-app/src/persist.rs	persist::tests::the_only_thread_that_fsyncs_session_json_is_the_writer	include_str!	flush_if_due;hand_over	P14	no
 crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value	include_str!	window_is_hidden	P14	no
-crates/bt-app/src/preview.rs	preview::tests::a_save_is_written_by_the_writer_that_keeps_what_the_file_carried	include_str!	save	P14	no
 crates/bt-app/src/preview.rs	preview::tests::md_loading_design_document_has_no_read_only_badge	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/preview.rs	preview::tests::sniffing_happens_off_the_window_thread	include_str!	new;preview_ftype;spawn	P14	no
 crates/bt-app/src/preview.rs	preview::tests::the_block_ranges_partition_the_file_and_the_file_comes_back_whole	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
 crates/bt-app/src/preview.rs	preview::tests::the_bytes_no_block_was_parsed_from_are_blank	include_str!	../../../README.md;../../../docs/features.md;preview.rs	P14	no
 crates/bt-app/src/preview.rs	preview::tests::the_latex_corpus_sets_every_section_it_promises	include_str!	../../../tests/assets/latex-render-check.md	P14	no
@@ -233,7 +173,6 @@ crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_term_variab
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::writing_the_profile_leaves_no_half_written_file_in_the_folder	include_str!	replace_profile	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag	include_str!	../../../scripts/shell-integration/folio.zsh	P14	no
 crates/bt-app/src/shortcuts.rs	shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	fixture / manifest read	target	P14	no
-crates/bt-app/src/update.rs	update::tests::the_check_asks_one_stack_on_every_platform	include_str!	update.rs	P14	no
 crates/bt-app/src/update.rs	update::tests::the_question_carries_nothing_about_the_machine	include_str!	../../../README.md;../../../README.zh-CN.md;../../../docs/PRIVACY.md	P14	no
 crates/bt-app/src/version.rs	version::tests::the_plist_carries_the_workspace_version_twice_and_no_literal	fixture / manifest read	(the file it reads)	P14	no
 crates/bt-app/src/version.rs	version::tests::the_version_is_the_manifests_and_nothing_elses	fixture / manifest read	(the file it reads)	P14	no
@@ -244,7 +183,6 @@ crates/bt-app/src/webhost.rs	webhost::refusal_card_tests::the_engine_is_only_eve
 crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
 crates/bt-platform/src/app_delegate.rs	tests::PROVIDER	include_str!	macos_services.rs	P14	no
 crates/bt-platform/src/hang.rs	tests::SOURCE	include_str!	hang.rs	P14	no
-crates/bt-platform/src/ime_observation.rs	tests::ime_observation_reads_only_the_supplied_window	include_str!	ime_observation.rs	P14	no
 crates/bt-platform/src/ime_trace.rs	tests::ime_native_outbound_sites_are_traced	include_str!	lib.rs	P14	no
 crates/bt-platform/src/instance.rs	tests::the_runtime_directory_is_asked_of_the_system_and_not_of_the_environment	include_str!	instance.rs	P14	no
 crates/bt-platform/src/instance.rs	tests::the_unix_claim_is_a_flock_on_a_descriptor_in_a_private_runtime_directory	include_str!	instance.rs	P14	no

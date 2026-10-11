@@ -17667,6 +17667,8 @@ pub use macos_compose::Compositor;
 /// that never ran on Windows.
 #[cfg(test)]
 mod compositor_arms_tests {
+    use bt_source::{Index, ItemQuery, Needle, Pattern, Scope, Search, View};
+
     /// The three texts these pins are about.
     const ROOT: &str = include_str!("lib.rs");
     const MACOS: &str = include_str!("macos_compose.rs");
@@ -17828,32 +17830,31 @@ mod compositor_arms_tests {
                 && MACOS.contains("VisualLayer::Top => NSWindowOrderingMode::Above,"),
             "the translation is the two arms of one function"
         );
-        let product = MACOS
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a body before its tests");
-        // The *code*, not the prose: the boolean is named in one doc comment,
-        // which is where it is explained and is the opposite of reading it.
-        let code: String = product
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim_start();
-                !trimmed.starts_with("//")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source = Index::of_package("bt-platform");
+        let found = |spelling: &str| {
+            source
+                .search(
+                    &Search::new(
+                        Needle::new(Pattern::text(spelling)),
+                        View::CodeKeepingLiterals,
+                    )
+                    .in_scope(Scope::Module("crate::macos_compose".to_owned())),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(source)
+        };
         assert!(
-            !code.contains("insert_above_with_null_reference"),
+            found("insert_above_with_null_reference").is_empty(),
             "the DirectComposition boolean must not reach AppKit, where its value spells the \
              opposite end of the stack"
         );
         assert_eq!(
-            product.matches("ordering_for(VisualLayer::Bottom)").count(),
+            found("ordering_for(VisualLayer::Bottom)").len(),
             1,
             "exactly one call puts a page's slot at the bottom of the window's subview list"
         );
         assert_eq!(
-            product.matches("ordering_for(VisualLayer::Top)").count(),
+            found("ordering_for(VisualLayer::Top)").len(),
             1,
             "and exactly one puts the page's own view at the top of its slot"
         );
@@ -17922,51 +17923,96 @@ mod compositor_arms_tests {
             "setWantsLayer(",
             "setLayer(",
         ];
-        let product = MACOS
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a body before its tests");
-        let mut inside = false;
-        let mut depth = 0_i32;
-        for (number, line) in product.lines().enumerate() {
-            let code = line.trim_start();
-            // A doc line naming a call is a sentence about it, and the line
-            // that *defines* `paint_floor` is not a call to it either.
-            let prose = code.starts_with("//")
-                || code.starts_with('*')
-                || code.starts_with("fn ")
-                || code.starts_with("pub fn ");
-            if line.contains("without_animation(|| {") {
-                inside = true;
-                depth = 0;
-            }
-            if inside {
-                depth += i32::try_from(line.matches('{').count()).unwrap_or(0);
-                depth -= i32::try_from(line.matches('}').count()).unwrap_or(0);
-            }
-            let guarded = inside || line.contains("without_animation(||");
-            if !prose {
+        let source = Index::of_package("bt-platform");
+        let method = |name: &str| {
+            source
+                .body_of(&ItemQuery::method("Compositor", name).in_module("crate::macos_compose"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+        };
+        let mut bodies = [
+            "set_gpu_offset",
+            "attach_page_view",
+            "set_page_ground_color",
+            "place_web_visual",
+            "hide_web_visual",
+            "detach_web_visual",
+            "make_slot",
+        ]
+        .map(method)
+        .to_vec();
+        bodies.push(
+            source
+                .body_of(&ItemQuery::function("paint_floor").in_module("crate::macos_compose"))
+                .unwrap_or_else(|failure| panic!("{failure}")),
+        );
+        bodies.push(
+            source
+                .body_of(
+                    &ItemQuery::function("without_animation").in_module("crate::macos_compose"),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}")),
+        );
+        for body in &bodies {
+            let mut inside = false;
+            let mut depth = 0_i32;
+            for line in body.lines() {
+                if line.contains("without_animation(|| {") {
+                    inside = true;
+                    depth = 0;
+                }
+                if inside {
+                    depth += i32::try_from(line.matches('{').count()).unwrap_or(0);
+                    depth -= i32::try_from(line.matches('}').count()).unwrap_or(0);
+                }
+                let guarded = inside || line.contains("without_animation(||");
                 for mutator in MUTATORS {
                     assert!(
                         !line.contains(mutator) || guarded,
-                        "line {} mutates the window's hierarchy outside a CATransaction with \
-                         actions disabled, so it animates: {line}",
-                        number + 1
+                        "a hierarchy mutation stands outside a CATransaction with actions \
+                         disabled, so it animates: {line}"
                     );
                 }
-            }
-            if inside && depth <= 0 {
-                inside = false;
+                if inside && depth <= 0 {
+                    inside = false;
+                }
             }
         }
+        // The item list above is complete: a new caller in another product item
+        // must not escape the lexical check merely by moving files.
+        for mutator in MUTATORS {
+            let mut search = Search::new(Needle::new(Pattern::text(mutator)), View::Raw)
+                .in_scope(Scope::Module("crate::macos_compose".to_owned()));
+            if mutator == "paint_floor(" {
+                search = search.exempting_declarations_of(
+                    ItemQuery::function("paint_floor").in_module("crate::macos_compose"),
+                );
+            }
+            let found = source
+                .search(&search)
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(source);
+            assert_eq!(
+                found.len(),
+                bodies
+                    .iter()
+                    .map(|body| body.matches(mutator).count())
+                    .sum::<usize>(),
+                "a new `{mutator}` caller is outside the checked compositor items"
+            );
+        }
         assert_eq!(
-            product.matches("setBackgroundColor(").count(),
+            bodies
+                .iter()
+                .map(|body| body.matches("setBackgroundColor(").count())
+                .sum::<usize>(),
             1,
             "a floor's colour is written in one place, and that place is reached from inside a \
              transaction"
         );
         assert!(
-            product.contains("CATransaction::setDisableActions(true);"),
+            bodies
+                .iter()
+                .any(|body| body.contains("CATransaction::setDisableActions(true);")),
             "and the transaction is the one that turns the actions off"
         );
     }

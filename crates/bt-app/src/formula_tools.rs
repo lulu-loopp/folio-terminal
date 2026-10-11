@@ -793,6 +793,7 @@ impl FormulaToggleMotion {
 mod tests {
     use super::*;
     use bt_render::{DARK_CHROME, LIGHT_CHROME};
+    use bt_source::{Index, Needle, Pattern, Scope, Search, View};
 
     /// A synthetic placement on a real viewport frame, using the production
     /// CPU geometry API. No device, window, sleeps or timer advances are needed.
@@ -1073,9 +1074,9 @@ mod tests {
     // the *next* method's declaration and doc comment, which the slice ran on
     // into — `turn`'s was 45,871 bytes around a 44,426-byte body.
     //
-    // `include_str!("formula_tools.rs")` stays: it belongs to P14's row for
-    // `the_marks_fade_in_travel_and_fade_out_on_the_tips_own_ninety_milliseconds`,
-    // which reads this file's own text above its tests.
+    // L1-large-1 removed the last file-named reader too: the timing pin below
+    // asks the index for this declared module's product universe, so moving the
+    // test module cannot move the boundary it reads.
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -1776,19 +1777,20 @@ mod tests {
         // ④ One span for all three, and it is the archive's fast rung — this
         //    module spells neither the number nor the curve.
         assert_eq!(tooltip::TOOLTIP_FADE, bt_render::MOTION_FAST);
-        // This module's own code, read as text — everything above the tests,
-        // whose own clocks are written in milliseconds on purpose. The marker is
-        // assembled rather than written out for the reason the house's other
-        // text pins assemble theirs: a literal here would be a second occurrence
-        // of the very string being searched for.
-        const SOURCE: &str = include_str!("formula_tools.rs");
-        let module = SOURCE
-            .split(&["#[cfg(", "test)]"].concat())
-            .next()
-            .unwrap_or(SOURCE);
-        for second_copy in [["from_", "millis"].concat(), ["cubic_", "bezier"].concat()] {
+        // The declared module and product filter replace the old textual cut at
+        // the first `#[cfg(test)]`; test clocks are outside the question even if
+        // this module moves or gains another test-only item.
+        let source = Index::of_package("bt-app");
+        for second_copy in ["from_millis", "cubic_bezier"] {
+            let found = source
+                .search(
+                    &Search::new(Needle::new(Pattern::text(second_copy)), View::Raw)
+                        .in_scope(Scope::Module("crate::formula_tools".to_owned())),
+                )
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(source);
             assert!(
-                !module.contains(&second_copy),
+                found.is_empty(),
                 "the band's marks keep a {second_copy} of their own"
             );
         }

@@ -11,50 +11,53 @@
 #     these is put to the crate by file_reads_source_tests.rs, and a key naming
 #     no declaration, or two, is a refusal rather than a merged count.
 #   trace.rs: create: .open    — the file, the bare name of the function the
-#     door stands in, the door. A row like this goes quiet the day its owner
-#     moves to another file; these are the rows still on
-#     docs/plans/MIGRATION-DEBT.tsv, and P16 of docs/plans/bt-app-split-prep.md
-#     is the ticket that re-keys them.
+#     door stands in, the door. P16 re-keyed every row whose item identity is
+#     unique; the eight remaining file keys name duplicate free functions and
+#     each group carries its reason beside the rows.
 # A file-keyed key's first segment ends in .rs, which is how the two are told
 # apart. Order is not part of the comparison; the rows are a set.
 # The installed-module seam: both are the seam's own verb; its production arm reads
 # through file_reads::read(Lane::Settings), so the bytes are counted.
-psreadline.rs: is_folios_copy_at: installed_disk::read
+is_folios_copy_at: installed_disk::read
 # The install door's own occupancy check (audit 3, E-1): the assembly is read at
 # the moment of the write to establish who wrote the module standing there.
-psreadline.rs: unclaimed_or_foreign: installed_disk::read
+unclaimed_or_foreign: installed_disk::read
+# `read` has six free-function declarations (four test-only); the installed
+# PSReadLine reader therefore also needs its file key to identify one item.
 psreadline.rs: read: .read
-main.rs: create_leaf_session: .output
-animation.rs: file_source_in_lane: FileAnimationSource::open
-animation.rs: first_frame: open
-animation.rs: open_in_lane: std::fs::File::open
-animation.rs: read: .read
+create_leaf_session: .output
+file_source_in_lane: FileAnimationSource::open
+first_frame: open
+FileAnimationSource::open_in_lane: std::fs::File::open
+<FileAnimationSource as Read>::read: .read
+# `read_head` is declared in both animation and preview, so its free-function
+# identity is ambiguous without this file key.
 animation.rs: read_head: .read
-animation.rs: stream: open
-attention_wire.rs: payload_on_stdin: .read_to_end
-attention_words.rs: lede_in_tail: .read_to_end
-attention_words.rs: transcript_lede: File::open
-clipboard_picture.rs: reserve: .open
-diagnostics.rs: append_note: .open
-files_watch.rs: sync_with: open
-git.rs: drain: .read_to_end
-git_watch.rs: sync_with: open
-hang_watch.rs: append_healed: .open
-main.rs: append_panic_report: .open
+stream: open
+payload_on_stdin: .read_to_end
+lede_in_tail: .read_to_end
+transcript_lede: File::open
+reserve: .open
+append_note: .open
+FilesWatch::sync_with: open
+drain: .read_to_end
+GitWatch::sync_with: open
+append_healed: .open
+append_panic_report: .open
 Runtime::commit_web_page: .open
 open_first_window: GpuContext::open
-main.rs: open_the_data_directorys_endpoints: attention_wire::open
-main.rs: open_the_data_directorys_endpoints: launch_wire::open
+open_the_data_directorys_endpoints: attention_wire::open
+open_the_data_directorys_endpoints: launch_wire::open
 Runtime::create: persist::KeybindingsStore::open
 Runtime::create: persist::ProfilesStore::open
 Runtime::create: persist::SessionStore::open
 Runtime::create: persist::SettingsStore::open
 Runtime::create: pins::PinsStore::open
-main.rs: dump_chrome_frame: .open
-main.rs: dump_overlay_frame: .open
+dump_chrome_frame: .open
+dump_overlay_frame: .open
 Runtime::land_page_source_on: .open
 Runtime::land_preview_source_on: .open
-main.rs: new_window_runtime: .open
+new_window_runtime: .open
 Runtime::open_rename: TabRename::open
 Runtime::open_search: .open
 Runtime::open_web_page_on: webhost::WebSeat::open
@@ -72,50 +75,59 @@ Runtime::raise_psreadline_invite_if_due: .open
 Runtime::reap_exited_tabs: .output
 Runtime::settings_layout: .read
 Runtime::turn: .open
-pdf.rs: count_pages: .read
-pdf.rs: read_capped: .read_to_end
-persist.rs: open: SessionWriter::open
-preview.rs: read_up_to: .read_to_end
-preview_watch.rs: sync_with: open
-profiles.rs: table: .read
-profiles.rs: title: .read
-profiles.rs: with_table: read
-schemes.rs: catalogue: .read
-settings.rs: adopted: .read
-settings.rs: get: .read
-settings.rs: scanned: .read
-shell_integration.rs: profile_path_reason: std::fs::File::open
-shell_integration.rs: add_profile_with_forms: profile_marks::Decoded::read
-shell_integration.rs: read_profile_for_edit: .open
-shell_integration.rs: read_profile_for_edit: .read
-shell_integration.rs: read_profile_for_edit: .read_to_end
-shell_integration.rs: replace_profile: .open
+count_pages: .read
+read_capped: .read_to_end
+SessionStore::open: SessionWriter::open
+read_up_to: .read_to_end
+PreviewWatch::sync_with: open
+Registry::table: .read
+title: .read
+with_table: read
+catalogue: .read
+CjkFamilySlot::adopted: .read
+MonospaceFamilySlot::adopted: .read
+SchemeLabelSlot::get: .read
+CjkFamilySlot::scanned: .read
+MonospaceFamilySlot::scanned: .read
+profile_path_reason: std::fs::File::open
+add_profile_with_forms: profile_marks::Decoded::read
+read_profile_for_edit: .open
+read_profile_for_edit: .read
+read_profile_for_edit: .read_to_end
+replace_profile: .open
+# `lock` is also a duplicate free-function name (six declarations in the
+# package), so the profile-marks owner remains file-keyed for the same reason.
 shell_integration/profile_marks.rs: lock: .open
 shell_integration/profile_marks.rs: lock: .read
-shell_integration/profile_marks.rs: rewrite_recorded: Decoded::read
-shell_integration/profile_marks.rs: retire: Decoded::read
+rewrite_recorded: Decoded::read
+ProfileFiles::retire: Decoded::read
+# `record` has a second test-only free-function declaration in install_channel;
+# this production owner remains file-keyed so the identity is unique.
 attention_ownership.rs: record: Marks::read
-shell_integration/profile_runtime.rs: operate_with: Marks::read
+# `install_recorded` is a duplicate free-function name (the PSReadLine and
+# profile-runtime modules each declare one), so these rows cannot name one item
+# without the file key; `bt_source::Index::one` refuses the ambiguous query.
+operate_with: Marks::read
 shell_integration/profile_runtime.rs: install_recorded: Marks::read
 shell_integration/profile_runtime.rs: install_recorded: ProfileFiles::read
-shell_integration/profile_runtime.rs: operate_with: ProfileFiles::read
-shell_integration/profile_runtime.rs: profile_answers: ProfileFiles::read
-shell_integration/profile_runtime.rs: profile_carries_an_owned_line: Decoded::read
-shell_integration/profile_runtime.rs: undo_profile_install: ProfileFiles::read
+operate_with: ProfileFiles::read
+profile_answers: ProfileFiles::read
+profile_carries_an_owned_line: Decoded::read
+undo_profile_install: ProfileFiles::read
 observe_profile_lines: Marks::read
 observe_profile_lines: ProfileFiles::read
 observe_profile_lines: ProfileRevision::read
 install_for_program: ProfileRevision::read
 ProfileRevision::carries_the_line: profile_marks::Decoded::read
-trace.rs: append: .open
-trace.rs: create: .open
-trace.rs: open: .open
-update.rs: take: .open
-video_seat.rs: open: Engine::open
-video_seat.rs: open: VideoSeat::open
+TraceFile::append: .open
+Trace::create: .open
+TraceFile::open: .open
+Claim::take: .open
+VideoSeat::open: Engine::open
+VideoSeats::open: VideoSeat::open
 psreadline.rs: install_recorded: Marks::read
-psreadline.rs: recorded_install: Marks::read
-uninstall.rs: execute_with_claim: Marks::read
+recorded_install: Marks::read
+execute_with_claim: Marks::read
 # The install channel (U-1): the marker and scoop's receipt on Lane::Install, each
 # capped; the derivation's one call of the folder read.
 capped: .read_to_end

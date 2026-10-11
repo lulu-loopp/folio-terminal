@@ -461,7 +461,8 @@ fn occurrences_inside(owner: &Owner, pattern: bt_source::Pattern) -> usize {
         bt_source::Needle::new(pattern),
         bt_source::View::Identifiers,
     )
-    .in_scope(bt_source::Scope::Item(owner.query()));
+    .in_scope(bt_source::Scope::Item(owner.query()))
+    .exempting_declarations_of(owner.query());
     source_index()
         .search(&search)
         .unwrap_or_else(|failure| panic!("{failure}"))
@@ -564,6 +565,12 @@ fn file_reads_every_item_keyed_door_answers_to_one_item() {
         // never saw as well as on one it saw twice.
         let mut by_verb: BTreeMap<&str, usize> = BTreeMap::new();
         for (door, count) in doors {
+            // A qualified door is checked by its full path below. Folding it
+            // into the bare verb would also count unrelated calls with the
+            // same last segment (`file_reads::read` beside `Decoded::read`).
+            if door.contains("::") {
+                continue;
+            }
             let Some(verb) = verb_of(door) else {
                 panic!("{door} is not a call");
             };
@@ -618,12 +625,14 @@ fn file_reads_source_guard_sees_reads_after_tests_and_ignores_comment_decoys() {
     assert_eq!(actual, expected);
 }
 
+/// MUTATION: give `Clock::tick` an independent wake or remove the watchdog's
+/// one `reads.tick` call and this goes red.
 #[test]
 fn file_reads_reporting_borrows_the_watchdog_and_installs_no_wake() {
-    let clock = include_str!("file_reads.rs")
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap();
+    let index = source_index();
+    let clock = index
+        .body_of(&bt_source::ItemQuery::method("Clock", "tick"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
     for forbidden in [
         "thread::spawn",
         "spawn_at_priority",
@@ -637,9 +646,9 @@ fn file_reads_reporting_borrows_the_watchdog_and_installs_no_wake() {
             "the reporting clock acquired its own wake: {forbidden}"
         );
     }
-    let watchdog = include_str!("hang_watch.rs");
-    let start = watchdog.find("fn watch_forever(").unwrap();
-    let body = &watchdog[start..watchdog[start..].find("\n}\n").unwrap() + start];
+    let body = index
+        .body_of(&bt_source::ItemQuery::function("watch_forever"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
     assert_eq!(body.matches("reads.tick(").count(), 1);
     assert!(body.contains("match watch.poll(now_ms,"));
     assert!(body.contains("reads.tick(\n            now_ms,"));
