@@ -182,7 +182,7 @@ pub enum WebEvent {
         success: bool,
         status: i32,
         /// **The HTTP status the server answered this navigation with**, when one answered
-        /// (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — [`http_status_of`] over WebView2's
+        /// (T-WEB-404-SAYS-UNKNOWN, ruling 2026-10-09) — `http_status_of` over WebView2's
         /// `HttpStatusCode` (`ICoreWebView2NavigationCompletedEventArgs2`) or the main-frame
         /// `NSHTTPURLResponse` WebKit showed this navigation. `None` when nothing was reached: a
         /// name that did not resolve, a connection refused or cut before a response, a scheme
@@ -361,7 +361,7 @@ pub enum WebEvent {
     /// aimed at a new window (F-SWEEP-048, issue #27).
     ///
     /// The engine opens nothing: the request is answered as handled inside the callback
-    /// ([`new_window_answer`]), because `SetHandled` — and WebKit's `nil` — cannot be decided
+    /// (`new_window_answer`), because `SetHandled` — and WebKit's `nil` — cannot be decided
     /// later. What happens instead is the caller's: the address is asked of the same door a typed
     /// address is, and a new page is opened, or the refusal said, by the window. `user_initiated`
     /// is the engine's own reading of whether a gesture is behind the request.
@@ -375,6 +375,7 @@ pub enum WebEvent {
 /// that is not a status) is "no HTTP response", which is how both engines spell it. One reading
 /// for the two arms (T-WEB-404-SAYS-UNKNOWN).
 #[must_use]
+#[cfg(any(windows, target_os = "macos", test))]
 pub fn http_status_of(code: i32) -> Option<u16> {
     u16::try_from(code)
         .ok()
@@ -390,6 +391,7 @@ pub fn http_status_of(code: i32) -> Option<u16> {
 /// and WebKit's `createWebViewWithConfiguration:` returns no view and its navigation action is
 /// cancelled when it is `true`.
 #[must_use]
+#[cfg(any(windows, target_os = "macos", test))]
 pub fn new_window_answer(uri: String, user_initiated: bool) -> NewWindowAnswer {
     NewWindowAnswer {
         handled: true,
@@ -402,6 +404,7 @@ pub fn new_window_answer(uri: String, user_initiated: bool) -> NewWindowAnswer {
 
 /// What [`new_window_answer`] decides inside the engine's callback.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg(any(windows, target_os = "macos", test))]
 pub struct NewWindowAnswer {
     /// Whether the engine is told the request is taken care of, so that it opens nothing itself.
     pub handled: bool,

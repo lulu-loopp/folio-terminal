@@ -22,12 +22,13 @@ literals and fails if this file and that scan disagree in either direction.
 every switch below reads it that way, with three exceptions noted in their own
 rows. Whitespace is not trimmed: a value of `" "` is a filename.
 
-**A name containing `TRACE` keeps the console.** When Folio starts from a console
+**A nonempty `TRACE` variable keeps the console.** When Folio starts from a console
 it normally lets that console go and sends `stdout`/`stderr` to
 `%APPDATA%\Folio\diagnostics.log`. If **any** environment variable in the process
-whose name starts with `BT_` also contains `TRACE`, the console is kept instead
-and those streams go there. The rule is a shape, not a list, so it covers a switch
-added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
+whose name starts with `BT_`, contains `TRACE` and has a nonempty value, the
+console is kept instead and those streams go there. The rule is a shape, not a
+list, so it covers a switch added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST`
+deliberately do not match it.
 
 ## 1. Read by a release build
 
