@@ -40538,8 +40538,10 @@ fn land_birth_death_fallback_shell(
         ..LeafSeed::default()
     };
     finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
-    apply_owed_shell_resize(leaf, born_grid, owed_physical)?;
+    // The stale spawn record goes before the apply can fail: a fallback that landed but could
+    // not be resized is still a landed fallback, not one still pending.
     leaf.spawn_fallback = None;
+    apply_owed_shell_resize(leaf, born_grid, owed_physical)?;
     Ok(())
 }
 
