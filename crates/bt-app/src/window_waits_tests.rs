@@ -7034,3 +7034,1063 @@ fn every_bare_site_is_a_row_and_every_row_a_site() {
         failures.join("\n  ")
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The completions ledger (`# completions`; the side-effects contract, design note 2026-10-11,
+// §3.1 as revised by (b)1, (b)3, (b)6, (c)1 and (c)2; ticket S-1)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// One row per request protocol: the item a request enters by (`door`, a `bt-source` item key),
+// the thread it runs on, how its end is told (`signal`), how it fails, what becomes of a request
+// a newer one replaces, where the answer goes when the requester is gone, and its `status` —
+// `conforms`, `owner-thread` (a member of revision (b)6's closed C7 list), or the ledger rows that
+// repair it. The tests below hold the section to the code in both directions; the shrink-only
+// half (a repair only ever becomes `conforms`) compares against the merge base, in
+// `scripts/ci/check-window-waits.ps1`, the way the `# rows` section's rule does.
+
+const COMPLETION_COLUMNS: [&str; 8] = [
+    "class",
+    "door",
+    "thread",
+    "signal",
+    "failure",
+    "supersession",
+    "sink",
+    "status",
+];
+
+/// The signals that are not an `AppEvent` variant: the completion is the door's own return value
+/// (`return` — every C7 member, and a door that refuses or takes synchronously); the door's return
+/// hands the work to a sink that owes nobody an answer (`detached`, revision (b)3); the answer is
+/// read by a later turn that nothing wakes for it (`polled`, which C2 allows only beside a wake).
+const SIGNAL_WORDS: [&str; 3] = ["return", "detached", "polled"];
+
+/// The threads a row may name that are not a worker's: the window thread inside the loop, and the
+/// main thread before the loop exists or after it has returned.
+const OWNER_THREADS: [&str; 2] = ["window", "main"];
+
+/// **Revision (b)6's closed C7 list**, by `# doors` door: the owner-thread effects whose
+/// completion is their return value (owner rulings 2026-10-11, Q1). A row may say `owner-thread`
+/// only when its door is an item a `# doors` line of one of these names (its `call` or its
+/// `minted at`); a new member needs an owner ruling and a line here. The desktop notification is
+/// not one ((c)1), and neither are `PlaceHidden` and `PlaceExposure`, which (b)6 does not list.
+const C7_DOORS: [&str; 22] = [
+    "TitleFlush",
+    "ImeCaretArea",
+    "SetCursor",
+    "SetVisible",
+    "FocusWindow",
+    "SurfaceBirth",
+    "CompositorBirth",
+    "CompositorWindowSize",
+    "CompositorCommit",
+    "WebEnvironment",
+    "WebController",
+    "WebRehost",
+    "FontFamilyLookup",
+    "PresentFrame",
+    "PtyResize",
+    "GpuOpen",
+    "PaneRetirementWait",
+    "SessionWriteWait",
+    "SessionWriterRetire",
+    "TraceFlush",
+    "UpdateLeave",
+    "LaunchHandOver",
+];
+
+/// **The `AppEvent` variants that answer no request** — news nobody in this process asked for,
+/// kept out of the ledger on purpose (revision (b)1, *kept out on purpose*): each is an ear's or
+/// the platform's nudge, and what it reports was never requested. Every other variant is the
+/// `signal` of a row. A variant listed here that is also a row's signal, or that the enum no
+/// longer has, is refused.
+const NOT_ANSWERS: [(&str, &str); 20] = [
+    (
+        "SystemPreferencesChanged",
+        "a system preference moved: the platform's news",
+    ),
+    (
+        "VolumesChanged",
+        "a volume came or went: the platform's news",
+    ),
+    (
+        "PathDirectoryChanged",
+        "a watched PATH directory moved: an ear's nudge",
+    ),
+    (
+        "LocaleChanged",
+        "the user's locale changed: the platform's news",
+    ),
+    (
+        "FileIndexHeard",
+        "a named tree watch heard a path: an ear's nudge",
+    ),
+    (
+        "DisplayChanged",
+        "a display changed mode: the platform's news",
+    ),
+    (
+        "InputLanguageChanged",
+        "the keyboard layout moved: the platform's news",
+    ),
+    (
+        "WindowChromeChanged",
+        "the platform redrew the title bar: the platform's news",
+    ),
+    ("GitChanged", "a watched repository moved: an ear's nudge"),
+    (
+        "AttentionSpoke",
+        "an agent spoke into the attention endpoint: ingress",
+    ),
+    (
+        "LaunchAsked",
+        "a second launch handed over its command line: ingress",
+    ),
+    ("SchemesChanged", "the schemes folder moved: an ear's nudge"),
+    ("StorageChanged", "the data folder moved: an ear's nudge"),
+    ("QuakeSummoned", "the summon chord was pressed: ingress"),
+    (
+        "NotificationClicked",
+        "a desktop notification was clicked: ingress",
+    ),
+    (
+        "PreviewFileChanged",
+        "a previewed file moved: an ear's nudge",
+    ),
+    (
+        "FilesDirChanged",
+        "a files column's folder moved: an ear's nudge",
+    ),
+    (
+        "AppDelegateSpoke",
+        "the application delegate spoke: ingress",
+    ),
+    ("SessionEnding", "the system is ending the session: ingress"),
+    ("TouchPanned", "a finger panned a window: input"),
+];
+
+/// The structural-debt ledger, for the D-rows a status names.
+const STRUCTURAL_DEBT: &str = include_str!("../../../docs/plans/structural-debt.md");
+
+/// One repair a row's status names.
+#[derive(Debug, PartialEq)]
+enum Repair {
+    /// `D-70`: a row of `docs/plans/structural-debt.md`.
+    Debt(&'static str),
+    /// `row 20`: an `open` or `pending` row of this registry's `# rows`.
+    Row(&'static str),
+}
+
+/// What a row's status says.
+#[derive(Debug, PartialEq)]
+enum Standing {
+    Conforms,
+    OwnerThread,
+    Repaired(Vec<Repair>),
+}
+
+/// One `# completions` line.
+struct Completion {
+    class: &'static str,
+    door: &'static str,
+    /// The threads the work runs on, as the row names them.
+    threads: Vec<&'static str>,
+    /// The `# rows` entries the thread cell cites: `window (row 20)`.
+    rows: Vec<&'static str>,
+    signal: &'static str,
+    status: &'static str,
+}
+
+fn completions() -> Vec<Completion> {
+    section("completions", &COMPLETION_COLUMNS)
+        .into_iter()
+        .map(|cells| {
+            let mut threads = Vec::new();
+            let mut rows = Vec::new();
+            for part in cells[2].split(", ") {
+                match part.split_once(" (row ") {
+                    Some((thread, row)) => {
+                        threads.push(thread);
+                        rows.push(row.strip_suffix(')').unwrap_or(row));
+                    }
+                    None => threads.push(part),
+                }
+            }
+            Completion {
+                class: cells[0],
+                door: cells[1],
+                threads,
+                rows,
+                signal: cells[3],
+                status: cells[7],
+            }
+        })
+        .collect()
+}
+
+/// A status read: `conforms`, `owner-thread`, or a comma-separated list of `D-<n>` and `row <n>`.
+fn standing(status: &'static str) -> Result<Standing, String> {
+    match status {
+        "conforms" => return Ok(Standing::Conforms),
+        "owner-thread" => return Ok(Standing::OwnerThread),
+        _ => {}
+    }
+    status
+        .split(", ")
+        .map(|part| {
+            if let Some(number) = part.strip_prefix("D-")
+                && !number.is_empty()
+                && number.bytes().all(|b| b.is_ascii_digit())
+            {
+                Ok(Repair::Debt(part))
+            } else if let Some(row) = part.strip_prefix("row ")
+                && !row.is_empty()
+            {
+                Ok(Repair::Row(row))
+            } else {
+                Err(format!(
+                    "status `{part}` is not `conforms`, `owner-thread`, `D-<n>` or `row <n>`"
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Standing::Repaired)
+}
+
+/// **A door key, read**: `Type::method`, `<Type as Trait>::method` or a free `function` — the
+/// item identity `file_reads_doors.txt` keys by, without a module path — optionally led by the
+/// module path that makes it one item (`pty_door::request_shell` is `request_shell` in
+/// `crate::pty_door`) and, for an item of another product crate, by that crate
+/// (`bt_platform::FolderPicker::request`). A segment before the name that starts with a capital is
+/// the `impl`'s type.
+struct RequestDoor {
+    package: String,
+    module: Option<String>,
+    owner: Option<String>,
+    trait_name: Option<String>,
+    name: String,
+}
+
+fn door_key(key: &str) -> RequestDoor {
+    if let Some(rest) = key.strip_prefix('<')
+        && let Some((owner, rest)) = rest.split_once(" as ")
+        && let Some((trait_name, name)) = rest.split_once(">::")
+    {
+        return RequestDoor {
+            package: "bt-app".to_owned(),
+            module: None,
+            owner: Some(owner.to_owned()),
+            trait_name: Some(trait_name.to_owned()),
+            name: name.to_owned(),
+        };
+    }
+    let mut segments: Vec<&str> = key.split("::").collect();
+    let package = match segments.first() {
+        Some(first) if first.starts_with("bt_") && segments.len() > 1 => {
+            let package = first.replace('_', "-");
+            segments.remove(0);
+            package
+        }
+        _ => "bt-app".to_owned(),
+    };
+    let (name, before) = segments.split_last().expect("a key has at least its name");
+    let (owner, modules) = match before.split_last() {
+        Some((owner, modules)) if owner.starts_with(|c: char| c.is_ascii_uppercase()) => {
+            (Some((*owner).to_owned()), modules)
+        }
+        _ => (None, before),
+    };
+    RequestDoor {
+        package,
+        module: (!modules.is_empty()).then(|| format!("crate::{}", modules.join("::"))),
+        owner,
+        trait_name: None,
+        name: (*name).to_owned(),
+    }
+}
+
+/// **The product declarations a door key names**, asked of the crate's items (`bt-source`'s
+/// production view): every callable of that name, owner, trait and module that a build of the
+/// shipped program contains — one per `cfg` arm, so two declarations standing on the same arm are
+/// a key that names two items, refused like a key that names none.
+fn door_records(world: &World, key: &str) -> Result<Vec<&'static ItemRecord>, String> {
+    let wanted = door_key(key);
+    let Some(src) = world.srcs.iter().find(|src| src.package == wanted.package) else {
+        return Err(format!("`{key}`: `{}` is no product crate", wanted.package));
+    };
+    let found: Vec<&'static ItemRecord> = src
+        .index
+        .items()
+        .iter()
+        .filter(|record| {
+            record.kind().is_callable()
+                && record.name() == wanted.name
+                && record.type_owner() == wanted.owner.as_deref()
+                && record.trait_name() == wanted.trait_name.as_deref()
+                && wanted
+                    .module
+                    .as_deref()
+                    .is_none_or(|module| record.module_paths().contains(&module))
+                && src.product_item(record)
+        })
+        .collect();
+    if found.is_empty() {
+        return Err(format!("`{key}` names no item of the product"));
+    }
+    let arms: Vec<(String, String)> = found.iter().map(|record| item_and_arm(record)).collect();
+    let distinct: BTreeSet<&String> = arms.iter().map(|(_, arm)| arm).collect();
+    if distinct.len() != arms.len() {
+        return Err(format!(
+            "`{key}` names {} items on one arm: {}",
+            arms.len(),
+            arms.iter()
+                .map(|(item, arm)| format!("{item} {arm}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(found)
+}
+
+/// The items a `# doors` line of a C7 door names in its `call` and `minted at` cells, as written
+/// between backticks.
+fn c7_items() -> BTreeSet<&'static str> {
+    let mut items = BTreeSet::new();
+    for cells in section("doors", &DOOR_COLUMNS) {
+        if !C7_DOORS.contains(&cells[0]) {
+            continue;
+        }
+        for cell in [cells[4], cells[5]] {
+            items.extend(cell.split('`').skip(1).step_by(2));
+        }
+    }
+    items
+}
+
+/// The `AppEvent` variants, asked of the crate.
+fn app_event_variants(world: &World) -> BTreeSet<&'static str> {
+    let src = world.src("bt-app");
+    src.index
+        .items()
+        .iter()
+        .filter(|record| {
+            record.kind() == ItemKind::Variant
+                && record.type_owner() == Some("AppEvent")
+                && src.product_item(record)
+        })
+        .map(ItemRecord::name)
+        .collect()
+}
+
+/// RED (S-1) — **every `# completions` row is one protocol, entered by an item of the product.**
+///
+/// The classes are distinct and no cell is empty; each door is a `bt-source` item key that names a
+/// product declaration (one per `cfg` arm), asked of the crate's items ([`door_records`]) and never
+/// found by reading a file. A door that names nothing, or two items on one arm, is refused.
+///
+/// MUTATION: rename the hand-off row's door to `Runtime::hand_off_now` and it goes red naming the
+/// key and the nearest declarations.
+#[test]
+fn every_completions_door_is_an_item_of_the_product() {
+    let world = World::new();
+    let rows = completions();
+    let mut failures = Vec::new();
+    for cells in section("completions", &COMPLETION_COLUMNS) {
+        for (column, cell) in COMPLETION_COLUMNS.iter().zip(&cells) {
+            if cell.trim().is_empty() {
+                failures.push(format!("`{}`: the `{column}` cell is empty", cells[0]));
+            }
+        }
+    }
+    let mut classes = BTreeSet::new();
+    for row in &rows {
+        if !classes.insert(row.class) {
+            failures.push(format!("`{}` is two rows", row.class));
+        }
+        if let Err(why) = door_records(&world, row.door) {
+            failures.push(format!("`{}`: {why}", row.class));
+        }
+    }
+    println!("the completions ledger: {} row(s)", rows.len());
+    assert!(
+        failures.is_empty(),
+        "the `# completions` doors:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// RED (S-1) — **a row's status and signal are the ledger's vocabulary.**
+///
+/// The status is `conforms`, `owner-thread`, or the rows that repair it: `D-<n>` naming a row of
+/// `docs/plans/structural-debt.md`, `row <n>` naming an `open` or `pending` `# rows` entry.
+/// `owner-thread` is for revision (b)6's closed C7 list alone ([`C7_DOORS`]): the row's door is an
+/// item that list's `# doors` lines name, its threads are the owner's, and its signal is `return`.
+/// The signal is an `AppEvent` variant or one of [`SIGNAL_WORDS`]; a thread cell's `(row <n>)`
+/// names a `# rows` entry.
+///
+/// MUTATION: write the desktop notification's status as `owner-thread` (it is not a C7 member,
+/// revision (c)1), or any status as `closed`, and it goes red naming the row.
+#[test]
+fn every_completions_status_and_signal_is_the_vocabulary() {
+    let world = World::new();
+    let variants = app_event_variants(&world);
+    let registry_rows: BTreeMap<&str, &str> = section("rows", &ROW_COLUMNS)
+        .into_iter()
+        .map(|cells| (cells[0], cells[1]))
+        .collect();
+    let c7 = c7_items();
+    let mut failures = Vec::new();
+    for row in completions() {
+        let class = row.class;
+        if !variants.contains(row.signal) && !SIGNAL_WORDS.contains(&row.signal) {
+            failures.push(format!(
+                "`{class}`: signal `{}` is neither an `AppEvent` variant nor one of \
+                 {SIGNAL_WORDS:?}",
+                row.signal
+            ));
+        }
+        for cited in &row.rows {
+            if !registry_rows.contains_key(cited) {
+                failures.push(format!(
+                    "`{class}`: its thread cites row {cited}, which `# rows` does not have"
+                ));
+            }
+        }
+        match standing(row.status) {
+            Err(why) => failures.push(format!("`{class}`: {why}")),
+            Ok(Standing::Conforms) => {}
+            Ok(Standing::OwnerThread) => {
+                if !c7.contains(row.door) {
+                    failures.push(format!(
+                        "`{class}`: `owner-thread` is revision (b)6's closed C7 list, and `{}` is \
+                         no item its doors name",
+                        row.door
+                    ));
+                }
+                if !row
+                    .threads
+                    .iter()
+                    .all(|thread| OWNER_THREADS.contains(thread))
+                {
+                    failures.push(format!(
+                        "`{class}`: an owner-thread effect runs on {OWNER_THREADS:?}"
+                    ));
+                }
+                if row.signal != "return" {
+                    failures.push(format!(
+                        "`{class}`: a C7 member's completion is its return value"
+                    ));
+                }
+            }
+            Ok(Standing::Repaired(repairs)) => {
+                for repair in repairs {
+                    match repair {
+                        Repair::Debt(id) => {
+                            if !STRUCTURAL_DEBT.contains(&format!("\n| {id} |")) {
+                                failures.push(format!(
+                                    "`{class}`: {id} is not a row of docs/plans/structural-debt.md"
+                                ));
+                            }
+                        }
+                        Repair::Row(number) => match registry_rows.get(number) {
+                            Some(&"open" | &"pending") => {}
+                            Some(status) => failures.push(format!(
+                                "`{class}`: row {number} is `{status}`; a repair is an `open` or \
+                                 `pending` row"
+                            )),
+                            None => failures
+                                .push(format!("`{class}`: row {number} is not a `# rows` entry")),
+                        },
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the `# completions` statuses and signals:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// RED (S-1) — **every `AppEvent` variant that answers a request is the signal of a row.**
+///
+/// The variants are asked of the crate (`bt-source`'s items of kind `Variant` owned by
+/// `AppEvent`), and each is either some row's `signal` or one of [`NOT_ANSWERS`], the news nobody
+/// asked for — never both, and no entry of that list names a variant the enum no longer has.
+///
+/// MUTATION: add a variant `ClipboardWritten` to `AppEvent` (an answer with no row) and it goes
+/// red naming it.
+#[test]
+fn every_answering_app_event_is_the_signal_of_a_completions_row() {
+    let world = World::new();
+    let variants = app_event_variants(&world);
+    let signals: BTreeSet<&str> = completions().iter().map(|row| row.signal).collect();
+    let mut failures = Vec::new();
+    for variant in &variants {
+        let news = NOT_ANSWERS.iter().any(|(name, _)| name == variant);
+        match (signals.contains(variant), news) {
+            (true, true) => failures.push(format!(
+                "`AppEvent::{variant}` is a row's signal and listed as news nobody asked for"
+            )),
+            (false, false) => failures.push(format!(
+                "`AppEvent::{variant}` answers no `# completions` row and is not listed as news \
+                 nobody asked for"
+            )),
+            _ => {}
+        }
+    }
+    for (name, _) in NOT_ANSWERS {
+        if !variants.contains(name) {
+            failures.push(format!(
+                "`AppEvent::{name}` is listed as news and is no variant"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the `AppEvent` answers and the ledger:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// The door each lane of the lane suite enters by — an exhaustive match, so a lane added to
+/// [`crate::lane::LaneName`] does not compile until it names its door here.
+fn lane_door(lane: crate::lane::LaneName) -> &'static str {
+    use crate::lane::LaneName;
+    match lane {
+        LaneName::Handoff => "Runtime::hand_off",
+        LaneName::Font => "request_font_walk",
+        LaneName::Taskbar => "taskbar_lane::request",
+        LaneName::Computation => "dispatch_decoration_task",
+        LaneName::Programs => "programs_lane::request",
+    }
+}
+
+/// RED (S-1) — **every lane of the lane suite is a row of the ledger.**
+///
+/// Each [`crate::lane::LaneName`] names the door its requests enter by ([`lane_door`]), and that
+/// door is a `# completions` row's.
+///
+/// MUTATION: add a lane to `LaneName` (and to `ALL`) whose door has no row, or point a lane's
+/// door at an item no row names, and it goes red naming the lane.
+#[test]
+fn every_lane_is_a_completions_row() {
+    let doors: BTreeSet<&str> = completions().iter().map(|row| row.door).collect();
+    let missing: Vec<String> = crate::lane::LaneName::ALL
+        .iter()
+        .filter(|lane| !doors.contains(lane_door(**lane)))
+        .map(|lane| format!("{lane:?} (door `{}`)", lane_door(*lane)))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "lanes with no `# completions` row: {missing:?}"
+    );
+}
+
+/// RED (S-1) — **every `open` or `pending` `# rows` entry names the class it belongs to.**
+///
+/// A row of `# completions` cites a registry row in its thread cell — `window (row 20)` — and
+/// every registry row still to be moved or ruled is cited by at least one: a wait on the window
+/// thread with no class would be an effect the contract does not cover.
+///
+/// MUTATION: drop `(row 26)` from the clipboard rows' thread cells and it goes red naming row 26.
+#[test]
+fn every_open_or_pending_registry_row_names_its_completions_class() {
+    let cited: BTreeSet<&str> = completions()
+        .iter()
+        .flat_map(|row| row.rows.iter().copied())
+        .collect();
+    let orphans: Vec<String> = section("rows", &ROW_COLUMNS)
+        .into_iter()
+        .filter(|cells| ["open", "pending"].contains(&cells[1]) && !cited.contains(cells[0]))
+        .map(|cells| format!("row {} ({})", cells[0], cells[1]))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "`# rows` entries no `# completions` class names: {orphans:?}"
+    );
+}
+
+/// One thread the product starts (`spawn_at_priority`, `spawn_at_priority_with_stack`) or one
+/// door process's main (`enter_standalone_main`), and the product functions taking a `WorkerCtx`
+/// that the capability it lends reaches.
+struct WorkerRoot {
+    name: String,
+    standalone: bool,
+    at: String,
+    /// `(crate, arm, item)`, as `# effects` keys a function.
+    reached: BTreeSet<(String, String, String)>,
+}
+
+/// The parameters of a declaration whose type names `WorkerCtx`, by their bound names.
+fn worker_ctx_params(src: &Src, record: &ItemRecord) -> Vec<&'static str> {
+    let toks = src.lex(record.declaration().start(), record.declaration().end());
+    let Some((_, open, close)) = signature(src, &toks) else {
+        return Vec::new();
+    };
+    split_commas(src, &toks[open + 1..close])
+        .into_iter()
+        .filter(|param| param.iter().any(|tok| src.text(*tok) == "WorkerCtx"))
+        .flat_map(|param| {
+            let colon = param
+                .iter()
+                .position(|tok| src.is(Some(tok), ":"))
+                .unwrap_or(param.len());
+            pattern_names(src, &param[..colon])
+        })
+        .collect()
+}
+
+/// The arguments of the call whose name token starts at `at` in `toks`, split at their commas.
+fn call_arguments(src: &Src, toks: &[Tok], at: usize) -> Option<Vec<Vec<Tok>>> {
+    let name = toks.iter().position(|tok| tok.start == at)?;
+    let open = toks[name..].iter().position(|tok| src.is(Some(tok), "("))? + name;
+    let close = closing(src, toks, open)?;
+    Some(split_commas(src, &toks[open + 1..close]))
+}
+
+/// Whether an argument is the capability itself: `ctx`, `&ctx` or `*ctx`.
+fn is_capability(src: &Src, argument: &[Tok], names: &[&str]) -> bool {
+    let bare: Vec<&str> = argument
+        .iter()
+        .map(|tok| src.text(*tok))
+        .skip_while(|text| ["&", "*"].contains(text))
+        .collect();
+    matches!(bare.as_slice(), [name] if names.contains(name))
+}
+
+/// A thread's name as the door is handed it: a string literal, or a `const` of this package
+/// spelled as one (named bare or by a path).
+fn thread_name(src: &Src, argument: &[Tok]) -> Option<String> {
+    if let [tok] = argument
+        && tok.kind == Kind::Literal
+    {
+        return src
+            .text(*tok)
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .map(ToOwned::to_owned);
+    }
+    if argument
+        .iter()
+        .any(|tok| tok.kind != Kind::Ident && !src.is(Some(tok), "::"))
+    {
+        return None;
+    }
+    let constant = src.text(*argument.last()?);
+    src.named(constant).into_iter().find_map(|at| {
+        let before = src.lex(at.saturating_sub(16), at);
+        if !src.is(before.last(), "const") {
+            return None;
+        }
+        let toks = src.lex(at, src.file_end(at).min(at + 256));
+        let equals = toks.iter().position(|tok| src.is(Some(tok), "="))?;
+        thread_name(src, toks.get(equals + 1..=equals + 1)?)
+    })
+}
+
+/// The first-party callables a site in `body` resolves to, as `(package, record)`.
+fn resolved(body: &Body<'_>, site: &Site) -> Vec<(usize, &'static ItemRecord)> {
+    body.resolve(site)
+        .into_iter()
+        .filter_map(|callable| callable.record.map(|record| (callable.src, record)))
+        .collect()
+}
+
+/// A function's parameters in order, each by the names its pattern binds — the receiver (`self`,
+/// `&self`, `&mut self`) left out, as a method call's arguments leave it out.
+fn ordered_params(src: &Src, record: &ItemRecord) -> Vec<Vec<&'static str>> {
+    let toks = src.lex(record.declaration().start(), record.declaration().end());
+    let Some((_, open, close)) = signature(src, &toks) else {
+        return Vec::new();
+    };
+    split_commas(src, &toks[open + 1..close])
+        .into_iter()
+        .filter(|param| !param.iter().any(|tok| src.is(Some(tok), "self")))
+        .map(|param| {
+            let colon = param
+                .iter()
+                .position(|tok| src.is(Some(tok), ":"))
+                .unwrap_or(param.len());
+            pattern_names(src, &param[..colon])
+        })
+        .collect()
+}
+
+/// Something the capability a thread lends has been handed to: a function that takes it, a
+/// closure written in a function's body that is called with it, or a function's parameter that
+/// a call fills with a closure the capability will be handed to (the `body` of
+/// `fn request(make: impl FnOnce(&WorkerCtx) -> Born)`, which its spawn calls `make(ctx)`).
+enum Carried {
+    Callee(usize, &'static ItemRecord),
+    Closure {
+        src: usize,
+        record: &'static ItemRecord,
+        names: Vec<&'static str>,
+        from: usize,
+        to: usize,
+    },
+    Parameter(usize, &'static ItemRecord, usize),
+}
+
+/// `[from, to)` of a closure literal written as `argument` (`move |ctx| …`, `|ctx: &WorkerCtx| …`),
+/// and the names its parameter binds; `None` when the argument is not a closure.
+fn closure_of(src: &Src, argument: &[Tok]) -> Option<(Vec<&'static str>, usize, usize)> {
+    let open = argument.iter().position(|tok| src.is(Some(tok), "|"))?;
+    if argument[..open]
+        .iter()
+        .any(|tok| !src.is(Some(tok), "move"))
+    {
+        return None;
+    }
+    let close = argument[open + 1..]
+        .iter()
+        .position(|tok| src.is(Some(tok), "|"))?
+        + open
+        + 1;
+    let colon = argument[open + 1..close]
+        .iter()
+        .position(|tok| src.is(Some(tok), ":"))
+        .map_or(close, |colon| colon + open + 1);
+    let names = pattern_names(src, &argument[open + 1..colon]);
+    let body = &argument[close + 1..];
+    Some((names, body.first()?.start, body.last()?.end))
+}
+
+/// What one argument hands on: a closure literal is called with the capability, a bare name that
+/// is one of the enclosing function's parameters passes the job up to that function's callers,
+/// and any other name is a function handed over by value.
+fn carried_by(body: &Body<'_>, argument: &[Tok]) -> Vec<Carried> {
+    let src = body.s();
+    if let Some((names, from, to)) = closure_of(src, argument) {
+        return vec![Carried::Closure {
+            src: body.src,
+            record: body.record,
+            names,
+            from,
+            to,
+        }];
+    }
+    let Some(tok) = argument.iter().rev().find(|tok| tok.kind == Kind::Ident) else {
+        return Vec::new();
+    };
+    let name = src.text(*tok);
+    if argument.len() == 1
+        && let Some(index) = ordered_params(src, body.record)
+            .iter()
+            .position(|names| names.contains(&name))
+    {
+        return vec![Carried::Parameter(body.src, body.record, index)];
+    }
+    resolved(
+        body,
+        &Site {
+            at: tok.start,
+            name,
+            form: Form::Value,
+        },
+    )
+    .into_iter()
+    .map(|(at, record)| Carried::Callee(at, record))
+    .collect()
+}
+
+/// Every call among `body`'s sites inside `[from, to)` that hands one of `names` on: to a
+/// function it resolves to, or — when the callee is one of the enclosing function's own
+/// parameters (`make(ctx)`) — up to whatever that parameter is filled with.
+fn capability_calls(body: &Body<'_>, names: &[&str], from: usize, to: usize) -> Vec<Carried> {
+    let src = body.s();
+    let params = ordered_params(src, body.record);
+    let mut out = Vec::new();
+    for site in body.sites() {
+        if site.at < from || site.at >= to {
+            continue;
+        }
+        let passes = call_arguments(src, &body.toks, site.at).is_some_and(|arguments| {
+            arguments
+                .iter()
+                .any(|argument| is_capability(src, argument, names))
+        });
+        if !passes {
+            continue;
+        }
+        if matches!(site.form, Form::Bare)
+            && let Some(index) = params.iter().position(|names| names.contains(&site.name))
+        {
+            out.push(Carried::Parameter(body.src, body.record, index));
+            continue;
+        }
+        out.extend(
+            resolved(body, &site)
+                .into_iter()
+                .map(|(at, record)| Carried::Callee(at, record)),
+        );
+    }
+    out
+}
+
+/// The arguments at `index` of every product call of `record`, each with the body it is written
+/// in.
+fn arguments_to<'w>(
+    world: &'w World,
+    callee: (usize, &'static ItemRecord),
+    index: usize,
+) -> Vec<(Body<'w>, Vec<Tok>)> {
+    let mut out = Vec::new();
+    for (at_src, src) in world.srcs.iter().enumerate() {
+        if !world.reach[at_src].contains(&callee.0) {
+            continue;
+        }
+        for at in src.named(callee.1.name()) {
+            if !src.in_product(at) || callee.1.whole().holds(at) && at_src == callee.0 {
+                continue;
+            }
+            let Some(record) = src.callable_at(at) else {
+                continue;
+            };
+            let body = Body::new(world, at_src, record);
+            let Some(site) = body.sites().into_iter().find(|site| site.at == at) else {
+                continue;
+            };
+            let calls_it = resolved(&body, &site).iter().any(|(src, record)| {
+                *src == callee.0 && record.whole().start() == callee.1.whole().start()
+            });
+            if !calls_it {
+                continue;
+            }
+            let argument = call_arguments(src, &body.toks, at).and_then(|mut arguments| {
+                (index < arguments.len()).then(|| arguments.remove(index))
+            });
+            if let Some(argument) = argument {
+                out.push((body, argument));
+            }
+        }
+    }
+    out
+}
+
+/// **Every thread and door-process main the product starts, and the worker functions each one's
+/// `WorkerCtx` reaches** — the capability followed from the closure the door is handed, through
+/// every call that passes it on, to each function that takes one; through a function's own
+/// parameter (`make(ctx)`) to the closures its callers fill it with. A call is resolved with the
+/// source guard's resolver ([`Body::resolve`]) and a function is kept only when it takes a
+/// `WorkerCtx`, which is what a worker's door body is (revision (j)13).
+fn worker_roots(world: &World) -> Vec<WorkerRoot> {
+    const DOORS: [(&str, bool); 3] = [
+        ("spawn_at_priority", false),
+        ("spawn_at_priority_with_stack", false),
+        ("enter_standalone_main", true),
+    ];
+    let mut roots = Vec::new();
+    for (at_src, src) in world.srcs.iter().enumerate() {
+        for (door, standalone) in DOORS {
+            for at in src.named(door) {
+                if !src.in_product(at) {
+                    continue;
+                }
+                let Some(record) = src.callable_at(at) else {
+                    continue;
+                };
+                let body = Body::new(world, at_src, record);
+                let Some(arguments) = call_arguments(src, &body.toks, at) else {
+                    continue;
+                };
+                let (Some(first), Some(last)) = (arguments.first(), arguments.last()) else {
+                    continue;
+                };
+                let Some(name) = thread_name(src, first) else {
+                    // The door's own forwarding (`spawn_at_priority` → `…_with_stack(name, …)`).
+                    continue;
+                };
+                let mut work = carried_by(&body, last);
+                let mut reached = BTreeSet::new();
+                let mut seen: BTreeSet<(u8, usize, usize, usize)> = BTreeSet::new();
+                while let Some(carried) = work.pop() {
+                    match carried {
+                        Carried::Callee(at_callee, callee) => {
+                            let callee_src = &world.srcs[at_callee];
+                            let names = worker_ctx_params(callee_src, callee);
+                            if names.is_empty()
+                                || !seen.insert((0, at_callee, callee.whole().start(), 0))
+                            {
+                                continue;
+                            }
+                            let (item, arm) = item_and_arm(callee);
+                            reached.insert((callee_src.package.to_owned(), arm, item));
+                            let inner = Body::new(world, at_callee, callee);
+                            work.extend(capability_calls(&inner, &names, 0, usize::MAX));
+                        }
+                        Carried::Closure {
+                            src: at_closure,
+                            record,
+                            names,
+                            from,
+                            to,
+                        } => {
+                            if !seen.insert((1, at_closure, from, to)) {
+                                continue;
+                            }
+                            let inner = Body::new(world, at_closure, record);
+                            work.extend(capability_calls(&inner, &names, from, to));
+                        }
+                        Carried::Parameter(at_function, function, index) => {
+                            if !seen.insert((2, at_function, function.whole().start(), index)) {
+                                continue;
+                            }
+                            for (caller, argument) in
+                                arguments_to(world, (at_function, function), index)
+                            {
+                                work.extend(carried_by(&caller, &argument));
+                            }
+                        }
+                    }
+                }
+                roots.push(WorkerRoot {
+                    name,
+                    standalone,
+                    at: src.location(at),
+                    reached,
+                });
+            }
+        }
+    }
+    roots
+}
+
+/// The names the product gives threads it starts without the thread door — `bt-pty`'s
+/// retirement thread, `std::thread::Builder::new().name("pty-retirement".to_string())` — read as
+/// the string literal a product `.name(` call is handed first.
+fn builder_thread_names(world: &World) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for src in &world.srcs {
+        for at in src.named("name") {
+            if !src.in_product(at) {
+                continue;
+            }
+            let toks = src.lex(at.saturating_sub(1), src.file_end(at).min(at + 128));
+            let Some(name) = toks.iter().position(|tok| tok.start == at) else {
+                continue;
+            };
+            if !src.is(name.checked_sub(1).and_then(|before| toks.get(before)), ".")
+                || !src.is(toks.get(name + 1), "(")
+            {
+                continue;
+            }
+            if let Some(literal) = toks.get(name + 2)
+                && literal.kind == Kind::Literal
+                && let Some(value) = thread_name(src, std::slice::from_ref(literal))
+            {
+                names.insert(value);
+            }
+        }
+    }
+    names
+}
+
+/// **The worker door bodies no product code asks for yet**, by `# effects` key, each with why: a
+/// body here is compiled into the product and reached from no thread it starts, so it belongs to
+/// no protocol until its caller exists. A listed body that a thread reaches, or that `# effects`
+/// no longer has, is refused, and so is an unlisted body that nothing reaches.
+const UNASKED_WORKER_BODIES: [(&str, &str); 1] = [(
+    "bt-platform [windows] crate::elevated_pipe::shell_execute_runas",
+    "the elevated host's launch (`launch_elevated_host`): the admin terminal's parent side \
+     (design note admin-terminal-2026-10-04) has no product caller yet",
+)];
+
+/// RED (S-1) — **every worker's door body runs on a thread a `# completions` row names.**
+///
+/// A `worker-door-body` of `# effects` is a function that takes a `WorkerCtx`, so it runs on a
+/// thread the thread door started — or in a door process's main, which revision (b)1 keeps out
+/// of the ledger (its contract is the update journal, A§4.4). [`worker_roots`] follows each
+/// thread's capability from the closure it was handed to the functions that take it; every body
+/// must be reached from a thread that some row's `thread` cell names, or from a door process's
+/// main alone, or be one of [`UNASKED_WORKER_BODIES`]. A row's thread that the product starts
+/// under no such name is refused too.
+///
+/// MUTATION: rename the hand-off row's thread to `bt-os-hand-off` and it goes red twice: the
+/// name starts no thread, and `run_handoff_lane` runs on a thread no row names.
+#[test]
+fn every_worker_door_body_runs_on_a_completions_thread() {
+    let world = World::new();
+    let roots = worker_roots(&world);
+    let rows = completions();
+    let named: BTreeSet<&str> = rows
+        .iter()
+        .flat_map(|row| row.threads.iter().copied())
+        .filter(|thread| !OWNER_THREADS.contains(thread))
+        .collect();
+    let mut started: BTreeSet<String> = roots.iter().map(|root| root.name.clone()).collect();
+    started.extend(builder_thread_names(&world));
+    let mut failures: Vec<String> = named
+        .iter()
+        .filter(|thread| !started.contains(**thread))
+        .map(|thread| format!("a row names thread `{thread}`, which the product never starts"))
+        .collect();
+    let mut listed = BTreeSet::new();
+    for cells in section("effects", &EFFECT_COLUMNS) {
+        if cells[4] != "worker-door-body" {
+            continue;
+        }
+        let key = (
+            cells[0].to_owned(),
+            cells[1].to_owned(),
+            cells[2].to_owned(),
+        );
+        let on: Vec<&WorkerRoot> = roots
+            .iter()
+            .filter(|root| root.reached.contains(&key))
+            .collect();
+        let spelled = format!("{} {} {}", key.0, key.1, key.2);
+        let unasked = UNASKED_WORKER_BODIES
+            .iter()
+            .any(|(body, _)| *body == spelled);
+        listed.insert(spelled.clone());
+        if unasked {
+            if !on.is_empty() {
+                failures.push(format!(
+                    "{spelled}: listed as asked for by nobody, and a thread the product starts \
+                     reaches it"
+                ));
+            }
+            continue;
+        }
+        let served = on
+            .iter()
+            .any(|root| !root.standalone && named.contains(root.name.as_str()));
+        let door_process_only = !on.is_empty() && on.iter().all(|root| root.standalone);
+        if served || door_process_only {
+            continue;
+        }
+        let threads: Vec<String> = on
+            .iter()
+            .map(|root| format!("`{}` ({})", root.name, root.at))
+            .collect();
+        failures.push(if threads.is_empty() {
+            format!(
+                "{} {} {}: no thread the product starts reaches it",
+                key.0, key.1, key.2
+            )
+        } else {
+            format!(
+                "{} {} {}: runs on {}, which no `# completions` row names",
+                key.0,
+                key.1,
+                key.2,
+                threads.join(", ")
+            )
+        });
+    }
+    for (body, _) in UNASKED_WORKER_BODIES {
+        if !listed.contains(body) {
+            failures.push(format!(
+                "{body}: listed as asked for by nobody, and `# effects` has no such body"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the worker door bodies and the ledger's threads:\n  {}",
+        failures.join("\n  ")
+    );
+}
