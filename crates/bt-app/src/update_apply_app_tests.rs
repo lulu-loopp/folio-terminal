@@ -96,7 +96,8 @@ fn every_owner_door_takes_its_own_token_by_value() {
         u32,
         f64,
     ) -> Result<(GpuContext, WindowRenderer), RenderError> = gpu_door::open_first_window;
-    let _: fn(WaitToken<'_, doors::TitleFlush>, &Window, &str) = owner_door::set_title;
+    let _: fn(WaitToken<'_, doors::TitleFlush>, &Window, &bt_platform::CustomWindowFrame, &str) =
+        owner_door::set_title;
     let _: fn(WaitToken<'_, doors::ImeCaretArea>, &Window, winit::dpi::Position, winit::dpi::Size) =
         owner_door::set_ime_cursor_area;
     let _: fn(WaitToken<'_, doors::FocusWindow>, &Window) = owner_door::focus_window;

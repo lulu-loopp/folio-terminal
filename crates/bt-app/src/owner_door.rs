@@ -12,10 +12,17 @@ use bt_platform::admission::{WaitToken, doors};
 use winit::dpi::{Position, Size};
 use winit::window::{Cursor, Window};
 
-/// `Window::set_title` — row 14's residue, written only by `Runtime::flush_title`.
-pub(crate) fn set_title(token: WaitToken<'_, doors::TitleFlush>, window: &Window, title: &str) {
+/// The native title write — row 14's residue, written only by `Runtime::flush_title`.
+pub(crate) fn set_title(
+    token: WaitToken<'_, doors::TitleFlush>,
+    window: &Window,
+    frame: &bt_platform::CustomWindowFrame,
+    title: &str,
+) {
     let _ = token;
-    window.set_title(title);
+    if !frame.set_title(title) {
+        window.set_title(title);
+    }
 }
 
 /// `Window::set_ime_cursor_area` — row 22's residue, told only by
