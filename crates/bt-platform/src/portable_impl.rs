@@ -359,6 +359,19 @@ impl CustomWindowFrame {
         Ok(())
     }
 
+    /// Let a platform whose native title layout moves its own window controls
+    /// own the title write. `true` means it did; `false` leaves the caller's
+    /// existing winit write unchanged.
+    pub fn set_title(&self, title: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(buttons) = &self.buttons {
+            buttons.set_title(title);
+            return true;
+        }
+        let _ = title;
+        false
+    }
+
     /// **Answer a press on the empty part of the title bar.** The macOS
     /// `HTCAPTION`: the application has decided this press landed where its own
     /// chrome is not, and this is it saying so — a drag, or, on a double click,

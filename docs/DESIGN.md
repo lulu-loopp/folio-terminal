@@ -14835,3 +14835,11 @@ remain unchanged and are labelled TD-1 through TD-13 in the thread-door note's r
 **The rule.** A pane size released while any shell birth is pending is owed to that shell. There is one owed-size fact and one landing implementation for ordinary births and birth-death fallbacks.
 
 **Pinned by** `runtime::tabs::birth_death_tests::{a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab, a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending}`.
+
+### 2026-10-11 — A title layout keeps the macOS window buttons on Folio's band
+
+**What is built.** The native title write is owned by `CustomWindowFrame::set_title`. On a macOS window with platform buttons it calls `setTitle:`, re-states §13.48's placement immediately, and schedules the same idempotent placement once on the next main-run-loop turn; every other window keeps the existing winit write. A closing window cancels a title placement that has not fired. This is the seventh trigger beside `WindowButtonsWatch`'s six notifications, not a periodic timer.
+
+**What the trace answered.** At launch, `NSWindowDidUpdate` first saw Folio's `(13, 5)` button origins; AppKit moved them to `(9, 9)` afterward, and another update 43 ms later finally put them back. During eight title writes 150 ms apart, none of the six notifications fired. In 63 ms capture loops, `.` is Folio's red-light centroid `(19.5, 19.5)` and `X` is AppKit's `(15.5, 15.5)`: the tab-switch run changed from `XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` to `..................................................`; the animated-title run changed from `XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` to `..............................................................................................................`.
+
+**The rule.** The road that asks AppKit to change the title owns the one completion turn for AppKit's deferred title-bar layout. `centre_window_buttons` still writes only a frame that is out of place, so a quiet window does no further work. The application seam is pinned by `only_one_function_in_bt_app_calls_window_set_title`; AppKit's ordering is pinned by the measured frame runs above.
