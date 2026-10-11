@@ -757,7 +757,7 @@ impl Runtime<'_> {
                     // and there is simply nothing to take.
                     return Ok(true);
                 }
-                self.preview_pane_mut(surface).md_select = selection;
+                self.preview_pane_mut(surface).select(selection);
                 self.repaint_preview()?;
             }
             PreviewTextCommand::Clear => {
@@ -769,7 +769,7 @@ impl Runtime<'_> {
                     // else on this surface wants it.
                     return Ok(false);
                 }
-                self.preview_pane_mut(surface).md_select = None;
+                self.preview_pane_mut(surface).select(None);
                 self.repaint_preview()?;
             }
         }
@@ -1164,11 +1164,12 @@ impl Runtime<'_> {
                     // The other half of the `math` station (§13.40): one line
                     // per answer, so "the picture is late" and "the engine
                     // refused it" stop being the same picture on the glass.
+                    let formula: &str = &key.source;
                     let (set, mode, em_milli, chars) = (
                         u8::from(result.is_ok()),
                         key.mode,
                         key.em_milli_px,
-                        key.source.chars().count(),
+                        formula.chars().count(),
                     );
                     preview_trace::emit(preview_trace::global(), || {
                         format!(
@@ -1647,15 +1648,16 @@ impl Runtime<'_> {
         )>,
     ) -> Option<bt_render::MathToolBoxes> {
         let hovered = self.window.math_hover_anchor.as_ref()?;
-        let (body, mut boxes) = self.sessions.keys().find_map(|seat| {
-            let (body, frame, metrics) = frame_for(*seat)?;
-            Some((
-                body,
-                self.window
-                    .renderer
-                    .math_tool_boxes(metrics, body, frame, hovered)?,
-            ))
-        })?;
+        let (body, mut boxes): (bt_render::SeatViewport, bt_render::MathToolBoxes) =
+            self.sessions.keys().find_map(|seat| {
+                let (body, frame, metrics) = frame_for(*seat)?;
+                Some((
+                    body,
+                    self.window
+                        .renderer
+                        .math_tool_boxes(metrics, body, frame, hovered)?,
+                ))
+            })?;
         let (dx, dy) = (body.x as f32, body.y as f32);
         for rect in [&mut boxes.block, &mut boxes.source, &mut boxes.copy] {
             *rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];

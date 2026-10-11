@@ -2344,18 +2344,19 @@ impl Runtime<'_> {
                         // **A pill is more specific than the row it is on.** The
                         // rectangles come from the same run the painter draws
                         // from, so a pill you can see is a pill you can press.
-                        let pill = self.graph_row_rect(surface, index).and_then(|rect| {
-                            git_graph::graph_ref_pill_at(
-                                commit,
-                                rect,
-                                content.lane_width,
-                                content.columns,
-                                self.window.renderer.scale_factor() as f32,
-                                position.x as f32,
-                                position.y as f32,
-                            )
-                            .and_then(|at| commit.refs.get(at))
-                        });
+                        let pill: Option<&git_graph::GraphRefPill> =
+                            self.graph_row_rect(surface, index).and_then(|rect| {
+                                git_graph::graph_ref_pill_at(
+                                    commit,
+                                    rect,
+                                    content.lane_width,
+                                    content.columns,
+                                    self.window.renderer.scale_factor() as f32,
+                                    position.x as f32,
+                                    position.y as f32,
+                                )
+                                .and_then(|at| commit.refs.get(at))
+                            });
                         match pill {
                             Some(pill) => match pill.kind {
                                 git::GitRefKind::Local => profiles::GitMenuTarget::LocalBranch {
@@ -3351,7 +3352,7 @@ impl Runtime<'_> {
             .and_then(|state| state.cache.refs().ready())
             .map(|refs| {
                 git::local_branches(refs)
-                    .map(|entry| entry.name.clone())
+                    .map(|entry: &git::GitRefEntry| entry.name.clone())
                     .collect()
             })
             .unwrap_or_default()

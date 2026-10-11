@@ -16,30 +16,30 @@ use crate::{
     PictureRefusal, PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag,
     PreviewDocument, PreviewEditPaint, PreviewHeadFrame, PreviewHexHover, PreviewImageState,
     PreviewLink, PreviewMathSite, PreviewOpenLane, PreviewPane, PreviewPreedit, PreviewRailFrame,
-    PreviewSurface, PreviewTextDrag, PreviewTextSite, PreviewViewState, ProseParagraph,
-    RenameSubject, Reparse, RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest,
-    ScrollThumbState, SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId,
-    TabRename, TabState, TabTriggerHand, VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb,
-    WindowRuntime, advance_drawn_animations, animation, animation_layer_key,
-    animation_refusal_notice, animations_opened, answer_one_picture, answers_for, attention_trace,
-    build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
-    build_preview_text_body, clipboard_picture, create_leaf_session, crumb_segments,
-    deliver_clipboard_picture, diagnostics, documents_held_in, documents_held_mut_in,
-    documents_pictures, earliest_deadline, file_peek, files, files_a_tab_stands_on,
-    files_row_display_name, float, float_dock_label, folded_levels, foot_revealed_label,
-    forget_a_picture, forget_standing_answers, git_panel, graph_key_of, hang_watch, hex_peek,
-    highlight, i18n, image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence,
-    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles,
-    image_zoom_toggled, ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
-    markdown_prose_paragraphs, markdown_runs, markdown_source_cell, markdown_source_offset_at,
-    marks, measure_preview_links, native_window, notice, owe_sharpened_rasters,
-    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
-    peek_scale_task, picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
-    pictures_need_handing_over, place_preview_math, preedit_caret_byte, present_diagnostics,
-    present_drawn_animations, preview, preview_block_bar_at, preview_block_wheel, preview_body_bar,
-    preview_caret_prose, preview_caret_row, preview_copies_on_select, preview_document_height,
-    preview_document_key, preview_document_max_scroll, preview_edit, preview_edit_bands,
-    preview_image_placement, preview_link_activation, preview_link_answers_a_press, preview_live,
+    PreviewSurface, PreviewTextDrag, PreviewTextSite, ProseParagraph, RenameSubject, Reparse,
+    RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState,
+    SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState,
+    TabTriggerHand, VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
+    advance_drawn_animations, animation, animation_layer_key, animation_refusal_notice,
+    animations_opened, answer_one_picture, answers_for, attention_trace, build_preview_diff_body,
+    build_preview_markdown_body, build_preview_table_body, build_preview_text_body,
+    clipboard_picture, create_leaf_session, crumb_segments, deliver_clipboard_picture, diagnostics,
+    documents_held_in, documents_held_mut_in, documents_pictures, earliest_deadline, file_peek,
+    files, files_a_tab_stands_on, files_row_display_name, float, float_dock_label, folded_levels,
+    foot_revealed_label, forget_a_picture, forget_standing_answers, git_panel, graph_key_of,
+    hang_watch, hex_peek, highlight, i18n, image_clamped_pan, image_destination, image_is_pannable,
+    image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
+    image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
+    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
+    markdown_source_offset_at, marks, measure_preview_links, native_window, notice,
+    owe_sharpened_rasters, page_address_hand_off, page_destination, page_foot_flash,
+    page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner, picture_errand,
+    picture_files_of, pictures_awaited_by, pictures_need_handing_over, place_preview_math,
+    preedit_caret_byte, present_diagnostics, present_drawn_animations, preview,
+    preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
+    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
+    preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
+    preview_link_activation, preview_link_answers_a_press, preview_live,
     preview_open_externally_label, preview_open_lane, preview_opened_label,
     preview_page_browser_hand_off, preview_press, preview_press_opens_its_link, preview_provenance,
     preview_rail_tip_text, preview_select, preview_selection_bands, preview_tab_index_among,
@@ -344,7 +344,7 @@ impl Runtime<'_> {
         let wants: Vec<(preview::PreviewSource, Option<preview::PreviewWant>)> = tab
             .preview_panes
             .iter()
-            .filter_map(|(_, pane)| {
+            .filter_map(|(_, pane): (PreviewSurface, &PreviewPane)| {
                 if let Some(image) = pane.image.as_ref() {
                     // The one field of the meta line no decoder can answer.
                     return Some((
@@ -370,7 +370,9 @@ impl Runtime<'_> {
             .get(index)
             .into_iter()
             .flat_map(|tab| tab.preview_panes.iter())
-            .filter_map(|(_, pane)| Some(pane.image.as_ref()?.path.clone()))
+            .filter_map(|(_, pane): (PreviewSurface, &PreviewPane)| {
+                Some(pane.image.as_ref()?.path.clone())
+            })
             .collect();
         for path in pictures {
             self.forget_the_picture_in(&path);
@@ -1382,7 +1384,7 @@ impl Runtime<'_> {
         }
         for (_, pane) in tab.preview_panes.iter_mut() {
             if pane.buffer.as_ref() == Some(source) {
-                pane.buffer = Some(moved.clone());
+                pane.show_source(moved.clone());
             }
         }
         self.preview_views.rekey(source, moved);
@@ -1691,18 +1693,20 @@ impl Runtime<'_> {
                     .iter()
                     .map(move |(surface, pane)| (tab.id, surface, pane))
             })
-            .filter_map(|(tab, surface, pane)| {
-                let PreviewSurface::Seat(leaf) = surface else {
-                    return None;
-                };
-                debug_assert_eq!(
-                    leaf.tab, tab,
-                    "a tab's preview map is filed under that tab's own leaves"
-                );
-                let url = pane.buffer.as_ref()?.web_url()?;
-                let named = webnav::LocalFileUrl::parse(url)?;
-                (named.path() == path && self.window.web.contains_key(&leaf)).then_some(leaf)
-            })
+            .filter_map(
+                |(tab, surface, pane): (TabId, PreviewSurface, &PreviewPane)| {
+                    let PreviewSurface::Seat(leaf) = surface else {
+                        return None;
+                    };
+                    debug_assert_eq!(
+                        leaf.tab, tab,
+                        "a tab's preview map is filed under that tab's own leaves"
+                    );
+                    let url = pane.buffer.as_ref()?.web_url()?;
+                    let named = webnav::LocalFileUrl::parse(url)?;
+                    (named.path() == path && self.window.web.contains_key(&leaf)).then_some(leaf)
+                },
+            )
             .collect();
         for leaf in reload {
             let window = &mut *self.window;
@@ -2595,7 +2599,7 @@ impl Runtime<'_> {
         // The buffer itself stays in the pool — it belongs to the tab, not to the
         // pane — so switching back finds it whole, and so does the view of it.
         self.leave_preview_buffer(surface);
-        self.preview_pane_mut(surface).image = Some(PreviewImageState::new(path));
+        self.preview_pane_mut(surface).show_picture(path);
         // A new picture arrives fit to the pane. The zoom is the *view of one
         // picture* and not a setting of the surface: inheriting 250% and a pan
         // from the screenshot you were reading a moment ago would open the next
@@ -2992,10 +2996,8 @@ impl Runtime<'_> {
         // would make the switcher a thing you pay for using (ruling 8⑧).
         self.leave_preview_buffer(surface);
         let view = self.preview_views.restore(&source);
-        let pane = self.preview_pane_mut(surface);
-        pane.buffer = Some(source.clone());
-        pane.caret = view.caret;
-        pane.scroll = view.scroll;
+        self.preview_pane_mut(surface)
+            .stand_on(source.clone(), view);
         if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
@@ -3036,7 +3038,7 @@ impl Runtime<'_> {
     /// and therefore no way for one preview closing to blank another's, which is
     /// exactly what the release this replaced had to be careful about.
     pub(in crate::runtime) fn clear_preview_image(&mut self, surface: PreviewSurface) {
-        self.preview_pane_mut(surface).image = None;
+        self.preview_pane_mut(surface).take_picture_down();
     }
 
     /// The same, told **which tab** the surface's view lives in — the twin of
@@ -3052,7 +3054,10 @@ impl Runtime<'_> {
         index: usize,
         surface: PreviewSurface,
     ) {
-        self.window.tabs[index].preview_panes.entry(surface).image = None;
+        self.window.tabs[index]
+            .preview_panes
+            .entry(surface)
+            .take_picture_down();
     }
 
     /// This surface is about to stop showing whatever it is showing. **File the
@@ -3089,20 +3094,8 @@ impl Runtime<'_> {
         // sweep to retire a moment later.
         if self.window.tabs[index].preview_panes.get(surface).is_some() {
             let pane = self.window.tabs[index].preview_panes.entry(surface);
-            let left = pane.buffer.take();
-            let view = PreviewViewState {
-                caret: pane.caret,
-                scroll: pane.scroll,
-            };
-            pane.caret = preview_edit::EditCaret::default();
-            pane.scroll = [0.0, 0.0];
-            // The surface is being emptied, not re-parsed: there is nothing left
-            // for a mark to be about, so this is the arm that clears.
-            pane.show_document(PreviewDocument::Empty, Reparse::Elsewhere);
+            let left = pane.leave_document();
             pane.doc_key = None;
-            // The block offsets this document was scrolled by mean nothing to
-            // the next one.
-            pane.md_block_scroll.clear();
             // The next document's links are measured with its body; what a hand
             // was resting on in this one is not a fact about that one, and a
             // stale box would keep the pointing finger over prose that answers
@@ -3118,7 +3111,7 @@ impl Runtime<'_> {
             // waiting for is not the body that is coming.
             pane.md_caret = false;
             pane.md_caret_wanted = None;
-            if let Some(source) = left {
+            if let Some((source, view)) = left {
                 // The memory is per buffer and the buffer is the tab's, so it is
                 // filed in the same tab the view came out of.
                 self.window.tabs[index]
@@ -4574,7 +4567,7 @@ impl Runtime<'_> {
         if scrolled == scroll {
             return Ok(());
         }
-        self.preview_pane_mut(surface).scroll = scrolled;
+        self.preview_pane_mut(surface).scroll_to(scrolled);
         self.refresh_preview_body();
         self.refresh_chrome();
         self.present_chrome_change()
@@ -4632,17 +4625,9 @@ impl Runtime<'_> {
         index: usize,
         offset: f32,
     ) -> Result<bool> {
-        let offsets = &mut self.preview_pane_mut(surface).md_block_scroll;
-        // Grown here rather than at the rebuild, because a document is parsed far
-        // more often than a block is scrolled and a vector of zeros per parse is
-        // a cost paid for a case that usually does not arise.
-        if offsets.len() <= index {
-            offsets.resize(index + 1, 0.0);
-        }
-        if offsets[index] == offset {
+        if !self.preview_pane_mut(surface).scroll_block(index, offset) {
             return Ok(false);
         }
-        offsets[index] = offset;
         self.repaint_preview()?;
         Ok(true)
     }
@@ -5399,7 +5384,7 @@ impl Runtime<'_> {
         let mut asked = scroll;
         asked[axis] = wanted;
         let scrolled = self.clamped_preview_scroll(drag.surface, body, scale, asked);
-        self.preview_pane_mut(drag.surface).scroll = scrolled;
+        self.preview_pane_mut(drag.surface).scroll_to(scrolled);
         self.repaint_preview()?;
         Ok(true)
     }
@@ -5896,7 +5881,7 @@ impl Runtime<'_> {
                 Some(was) => preview_select::Selection { head: place, ..was },
                 None => preview_select::Selection::collapsed(place, grain),
             };
-            self.preview_pane_mut(surface).md_select = Some(selection);
+            self.preview_pane_mut(surface).select(Some(selection));
             drew = true;
         }
         // **And the one press that is answered where it stands** (closure review
@@ -5949,9 +5934,7 @@ impl Runtime<'_> {
     /// A *shift*-press is an extension and never reaches here: what it extends
     /// from is the very anchor this would drop.
     pub(crate) fn drop_preview_selection(&mut self, surface: PreviewSurface) {
-        let pane = self.preview_pane_mut(surface);
-        pane.caret.anchor = pane.caret.caret;
-        pane.md_select = None;
+        self.preview_pane_mut(surface).drop_selection();
     }
 
     /// **Whether a byte of the file is in the source this page is already
@@ -6120,9 +6103,12 @@ impl Runtime<'_> {
             return Ok(());
         }
         let pane = self.preview_pane_mut(surface);
-        pane.caret.anchor = preview_edit::normalize(&content, range.start);
-        pane.caret.caret = preview_edit::normalize(&content, range.end);
-        pane.caret.desired_column = None;
+        pane.place_caret(preview_edit::EditCaret {
+            anchor: preview_edit::normalize(&content, range.start),
+            caret: preview_edit::normalize(&content, range.end),
+            desired_column: None,
+            ..pane.caret
+        });
         self.repaint_preview()
     }
 
@@ -6149,8 +6135,8 @@ impl Runtime<'_> {
         let extend = extend && pane.md_caret;
         let mut caret = pane.caret;
         caret.place(&content, offset, extend);
-        pane.caret = caret;
-        pane.md_select = None;
+        pane.place_caret(caret);
+        pane.select(None);
         pane.md_caret = true;
         pane.md_caret_wanted = None;
         self.preview_edit_focus = Some(surface);
@@ -6274,10 +6260,11 @@ impl Runtime<'_> {
             }
             return Ok(true);
         };
-        self.preview_pane_mut(surface).md_select = Some(preview_select::Selection {
-            head: place,
-            ..selection
-        });
+        self.preview_pane_mut(surface)
+            .select(Some(preview_select::Selection {
+                head: place,
+                ..selection
+            }));
         self.repaint_preview()?;
         Ok(true)
     }
@@ -6324,7 +6311,7 @@ impl Runtime<'_> {
             // every reader expects of a click in a page of text — and the same
             // click on a link is still the link's.
             if !selected {
-                self.preview_pane_mut(drag.surface).md_select = None;
+                self.preview_pane_mut(drag.surface).select(None);
             }
             self.repaint_preview()?;
             if let Some(target) = drag.link {
@@ -6821,7 +6808,7 @@ impl Runtime<'_> {
                 {
                     preview_edit::select_all(content, &mut caret);
                 }
-                self.preview_pane_mut(surface).caret = caret;
+                self.preview_pane_mut(surface).place_caret(caret);
                 self.repaint_preview()?;
             }
             preview_edit::EditCommand::Copy => self.copy_preview_selection(),
@@ -7037,7 +7024,7 @@ impl Runtime<'_> {
         if scrolled == scroll {
             return Ok(true);
         }
-        self.preview_pane_mut(surface).scroll = scrolled;
+        self.preview_pane_mut(surface).scroll_to(scrolled);
         self.repaint_preview()?;
         Ok(true)
     }
@@ -7233,7 +7220,7 @@ impl Runtime<'_> {
         // remembers is the one that made the change (T3, `preview_undo`).
         let changed = buffer.edit_by_caret(&mut caret, |content, caret| edit(content, caret));
         let pane = self.preview_pane_mut(surface);
-        pane.caret = caret;
+        pane.place_caret(caret);
         if changed {
             // A keystroke answers whatever the last save had to say: a conflict
             // notice still standing over a body that has moved on is a sentence
@@ -7320,7 +7307,7 @@ impl Runtime<'_> {
         } else if !extend {
             caret.anchor = caret.caret;
         }
-        self.preview_pane_mut(surface).caret = caret;
+        self.preview_pane_mut(surface).place_caret(caret);
         self.reveal_preview_caret(surface);
         self.repaint_preview()
     }
@@ -7548,7 +7535,7 @@ impl Runtime<'_> {
             .min(left - metrics.padding_x)
             .max(left + advance + metrics.padding_x - width);
         let scrolled = self.clamped_preview_scroll(surface, body, scale, scroll);
-        self.preview_pane_mut(surface).scroll = scrolled;
+        self.preview_pane_mut(surface).scroll_to(scrolled);
     }
 
     /// **Bring the caret's row of the source block into view** — the rendered
@@ -7588,7 +7575,7 @@ impl Runtime<'_> {
             let mut wanted = scroll;
             wanted[1] = wanted[1].min(top).max(bottom - (body[3] - body[1]));
             let scrolled = self.clamped_preview_scroll(surface, body, scale, wanted);
-            self.preview_pane_mut(surface).scroll = scrolled;
+            self.preview_pane_mut(surface).scroll_to(scrolled);
             return;
         }
         // The block's borrow ends with this expression, before the scroll is
@@ -7618,7 +7605,7 @@ impl Runtime<'_> {
         let mut wanted = scroll;
         wanted[1] = wanted[1].min(top).max(bottom - (body[3] - body[1]));
         let scrolled = self.clamped_preview_scroll(surface, body, scale, wanted);
-        self.preview_pane_mut(surface).scroll = scrolled;
+        self.preview_pane_mut(surface).scroll_to(scrolled);
     }
 
     /// Which row and column this surface's caret stands on.
@@ -7743,7 +7730,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         let pane = self.preview_pane_mut(surface);
-        pane.caret = caret;
+        pane.place_caret(caret);
         pane.notice = None;
         self.reveal_preview_caret(surface);
         self.repaint_preview()
@@ -7921,7 +7908,7 @@ impl Runtime<'_> {
         // the one gesture that makes a long selection possible without a drag
         // that outruns the pane.
         caret.place(&content, offset, self.window.modifiers.shift_key());
-        self.preview_pane_mut(surface).caret = caret;
+        self.preview_pane_mut(surface).place_caret(caret);
         self.preview_edit_focus = Some(surface);
         self.latch_preview_selecting(surface);
         self.repaint_preview()?;
@@ -8032,7 +8019,7 @@ impl Runtime<'_> {
         if caret == was {
             return Ok(true);
         }
-        self.preview_pane_mut(surface).caret = caret;
+        self.preview_pane_mut(surface).place_caret(caret);
         self.repaint_preview()?;
         Ok(true)
     }
@@ -8139,7 +8126,7 @@ impl Runtime<'_> {
             };
             let healed = self.clamped_preview_scroll(surface, body, scale, scroll);
             if healed != scroll {
-                self.preview_pane_mut(surface).scroll = healed;
+                self.preview_pane_mut(surface).scroll_to(healed);
                 moved = true;
             }
         }
@@ -8231,7 +8218,7 @@ impl Runtime<'_> {
                 in_flight,
                 self.preview_pane(surface)
                     .and_then(|pane| pane.doc_key.as_ref())
-                    .and_then(|key| key.source.as_ref()),
+                    .and_then(|key: &crate::PreviewDocumentKey| key.source.as_ref()),
                 || self.standing_source_span(surface, Some(caret)),
             )
         });
@@ -8374,7 +8361,7 @@ impl Runtime<'_> {
             // and until this line existed a table flipping to its source left
             // no trace at all. The clock runs only when the trace is open.
             let trace = preview_trace::global();
-            let old = std::mem::take(&mut pane.doc);
+            let old = pane.take_document();
             let PreviewDocument::Markdown {
                 blocks,
                 ranges,
@@ -8623,7 +8610,7 @@ impl Runtime<'_> {
                     &standing_pictures,
                 );
                 let clock = clock.map(|_| Instant::now());
-                let old = std::mem::take(&mut self.preview_pane_mut(surface).doc);
+                let old = self.preview_pane_mut(surface).take_document();
                 let (layout, intrinsic, wrap, _) = self.rebuild_markdown_geometry(
                     surface,
                     body,
@@ -9350,7 +9337,7 @@ impl Runtime<'_> {
                 }
             }));
         }
-        self.preview_pane_mut(surface).md_text = text_boxes;
+        self.preview_pane_mut(surface).keep_text_boxes(text_boxes);
         // **The prose block's own geometry, and everything struck in it**
         // (§7.1.3w). Here rather than in the builder for the bands' own reason,
         // one paragraph up: which glass a byte of a proportional row covers is a
@@ -9418,8 +9405,8 @@ impl Runtime<'_> {
                 });
             }
         }
-        self.preview_pane_mut(surface).md_prose = prose;
-        self.preview_pane_mut(surface).md_prose_blocks = prose_blocks;
+        self.preview_pane_mut(surface)
+            .keep_prose(prose, prose_blocks);
         // The hover's rule is drawn from the boxes measured above, so the line
         // under a link cannot be anywhere but under it — and it is struck here,
         // last of the fills, so that nothing else is laid over it.
@@ -11119,7 +11106,9 @@ impl Runtime<'_> {
         // Whether a read landing raised the "this file changed on disk" strip
         // over a document somebody had typed in — see [`preview::ReadLanded`].
         let mut said_disk_news = false;
-        for response in answers_for(batch, |response| self.owns(response.owner())) {
+        let answers: Vec<preview::PreviewResponse> =
+            answers_for(batch, |response| self.owns(response.owner()));
+        for response in answers {
             let Some(index) = self
                 .window
                 .tabs
@@ -11210,12 +11199,7 @@ impl Runtime<'_> {
                     let tab = &mut self.window.tabs[index];
                     let mut told = false;
                     for (_, pane) in tab.preview_panes.iter_mut() {
-                        if let Some(image) =
-                            pane.image.as_mut().filter(|image| image.path == answered)
-                        {
-                            image.bytes = bytes;
-                            told = true;
-                        }
+                        told |= pane.hear_picture_size(answered, bytes);
                     }
                     changed |= told && index == self.window.active_tab;
                 }
@@ -12434,14 +12418,14 @@ impl Runtime<'_> {
             None => scroll,
         };
         let pane = self.preview_pane_mut(surface);
-        pane.caret = preview_edit::EditCaret {
+        pane.place_caret(preview_edit::EditCaret {
             anchor: offset,
             caret: offset,
             desired_column: None,
             desired_x: None,
-        };
+        });
         let moved = pane.scroll != scrolled;
-        pane.scroll = scrolled;
+        pane.scroll_to(scrolled);
         pane.goto_line = None;
         let rows = self
             .preview_wrap(surface)

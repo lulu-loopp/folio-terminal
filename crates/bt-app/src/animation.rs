@@ -1100,6 +1100,7 @@ fn compose(
     height_px: u32,
 ) -> AnimationFrame {
     let mut composed = canvas.to_vec();
+    let pixels: &[u8] = &frame.buffer;
     let frame_width = u32::from(frame.width);
     let frame_height = u32::from(frame.height);
     for row in 0..frame_height {
@@ -1113,7 +1114,7 @@ fn compose(
                 break;
             }
             let source = ((row * frame_width + column) * 4) as usize;
-            let Some(rgba) = frame.buffer.get(source..source + 4) else {
+            let Some(rgba) = pixels.get(source..source + 4) else {
                 break;
             };
             let target = ((canvas_row * width_px + canvas_column) * 4) as usize;

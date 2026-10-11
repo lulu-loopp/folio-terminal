@@ -592,7 +592,7 @@ fn walk_dir(
     ancestors: &mut Vec<PathBuf>,
     view: &mut TreeView,
 ) {
-    let listing = match cache.get(key) {
+    let listing: &DirListing = match cache.get(key) {
         Some(DirNode::Listed(listing)) => listing,
         Some(DirNode::Pending) => {
             view.rows.push(notice_row(key, depth, RowNotice::Loading));

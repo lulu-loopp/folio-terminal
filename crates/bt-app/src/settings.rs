@@ -12596,7 +12596,7 @@ pub fn layout_for_menus(
             .collect();
         (geometry, acts, action.is_some().then_some(values_count))
     });
-    let popup = menu.as_ref().map(|(geometry, _, _)| geometry);
+    let popup: Option<&MenuGeometry> = menu.as_ref().map(|(geometry, _, _)| geometry);
     // The row menu hangs off the `⋯` that opened it, on exactly the terms a
     // picker's popup hangs off its button: a trigger the page has scrolled out
     // from under its own menu is a trigger the menu cannot honestly hang from.

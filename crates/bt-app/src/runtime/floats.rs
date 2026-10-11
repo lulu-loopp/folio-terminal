@@ -565,10 +565,10 @@ impl Runtime<'_> {
                 // machine may be able to. Asked before the buffer below because
                 // a picture *is* not one (`preview_chrome_on`), so the two
                 // cannot both answer.
-                if let Some(refusal) = self
+                let refusal: Option<&crate::PictureRefusal> = self
                     .preview_picture(here)
-                    .and_then(PreviewImageState::refusal)
-                {
+                    .and_then(PreviewImageState::refusal);
+                if let Some(refusal) = refusal {
                     return Some((
                         seat,
                         refused_preview_card(
@@ -1802,7 +1802,7 @@ impl Runtime<'_> {
                         _ => None,
                     };
                     if selection.is_some() {
-                        self.preview_pane_mut(surface).md_select = selection;
+                        self.preview_pane_mut(surface).select(selection);
                         self.repaint_preview()?;
                     }
                     Ok(())
@@ -3279,10 +3279,10 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         open_label: &str,
     ) -> Option<CardWords> {
-        if let Some(refusal) = self
+        let refusal: Option<&crate::PictureRefusal> = self
             .preview_picture(surface)
-            .and_then(PreviewImageState::refusal)
-        {
+            .and_then(PreviewImageState::refusal);
+        if let Some(refusal) = refusal {
             return Some(refused_preview_card(
                 refusal.notice.clone(),
                 refusal.offers_the_default_app,

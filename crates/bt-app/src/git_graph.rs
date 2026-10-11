@@ -2467,7 +2467,7 @@ pub fn build(
                             .refs
                             .iter()
                             .filter(|reference| look.filter.draws(reference.kind))
-                            .map(|reference| GraphRefPill {
+                            .map(|reference: &crate::git::GitRef| GraphRefPill {
                                 text_width: measure(
                                     &reference.name,
                                     ref_font,
@@ -4943,6 +4943,7 @@ fn push_commit_row(
     let tag_gap = (GRAPH_REF_TAG_GAP_LOGICAL_PX * scale).round();
     let run = graph_ref_pill_run(commit, rect, lane_width, columns, scale);
     for (pill, box_) in commit.refs.iter().zip(run.boxes.iter().copied()) {
+        let pill: &GraphRefPill = pill;
         let tagged = pill.kind == crate::git::GitRefKind::Tag;
         let lane = palette.graph_lanes[lane_colour_index(pill.lane)];
         // ── the three shapes (T7, v2 ③) ──

@@ -239,6 +239,11 @@ pub(super) struct Reconcile<'a> {
 }
 
 impl State {
+    /// The viewport is this tall now, and nothing in it is pending.
+    pub(super) const fn fit_height(&mut self, height: f32) {
+        self.height = height;
+    }
+
     pub(super) fn reconcile(input: Reconcile<'_>) -> (Self, Layout, Vec<MarkdownBlockIntrinsic>) {
         let Reconcile {
             old,
@@ -1026,7 +1031,7 @@ impl Runtime<'_> {
             .preview_pane(surface)
             .and_then(|p| p.doc_key.as_ref())
             .map_or(PictureReach::from_the_top(), |k| k.art.picture_reach);
-        let doc = std::mem::take(&mut self.preview_pane_mut(surface).doc);
+        let doc = self.preview_pane_mut(surface).take_document();
         let PreviewDocument::Markdown {
             blocks,
             ranges,
@@ -1039,7 +1044,7 @@ impl Runtime<'_> {
             mut wrap,
         } = doc
         else {
-            self.preview_pane_mut(surface).doc = doc;
+            self.preview_pane_mut(surface).reflow_document(doc);
             return;
         };
         let state = &mut Arc::make_mut(&mut wrap).viewport;
@@ -1122,7 +1127,7 @@ impl Runtime<'_> {
                 .then_some(top)
         });
         if let Some(top) = target {
-            self.preview_pane_mut(surface).scroll[1] = top;
+            self.preview_pane_mut(surface).scroll_top_to(top);
             self.ensure_markdown_viewport(surface, body, scale);
         }
         let changed = self.preview_pane(surface).is_some_and(|p| {
@@ -1131,8 +1136,7 @@ impl Runtime<'_> {
         if changed {
             let blocks = self.preview_prose_geometry(surface, scale, None);
             let prose = preview_caret_prose(&blocks, self.preview_caret_seat_block(surface));
-            self.preview_pane_mut(surface).md_prose = prose;
-            self.preview_pane_mut(surface).md_prose_blocks = blocks;
+            self.preview_pane_mut(surface).keep_prose(prose, blocks);
         }
     }
 
@@ -1239,7 +1243,7 @@ impl Runtime<'_> {
             realize: clock.map(|clock| clock.elapsed()).unwrap_or_default(),
         };
         let pane = self.preview_pane_mut(surface);
-        pane.scroll[1] = view.scroll;
+        pane.scroll_top_to(view.scroll);
         let mut wrap = pass.document();
         Arc::make_mut(&mut wrap).viewport = state;
         (layout, intrinsic, wrap, cost)
@@ -1272,13 +1276,11 @@ impl Runtime<'_> {
             (view, wrap.viewport.pending(layout, view))
         };
         if !pending {
-            if let PreviewDocument::Markdown { wrap, .. } = &mut self.preview_pane_mut(surface).doc
-            {
-                Arc::make_mut(wrap).viewport.height = view.height;
-            }
+            self.preview_pane_mut(surface)
+                .fit_viewport_height(view.height);
             return;
         }
-        let old = std::mem::take(&mut self.preview_pane_mut(surface).doc);
+        let old = self.preview_pane_mut(surface).take_document();
         let PreviewDocument::Markdown {
             blocks,
             ranges,
@@ -1334,7 +1336,7 @@ impl Runtime<'_> {
             },
         );
         let pane = self.preview_pane_mut(surface);
-        pane.scroll[1] = view.scroll;
+        pane.scroll_top_to(view.scroll);
         pane.reflow_document(PreviewDocument::Markdown {
             blocks,
             ranges,
