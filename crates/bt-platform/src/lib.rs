@@ -1092,25 +1092,9 @@ pub const INSERT_ABOVE_REFERENCE: bool = true;
 #[cfg(all(test, windows))]
 mod web_security_tests {
     use super::{WEB_SETTINGS, WebSetting};
-    /// `webview.rs` with its whitespace removed, so that rustfmt's line breaks
-    /// are not part of any claim below.
-    fn source() -> String {
-        include_str!("webview.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect()
-    }
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
 
-    /// The whitespace-free text of `source` from `open` up to the first `close` after it.
-    fn between<'a>(source: &'a str, open: &str, close: &str) -> &'a str {
-        let at = source
-            .find(open)
-            .unwrap_or_else(|| panic!("`{open}` is in webview.rs"));
-        let body = &source[at + open.len()..];
-        &body[..body
-            .find(close)
-            .unwrap_or_else(|| panic!("`{close}` follows `{open}`"))]
-    }
+    use crate::source_test;
 
     /// RED (0.4.4 ticket 09) — **the colour scheme a page prefers is said in the same step as the
     /// engine's other settings, before anything navigates, and a failure to say it is that step's
@@ -1130,11 +1114,8 @@ mod web_security_tests {
     #[test]
     fn the_preferred_colour_scheme_is_said_before_the_first_navigation_and_its_failure_is_the_steps()
      {
-        let source = source();
-        let configure = between(
-            &source,
-            "fnconfigure(&self)->Result<Vec<WebSetting>,String>{",
-            "fnattach_events(",
+        let configure = source_test::squeezed_body(
+            &ItemQuery::method("WebHost", "configure").in_module("crate::webview"),
         );
         assert!(
             configure.contains(
@@ -1142,10 +1123,8 @@ mod web_security_tests {
             ),
             "the scheme is applied inside the configure step and its failure fails it"
         );
-        let apply = between(
-            &source,
-            "fnapply_color_scheme(webview:&ICoreWebView2,scheme:WebColorScheme)->Result<(),String>{",
-            "fnpreferred_color_scheme(",
+        let apply = source_test::squeezed_body(
+            &ItemQuery::function("apply_color_scheme").in_module("crate::webview"),
         );
         for call in [
             "failure(\"ICoreWebView2_13\",&error))?",
@@ -1168,7 +1147,6 @@ mod web_security_tests {
     /// refused before anybody is asked.
     #[test]
     fn the_page_gets_no_bridge_and_no_permissions() {
-        let source = source();
         for switch in [WebSetting::WebMessage, WebSetting::HostObjects] {
             let rows: Vec<bool> = WEB_SETTINGS
                 .iter()
@@ -1186,10 +1164,10 @@ mod web_security_tests {
         // one needle rather than two facts, because a handler that is installed
         // and answers something else is worse than no handler at all.
         assert!(
-            source.contains(concat!(
-                "args.SetState(COREWEBVIEW2_PERMISSION",
-                "_STATE_DENY)?;"
-            )),
+            source_test::body(
+                &ItemQuery::method("WebHost", "attach_events").in_module("crate::webview")
+            )
+            .contains("args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;"),
             "every permission request is refused by the handler itself"
         );
     }
@@ -1221,7 +1199,9 @@ mod web_security_tests {
     /// this comment.
     #[test]
     fn the_environment_is_created_with_no_browser_arguments_at_all() {
-        let source = source();
+        let request = source_test::body(
+            &ItemQuery::method("WebHost", "request_environment").in_module("crate::webview"),
+        );
         // **Zero, since route B** (2026-08-28; `docs/DESIGN.md` §7.44 ④). This
         // pinned "exactly one, and it is the autoplay policy" while a video was
         // played by a page this window wrote; the page is gone and the policy
@@ -1229,14 +1209,18 @@ mod web_security_tests {
         // argument added later has to arrive with its own reason and its own
         // line here, rather than joining a list that already existed.
         assert_eq!(
-            source
-                .matches(concat!("set_additional_browser", "_arguments("))
-                .count(),
+            source_test::found(
+                Needle::new(Pattern::call("set_additional_browser_arguments")),
+                View::Identifiers,
+                Scope::Module("crate::webview".to_owned()),
+            )
+            .in_the_product(source_test::index())
+            .len(),
             0,
             "this host writes no browser command line"
         );
         assert!(
-            !source.contains(concat!("--autoplay-policy=", "no-user-gesture-required")),
+            !request.contains("--autoplay-policy=no-user-gesture-required"),
             "the shell page's autoplay argument retired with the shell page"
         );
         for absent in [
@@ -1245,7 +1229,13 @@ mod web_security_tests {
             concat!("remote-debugging", "-port"),
         ] {
             assert!(
-                !source.contains(absent),
+                source_test::found(
+                    Needle::new(Pattern::text(absent)),
+                    View::CodeKeepingLiterals,
+                    Scope::Module("crate::webview".to_owned()),
+                )
+                .in_the_product(source_test::index())
+                .is_empty(),
                 "this host does not pass this argument: {absent}"
             );
         }
@@ -1420,8 +1410,153 @@ mod locale_tests {
 }
 
 #[cfg(test)]
+mod source_test {
+    use bt_source::{Found, Index, ItemKind, ItemQuery, ItemRecord, Needle, Scope, Search, View};
+
+    pub(super) fn index() -> &'static Index {
+        Index::of_package("bt-platform")
+    }
+
+    pub(super) fn body(query: &ItemQuery) -> &'static str {
+        index()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    pub(super) fn declaration(query: &ItemQuery) -> &'static str {
+        index()
+            .declaration_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    pub(super) fn squeezed(text: &str) -> String {
+        text.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    pub(super) fn squeezed_body(query: &ItemQuery) -> String {
+        squeezed(body(query))
+    }
+
+    pub(super) fn squeezed_declaration(query: &ItemQuery) -> String {
+        squeezed(signature(declaration(query)))
+    }
+
+    pub(super) fn signature(declaration: &str) -> &str {
+        let mut offset = 0;
+        for line in declaration.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            if ["pub fn ", "pub unsafe fn ", "fn ", "unsafe fn "]
+                .into_iter()
+                .any(|start| trimmed.starts_with(start))
+            {
+                return &declaration[offset + line.len() - trimmed.len()..];
+            }
+            offset += line.len();
+        }
+        declaration
+    }
+
+    fn record_in_reaching_variant(
+        query: &ItemQuery,
+        declarations: usize,
+        predicate: &str,
+    ) -> &'static ItemRecord {
+        let records = index()
+            .find(&query.clone().expecting(declarations))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let matching: Vec<_> = records
+            .into_iter()
+            .filter(|record| {
+                record.identities().any(|identity| {
+                    identity
+                        .variant
+                        .predicates()
+                        .iter()
+                        .any(|actual| actual == predicate)
+                })
+            })
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "`{query}` has one declaration reached through #[cfg({predicate})]"
+        );
+        matching[0]
+    }
+
+    pub(super) fn declaration_in_reaching_variant(
+        query: &ItemQuery,
+        declarations: usize,
+        predicate: &str,
+    ) -> &'static str {
+        index().text(record_in_reaching_variant(query, declarations, predicate).declaration())
+    }
+
+    pub(super) fn body_in_reaching_variant(
+        query: &ItemQuery,
+        declarations: usize,
+        predicate: &str,
+    ) -> &'static str {
+        let record = record_in_reaching_variant(query, declarations, predicate);
+        index().text(record.body().expect("the item has a body"))
+    }
+
+    pub(super) fn fields_in_reaching_variant(
+        type_owner: &str,
+        module: &str,
+        predicate: &str,
+    ) -> Vec<String> {
+        index()
+            .items()
+            .iter()
+            .filter(|record| record.kind() == ItemKind::Field)
+            .filter(|record| record.type_owner() == Some(type_owner))
+            .filter(|record| {
+                record.identities().any(|identity| {
+                    identity.module_path == module
+                        && identity
+                            .variant
+                            .predicates()
+                            .iter()
+                            .any(|actual| actual == predicate)
+                })
+            })
+            .map(|record| {
+                let declaration = index().text(record.declaration());
+                let start = declaration
+                    .find("pub ")
+                    .unwrap_or_else(|| panic!("a public field has a public declaration"));
+                squeezed(&declaration[start..])
+            })
+            .collect()
+    }
+
+    pub(super) fn found(needle: Needle, view: View, scope: Scope) -> Found {
+        index()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    pub(super) fn public_methods(owner: &str, module: &str) -> Vec<String> {
+        index()
+            .items()
+            .iter()
+            .filter(|item| item.type_owner() == Some(owner))
+            .filter(|item| item.module_paths().contains(&module))
+            .filter(|item| signature(index().text(item.declaration())).starts_with("pub fn "))
+            .map(|item| item.name().to_owned())
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod visual_layer_tests {
     use super::VisualLayer;
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
+
+    use crate::source_test;
 
     /// RED ①, the one the handoff names by hand: the WebView's visual is added
     /// with `AddVisual(insertAbove = TRUE, NULL)` and therefore lands at the
@@ -1456,53 +1591,35 @@ mod visual_layer_tests {
     /// theme colour where a web page should be.
     #[test]
     fn the_compositor_adds_the_web_visual_directly_above_its_own_ground() {
-        // Whitespace out, because rustfmt decides where the line breaks in a
-        // three-argument call go and the claim is about the arguments. Every
-        // needle is spelled in pieces so that this test's own source is not one
-        // of the things it finds.
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let opens_with = concat!("AddVisual", "(&web,");
-        assert_eq!(
-            source.matches(opens_with).count(),
-            1,
-            "exactly one call adds the web visual"
+        let body = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "attach_web_visual").in_module("crate::windows_impl"),
         );
-        let call = &source[source
-            .find(opens_with)
-            .expect("the call this test just counted")..];
         // `floor` is what the one door that mints one hands back — the ground's
         // `holder`, and the only visual a page is ever allowed to name here.
         assert!(
-            call.starts_with(concat!(
-                "AddVisual",
-                "(&web,INSERT_ABOVE_REFERENCE,Some(&floor))"
-            )),
+            body.contains("AddVisual(&web,INSERT_ABOVE_REFERENCE,Some(&floor))"),
             "the web visual's insertion must name the sibling it is claiming a \
-             slot above rather than a bare boolean and a NULL: {}",
-            &call[..call.len().min(120)]
+             slot above rather than a bare boolean and a NULL: {body}"
         );
         assert!(
-            source.contains(concat!("letfloor=self.ensure_page", "_ground(page)?;")),
+            body.contains("letfloor=self.ensure_page_ground(page)?;"),
             "the sibling the page names must be the floor the one minting door \
              handed back, or it is some other visual wearing that name"
         );
         assert!(
-            !source.contains(concat!("AddVisual", "(&web,VisualLayer::Top")),
+            !body.contains("AddVisual(&web,VisualLayer::Top"),
             "nothing may add the web visual above anything"
         );
         // And the floor itself is the one thing that does ask for the beginning
         // of the list, so there is always a sibling for the page to sit above.
-        let ground_call = concat!(
-            "AddVisual",
-            "(&holder,VisualLayer::Bottom.insert_above_with_null_reference(),None::<&IDCompositionVisual>,)"
+        let minted = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "create_page_ground").in_module("crate::windows_impl"),
         );
-        assert_eq!(
-            source.matches(ground_call).count(),
-            1,
-            "exactly one call puts a page's floor at the bottom of the tree"
+        assert!(
+            minted.contains(
+                "AddVisual(&holder,VisualLayer::Bottom.insert_above_with_null_reference(),None::<&IDCompositionVisual>,)"
+            ),
+            "the one floor-minting body puts the floor at the bottom of the tree: {minted}"
         );
     }
 
@@ -1523,17 +1640,9 @@ mod visual_layer_tests {
     /// leaves a rectangle of theme colour standing where a pane no longer is.
     #[test]
     fn a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let placement = source
-            .find(concat!("pubfnplace_web", "_visual("))
-            .expect("the one door that places a page");
-        let next_door = source[placement..]
-            .find(concat!("fnplace_", "clip("))
-            .expect("the helper that follows it");
-        let body = &source[placement..placement + next_door];
+        let body = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "place_web_visual").in_module("crate::windows_impl"),
+        );
         for owed in [
             "ground.holder.SetOffsetX2(x)",
             "ground.holder.SetOffsetY2(y)",
@@ -1546,10 +1655,9 @@ mod visual_layer_tests {
                  half of it is missing: {owed}"
             );
         }
-        let teardown = source
-            .find(concat!("pubfndetach_web", "_visual("))
-            .expect("the one door that takes a page out");
-        let teardown_body = &source[teardown..teardown + 700];
+        let teardown_body = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "detach_web_visual").in_module("crate::windows_impl"),
+        );
         assert!(
             teardown_body.contains(concat!("web_ground", ".borrow_mut().remove(&page)")),
             "a page's floor leaves with the page"
@@ -1589,17 +1697,9 @@ mod visual_layer_tests {
     /// `ensure_page_ground` and the last assertion goes red.
     #[test]
     fn a_pages_floor_comes_off_the_glass_with_the_page() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let door = source
-            .find(concat!("pubfnhide_web", "_visual(&self,page:PageVisual)"))
-            .expect("the door that takes a page's pair off the glass");
-        let next_door = source[door..]
-            .find(concat!("fnplace_", "clip("))
-            .expect("the helper that follows it");
-        let body = &source[door..door + next_door];
+        let body = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "hide_web_visual").in_module("crate::windows_impl"),
+        );
         for owed in [
             concat!("self.place_clip(&ground.holder,NO_CLIP", "_AT_ALL,"),
             concat!("self.place_clip(web,NO_CLIP", "_AT_ALL,"),
@@ -1615,14 +1715,15 @@ mod visual_layer_tests {
             "taking a page off the glass must not build it a floor: {body}"
         );
         assert_eq!(
-            source
-                .matches(concat!(
-                    "constNO_CLIP",
-                    "_AT_ALL:(f32,f32,f32,f32)=(0.0,0.0,0.0,0.0);"
-                ))
-                .count(),
-            1,
-            "the crop that shows nothing is spelled once, as an empty rectangle"
+            source_test::found(
+                Needle::new(Pattern::identifier("NO_CLIP_AT_ALL")),
+                View::Identifiers,
+                Scope::Module("crate".to_owned()),
+            )
+            .in_the_product(source_test::index())
+            .len(),
+            3,
+            "the empty crop has one declaration and the two uses in the hide body"
         );
     }
 
@@ -1658,17 +1759,9 @@ mod visual_layer_tests {
     /// duplicate under a page that already had one.
     #[test]
     fn a_pages_floor_is_minted_by_whoever_first_places_it_and_not_by_the_engine() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let placement = source
-            .find(concat!("pubfnplace_web", "_visual("))
-            .expect("the one door that places a page");
-        let next_door = source[placement..]
-            .find(concat!("fnplace_", "clip("))
-            .expect("the helper that follows it");
-        let body = &source[placement..placement + next_door];
+        let body = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "place_web_visual").in_module("crate::windows_impl"),
+        );
 
         let mints = body
             .find(concat!("self.ensure_page", "_ground(page)?"))
@@ -1688,16 +1781,18 @@ mod visual_layer_tests {
         // And exactly one door mints one, so the floor a placement made and the
         // floor an attachment expects can never be two different floors.
         assert_eq!(
-            source
-                .matches(concat!("self.create_page", "_ground()?"))
-                .count(),
+            source_test::body(
+                &ItemQuery::method("Compositor", "ensure_page_ground")
+                    .in_module("crate::windows_impl"),
+            )
+            .matches("create_page_ground(")
+            .count(),
             1,
             "a page's floor is built in more than one place"
         );
-        let attach = source
-            .find(concat!("pubfnattach_web", "_visual("))
-            .expect("the one door that puts a page in the tree");
-        let attach_body = &source[attach..attach + 900];
+        let attach_body = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "attach_web_visual").in_module("crate::windows_impl"),
+        );
         assert!(
             attach_body.contains(concat!("self.ensure_page", "_ground(page)?")),
             "attaching a page does not go through the one door that mints a \
@@ -1728,33 +1823,18 @@ mod visual_layer_tests {
     /// does.
     #[test]
     fn the_skirt_commits_on_the_window_clock_and_not_on_the_frames() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let body = |signature: &str| -> String {
-            let start = source
-                .find(signature)
-                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-            let rest = &source[start + signature.len()..];
-            let end = rest.find("///").unwrap_or(rest.len());
-            rest[..end].to_owned()
-        };
-
-        let window = body(concat!(
-            "pubfnset_window",
-            "_size(&self,token:WaitToken<'_,doors::CompositorWindowSize>,width:u32,height:u32,)"
-        ));
+        let window = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "set_window_size").in_module("crate::windows_impl"),
+        );
         assert!(
             window.contains("self.place_skirt()?;self.commit_now()"),
             "the window's own clock places the skirt and publishes it in the \
              same breath, or the strip is transparent until the next frame: {window}"
         );
 
-        let covered = body(concat!(
-            "pubfnset_covered",
-            "_size(&self,width:u32,height:u32)"
-        ));
+        let covered = source_test::squeezed_body(
+            &ItemQuery::method("Compositor", "set_covered_size").in_module("crate::windows_impl"),
+        );
         assert!(
             covered.contains("self.place_skirt()"),
             "the swapchain's clock places the skirt too: {covered}"
@@ -1781,9 +1861,12 @@ mod visual_layer_tests {
         );
 
         assert_eq!(
-            source
-                .matches(concat!("window_", "skirt(self.window_size.get()"))
-                .count(),
+            source_test::found(
+                Needle::new(Pattern::call("window_skirt")),
+                View::Identifiers,
+                Scope::Module("crate::windows_impl".to_owned()),
+            )
+            .len(),
             2,
             "one expression turns the two sizes into two bands; both setters and \
              the question the funnel asks go through it"
@@ -1812,27 +1895,25 @@ mod visual_layer_tests {
     /// compiling, which is the other half.
     #[test]
     fn every_web_visual_belongs_to_one_page_and_is_reached_by_naming_it() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
+        let field = source_test::squeezed_declaration(
+            &ItemQuery::field("Compositor", "web").in_module("crate::windows_impl"),
+        );
         assert!(
-            source.contains(concat!(
-                "web:RefCell<BTreeMap<PageVisual,",
-                "IDCompositionVisual",
-                ">>"
-            )),
+            field.contains("web:RefCell<BTreeMap<PageVisual,IDCompositionVisual>>"),
             "the window's web visuals are a map keyed by the whole page name, \
              neither one slot nor a bare seat number"
         );
-        for entry in [
-            concat!("fnattach_web", "_visual(&self,page:PageVisual)"),
-            concat!("fndetach_web", "_visual(&self,page:PageVisual)"),
-            concat!("fnweb_", "visual(&self,page:PageVisual)"),
-            concat!("fnplace_web", "_visual(&self,page:PageVisual,"),
+        for name in [
+            "attach_web_visual",
+            "detach_web_visual",
+            "web_visual",
+            "place_web_visual",
         ] {
+            let entry = source_test::squeezed_declaration(
+                &ItemQuery::method("Compositor", name).in_module("crate::windows_impl"),
+            );
             assert!(
-                source.contains(entry),
+                entry.contains("page:PageVisual"),
                 "every door onto a web visual takes the page it belongs to: {entry}"
             );
         }
@@ -17669,39 +17750,7 @@ pub use macos_compose::Compositor;
 mod compositor_arms_tests {
     use bt_source::{Index, ItemQuery, Needle, Pattern, Scope, Search, View};
 
-    /// The three texts these pins are about.
-    const ROOT: &str = include_str!("lib.rs");
-    const MACOS: &str = include_str!("macos_compose.rs");
-    const WEBVIEW: &str = include_str!("webview.rs");
-
-    /// The names of every `pub fn` inside the first `impl Compositor {` block
-    /// of `source`, in the order they are written.
-    ///
-    /// A lexical reading and deliberately not a parse: the claim is about what
-    /// a reader of the two files sees side by side, and a gate that needed a
-    /// syntax tree would be a gate that needs the crate to build for a platform
-    /// this machine does not have.
-    fn compositor_doors(source: &str) -> Vec<String> {
-        let at = source
-            .find("impl Compositor {")
-            .expect("both arms name the type they implement");
-        let indent = source[..at].rfind('\n').map_or(0, |line| at - line - 1);
-        let closing = format!("\n{}}}\n", " ".repeat(indent));
-        let rest = &source[at..];
-        let end = rest
-            .find(&closing)
-            .expect("an impl block is closed at the indent it was opened at");
-        // Whole lines at the method indent, rather than every "pub fn" the text
-        // happens to contain: a door named inside a doc comment is a sentence
-        // about a door and not one.
-        let method = format!("{}pub fn ", " ".repeat(indent + 4));
-        rest[..end]
-            .lines()
-            .filter_map(|line| line.strip_prefix(&method))
-            .filter_map(|tail| tail.split('(').next())
-            .map(str::to_owned)
-            .collect()
-    }
+    use crate::source_test;
 
     /// RED — **the two arms answer the same doors, and the macOS one answers
     /// exactly one more.**
@@ -17719,8 +17768,8 @@ mod compositor_arms_tests {
     /// extra one, and this names it.
     #[test]
     fn the_two_compositors_answer_the_same_doors() {
-        let windows = compositor_doors(ROOT);
-        let macos = compositor_doors(MACOS);
+        let windows = source_test::public_methods("Compositor", "crate::windows_impl");
+        let macos = source_test::public_methods("Compositor", "crate::macos_compose");
         assert_eq!(
             windows,
             [
@@ -17779,11 +17828,8 @@ mod compositor_arms_tests {
     /// MUTATION: put an `hwnd` back, or gate the struct, and this names it.
     #[test]
     fn a_rehost_side_carries_a_window_token_on_both_arms() {
-        let at = WEBVIEW
-            .find("pub struct RehostSide<'a> {")
-            .expect("the type exists");
-        let rest = &WEBVIEW[at..];
-        let body = &rest[..rest.find("\n}\n").expect("a struct is closed")];
+        let query = ItemQuery::type_item("RehostSide").in_module("crate::webview");
+        let body = source_test::body(&query);
         assert!(
             body.contains("pub window: NativeWindow,"),
             "one end of a rehost names a window token:\n{body}"
@@ -17792,20 +17838,19 @@ mod compositor_arms_tests {
             !body.contains("hwnd"),
             "and it names no Win32 handle at all:\n{body}"
         );
-        let before = &WEBVIEW[..at];
-        let attributes = &before[before.rfind("///").expect("the type carries a doc comment")..];
+        let attributes = source_test::declaration(&query);
         assert!(
             !attributes.contains("#[cfg("),
             "the type is one definition on every platform, not two arms:\n{attributes}"
         );
-        // Spelled in pieces so that this test's own source is not the thing it
-        // finds — the same guard `visual_layer_tests` uses one file over.
+        let windows_new = source_test::squeezed_declaration(
+            &ItemQuery::method("Compositor", "new").in_module("crate::windows_impl"),
+        );
         assert!(
-            ROOT.contains(concat!(
-                "pub fn ",
-                "new(window: NativeWindow) -> Result<Self, String> {"
-            )),
-            "and the Windows compositor is built from the same token"
+            windows_new.contains(
+                "pubfnnew(token:WaitToken<'_,doors::CompositorBirth>,window:NativeWindow,)->Result<Self,String>"
+            ),
+            "and the Windows compositor is built from the same token: {windows_new}"
         );
     }
 
@@ -17825,9 +17870,12 @@ mod compositor_arms_tests {
     /// and this names it.
     #[test]
     fn the_macos_arm_orders_by_the_enum_and_never_by_the_boolean() {
+        let ordering = source_test::body(
+            &ItemQuery::function("ordering_for").in_module("crate::macos_compose"),
+        );
         assert!(
-            MACOS.contains("VisualLayer::Bottom => NSWindowOrderingMode::Below,")
-                && MACOS.contains("VisualLayer::Top => NSWindowOrderingMode::Above,"),
+            ordering.contains("VisualLayer::Bottom => NSWindowOrderingMode::Below,")
+                && ordering.contains("VisualLayer::Top => NSWindowOrderingMode::Above,"),
             "the translation is the two arms of one function"
         );
         let source = Index::of_package("bt-platform");
@@ -17880,16 +17928,29 @@ mod compositor_arms_tests {
     /// on a real window.
     #[test]
     fn a_surface_rebuild_cannot_reach_a_page_slot() {
+        let slot = source_test::body(
+            &ItemQuery::method("Compositor", "make_slot").in_module("crate::macos_compose"),
+        );
         assert!(
-            MACOS.contains("self.content.addSubview_positioned_relativeTo("),
+            slot.contains("self.content.addSubview_positioned_relativeTo("),
             "a slot is a subview of the content view"
         );
         assert!(
-            !MACOS.contains("self.surface.addSubview"),
+            source_test::found(
+                Needle::new(Pattern::text("self.surface.addSubview")),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_compose".to_owned()),
+            )
+            .is_empty(),
             "and never a subview of the view whose layer a rebuild empties"
         );
         assert!(
-            !MACOS.contains("setSublayers"),
+            source_test::found(
+                Needle::new(Pattern::identifier("setSublayers")),
+                View::Identifiers,
+                Scope::Module("crate::macos_compose".to_owned()),
+            )
+            .is_empty(),
             "the composition owns no sublayer of the surface view's layer, which is the only \
              thing a rebuild takes away"
         );
@@ -18036,14 +18097,10 @@ mod compositor_arms_tests {
     /// MUTATION: take the gate out of any other door and this names it.
     #[test]
     fn every_door_of_the_macos_composition_proves_its_thread() {
-        for door in compositor_doors(MACOS) {
-            let needle = format!("\n    pub fn {door}(");
-            let at = MACOS.find(&needle).expect("named by the pin above");
-            let rest = &MACOS[at + 1..];
-            let end = rest
-                .find("\n    }\n")
-                .expect("a method is closed at one indent");
-            let body = &rest[..end];
+        for door in source_test::public_methods("Compositor", "crate::macos_compose") {
+            let body = source_test::body(
+                &ItemQuery::method("Compositor", &door).in_module("crate::macos_compose"),
+            );
             if matches!(
                 door.as_str(),
                 "gpu_visual_ptr"
@@ -18688,9 +18745,9 @@ pub use portable_clipboard::{clipboard_text, set_clipboard_text};
 /// on every platform, including the one where that parameter would work.
 #[cfg(test)]
 mod platform_door_tests {
-    /// This file's own text — every arm of every door, including the ones this
-    /// build does not compile.
-    const SOURCE: &str = include_str!("lib.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
+
+    use crate::source_test;
 
     /// What each `pub fn NAME(…)` in this file declares: from its open
     /// parenthesis to the brace that opens its body.
@@ -18698,15 +18755,12 @@ mod platform_door_tests {
     /// The needle is assembled at run time, so the line that builds it is not
     /// one of the declarations it goes looking for.
     fn declarations(name: &str) -> Vec<String> {
-        let needle = format!("pub fn {name}(");
-        SOURCE
-            .match_indices(&needle)
-            .map(|(at, _)| {
-                let rest = &SOURCE[at + needle.len() - 1..];
-                let end = rest
-                    .find(" {")
-                    .expect("a declaration is followed by the body it opens");
-                rest[..end].to_owned()
+        source_test::index()
+            .items()
+            .iter()
+            .filter(|item| item.name() == name && item.type_owner().is_none())
+            .map(|item| {
+                source_test::signature(source_test::index().text(item.declaration())).to_owned()
             })
             .collect()
     }
@@ -18760,15 +18814,20 @@ mod platform_door_tests {
             "three arms: Windows, macOS, and the platforms nobody has asked yet",
         );
         assert!(
-            SOURCE.contains(
-                "#[cfg(all(not(windows), not(target_os = \"macos\")))]\nmod portable_ime {"
-            ),
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "#[cfg(all(not(windows), not(target_os = \"macos\")))]\nmod portable_ime {",
+                )),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate".to_owned()),
+            )
+            .len()
+                == 1,
             "the portable arm no longer answers for a Mac",
         );
-        let arm = SOURCE
-            .split_once("mod macos_ime {")
-            .map(|(_, rest)| rest.split_once("\n}\n").expect("the module closes").0)
-            .expect("the macOS arm of the composition door");
+        let arm = source_test::body(
+            &ItemQuery::function("cancel_composition").in_module("crate::macos_ime"),
+        );
         for call in ["discardMarkedText", "unmarkText"] {
             assert!(
                 arm.contains(call),
@@ -18817,6 +18876,8 @@ mod native_window_door_tests {
     use bt_source::{
         Index, ItemQuery, Pattern, Search, View, Workspace, needle, report, universes,
     };
+
+    use crate::source_test;
 
     /// The spellings that are a Windows handle however they are dressed.
     const WINDOWS_SHAPES: [&str; 4] = ["NonZeroIsize", "HWND", "HANDLE", "windows::"];
@@ -19113,17 +19174,14 @@ mod native_window_door_tests {
     /// the platform whose handle it takes.
     #[test]
     fn each_native_window_constructor_is_gated_to_its_own_platform() {
-        let source = include_str!("lib.rs");
         for (constructor, gate) in [
-            ("pub const fn from_win32(", "#[cfg(windows)]"),
-            ("pub fn from_appkit(", "#[cfg(target_os = \"macos\")]"),
+            ("from_win32", "#[cfg(windows)]"),
+            ("from_appkit", "#[cfg(target_os = \"macos\")]"),
         ] {
-            let at = source
-                .find(constructor)
-                .unwrap_or_else(|| panic!("{constructor} is this crate's window constructor"));
-            let before = &source[..at];
+            let declaration =
+                source_test::declaration(&ItemQuery::method("NativeWindow", constructor));
             assert!(
-                before.lines().rev().take(4).any(|line| line.trim() == gate),
+                declaration.lines().any(|line| line.trim() == gate),
                 "{constructor} is not gated with {gate}, so the handle it takes is spelled on a \
                  platform that does not have one"
             );
@@ -19156,43 +19214,9 @@ mod native_window_door_tests {
 /// it; make any named door return `Ok` and it goes red the other way.
 #[cfg(test)]
 mod deferred_service_tests {
-    /// The portable backend's own text — the arm this workstation does not
-    /// compile.
-    const PORTABLE: &str = include_str!("portable_impl.rs");
+    use bt_source::ItemQuery;
 
-    /// The text of `impl NAME {`, from its opening brace to the line that
-    /// closes it at column zero.
-    fn impl_block(type_name: &str) -> &'static str {
-        let needle = format!("\nimpl {type_name} {{\n");
-        let at = PORTABLE
-            .find(&needle)
-            .unwrap_or_else(|| panic!("`{type_name}` is one of the portable backend's types"));
-        let rest = &PORTABLE[at + needle.len()..];
-        let end = rest
-            .find("\n}\n")
-            .expect("an impl block is closed at column zero");
-        &rest[..end]
-    }
-
-    /// The body of `fn NAME(` inside `within`, up to the line that closes it at
-    /// four-space indentation.
-    ///
-    /// Crude on purpose: what is being read is whether a body says `Ok` or
-    /// `Err`, and a parser here would be a second thing to be wrong.
-    fn body_of(within: &str, name: &str) -> String {
-        let needle = format!("fn {name}(");
-        let at = within
-            .find(&needle)
-            .unwrap_or_else(|| panic!("`{name}` is one of that type's doors"));
-        let rest = &within[at..];
-        let open = rest
-            .find(" {")
-            .expect("a declaration is followed by the body it opens");
-        let end = rest[open..]
-            .find("\n    }")
-            .expect("a method body is closed at four spaces");
-        rest[open..open + end].to_owned()
-    }
+    use crate::source_test;
 
     /// RED — **nothing on the startup path refuses at construction.**
     ///
@@ -19216,7 +19240,9 @@ mod deferred_service_tests {
             ),
             ("ImeSystemCaret", "new", "the input method's caret"),
         ] {
-            let body = body_of(impl_block(type_name), constructor);
+            let body = source_test::body(
+                &ItemQuery::method(type_name, constructor).in_module("crate::portable_impl"),
+            );
             assert!(
                 !body.contains("Err("),
                 "{type_name}::{constructor} refuses at construction, so {what} does not fail on \
@@ -19240,7 +19266,9 @@ mod deferred_service_tests {
             ("Compositor", "attach_web_visual"),
             ("Compositor", "place_web_visual"),
         ] {
-            let body = body_of(impl_block(type_name), door);
+            let body = source_test::body(
+                &ItemQuery::method(type_name, door).in_module("crate::portable_impl"),
+            );
             assert!(
                 body.contains("Err("),
                 "{type_name}::{door} does not refuse, so a caller is told nothing happened only \
@@ -19253,11 +19281,15 @@ mod deferred_service_tests {
             "request_window_close",
             "recycle",
         ] {
-            let body = body_of(PORTABLE, door);
+            let body =
+                source_test::body(&ItemQuery::function(door).in_module("crate::portable_impl"));
             assert!(body.contains("Err("), "`{door}` does not refuse:\n{body}");
         }
         assert!(
-            PORTABLE.contains("fn not_here(what: &str) -> String {"),
+            source_test::declaration(
+                &ItemQuery::function("not_here").in_module("crate::portable_impl")
+            )
+            .contains("fn not_here(what: &str) -> String"),
             "the refusals are spelled one way, so that a reader who meets one in a toast and one \
              in diagnostics.log recognises the same sentence"
         );
@@ -19281,9 +19313,9 @@ mod deferred_service_tests {
 /// §4.6 of the plan says must stay possible.
 #[cfg(test)]
 mod macos_window_backend_tests {
-    /// The two arms' own text.
-    const PORTABLE: &str = include_str!("portable_impl.rs");
-    const MACOS: &str = include_str!("macos_impl.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
+
+    use crate::source_test;
 
     /// The gate every door in the portable arm now stands behind.
     const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
@@ -19334,23 +19366,6 @@ mod macos_window_backend_tests {
     /// its one `#[cfg(target_os = "macos")]` arm and nothing else ever asks.
     const SURFACE_DOORS: [&str; 2] = ["clear_surface_layers", "surface_view"];
 
-    /// The text from the start of the line `pub fn NAME(` back to the end of
-    /// the doc comment above it — the attributes, and nothing else.
-    fn attributes_above(source: &str, name: &str) -> String {
-        let needle = format!("\npub fn {name}(");
-        let at = source
-            .find(&needle)
-            .unwrap_or_else(|| panic!("`{name}` is defined in this arm"));
-        let before = &source[..at];
-        let doc_ends = before
-            .rfind("///")
-            .expect("every door carries a doc comment");
-        let line_end = before[doc_ends..]
-            .find('\n')
-            .expect("a doc comment ends in a newline");
-        before[doc_ends + line_end..].to_owned()
-    }
-
     /// RED — **every window and screen door in the portable arm is off on
     /// macOS.**
     ///
@@ -19359,45 +19374,26 @@ mod macos_window_backend_tests {
     #[test]
     fn a_window_or_screen_door_has_one_arm_per_platform() {
         for door in DOORS {
-            let attributes = attributes_above(PORTABLE, door);
+            let attributes = source_test::declaration(
+                &ItemQuery::function(door).in_module("crate::portable_impl"),
+            );
             assert!(
                 attributes.contains(NEITHER),
                 "`{door}` is still the portable arm's on macOS, where `macos_impl` also defines \
                  it:\n{attributes}"
             );
-            assert!(
-                MACOS.contains(&format!("\npub fn {door}(")),
-                "`{door}` left the portable arm without arriving in the macOS one, which is a \
-                 platform with no such door at all"
-            );
+            source_test::declaration(&ItemQuery::function(door).in_module("crate::macos_impl"));
         }
         assert!(
-            PORTABLE.contains(&format!("{NEITHER}\npub struct SystemSettingsWatch")),
+            source_test::declaration(
+                &ItemQuery::type_item("SystemSettingsWatch").in_module("crate::portable_impl")
+            )
+            .contains(NEITHER),
             "the settings watch is the group's one type and it moves with the doors"
         );
-        assert!(
-            MACOS.contains("pub struct SystemSettingsWatch {"),
-            "and the macOS arm is the one that really subscribes"
+        source_test::declaration(
+            &ItemQuery::type_item("SystemSettingsWatch").in_module("crate::macos_impl"),
         );
-    }
-
-    /// The body of one function, from its signature to the brace that closes it
-    /// at the indent it was opened at.
-    fn body_of(source: &str, signature: &str) -> String {
-        let at = source
-            .find(signature)
-            .unwrap_or_else(|| panic!("`{signature}` is in this file"));
-        // The signature's own indent, which is what its closing brace wears:
-        // the leading newline is the needle's, and the spaces after it are the
-        // function's.
-        let after_newline = signature.trim_start_matches('\n');
-        let indent = after_newline.len() - after_newline.trim_start().len();
-        let closer = format!("\n{}}}\n", " ".repeat(indent));
-        let rest = &source[at..];
-        let end = rest
-            .find(&closer)
-            .expect("a function is closed at the indent it was opened at");
-        rest[..end].to_owned()
     }
 
     /// RED (M3-4) — **a display is named by its UUID on macOS and by its
@@ -19428,7 +19424,8 @@ mod macos_window_backend_tests {
     /// display's name any other way and ③ does.
     #[test]
     fn a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows() {
-        let door = body_of(MACOS, "\npub fn monitor_id_at(");
+        let door =
+            source_test::body(&ItemQuery::function("monitor_id_at").in_module("crate::macos_impl"));
         assert!(
             door.contains("display_uuid("),
             "macOS names a display by something other than its UUID:\n{door}"
@@ -19437,7 +19434,8 @@ mod macos_window_backend_tests {
             !door.contains("to_string()"),
             "macOS spells a display number where its name belongs:\n{door}"
         );
-        let uuid_door = body_of(MACOS, "\nfn display_uuid(");
+        let uuid_door =
+            source_test::body(&ItemQuery::function("display_uuid").in_module("crate::macos_impl"));
         assert!(
             uuid_door.contains("CGDisplayCreateUUIDFromDisplayID(")
                 && uuid_door.contains("CFUUID::new_string("),
@@ -19445,12 +19443,17 @@ mod macos_window_backend_tests {
              spelling:\n{uuid_door}"
         );
         assert!(
-            MACOS.contains("#[link(name = \"ApplicationServices\", kind = \"framework\")]"),
+            source_test::found(
+                Needle::new(Pattern::text("ApplicationServices")),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_impl".to_owned()),
+            )
+            .len()
+                == 1,
             "the symbol is taken from a framework that has not always carried ColorSync"
         );
-        let windows = body_of(
-            include_str!("lib.rs"),
-            "\n    pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {",
+        let windows = source_test::body(
+            &ItemQuery::function("monitor_id_at").in_module("crate::windows_impl"),
         );
         assert!(
             windows.contains("MONITORINFOEXW") && windows.contains("szDevice"),
@@ -19487,11 +19490,7 @@ mod macos_window_backend_tests {
     #[test]
     fn every_macos_window_door_proves_its_thread_before_it_calls_appkit() {
         for door in DOORS.into_iter().chain(CHROME_DOORS).chain(SURFACE_DOORS) {
-            let needle = format!("\npub fn {door}(");
-            let at = MACOS.find(&needle).expect("named in the pin above");
-            let rest = &MACOS[at + 1..];
-            let end = rest.find("\n}\n").expect("a door is closed at column zero");
-            let body = &rest[..end];
+            let body = source_test::body(&ItemQuery::function(door).in_module("crate::macos_impl"));
             if matches!(door, "wheel_scroll_amount" | "stand_window_at") {
                 assert!(
                     !body.contains("NS"),
@@ -19526,12 +19525,9 @@ mod macos_window_backend_tests {
         }
         // And the function the split made is itself gated, which is what makes
         // the delegation above an answer rather than a hole.
-        let minting = {
-            let needle = "\npub(crate) fn folios_surface_view(";
-            let at = MACOS.find(needle).expect("the minting function exists");
-            let rest = &MACOS[at + 1..];
-            rest[..rest.find("\n}\n").expect("closed at column zero")].to_owned()
-        };
+        let minting = source_test::body(
+            &ItemQuery::function("folios_surface_view").in_module("crate::macos_impl"),
+        );
         assert!(
             minting.contains("window_for("),
             "the one function that makes Folio's view asks whose thread it is on:\n{minting}"
@@ -19572,8 +19568,16 @@ mod macos_window_backend_tests {
     /// `hitTest:` override and ③ does; look the view up by position and ① does.
     #[test]
     fn the_surface_view_is_folios_own_subview() {
-        assert!(
-            MACOS.contains("#[unsafe(super(NSView))]\n    #[name = \"FolioSurfaceView\"]"),
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "#[unsafe(super(NSView))]\n    #[name = \"FolioSurfaceView\"]\n    struct SurfaceView;",
+                )),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_impl".to_owned()),
+            )
+            .len(),
+            1,
             "the surface view is a class of Folio's own, subclassing NSView — that class is how \
              a rebuild finds the same view again"
         );
@@ -19585,25 +19589,16 @@ mod macos_window_backend_tests {
         // is Folio's". The claims below are about the making, so they read the
         // function that makes it — and the first of them is that the public
         // door still goes through it.
-        let door = {
-            let needle = "\npub fn surface_view(";
-            let at = MACOS.find(needle).expect("the door exists");
-            let rest = &MACOS[at + 1..];
-            let end = rest.find("\n}\n").expect("a door is closed at column zero");
-            rest[..end].to_owned()
-        };
+        let door =
+            source_test::body(&ItemQuery::function("surface_view").in_module("crate::macos_impl"));
         assert!(
             door.contains("folios_surface_view(window,"),
             "the public door must reach the one function that makes the view, or there are two \
              views called Folio's own:\n{door}"
         );
-        let body = {
-            let needle = "\npub(crate) fn folios_surface_view(";
-            let at = MACOS.find(needle).expect("the minting function exists");
-            let rest = &MACOS[at + 1..];
-            let end = rest.find("\n}\n").expect("a door is closed at column zero");
-            rest[..end].to_owned()
-        };
+        let body = source_test::body(
+            &ItemQuery::function("folios_surface_view").in_module("crate::macos_impl"),
+        );
         assert!(
             body.contains("content.addSubview(&view);") && !body.contains("setContentView"),
             "the view is added under the window's content view and does not replace it; \
@@ -19611,7 +19606,10 @@ mod macos_window_backend_tests {
         );
         assert!(
             body.contains("folios_own_view(&content)")
-                && MACOS.contains("isKindOfClass(SurfaceView::class())"),
+                && source_test::body(
+                    &ItemQuery::function("folios_own_view").in_module("crate::macos_impl")
+                )
+                .contains("isKindOfClass(SurfaceView::class())"),
             "called again for the same window the door must answer the same view, found by its \
              class rather than by its position among subviews:\n{body}"
         );
@@ -19622,19 +19620,22 @@ mod macos_window_backend_tests {
             "the view is the content view's size and follows it, which is what keeps the \
              CAMetalLayer's bounds and contentsScale right through a resize:\n{body}"
         );
-        assert!(
-            MACOS.contains("#[unsafe(method(hitTest:))]")
-                && MACOS.contains("fn hit_test(&self, _point: NSPoint) -> *mut NSView {\n            std::ptr::null_mut()"),
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "#[unsafe(method(hitTest:))]\n        fn hit_test(&self, _point: NSPoint) -> *mut NSView {\n            std::ptr::null_mut()\n        }",
+                )),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_impl".to_owned()),
+            )
+            .len(),
+            1,
             "the surface view declines every press, or it is a sheet of glass over a terminal \
              nobody can click"
         );
-        let clearing = {
-            let needle = "\npub fn clear_surface_layers(";
-            let at = MACOS.find(needle).expect("the door exists");
-            let rest = &MACOS[at + 1..];
-            let end = rest.find("\n}\n").expect("a door is closed at column zero");
-            rest[..end].to_owned()
-        };
+        let clearing = source_test::body(
+            &ItemQuery::function("clear_surface_layers").in_module("crate::macos_impl"),
+        );
         assert!(
             clearing.contains("view.layer()") && clearing.contains("layer.setSublayers(None)"),
             "the stale CAMetalLayer is a sublayer of the view's own layer, so that is what is \
@@ -19659,11 +19660,9 @@ mod macos_window_backend_tests {
     /// still hosting a browser process would be gone with it.
     #[test]
     fn closing_the_last_window_leaves_the_application_running() {
-        let needle = "\npub fn request_window_close(";
-        let at = MACOS.find(needle).expect("the close door");
-        let rest = &MACOS[at + 1..];
-        let end = rest.find("\n}\n").expect("a door is closed at column zero");
-        let body = &rest[..end];
+        let body = source_test::body(
+            &ItemQuery::function("request_window_close").in_module("crate::macos_impl"),
+        );
         assert!(
             body.contains("performClose(None)"),
             "the close door does not go through `performClose:`:\n{body}"
@@ -19719,15 +19718,9 @@ mod macos_window_backend_tests {
     /// `standardWindowButton` and this names it.
     #[test]
     fn the_macos_title_bar_is_kept_and_emptied_rather_than_taken_away() {
-        let body_of = |needle: &str| {
-            let at = MACOS.find(needle).expect("a door this ticket names");
-            let rest = &MACOS[at + 1..];
-            let end = rest.find("\n}\n").expect("a door is closed at column zero");
-            &rest[..end]
-        };
-        let needle = "\npub fn adopt_window_chrome(";
-        let at = MACOS.find(needle).expect("M3-3's door");
-        let body = body_of(needle);
+        let body = source_test::body(
+            &ItemQuery::function("adopt_window_chrome").in_module("crate::macos_impl"),
+        );
         for required in [
             "NSWindowStyleMask::FullSizeContentView",
             "setTitlebarAppearsTransparent(true)",
@@ -19742,7 +19735,9 @@ mod macos_window_backend_tests {
                  something other than this door:\n{body}"
             );
         }
-        let measured = body_of("\nfn measure_window_chrome(");
+        let measured = source_test::body(
+            &ItemQuery::function("measure_window_chrome").in_module("crate::macos_impl"),
+        );
         for required in ["standardWindowButton(", "backingScaleFactor()"] {
             assert!(
                 measured.contains(required),
@@ -19756,7 +19751,7 @@ mod macos_window_backend_tests {
              puts them:\n{body}"
         );
         assert!(
-            MACOS[at..].contains("FOLIO_DRAWS_THE_WHOLE_BAR"),
+            body.contains("FOLIO_DRAWS_THE_WHOLE_BAR"),
             "a window with no standard buttons to measure is not given the same answer Windows \
              gets, so a title-bar-less window would have its strip pushed in by an inset nobody \
              measured"
@@ -19788,13 +19783,9 @@ mod macos_window_backend_tests {
     /// of this program's own for a value Apple has not named and this names it.
     #[test]
     fn one_title_bar_press_is_appkits_drag_and_the_readers_own_double_click() {
-        let door = {
-            let needle = "\npub fn press_title_bar(";
-            let at = MACOS.find(needle).expect("M3-3's title-bar door");
-            let rest = &MACOS[at + 1..];
-            let end = rest.find("\n}\n").expect("a door is closed at column zero");
-            rest[..end].to_owned()
-        };
+        let door = source_test::body(
+            &ItemQuery::function("press_title_bar").in_module("crate::macos_impl"),
+        );
         assert!(
             door.contains("performWindowDragWithEvent("),
             "the drag is not AppKit's own:\n{door}"
@@ -19809,15 +19800,9 @@ mod macos_window_backend_tests {
              `AppleActionOnDoubleClick` is never honoured:\n{door}"
         );
 
-        let action = {
-            let needle = "\nfn act_on_double_click(";
-            let at = MACOS.find(needle).expect("the door's double-click half");
-            let rest = &MACOS[at + 1..];
-            let end = rest
-                .find("\n}\n")
-                .expect("a function is closed at column zero");
-            rest[..end].to_owned()
-        };
+        let action = source_test::body(
+            &ItemQuery::function("act_on_double_click").in_module("crate::macos_impl"),
+        );
         assert!(
             action.contains("standardUserDefaults()")
                 && action.contains("AppleActionOnDoubleClick"),
@@ -19851,27 +19836,29 @@ mod macos_window_backend_tests {
     /// MUTATION: read the appearance inside `observe_value` and this names it.
     #[test]
     fn dark_mode_changes_arrive_on_the_window_thread_through_winit() {
-        let at = MACOS
-            .find("fn observe_value(")
-            .expect("the appearance observer");
-        let rest = &MACOS[at..];
-        let end = rest
-            .find("\n        }")
-            .expect("a method body is closed at eight spaces");
-        let body = &rest[..end];
-        assert!(
-            body.contains("(self.ivars().0)(crate::SystemNews::Preferences);"),
-            "the observer does something other than nudge the loop:\n{body}"
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "if key_path == Some(ns_string!(\"effectiveAppearance\")) {\n                (self.ivars().0)(crate::SystemNews::Preferences);\n            }",
+                )),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_impl".to_owned()),
+            )
+            .len(),
+            1,
+            "the observer does not limit itself to nudging the loop"
         );
-        for forbidden in ["effectiveAppearance()", "appearance_is_light", "NSScreen"] {
-            assert!(
-                !body.contains(forbidden),
-                "the observer reads `{forbidden}` inside AppKit's own delivery instead of on the \
-                 loop's next turn:\n{body}"
-            );
-        }
         assert!(
-            MACOS.contains("addObserver_forKeyPath_options_context("),
+            source_test::found(
+                Needle::new(Pattern::identifier(
+                    "addObserver_forKeyPath_options_context"
+                )),
+                View::Identifiers,
+                Scope::Module("crate::macos_impl".to_owned()),
+            )
+            .in_the_product(source_test::index())
+            .len()
+                >= 1,
             "nothing is observed, so nothing can arrive"
         );
     }
@@ -19895,55 +19882,13 @@ mod macos_window_backend_tests {
 /// defect the whole macOS arm is shaped around.
 #[cfg(test)]
 mod macos_dialog_backend_tests {
-    use crate::IMAGE_FILE_EXTENSIONS;
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
 
-    /// The two arms' own text.
-    const PORTABLE: &str = include_str!("portable_impl.rs");
-    const MACOS: &str = include_str!("macos_dialogs.rs");
+    use crate::IMAGE_FILE_EXTENSIONS;
+    use crate::source_test;
 
     /// The gate the portable arm's four now stand behind.
     const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
-
-    /// The text of the item `needle` opens, to the line that closes it at the
-    /// indentation `needle` itself is written at.
-    ///
-    /// Crude on purpose, as `deferred_service_tests`' own reader is: what is
-    /// being read is whether a body names a call, and a parser here would be a
-    /// second thing to be wrong. The indentation is taken from the needle rather
-    /// than guessed, because a body with a `let … else { … };` in it closes an
-    /// inner block at the outer block's column and a reader that stopped at the
-    /// first candidate would read half a function.
-    fn item(source: &str, needle: &str) -> String {
-        let indent: String = needle
-            .trim_start_matches('\n')
-            .chars()
-            .take_while(|character| *character == ' ')
-            .collect();
-        let closer = format!("\n{indent}}}\n");
-        let at = source
-            .find(needle)
-            .unwrap_or_else(|| panic!("`{needle}` is in this arm"));
-        let rest = &source[at..];
-        let end = rest
-            .find(&closer)
-            .unwrap_or_else(|| panic!("`{needle}` opens an item that is never closed"));
-        rest[..end].to_owned()
-    }
-
-    /// The attributes between a definition and the doc comment above it.
-    fn attributes_above(source: &str, needle: &str) -> String {
-        let at = source
-            .find(needle)
-            .unwrap_or_else(|| panic!("`{needle}` is defined in this arm"));
-        let before = &source[..at];
-        let doc_ends = before
-            .rfind("///")
-            .expect("every item here carries a doc comment");
-        let line_end = before[doc_ends..]
-            .find('\n')
-            .expect("a doc comment ends in a newline");
-        before[doc_ends + line_end..].to_owned()
-    }
 
     /// RED — **each of the four is the portable arm's for Linux only, and the
     /// macOS arm's for a Mac.**
@@ -19952,28 +19897,32 @@ mod macos_dialog_backend_tests {
     /// it twice; delete one from `macos_dialogs.rs` and a Mac loses the door.
     #[test]
     fn a_dialog_door_has_one_arm_per_platform() {
-        for definition in [
-            "\npub struct MathContextMenu {",
-            "\npub struct FolderPicker {",
-            "\npub struct ImagePicker {",
-            "\npub struct SaveFilePicker {",
-            "\npub fn message_box(",
+        for query in [
+            ItemQuery::type_item("MathContextMenu"),
+            ItemQuery::type_item("FolderPicker"),
+            ItemQuery::type_item("ImagePicker"),
+            ItemQuery::type_item("SaveFilePicker"),
+            ItemQuery::function("message_box"),
         ] {
-            let attributes = attributes_above(PORTABLE, definition);
+            let attributes =
+                source_test::declaration(&query.clone().in_module("crate::portable_impl"));
             assert!(
                 attributes.contains(NEITHER),
-                "`{definition}` is still the portable arm's on macOS, where `macos_dialogs` also \
+                "`{query}` is still the portable arm's on macOS, where `macos_dialogs` also \
                  defines it:\n{attributes}"
             );
-            assert!(
-                MACOS.contains(definition),
-                "`{definition}` left the portable arm without arriving in the macOS one, which is \
-                 a platform with no such door at all"
-            );
+            source_test::declaration(&query.in_module("crate::macos_dialogs"));
         }
-        assert!(
-            PORTABLE.contains("pub enum ShellPickKind {")
-                && !MACOS.contains("pub enum ShellPickKind {"),
+        let shell_pick_modules: Vec<&str> = source_test::index()
+            .items()
+            .iter()
+            .filter(|item| item.name() == "ShellPickKind" && item.type_owner().is_none())
+            .flat_map(|item| item.module_paths())
+            .filter(|module| *module != "crate::windows_impl")
+            .collect();
+        assert_eq!(
+            shell_pick_modules,
+            ["crate::portable_impl"],
             "the three cases a chooser is opened for are the product's and stay in one place; a \
              second definition on macOS would be two spellings of one choice"
         );
@@ -19998,11 +19947,10 @@ mod macos_dialog_backend_tests {
     /// directly in `request` and ③ does.
     #[test]
     fn the_macos_dialogs_never_block_the_event_loop() {
-        for door in [
-            "\n    pub fn request(&self, start:",
-            "\n    pub fn request(&self, kind:",
-        ] {
-            let body = item(MACOS, door);
+        for owner in ["FolderPicker", "ImagePicker"] {
+            let body = source_test::body(
+                &ItemQuery::method(owner, "request").in_module("crate::macos_dialogs"),
+            );
             assert!(
                 !body.contains("runModal"),
                 "a chooser that runs a modal loop stops this process for as long as the reader \
@@ -20013,24 +19961,32 @@ mod macos_dialog_backend_tests {
                 "and what it does instead is attach the panel to the window:\n{body}"
             );
         }
-        let putting_up = item(MACOS, "\nfn sheet(");
+        let putting_up =
+            source_test::body(&ItemQuery::function("sheet").in_module("crate::macos_dialogs"));
         assert!(
             putting_up.contains("beginSheetModalForWindow_completionHandler("),
             "the one place a panel is shown shows it as a sheet:\n{putting_up}"
         );
-        let alert = item(MACOS, "\npub fn message_box(");
+        let alert = source_test::body(
+            &ItemQuery::function("message_box").in_module("crate::macos_dialogs"),
+        );
         assert!(
             alert.contains("alert.runModal();"),
             "the alert is the one door here that may block, and it is the one that does"
         );
         assert_eq!(
-            MACOS.matches(".runModal()").count(),
+            source_test::found(
+                Needle::new(Pattern::call("runModal")),
+                View::Identifiers,
+                Scope::Module("crate::macos_dialogs".to_owned()),
+            )
+            .in_the_product(source_test::index())
+            .len(),
             1,
             "and it is the only `runModal` in the file"
         );
-        let menu = item(
-            MACOS,
-            "\n    pub fn request(&self) -> Result<bool, String> {",
+        let menu = source_test::body(
+            &ItemQuery::method("MathContextMenu", "request").in_module("crate::macos_dialogs"),
         );
         assert!(
             menu.contains("performSelector_withObject_afterDelay(")
@@ -20053,28 +20009,37 @@ mod macos_dialog_backend_tests {
     /// or the menu's pop and this names it.
     #[test]
     fn a_parked_answer_asks_the_window_for_a_frame() {
-        let waking = item(MACOS, "\nfn ask_for_a_frame(");
+        let waking = source_test::body(
+            &ItemQuery::function("ask_for_a_frame").in_module("crate::macos_dialogs"),
+        );
         assert!(
             waking.contains("setNeedsDisplay(true)"),
             "the wake is a redraw on winit's own view, which is what the handle holds:\n{waking}"
         );
-        for (landing, what) in [
-            ("\nfn sheet(", "a sheet's completion"),
-            ("\n        fn pop(&self) {", "the menu's pop"),
-        ] {
-            let body = item(MACOS, landing);
-            let parked = body
-                .find("state.complete(")
-                .or_else(|| body.find("ivars.state.complete("))
-                .unwrap_or_else(|| panic!("{what} parks its answer"));
-            let woke = body
-                .find("ask_for_a_frame(")
-                .unwrap_or_else(|| panic!("{what} parks an answer nothing will collect"));
-            assert!(
-                parked < woke,
-                "{what} wakes the loop before the answer is there for it:\n{body}"
-            );
-        }
+        let sheet =
+            source_test::body(&ItemQuery::function("sheet").in_module("crate::macos_dialogs"));
+        let parked = sheet
+            .find("state.complete(")
+            .unwrap_or_else(|| panic!("a sheet's completion parks its answer"));
+        let woke = sheet
+            .find("ask_for_a_frame(")
+            .unwrap_or_else(|| panic!("a sheet's completion parks an answer nothing will collect"));
+        assert!(
+            parked < woke,
+            "a sheet's completion wakes the loop before the answer is there for it:\n{sheet}"
+        );
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "ivars.state.complete(answer);\n            ask_for_a_frame(ivars.window, mtm);",
+                )),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_dialogs".to_owned()),
+            )
+            .len(),
+            1,
+            "the menu's pop does not wake the loop after parking its answer"
+        );
     }
 
     /// RED — **the last-resort report asks both of its questions before it
@@ -20089,7 +20054,9 @@ mod macos_dialog_backend_tests {
     /// assertion names it; move either guard below the modal and the first does.
     #[test]
     fn the_last_resort_report_asks_its_thread_and_its_application_first() {
-        let body = item(MACOS, "\npub fn message_box(");
+        let body = source_test::body(
+            &ItemQuery::function("message_box").in_module("crate::macos_dialogs"),
+        );
         let runs_at = body.find("alert.runModal();").expect("it raises the alert");
         for guard in ["MainThreadMarker::new()", "NSApp }.is_null()"] {
             let at = body
@@ -20131,7 +20098,9 @@ mod macos_dialog_backend_tests {
     /// `hasVisibleWindows` and the last names it.
     #[test]
     fn a_modal_box_is_raised_only_when_this_application_is_on_the_screen() {
-        let body = item(MACOS, "\npub fn message_box(");
+        let body = source_test::body(
+            &ItemQuery::function("message_box").in_module("crate::macos_dialogs"),
+        );
         let asks = body
             .find("if !an_alert_would_be_seen(mtm) {")
             .expect("the third question is asked");
@@ -20140,7 +20109,9 @@ mod macos_dialog_backend_tests {
             asks < runs_at,
             "the question is asked after the modal is already running:\n{body}"
         );
-        let rule = item(MACOS, "\nfn an_alert_would_be_seen(");
+        let rule = source_test::body(
+            &ItemQuery::function("an_alert_would_be_seen").in_module("crate::macos_dialogs"),
+        );
         assert!(
             rule.contains("application.isActive()"),
             "frontmost is half of the rule:\n{rule}"
@@ -20165,7 +20136,9 @@ mod macos_dialog_backend_tests {
     /// third does.
     #[test]
     fn the_picture_chooser_is_built_from_the_decoders_own_list() {
-        let types = item(MACOS, "\nfn image_content_types()");
+        let types = source_test::body(
+            &ItemQuery::function("image_content_types").in_module("crate::macos_dialogs"),
+        );
         assert!(
             types.contains("IMAGE_FILE_EXTENSIONS"),
             "the chooser's filter is the decoder's list, read rather than restated:\n{types}"
@@ -20176,7 +20149,8 @@ mod macos_dialog_backend_tests {
                 "`{extension}` is written out in the macOS arm, so the two lists can drift"
             );
         }
-        let dressing = item(MACOS, "\nfn dress(");
+        let dressing =
+            source_test::body(&ItemQuery::function("dress").in_module("crate::macos_dialogs"));
         assert_eq!(
             dressing.matches("setAllowedContentTypes(").count(),
             2,
@@ -20206,10 +20180,9 @@ mod macos_dialog_backend_tests {
 /// not a dismissal, an identifier is not a route — are still written down.
 #[cfg(test)]
 mod macos_notification_backend_tests {
-    /// The three arms' own text. The Windows arm is this file.
-    const WINDOWS: &str = include_str!("lib.rs");
-    const MACOS: &str = include_str!("macos_notify.rs");
-    const PORTABLE: &str = include_str!("portable_impl.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
+
+    use crate::source_test;
 
     /// The gate every door in the portable arm now stands behind.
     const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
@@ -20229,63 +20202,39 @@ mod macos_notification_backend_tests {
     /// `Notifier` is a signature, `bt-app` is written against it once, and a
     /// port that quietly took a `&str` where another arm takes a `&mut self`
     /// would compile on the platform it was edited on.
-    const TYPES: [(&str, [&str; 3]); 2] = [
+    const TYPES: [(&str, [(&str, &str); 3]); 2] = [
         (
-            "impl Notifier {",
+            "Notifier",
             [
-                "pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String>",
-                "pub fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String>",
-                "pub fn take_activations(&self) -> Vec<String>",
+                (
+                    "new",
+                    "pubfnnew(wake:Box<dynFn()+Send>)->Result<Self,String>",
+                ),
+                (
+                    "show",
+                    "pubfnshow(&mutself,title:&str,body:&str,launch:&str)->Result<(),String>",
+                ),
+                (
+                    "take_activations",
+                    "pubfntake_activations(&self)->Vec<String>",
+                ),
             ],
         ),
         (
-            "impl Taskbar {",
+            "Taskbar",
             [
-                "pub fn new(window: NativeWindow) -> Result<Self, String>",
-                "pub fn set_progress(&self, progress: TaskbarProgress) -> Result<(), String>",
+                ("new", "pubfnnew(window:NativeWindow)->Result<Self,String>"),
+                (
+                    "set_progress",
+                    "pubfnset_progress(&self,progress:TaskbarProgress)->Result<(),String>",
+                ),
                 // Two doors and a three-slot array: the third slot is the
                 // constructor's own name, asked for a second time so that the
                 // shape of this table is the same for both types.
-                "pub fn new(window: NativeWindow) -> Result<Self, String>",
+                ("new", "pubfnnew(window:NativeWindow)->Result<Self,String>"),
             ],
         ),
     ];
-
-    /// The text of one `impl` block, from its header to the brace that closes
-    /// it at the same indent.
-    ///
-    /// The indent is read off the header rather than assumed, because the
-    /// Windows arm lives inside `mod windows_impl` and is therefore four spaces
-    /// further in than the other two.
-    fn impl_block<'a>(source: &'a str, header: &str) -> &'a str {
-        let at = source
-            .find(header)
-            .unwrap_or_else(|| panic!("`{header}` is in this arm"));
-        let line_start = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
-        let closing = format!("\n{}}}\n", &source[line_start..at]);
-        let rest = &source[at..];
-        let end = rest
-            .find(&closing)
-            .expect("an impl block closes at its own indent");
-        &rest[..end]
-    }
-
-    /// The text from the start of the line `pub fn NAME(` back to the end of
-    /// the doc comment above it — the attributes, and nothing else.
-    fn attributes_above(source: &str, name: &str) -> String {
-        let needle = format!("\npub fn {name}(");
-        let at = source
-            .find(&needle)
-            .unwrap_or_else(|| panic!("`{name}` is defined in this arm"));
-        let before = &source[..at];
-        let doc_ends = before
-            .rfind("///")
-            .expect("every door carries a doc comment");
-        let line_end = before[doc_ends..]
-            .find('\n')
-            .expect("a doc comment ends in a newline");
-        before[doc_ends + line_end..].to_owned()
-    }
 
     /// RED — **every notification and Dock door in the portable arm is off on
     /// macOS.**
@@ -20295,25 +20244,26 @@ mod macos_notification_backend_tests {
     #[test]
     fn a_notification_or_dock_door_has_one_arm_per_platform() {
         for door in DOORS {
-            let attributes = attributes_above(PORTABLE, door);
+            let attributes = source_test::declaration(
+                &ItemQuery::function(door).in_module("crate::portable_impl"),
+            );
             assert!(
                 attributes.contains(NEITHER),
                 "`{door}` is still the portable arm's on macOS, where `macos_notify` also defines \
                  it:\n{attributes}"
             );
-            assert!(
-                MACOS.contains(&format!("\npub fn {door}(")),
-                "`{door}` left the portable arm without arriving in the macOS one"
-            );
+            source_test::declaration(&ItemQuery::function(door).in_module("crate::macos_notify"));
         }
         for type_name in ["Notifier", "Taskbar"] {
             assert!(
-                PORTABLE.contains(&format!("{NEITHER}\npub struct {type_name}")),
+                source_test::declaration(
+                    &ItemQuery::type_item(type_name).in_module("crate::portable_impl")
+                )
+                .contains(NEITHER),
                 "`{type_name}` is the group's type and it moves with the doors"
             );
-            assert!(
-                MACOS.contains(&format!("pub struct {type_name} {{")),
-                "and the macOS arm is the one that really speaks to the machine"
+            source_test::declaration(
+                &ItemQuery::type_item(type_name).in_module("crate::macos_notify"),
             );
         }
     }
@@ -20324,17 +20274,19 @@ mod macos_notification_backend_tests {
     /// names the arm and the declaration.
     #[test]
     fn the_notification_doors_have_one_signature_on_every_platform() {
-        for (header, doors) in TYPES {
-            for (arm, source) in [
-                ("windows", WINDOWS),
-                ("macos", MACOS),
-                ("portable", PORTABLE),
+        for (owner, doors) in TYPES {
+            for (arm, module) in [
+                ("windows", "crate::windows_impl"),
+                ("macos", "crate::macos_notify"),
+                ("portable", "crate::portable_impl"),
             ] {
-                let block = impl_block(source, header);
-                for door in doors {
+                for (name, expected) in doors {
+                    let declaration = source_test::squeezed_declaration(
+                        &ItemQuery::method(owner, name).in_module(module),
+                    );
                     assert!(
-                        block.contains(door),
-                        "the {arm} arm's `{header}` does not declare `{door}`",
+                        declaration.contains(expected),
+                        "the {arm} arm's `{owner}` does not declare `{expected}`: {declaration}",
                     );
                 }
             }
@@ -20354,7 +20306,9 @@ mod macos_notification_backend_tests {
     /// every platform.
     #[test]
     fn the_macos_notifier_reads_the_bundle_before_it_touches_the_centre() {
-        let block = impl_block(MACOS, "impl Notifier {");
+        let block = source_test::body(
+            &ItemQuery::method("Notifier", "new").in_module("crate::macos_notify"),
+        );
         let bundle = block
             .find("NSBundle::mainBundle()")
             .expect("the macOS arm reads the bundle identifier");
@@ -20382,9 +20336,19 @@ mod macos_notification_backend_tests {
     /// string to `requestWithIdentifier:`, and this names which.
     #[test]
     fn a_click_is_not_a_dismissal_and_an_identifier_is_not_a_route() {
-        let block = impl_block(MACOS, "impl Notifier {");
-        assert!(
-            MACOS.contains("UNNotificationDefaultActionIdentifier"),
+        let block = source_test::body(
+            &ItemQuery::method("Notifier", "show").in_module("crate::macos_notify"),
+        );
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "let opened = unsafe { UNNotificationDefaultActionIdentifier };\n            if &*response.actionIdentifier() == opened",
+                )),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_notify".to_owned()),
+            )
+            .len(),
+            1,
             "the macOS arm decides what an activation is by the action the reader took",
         );
         assert!(
@@ -20392,7 +20356,8 @@ mod macos_notification_backend_tests {
             "every request carries an identifier of its own rather than the route",
         );
         assert!(
-            !WINDOWS.contains("<toast launch=\\\"{launch}\\\" tag="),
+            !source_test::body(&ItemQuery::function("toast_xml").in_module("crate"))
+                .contains("<toast launch=\\\"{launch}\\\" tag="),
             "the Windows arm writes no tag, which is why this one writes no route identifier",
         );
     }
@@ -20408,11 +20373,17 @@ mod macos_notification_backend_tests {
     #[test]
     fn the_dock_bounce_lasts_as_long_as_the_taskbar_flash_does() {
         assert!(
-            MACOS.contains("NSRequestUserAttentionType::CriticalRequest"),
+            source_test::body(
+                &ItemQuery::function("flash_window").in_module("crate::macos_notify")
+            )
+            .contains("NSRequestUserAttentionType::CriticalRequest"),
             "the macOS flash is the critical request",
         );
         assert!(
-            WINDOWS.contains("FLASHW_TRAY | FLASHW_TIMERNOFG"),
+            source_test::body(
+                &ItemQuery::function("flash_window").in_module("crate::windows_impl")
+            )
+            .contains("FLASHW_TRAY | FLASHW_TIMERNOFG"),
             "and the Windows one is the flash that does not stop on a timer",
         );
     }
@@ -20429,29 +20400,23 @@ mod macos_notification_backend_tests {
     /// MUTATION: take the gate out of any of the three and this names it.
     #[test]
     fn every_macos_notification_door_proves_its_thread() {
-        for (header, door) in [
-            ("impl Notifier {", "new"),
-            ("impl Taskbar {", "new"),
-            ("impl Taskbar {", "set_progress"),
+        for (owner, door) in [
+            ("Notifier", "new"),
+            ("Taskbar", "new"),
+            ("Taskbar", "set_progress"),
         ] {
-            let block = impl_block(MACOS, header);
-            let at = block
-                .find(&format!("pub fn {door}("))
-                .unwrap_or_else(|| panic!("`{header}{door}` is in the macOS arm"));
-            let rest = &block[at..];
-            // No trailing newline in the needle: the last method of a block
-            // ends where `impl_block`'s own closing brace begins, and that
-            // newline has already been taken.
-            let end = rest
-                .find("\n    }")
-                .expect("a method closes at its own indent");
+            let body =
+                source_test::body(&ItemQuery::method(owner, door).in_module("crate::macos_notify"));
             assert!(
-                rest[..end].contains("main_thread("),
-                "`{header} {door}` reaches AppKit without proving its thread",
+                body.contains("main_thread("),
+                "`{owner}::{door}` reaches AppKit without proving its thread",
             );
         }
         assert!(
-            impl_block(MACOS, "pub fn flash_window(").contains("MainThreadMarker::new()"),
+            source_test::body(
+                &ItemQuery::function("flash_window").in_module("crate::macos_notify")
+            )
+            .contains("MainThreadMarker::new()"),
             "the flash answers nothing, so it checks the marker and returns",
         );
     }
@@ -20544,40 +20509,9 @@ mod dock_badge_tests {
 /// exactly one place — a preview seat woken by a build it is not reading.
 #[cfg(test)]
 mod watch_contract_tests {
-    /// The three arms' own text.
-    const MACOS: &str = include_str!("macos_watch.rs");
-    const PORTABLE: &str = include_str!("portable_impl.rs");
-    const WHOLE_FILE: &str = include_str!("lib.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
 
-    /// **This file, up to where these pins begin.**
-    ///
-    /// Not a nicety. A pin that searched the whole of `lib.rs` for a line would
-    /// find that line **in its own assertion** and pass for a reason that has
-    /// nothing to do with the code — which is a green test that can never go
-    /// red, the one kind worse than no test at all. Everything these pins are
-    /// about is defined above them, so the file is cut here and the quotations
-    /// below name only real code.
-    fn above_the_pins() -> &'static str {
-        let at = WHOLE_FILE
-            .find("\nmod watch_contract_tests {")
-            .expect("these pins are in this file");
-        &WHOLE_FILE[..at]
-    }
-
-    /// The attributes between a doc comment and the item it is on.
-    fn attributes_above(source: &str, item: &str) -> String {
-        let at = source
-            .find(item)
-            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
-        let before = &source[..at];
-        let doc_ends = before
-            .rfind("///")
-            .expect("every item here carries a doc comment");
-        let line_end = before[doc_ends..]
-            .find('\n')
-            .expect("a doc comment ends in a newline");
-        before[doc_ends + line_end..].to_owned()
-    }
+    use crate::source_test;
 
     /// The gate the portable arm's two watch names now stand behind — the same
     /// one M1-3 put on the window and screen doors.
@@ -20590,47 +20524,6 @@ mod watch_contract_tests {
         ("start_shallow_named", "WatchDepth::HereOnly"),
     ];
 
-    /// The text of `impl DirWatch { … }` in one arm.
-    ///
-    /// The two arms are indented differently — the macOS one is a module of its
-    /// own and the Windows one lives inside `mod windows_impl` — so the block is
-    /// cut by the header it opens with and the line that closes it at that
-    /// header's own indentation. Crude on purpose: what is being read is which
-    /// depth a one-line body names, and a parser here would be a second thing to
-    /// be wrong.
-    fn text_between(source: &str, header: &str, closes_at: &str) -> String {
-        let at = source
-            .find(header)
-            .unwrap_or_else(|| panic!("this arm opens a `{}`", header.trim()));
-        let rest = &source[at + header.len()..];
-        let end = rest
-            .find(closes_at)
-            .expect("a block is closed at its own indentation");
-        rest[..end].to_owned()
-    }
-
-    /// The macOS arm's three doors.
-    fn macos_doors() -> String {
-        text_between(MACOS, "\nimpl DirWatch {\n", "\n}\n")
-    }
-
-    /// The Windows arm's three doors.
-    fn windows_doors() -> String {
-        text_between(above_the_pins(), "\n    impl DirWatch {\n", "\n    }\n")
-    }
-
-    /// The body of `pub fn NAME(`, which in all six cases is one expression
-    /// followed by a blank line.
-    fn body_of(doors: &str, name: &str) -> String {
-        let needle = format!("pub fn {name}(");
-        let at = doors
-            .find(&needle)
-            .unwrap_or_else(|| panic!("`{name}` is one of the three doors"));
-        let rest = &doors[at..];
-        let end = rest.find("\n\n").unwrap_or(rest.len());
-        rest[..end].to_owned()
-    }
-
     /// RED — **three doors, and each passes the depth its contract is.**
     ///
     /// Asserted against both real arms at once, because "all three contracts" is
@@ -20642,10 +20535,13 @@ mod watch_contract_tests {
     /// MUTATION: swap either depth in either file and this names the door.
     #[test]
     fn the_three_constructors_keep_their_contracts_on_every_platform() {
-        let arms = [("macOS", macos_doors()), ("Windows", windows_doors())];
         for (door, depth) in CONTRACTS {
-            for (arm, source) in &arms {
-                let body = body_of(source, door);
+            for (arm, module) in [
+                ("macOS", "crate::macos_watch"),
+                ("Windows", "crate::windows_impl"),
+            ] {
+                let body =
+                    source_test::body(&ItemQuery::method("DirWatch", door).in_module(module));
                 assert!(
                     body.contains(depth),
                     "the {arm} arm's `{door}` does not pass `{depth}`, so that contract is not \
@@ -20656,14 +20552,23 @@ mod watch_contract_tests {
         // And the difference between the two shallow doors, which is the whole
         // of defect #186: one throws the names away at the door and one hands
         // them to the caller.
-        for (arm, source) in &arms {
+        for (arm, module) in [
+            ("macOS", "crate::macos_watch"),
+            ("Windows", "crate::windows_impl"),
+        ] {
             assert!(
-                body_of(source, "start_shallow").contains("move |_| wake()"),
+                source_test::body(
+                    &ItemQuery::method("DirWatch", "start_shallow").in_module(module)
+                )
+                .contains("move |_| wake()"),
                 "the {arm} arm's nameless shallow door now carries names into a callback that \
                  does not take them"
             );
             assert!(
-                !body_of(source, "start_shallow_named").contains("move |_|"),
+                !source_test::body(
+                    &ItemQuery::method("DirWatch", "start_shallow_named").in_module(module)
+                )
+                .contains("move |_|"),
                 "the {arm} arm's named shallow door throws the names away, which is the whole of \
                  what it exists for"
             );
@@ -20677,20 +20582,30 @@ mod watch_contract_tests {
     /// way to ask for a watch and a second thing for a caller to get wrong.
     #[test]
     fn the_depth_is_not_a_door() {
+        let depth = source_test::declaration(
+            &ItemQuery::type_item("WatchDepth").in_module("crate::macos_watch"),
+        );
         assert!(
-            MACOS.contains("\nenum WatchDepth {"),
+            depth.contains("enum WatchDepth"),
             "the macOS arm names its depth"
         );
         assert!(
-            !MACOS.contains("pub enum WatchDepth"),
+            !depth.contains("pub enum WatchDepth"),
             "the macOS arm exported its depth, which is a fourth contract nobody asked for"
         );
         // And the Windows arm's depth, which has been `pub` inside a private
         // module since the day it was written, stays out of the crate root's own
         // list — which is the sentence §6 ⑤ of the inventory is making.
-        let exported = text_between(above_the_pins(), "\npub use windows_impl::{\n", "\n};\n");
         assert!(
-            !exported.contains("WatchDepth"),
+            source_test::found(
+                Needle::new(Pattern::identifier("WatchDepth")),
+                View::Identifiers,
+                Scope::Module("crate".to_owned()),
+            )
+            .in_the_product(source_test::index())
+            .owners(source_test::index())
+            .keys()
+            .all(|owner| owner.module_path != "crate"),
             "the crate root exports the depth, so the three doors are no longer the three \
              contracts"
         );
@@ -20705,31 +20620,39 @@ mod watch_contract_tests {
     /// which §4.6 of the plan says must stay possible.
     #[test]
     fn a_watch_door_has_one_arm_per_platform() {
-        for name in ["\npub enum DirChange<'a> {", "\npub struct DirWatch {"] {
-            let attributes = attributes_above(PORTABLE, name);
+        for name in ["DirChange", "DirWatch"] {
+            let portable = ItemQuery::type_item(name).in_module("crate::portable_impl");
+            let attributes = source_test::declaration(&portable);
             assert!(
                 attributes.contains(NEITHER),
                 "`{name}` is still the portable arm's on macOS, where `macos_watch` also defines \
                  it:\n{attributes}"
             );
-            assert!(
-                MACOS.contains(name),
-                "`{name}` left the portable arm without arriving in the macOS one"
-            );
+            source_test::declaration(&ItemQuery::type_item(name).in_module("crate::macos_watch"));
         }
-        assert!(
-            PORTABLE.contains(&format!("{NEITHER}\nimpl DirWatch {{")),
-            "the portable arm's three refusals are gated with the type they belong to"
+        source_test::declaration(
+            &ItemQuery::method("DirWatch", "start").in_module("crate::portable_impl"),
         );
-        let root = above_the_pins();
-        assert!(
-            root.contains("#[cfg(all(not(windows), not(target_os = \"macos\")))]\npub use portable_impl::{DirChange, DirWatch};"),
+        let portable_reexport = source_test::found(
+            Needle::new(Pattern::text(
+                "pub use portable_impl::{DirChange, DirWatch};",
+            )),
+            View::CodeKeepingLiterals,
+            Scope::Module("crate".to_owned()),
+        );
+        assert_eq!(
+            portable_reexport.in_the_product(source_test::index()).len(),
+            1,
             "the portable re-export is the one a third platform still meets"
         );
-        assert!(
-            root.contains(
-                "#[cfg(target_os = \"macos\")]\npub use macos_watch::{DirChange, DirWatch};"
-            ),
+        assert_eq!(
+            source_test::found(
+                bt_source::needle!(Pattern::text("pub use macos_watch::{DirChange, DirWatch};")),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate".to_owned()),
+            )
+            .len(),
+            1,
             "and macOS takes its two names from the FSEvents arm"
         );
     }
@@ -20746,14 +20669,11 @@ mod watch_contract_tests {
     /// MUTATION: put an `FSEventStreamStop` in `Drop::drop` and this names it.
     #[test]
     fn the_owner_never_touches_the_stream() {
-        let at = MACOS
-            .find("\nimpl Drop for DirWatch {")
-            .expect("the cancellation is a `Drop`");
-        let rest = &MACOS[at + 1..];
-        let end = rest
-            .find("\n}\n")
-            .expect("an impl is closed at column zero");
-        let body = &rest[..end];
+        let body = source_test::body(
+            &ItemQuery::method("DirWatch", "drop")
+                .of_trait("Drop")
+                .in_module("crate::macos_watch"),
+        );
         for call in [
             "FSEventStreamStop(",
             "FSEventStreamInvalidate(",
@@ -20769,10 +20689,10 @@ mod watch_contract_tests {
             "`drop` is signal-and-join, or the cancellation is a flag somebody notices later:\n\
              {body}"
         );
-        let order = MACOS
-            .find("FSEventStreamStop(stream.as_ptr());\n        FSEventStreamInvalidate(stream.as_ptr());\n        FSEventStreamRelease(stream.as_ptr());");
+        let watcher =
+            source_test::body(&ItemQuery::function("watch_loop").in_module("crate::macos_watch"));
         assert!(
-            order.is_some(),
+            watcher.contains("FSEventStreamStop(stream.as_ptr());\n        FSEventStreamInvalidate(stream.as_ptr());\n        FSEventStreamRelease(stream.as_ptr());"),
             "the watcher thread's teardown is stop, then invalidate, then release — any other \
              order leaves a callback running against a freed subscriber"
         );
@@ -20787,16 +20707,26 @@ mod watch_contract_tests {
     /// `RootChanged` is ever set, which is the root-replacement answer.
     #[test]
     fn the_stream_is_created_with_the_flags_its_contracts_need() {
-        assert!(
-            MACOS.contains("USE_CF_TYPES | NO_DEFER | WATCH_ROOT | FILE_EVENTS"),
-            "a create flag went missing, and each of the four is a contract"
+        let create = source_test::body(
+            &ItemQuery::function("create_stream").in_module("crate::macos_watch"),
         );
         assert!(
-            MACOS.contains("const LATENCY_SECONDS: f64 = 0.300;"),
+            create.contains("USE_CF_TYPES | NO_DEFER | WATCH_ROOT | FILE_EVENTS"),
+            "a create flag went missing, and each of the four is a contract"
+        );
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text("const LATENCY_SECONDS: f64 = 0.300;")),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::macos_watch".to_owned()),
+            )
+            .in_the_product(source_test::index())
+            .len(),
+            1,
             "the stream's latency is the portable debounce's own number and has moved"
         );
         assert!(
-            MACOS.contains("SINCE_NOW,"),
+            create.contains("SINCE_NOW,"),
             "the stream replays history, which every caller has already accounted for"
         );
     }
@@ -20824,46 +20754,13 @@ mod watch_contract_tests {
 /// (§4.4 ②).
 #[cfg(test)]
 mod macos_process_door_tests {
-    /// The four arms' own text. `lib.rs` is here twice over — it holds the
-    /// Windows `recycle` and font enumeration *and* the re-export lists — so it
-    /// is cut at these pins for `watch_contract_tests`' reason: a pin that
-    /// searched the whole file would find its own assertion.
-    const HANDOFF: &str = include_str!("handoff.rs");
-    const PORTABLE: &str = include_str!("portable_impl.rs");
-    const MACOS_FILES: &str = include_str!("macos_files.rs");
-    const MACOS_FONTS: &str = include_str!("macos_fonts.rs");
-    const WHOLE_FILE: &str = include_str!("lib.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
+
+    use crate::source_test;
 
     /// The gate every door that macOS now answers stands behind in the portable
     /// arm.
     const NOT_MACOS: &str = "#[cfg(not(target_os = \"macos\"))]";
-
-    /// Where a function of one of these arms ends: a closing brace at the
-    /// module's own indentation, on a line of its own.
-    const END_OF_A_DOOR: &str = "\n    }\n";
-
-    /// **This file, up to where these pins begin.**
-    fn above_the_pins() -> &'static str {
-        let at = WHOLE_FILE
-            .find("\nmod macos_process_door_tests {")
-            .expect("these pins are in this file");
-        &WHOLE_FILE[..at]
-    }
-
-    /// The attributes between a doc comment and the item it is on.
-    fn attributes_above(source: &str, item: &str) -> String {
-        let at = source
-            .find(item)
-            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
-        let before = &source[..at];
-        let doc_ends = before
-            .rfind("///")
-            .expect("every door here carries a doc comment");
-        let line_end = before[doc_ends..]
-            .find('\n')
-            .expect("a doc comment ends in a newline");
-        before[doc_ends + line_end..].to_owned()
-    }
 
     /// One door's signature, from `pub fn` to the brace, as one line.
     ///
@@ -20873,16 +20770,8 @@ mod macos_process_door_tests {
     /// `MonospaceFamily`, because the paths that are in scope are not the same
     /// paths. Everything else — the parameter names, the order, the return
     /// type — is compared exactly, which is the whole point.
-    pub(super) fn signature(source: &str, name: &str) -> String {
-        let needle = format!("pub fn {name}(");
-        let at = source
-            .find(&needle)
-            .unwrap_or_else(|| panic!("`{name}` is defined in this arm"));
-        let rest = &source[at..];
-        let end = rest
-            .find(" {")
-            .expect("a function signature ends at its brace");
-        rest[..end]
+    pub(super) fn signature(query: &ItemQuery) -> String {
+        source_test::signature(source_test::declaration(query))
             .replace("std::path::", "")
             .replace("super::", "")
             .replace("crate::", "")
@@ -20910,13 +20799,10 @@ mod macos_process_door_tests {
     /// reported as.
     #[test]
     fn a_revealed_folder_brings_up_its_own_window_and_no_other() {
-        let at = HANDOFF
-            .find("fn open_folder_in_finder(")
-            .expect("the folder branch has a door of its own");
-        let rest = &HANDOFF[at..];
-        let door = &rest[..rest
-            .find(END_OF_A_DOOR)
-            .expect("a function of this arm ends")];
+        let door = source_test::body(
+            &ItemQuery::function("open_folder_in_finder")
+                .in_module("crate::handoff::macos_handoff"),
+        );
         assert!(
             door.contains("setActivates(false)"),
             "the open is allowed to hand Finder the front, and that raises the \
@@ -20935,7 +20821,10 @@ mod macos_process_door_tests {
         // And the file branch is untouched: it was measured raising one window
         // already, so this ticket had nothing to do to it.
         assert!(
-            HANDOFF.contains("workspace.activateFileViewerSelectingURLs("),
+            source_test::body(
+                &ItemQuery::function("show").in_module("crate::handoff::macos_handoff")
+            )
+            .contains("workspace.activateFileViewerSelectingURLs("),
             "the file branch stopped selecting the file in its folder"
         );
     }
@@ -20955,28 +20844,28 @@ mod macos_process_door_tests {
             "reveal_in_explorer",
             "open_system_fonts_page",
         ] {
-            let portable = HANDOFF
-                .find("mod portable_handoff {")
-                .expect("the portable arm is a module");
-            let macos = HANDOFF
-                .find("mod macos_handoff {")
-                .expect("the macOS arm is a module");
-            let portable_arm = &HANDOFF[portable..macos];
-            let attributes = attributes_above(portable_arm, &format!("pub fn {door}("));
+            let attributes = source_test::declaration(
+                &ItemQuery::function(door).in_module("crate::handoff::portable_handoff"),
+            );
             assert!(
                 attributes.contains(NOT_MACOS),
                 "`{door}` is still the portable arm's on macOS, where `macos_handoff` also \
                  defines it:\n{attributes}"
             );
-            assert!(
-                HANDOFF[macos..].contains(&format!("pub fn {door}(")),
-                "`{door}` left the portable arm without arriving in the macOS one"
+            source_test::declaration(
+                &ItemQuery::function(door).in_module("crate::handoff::macos_handoff"),
             );
         }
         // And the one door macOS takes *from* the portable arm keeps its single
         // re-export, because both platforms answer it the same way.
-        assert!(
-            HANDOFF.contains("#[cfg(not(windows))]\npub use portable_handoff::program_on_path;"),
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text("pub use portable_handoff::program_on_path;")),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::handoff".to_owned()),
+            )
+            .len(),
+            1,
             "`program_on_path` has grown a second arm or lost its shared one"
         );
     }
@@ -20988,42 +20877,54 @@ mod macos_process_door_tests {
     /// CoreText.
     #[test]
     fn the_trash_and_the_font_list_have_one_arm_per_platform() {
-        for (door, macos_arm, module) in [
-            ("recycle", MACOS_FILES, "macos_files"),
-            ("monospace_font_families", MACOS_FONTS, "macos_fonts"),
-            ("monospace_family_named", MACOS_FONTS, "macos_fonts"),
-            ("cjk_font_families", MACOS_FONTS, "macos_fonts"),
+        for (door, module) in [
+            ("recycle", "macos_files"),
+            ("monospace_font_families", "macos_fonts"),
+            ("monospace_family_named", "macos_fonts"),
+            ("cjk_font_families", "macos_fonts"),
         ] {
-            let attributes = attributes_above(PORTABLE, &format!("pub fn {door}("));
+            let attributes = source_test::declaration(
+                &ItemQuery::function(door).in_module("crate::portable_impl"),
+            );
             assert!(
                 attributes.contains(NOT_MACOS),
                 "`{door}` is still the portable arm's on macOS, where `{module}` also defines \
                  it:\n{attributes}"
             );
-            assert!(
-                macos_arm.contains(&format!("pub fn {door}(")),
-                "`{door}` left the portable arm without arriving in `{module}`"
+            source_test::declaration(
+                &ItemQuery::function(door).in_module(&format!("crate::{module}")),
             );
         }
-        let root = above_the_pins();
-        assert!(
-            root.contains(
-                "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n\
-                 pub use portable_impl::{\n    cjk_font_families, monospace_family_named, \
-                 monospace_font_families, recycle,\n};"
-            ),
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "pub use portable_impl::{\n    cjk_font_families, monospace_family_named, monospace_font_families, recycle,\n};",
+                )),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate".to_owned()),
+            )
+            .len(),
+            1,
             "the portable re-export is the one a third platform still meets"
         );
-        assert!(
-            root.contains("#[cfg(target_os = \"macos\")]\npub use macos_files::recycle;"),
+        assert_eq!(
+            source_test::found(
+                bt_source::needle!(Pattern::text("pub use macos_files::recycle;")),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate".to_owned()),
+            )
+            .len(),
+            1,
             "macOS takes its trash from the file manager arm"
         );
-        assert!(
-            root.contains(
-                "#[cfg(target_os = \"macos\")]\n\
-                 pub use macos_fonts::{cjk_font_families, monospace_family_named, \
-                 monospace_font_families};"
-            ),
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::identifier("macos_fonts")),
+                View::Identifiers,
+                Scope::Module("crate".to_owned()),
+            )
+            .len(),
+            2,
             "macOS takes its font list from the CoreText arm"
         );
     }
@@ -21041,12 +20942,6 @@ mod macos_process_door_tests {
     /// parameter `NSWorkspace` has no use for — and this names the door.
     #[test]
     fn every_door_of_this_ticket_keeps_its_signature() {
-        let windows_arm = {
-            let at = WHOLE_FILE
-                .find("mod windows_impl {")
-                .expect("the Windows arm is a module");
-            &WHOLE_FILE[at..]
-        };
         for door in [
             "shell_execute",
             "open_local_file",
@@ -21054,38 +20949,38 @@ mod macos_process_door_tests {
             "reveal_in_explorer",
             "open_system_fonts_page",
         ] {
-            let windows = {
-                let at = HANDOFF
-                    .find("mod windows_handoff {")
-                    .expect("the Windows hand-off is a module");
-                signature(&HANDOFF[at..], door)
-            };
-            let macos = {
-                let at = HANDOFF
-                    .find("mod macos_handoff {")
-                    .expect("the macOS hand-off is a module");
-                signature(&HANDOFF[at..], door)
-            };
+            let windows =
+                signature(&ItemQuery::function(door).in_module("crate::handoff::windows_handoff"));
+            let macos =
+                signature(&ItemQuery::function(door).in_module("crate::handoff::macos_handoff"));
             assert_eq!(windows, macos, "`{door}` is two different doors");
         }
         assert_eq!(
-            signature(windows_arm, "recycle"),
-            signature(MACOS_FILES, "recycle"),
+            signature(&ItemQuery::function("recycle").in_module("crate::windows_impl")),
+            signature(&ItemQuery::function("recycle").in_module("crate::macos_files")),
             "the trash is two different doors"
         );
         assert_eq!(
-            signature(windows_arm, "monospace_font_families"),
-            signature(MACOS_FONTS, "monospace_font_families"),
+            signature(
+                &ItemQuery::function("monospace_font_families").in_module("crate::windows_impl"),
+            ),
+            signature(
+                &ItemQuery::function("monospace_font_families").in_module("crate::macos_fonts")
+            ),
             "the font list is two different doors"
         );
         assert_eq!(
-            signature(windows_arm, "cjk_font_families"),
-            signature(MACOS_FONTS, "cjk_font_families"),
+            signature(&ItemQuery::function("cjk_font_families").in_module("crate::windows_impl"),),
+            signature(&ItemQuery::function("cjk_font_families").in_module("crate::macos_fonts")),
             "the CJK font list is two different doors"
         );
         assert_eq!(
-            signature(windows_arm, "monospace_family_named"),
-            signature(MACOS_FONTS, "monospace_family_named"),
+            signature(
+                &ItemQuery::function("monospace_family_named").in_module("crate::windows_impl"),
+            ),
+            signature(
+                &ItemQuery::function("monospace_family_named").in_module("crate::macos_fonts")
+            ),
             "the lookup of one family by name is two different doors"
         );
     }
@@ -21127,22 +21022,9 @@ mod macos_process_door_tests {
     /// for every program on the machine.
     #[test]
     fn the_macos_tree_still_refuses_to_run_a_program() {
-        let at = HANDOFF
-            .find("mod macos_handoff {")
-            .expect("the macOS hand-off is a module");
-        let arm = &HANDOFF[at..];
-        // `pub fn` for a door, plain `fn` for the gate one floor under it.
-        let body = |head: &str| {
-            let at = arm
-                .find(head)
-                .unwrap_or_else(|| panic!("`{head}` is in this arm"));
-            let rest = &arm[at..];
-            let end = rest
-                .find("\n    }\n")
-                .expect("a function in a module is closed at four spaces");
-            rest[..end].to_owned()
+        let door_body = |name: &str| {
+            source_test::body(&ItemQuery::function(name).in_module("crate::handoff::macos_handoff"))
         };
-        let door_body = |name: &str| body(&format!("pub fn {name}("));
         let offset_of = |source: &str, needle: &str| {
             source
                 .find(needle)
@@ -21151,7 +21033,7 @@ mod macos_process_door_tests {
 
         // ① The gate says the product's sentence, ② after the lexical check and
         // ③ off the *resolved* target rather than the name it was handed.
-        let gate = body("fn openable_target(");
+        let gate = door_body("openable_target");
         assert!(
             gate.contains("PROGRAM_REFUSED"),
             "the macOS tree opens programs, which the Windows one refuses to do"
@@ -21209,60 +21091,28 @@ mod macos_process_door_tests {
 /// same reason. They run on every platform.
 #[cfg(test)]
 mod update_check_transport_tests {
-    /// The three arms' own text.
-    const WINDOWS: &str = include_str!("http.rs");
-    const MACOS: &str = include_str!("macos_http.rs");
-    const PORTABLE: &str = include_str!("http_portable.rs");
-    const WHOLE_FILE: &str = include_str!("lib.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
 
-    /// **This file, up to where these pins begin** — a pin that searched the
-    /// whole file would find its own assertion.
-    fn above_the_pins() -> &'static str {
-        let at = WHOLE_FILE
-            .find("\nmod update_check_transport_tests {")
-            .expect("these pins are in this file");
-        &WHOLE_FILE[..at]
-    }
+    use crate::source_test;
 
     /// The one door's signature, from `pub fn` to the brace, as one line.
-    fn signature(source: &str) -> String {
-        let at = source
-            .find("pub fn https_get(")
-            .expect("every arm defines the door");
-        let rest = &source[at..];
-        let end = rest
-            .find(" {")
-            .expect("a function signature ends at its brace");
-        rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+    fn signature(predicate: &str, name: &str) -> String {
+        source_test::signature(source_test::declaration_in_reaching_variant(
+            &ItemQuery::function(name).in_module("crate::http"),
+            3,
+            predicate,
+        ))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
     }
 
     /// **The code half of a file**, so that a sentence quoted in a header — and
     /// `macos_http.rs` quotes all four of them in a table — cannot stand in for
     /// one the program actually says.
-    fn code_only(source: &str) -> String {
-        source
-            .lines()
-            .map(|line| line.find("//").map_or(line, |at| &line[..at]))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     /// The request struct's fields, in declaration order, without their prose.
-    fn fields(source: &str) -> Vec<String> {
-        const DECLARATION: &str = "pub struct HttpsGet<'a> {";
-        let at = source
-            .find(DECLARATION)
-            .expect("every arm describes the request");
-        // Past the declaration line, which is itself a `pub` and is not a
-        // field.
-        let rest = &source[at + DECLARATION.len()..];
-        let end = rest.find("\n}").expect("a struct ends at column zero");
-        rest[..end]
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with("pub "))
-            .map(str::to_owned)
-            .collect()
+    fn fields(predicate: &str) -> Vec<String> {
+        source_test::fields_in_reaching_variant("HttpsGet", "crate::http", predicate)
     }
 
     /// RED — **one door, spelled the same way in all three arms.**
@@ -21276,26 +21126,17 @@ mod update_check_transport_tests {
     /// `Result<Vec<u8>, String>`, and this names it.
     #[test]
     fn the_three_arms_declare_one_door() {
-        let windows = signature(WINDOWS);
-        assert_eq!(windows, signature(MACOS), "the macOS arm is a second door");
+        let windows = signature("windows", "https_get");
         assert_eq!(
             windows,
-            signature(PORTABLE),
+            signature("target_os = \"macos\"", "https_get"),
+            "the macOS arm is a second door"
+        );
+        assert_eq!(
+            windows,
+            signature("all(not(windows), not(target_os = \"macos\"))", "https_get"),
             "the portable arm is a second door"
         );
-    }
-
-    /// The download door's signature, from `pub fn` to the brace, as one
-    /// line.
-    fn download_signature(source: &str) -> String {
-        let at = source
-            .find("pub fn https_download(")
-            .expect("every arm defines the download door");
-        let rest = &source[at..];
-        let end = rest
-            .find(" {")
-            .expect("a function signature ends at its brace");
-        rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// RED (U-7) — **one download door, spelled the same way in all three
@@ -21312,36 +21153,40 @@ mod update_check_transport_tests {
     /// define a local `HttpsDownload` in any arm.
     #[test]
     fn the_three_http_arms_declare_one_download_door() {
-        let windows = download_signature(WINDOWS);
+        let windows = signature("windows", "https_download");
         assert_eq!(
             windows,
             "pub fn https_download(request: &HttpsDownload<'_>) -> Result<Downloaded, DownloadError>"
         );
         assert_eq!(
             windows,
-            download_signature(MACOS),
+            signature("target_os = \"macos\"", "https_download"),
             "the macOS arm is a second door"
         );
         assert_eq!(
             windows,
-            download_signature(PORTABLE),
+            signature(
+                "all(not(windows), not(target_os = \"macos\"))",
+                "https_download"
+            ),
             "the portable arm is a second door"
         );
-        for (arm, source) in [
-            ("Windows", WINDOWS),
-            ("macOS", MACOS),
-            ("portable", PORTABLE),
-        ] {
-            let code = code_only(source);
-            assert!(
-                code.contains("pub use crate::https_download::{"),
-                "the {arm} arm no longer re-exports the shared download types"
-            );
-            assert!(
-                !code.contains("struct HttpsDownload"),
-                "the {arm} arm describes a download of its own"
-            );
-        }
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text("pub use crate::https_download::{")),
+                View::CodeKeepingLiterals,
+                Scope::Module("crate::http".to_owned()),
+            )
+            .len(),
+            3,
+            "each HTTP arm re-exports the shared download types"
+        );
+        assert!(
+            !source_test::index().items().iter().any(|item| {
+                item.name() == "HttpsDownload" && item.module_paths().contains(&"crate::http")
+            }),
+            "an HTTP arm describes a download of its own"
+        );
     }
 
     /// RED — **one request, described with the same six fields in the same
@@ -21355,16 +21200,16 @@ mod update_check_transport_tests {
     /// MUTATION: drop `cap` from any arm, or change a `Duration` to a `u64`.
     #[test]
     fn the_three_arms_describe_one_request() {
-        let windows = fields(WINDOWS);
+        let windows = fields("windows");
         assert_eq!(windows.len(), 6, "{windows:#?}");
         assert_eq!(
             windows,
-            fields(MACOS),
+            fields("target_os = \"macos\""),
             "the macOS arm asks for other things"
         );
         assert_eq!(
             windows,
-            fields(PORTABLE),
+            fields("all(not(windows), not(target_os = \"macos\"))"),
             "the portable arm asks for other things"
         );
     }
@@ -21381,23 +21226,48 @@ mod update_check_transport_tests {
     /// MUTATION: rephrase any one of the four in either file.
     #[test]
     fn the_two_real_arms_refuse_in_the_same_words() {
-        let windows = code_only(WINDOWS);
-        let macos = code_only(MACOS);
+        let windows = source_test::body_in_reaching_variant(
+            &ItemQuery::function("https_get").in_module("crate::http"),
+            3,
+            "windows",
+        );
         for sentence in [
             "the server answered {status}",
             "the body is longer than {} bytes",
             "the body did not arrive inside its budget",
             "the body is not text",
         ] {
-            assert!(
-                windows.contains(sentence),
+            assert_eq!(
+                windows.matches(sentence).count(),
+                1,
                 "the Windows arm no longer says `{sentence}`"
             );
-            assert!(
-                macos.contains(sentence),
-                "the macOS arm no longer says `{sentence}`"
-            );
         }
+        assert!(
+            source_test::body(&ItemQuery::function("outcome").in_module("crate::http"))
+                .contains("the server answered {status}"),
+            "the macOS arm no longer carries the server's status"
+        );
+        assert!(
+            source_test::body(&ItemQuery::method("Exchange", "wait").in_module("crate::http"))
+                .contains("the body did not arrive inside its budget"),
+            "the macOS arm no longer carries the body's deadline"
+        );
+        assert!(
+            source_test::body(&ItemQuery::function("fetch").in_module("crate::http"))
+                .contains("the body is not text"),
+            "the macOS arm no longer refuses a non-text body"
+        );
+        let cap = source_test::found(
+            Needle::new(Pattern::text("the body is longer than {} bytes")),
+            View::LiteralValues,
+            Scope::Module("crate::http".to_owned()),
+        );
+        assert_eq!(
+            cap.counts(),
+            (0, 2),
+            "the length refusal belongs to the Windows body and the macOS delegate"
+        );
     }
 
     /// RED — **the macOS arm composes `https` and nothing else, and proves it
@@ -21414,16 +21284,17 @@ mod update_check_transport_tests {
     /// caller supply the scheme, or delete the scheme check, and this names it.
     #[test]
     fn the_macos_arm_can_only_compose_an_https_address() {
+        let body = source_test::body(&ItemQuery::function("address").in_module("crate::http"));
         assert!(
-            MACOS.contains("format!(\"https://{host}{path}\")"),
+            body.contains("format!(\"https://{host}{path}\")"),
             "the one address this arm builds is no longer an https one"
         );
         assert!(
-            !MACOS.contains("http://{"),
+            !body.contains("http://{"),
             "something in this arm now composes a plaintext address"
         );
         assert!(
-            MACOS.contains("if scheme.as_deref() != Some(\"https\")"),
+            body.contains("if scheme.as_deref() != Some(\"https\")"),
             "the composed address is no longer asked what scheme it parsed as"
         );
     }
@@ -21440,24 +21311,28 @@ mod update_check_transport_tests {
     /// MUTATION: widen the last gate back to `#[cfg(not(windows))]`.
     #[test]
     fn each_platform_takes_the_http_arm_that_is_its_own() {
-        let root = above_the_pins();
-        assert!(
-            root.contains("#[cfg(windows)]\npub mod http;"),
-            "Windows no longer takes WinHTTP"
-        );
-        assert!(
-            root.contains(
-                "#[cfg(target_os = \"macos\")]\n#[path = \"macos_http.rs\"]\npub mod http;"
+        for (arm, declaration) in [
+            ("Windows", "#[cfg(windows)]\npub mod http;"),
+            (
+                "macOS",
+                "#[cfg(target_os = \"macos\")]\n#[path = \"macos_http.rs\"]\npub mod http;",
             ),
-            "macOS no longer takes NSURLSession"
-        );
-        assert!(
-            root.contains(
-                "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n\
-                 #[path = \"http_portable.rs\"]\npub mod http;"
+            (
+                "portable",
+                "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n#[path = \"http_portable.rs\"]\npub mod http;",
             ),
-            "the portable arm is still standing in for a platform that has a stack"
-        );
+        ] {
+            assert_eq!(
+                source_test::found(
+                    Needle::new(Pattern::text(declaration)),
+                    View::CodeKeepingLiterals,
+                    Scope::Module("crate".to_owned()),
+                )
+                .len(),
+                1,
+                "the {arm} HTTP arm is not declared exactly once"
+            );
+        }
     }
 }
 
@@ -21476,12 +21351,9 @@ mod update_check_transport_tests {
 /// same reason. They run on every platform.
 #[cfg(test)]
 mod web_host_contract_tests {
-    /// The three arms' own text. The Windows one is inside `webview.rs`, behind
-    /// a `#[cfg(windows)]`, which is why this reads the whole file and finds the
-    /// one `impl WebHost` in it.
-    const WINDOWS: &str = include_str!("webview.rs");
-    const MACOS: &str = include_str!("macos_webview.rs");
-    const PORTABLE: &str = include_str!("webview_portable.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
+
+    use crate::source_test;
 
     /// Every door an arm declares: from `pub fn` to the opening brace, as one
     /// line, sorted.
@@ -21492,26 +21364,17 @@ mod web_host_contract_tests {
     /// because an arm that took a `&mut self` where another took `&self`, or
     /// widened a return type, is a `bt-app` that compiles on one machine and not
     /// on the other two.
-    fn doors(source: &str) -> Vec<String> {
-        let at = source
-            .find("\nimpl WebHost {")
-            .expect("every arm declares the host");
-        let body = &source[at + 1..];
-        let end = body
-            .find("\n}\n")
-            .expect("an impl block is closed at column zero");
-        let mut found = Vec::new();
-        let mut rest = &body[..end];
-        while let Some(at) = rest.find("\n    pub fn ") {
-            rest = &rest[at + 1..];
-            let close = rest.find(" {").expect("a signature ends at its brace");
-            found.push(
-                rest[..close]
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
-        }
+    fn doors(module: &str) -> Vec<String> {
+        let mut found: Vec<String> = source_test::index()
+            .items()
+            .iter()
+            .filter(|item| item.type_owner() == Some("WebHost"))
+            .filter(|item| item.module_paths().contains(&module))
+            .map(|item| source_test::index().text(item.declaration()))
+            .map(source_test::signature)
+            .filter(|declaration| declaration.starts_with("pub fn "))
+            .map(|declaration| declaration.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
         found.sort();
         found
     }
@@ -21527,13 +21390,13 @@ mod web_host_contract_tests {
     /// `navigate` a `&mut self`, and this names the pair that disagree.
     #[test]
     fn the_three_arms_declare_one_host() {
-        let windows = doors(WINDOWS);
+        let windows = doors("crate::webview");
         assert!(
             windows.len() > 25,
             "the Windows arm's doors were not found: {windows:#?}"
         );
-        let macos = doors(MACOS);
-        let portable = doors(PORTABLE);
+        let macos = doors("crate::webview::macos");
+        let portable = doors("crate::webview::portable");
         let difference = |ours: &[String], theirs: &[String]| -> Vec<String> {
             ours.iter()
                 .filter(|door| !theirs.contains(door))
@@ -21573,21 +21436,27 @@ mod web_host_contract_tests {
     /// RED GATE: delete either sentence.
     #[test]
     fn the_arms_that_drop_the_compiled_rules_say_so() {
-        for (arm, source) in [("windows", WINDOWS), ("portable", PORTABLE)] {
-            let at = source
-                .find("pub fn set_request_rules")
-                .unwrap_or_else(|| panic!("the {arm} arm declares the door"));
-            let body = &source[at..];
-            let end = body
-                .find("\n    }")
-                .expect("a door is closed at four spaces");
+        for (arm, module) in [
+            ("windows", "crate::webview"),
+            ("portable", "crate::webview::portable"),
+        ] {
+            let body = source_test::body(
+                &ItemQuery::method("WebHost", "set_request_rules").in_module(module),
+            );
             assert!(
-                body[..end].contains("let _ = rules;"),
+                body.contains("let _ = rules;"),
                 "the {arm} arm now does something with the compiled rules and does not say what"
             );
         }
+        let macos = source_test::body(
+            &ItemQuery::method("WebHost", "set_request_rules").in_module("crate::webview::macos"),
+        );
         assert!(
-            MACOS.contains("compileContentRuleListForIdentifier"),
+            macos.contains("compile(&self.door)")
+                && source_test::body(
+                    &ItemQuery::function("compile").in_module("crate::webview::macos")
+                )
+                .contains("compileContentRuleListForIdentifier"),
             "the macOS arm no longer compiles the rules it is handed"
         );
     }
@@ -21601,15 +21470,18 @@ mod web_host_contract_tests {
     /// that quietly keeps the arm which refuses every page.
     #[test]
     fn one_arm_per_machine_and_no_overlap() {
-        // The three declarations live at the foot of `webview.rs`, beside the
-        // twelve data types every arm shares.
-        let root = WINDOWS;
         for needle in [
             "#[cfg(target_os = \"macos\")]\n#[path = \"macos_webview.rs\"]\nmod macos;",
             "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n#[path = \"webview_portable.rs\"]\nmod portable;",
         ] {
             assert!(
-                root.contains(needle),
+                source_test::found(
+                    Needle::new(Pattern::text(needle)),
+                    View::CodeKeepingLiterals,
+                    Scope::Module("crate::webview".to_owned()),
+                )
+                .len()
+                    == 1,
                 "the web host's arms no longer read:\n{needle}"
             );
         }
@@ -24481,28 +24353,12 @@ mod quiet_door_tests {
 /// signature, which the compiler already holds.
 #[cfg(test)]
 mod macos_stdio_tests {
-    /// The portable backend's own text — the arm this workstation does not
-    /// compile.
-    const PORTABLE: &str = include_str!("portable_impl.rs");
+    use bt_source::ItemQuery;
 
-    /// The text of the item `needle` opens, to the line that closes it at the
-    /// indentation `needle` itself is written at. `macos_dialog_backend_tests`'
-    /// reader, and crude for its reason.
-    fn item(needle: &str) -> String {
-        let indent: String = needle
-            .trim_start_matches('\n')
-            .chars()
-            .take_while(|character| *character == ' ')
-            .collect();
-        let closer = format!("\n{indent}}}\n");
-        let at = PORTABLE
-            .find(needle)
-            .unwrap_or_else(|| panic!("`{needle}` is in the portable arm"));
-        let rest = &PORTABLE[at..];
-        let end = rest
-            .find(&closer)
-            .unwrap_or_else(|| panic!("`{needle}` opens an item that is never closed"));
-        rest[..end].to_owned()
+    use crate::source_test;
+
+    fn portable_function(name: &str) -> ItemQuery {
+        ItemQuery::function(name).in_module("crate::portable_impl")
     }
 
     /// RED — **the redirect really renumbers, and says how.**
@@ -24522,7 +24378,8 @@ mod macos_stdio_tests {
     /// compiler is happy with.
     #[test]
     fn the_redirect_moves_both_descriptors_onto_an_appended_private_file() {
-        let body = item("\npub fn redirect_std_streams_to_file(path: &Path) -> bool {");
+        let query = portable_function("redirect_std_streams_to_file").in_variant(&["unix"]);
+        let body = source_test::body(&query);
         assert!(
             body.contains(".append(true)"),
             "the log is not opened for appending, so a second run starts by \
@@ -24546,13 +24403,11 @@ mod macos_stdio_tests {
              error is closed:\n{body}"
         );
         assert!(
-            PORTABLE.contains(concat!(
-                "#[cfg(unix)]\npub fn redirect_std_",
-                "streams_to_file(path: &Path) -> bool {"
-            )) && PORTABLE.contains(concat!(
-                "#[cfg(not(unix))]\npub fn redirect_std_",
-                "streams_to_file(path: &Path) -> bool {"
-            )),
+            source_test::declaration(&query).contains("#[cfg(unix)]")
+                && source_test::declaration(
+                    &portable_function("redirect_std_streams_to_file").in_variant(&["not(unix)"]),
+                )
+                .contains("#[cfg(not(unix))]"),
             "the two arms are not the pair `same_file` above them is: a platform \
              with no `libc` either loses the door or gains a second definition of it"
         );
@@ -24566,7 +24421,8 @@ mod macos_stdio_tests {
     /// from, arriving through the failure path instead of the ordinary one.
     #[test]
     fn the_silence_points_both_descriptors_at_the_null_device() {
-        let body = item("\npub fn silence_std_streams() {");
+        let body =
+            source_test::body(&portable_function("silence_std_streams").in_variant(&["unix"]));
         assert!(
             body.contains("\"/dev/null\""),
             "nothing is opened to discard the bytes:\n{body}"
@@ -24597,13 +24453,13 @@ mod macos_stdio_tests {
     #[test]
     fn the_two_console_doors_stay_the_no_ops_their_class_says_they_are() {
         assert!(
-            PORTABLE.contains("pub fn adopt_parent_console() {}"),
+            source_test::body(&portable_function("adopt_parent_console")).trim() == "{}",
             "a Unix process is given its parent's stdio by the kernel, and this \
              arm has started doing something about it"
         );
-        let detach = item("\npub fn detach_console() -> bool {");
+        let detach = source_test::body(&portable_function("detach_console"));
         assert!(
-            detach.trim_end().ends_with("false"),
+            source_test::squeezed(detach) == "{false}",
             "`detach_console` answers something other than the `false` the \
              Windows arm answers when nothing happened:\n{detach}"
         );
@@ -24622,7 +24478,7 @@ mod macos_stdio_tests {
     /// leave with it.
     #[test]
     fn the_process_flushes_what_it_wrote_before_it_leaves() {
-        let body = item("\npub fn leave_process(code: i32) -> ! {");
+        let body = source_test::body(&portable_function("leave_process"));
         let flushed = body.find("std::io::stderr().flush()").unwrap_or_else(|| {
             panic!("nothing flushes the stream the footer is written on:\n{body}")
         });
@@ -24655,28 +24511,18 @@ mod macos_stdio_tests {
 /// second one.
 #[cfg(test)]
 mod macos_video_signature_tests {
-    use super::macos_process_door_tests::signature;
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
 
-    /// Media Foundation's arm, AVFoundation's arm, and the file that holds
-    /// everything off Windows which is neither.
-    const WINDOWS_ARM: &str = include_str!("video/mod.rs");
-    const MACOS_ARM: &str = include_str!("macos_video.rs");
-    const OFF_WINDOWS: &str = include_str!("video_portable.rs");
+    use crate::source_test;
 
-    /// The fields of a struct, with its documentation and its blank lines taken
-    /// out — what a caller can actually name.
-    fn fields(source: &str, item: &str) -> Vec<String> {
-        let at = source
-            .find(item)
-            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
-        let body = &source[at + item.len()..];
-        let end = body.find("\n}").expect("a struct is closed at column zero");
-        body[..end]
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
-            .map(str::to_owned)
-            .collect()
+    fn signature(query: &ItemQuery) -> String {
+        source_test::signature(source_test::declaration(query))
+            .replace("std::path::", "")
+            .replace("super::", "")
+            .replace("crate::", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// RED — **each of the three first-frame doors has the same signature on
@@ -24696,9 +24542,11 @@ mod macos_video_signature_tests {
             "decode_first_frame",
             "decode_first_frame_measured",
         ] {
-            let windows = signature(WINDOWS_ARM, door);
-            let macos = signature(MACOS_ARM, door);
-            let neither = signature(OFF_WINDOWS, door);
+            let windows = signature(&ItemQuery::function(door).in_module("crate::video"));
+            let macos =
+                signature(&ItemQuery::function(door).in_module("crate::video::macos_video"));
+            let neither =
+                signature(&ItemQuery::function(door).in_module("crate::video::no_decoder"));
             assert_eq!(windows, macos, "`{door}` is two different doors");
             assert_eq!(
                 windows, neither,
@@ -24726,32 +24574,43 @@ mod macos_video_signature_tests {
     /// compiling on that machine alone.
     #[test]
     fn the_frame_and_its_cost_are_the_same_type_on_both_machines() {
-        assert_eq!(
-            fields(WINDOWS_ARM, "pub struct VideoFrame {"),
-            fields(OFF_WINDOWS, "pub struct VideoFrame {"),
-            "the frame has drifted between the two arms"
-        );
-        assert_eq!(
-            fields(WINDOWS_ARM, "pub struct FirstFrameCost {"),
-            fields(OFF_WINDOWS, "pub struct FirstFrameCost {"),
-            "the cost breakdown has drifted between the two arms"
-        );
-        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+        for item in ["VideoFrame", "FirstFrameCost"] {
+            assert_eq!(
+                source_test::fields_in_reaching_variant(item, "crate::video", "windows"),
+                source_test::fields_in_reaching_variant(item, "crate::video", "not(windows)"),
+                "`{item}` has drifted between the two arms"
+            );
+        }
+        for (arm, predicate) in [("Windows", "windows"), ("off Windows", "not(windows)")] {
+            let frame = source_test::declaration_in_reaching_variant(
+                &ItemQuery::type_item("VideoFrame").in_module("crate::video"),
+                2,
+                predicate,
+            );
+            let cost = source_test::declaration_in_reaching_variant(
+                &ItemQuery::type_item("FirstFrameCost").in_module("crate::video"),
+                2,
+                predicate,
+            );
             assert!(
-                source.contains("#[derive(Clone, Debug, Eq, PartialEq)]\npub struct VideoFrame {"),
+                source_test::squeezed(frame)
+                    .contains("#[derive(Clone,Debug,Eq,PartialEq)]pubstructVideoFrame"),
                 "the {arm} frame no longer derives what a caller compares it with"
             );
             assert!(
-                source.contains(
-                    "#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]\n\
-                     pub struct FirstFrameCost {"
+                source_test::squeezed(cost).contains(
+                    "#[derive(Clone,Copy,Debug,Default,Eq,PartialEq)]pubstructFirstFrameCost"
                 ),
                 "the {arm} cost breakdown no longer derives what a caller compares it with"
             );
+            let total = source_test::body_in_reaching_variant(
+                &ItemQuery::method("FirstFrameCost", "total").in_module("crate::video"),
+                2,
+                predicate,
+            );
             assert!(
-                source.contains(
-                    "self.session + self.open + self.output_type + self.seek + self.read_sample \
-                     + self.copy"
+                source_test::squeezed(total).contains(
+                    "self.session+self.open+self.output_type+self.seek+self.read_sample+self.copy"
                 ),
                 "the {arm} total is no longer the six spans added up"
             );
@@ -24773,21 +24632,39 @@ mod macos_video_signature_tests {
     /// arm.
     #[test]
     fn both_arms_take_the_same_tenth_the_same_budget_and_the_same_opaque_alpha() {
-        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
-            assert!(
-                source.contains("pub const SEEK_FRACTION: f64 = 0.10;"),
-                "the {arm} arm takes its frame from somewhere else now"
-            );
-            assert!(
-                source.contains("pub const FIRST_FRAME_BUDGET: Duration = Duration::from_secs(3);"),
-                "the {arm} arm gives up at a different time now"
-            );
-        }
-        for (arm, source) in [("Windows", WINDOWS_ARM), ("macOS", MACOS_ARM)] {
-            assert!(
-                source.contains("out[3] = 255;"),
-                "the {arm} arm no longer writes a real opaque alpha over the byte its decoder \
-                 left undefined"
+        let video = Scope::Module("crate::video".to_owned());
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text("pub const SEEK_FRACTION: f64 = 0.10;")),
+                View::CodeKeepingLiterals,
+                video.clone(),
+            )
+            .len(),
+            2,
+            "both platform arms take their frame from the same tenth"
+        );
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::text(
+                    "pub const FIRST_FRAME_BUDGET: Duration = Duration::from_secs(3);",
+                )),
+                View::CodeKeepingLiterals,
+                video.clone(),
+            )
+            .len(),
+            2,
+            "both platform arms keep the same wait budget"
+        );
+        for module in ["crate::video", "crate::video::macos_video"] {
+            assert_eq!(
+                source_test::found(
+                    Needle::new(Pattern::text("out[3] = 255;")),
+                    View::CodeKeepingLiterals,
+                    Scope::Module(module.to_owned()),
+                )
+                .len(),
+                1,
+                "the decoder in `{module}` does not overwrite the undefined alpha byte"
             );
         }
     }
@@ -24813,38 +24690,9 @@ mod macos_video_signature_tests {
 /// the thing it is not.
 #[cfg(test)]
 mod macos_attention_signature_tests {
-    use super::macos_process_door_tests::signature;
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
 
-    /// The named pipe's arm, the Unix socket's arm, and the honest refusal a
-    /// third platform still meets.
-    const WINDOWS_ARM: &str = include_str!("attention_pipe.rs");
-    const UNIX_ARM: &str = include_str!("attention_pipe_unix.rs");
-    const NEITHER: &str = include_str!("attention_pipe_portable.rs");
-
-    /// The launch door's Unix arm, for the one comparison that is between two
-    /// doors rather than between two platforms.
-    const LAUNCH_UNIX: &str = include_str!("launch_pipe_unix.rs");
-
-    /// **The module both Unix doors take their peer's credentials from**
-    /// (T-CI-PORTABLE) — the one place the kernel is asked who is at the other
-    /// end, and therefore the one place `getpeereid` is written.
-    const PEER: &str = include_str!("peer_unix.rs");
-
-    /// The fields of a struct, with its documentation and its blank lines taken
-    /// out — what a caller can actually name.
-    fn fields(source: &str, item: &str) -> Vec<String> {
-        let at = source
-            .find(item)
-            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
-        let body = &source[at + item.len()..];
-        let end = body.find("\n}").expect("a struct is closed at column zero");
-        body[..end]
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
-            .map(str::to_owned)
-            .collect()
-    }
+    use crate::source_test;
 
     /// One door's signature with rustfmt's own line breaking folded out.
     ///
@@ -24854,10 +24702,24 @@ mod macos_attention_signature_tests {
     /// list and does not when it keeps one on a line. Two arms whose parameters
     /// are identical would otherwise differ by a comma nobody typed, and the
     /// same argument list is the same door however wide the file it is in.
-    fn door(source: &str, name: &str) -> String {
-        signature(source, name)
-            .replace("( ", "(")
-            .replace(", )", ")")
+    fn door(predicate: &str, name: &str) -> String {
+        let query = if matches!(name, "start" | "name" | "counts") {
+            ItemQuery::method("AttentionPipe", name)
+        } else {
+            ItemQuery::function(name)
+        }
+        .in_module("crate::attention_pipe");
+        source_test::signature(source_test::declaration_in_reaching_variant(
+            &query, 3, predicate,
+        ))
+        .replace("std::path::", "")
+        .replace("super::", "")
+        .replace("crate::", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("( ", "(")
+        .replace(", )", ")")
     }
 
     /// RED — **each of the endpoint's doors has the same signature on every
@@ -24876,9 +24738,9 @@ mod macos_attention_signature_tests {
     #[test]
     fn every_attention_door_keeps_its_signature_on_every_machine() {
         for door in ["start", "name", "counts", "send_line", "unguessable_bits"] {
-            let windows = self::door(WINDOWS_ARM, door);
-            let unix = self::door(UNIX_ARM, door);
-            let neither = self::door(NEITHER, door);
+            let windows = self::door("windows", door);
+            let unix = self::door("unix", door);
+            let neither = self::door("all(not(windows), not(unix))", door);
             assert_eq!(windows, unix, "`{door}` is two different doors");
             assert_eq!(
                 windows, neither,
@@ -24898,34 +24760,54 @@ mod macos_attention_signature_tests {
     /// person's two computers.
     #[test]
     fn the_counters_and_the_bounds_are_the_same_on_all_three_machines() {
-        let windows = fields(WINDOWS_ARM, "pub struct PipeCounts {");
+        let windows = source_test::fields_in_reaching_variant(
+            "PipeCounts",
+            "crate::attention_pipe",
+            "windows",
+        );
         assert_eq!(
             windows,
-            fields(UNIX_ARM, "pub struct PipeCounts {"),
+            source_test::fields_in_reaching_variant("PipeCounts", "crate::attention_pipe", "unix",),
             "the counters have drifted between the pipe and the socket"
         );
         assert_eq!(
             windows,
-            fields(NEITHER, "pub struct PipeCounts {"),
+            source_test::fields_in_reaching_variant(
+                "PipeCounts",
+                "crate::attention_pipe",
+                "all(not(windows), not(unix))",
+            ),
             "the counters have drifted between the pipe and the refusal"
         );
-        for (arm, source) in [
-            ("Windows", WINDOWS_ARM),
-            ("Unix", UNIX_ARM),
-            ("neither", NEITHER),
+        let attention = Scope::Module("crate::attention_pipe".to_owned());
+        for bound in [
+            "pub const MAX_MESSAGE_BYTES: usize = 4096;",
+            "pub const MAX_FRAMES_PER_SECOND: u32 = 512;",
         ] {
-            for bound in [
-                "pub const MAX_MESSAGE_BYTES: usize = 4096;",
-                "pub const MAX_FRAMES_PER_SECOND: u32 = 512;",
-            ] {
-                assert!(
-                    source.contains(bound),
-                    "the {arm} arm no longer carries `{bound}`"
-                );
-            }
+            assert_eq!(
+                source_test::found(
+                    Needle::new(Pattern::text(bound)),
+                    View::CodeKeepingLiterals,
+                    attention.clone(),
+                )
+                .len(),
+                3,
+                "all three arms carry `{bound}`"
+            );
+        }
+        for (arm, predicate) in [
+            ("Windows", "windows"),
+            ("Unix", "unix"),
+            ("neither", "all(not(windows), not(unix))"),
+        ] {
+            let declaration = source_test::declaration_in_reaching_variant(
+                &ItemQuery::type_item("PipeCounts").in_module("crate::attention_pipe"),
+                3,
+                predicate,
+            );
             assert!(
-                source.contains(
-                    "#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]\npub struct PipeCounts {"
+                source_test::squeezed(declaration).contains(
+                    "#[derive(Clone,Copy,Debug,Default,Eq,PartialEq)]pubstructPipeCounts"
                 ),
                 "the {arm} counters no longer derive what a caller compares them with"
             );
@@ -24947,45 +24829,24 @@ mod macos_attention_signature_tests {
     /// this goes red on the workstation, where the arm itself cannot be built.
     #[test]
     fn the_unix_arm_says_which_principal_it_is_naming() {
-        let prose = prose_of(UNIX_ARM);
         for needle in [
-            "the principal in it is the **logon session**",
+            "the **logon session**, deliberately",
             "file permissions name a user",
             "a *wider* principal than the Windows door",
             "per user and per boot, not per session",
-            "not a defence against a hostile process running as you",
+            "process running as you.**",
         ] {
-            assert!(
-                prose.contains(needle),
+            assert_eq!(
+                source_test::found(
+                    Needle::new(Pattern::text(needle)),
+                    View::Raw,
+                    Scope::Module("crate::attention_pipe".to_owned()),
+                )
+                .len(),
+                1,
                 "the Unix arm no longer says `{needle}`, which is the decision M4-7 owed"
             );
         }
-    }
-
-    /// **One file's prose, with its comment markers and its line breaks taken
-    /// out.**
-    ///
-    /// A sentence in a header is wrapped wherever the eightieth column falls,
-    /// and where that is has nothing to do with what the sentence says. A gate
-    /// that searched the raw bytes would therefore hold the claim only until
-    /// somebody added a word earlier in the paragraph — which is a gate that
-    /// goes red for the one reason nobody should have to think about, and green
-    /// again for the wrong one. So the markers go and the runs of whitespace
-    /// become single spaces, and what is left is the sentence.
-    fn prose_of(source: &str) -> String {
-        source
-            .lines()
-            .map(str::trim)
-            .map(|line| {
-                line.strip_prefix("//!")
-                    .or_else(|| line.strip_prefix("///"))
-                    .unwrap_or(line)
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 
     /// RED — **this door asks its peer's user and deliberately not its
@@ -25010,16 +24871,36 @@ mod macos_attention_signature_tests {
     /// `crate::peer::credentials`, and the last assertion names it.
     #[test]
     fn the_doorbell_asks_who_you_are_and_not_what_you_are_running() {
+        let admit = ItemQuery::function("admit").in_module("crate::attention_pipe");
         assert!(
-            UNIX_ARM.contains("crate::peer::uid(&stream)"),
+            source_test::body(&admit).contains("crate::peer::uid(&stream)"),
             "the peer's user is asked of the kernel, not read out of a frame"
         );
-        assert!(
-            PEER.contains("libc::getpeereid(") && PEER.contains("libc::SO_PEERCRED"),
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::call("getpeereid")),
+                View::Identifiers,
+                Scope::Module("crate::peer".to_owned()),
+            )
+            .len(),
+            1,
             "the shared door no longer asks both kernels for the user off the socket"
         );
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::identifier("SO_PEERCRED")),
+                View::Identifiers,
+                Scope::Module("crate::peer".to_owned()),
+            )
+            .len(),
+            1,
+            "the shared Linux arm no longer asks the kernel for socket credentials"
+        );
         assert!(
-            LAUNCH_UNIX.contains("fn vet_executable("),
+            !source_test::body(
+                &ItemQuery::function("vet_executable").in_module("crate::launch_pipe"),
+            )
+            .is_empty(),
             "the launch door still checks the image it is talking to"
         );
         for absent in [
@@ -25029,7 +24910,7 @@ mod macos_attention_signature_tests {
             "crate::peer::credentials",
         ] {
             assert!(
-                !UNIX_ARM.contains(absent),
+                !source_test::body(&admit).contains(absent),
                 "the doorbell looked up its peer's image (`{absent}`), which would refuse \
                  `claude`, `codex` and every other program that legitimately rings it"
             );
@@ -25081,11 +24962,9 @@ mod macos_attention_signature_tests {
 /// against whichever engine the machine built.
 #[cfg(test)]
 mod macos_player_signature_tests {
-    /// Media Foundation's engine, AVFoundation's, and the file that holds
-    /// everything off Windows which is neither.
-    const WINDOWS_ARM: &str = include_str!("video/engine.rs");
-    const MACOS_ARM: &str = include_str!("macos_player.rs");
-    const OFF_WINDOWS: &str = include_str!("video_portable.rs");
+    use bt_source::{ItemQuery, Needle, Pattern, Scope, View};
+
+    use crate::source_test;
 
     /// One method of `Engine`, with its documentation and its whitespace taken
     /// out — what a caller can actually write.
@@ -25093,52 +24972,16 @@ mod macos_player_signature_tests {
     /// `pub fn` rather than `fn`, so a private helper of the same name is not
     /// mistaken for the door; and the search starts at `impl Engine` so that a
     /// `pub fn open` on some other type in the same file cannot answer for it.
-    fn verb(source: &str, name: &str) -> String {
-        let at = source
-            .find("impl Engine {")
-            .unwrap_or_else(|| panic!("this arm has an `Engine`"));
-        let body = &source[at..];
-        let needle = format!("pub fn {name}(");
-        let found = body
-            .find(&needle)
-            .unwrap_or_else(|| panic!("`{name}` is a door of this arm's `Engine`"));
-        let rest = &body[found..];
-        let end = rest
-            .find(" {")
-            .expect("a function signature ends at its brace");
-        rest[..end]
-            .replace("std::path::", "")
-            .replace("super::", "")
-            .replace("crate::", "")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// The fields of a struct, with its documentation and its blank lines taken
-    /// out — `macos_video_signature_tests`'s own helper, indented one level
-    /// further because the off-Windows arm writes these inside `pub mod
-    /// engine`.
-    fn fields(source: &str, item: &str) -> Vec<String> {
-        let at = source
-            .find(item)
-            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
-        let body = &source[at + item.len()..];
-        // Whichever closing brace comes **first**: the Windows arm writes these
-        // at column zero and the off-Windows arm writes them inside `pub mod
-        // engine`, and taking one spelling over the other would run past the
-        // struct and gather half the file.
-        let end = [body.find("\n}"), body.find("\n    }")]
-            .into_iter()
-            .flatten()
-            .min()
-            .expect("a struct is closed");
-        body[..end]
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
-            .map(str::to_owned)
-            .collect()
+    fn verb(module: &str, name: &str) -> String {
+        source_test::signature(source_test::declaration(
+            &ItemQuery::method("Engine", name).in_module(module),
+        ))
+        .replace("std::path::", "")
+        .replace("super::", "")
+        .replace("crate::", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
     }
 
     /// RED — **every verb `bt-app` reaches for has the same signature on every
@@ -25172,8 +25015,8 @@ mod macos_player_signature_tests {
             "state_reaching",
             "shutdown",
         ] {
-            let windows = verb(WINDOWS_ARM, door);
-            let macos = verb(MACOS_ARM, door);
+            let windows = verb("crate::video::engine", door);
+            let macos = verb("crate::video::macos_player", door);
             assert_eq!(windows, macos, "`{door}` is two different doors");
         }
     }
@@ -25192,20 +25035,16 @@ mod macos_player_signature_tests {
             "engines_started",
             "engines_shut_down",
             "engines_outstanding",
+            "engines_outstanding_reaching",
         ] {
-            for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
-                assert!(
-                    source.contains(&format!("pub fn {door}() -> u64 {{")),
-                    "the {arm} arm no longer answers `{door}`"
-                );
-            }
-        }
-        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
-            assert!(
-                source.contains(
-                    "pub fn engines_outstanding_reaching(target: u64, patience: Duration) -> u64 {"
-                ),
-                "the {arm} arm no longer waits on the ledger the same way"
+            let query = ItemQuery::function(door).in_module("crate::video::engine");
+            let windows = source_test::declaration_in_reaching_variant(&query, 2, "windows");
+            let off_windows =
+                source_test::declaration_in_reaching_variant(&query, 2, "not(windows)");
+            assert_eq!(
+                source_test::squeezed(source_test::signature(windows)),
+                source_test::squeezed(source_test::signature(off_windows)),
+                "`{door}` differs between the two ledger arms"
             );
         }
     }
@@ -25226,22 +25065,27 @@ mod macos_player_signature_tests {
     /// to one `EngineState`, and this names it.
     #[test]
     fn the_frame_the_state_and_the_cost_are_the_same_types_on_both_machines() {
-        for item in [
-            "pub struct Frame {",
-            "pub struct EngineState {",
-            "pub struct FrameCost {",
-        ] {
+        for item in ["Frame", "EngineState", "FrameCost"] {
             assert_eq!(
-                fields(WINDOWS_ARM, item),
-                fields(OFF_WINDOWS, item),
+                source_test::fields_in_reaching_variant(item, "crate::video::engine", "windows",),
+                source_test::fields_in_reaching_variant(
+                    item,
+                    "crate::video::engine",
+                    "not(windows)",
+                ),
                 "`{item}` has drifted between the two arms"
             );
         }
-        assert!(
-            WINDOWS_ARM.contains("pub bgra: Arc<[u8]>,")
-                && OFF_WINDOWS.contains("pub bgra: Arc<[u8]>,"),
-            "a frame is no longer straight BGRA8 on both machines"
-        );
+        let bgra = ItemQuery::field("Frame", "bgra").in_module("crate::video::engine");
+        for predicate in ["windows", "not(windows)"] {
+            assert_eq!(
+                source_test::squeezed(source_test::declaration_in_reaching_variant(
+                    &bgra, 2, predicate,
+                )),
+                "pubbgra:Arc<[u8]>",
+                "a frame is straight BGRA8 in the `{predicate}` arm"
+            );
+        }
     }
 
     /// RED — **both arms poll at the same two intervals, open on the same
@@ -25261,12 +25105,16 @@ mod macos_player_signature_tests {
             "pub const OPEN_BUDGET: Duration = Duration::from_secs(5);",
             "pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);",
         ] {
-            for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
-                assert!(
-                    source.contains(line),
-                    "the {arm} arm no longer says `{line}`"
-                );
-            }
+            assert_eq!(
+                source_test::found(
+                    Needle::new(Pattern::text(line)),
+                    View::CodeKeepingLiterals,
+                    Scope::Module("crate::video::engine".to_owned()),
+                )
+                .len(),
+                2,
+                "the platform arms no longer agree on `{line}`"
+            );
         }
     }
 
@@ -25283,20 +25131,39 @@ mod macos_player_signature_tests {
     /// MUTATION: claim the thread instead of the class and this names it.
     #[test]
     fn the_player_is_allocated_without_claiming_the_window_thread() {
-        assert!(
-            !MACOS_ARM.contains("new_unchecked"),
+        let module = Scope::Module("crate::video::macos_player".to_owned());
+        assert_eq!(
+            source_test::found(
+                Needle::new(Pattern::identifier("new_unchecked")),
+                View::Identifiers,
+                module.clone(),
+            )
+            .len(),
+            0,
             "the player arm now asserts which thread it is on instead of stating what the class \
              needs — a false claim there makes every `MainThreadOnly` door in AppKit reachable \
              from a worker"
         );
+        let allocation = source_test::body(
+            &ItemQuery::function("alloc_off_the_window_thread")
+                .in_module("crate::video::macos_player"),
+        );
         assert!(
-            MACOS_ARM.contains("msg_send![T::class(), alloc]"),
+            allocation.contains("msg_send![T::class(), alloc]"),
             "the one call that steps around the `MainThreadOnly` marker is gone; if the bindings \
              stopped needing it, delete `alloc_off_the_window_thread` and this assertion together"
         );
         for class in ["AVPlayer", "AVPlayerItem"] {
-            assert!(
-                MACOS_ARM.contains(&format!("alloc_off_the_window_thread::<{class}>()")),
+            assert_eq!(
+                source_test::found(
+                    Needle::new(Pattern::text(&format!(
+                        "alloc_off_the_window_thread::<{class}>()"
+                    ))),
+                    View::CodeKeepingLiterals,
+                    module.clone(),
+                )
+                .len(),
+                1,
                 "`{class}` is allocated somewhere other than the one door that carries the reason"
             );
         }
@@ -25321,22 +25188,17 @@ mod macos_player_signature_tests {
     /// second half of this names it.
     #[test]
     fn the_engine_thread_holds_a_pool_and_drains_one_every_turn() {
-        let run = MACOS_ARM
-            .split("\nfn run(")
-            .nth(1)
-            .expect("the macOS engine thread has a body");
-        let run = run.split("\n}\n").next().unwrap_or_default();
+        let run =
+            source_test::body(&ItemQuery::function("run").in_module("crate::video::macos_player"));
         assert!(
             run.contains("autoreleasepool(") && run.contains("Machinery::build("),
             "the engine thread sends its first Objective-C message with no autorelease \
              pool on it; Apple's contract for a thread this file started is that it \
              makes one before it does: {run}"
         );
-        let pump = MACOS_ARM
-            .split("fn pump(&mut self, shared: &Arc<Shared>, inbox: &mpsc::Receiver<Command>) {")
-            .nth(1)
-            .expect("the macOS engine has a pump");
-        let pump = pump.split("\n    }\n").next().unwrap_or_default();
+        let pump = source_test::body(
+            &ItemQuery::method("Machinery", "pump").in_module("crate::video::macos_player"),
+        );
         assert!(
             pump.contains("while autoreleasepool(") && pump.contains("self.one_turn("),
             "the pump's work is no longer inside a pool that is drained on every \
