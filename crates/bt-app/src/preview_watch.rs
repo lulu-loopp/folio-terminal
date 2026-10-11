@@ -1076,10 +1076,9 @@ mod tests {
     /// even sent to it. The two files share a folder, so the first turn asks for
     /// one folder and the two after it ask for nothing.
     ///
-    /// MUTATIONS: open the ear on every turn rather than once and the first
-    /// assertion goes; tell the ear on every turn rather than on a change and
-    /// the steward's attempt count is unchanged but the second assertion goes —
-    /// the set was sent three times.
+    /// MUTATION: open the ear on every turn (drop `tell_the_ear`'s `changed`
+    /// gate and its `get_or_insert_with`) and the first assertion goes — three
+    /// ears, three clones of the proxy, for one folder.
     #[test]
     fn a_folder_is_subscribed_to_once_however_many_turns_go_by() {
         let door = crate::watch_steward::fake::FakeDoor::default();

@@ -1019,7 +1019,21 @@ mod tests {
         wait_for_a_wake(&wakes, "the refusal");
         assert_eq!(door.attempts(&member), 1);
 
+        // A volume elsewhere, then a request the worker must answer: once its
+        // answer is in, the arrival before it has been served too.
         steward.volume_arrived(PathBuf::from("/Volumes/Elsewhere"));
+        let other = folder("other");
+        ear.want(
+            &BTreeSet::from([member.clone(), other.clone()]),
+            BTreeSet::new(),
+        );
+        wait_for_a_wake(&wakes, "the other member's arming");
+        assert_eq!(
+            door.attempts(&member),
+            1,
+            "a volume that does not cover the member is no attempt"
+        );
+
         door.admit(&member);
         steward.volume_arrived(PathBuf::from("/Volumes/USB 盘"));
         wait_for_a_wake(&wakes, "the volume's attempt");

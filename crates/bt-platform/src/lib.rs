@@ -22715,12 +22715,12 @@ mod dir_watch_tests {
     /// failed, `is_armed` answered `true` for ever and `take_failure` `None`, so a
     /// folder whose watch had ended was believed heard. The directory is removed
     /// under the open handle (all three share modes are granted, so the removal
-    /// goes through), which is the read error a deleted folder or a vanished share
-    /// gives.
+    /// goes through), which a pending read answers with a failed completion: the arm
+    /// this pins.
     ///
     /// MUTATIONS: make `is_armed` answer `true` again — the second assertion goes
     /// red; drop the `end.record` and `wake(DirChange::Ended)` from the failed
-    /// read's arm — no `Ended` is heard and the first goes red.
+    /// completion's arm — no `Ended` is heard and the first goes red.
     #[test]
     fn a_watch_whose_directory_goes_away_ends_unarmed_and_says_so() {
         let _turn = first_read_gate::watchers_take_turns();
@@ -22766,7 +22766,7 @@ mod dir_watch_tests {
     /// at the door that carries variants.
     ///
     /// MUTATION: send `DirChange::Unknown` instead of `DirChange::Ended` in the
-    /// failed read's arm, and no `Ended` arrives.
+    /// failed completion's arm, and no `Ended` arrives.
     #[test]
     fn the_named_door_says_ended_when_its_directory_goes_away() {
         let _turn = first_read_gate::watchers_take_turns();
