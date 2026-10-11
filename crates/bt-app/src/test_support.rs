@@ -2397,7 +2397,11 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // takes one from.
         incarnation: next_incarnation(),
         pty: None,
+        shell_exit_age: None,
         shell_exit_said: false,
+        birth_death_fallback: None,
+        birth_death_kept: false,
+        spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,

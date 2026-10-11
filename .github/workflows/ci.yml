@@ -70,6 +70,9 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_FROM_API: "1"
+      # The strict online audit asks the GitHub API about the release; the runner's
+      # shared address is rate-limited unauthenticated (seen on the first runs).
+      HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Audit the cask in a throwaway tap

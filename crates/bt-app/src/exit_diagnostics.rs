@@ -9,22 +9,32 @@ const MAX_CONTROLLED_FAILURE_CHARS: usize = 240;
 /// What the shell's exit made the reaper retire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShellExitDisposition {
+    BirthDeathFellBack(&'static str),
+    BirthDeathPaneKept,
     PaneRetired,
     TabKept,
     TabRetired,
 }
 
 impl ShellExitDisposition {
-    const fn words(self) -> &'static str {
+    fn words(self) -> String {
         match self {
-            Self::PaneRetired => "retired pane",
-            Self::TabKept => "tab kept",
-            Self::TabRetired => "tab retired",
+            Self::BirthDeathFellBack(program) => {
+                format!(
+                    "birth death: fell back to {}",
+                    program_basename(Some(Path::new(program)))
+                )
+            }
+            Self::BirthDeathPaneKept => "birth death: pane kept".to_owned(),
+            Self::PaneRetired => "retired pane".to_owned(),
+            Self::TabKept => "tab kept".to_owned(),
+            Self::TabRetired => "tab retired".to_owned(),
         }
     }
 }
 
 /// The facts the reaper learned about one shell exit.
+#[derive(Debug)]
 pub(crate) struct ShellExit {
     pub(crate) seat: u64,
     pub(crate) code: Option<u32>,
@@ -56,6 +66,34 @@ fn shell_exit_line(exit: &ShellExit) -> String {
         exit.tab,
         exit.disposition.words()
     ))
+}
+
+/// Say a requested shell's spawn failure and the last-resort shell that replaced it.
+pub(crate) fn say_spawn_fallback(
+    seat: u64,
+    fallback: &bt_pty::ShellFallback,
+    mut note: impl FnMut(&str),
+) {
+    note(&one_line(&format!(
+        "Folio: pane {seat} shell spawn failed: {} ({}); fell back to {}",
+        program_basename(Some(Path::new(&fallback.requested))),
+        controlled_failure_text(&fallback.error),
+        program_basename(Some(Path::new(fallback.started)))
+    )));
+}
+
+/// Say a pane birth whose program could not be spawned and had no working fallback.
+pub(crate) fn say_spawn_failure(
+    seat: u64,
+    program: Option<&Path>,
+    error: &str,
+    mut note: impl FnMut(&str),
+) {
+    note(&one_line(&format!(
+        "Folio: pane {seat} shell spawn failed: {} ({})",
+        program_basename(program),
+        controlled_failure_text(error)
+    )));
 }
 
 /// Say each exit exactly once through the resident diagnostics road.
@@ -241,6 +279,76 @@ mod tests {
         assert_eq!(
             lines_for(&[exit]),
             ["Folio: pane 7 shell exited code=23 after 41 ms (pwsh.exe, tab 11, retired pane)"]
+        );
+    }
+
+    /// MUTATION (observed RED): omit the stored OS error, keep bt-pty's stderr-only line, or write
+    /// the error without reducing its absolute paths.
+    #[test]
+    fn a_spawn_fallback_names_both_programs_and_the_error_in_resident_diagnostics() {
+        let fallback = bt_pty::ShellFallback {
+            requested: PathBuf::from("private").join("pwsh.exe").into_os_string(),
+            started: bt_pty::LAST_RESORT_SHELL,
+            error: "access denied at C:\\Users\\alice\\pwsh.exe\nby the package broker".to_owned(),
+        };
+        let mut lines = Vec::new();
+        say_spawn_fallback(9, &fallback, |line| lines.push(line.to_owned()));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            format!(
+                "Folio: pane 9 shell spawn failed: pwsh.exe (access denied at pwsh.exe by the package broker); fell back to {}",
+                program_basename(Some(Path::new(bt_pty::LAST_RESORT_SHELL)))
+            )
+        );
+        assert!(!lines[0].contains("alice"));
+    }
+
+    /// MUTATION (observed RED): omit the error from the resident spawn-failure line, or write it
+    /// without reducing its absolute paths.
+    #[test]
+    fn a_nonrecoverable_spawn_failure_has_one_resident_line() {
+        let mut lines = Vec::new();
+        say_spawn_failure(
+            12,
+            Some(Path::new("/private/bin/坏-shell")),
+            "operation refused: /private/bin/坏-shell\n(os error 5)",
+            |line| lines.push(line.to_owned()),
+        );
+        assert_eq!(
+            lines,
+            [
+                "Folio: pane 12 shell spawn failed: 坏-shell (operation refused: 坏-shell (os error 5))"
+            ]
+        );
+    }
+
+    /// MUTATION (observed RED): report a birth death as an ordinary kept tab.
+    #[test]
+    fn birth_death_diagnostics_name_the_fallback_and_the_kept_pane() {
+        let exit = |disposition| ShellExit {
+            seat: 2,
+            code: Some(5),
+            elapsed: Duration::from_millis(701),
+            program: Some(PathBuf::from("pwsh.exe")),
+            tab: 3,
+            disposition,
+        };
+        let lines = lines_for(&[
+            exit(ShellExitDisposition::BirthDeathFellBack(
+                bt_pty::LAST_RESORT_SHELL,
+            )),
+            exit(ShellExitDisposition::BirthDeathPaneKept),
+        ]);
+        assert!(
+            lines[0].contains("birth death: fell back to"),
+            "{:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].ends_with("birth death: pane kept)"),
+            "{:?}",
+            lines[1]
         );
     }
 

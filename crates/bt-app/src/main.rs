@@ -11521,6 +11521,8 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// The age recorded on the first observation that this shell had exited.
+    shell_exit_age: Option<Duration>,
     /// Whether this shell's one exit diagnostics line has been written.
     ///
     /// A dead shell can remain in a tab while a dirty preview keeps that tab open, and
@@ -11528,6 +11530,12 @@ struct LeafSession {
     /// bit is the pane-level complement: the answer stays true, while the resident diagnostic is
     /// emitted once.
     shell_exit_said: bool,
+    /// A last-resort shell being born in place after this pane's first shell died at birth.
+    birth_death_fallback: Option<BirthDeathFallback>,
+    /// A birth-death pane deliberately kept without a live PTY until the person closes it.
+    birth_death_kept: bool,
+    /// A spawn-time fallback record waiting for the runtime, which knows this pane's seat.
+    spawn_fallback: Option<bt_pty::ShellFallback>,
     /// **A shell still being born** (T-PROGRAMS-REFRESH, T-LAUNCH-PROBE's invariant): `Some`
     /// while the rule that decides which program this pane starts needs a row the program walk
     /// has not answered, `None` for every pane whose shell was decided at creation. Such a pane
@@ -11925,6 +11933,13 @@ struct ShellLanding {
     /// The physical size of the last resize released while the shell was being born, when one
     /// was: the pane's grid moved and its pseudoconsole is owed it at the landing.
     owed_physical: Option<PhysicalSize<u32>>,
+}
+
+/// The last-resort shell replacing a silent birth death, and the exit it will account for.
+#[derive(Debug)]
+struct BirthDeathFallback {
+    shell: pty_door::ShellBirth,
+    exit: exit_diagnostics::ShellExit,
 }
 
 /// **What the window thread decided about a pane's shell before asking for it**: the rule's
@@ -40243,7 +40258,11 @@ fn bare_leaf(
         incarnation: next_incarnation(),
         wake,
         pty: None,
+        shell_exit_age: None,
         shell_exit_said: false,
+        birth_death_fallback: None,
+        birth_death_kept: false,
+        spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
@@ -40334,6 +40353,7 @@ fn finish_leaf_birth(
 ) -> Result<()> {
     let mut pty = pty;
     let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
+    leaf.spawn_fallback = shell_fallback.clone();
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
     // load; that pane gets no win32-input-mode key records (`input::key_records`), so a line in
@@ -40461,6 +40481,32 @@ fn finish_leaf_birth(
     leaf.profile = profile;
     leaf.program = resolved_program;
     leaf.pty = pty;
+    Ok(())
+}
+
+/// **A silent birth death's last-resort shell takes its pane on the birth road**
+/// (T-SHELL-BIRTH-DEATH). The pane is finished from it exactly as a pane whose own program would
+/// not start is ([`finish_leaf_birth`] over a session carrying bt-pty's fallback record): the same
+/// banner under the profile that was asked for, the profile, program, place, paste recipient and
+/// integration of the shell that started. The decision is the dead shell's own, read back from the
+/// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
+/// exit line names the fallback — so it is spent with the landing.
+fn land_birth_death_fallback_shell(leaf: &mut LeafSession, pty: PtySession) -> Result<()> {
+    let decision = BirthDecision {
+        started: Started::AsAsked,
+        spawn_profile: leaf.profile.clone(),
+        spawn_place: leaf.spawn_place.clone(),
+        at_shell_home: leaf.session.spawn_at_shell_home(),
+        named: leaf.born_named,
+        program: leaf.program.clone(),
+        unless_gone: None,
+    };
+    let seed = LeafSeed {
+        profile: leaf.profile.clone(),
+        ..LeafSeed::default()
+    };
+    finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
+    leaf.spawn_fallback = None;
     Ok(())
 }
 

@@ -14,6 +14,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - Folio keeps one `session.prev.json` copy of the layout it saw at startup, so a useful earlier layout remains available if a later session save goes wrong. <!-- zh: Folio 会在 `session.prev.json` 中保留启动时看到的一份布局；之后的会话保存若出错，仍可找回此前有用的布局。 -->
+- A shell that stops as Folio starts no longer removes its restored pane or tab: Folio falls back to the system shell when it can, or keeps the shell's output and the pane in place. <!-- zh: pending T-SHELL-BIRTH-DEATH -->
 - The diagnostics log now says when a pane's shell exits and why Folio's last window closed. <!-- zh: pending T-SHELL-EXIT-DIAG-LINE -->
 - An invisible window Folio kept in reserve for web pages no longer swallows clicks at the top-left of your main screen. <!-- // zh: pending -->
 - A web page that answers with an error, such as 404 Not Found, shows the page the server sent instead of a card saying it could not be opened; the card is for an address that could not be reached at all. <!-- zh: 网页返回错误（如 404 Not Found）时，现在显示服务器发来的页面，不再显示无法打开的卡片；卡片只用于完全无法访问的地址。 -->

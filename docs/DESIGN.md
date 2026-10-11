@@ -14813,6 +14813,14 @@ spellings of a path. The audit road never needs a maintainer's tap checkout.
 `install_channel::tests::a_default_prefix_record_without_attributes_is_homebrew`;
 its `mutation-default-record` arm refuses to derive the Homebrew channel.
 
+### 2026-10-10 — A shell that dies at birth never costs the person their layout (T-SHELL-BIRTH-DEATH)
+
+**What is built.** A pane shell that ends within three seconds of its PTY's own birth is a birth death. After the reader has handed over every byte, a silent child with an available last-resort shell starts that fallback in the same pane and writes the existing fallback banner; a child that wrote anything, or had no fallback, leaves its transcript in place with a one-line face naming the program, exit code and elapsed milliseconds. The kept pane owns no live PTY: writes, pastes and child resizes are no-ops, while its transcript still reflows with the pane. It counts as live for the tab's exit rule until the person closes or restarts it. An exit after the grace follows the old pane and tab retirement road unchanged.
+
+**The rule.** Automatic shell birth and death cannot reduce a restored layout. Only a person's close verb may remove a birth-death pane. The resident diagnostics line distinguishes a fallback from a kept pane and includes the exit facts; spawn failures likewise reach resident diagnostics, while the pane's fallback banner remains the existing user-facing sentence without technical details.
+
+**Pinned by** `runtime::tabs::birth_death_tests::{a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab, a_birth_death_with_output_keeps_the_pane_and_appends_its_face, an_exit_after_the_birth_grace_retires_as_before}` and `exit_diagnostics::tests::{a_spawn_fallback_names_both_programs_and_the_error_in_resident_diagnostics, a_nonrecoverable_spawn_failure_has_one_resident_line, birth_death_diagnostics_name_the_fallback_and_the_kept_pane}`.
+
 ### 2026-10-10 — The macOS Dock badge destructor is not a thread-door exception (H5)
 
 `macos_notify::Taskbar::drop` performs only an atomic owner comparison and, when still on AppKit's

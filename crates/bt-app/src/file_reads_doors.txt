@@ -67,6 +67,9 @@ Runtime::promote_file_peek: .open
 DirtyGate::raise: .open
 Runtime::raise_first_run_if_due: .open
 Runtime::raise_psreadline_invite_if_due: .open
+# A silent birth death's in-place fallback (T-SHELL-BIRTH-DEATH): LeafWake::output, the pane's
+# output-wake closure handed to the last-resort shell's birth worker; no bytes are read.
+Runtime::reap_exited_tabs: .output
 Runtime::settings_layout: .read
 Runtime::turn: .open
 pdf.rs: count_pages: .read

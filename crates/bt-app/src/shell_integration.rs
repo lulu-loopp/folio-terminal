@@ -1505,8 +1505,8 @@ fn compose_with_prepared_and_retry(
 /// The complete argument list `bt-pty`'s last-resort retry is started with when a pane's own
 /// program would not start: [`bt_pty::LAST_RESORT_ARGUMENTS`] through
 /// [`compose_powershell_birth`], so the retry — Windows PowerShell — carries the same load as any
-/// other PowerShell this process starts, and `/bin/sh` off Windows carries nothing. Asked by
-/// `bt-pty` only when the retry happens, on the birth worker.
+/// other PowerShell this process starts, and `/bin/sh` off Windows carries nothing. Asked once on
+/// the birth worker when `bt-pty` prepares either the immediate or retained birth fallback.
 #[must_use]
 pub fn last_resort_arguments(powershell_integration: bool) -> Vec<OsString> {
     compose_powershell_birth(

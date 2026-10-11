@@ -3,8 +3,8 @@
 
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
-    conpty_source_of, decided_birth, deliver_held_input, diagnostics, i18n, land_shell_birth,
-    land_successor, landed_source, resolved_birth_seed, toast,
+    conpty_source_of, decided_birth, deliver_held_input, diagnostics, exit_diagnostics, i18n,
+    land_shell_birth, land_successor, landed_source, resolved_birth_seed, toast,
 };
 use crate::{
     ColumnNotch, CommandFlash, DividerGrip, Drag, DragCarry, DragHandover, DragSource, DropLanding,
@@ -61,6 +61,20 @@ impl Runtime<'_> {
         let stored = self.app.settings_store.loaded().default_profile.clone();
         let mut landed = false;
         for tab_index in 0..self.window.tabs.len() {
+            let birth_death_due: Vec<SeatId> = self.window.tabs[tab_index]
+                .sessions
+                .iter()
+                .filter_map(|(seat, leaf)| {
+                    leaf.birth_death_fallback
+                        .as_ref()
+                        .is_some_and(|pending| pending.shell.answered())
+                        .then_some(*seat)
+                })
+                .collect();
+            for seat in birth_death_due {
+                landed = true;
+                self.land_birth_death_fallback(tab_index, seat)?;
+            }
             let due: Vec<(SeatId, BirthAt, BirthDue)> = {
                 let programs = &self.app.profile_programs;
                 let rows_decide = |seed: &LeafSeed| decided_birth(seed, &stored, programs).is_ok();
@@ -93,6 +107,30 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// Land the last-resort shell requested in place after a silent birth death, and say what
+    /// became of the pane (`runtime::tabs::land_birth_death_fallback`).
+    fn land_birth_death_fallback(&mut self, tab_index: usize, seat: SeatId) -> Result<()> {
+        let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        match crate::runtime::tabs::land_birth_death_fallback(leaf)? {
+            crate::runtime::tabs::BirthDeathLanding::Waiting => {}
+            crate::runtime::tabs::BirthDeathLanding::FellBack(exit) => {
+                exit_diagnostics::say_shell_exits([&exit], diagnostics::note);
+            }
+            crate::runtime::tabs::BirthDeathLanding::Kept(exit, error) => {
+                exit_diagnostics::say_shell_exits([&exit], diagnostics::note);
+                exit_diagnostics::say_spawn_failure(
+                    seat.0,
+                    Some(Path::new(bt_pty::LAST_RESORT_SHELL)),
+                    &error,
+                    diagnostics::note,
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// A pane's own shell has answered: land it, record its source for the startup trace, and
     /// say a failed birth.
     fn land_own_shell(&mut self, tab_index: usize, seat: SeatId) -> Result<()> {
@@ -111,6 +149,16 @@ impl Runtime<'_> {
                 self.app.startup_shells = None;
             }
         }
+        if let Some(fallback) = leaf.spawn_fallback.take() {
+            exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
+        } else if let Some(refusal) = refusal.as_ref() {
+            exit_diagnostics::say_spawn_failure(
+                seat.0,
+                leaf.program.as_deref(),
+                &format!("{refusal:#}"),
+                diagnostics::note,
+            );
+        }
         if let Some(refusal) = refusal {
             self.say_shell_refusal(&refusal)?;
         }
@@ -123,13 +171,31 @@ impl Runtime<'_> {
         let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) else {
             return Ok(());
         };
+        let requested = leaf
+            .successor
+            .as_deref()
+            .and_then(|successor: &LeafSession| successor.program.clone());
         match land_successor(leaf, diagnostics::note)? {
             SuccessorLanding::Waiting => Ok(()),
-            SuccessorLanding::Refused(refusal) => self.say_shell_refusal(&refusal),
-            SuccessorLanding::Landed(successor) if tab_index == self.window.active_tab => {
+            SuccessorLanding::Refused(refusal) => {
+                exit_diagnostics::say_spawn_failure(
+                    seat.0,
+                    requested.as_deref(),
+                    &format!("{refusal:#}"),
+                    diagnostics::note,
+                );
+                self.say_shell_refusal(&refusal)
+            }
+            SuccessorLanding::Landed(mut successor) if tab_index == self.window.active_tab => {
+                if let Some(fallback) = successor.spawn_fallback.take() {
+                    exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
+                }
                 self.replace_restarted_shell(seat, *successor)
             }
-            SuccessorLanding::Landed(successor) => {
+            SuccessorLanding::Landed(mut successor) => {
+                if let Some(fallback) = successor.spawn_fallback.take() {
+                    exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
+                }
                 self.window.tabs[tab_index]
                     .sessions
                     .insert(seat, *successor);
