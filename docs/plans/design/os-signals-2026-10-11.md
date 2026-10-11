@@ -5,7 +5,10 @@ Status: **revision (b), 2026-10-11**, after the Codex review of `3de187a4`
 changes). Revision (b) is the dated section at the end. **Where revision (a)'s text and
 revision (b) differ, revision (b) stands**: in particular §2's totals, §3.1's forced-removal
 sentence, §3.5's procedure, §4.3's queue, filter and memory sentences, §6, §7 and §8 are
-replaced by (b)1–(b)14. Revision (a) was the draft for review, written before any ticket
+replaced by (b)1–(b)14. **Revision (c)**, after the Codex confirmation round
+(`B5-os-signals-design.review-codex-b.md`), follows (b) and stands wherever the two differ:
+(c)1–(c)10 replace (b)3's callback, (b)4's tests, (b)6's rerun, (b)11's probe door and
+retry rule, (b)13's ticket sizes and (b)14's Q2, Q3 and Q5. Revision (a) was the draft for review, written before any ticket
 below was dispatched.
 Plan row B5 ("OS-level change signals; deep palette refresh"), the last in the chain
 B1 → B2 → B3 → B4, all four landed. Read at `main` = `ae933eb7` on
@@ -1423,3 +1426,338 @@ cap, for the reason given in (b)8.
   `:290-306` (the queue's `Pending`, the per-directory read cap, the directory-only skip);
   `environment.rs:20-24` (no logon block off Windows); `shell_integration.rs:636`, `:709`
   (the locale's product call sites).
+
+---
+
+## Revision (c), 2026-10-11, after the Codex confirmation round
+
+Codex checked revision (b) (`a3f3876a`; review `B5-os-signals-design.review-codex-b.md`).
+Its verdict was again **adopt with changes**. Eight of the twelve changes were applied,
+and four were partial: (b)3, (b)4, (b)11 and (b)12. Those four left seven required
+changes at implementation level. **All seven are applied below**, each against the code
+at `ae933eb7`, and the review's "Directory bounds" paragraph is adopted as (c)8. **Where
+(c) and (b) differ, (c) stands.** The Departures heading at the end records none.
+
+### (c)1 · The removal callback cannot wait; the registration is retained; the cancelled read is drained: adopted
+
+(b)3's callback took `HandleSlot`'s mutex. That is a wait: a watcher thread pre-empted
+while holding the lock would hold the callback for as long as it is not scheduled. (b)3
+also reopened the handle with a **new** registration after `QUERYREMOVEFAILED`. Microsoft's
+procedure keeps the original registration: after a failed query-remove it stays valid on
+the now-closed handle and is not replaced [S30]. And (b)3 did not say that the cancelled
+read must complete before its `OVERLAPPED` and buffer are used again. `CancelIoEx` asks for
+cancellation without waiting for it, and its contract forbids reusing the operation's
+state until the cancellation has completed [S31].
+
+**The slot becomes one atomic word**, `HandleSlot(AtomicU32)`, holding a small state and
+no lock. The directory `HANDLE` itself sits beside it and is written only by whichever side
+wins a compare-and-swap:
+
+| state | meaning | who moves it out |
+|---|---|---|
+| `Idle` | Handle open, read outstanding, the watcher **not** touching the handle (it is parked in `WaitForMultipleObjects`) | the callback (`Idle → Closing`), or the watcher on a completion (`Idle → Issuing`) |
+| `Issuing` | The watcher is inside its few-microsecond window: `GetOverlappedResult(bWait = FALSE)` then `ReadDirectoryChangesW` to re-issue | the watcher, back to `Idle`, or to `Closing` if a close was asked for meanwhile |
+| `CloseAsked` | The callback found `Issuing`, recorded the request and returned | the watcher, right after its re-issue: `CloseAsked → Closing` |
+| `Closing` | `CancelIoEx` + `CloseHandle` are being done by whichever side won | the same side, to `Draining` |
+| `Draining` | The handle is closed; the cancelled read has not yet completed into the watcher's `OVERLAPPED` | the watcher only, after observing the cancelled read's completion (`ERROR_OPERATION_ABORTED` on its event) |
+| `Suspended` | Drained, no handle; the **original registration retained** | callbacks: `QUERYREMOVEFAILED → Reopening`; `REMOVEPENDING`/`REMOVECOMPLETE → Absent` |
+| `Reopening` | The watcher is reopening by path, reusing the drained buffer | the watcher: `Reopening → Idle` on success; `→ Failed` ((c)2) on an error; a callback's `REMOVEPENDING`/`COMPLETE` here moves it to `Absent`, and the watcher closes the handle it just opened as soon as its own `Reopening → Idle` swap fails |
+| `Absent` | Removed. The registration is retired by the steward ((c)3), never by the callback | only a `Volumes` arrival covering the path ((b)3) |
+
+**The callback, entire:** read the state, then one compare-and-swap.
+- `Idle → Closing` wins: the callback runs `CancelIoEx` and `CloseHandle`, stores
+  `Draining`, signals the watcher's event, and returns `ERROR_SUCCESS`.
+- The state is `Issuing`: the callback swaps it to `CloseAsked` and returns
+  `ERROR_SUCCESS` without waiting.
+- Every other state: the callback records the action (`QUERYREMOVEFAILED`, `PENDING`,
+  `COMPLETE`) by a swap and returns.
+
+No lock, no join, no wait, no unregister [S10]. The handle is never closed while the
+watcher may be using its value, because only the side that won `Idle → Closing` or
+`CloseAsked → Closing` closes it. So a recycled handle value can never be read by the
+other side.
+
+**The one residual, said plainly.** If the query-remove lands inside the watcher's
+`Issuing` window, the handle closes a few microseconds **after** the callback returns
+(when the watcher sees `CloseAsked`). In that window the system's removal may still find
+the handle open and fail once, as "in use". The person's next eject attempt then succeeds.
+Folio never *answers* a refusal: the callback always returns `ERROR_SUCCESS`. E-2 measures
+how often this window is hit (expected: never in practice, given its microsecond length).
+The alternative is to have the callback wait for the watcher, which is what the review
+forbids. The handle cannot be closed from both sides without the swap.
+
+**Drain before reuse.** The watcher never reissues a read into, frees, or reuses its
+`OVERLAPPED` and buffer for a reopened handle until it has seen the cancelled read
+complete. That wait is the watcher's own `WaitForMultipleObjects` on its own event, on its
+own thread, which is legal there. Only then does it leave `Draining`.
+
+**Retained registration.** On `QUERYREMOVEFAILED` the watcher reopens by path into the
+same buffer, under the **original** registration, with no unregister/register cycle
+[S30]. The steward retires the registration only from `Absent`, or when the member leaves
+the wanted set.
+
+**Tests** (T-WATCH-LETS-GO), replacing (b)13's list for this ticket:
+- `…::a_query_remove_while_idle_closes_inside_the_callback` (the callback driven directly
+  on a test thread with the watcher parked). MUTATION: the callback only signals the
+  watcher (the handle is still open on return).
+- `…::a_query_remove_while_issuing_is_closed_by_the_watcher_and_the_callback_does_not_wait`
+  (the watcher held inside `Issuing` by a gate; the callback must return with the gate
+  shut). MUTATION: the callback spins until `Idle`.
+- `…::the_buffer_is_not_reused_before_the_cancelled_read_completes` (a fake read whose
+  cancellation completes only when a gate opens). MUTATION: the reopen proceeds from
+  `Closing`.
+- `…::query_remove_failed_reopens_under_the_original_registration` (a counting fake
+  registration door). MUTATION: unregister and register again.
+- `…::a_removal_during_reopening_ends_absent_and_closes_the_new_handle`. MUTATION: the
+  watcher's `Reopening → Idle` is an unconditional store.
+- `…::a_suspended_member_is_not_reopened_by_a_sync` and
+  `…::each_handle_on_one_volume_lets_go_of_itself`, with their (b)13 mutations.
+- `…::a_removal_is_never_refused` (MUTATION: `ERROR_CANCELLED`).
+- The source guard (MUTATION: `CM_Unregister_Notification` in the callback).
+- A further source guard: no `Mutex`, `lock(`, `join(` or `wait` call in the callback's
+  body. MUTATION: put back (b)3's lock.
+
+### (c)2 · A distinct terminal `Failed` (unheard) state with its own rearm rule: adopted
+
+A watch that fails without a removal message (an initial start failure; a terminal read
+error; the watched directory deleted and later recreated on the same mounted volume; an
+FSEvents root change) is neither `Suspended` nor removal-caused `Absent`. Its member goes
+to **`Failed`**, which is unheard, with (b)5's consequences. The three states now carry
+three rearm rules:
+
+| state | how it is entered | what may rearm it |
+|---|---|---|
+| `Suspended` | a query-remove | only `QUERYREMOVEFAILED` ((c)1) |
+| `Absent` | `REMOVEPENDING` or `REMOVECOMPLETE` | only a `Volumes` arrival covering the path |
+| **`Failed`** | an initial start error, a terminal read error, or an `Ended` wake not caused by removal | **one attempt on the next reader-triggered event**: for a palette root, the palette opening over it, or the walk that open asks for landing; for a PATH directory, the next walk landing whose snapshot still lists it; also a `Volumes` arrival covering it. **Never** on an ordinary loop sync, which runs every turn and would poll a missing directory |
+
+Each attempt is one start on the steward. A failed attempt stays `Failed` and is said
+once in `diagnostics.log` per transition, not per attempt. A directory recreated on the
+same volume is heard again from the next open or walk after it reappears.
+
+Tests (T-DIRWATCH-LIFECYCLE):
+- `…::a_failed_root_is_attempted_again_on_the_next_open_and_not_on_a_sync`. MUTATIONS:
+  rearm `Failed` on every sync (the attempt count rises without an open); never rearm
+  `Failed` (the recreated directory is never heard).
+- `…::a_failed_path_directory_is_attempted_again_when_a_walk_lands`. MUTATION: rearm on
+  the wanted-set comparison.
+
+### (c)3 · The steward's exact door, its wake, and two held-door tests: adopted
+
+**The door.**
+- `bt_app::watch_steward::WatchSteward::serve(self, ctx: &bt_platform::admission::WorkerCtx)`
+  is the worker's whole body. It is started by `watch_steward::request` through
+  `bt_platform::spawn_at_priority("watch-steward", ThreadPriority::BelowNormal,
+  move |ctx| steward.serve(ctx))`, the shape `programs_lane` uses (`programs_lane.rs`'s
+  `WorkerCtx` import).
+- Every `DirWatch` / `DirWatchSet` start, reconfigure and drop takes `&WorkerCtx`, so only
+  a thread lent one by the door can call it. This is the A1 capability rule (TD§2), and
+  the compiler enforces it.
+- The window thread's side is
+  `watch_steward::request(ear: Ear, wanted: BTreeSet<PathBuf>, reasons: Rearm)`, a
+  nonblocking `Mutex<Requests>` store of the newest set per ear, plus a `Condvar` notify.
+  It takes the same lock-free-for-the-reader shape as `programs_lane::request`; the
+  window thread never waits on that `Condvar`.
+
+**The wake.** The steward publishes per-member reports into
+`watch_steward::REPORTS: Mutex<BTreeMap<(Ear, PathBuf), MemberReport>>`
+(`MemberReport = Armed | Suspended | Absent | Failed(cause)`, with a report number). It
+then sends **`AppEvent::WatchStewardAnswered`** through the `EventLoopProxy` it was handed
+at the first request: the report first, the wake after (the lane contract). The loop's
+arm drains `REPORTS` once per turn and hands each report to its ear (`ProgramsEar`,
+`IndexEar`).
+
+**Two tests, each with its own calling-thread mutation**, replacing (b)4's single one:
+- `watch_steward::tests::a_sync_returns_while_a_watch_start_is_held`: a fake door whose
+  `start` blocks on a gate; `request` from the test thread must return, and the loop arm
+  must run with the gate shut. MUTATION: `request` starts the watch on the calling thread.
+- `watch_steward::tests::a_retirement_returns_while_a_watch_drop_is_held`: a fake door
+  whose `Drop` blocks on a gate; a `request` that removes the member must return with the
+  gate shut, and the drop must happen on the steward's thread (asserted by thread name
+  inside the fake `Drop`). MUTATION: the steward hands the retired `DirWatch` back in its
+  report, so it is dropped by the loop arm on the calling thread.
+
+### (c)4 · A macOS-capable contained probe with ONE ten-second budget; what the waiting pane shows: adopted
+
+`probe_output_with_raw_tail` is `#[cfg(windows)]` (`lib.rs:5128-5134`), so (b)11 named a
+door that cannot run the macOS locale probe. And with two children each held to ten
+seconds, the worst case was about twenty.
+
+**The door.** A new `bt_platform` function, built only on parts that already exist on
+every platform:
+`probe_outputs_within(worker: &WorkerCtx, commands: Vec<Command>, total: Duration) -> io::Result<ProbeRun>`.
+- It runs the commands **in order** through `spawn_probe` (`lib.rs:4343`, all platforms)
+  and `ProbeChild::wait_within` (`lib.rs:3499`; its macOS arm reads processor time through
+  `proc_taskinfo`, `lib.rs:3588`).
+- Each child gets `ProbePatience::fixed(remaining)` (`lib.rs:3387-3395`), where
+  `remaining = total − elapsed since the first spawn`.
+- A child still running when `remaining` reaches zero is ended with its contained tree, as
+  `ProbeChild`'s `Drop` does today (`lib.rs:3364`). The run then answers
+  `ProbeRun::Overran { finished: Vec<Output> }`, and no later command is started.
+- `ProbeRun::Finished(Vec<Output>)` answers when every command ended within the budget.
+- It takes `&WorkerCtx`, so it cannot run on the window thread.
+
+The locale cell calls it with the two commands of `read_system_locale_declaration`
+(`lib.rs:7821-7833`) and `total = 10 s`. **The worst case is one ten-second total,
+for both children together.** `choose_locale_declaration` is unchanged: it gets
+`defaults`' output, or empty on a failure or an overrun (as `unwrap_or_default` does today),
+and `locale -a`'s output on the same terms.
+
+Tests: bt-platform `probe_run_tests::two_children_share_one_budget`. The first child
+sleeps for 70 % of the budget and the second for 70 %; the run must answer `Overran`
+within the budget plus one 20 ms poll. MUTATION: each child gets the full `total`, so the
+run lasts about 140 % of it. This runs on the Mac at the Mac gate and on Windows locally;
+the children come from the test-shell door.
+
+**What the waiting first pane shows** (stated for Q5). It takes B2's road for a pane in
+birth (`PaneBirth`, `main.rs:11907`). The pane, its tab and its chrome draw normally, and
+the terminal grid is **empty**: no prompt, no output. Everything typed is kept, in order,
+in the birth's `typed` queue and written to the shell when it is born. That is pinned for
+this road by `a_pane_draws_before_its_shell_exists_and_its_shell_gets_what_was_typed_in_order`
+(`main.rs:39505`). The tab reads the profile's name, because the profile is known. The
+longest a person can look at that empty grid for the locale's sake is **ten seconds in
+total**, only on a cold first pane, and only when the probe hangs. On an ordinary Mac the
+two children take tens of milliseconds (**estimate**: E-3 measures it), well inside window
+and GPU creation, so the first pane does not wait at all.
+
+### (c)5 · A failed refresh is retried even when an older success remains: adopted
+
+(b)11's "a birth that finds no success held … requests a probe" leaves a trap. If the
+sequence is success, then a locale change, then a failed refresh, the old success stays
+held and no birth ever asks again: a cached failure in a new form. **The retry predicate
+keys on the newest outcome.**
+
+The cell holds `{ last_success: Option<(n, LocaleDeclaration)>, newest: Option<(n, Outcome)>,
+out: Option<n> }`.
+- A birth requests a probe, without waiting, whenever `newest` is a failure (or an
+  overrun) and `out` is `None`, **whether or not `last_success` exists**.
+- What the birth uses meanwhile is `last_success`, the fallback declaration (`None` if
+  there never was one).
+- The cold case of (c)4 waits only when `newest` is `None`, meaning nothing ever finished.
+- Each retry says one `diagnostics.log` line ("locale probe N failed (…); asked again by a
+  pane's birth").
+
+Test: `locale_declaration::tests::a_failed_refresh_after_a_success_is_retried_by_the_next_birth_and_the_old_success_is_used_meanwhile`.
+MUTATION: the predicate is (b)11's "no success held", so no second probe is requested.
+
+### (c)6 · An owed palette rerun waits for its clock: adopted
+
+(b)6 claimed an owed rerun immediately on `accept`. With walks shorter than the floor and
+events arriving during each one, that chains reruns faster than one per 2 s, and the
+"30 walks a minute" ceiling of (b)12 is false. **The rerun goes through the root's
+`WatchClock`, and the floor carries forward.**
+- A heard event while a walk runs does what any heard event does: `note_event` on the
+  root's clock (`watch_clock.rs:69`). Nothing else is recorded; `owed` is no longer a
+  stored Boolean, but *the clock owes a reading* (`due_at().is_some()`).
+- The loop calls `take_due` for a root **only when no walk is running for it**. So a clock
+  that becomes due during a walk stays owed, and a running walk is never overtaken.
+- On `accept`, the loop asks the clock for the root. If `take_due(now)` is true, it claims
+  now; otherwise the loop's deadline is `due_at`. The floor's anchor is `last_reread`,
+  which `take_due` set at the **previous** claim (`watch_clock.rs:61-63`, `:104-110`). So
+  two ear-driven claims of one root are always at least `WATCH_FLOOR` apart, however
+  short the walks are.
+
+**The ceiling, now true:** at most one ear-driven walk per root per 2 s, so at most 30 a
+minute per root, plus one walk per palette **open** (person-driven, merged into a running
+walk as today). Opens are not throttled, because they are the reader asking.
+
+Test: `palette_index::tests::fast_walks_with_events_during_each_are_at_most_one_per_floor`.
+A fake clock, walks that each land 50 ms after their claim, and an event during every walk,
+for 60 simulated seconds: at most 30 claims. MUTATION: (b)6's immediate rerun on `accept`
+(about 1 000 claims).
+
+### (c)7 · Ticket sizes, and per-root `DirWatch` for the palette: adopted
+
+- **T-DIRWATCH-LIFECYCLE is L**, not M. It carries a cross-platform terminal-failure
+  contract ((b)5), the `Failed` state and its rearm rule ((c)2), a new application lane
+  with its door and wake ((c)3), and the Windows `HandleSlot` refactor ((c)1's atomic slot
+  without notifications yet).
+- **T-PALETTE-DEEP uses one `DirWatch::start_named` per root**, not the shared
+  `DirWatchSet`. (b)9's "roots can share a set" is withdrawn. The roots are few (the front
+  tabs' files columns), each root's tree watch is its own contract, and keeping them
+  per-root keeps T-PALETTE-DEEP **independent of T-OS-SIGNALS-MAC**. Its dependencies stay
+  tickets 1, 2 and 3 (3 for `Volumes`). The cost per root stays (b)9's: on Windows one
+  thread, one handle and one 64 KiB buffer; on macOS one stream and its run-loop thread.
+
+### (c)8 · Directory bounds, stated as the review states them: adopted
+
+The two bounds are **independent dimensions**, not one combined limit:
+- **`INDEX_MAX_ENTRIES`** (30 000, `palette_index.rs:103`) bounds the **files retained**
+  in the index, and also the **names collected from any one directory**
+  (`palette_index.rs:256-266`).
+- **`INDEX_MAX_DIRECTORIES`** ((b)8) bounds the **total number of directories enqueued**
+  by one walk. The ticket fixes the root convention and states it in the constant's doc
+  comment: **the root counts as the first enqueued directory**, so a value of `n` admits
+  the root plus `n − 1` descendants.
+- **One `truncated` truth.** Reaching either bound sets the same `FileIndex::truncated`,
+  and the palette says the same `PaletteFilesTruncated` note. There is no second flag and
+  no second sentence, because the person's question ("is this all of it?") is the same.
+- **It is not a "30 000 entries in total" limit.** A walk may hold up to 30 000 files *and*
+  have enqueued up to `INDEX_MAX_DIRECTORIES` directories. Thirty thousand queued `Pending`
+  values are not small, because each carries its path, its relative path and its ancestors
+  (`palette_index.rs:209-221`). E-5 measures peak memory on its 200 000-entry tree and
+  **confirms or replaces** the estimated 30 000 before the constant is committed. The
+  ticket's DESIGN entry records the chosen value with its measurement.
+
+Test (T-PALETTE-DEEP): `…::either_bound_sets_the_one_truncated_flag`. MUTATIONS: the
+directory bound never sets `truncated`; the root is not counted (one extra directory is
+admitted at the boundary).
+
+### (c)9 · The tickets, revised again
+
+1. **T-DIRWATCH-LIFECYCLE (L; first).** (b)5, (c)2, (c)3, and (c)1's atomic slot (no
+   notifications). Tests: (c)2's two, (c)3's two, (b)5's unavailable-root and
+   failure-after-arming pair, and the source guard of (b)13. Mac gate.
+2. **T-WATCH-LETS-GO (M, Windows).** E-2 first. (c)1's callback, drain and retained
+   registration, with (c)1's test list.
+3. **T-OS-SIGNALS-WIN (M).** As (b)13 item 3.
+4. **T-OS-SIGNALS-MAC (M).** As (b)13 item 4, with (c)4's `probe_outputs_within` (its
+   bt-platform half also runs on Windows), the one ten-second budget, and (c)5's predicate
+   and test. Depends on ticket 1 only for the steward; its `DirWatchSet` half follows
+   ticket 3's Windows arm.
+5. **T-PALETTE-DEEP (M).** As (b)13 item 5, with per-root `DirWatch::start_named` ((c)7),
+   (c)6's clock-gated rerun and its test, and (c)8's bound and test. Depends on tickets 1,
+   2 and 3, and **not** on 4.
+
+Order: 1 → 2 → 3 → 4, and 1 + 2 + 3 → 5.
+
+### (c)10 · The owner questions, revised (five)
+
+- **Q1 — watch the `PATH` directories?** **Yes, subject to E-4 and tickets 1–2**
+  (unchanged from (b)14).
+- **Q2 — the palette's background walk?** **Yes.** With (c)6, walks the ear causes are at
+  most one per 2 s per root (at most 30 a minute), plus one per palette open. With (c)8,
+  each walk is bounded in files and in directories.
+- **Q3 — let an ejected drive go silently, never refuse?** **Yes, through (c)1's
+  non-waiting callback.** One residual: an eject that lands inside a watcher's
+  microsecond re-issue window may fail once as "in use" and succeed when retried. Folio
+  itself never answers a refusal.
+- **Q4 — the macOS locale re-read applies to new panes only?** **Yes** (unchanged).
+- **Q5 — may a cold first pane be born without the locale declaration?** **No.** Keep
+  today's outcome. The cost, stated: on a cold first pane, while the probe is still out,
+  the pane shows its tab and chrome with an **empty terminal grid** and keeps everything
+  typed. The worst case is **ten seconds in total** for both probe children together, and
+  only when the probe hangs. On an ordinary Mac it is tens of milliseconds, inside window
+  creation (estimate, E-3).
+
+### Departures
+
+None. All seven required changes are applied as worded, and the "Directory bounds"
+paragraph is adopted as (c)8. One consequence is said rather than hidden: (c)1's
+microsecond residual is the price of a callback that cannot wait, and E-2 measures it.
+
+### Sources added
+
+- [S30] Registering for notification of device interface arrival and device removal:
+  https://learn.microsoft.com/en-us/windows-hardware/drivers/install/registering-for-notification-of-device-interface-arrival-and-device-removal
+  (after a failed query-remove, the registration on the original handle remains valid).
+- [S31] `CancelIoEx`: https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex
+  (the `OVERLAPPED` must not be reused or freed until the cancelled operation completes).
+- The confirmation review: `B5-os-signals-design.review-codex-b.md` (0.4.8 trace,
+  2026-10-11).
+- Folio at `ae933eb7`: `lib.rs:3210` (`ProbeChild`, legal on every platform), `:3364`
+  (its `Drop`), `:3380-3395` (`ProbePatience`, `fixed`), `:3499` (`wait_within`), `:3588`
+  (macOS processor time), `:4343` (`spawn_probe`), `:5104` (`probe_output`), `:5110`
+  (`ProbeEnding`), `:5128-5134` (`probe_output_with_raw_tail`, `#[cfg(windows)]`);
+  `watch_clock.rs:54-110` (`last_reread` as the floor's anchor); `main.rs:11907`
+  (`PaneBirth`), `:39505` (the birth-road drawing test).
