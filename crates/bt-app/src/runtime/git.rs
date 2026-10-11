@@ -302,17 +302,7 @@ impl Runtime<'_> {
                             .filter(|peek| peek.source == source)
                         {
                             match outcome {
-                                Ok(text) => peek.accept(preview::HeadOutcome::Read {
-                                    text,
-                                    truncated: false,
-                                    mtime: None,
-                                    // A composed document's text came out of a
-                                    // program as a `String`; there are no bytes
-                                    // here to be in doubt about (§7.32).
-                                    content_says_text: true,
-                                    encoding: preview::HeadEncoding::Utf8,
-                                    lossy: false,
-                                }),
+                                Ok(bytes) => peek.accept(preview::composed_read(&bytes)),
                                 Err(fault) => {
                                     peek.decline(git::fault_sentence(&fault));
                                 }
@@ -322,20 +312,7 @@ impl Runtime<'_> {
                         continue;
                     };
                     match outcome {
-                        Ok(text) => buffer.accept(preview::HeadOutcome::Read {
-                            text,
-                            // Nothing truncated it and no disk wrote it:
-                            // both of those are facts about a file, and
-                            // this document is not one.
-                            truncated: false,
-                            mtime: None,
-                            // And nothing sniffed it, for the same reason:
-                            // a program handed this window a `String`
-                            // (§7.32).
-                            content_says_text: true,
-                            encoding: preview::HeadEncoding::Utf8,
-                            lossy: false,
-                        }),
+                        Ok(bytes) => buffer.accept(preview::composed_read(&bytes)),
                         Err(fault) => buffer.decline(git::fault_sentence(&fault)),
                     }
                     body |= index == self.window.active_tab;

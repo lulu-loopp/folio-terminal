@@ -1021,20 +1021,25 @@ pub enum GitAnswer {
         root: PathBuf,
         path: String,
         against: crate::preview::GitDiffAgainst,
-        outcome: GitOutcome<String>,
+        /// git's own bytes, decoded where every document's bytes are
+        /// (`preview::composed_read`), so a file that is not UTF-8 says so
+        /// rather than arriving pre-repaired (AUDIT-hardcode RT-4).
+        outcome: GitOutcome<Vec<u8>>,
     },
     Show {
         root: PathBuf,
         hash: String,
         path: String,
-        outcome: GitOutcome<String>,
+        /// As [`Self::Diff`]'s: git's bytes, undecoded.
+        outcome: GitOutcome<Vec<u8>>,
     },
     DiffRange {
         root: PathBuf,
         a: String,
         b: Option<String>,
         path: String,
-        outcome: GitOutcome<String>,
+        /// As [`Self::Diff`]'s: git's bytes, undecoded.
+        outcome: GitOutcome<Vec<u8>>,
     },
     CommitFiles {
         root: PathBuf,
@@ -2785,7 +2790,7 @@ pub fn answer(
                     root: root.clone(),
                     path: path.clone(),
                     against: *against,
-                    outcome: Ok(String::from_utf8_lossy(&run.stdout).into_owned()),
+                    outcome: Ok(run.stdout),
                 },
                 Ok(run) => faulted(question, classify_failure(&run.stderr)),
                 Err(fault) => faulted(question, fault),
@@ -2838,7 +2843,7 @@ pub fn answer(
                     root: root.clone(),
                     hash: hash.clone(),
                     path: path.clone(),
-                    outcome: Ok(String::from_utf8_lossy(&run.stdout).into_owned()),
+                    outcome: Ok(run.stdout),
                 },
                 Ok(run) => faulted(question, classify_failure(&run.stderr)),
                 Err(fault) => faulted(question, fault),
@@ -2876,7 +2881,7 @@ pub fn answer(
                     a: a.clone(),
                     b: b.clone(),
                     path: path.clone(),
-                    outcome: Ok(String::from_utf8_lossy(&run.stdout).into_owned()),
+                    outcome: Ok(run.stdout),
                 },
                 Ok(run) => faulted(question, classify_failure(&run.stderr)),
                 Err(fault) => faulted(question, fault),
@@ -6356,7 +6361,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
                 root: root.clone(),
                 path: "src/main.rs".to_owned(),
                 against: crate::preview::GitDiffAgainst::Index,
-                outcome: Ok("diff --git a/src/main.rs b/src/main.rs\n".to_owned()),
+                outcome: Ok(b"diff --git a/src/main.rs b/src/main.rs\n".to_vec()),
             }),
             "a diff is not this cache's to keep"
         );
@@ -6365,7 +6370,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
                 root: root.clone(),
                 hash: "a".repeat(40),
                 path: "src/main.rs".to_owned(),
-                outcome: Ok("diff --git a/src/main.rs b/src/main.rs\n".to_owned()),
+                outcome: Ok(b"diff --git a/src/main.rs b/src/main.rs\n".to_vec()),
             }),
             "nor is one commit's reading of a file"
         );
@@ -6602,7 +6607,8 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             else {
                 panic!("a diff question is answered with a diff");
             };
-            outcome.expect("the scratch repository answers")
+            String::from_utf8(outcome.expect("the scratch repository answers"))
+                .expect("the scratch repository's diff is UTF-8")
         };
 
         let half = ask(None);
@@ -6691,7 +6697,8 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             else {
                 panic!("a diff question is answered with a diff");
             };
-            outcome.expect("the scratch repository answers")
+            String::from_utf8(outcome.expect("the scratch repository answers"))
+                .expect("the scratch repository's diff is UTF-8")
         };
         let command_line =
             |arguments: &[&str]| String::from_utf8_lossy(&run(arguments).stdout).into_owned();

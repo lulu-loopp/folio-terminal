@@ -7276,6 +7276,32 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     }
 }
 
+/// **A document a program composed — a diff, a commit's reading of a file —
+/// read the way a file's bytes are read** (AUDIT-hardcode RT-4).
+///
+/// git hands back bytes, and the file inside a diff is in whatever encoding it
+/// was committed in. They go through [`decode_head`], the disk's own decode: a
+/// UTF-16 mark is honoured, and a byte that is not text is replaced *and the
+/// read says so* (`lossy`), which is what keeps an edit from writing the
+/// replacement over the original. They used to arrive pre-repaired by
+/// `from_utf8_lossy` and labelled UTF-8 and lossless.
+///
+/// Whole (nothing cut it) and with no time on a disk (no disk wrote it); and
+/// promoted as text by being a document this window asked a program for, not
+/// by a sniff (§7.32).
+#[must_use]
+pub fn composed_read(bytes: &[u8]) -> HeadOutcome {
+    let (text, lossy) = decode_head(bytes, false);
+    HeadOutcome::Read {
+        text,
+        truncated: false,
+        mtime: None,
+        content_says_text: true,
+        encoding: HeadEncoding::of(bytes),
+        lossy,
+    }
+}
+
 /// Turn a head of bytes into text.
 ///
 /// Lossy, because a preview that refuses a file over one bad byte is a preview
@@ -14693,5 +14719,54 @@ mod tests {
         let text: Vec<&str> = ranges.iter().map(|range| &src[range.clone()]).collect();
         assert_eq!(blocks.len(), 3);
         assert_eq!(text, ["before\n", "![alt](one.png)", "\nafter\n"]);
+    }
+
+    /// RED (AUDIT-hardcode RT-4) — **a document git composed is read the way a
+    /// file is: its encoding is the bytes', and a byte that is not text makes
+    /// the read say it is lossy.**
+    ///
+    /// The worker used to decode git's output with `from_utf8_lossy` and the
+    /// buffer labelled it UTF-8 and lossless, so a diff of a GBK file showed
+    /// replacement characters with nothing saying anything had been replaced.
+    ///
+    /// MUTATION: answer `lossy: false` in `composed_read` — the GBK row goes
+    /// red.
+    #[test]
+    fn a_composed_document_says_when_its_bytes_were_not_text() {
+        let read = |bytes: &[u8]| match composed_read(bytes) {
+            HeadOutcome::Read {
+                text,
+                encoding,
+                lossy,
+                truncated,
+                ..
+            } => {
+                assert!(!truncated, "nothing cut a composed document");
+                (text, encoding, lossy)
+            }
+            other => panic!("a composed document is read: {other:?}"),
+        };
+        // UTF-8 with Chinese: decoded as itself, nothing invented.
+        let utf8 = "@@ -1 +1 @@\n-旧\n+新的 line\n";
+        assert_eq!(
+            read(utf8.as_bytes()),
+            (utf8.to_owned(), HeadEncoding::Utf8, false)
+        );
+        // A GBK line inside the diff (`中文` is D6 D0 CE C4): replaced, and said.
+        let mut gbk = b"+".to_vec();
+        gbk.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]);
+        let (text, encoding, lossy) = read(&gbk);
+        assert_eq!(encoding, HeadEncoding::Utf8);
+        assert!(text.contains(char::REPLACEMENT_CHARACTER));
+        assert!(lossy, "the read says it replaced bytes");
+        // A UTF-16 mark is honoured, as on the disk.
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in "中文 ok".encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(
+            read(&utf16),
+            ("中文 ok".to_owned(), HeadEncoding::Utf16Le, false)
+        );
     }
 }

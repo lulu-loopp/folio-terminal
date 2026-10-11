@@ -42775,7 +42775,7 @@ fn git_answer_notice(answer: &git::GitAnswer) -> Option<String> {
 #[allow(clippy::result_large_err)]
 fn git_document_answer(
     answer: git::GitAnswer,
-) -> Result<(preview::PreviewSource, git::GitOutcome<String>), git::GitAnswer> {
+) -> Result<(preview::PreviewSource, git::GitOutcome<Vec<u8>>), git::GitAnswer> {
     match answer {
         git::GitAnswer::Diff {
             root,
