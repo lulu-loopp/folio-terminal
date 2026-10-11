@@ -6,6 +6,10 @@ the end. **Where revision (a)'s text and revision (b) differ, revision (b) stand
 particular §1.5's defect 1 and the failure card, §2.2's filter, §3.1's memory, §3.2's
 fallback, `Displaced` row and receipts, §3.3's base, §3.4's four policies, §3.5's torn-write
 claim, §3.6's wording, §4, §7, §8, §9 and §10 are replaced or amended by (b)1–(b)17.
+**Revision (c)**, after the Codex confirmation round (`B6-settings-reread-design.review-codex-b.md`),
+follows (b) and stands wherever the two differ: (c)1 replaces (b)3's revision bookkeeping,
+(c)2 replaces (b)5's quit, (c)3 replaces (b)16's J5 join, and (c)4 and (c)5 replace (b)17's
+tickets and (b)18's questions.
 Revision (a) was the draft for review. No ticket below has been dispatched. Plan row B6 ("hand-edited settings/keybindings/profiles/pins re-read — design
 first (storage transaction: revision preconditions, field-level merge, explicit conflict,
 durable owed edits), Codex review, then build"). Read at `main` = `77399d57` on
@@ -1601,3 +1605,245 @@ the silent loss this design exists to end.
 - Folio at `77399d57`: `main.rs:43955-44208` (the five `take_fault` calls), `main.rs:65789-65800`,
   `settings_bundle.rs:85-89`, `bt-persist/src/keybindings.rs:71-73`, `profiles.rs:2511-2514`,
   `migrate.rs:1538-1540`, `preview.rs:5766-5801`, `packaging/macos/Info.plist.in:88-89`.
+
+---
+
+## Revision (c), 2026-10-11, after the Codex confirmation round
+
+The confirmation (`B6-settings-reread-design.review-codex-b.md`, in the 0.4.8 trace) adopts
+revision (b)'s items 1–2, 4, 6–13 and 15. It finds the pins departure acceptable "if Q1
+adopts it" and the refusal on volumes that cannot exchange correct. It finds the two preview
+revisions and the stated head-of-line cost "sound in principle". It leaves **three blockers**,
+and all three are applied below; none is argued away. **Where revision (b) and revision (c)
+differ, revision (c) stands**: (c)1 replaces (b)3's revision bookkeeping, (c)2 replaces (b)5,
+(c)3 replaces (b)16, (c)4 replaces (b)17, and (c)5 replaces (b)18. Everything else in (b)
+stands.
+
+### The change table
+
+| # | the review's words | disposition | where |
+|---|---|---|---|
+| 1 | "After `Displaced`, revision (b) incorrectly moves the revision to `theirs` although the target contains `written`, so a subsequent `Moved` can merge against the wrong base and discard a change recovered from the first displacement" | applied: after a landed exchange the revision is `written`; the displaced bytes are merged as `T` against the pre-exchange revision; the merged result becomes `desired`, owed when it differs from `written` | (c)1 |
+| 2 | "The quit design submits its sidecar at an already-expired deadline … timeout must instead cancel quit or reserve a realizable recovery phase" | applied, both: a documents phase with its own sub-budget, a recovery phase that writes the copy **first** with the time that is left, the session write only behind a landed copy, and **the quit cancelled** when either phase runs out — J5 (b)8's rule | (c)2 |
+| 3 | "The claimed J5 join is not the current J5 contract: J5 revision (b) specifies one worker with two protocols, the preview's existing baseline semantics, explicit quit cancellation on timeout, and S-6a/b/c" | applied: `Merge \| Restore`, the link-policy parameter and the jointly owned ticket are withdrawn; one worker, two protocols, shared scheduling and per-file order; ticket 4 becomes the worker's job kinds and per-file order, which S-6a extends; what B6 needs from S-6a/b/c is listed | (c)3 |
+| — | consequences: the ticket table and the owner questions | revised | (c)4, (c)5 |
+
+### (c)1 · After an exchange, the revision is what the target holds: adopted
+
+Revision (b) said, after a `Displaced` answer: "revision ← `(theirs bytes, T)` for the merge's
+purposes, and the next write is sent with `expected = written`". The two halves disagree: the
+revision named `theirs` while the target held `written`. A later `Moved` then merged against
+`theirs`, so a unit recovered from the displaced file and kept in `desired` looked unchanged
+against that base, and the file's next change to it was taken as the only change. That
+discards what the first merge recovered.
+
+**The bookkeeping, restated as one invariant: the revision is always the bytes Folio last
+read from or placed at the target, and the document they parse to.** On each answer:
+
+| answer | revision ← | merge | `desired` ← | owed when |
+|---|---|---|---|---|
+| `Landed { bytes }` | `(bytes, document sent)` | none | unchanged | `desired != revision.document` (a press while in flight) |
+| `Moved { theirs }` | `(theirs, T)`, **after** the merge | `B` = current revision's document, `O` = `desired`, `T` = `theirs` | the merged document `M` | `M != T` |
+| `Displaced { expected, written, theirs, kept }` | **`(written, the document written)`** | `B` = the document of `expected` (the pre-exchange revision, (b)3), `O` = the document written, `T` = `theirs` | the merged document `M` | `M != written` |
+| `Refused` | unchanged | none | unchanged | as before |
+
+Two details make the `Displaced` row right:
+- **`O` is the document written, not the current `desired`.** The exchange put `written` on
+  disk and handed back what it replaced; the merge reconciles exactly those two against the
+  base both were derived from. A press that arrived after the write was sent has already moved
+  `desired` by its unit delta ((b)6); that delta is re-applied to `M` (the same unit-delta rule a
+  press uses), so it is neither lost nor counted twice.
+- **`kept` is removed only when a write whose `expected` is `written` lands** — that is, when the
+  merged document, which contains the displaced units, is on disk. Until then the displaced
+  bytes stay on disk under `kept` ((b)2's naming), so a crash in between loses nothing.
+
+A second `Displaced` before the first's merge lands is the same row again: its `expected` is
+`written₁`, its base is `written₁`'s document, and its `O` is `written₂`'s. Each displaced file
+is merged against the revision its own exchange was conditional on, and `kept₁` is removed only
+after a document derived from it lands.
+
+Tests (replacing (b)14 item 4's mutation and adding one):
+- `persist::conditional_write_tests::displaced_merges_against_the_pre_exchange_revision`.
+  MUTATION: set the revision to `theirs` (revision (b)'s text).
+- `…::a_unit_recovered_from_a_displaced_file_survives_a_later_moved`. Folio writes A; a crossing
+  edit sets B (displaced, recovered into `desired`); the file then changes C; the merge keeps A,
+  B and C. MUTATION: revision (b)'s bookkeeping (revision ← `theirs` after `Displaced`).
+- `…::a_kept_file_is_removed_only_after_a_document_derived_from_it_lands`. MUTATION: remove
+  `kept` on the `Displaced` answer.
+
+### (c)2 · Quit: a documents phase, a recovery phase, and cancellation: adopted
+
+Revision (b)'s step 4 issued the copy "at the deadline", on the same worker, possibly behind the
+job that used the deadline up. Neither the copy's receipt nor the session write then had any
+time, and a change held only in memory could vanish on exit. Revision (c) replaces (b)5's steps
+2–5 with two phases inside the one budget, and the rule J5 (b)8 chose: **a quit that cannot
+keep the person's change is cancelled, not completed.**
+
+The budget stays `SESSION_SAVE_BUDGET` (3 s, `persist.rs:399`), measured from the start of the
+documents phase, and is split by two named constants (S-6c's quit uses the same two; (c)3):
+
+1. **Documents phase** — until `QUIT_DOCUMENTS_BY` (start + 1.5 s). Each owed store sends its
+   desired document; each answer is processed as in the running window ((c)1; merges are pure,
+   no door runs). The phase ends when every store has landed or has a **terminal answer**:
+   `Refused` (disk, `Link`, `ExchangeUnavailable`) or `Moved` against a file that will not parse.
+2. **Recovery phase** — only for stores with a terminal answer, from the end of phase 1 until
+   `QUIT_RECOVERY_BY` (start + 2.5 s). Each such store's desired document is written **first**
+   into the data directory's `recovered` folder (`preview::RECOVERED_FOLDER`, `preview.rs:7059`;
+   T-RECOVERED-FOLDER's folder, the one `keep_dirty` writes on a forced stop,
+   `main.rs:66335-66348`), create-new, the file `fsync`ed and the directory flushed. Revision
+   (b)'s `<name>.unsaved-<stamp>` beside the file is **withdrawn**: one place for kept changes,
+   whose next start already says "An unsaved edit was kept at {folder}" (`recovered.rs`,
+   `i18n.rs:3797-3802`). Nothing else is queued on the worker behind these copies until their
+   receipts are back.
+3. **Session write** — queued **only behind landed copies, and only if time remains** before the
+   3 s budget ends; it then waits as today (row 16).
+
+**The quit is cancelled** — the window stays, and the existing failure card names the file
+(b)7 — in each of these cases:
+- phase 1 reaches `QUIT_DOCUMENTS_BY` with a document job still unanswered (the worker is inside a
+  write; a copy would queue behind it and could not land);
+- a copy is refused by the disk, or phase 2 reaches `QUIT_RECOVERY_BY` without its receipt;
+- the session write is refused (today's rule, `SaveRefusal::quit_may_proceed`,
+  `persist.rs:462-466`).
+
+This is A§11's "a refused disk means do not leave", which J5 (b)8 applies to document saves
+("Under A§11 … the quit is **cancelled** and the gate comes back saying the save did not
+finish"). A session write that times out still lets the quit proceed, as today; that rule is
+row 16's and unchanged.
+
+**A quit asked again after a cancellation for the same refusal leaves.** The person has seen the
+card naming the file; a second quit is the explicit choice to go without that change. The change
+is then named in `diagnostics.log` (file and units) before the way out. Without this, a data
+directory on a full disk or on a volume that cannot exchange would make Folio impossible to quit
+by its own menu. This is (c)5's Q4.
+
+**A forced stop** (`FolioApp::fail`, `exiting`; A§11) cannot wait, and takes J5's road: each
+store's owed desired document is written into the `recovered` folder on the failing thread's
+existing recovery step, beside the dirty documents `keep_dirty` writes, and named in
+`diagnostics.log`. (c)3 lists this as something B6 needs from S-6c.
+
+Tests (replacing (b)14 items 6–7):
+- `quit_tests::a_moved_or_displaced_answer_at_quit_is_merged_and_landed_before_the_session`.
+  MUTATION: queue the session job at the start of the documents phase.
+- `quit_tests::a_refused_document_is_copied_first_and_the_session_waits_behind_the_copy`. MUTATION:
+  queue the copy behind the session job.
+- `quit_tests::an_unanswered_document_at_the_phase_deadline_cancels_the_quit` (fake clock, a fake
+  disk holding the write). MUTATION: issue the copy at the expired deadline and proceed (revision
+  (b)'s step 4).
+- `quit_tests::a_refused_copy_cancels_the_quit_and_a_second_quit_leaves_and_says_so`. MUTATIONS:
+  proceed on the first quit / never proceed.
+- `app_diagnostics_tests::a_forced_stop_keeps_an_owed_settings_change_in_recovered`. MUTATION: skip
+  the stores in the forced stop's recovery step.
+
+### (c)3 · The J5 join, as J5 has it: one worker, two protocols: adopted
+
+Revision (b)'s (b)16 claimed that this note's conditional write **is** the save lane's protocol,
+and joined them with a `Merge | Restore` mode, a link-policy parameter, two revisions per buffer
+and one jointly owned M ticket. That is **withdrawn**. J5 revision (b) (its (b)8,
+`side-effects-contract-2026-10-11.md:535-554`, and S-6a/b/c, `:586-588`) has a different and
+simpler contract, and this note adopts it as stated there:
+
+- **One storage worker**: `persist::SessionWriter` on `session-writer`, extended by this note with
+  `StorageJob::Document` and `StorageJob::Read` and woken with `AppEvent::DocumentsAnswered`.
+- **Two protocols on it, sharing only scheduling and per-file order:**
+  - the four configuration documents keep this note's protocol unchanged: revision = exact bytes;
+    the precondition read; the exchange that hands back the displaced file; `Landed`, `Moved`,
+    `Displaced`, `Refused`; the three-way merge; owed edits;
+  - document saves keep the preview's own protocol: `PreviewBuffer::save`'s preserving save judged
+    against the buffer's disk baseline (`preview.rs:5778-5801`), as `StorageJob::Save` with
+    `Saved { revision }`, `Conflict { revision }`, `Failed { revision, error }`. A document save is
+    not merged three ways and is not exchanged; its links and its baseline stay J5's.
+- **Timeouts, J5's**: a close keeps its gate open with the document dirty at
+  `SAVE_RECEIPT_DEADLINE` (S-6b); a quit whose saves miss the budget is cancelled (S-6c); a forced
+  stop writes the recovery copy (S-6c). (c)2 brings this note's quit into the same rules.
+
+**This note's ticket 4 becomes T-STORAGE-WORKER-JOBS: the storage worker's job kinds and per-file
+order**, which S-6a extends with `StorageJob::Save`. J5 names B6's ticket as S-6a's dependency
+(`:586`); that dependency now points at ticket 4.
+
+**What B6 still needs from S-6a, S-6b and S-6c:**
+1. **Per-file order across job kinds (S-6a).** A preview can open and save one of the four
+   documents. Jobs naming one path — a `Document`, a `Read` and a `Save` — must run in the order they
+   were queued, never reordered by kind. The two protocols then coexist on one file without a
+   third rule, because each checks before it writes: a preview save after a store write finds a new
+   modified time and answers `Conflict`; a store write after a preview save finds bytes that are not
+   its revision and answers `Moved`, and the storage watch hears the save as a hand edit (by name,
+   (b)9). The preview's own race window (its modified-time check, then a replace) stays the
+   preview's, under J5.
+2. **No new wake (S-6a).** `StorageJob::Save` answers through `AppEvent::DocumentsAnswered`, so the
+   handler that drains this note's answers drains the saves too, and (b)7's failure-card routing
+   is in one place.
+3. **One quit phase and one budget split (S-6c).** The documents phase of (c)2 is the phase S-6c's
+   "owed saves before the final session job" runs in: owed saves are sent in phase 1 beside owed
+   configuration documents, under the same `QUIT_DOCUMENTS_BY`, and a save not landed by then
+   cancels the quit as J5 says. S-6c uses (c)2's two constants rather than a second split. Ticket 5
+   (T-QUIT-DOCUMENTS) builds the phase; S-6c adds saves to it.
+4. **The forced stop's recovery step takes configuration documents too (S-6c).** The step that
+   writes dirty documents into `recovered` (`main.rs:66335-66348`) also writes each store's owed
+   desired document, with the same `diagnostics.log` line and the same start-time sentence.
+5. **Nothing else.** The close gate (S-6b) concerns document saves only; a store has no gate.
+
+**What the join no longer costs**: the mode, the link-policy parameter, the second revision per
+buffer and the bytes copy per open buffer of (b)16 items 1–4 are gone; the preview's protocol is
+not touched by B6. **What it still costs**: the head-of-line delay of one worker ((b)16 item 5), and
+ticket 4's ordering rule, which is now a contract S-6a builds on and must not break.
+
+### (c)4 · The tickets, revised
+
+| # | ticket | size | after | the work | tests |
+|---|---|---|---|---|---|
+| 1 | T-STORAGE-EAR-NAMED | S | — (E-3) | as (b)17 | as (b)17 |
+| 2 | T-STORE-REVISION | S | 1 | as (b)17 | as (b)17 |
+| 3 | T-EXCHANGE-DOOR | M | — (E-1, E-2, E-5) | as (b)17 | as (b)17 |
+| 4 | **T-STORAGE-WORKER-JOBS** | M | 2, 3 | `StorageJob::Document` and `StorageJob::Read` with stable reads (b)9; **per-file order across job kinds** (c)3; one in flight per document and every receipt processed (b)4; `desired` and owed (b)6 with (c)1's bookkeeping; **a `Moved` or `Displaced` before ticket 6 leaves the document owed and keeps `kept` on disk** (no merge yet, nothing removed); faults to cards (b)7; no mid-run `.rejected-`; row 20's four stores | 2's in-flight variant, 5, 8, 9, 10, 17, 18, 19; (b)14-5, -8, -15, -17; `…::jobs_for_one_path_run_in_queue_order_across_kinds` (MUTATION: a queue per kind) |
+| 5 | T-QUIT-DOCUMENTS | M | 4 | (c)2: the two phases, the two constants, the copy into `recovered`, cancellation, the second quit, the forced stop's step for the stores | 4; (c)2's five |
+| 6 | T-STORE-MERGE-SETTINGS | M | 4 | as (b)17, with (c)1's table | 3, 15, 16; (c)1's three; (b)14-9 |
+| 7 | T-STORE-MERGE-KEYBINDINGS | S | 6 | as (b)17 | as (b)17 |
+| 8 | T-STORE-MERGE-PROFILES-PINS | M | 6 | as (b)17 | as (b)17 |
+| 9 | T-STORE-NOTICE | S | 7, 8 | as (b)17 | as (b)17 |
+
+J5's S-6a follows ticket 4; S-6c follows ticket 5 and S-6b. Ticket 5 may run beside 6–8; 7 beside 8.
+Between tickets 4 and 6 a crossing edit is kept, not merged: the store stays owed against a file it
+will not write over, and the displaced file stays on disk — the protocol is safe before it is
+complete, which is what lets the merge land separately.
+
+### (c)5 · The owner questions, revised (five)
+
+**Q1. When a value was changed both in Folio (not yet saved) and in the file, does the file's
+stand?** Including the pins case the review accepts only if this question adopts it: a pin
+unpinned and pinned again in Folio looks untouched to the merge, so a removal of that pin in the
+file stands. **Recommendation: yes, the file wins every conflict, and one short card names what
+came from disk.**
+
+**Q2. Should a hand edit that conflicts with nothing take effect silently?** **Recommendation:
+yes.**
+
+**Q3. Should `settings.json` and `keybindings.json` be followed while Folio runs?**
+**Recommendation: yes.**
+
+**Q4 (revised). When you quit and Folio cannot save a change to one of these files, nor a copy of
+it into the `recovered` folder, should the quit be cancelled — the window stays, with a card naming
+the file — and a second quit leave without that change?** Folio first tries the file, then the copy
+(which the next start announces, as it does for documents today). Only when both fail, or the disk
+does not answer in time, is the quit cancelled. **Recommendation: yes.** It is the rule J5 adopts
+for documents, and the second quit is what keeps a full disk or a volume that cannot exchange from
+making Folio impossible to quit.
+
+**Q5. When Folio cannot replace one of these files safely — a symbolic link, a file with a second
+name (a hard link), or a volume that cannot exchange two files in one step — should it refuse and say
+so rather than overwrite?** Unchanged from (b)18. **Recommendation: yes.**
+
+### Departures
+
+None. All three blockers are applied as the review states them; (c)2 takes both of the review's
+alternatives at once (a recovery phase *and* cancellation when it cannot be realised), which is the
+combination the coordinator's message names.
+
+### Sources added
+
+- The confirmation: `B6-settings-reread-design.review-codex-b.md` (the 0.4.8 trace, 2026-10-11).
+- J5 revision (b): `docs/plans/design/side-effects-contract-2026-10-11.md` (on `j5-contracts`),
+  (b)8 (`:535-554`) and S-6a/b/c (`:586-588`).
+- Folio at `77399d57`: `preview.rs:7059` (`RECOVERED_FOLDER`), `main.rs:66335-66348` (the forced
+  stop's recovery step), `i18n.rs:3797-3802` (the start's sentence), `persist.rs:399`
+  (`SESSION_SAVE_BUDGET`), `persist.rs:462-466` (`quit_may_proceed`).
