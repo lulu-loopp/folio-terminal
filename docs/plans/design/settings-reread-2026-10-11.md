@@ -9,7 +9,10 @@ claim, §3.6's wording, §4, §7, §8, §9 and §10 are replaced or amended by (
 **Revision (c)**, after the Codex confirmation round (`B6-settings-reread-design.review-codex-b.md`),
 follows (b) and stands wherever the two differ: (c)1 replaces (b)3's revision bookkeeping,
 (c)2 replaces (b)5's quit, (c)3 amends (b)16's J5 join, and (c)4 and (c)5 replace (b)17's
-tickets and (b)18's questions.
+tickets and (b)18's questions. **Revision (d)**, after the scoped review of (c)
+(`B6-settings-reread-design.review-codex-c.md`), closes its three blockers and stands over (c)
+there: `kept` files follow derived versions (d)1, leaving without a change is a choice on the card
+(d)2, and a forced stop's `Lost` is said through the system's message box (d)3.
 Revision (a) was the draft for review. No ticket below has been dispatched. Plan row B6 ("hand-edited settings/keybindings/profiles/pins re-read — design
 first (storage transaction: revision preconditions, field-level merge, explicit conflict,
 durable owed edits), Codex review, then build"). Read at `main` = `77399d57` on
@@ -1889,3 +1892,202 @@ so rather than overwrite?** Unchanged from (b)18. **Recommendation: yes.**
 - Folio at `77399d57`: `preview.rs:7059` (`RECOVERED_FOLDER`), `main.rs:66335-66348` (the forced
   stop's recovery step), `i18n.rs:3797-3802` (the start's sentence), `persist.rs:399`
   (`SESSION_SAVE_BUDGET`), `persist.rs:462-466` (`quit_may_proceed`).
+
+---
+
+## Revision (d), 2026-10-11, after the scoped review of revision (c)
+
+The scoped review (`B6-settings-reread-design.review-codex-c.md`, in the 0.4.8 trace) adopts
+revision (c) with three blockers. This revision is scoped to exactly those three. All three are
+applied; none is argued away. Each closure is stated as a rule and pinned by named tests with
+their mutations. **Where revision (c) and revision (d) differ, revision (d) stands**:
+- (d)1 replaces (c)1's sentence on removing `kept`;
+- (d)2 replaces (c)2's paragraph "A quit asked again after a cancellation … leaves";
+- (d)3 extends (c)2's forced-stop paragraph;
+- (d)4 amends (c)4's ticket 5;
+- (d)5 replaces (c)5's Q4.
+
+### The change table
+
+| # | the review's words | disposition | closure | pinned by |
+|---|---|---|---|---|
+| 1 | "The `kept` cleanup rule is unsound across `Displaced → Moved → Displaced`: after `Moved`, no future write necessarily has `expected = written₁`, so cleanup obligations must follow derived generations and all applicable `kept` files must be removed only when such a generation lands" | applied | Each `kept` file is tagged with the desired-document version its merge produced. A landed write of version `v` removes every `kept` file tagged `≤ v`, and no other answer removes any. | (d)1's three tests |
+| 2 | "A repeated Quit is not an explicit discard merely because the earlier card named the file; provide a person-visible 'leave without this change' choice and amend A§11's 'refused disk means do not leave' rule, since a post-exit diagnostics line is neither warning nor consent" | applied | The cancelled quit's card carries one choice, **Leave without this change** (`// zh: pending`). Only that choice leaves. A repeated Quit runs the transaction again. A§11's rule gains its one exception, worded in (d)2. | (d)2's three tests |
+| 3 | "The forced-stop path specifies and tests only a successful recovery copy; it must define and test recovery refusal as an explicit `Lost` outcome reported through a surviving native channel" | applied | A store's forced-stop outcome is `Kept { copy }` or **`Lost { file, error }`**. `Lost` is said through the operating system's own message box (`bt_platform::message_box`), which needs neither the disk nor the renderer. `diagnostics.log` is still attempted, but it is not the channel. | (d)3's three tests |
+| — | consequences: ticket 5, and Q4's wording | revised | — | (d)4, (d)5 |
+
+### (d)1 · `kept` follows derived generations: adopted
+
+**The flaw.** Revision (c) said `kept` is removed "only when a write whose `expected` is
+`written` lands". Consider `Displaced₁` (keeps `kept₁`), then `Moved` (the revision becomes the
+file's `theirs`), then `Displaced₂`. After the `Moved`, every later write is conditional on
+`theirs` or something newer, never on `written₁`. So `kept₁` would never be removed, although
+documents derived from its merge did land.
+
+**The rule.**
+1. Each store's `desired` document carries a **version**, a counter on the store that rises by
+   one at every change to `desired`: a press's unit delta (b)6, or a merge (c)1.
+2. Every `Document` job carries the version of the document it sends. Its answer echoes it.
+3. When a `Displaced` answer's merge folds the displaced bytes into `desired`, the resulting
+   version `m` is recorded beside that answer's `kept` file: an obligation `(kept, m)`.
+4. **A `Landed` answer for version `v` removes every `kept` file whose `m ≤ v`.**
+5. **Nothing else removes a `kept` file**: not `Displaced`, `Moved` or `Refused`, and not a quit.
+   A file left behind by an exit or a crash stays on disk under its `.displaced-` name, never
+   read back, like a `.rejected-` copy.
+
+**Why `m ≤ v` is "derived from".** `desired` is one variable with one line of descent. Every
+version after `m` is `m`'s document changed by press deltas and later merges. So any document of
+version `v ≥ m` descends from the merge that took `kept`'s units in. A later merge may let the file
+win over one of those units (c)1. That unit is then on disk in the file's newer value, named on that
+pass's card. The `kept` copy has been superseded, not lost, and removing it is correct.
+
+**The sequence the review names, run through the rule.**
+
+| step | answer | result |
+|---|---|---|
+| 1 | `Displaced₁` | obligation `(kept₁, m₁)` |
+| 2 | `Moved` | its merge makes version `m₁+1` |
+| 3 | `Displaced₂` | obligation `(kept₂, m₂)`, with `m₂ > m₁` |
+| 4 | a `Landed` of version `v ≥ m₂` | removes both `kept₁` and `kept₂` |
+| — | a `Landed` of a version in `[m₁, m₂)`, had one come between | removes only `kept₁` |
+
+Tests (T-STORAGE-WORKER-REQUEST, ticket 4; the merge itself in ticket 6):
+- `persist::conditional_write_tests::kept_files_survive_displaced_moved_displaced_until_a_derived_version_lands`.
+  This drives the review's sequence with a fake disk. Both `kept` files stay on disk through steps
+  1–3, and both are gone after step 4. MUTATION: remove `kept` only when `expected == written`
+  (revision (c)'s rule). `kept₁` is never removed, and the test fails at step 4.
+- `…::a_landed_older_version_removes_only_the_kept_files_it_derives_from`. MUTATION: on any `Landed`,
+  remove every obligation.
+- `…::no_answer_but_landed_removes_a_kept_file`. MUTATION: remove `kept` on the `Displaced` answer
+  (revision (b)'s rule).
+
+### (d)2 · Leaving without a change is a choice on the card: adopted
+
+**The flaw.** Revision (c) let a second Quit leave and wrote the loss to `diagnostics.log` on the
+way out. The review: a repeated Quit "is not an explicit discard merely because the earlier card
+named the file", and "a post-exit diagnostics line is neither warning nor consent".
+
+**The card.** When (c)2 cancels a quit for a configuration document, the window stays. It raises one
+Error card, anchored to the window, under the copy rules (a plain statement, few words, no advice):
+
+> `settings.json could not be saved.` · **Leave without this change** `// zh: pending`
+
+- Several documents share one card: `settings.json and profiles.json could not be saved.` At most
+  three names are shown, then "and N more" (b)11.
+- The choice covers exactly the documents the card names. The full list, with the reason for each,
+  goes to `diagnostics.log`, as (b)11 does.
+
+**The rule.**
+- **Only the card's choice leaves.** Pressing **Leave without this change** resumes the cancelled
+  quit at the session write. The named documents' owed changes are dropped from this run, and each
+  is written to `diagnostics.log` before the way out.
+- **A repeated Quit is not a discard.** It runs the transaction again from the documents phase. The
+  disk may have recovered, in which case the quit simply completes. If it has not, the same card
+  comes back.
+- **Dismissing the card is not a choice either.** Folio stays open, and its changes stay owed.
+
+**A§11, amended** (`ARCHITECTURE.md`, §11, the normal-quit paragraph). Today it reads "a refused disk
+means do not leave". It becomes:
+
+> "a refused disk means do not leave, **unless the person chooses to leave without the change the
+> refusal names, on the card that names it**".
+
+This is the same exception the dirty gate already gives a preview document (*Save · Discard ·
+Cancel*): leaving with unsaved work is the person's decision, made where the loss is stated, never a
+default. The amendment goes into the ticket's DESIGN entry and into A§11. That adds one row to (b)15's
+list of edits, owned by ticket 5.
+
+Tests (ticket 5):
+- `quit_tests::a_repeated_quit_runs_the_transaction_again_and_does_not_leave`. MUTATION: revision
+  (c)'s rule (a second Quit after a cancellation leaves).
+- `quit_tests::only_leave_without_this_change_leaves_and_drops_only_the_named_documents`. Two stores
+  are owed: one refused, one landing. Pressing the choice leaves. The refused store's change is
+  dropped and named in diagnostics before the exit; the landed one was saved. MUTATIONS: drop every
+  owed document; leave on the card's dismissal.
+- `app_quit_tests::the_cancelled_quits_card_names_the_files_and_carries_one_choice`. This asserts the
+  card's statement, the bound of three names, and the one choice. MUTATION: raise the card with no
+  choice.
+
+### (d)3 · A forced stop's `Lost` outcome, said through a surviving native channel: adopted
+
+**The flaw.** Revision (c)'s forced stop wrote each store's owed document into `recovered` and named it
+in `diagnostics.log`. It did not say what happens when that write is refused. With no writable disk,
+both the copy and the log line fail, and the loss is silent. A§11 already asks for the repair: "take a
+durable receipt or retain an explicit unpreserved state; retire only once that outcome is known,
+reporting through a surviving native path if the renderer failed" (`ARCHITECTURE.md`, §11).
+
+**The outcome.** The stores' forced-stop step answers one value per owed store, in the shape the
+preview's `keep_dirty` already uses (`preview::Kept`, `preview.rs:7063-7080`):
+- `Kept { file, copy }` — the copy landed in `recovered`, the file was `fsync`ed and the directory
+  flushed;
+- **`Lost { file, error }`** — the copy was refused. The change went with the process.
+
+**The channel.** After the step, and before the windows are closed, every `Lost` is said once,
+together, through **`bt_platform::message_box`** (`bt-platform/src/lib.rs:17847-17891`). This is the
+operating system's own dialog: `MessageBoxTimeoutW`, ownerless and bounded at fifteen minutes, on
+Windows; an `NSAlert` on the main thread on macOS (`macos_dialogs.rs:781-848`). It needs no file, no
+data directory and no renderer of Folio's, so it survives exactly the failures that silence the other
+two. The text is a plain statement (`// zh: pending`):
+
+> `Folio stopped. A change to settings.json could not be kept.`
+
+Several stores give one box: "Changes to settings.json and profiles.json could not be kept."
+`diagnostics.log` is still attempted for each `Lost`, but it is not relied on.
+
+- **No `Lost`, no box.** A copy that landed is announced at the next start, as today (`recovered.rs`).
+- **Why a box here.** `message_box`'s own doc allows "the single message box this product is allowed to
+  raise" only because there is no window to put a card on (`lib.rs:17849-17854`). A forced stop is the
+  same situation: the windows are being torn down, and the renderer may be the thing that failed. The
+  doc gains this second case in ticket 5, and the guard that holds `message_box`'s callers gains one
+  row.
+- **The preview's own `Lost`** (`preview.rs:7074`; today a diagnostics line only,
+  `runtime/windows.rs:1719`) has the same gap. Folding it into the same box is J5/G7's to adopt (S-6c),
+  and is named here, not built.
+
+Tests (ticket 5; the box through an injected `NativeSay` seam, so no dialog opens in a test):
+- `app_diagnostics_tests::a_refused_recovery_copy_is_lost_and_said_natively`. The fake disk refuses
+  both the copy and the log line. The store answers `Lost`, and the seam is asked once, naming
+  `settings.json`. MUTATION: report `Lost` to `diagnostics.log` only (the preview's behaviour today).
+- `…::several_lost_stores_are_one_native_message`. MUTATION: one box per store.
+- `…::a_landed_recovery_copy_raises_no_native_message`. MUTATION: say every outcome natively.
+
+### (d)4 · Ticket 5, amended
+
+| # | ticket | size | after | the work | tests |
+|---|---|---|---|---|---|
+| 5 | T-QUIT-DOCUMENTS | M | 4 | (c)2's two phases, constants, copy into `recovered` and cancellation; **(d)2's card with the choice Leave without this change, the repeated Quit that runs again, and A§11's amendment**; **(d)3's `Kept`/`Lost` forced-stop outcome and the native message for `Lost`**; `message_box`'s doc and its caller guard | (c)2's quit tests, without the second-quit test; (d)2's three; (d)3's three |
+
+Ticket 4 also gains (d)1's version tag and obligation rule, with its three tests. Every other row of
+(c)4 stands. Ticket 5 stays M: the card reuses the toast's verb road (the next start's `recovered`
+toast already carries a verb, `ARCHITECTURE.md` §11), and the native message reuses an existing door.
+
+### (d)5 · Q4, reworded
+
+**Q4. When you quit and Folio can save neither a change to one of these files nor a copy of it in the
+`recovered` folder, should the quit stop and a card say "settings.json could not be saved", with
+one choice, "Leave without this change"?** Quitting again would try again; only the choice would leave
+without the change. And if Folio is stopped by a failure and cannot keep the change anywhere, should
+the system's own message box say so, because nothing else may survive to say it? **Recommendation:
+yes, to both.** Leaving with unsaved work is the person's decision, made where the loss is stated, as
+the dirty gate already makes it for documents.
+
+Q1, Q2, Q3 and Q5 stand as (c)5 states them.
+
+### Departures
+
+None. The three blockers are applied as the review states them. For (d)3's channel, the review
+suggested "the OS's own notification/event log". The system message box is chosen because it is
+that kind of channel and already a product door, which a notification and an event-log source are
+not: both would add a registration that can itself fail at stop time.
+
+### Sources added
+
+- The scoped review: `B6-settings-reread-design.review-codex-c.md` (the 0.4.8 trace, 2026-10-11).
+- Folio at `77399d57`:
+  - `bt-platform/src/lib.rs:17847-17899` (`message_box`, `standalone_alert`);
+  - `macos_dialogs.rs:781-848`;
+  - `preview.rs:7063-7080` (`Kept`, `Lost`);
+  - `runtime/windows.rs:1719`;
+  - `main.rs:66328-66354` (`stop_every_window`);
+  - `docs/ARCHITECTURE.md` §11 (the normal-quit paragraph's "a refused disk means do not leave"; the
+    controlled-failure repair's "surviving native path").
